@@ -75,6 +75,7 @@ target_link_libraries(${LIB_NAME}
   PRIVATE
   morphizen-utils
   morphizen-ort-api-ext
+  morphizen-graph
   Microsoft.GSL::GSL
   # OMBuilder
   MLIRIR

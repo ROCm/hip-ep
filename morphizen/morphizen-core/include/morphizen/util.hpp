@@ -166,4 +166,9 @@ MORPHIZEN_DLL_SPEC std::string
 get_md5_of_file(const std::filesystem::path &path);
 MORPHIZEN_DLL_SPEC std::string get_md5_of_buffer(const char *buffer,
                                                  size_t size);
+MORPHIZEN_DLL_SPEC std::string get_sha256_of_buffer(const void *buffer,
+                                                    size_t size);
+MORPHIZEN_DLL_SPEC std::string
+get_sha256_of_file_slice(const std::filesystem::path &path, int64_t offset,
+                         size_t size);
 } // namespace morphizen

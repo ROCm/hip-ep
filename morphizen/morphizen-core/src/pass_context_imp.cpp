@@ -21,6 +21,7 @@
 #include "mem_stream_buffer.hpp"
 #include "morphizen-foundation/env_config.hpp"
 #include "morphizen-foundation/mem_binary.hpp"
+#include "morphizen/cache_identity.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/weak.hpp"
@@ -986,23 +987,26 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
     // when ep.context is not enabled, we don't need to worry to much about
     // how to save tar_file_
     tar_file_ = TarFile::create_from_buffer(std::move(buffer));
-    CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
+    if (!tar_file_)
+      throw CacheIntegrityError("cannot open prebuilt cache from memory");
   } else {
     if (is_ep_context_embed_mode) {
       // for embeded mode, it works similar to is_ep_context_enable = false;
       tar_file_ = TarFile::create_from_buffer(std::move(buffer));
-      CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
+      if (!tar_file_)
+        throw CacheIntegrityError("cannot open embedded prebuilt cache");
     } else {
       auto binary_file_path = get_dir_of_ep_context_model() /
                               get_basename_of_ep_context_binary_file();
       auto open_mode =
           std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc;
-      auto stream = std::unique_ptr<std::fstream>();
-      stream = std::make_unique<std::fstream>(binary_file_path, open_mode);
-      CHECK(stream->is_open())
-          << "failed to open ep context file " << binary_file_path;
-      CHECK(stream->write(buffer.data(), buffer.size()).good())
-          << "fail to write to " << binary_file_path;
+      auto stream = std::make_unique<std::fstream>(binary_file_path, open_mode);
+      if (!stream->is_open())
+        throw CacheIntegrityError("cannot open prebuilt EP context file: " +
+                                  binary_file_path.string());
+      if (!stream->write(buffer.data(), buffer.size()).good())
+        throw CacheIntegrityError("cannot write prebuilt EP context file: " +
+                                  binary_file_path.string());
       stream->seekg(0);
       stream->seekp(0);
       stream->flush();
@@ -1012,10 +1016,11 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
   }
   // Always use cache_key prefix - verify context.json exists with prefix
   auto prefix = get_context_proto().cache_key();
-  CHECK(!prefix.empty()) << "cache_key required for prebuild cache";
-  CHECK(tar_file_->has_file(prefix + "/context.json"))
-      << "tar file does not have " << prefix << "/context.json, "
-      << "please check prebuild ep context generation";
+  if (prefix.empty())
+    throw CacheIntegrityError("cache key required for prebuilt cache");
+  if (!tar_file_ || !tar_file_->has_file(prefix + "/context.json"))
+    throw CacheIntegrityError("prebuilt cache does not contain " + prefix +
+                              "/context.json");
 }
 void PassContextImp::print_version_info(const char *prefix) {
   auto &context = get_context_proto();
@@ -1070,8 +1075,13 @@ void PassContextImp::pass_context_update_context_json(
   auto status = google::protobuf::util::JsonStringToMessage(
       &json_str[0], &context_proto_in_cache, options);
 
-  CHECK(status.ok()) << "cannot parse json string:" << status.message()
-                     << &json_str[0];
+  if (!status.ok())
+    throw CacheIntegrityError("cannot parse cached context JSON: " +
+                              std::string(status.message()));
+  if (cache_key_finalized &&
+      context_proto_in_cache.cache_key() != context_proto.cache_key())
+    throw CacheIntegrityError(
+        "cached context key does not match the finalized graph cache key");
   // Note: Old cache files with config field in ContextProto are not supported
   // after this refactoring (breaking change). The config field is now
   // runtime-only.
@@ -1083,8 +1093,8 @@ void PassContextImp::pass_context_update_context_json(
 
 void PassContextImp::update_pass_context_from_context_json_in_cache() {
   auto context_context_json = read_file_c8("context.json");
-  CHECK(context_context_json.has_value())
-      << "cannot read context.json from ep context";
+  if (!context_context_json)
+    throw CacheIntegrityError("cannot read context.json from cache context");
   auto context_context_json_text = dos2unix(*context_context_json);
   pass_context_update_context_json(context_context_json_text);
 }
@@ -1100,9 +1110,9 @@ void PassContextImp::update_config_proto_root_field() {
     auto ret = std::optional<std::string>();
     return this->get_provider_option_with_priority(names);
   };
-  if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
-    context_proto.set_cache_key(*cache_key);
-  }
+  if (!cache_key_finalized)
+    if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"}))
+      context_proto.set_cache_key(*cache_key);
   // cache_dir removed by Issue #006 (PR #80)
   // encryption_key removed - now read from provider_options directly (Issue
   // #004)
