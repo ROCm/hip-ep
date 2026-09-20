@@ -2,8 +2,8 @@
 #!r6rs
 
 (import (rnrs (6))
-        (prefix (test basic-test) basic:)
-        (prefix (test pattern-macro-incremental-test) incremental:))
+        (prefix (test framework-test) framework:)
+        (prefix (test parse-validate-test) parse-validate:))
 
-(basic:run-tests)
-(incremental:run-tests)
+(framework:run-tests)
+(parse-validate:run-tests)
