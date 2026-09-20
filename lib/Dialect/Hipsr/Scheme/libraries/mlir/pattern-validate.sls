@@ -18,27 +18,29 @@
     ;; Phase 2 validates and normalizes the AST from Phase 1 (parse).
     ;; Order matters: normalization must happen before validation that depends on it.
 
-    ;; Step 1: Basic structure validation
+    ;; Rule: Function name must be an identifier
     (validate-ast-match-function-name ast-rec)
+
+    ;; Rule: Root variable must be an identifier
     (validate-ast-match-root-var ast-rec)
 
-    ;; Step 2: Normalize to canonical form (required for subsequent validation)
-    ;; - match field: list → vector (enables indexed access in Phase 3)
-    ;; - result-var: identifier → list (uniform representation)
-    ;; - op-name: symbol → string (canonical form)
+    ;; Normalization: match field from list to vector (enables indexed access in Phase 3)
     (normalize-ast-match-to-vector ast-rec)
+
+    ;; Normalization: result-var from single identifier to list (uniform representation)
     (normalize-match-result-vars ast-rec)
+
+    ;; Normalization: op-name from symbol to string (canonical form)
     (normalize-match-op-names ast-rec)
 
-    ;; Step 3: Validate match operations
-    ;; - Identifiers must start with %
-    ;; - Result variables must be unique across all operations (fatal error)
+    ;; Rule: All identifiers in match operations must start with %
+    ;; Rule: Result variables must be unique across all operations (FATAL if violated)
     (validate-match-operations ast-rec)
 
-    ;; Step 4: Validate rewrite operations (recursive structure walk)
+    ;; Rule: Rewrite operations must have valid structure (recursive validation)
     (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
 
-    ;; Step 5: Validate where bindings
+    ;; Rule: Where binding variables must be identifiers
     (validate-where-bindings ast-rec)
 
     ast-rec)
