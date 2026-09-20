@@ -10,16 +10,21 @@
   ;; Phase 2: Validate AST record and normalize fields
   ;;=======================================================================
 
-  (define (validate-ast ast-rec)
-    ;; Validate function name
+  ;; Helper: validate function name is identifier
+  (define (validate-ast-match-function-name ast-rec)
     (unless (identifier? (ast-pattern-expand-function-name ast-rec))
       (syntax-violation 'validate-ast "Function name must be an identifier"
-                       (ast-pattern-expand-function-name ast-rec)))
+                       (ast-pattern-expand-function-name ast-rec))))
 
-    ;; Validate root-var
+  ;; Helper: validate root-var is identifier
+  (define (validate-ast-match-root-var ast-rec)
     (unless (identifier? (ast-pattern-expand-root-var ast-rec))
       (syntax-violation 'validate-ast "Root variable must be an identifier"
-                       (ast-pattern-expand-root-var ast-rec)))
+                       (ast-pattern-expand-root-var ast-rec))))
+
+  (define (validate-ast ast-rec)
+    (validate-ast-match-function-name ast-rec)
+    (validate-ast-match-root-var ast-rec)
 
     ;; Validate and normalize match operations
     (validate-and-analyze-pattern-matching ast-rec)
