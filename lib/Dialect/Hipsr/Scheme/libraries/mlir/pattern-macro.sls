@@ -2,20 +2,11 @@
 (library (mlir pattern-macro)
   (export define-conversion-pattern
           :match :rewrite :with :where :debug-ast :debug-matching
-          = : -> :region :regions :attrs
-          ast-pattern?
-          ast-pattern-function-name
-          ast-pattern-root-op-name
-          ast-pattern-match
-          ast-pattern-rewrite
-          ast-pattern-where
-          ast-pattern-debug-ast?
-          ast-pattern-debug-matching?
-          make-ast-pattern)  ;; Re-export for generated code
+          = : -> :region :regions :attrs)
   (import (except (rnrs (6)) =)
-          (for (only (chezscheme) syntax->list) expand)  ;; Import syntax->list for expansion time
-          (for (rename (rime loop) (:with :rime-with)) expand))  ;; Import loop with :with renamed to avoid conflict
-
+          (for (only (chezscheme) syntax->list) expand)
+          (for (rename (rime loop) (:with :rime-with)) expand)
+          (for (mlir pattern-ast) expand))
 
   ;; Define keywords as syntax (for cross-library hygiene)
   (define-syntax :match (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
@@ -31,80 +22,8 @@
   (define-syntax :regions (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :attrs (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
 
-  ;; Runtime AST record (created when :debug-ast is used)
-  ;; Contains datums (symbols, strings, lists) for inspection
-  (define-record-type ast-pattern
-    (fields function-name      ;; symbol - name of the pattern function
-            root-op-name       ;; string - operation name for OpConversionPattern (e.g., "onnx.Cast")
-            match              ;; list - match operations (at least one, raw s-expressions)
-            rewrite            ;; list - rewrite operations (at least one, raw s-expressions)
-            where              ;; list - where bindings (zero or more, raw s-expressions)
-            debug-ast?         ;; boolean - return AST instead of compiled pattern
-            debug-matching?))  ;; boolean - add debug prints during matching
-
   (define-syntax define-conversion-pattern
     (lambda (stx)
-      
-      ;; Expansion-time AST record for the whole pattern
-      ;; Contains syntax objects to preserve lexical context for code generation
-      (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
-        (fields (mutable function-name)    ;; syntax - identifier for pattern function
-                (mutable root-var)         ;; syntax - identifier for root result var (e.g., #'%out)
-                (mutable root-op-name)     ;; syntax - string literal for op name (e.g., #'"onnx.Cast")
-                (mutable match)            ;; list of ast-match-expand - parsed match operations
-                (mutable match-bindings)   ;; hashtable: identifier -> matcher (first occurrence)
-                (mutable match-actions)    ;; list of matchers (ordered, for codegen)
-                (mutable rewrite)          ;; list of ast-operation-expand - parsed rewrite operations
-                (mutable where)            ;; list of ast-where-binding-expand - parsed where bindings
-                (mutable debug-ast?)       ;; boolean - whether :debug-ast flag is present
-                (mutable debug-matching?)))  ;; boolean - whether :debug-matching flag is present
-
-      ;; Expansion-time AST record for match operations
-      ;; Contains syntax objects for code generation
-      ;; Mutable fields allow validation to normalize in-place
-      (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
-        (fields (mutable result-var)     ;; syntax - identifier (e.g., #'%out)
-                (mutable op-name)        ;; syntax - string literal (e.g., #'"onnx.Cast")
-                (mutable operands)       ;; syntax - operand list (e.g., #'(%in))
-                (mutable attributes)     ;; syntax - attribute list (e.g., #'())
-                (mutable input-types)    ;; syntax - input types (e.g., #'(!in-type))
-                (mutable output-type)))  ;; syntax - output type (e.g., #'!out-type)
-
-      ;; Expansion-time AST record for rewrite operations
-      ;; Contains syntax objects for code generation
-      ;; Field order matches MLIR generic syntax: operands, regions, attributes, types
-      ;; Note: No input-types field because input types are implicit in operands
-      ;;       (each operand is a Value with .getType()). Only result types are needed.
-      ;; Mutable fields allow validation to normalize in-place
-      (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
-        (fields (mutable result-var)     ;; syntax - identifier (e.g., #'%new)
-                (mutable op-name)        ;; syntax - string literal (e.g., #'"hipsr.cast")
-                (mutable operands)       ;; syntax - operand expressions
-                (mutable regions)        ;; syntax - regions (before attributes in MLIR syntax)
-                (mutable attributes)     ;; syntax - attribute expressions
-                (mutable result-types))) ;; syntax - result type(s) for operation output
-
-      ;; Expansion-time AST record for where bindings
-      ;; Contains syntax objects for code generation
-      ;; Mutable fields allow validation to normalize in-place
-      (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
-        (fields (mutable var)            ;; syntax - identifier (e.g., #'%ctx)
-                (mutable expr)))         ;; syntax - expression to compute
-
-      ;; Expansion-time AST record for regions (mimics MLIR Region)
-      ;; A region contains a list of blocks
-      ;; Mutable fields allow validation to normalize in-place
-      (define-record-type (ast-region-expand make-ast-region-expand ast-region-expand?)
-        (fields (mutable blocks)))       ;; list of ast-block-expand
-
-      ;; Expansion-time AST record for blocks (mimics MLIR Block)
-      ;; A block has a label, arguments, and operations
-      ;; Mutable fields allow validation to normalize in-place
-      (define-record-type (ast-block-expand make-ast-block-expand ast-block-expand?)
-        (fields (mutable label)          ;; syntax - block label (e.g., #'^bb0)
-                (mutable arguments)      ;; list of (var type) pairs - block arguments
-                (mutable operations)))   ;; list of ast-operation-expand
-
       ;;=======================================================================
       ;; Phase 1: Parse whole syntax to AST record - pure pattern matching
       ;;=======================================================================
@@ -557,26 +476,22 @@
                    [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
                    [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
                (if debug-ast?
-                   ;; For :debug-ast mode, generate record constructor call with actual data
+                   ;; For :debug-ast mode, return list with AST data
                    ;; Convert syntax objects to datums for runtime inspection
-                   (with-syntax ([fname-sym #'(quote fname)]
-                                [root-op-str (syntax->datum #'root-op-name)]
-                                [match-data (datum->syntax #'macro-name
-                                              (list 'quote (map match-expand->datum match-ops)))]
-                                [rewrite-data (datum->syntax #'macro-name
-                                                (list 'quote (map operation-expand->datum rewrite-ops)))]
-                                [where-data (datum->syntax #'macro-name
-                                              (list 'quote (map where-binding-expand->datum where-bindings)))]
-                                [debug-ast-flag (datum->syntax #'macro-name debug-ast?)]
-                                [debug-match-flag (datum->syntax #'macro-name debug-matching?)])
-                     #'(define fname
-                         (make-ast-pattern fname-sym
-                                           root-op-str
-                                           match-data
-                                           rewrite-data
-                                           where-data
-                                           debug-ast-flag
-                                           debug-match-flag)))
+                   (let ([fname-sym (syntax->datum #'fname)]
+                         [root-op-str (syntax->datum #'root-op-name)]
+                         [match-data (map match-expand->datum match-ops)]
+                         [rewrite-data (map operation-expand->datum rewrite-ops)]
+                         [where-data (map where-binding-expand->datum where-bindings)])
+                     (with-syntax ([ast-list (datum->syntax #'macro-name
+                                               `(list 'function-name ',fname-sym
+                                                      'root-op-name ,root-op-str
+                                                      'match ',match-data
+                                                      'rewrite ',rewrite-data
+                                                      'where ',where-data
+                                                      'debug-ast? ,debug-ast?
+                                                      'debug-matching? ,debug-matching?))])
+                       #'(define fname ast-list)))
                    ;; For normal mode, generate lambda using syntax objects directly
                    #'(define fname
                        (lambda (op operands-ref rewriter type-converter)
