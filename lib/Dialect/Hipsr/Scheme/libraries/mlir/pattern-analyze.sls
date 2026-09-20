@@ -70,36 +70,35 @@
             (set! actions (cons (list ':set-current-op op-idx result-var result-var-idx) actions))
             (set! actions (cons (list ':check-op op-idx) actions))
 
-            ;; Bind all result variables for this operation
-            (loop :for result-var :in (ast-match-expand-result-var match-op)
-                  :do (set! actions
-                         (cons (action-bind-result! binding-mgr result-var)
-                               actions)))
-
             ;; Process operands: bind or check equality
             (let ([operands (syntax->list (ast-match-expand-operands match-op))])
               (loop :for operand :in operands
                     :for operand-idx :from 0
-                    :do (if (is-binding-bound? binding-mgr operand)
-                            ;; Already bound - check equality
-                            (set! actions
-                              (cons (action-check-operand-equal binding-mgr operand op-idx operand-idx)
-                                    actions))
-                            ;; Not bound yet - bind it
-                            (set! actions
-                              (cons (action-bind-operand! binding-mgr operand op-idx operand-idx)
-                                    actions))))
+                    :rime-with entry := (find-binding-entry binding-mgr operand)
+                    :rime-with is-result := (binding-entry-is-result? entry)
+                    :rime-with is-bound := (binding-entry-bound? entry)
+                    :do (cond
+                          ;; Case 1: Operand binding (not result) and not bound → bind it
+                          [(and (not is-result) (not is-bound))
+                           (set! actions
+                             (cons (list ':bind-operand op-idx operand
+                                        (binding-entry-operand-idx entry))
+                                   actions))
+                           (binding-entry-bound?-set! entry #t)]
 
-              ;; Recursively traverse operands (DAG edges)
-              (loop :for operand :in operands
-                    :rime-with operand-op-idx := (find-operation-by-result match-vec operand)
-                    :when operand-op-idx
-                    :rime-with operand-op := (vector-ref match-vec operand-op-idx)
-                    :rime-with operand-result-idx := (find-result-index operand-op operand)
-                    :do (set! actions
-                           (append (build-match-actions match-vec operand-op-idx operand operand-result-idx
-                                                       visited binding-mgr)
-                                   actions))))
+                          ;; Cases 2 & 3: Variable is bound (operand or result) → check equality
+                          [is-bound
+                           (set! actions
+                             (cons (list ':check-eq op-idx operand-idx operand)
+                                   actions))]
+
+                          ;; Case 4: Result binding not yet bound → TODO
+                          [(and is-result (not is-bound))
+                           ;; TODO: Need to recurse to defining operation
+                           ;; Issue: May need different handling than simple recursion
+                           (error 'build-match-actions
+                                 "Case 4: result binding not yet bound"
+                                 operand)])))
 
             (reverse actions)))))
 
