@@ -22,8 +22,14 @@
       (syntax-violation 'validate-ast "Root variable must be an identifier"
                        (ast-pattern-expand-root-var ast-rec))))
 
+  ;; Helper: normalize match field from list to vector
+  (define (normalize-ast-match-to-vector ast-rec)
+    (ast-pattern-expand-match-set! ast-rec
+      (list->vector (ast-pattern-expand-match ast-rec))))
+
   (define (validate-ast ast-rec)
     (validate-ast-match-function-name ast-rec)
+    (normalize-ast-match-to-vector ast-rec)
     (validate-ast-match-root-var ast-rec)
 
     ;; Validate and normalize match operations
@@ -67,20 +73,22 @@
         (ast-match-expand-op-name-set! match-op
           (datum->syntax op-name-stx (symbol->string op-name-datum))))))
 
-  ;; Validate match operations
+  ;; Validate match operations (match field is already a vector)
   (define (validate-match-operations ast-rec)
-    (loop :for match-op :in (ast-pattern-expand-match ast-rec)
-          :do (normalize-op-name match-op)
-          (:loop :for var :in (let ([rv (ast-match-expand-result-var match-op)])
-                                (if (identifier? rv) (list rv) (syntax->list rv)))
-                 :do (validate-%-identifier var "Result"))
-          (:loop :for var :in (syntax->list (ast-match-expand-operands match-op))
-                 :do (validate-%-identifier var "Operand"))))
+    (let ([match-vec (ast-pattern-expand-match ast-rec)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (normalize-op-name match-op)
+            (:loop :for var :in (let ([rv (ast-match-expand-result-var match-op)])
+                                  (if (identifier? rv) (list rv) (syntax->list rv)))
+                   :do (validate-%-identifier var "Result"))
+            (:loop :for var :in (syntax->list (ast-match-expand-operands match-op))
+                   :do (validate-%-identifier var "Operand")))))
 
   ;; Analyze match operations - build match-bindings and match-actions
   (define (analyze-match-operations ast-rec)
-    ;; Convert match list to vector for index-based access
-    (let* ([match-vec (list->vector (ast-pattern-expand-match ast-rec))]
+    ;; Match field is already a vector (normalized earlier)
+    (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [bindings (make-eq-hashtable)]
            [actions '()])
 
