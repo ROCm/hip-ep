@@ -358,6 +358,23 @@ __global__ __launch_bounds__(kGemvBlock) void qconv_gemv_kernel(
 constexpr int kGemvVec = 16;
 constexpr int kGemvWords = kGemvVec / 8; // 4-bit; 8-bit needs twice this
 
+// Output channels one block covers.
+//
+// A block reads the whole activation column whatever number of channels it
+// produces, so at one channel per block the column is re-read once per output
+// and those reads, not the weights, set the rate: per channel and per k the
+// column costs two bytes against the half byte a 4-bit weight costs. The
+// block's reduction is fixed for the same reason, paid once however much the
+// block produces. Covering several channels at once divides both terms by the
+// count and leaves the weights, which are the only traffic that is actually
+// per channel.
+//
+// Eight is where the two directions meet. Raising it keeps dividing the shared
+// traffic, but it divides the grid by the same count, and a narrow output layer
+// runs out of blocks to fill the machine before the saving pays for the
+// registers and shared memory the extra accumulators cost.
+constexpr int kGemvCoPerBlock = 8;
+
 // Same reduction as qconv_gemv_kernel, but reading weights by the word.
 //
 // The scalar loop above fetches one weight per iteration and dereferences it
@@ -373,6 +390,10 @@ constexpr int kGemvWords = kGemvVec / 8; // 4-bit; 8-bit needs twice this
 // weights as words rather than bytes shortens the chain again, by the packing
 // factor, and makes the access a contiguous 128 bytes per wave.
 //
+// A block also covers kGemvCoPerBlock output channels rather than one, so the
+// activation chunk a step stages is read once and spent against every one of
+// those channels, and the block's reduction is walked once for all of them.
+//
 // Requires kGemvVec to divide in_channels, which the caller checks. That is
 // what guarantees a thread's chunk lies wholly inside the row or wholly past
 // its end -- never straddling -- so no step needs a partial vector and the
@@ -387,34 +408,40 @@ __global__ __launch_bounds__(kGemvBlock) void qconv_gemv_packed_kernel(
     float act_out_scale_ratio, int32_t input_zp, float inv_output_scale,
     int32_t output_zp) {
   constexpr int kWords = WBits == 4 ? kGemvWords : kGemvWords * 2;
+  constexpr int kCo = kGemvCoPerBlock;
 
-  __shared__ int64_t reduce[kGemvBlock];
+  __shared__ int64_t reduce[kCo][kGemvBlock];
 
-  const int64_t co = blockIdx.x;
+  const int64_t co0 = static_cast<int64_t>(blockIdx.x) * kCo;
   const int64_t p = blockIdx.y;
   const int64_t n = blockIdx.z;
 
+  // Channels this block really owns. A tail block folds the rest onto its
+  // first channel, which costs a repeated row and is thrown away below; the
+  // point is that no lane addresses past the weight buffer.
+  const int live = static_cast<int>(out_channels - co0) < kCo
+                       ? static_cast<int>(out_channels - co0)
+                       : kCo;
+
   const TAct *x_n = input + n * in_channels * spatial_size;
-  const int zw = qconv_read_quant(weight_zero_points, co, WBits, WSigned);
 
-  // Byte where this output channel's weights start. Divisibility of
-  // in_channels by kGemvVec keeps it a multiple of four, so the word reads
-  // below stay naturally aligned.
-  const uint8_t *w_row =
-      weights + (WBits == 4 ? (co * in_channels) / 2 : co * in_channels);
+  // Uniform across the block, so these stay in scalar registers.
+  int zw[kCo];
+  const uint8_t *w_row[kCo];
+#pragma unroll
+  for (int c = 0; c < kCo; ++c) {
+    // Byte where the channel's weights start. Divisibility of in_channels by
+    // kGemvVec keeps it a multiple of four, so the word reads below stay
+    // naturally aligned.
+    const int64_t co = co0 + (c < live ? c : 0);
+    zw[c] = qconv_read_quant(weight_zero_points, co, WBits, WSigned);
+    w_row[c] =
+        weights + (WBits == 4 ? (co * in_channels) / 2 : co * in_channels);
+  }
 
-  int64_t acc = 0;
+  int64_t acc[kCo] = {};
   for (int64_t k0 = static_cast<int64_t>(threadIdx.x) * kGemvVec;
        k0 < in_channels; k0 += static_cast<int64_t>(kGemvBlock) * kGemvVec) {
-    uint32_t wv[kWords];
-    {
-      const auto *src = reinterpret_cast<const uint32_t *>(
-          w_row + (WBits == 4 ? k0 / 2 : k0));
-#pragma unroll
-      for (int i = 0; i < kWords; ++i)
-        wv[i] = src[i];
-    }
-
     TAct xs[kGemvVec];
     if (spatial_size == 1) {
       // Decode reads straight down the channel axis. Splitting the case out
@@ -429,29 +456,51 @@ __global__ __launch_bounds__(kGemvBlock) void qconv_gemv_packed_kernel(
         xs[i] = x_n[(k0 + i) * spatial_size + p];
     }
 
+    uint32_t wv[kCo][kWords];
+#pragma unroll
+    for (int c = 0; c < kCo; ++c) {
+      const auto *src = reinterpret_cast<const uint32_t *>(
+          w_row[c] + (WBits == 4 ? k0 / 2 : k0));
+#pragma unroll
+      for (int i = 0; i < kWords; ++i)
+        wv[c][i] = src[i];
+    }
+
     // Nothing above this line reads a loaded value, so every load in the step
     // is still outstanding when the first one is finally waited on.
-    int32_t part = 0;
 #pragma unroll
-    for (int i = 0; i < kGemvVec; ++i) {
-      const int32_t xv = static_cast<int32_t>(xs[i]) - input_zp;
-      part += xv * (qconv_unpack_word<WBits, WSigned>(wv, i) - zw);
+    for (int c = 0; c < kCo; ++c) {
+      int32_t part = 0;
+#pragma unroll
+      for (int i = 0; i < kGemvVec; ++i) {
+        const int32_t xv = static_cast<int32_t>(xs[i]) - input_zp;
+        part += xv * (qconv_unpack_word<WBits, WSigned>(wv[c], i) - zw[c]);
+      }
+      acc[c] += part;
     }
-    acc += part;
   }
 
-  reduce[threadIdx.x] = acc;
+  // The channels share the tree, so the barriers are walked once rather than
+  // once per channel.
+#pragma unroll
+  for (int c = 0; c < kCo; ++c)
+    reduce[c][threadIdx.x] = acc[c];
   __syncthreads();
   for (int stride = kGemvBlock / 2; stride > 0; stride >>= 1) {
-    if (static_cast<int>(threadIdx.x) < stride)
-      reduce[threadIdx.x] += reduce[threadIdx.x + stride];
+    if (static_cast<int>(threadIdx.x) < stride) {
+#pragma unroll
+      for (int c = 0; c < kCo; ++c)
+        reduce[c][threadIdx.x] += reduce[c][threadIdx.x + stride];
+    }
     __syncthreads();
   }
 
-  if (threadIdx.x == 0) {
+  if (static_cast<int>(threadIdx.x) < live) {
+    const int c = static_cast<int>(threadIdx.x);
+    const int64_t co = co0 + c;
     const float m_co = act_out_scale_ratio * weight_scales[co];
     output[n * out_channels * spatial_size + co * spatial_size + p] =
-        qconv_epilogue<TAct>(reduce[0], m_co, bias, co, inv_output_scale,
+        qconv_epilogue<TAct>(reduce[c][0], m_co, bias, co, inv_output_scale,
                              output_zp);
   }
 }
@@ -495,11 +544,17 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
     const bool packed = (in_channels % kGemvVec) == 0 &&
                         (reinterpret_cast<uintptr_t>(w) % sizeof(uint32_t)) == 0;
 
+    // The packed body produces kGemvCoPerBlock channels per block.
+    dim3 packed_grid(
+        static_cast<unsigned>((out_channels + kGemvCoPerBlock - 1) /
+                              kGemvCoPerBlock),
+        static_cast<unsigned>(spatial_size), static_cast<unsigned>(batch));
+
 #define QCONV_LAUNCH_GEMV_PACKED(BITS, SIGNED)                                 \
   hipLaunchKernelGGL(                                                          \
-      HIP_KERNEL_NAME(qconv_gemv_packed_kernel<TAct, BITS, SIGNED>), grid,     \
-      dim3(kGemvBlock), 0, stream, x, w, ws, wzp, b, y, in_channels,           \
-      out_channels, spatial_size, act_out_scale_ratio, input_zp,               \
+      HIP_KERNEL_NAME(qconv_gemv_packed_kernel<TAct, BITS, SIGNED>),           \
+      packed_grid, dim3(kGemvBlock), 0, stream, x, w, ws, wzp, b, y,           \
+      in_channels, out_channels, spatial_size, act_out_scale_ratio, input_zp,  \
       inv_output_scale, output_zp)
 
     if (packed && weight_bits == 4 && weight_signed)
