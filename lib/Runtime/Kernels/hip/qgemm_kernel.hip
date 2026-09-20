@@ -1838,10 +1838,18 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
       std::is_same_v<TY, uint16_t>;
   if constexpr (kCanTuneNk) {
     int config = qgemm_gemv_nk_config_override();
-    if (config == 0 && qgemm_device_cu_count() == 20) {
-      if (g.N == 1024)
+    if (config == 0) {
+      // Measured winners for these two output widths. A config only pays off
+      // while its grid still covers the device: a block owns kCols * kWaves
+      // outputs, so a wider group yields fewer blocks. Requiring at least one
+      // block per scheduling unit is what stops the narrow-N choice from
+      // shrinking the grid below the machine on a wider part. The count is
+      // hipDeviceProp_t::multiProcessorCount, so it is the unit a block is
+      // dispatched to rather than a physical CU tally.
+      const int64_t cus = qgemm_device_cu_count();
+      if (g.N == 1024 && g.N / (4 * 8) >= cus)
         config = 48;
-      else if (g.N == 8192)
+      else if (g.N == 8192 && g.N / (2 * 4) >= cus)
         config = 24;
     }
     switch (config) {
@@ -2022,14 +2030,15 @@ int qgemm_gemv_config(const QGemmArgs &g, const QGemmRequant &requant,
                       bool need_row_a, bool need_col_b) {
   if (const int forced = qgemm_gemv_config_override(); forced >= 0)
     return forced;
-  constexpr bool kPsuDecodeTypes =
+  constexpr bool kSplitAdapterTypes =
       std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
       std::is_same_v<TY, uint16_t>;
-  if constexpr (kPsuDecodeTypes) {
-    // The LoRA-B GEMVs have only one 32-element K slice. Launching the generic
-    // 32-slice block wastes almost all of its waves; the single-slice geometry
-    // is the deterministic winner for every PSU output width on gfx1151.
-    if (g.K <= 32 && qgemm_device_cu_count() == 20)
+  if constexpr (kSplitAdapterTypes) {
+    // A K that is a single 32-element slice cannot fill the generic 32-slice
+    // block: every slice but one is empty, so almost all of its waves retire
+    // without work. The single-slice geometry is the right shape for that
+    // whatever the CU count, so this needs no device gate.
+    if (g.K <= 32)
       return kQGemmGemvSafeConfig;
   }
   if (!qgemm_gemv_autotune_enabled())
@@ -2192,8 +2201,9 @@ QGemmSplitKPlan qgemm_plan_splitk(int64_t M, int64_t N, int64_t K) {
   const int64_t base_blocks =
       ((N + kTileN - 1) / kTileN) * ((M + kTileM - 1) / kTileM);
   const int override_target = qgemm_splitk_target_blocks_per_cu_override();
-  // PSU M=128 sweep: N=32 LoRA-A wins at 3 blocks/CU, while the N=1024
-  // K/V base projections win at 4. Preserve the established value elsewhere.
+  // Swept at M=128: a narrow N=32 output wins at 3 blocks/CU because each block
+  // carries so little work that occupancy matters more than reuse, while
+  // N=1024, K=2048 wins at 4. Preserve the established value elsewhere.
   const int target_blocks_per_cu =
       override_target > 0
           ? override_target
@@ -2259,9 +2269,9 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
 
   (void)hipGetLastError();
   if constexpr (kCanUseW4Specialized) {
-    // K=32 staging wins for the PSU Up/Gate and O/Down shapes, but regresses
-    // Q (N=3072). Keep the dispatch shape-exact instead of applying it to all
-    // complete tiles.
+    // K=32 staging wins for the two shape families below but regresses
+    // N=3072, so keep the dispatch shape-exact instead of applying it to every
+    // complete tile.
     const bool use_k32_shape =
         (g.N >= 8192 && g.K == 2048) ||
         (g.N == 2048 && g.K >= 3072);
@@ -2277,8 +2287,8 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
       return static_cast<int>(hipGetLastError());
     }
 
-    // Screening showed this geometry wins on the PSU Up/Gate projection
-    // (M=128, K=2048, N=8192) but loses on narrower N and K=32 LoRA-B.
+    // Screening showed this geometry wins at M=128, K=2048, N=8192 but loses
+    // on narrower N and on the single-slice K=32 shapes.
     if (!use_splitk && use_w4_specialized && g.M == kM128TileM &&
         g.N >= 8192 && g.K >= 1024 && qgemm_tiled_m128_config() == 1) {
       hipLaunchKernelGGL(
