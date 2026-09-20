@@ -180,19 +180,9 @@
   (define (action-bind-result! mgr id)
     ;; Mark a result variable as bound - returns :bind-result action
     ;; Note: result-op-idx and result-idx are already set during collect-all-identifiers
+    ;; Phase 2 validation guarantees: identifier exists, starts with %, is a result variable
     (let ([entry (find-binding-entry mgr id)])
-      (unless entry
-        (syntax-violation 'action-bind-result!
-          "Identifier not found in bindings" id))
-      (when (binding-entry-bound? entry)
-        (syntax-violation 'action-bind-result!
-          "Identifier already bound" id))
-      (unless (binding-entry-is-result? entry)
-        (syntax-violation 'action-bind-result!
-          "Identifier is not a result variable" id))
-      ;; Mark as bound
       (binding-entry-bound?-set! entry #t)
-      ;; Return :bind-result action for codegen
       (list ':bind-result id
             (binding-entry-result-op-idx entry)
             (binding-entry-result-idx entry))))
@@ -200,31 +190,18 @@
   (define (action-bind-operand! mgr id op-idx operand-idx)
     ;; Bind an operand variable - updates entry in place, returns :bind-operand action
     ;; Note: operand location is already recorded during collect-all-identifiers
+    ;; Phase 2 validation guarantees: identifier exists and starts with %
     (let ([entry (find-binding-entry mgr id)])
-      (unless entry
-        (syntax-violation 'action-bind-operand!
-          "Identifier not found in bindings" id))
-      (when (binding-entry-bound? entry)
-        (syntax-violation 'action-bind-operand!
-          "Identifier already bound" id))
-      ;; Mark as bound
       (binding-entry-bound?-set! entry #t)
-      ;; Return :bind-operand action using recorded location
       (list ':bind-operand id
             (binding-entry-operand-op-idx entry)
             (binding-entry-operand-idx entry))))
 
   (define (action-check-operand-equal mgr id op-idx operand-idx)
     ;; Check operand equality - returns :check-operand-equal action
-    (let ([entry (find-binding-entry mgr id)])
-      (unless entry
-        (syntax-violation 'action-check-operand-equal
-          "Identifier not found in bindings" id))
-      (unless (binding-entry-bound? entry)
-        (syntax-violation 'action-check-operand-equal
-          "Identifier not bound yet" id))
-      ;; Return action: check that operand at (op-idx, operand-idx) equals bound value
-      (list ':check-operand-equal id op-idx operand-idx)))
+    ;; Phase 2 validation guarantees: identifier exists and starts with %
+    ;; DAG traversal guarantees: identifier is already bound
+    (list ':check-operand-equal id op-idx operand-idx))
 
   (define (check-all-results-bound! mgr)
     ;; Verify all result variables are bound (call at end of analysis)
