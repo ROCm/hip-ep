@@ -59,6 +59,7 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
@@ -537,9 +538,56 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 //     compile-time known)
 //   - output spatial extents static and equal to input/kernel
 //   - pads all zero, dilations all 1, group == 1, auto_pad NOTSET or VALID
+//   - not a DQ/Conv/Q sandwich. hip-fusion-transform fuses that chain into
+//     hip.qconv after OnnxToHip; rewriting to Reshape/Gemm here would hide
+//     hip.conv and also block hip.qgemm (layout ops sit between DQ and Gemm).
+//     Native onnx.DequantizeLinear / QuantizeLinear and the com.microsoft
+//     onnx.Custom spellings both count. Unquantized patch embeds still rewrite.
 //
 // Bias is optional. When absent we still emit Gemm with a zero C operand
 // because the converter requires three inputs; α=1 β=1.
+
+/// Match `op_type` as `"domain.OpName"` (e.g. `"onnx.DequantizeLinear"`).
+/// Native ONNX ops compare the MLIR name; `onnx.Custom` compares
+/// `domain_name.function_name` (`ai.onnx` and a missing domain map to `onnx`).
+static bool isOpType(mlir::Operation *op, const char *op_type) {
+  if (!op)
+    return false;
+  llvm::StringRef want(op_type);
+  if (op->getName().getStringRef() == want)
+    return true;
+  if (op->getName().getStringRef() != "onnx.Custom")
+    return false;
+  auto fn = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!fn)
+    return false;
+  llvm::StringRef domain = "onnx";
+  if (auto d = op->getAttrOfType<mlir::StringAttr>("domain_name")) {
+    domain = d.getValue();
+    if (domain.empty() || domain == "ai.onnx")
+      domain = "onnx";
+  }
+  llvm::SmallString<64> full(domain);
+  full += '.';
+  full += fn.getValue();
+  return want == full;
+}
+
+static bool isQdqConv(mlir::Operation *conv) {
+  if (conv->getNumOperands() < 1 || conv->getNumResults() != 1)
+    return false;
+  mlir::Operation *dq = conv->getOperand(0).getDefiningOp();
+  if (!isOpType(dq, "onnx.DequantizeLinear") &&
+      !isOpType(dq, "com.microsoft.DequantizeLinear"))
+    return false;
+  for (mlir::Operation *user : conv->getResult(0).getUsers()) {
+    if (isOpType(user, "onnx.QuantizeLinear") ||
+        isOpType(user, "com.microsoft.QuantizeLinear"))
+      return true;
+  }
+  return false;
+}
+
 struct PatchEmbedConvToGemm : public mlir::RewritePattern {
   PatchEmbedConvToGemm(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/2, ctx) {}
@@ -550,6 +598,8 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     if (op->getNumOperands() < 2 || op->getNumOperands() > 3 ||
         op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "conv.arity");
+    if (isQdqConv(op))
+      return rewriter.notifyMatchFailure(op, "qdq_conv");
     mlir::Value x = op->getOperand(0);
     mlir::Value w = op->getOperand(1);
     mlir::Value bias = op->getNumOperands() == 3 ? op->getOperand(2) : nullptr;
