@@ -149,24 +149,48 @@ __device__ inline TAct qconv_epilogue(int64_t acc, float m_co,
 // Tiled path (spatial_size > kGemvSpatialThreshold, i.e. prefill)
 //===----------------------------------------------------------------------===//
 
-// kThreadCo trades register blocking against parallelism, and on this GPU
-// parallelism wins by a wide margin. Total threads launched is
-// (Cout / kThreadCo) * P, while the device holds 20 CUs * 2048 threads = 40960
-// resident. At kThreadCo = 8 a Cout = 1024 layer launches only 16384 threads and
-// leaves 60% of the machine idle for the whole kernel; at 2 it launches 65536 and
-// oversubscribes, which is what lets latency hiding work at all.
+// kTileCo sets how much of the activation traffic is shared rather than
+// repeated, and it is the term that dominates this kernel.
+//
+// A block streams the whole of K for the kTileP positions it owns, whatever
+// number of channels it produces, so that column is re-read once per co-tile:
+// ceil(Cout / kTileCo) * K * P * sizeof(TAct) bytes against the
+// ceil(P / kTileP) * Cout * K * bits/8 the weights cost. At a 5120-deep,
+// 17920-wide layer with P = 512 and 4-bit weights the two are 11.7 GB and
+// 367 MB, so 97% of what the kernel moves is the same activations over again,
+// and dividing kTileCo into that is worth far more than anything done to the
+// weight side.
+//
+// The cost is grid granularity: the grid is ceil(P / kTileP) by
+// ceil(Cout / kTileCo), so raising kTileCo divides the block count by the same
+// factor, and a narrow layer runs out of blocks to fill the machine before the
+// saved traffic pays for it. 64 keeps 280 co-tiles on the widest layer here and
+// still leaves a 1024-wide one with 16, which at 8 p-tiles is 128 blocks.
 constexpr int kTileP = 64;
-constexpr int kTileCo = 8;
+constexpr int kTileCo = 64;
 constexpr int kTileK = 32;
-constexpr int kThreadCo = 2;
+constexpr int kThreadCo = 16;
 constexpr int kCoGroups = kTileCo / kThreadCo;  // 4
 constexpr int kTiledBlock = kTileP * kCoGroups; // 256
 
 // Staging repetitions: how many elements of each LDS tile one thread fetches.
 constexpr int kXRepeats = (kTileK * kTileP) / kTiledBlock;  // 8
-constexpr int kWRepeats = (kTileCo * kTileK) / kTiledBlock; // 1
+constexpr int kWRepeats = (kTileCo * kTileK) / kTiledBlock; // 8
 static_assert(kTileK * kTileP == kXRepeats * kTiledBlock, "x tile must divide");
 static_assert(kTileCo * kTileK == kWRepeats * kTiledBlock, "w tile must divide");
+
+// Padding on the channel axis of the staged weights, in int16 elements.
+//
+// The inner loop wants the kThreadCo weights of one k contiguous so they arrive
+// as two 128-bit reads instead of kThreadCo separate ones, which needs the row
+// stride to stay a multiple of 16 bytes. 8 is the smallest padding that keeps
+// that while moving the staging writes off a single bank: writes step by one
+// row and (kTileCo + 8) * 2 / 4 is 36 dwords, so they spread over 8 banks
+// rather than colliding on one. The writes are outnumbered 4 to 1 by the reads,
+// so the read side is what the padding is chosen for.
+constexpr int kWPad = 8;
+static_assert((kTileCo + kWPad) * sizeof(int16_t) % 16 == 0,
+              "staged weight rows must stay 16-byte aligned");
 
 // OUT[n, co, p] = requantize(sum_ci (X[n, ci, p] - z_x) * (W[co, ci] - z_w[co]))
 //
@@ -184,18 +208,36 @@ static_assert(kTileCo * kTileK == kWRepeats * kTiledBlock, "w tile must divide")
 // Out-of-range K is staged as a zero WEIGHT, not a zero activation: the
 // activation has z_x subtracted from it, so a zero there would contribute
 // -z_x * w instead of nothing.
-template <typename TAct>
+//
+// word_staged picks how the weight slab is fetched. Element-at-a-time, a wave
+// spends 64 byte loads to collect the 32 bytes of one staging round, because
+// two lanes share every byte at 4 bits and the unpack has to happen before the
+// value can be stored. By the word each lane instead brings in 32/WBits
+// logical weights in one read, which is the same slab in a quarter of the
+// requests and with the shifts folded away by WBits and WSigned. It needs
+// in_channels to be a multiple of that element count so a word never straddles
+// the end of a channel's row; the caller checks, and the element path stays for
+// the shapes where it does not hold.
+template <typename TAct, int WBits, bool WSigned>
 __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
     const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
     const float *__restrict__ weight_scales,
     const uint8_t *__restrict__ weight_zero_points,
     const float *__restrict__ bias, TAct *__restrict__ output,
     int64_t in_channels, int64_t out_channels, int64_t spatial_size,
-    int weight_bits, bool weight_signed, float act_out_scale_ratio,
-    int32_t input_zp, float inv_output_scale, int32_t output_zp) {
+    bool word_staged, float act_out_scale_ratio, int32_t input_zp,
+    float inv_output_scale, int32_t output_zp) {
+  // Logical weights per 32-bit word, and how the tile's slab divides into them.
+  constexpr int kWElems = 32 / WBits;
+  constexpr int kWWordsPerRow = kTileK / kWElems;
+  constexpr int kWWordRepeats = (kTileCo * kWWordsPerRow) / kTiledBlock;
+  static_assert(kTileCo * kWWordsPerRow == kWWordRepeats * kTiledBlock,
+                "w word slab must divide");
   __shared__ TAct x_lds[kTileK][kTileP];
+  // Indexed [k][co], the transpose of the weight layout in memory, so that the
+  // channels one thread multiplies against a single activation are adjacent.
   // int16, not int8: an 8-bit weight minus its zero point reaches +-255.
-  __shared__ int16_t w_lds[kTileCo][kTileK];
+  __shared__ int16_t w_lds[kTileK][kTileCo + kWPad];
 
   const int64_t n = blockIdx.z;
   const int64_t p_base = static_cast<int64_t>(blockIdx.x) * kTileP;
@@ -210,7 +252,8 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
 
   // z_w depends only on the output channel, so each thread's staging slots keep
   // the same zero point for every K-tile. Hoisting it out of the loop turns a
-  // per-tile reload into one read.
+  // per-tile reload into one read. The two staging layouts land a thread on
+  // different channels, so each keeps its own copy.
   int zw_stage[kWRepeats];
 #pragma unroll
   for (int rep = 0; rep < kWRepeats; ++rep) {
@@ -218,8 +261,16 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
     const int64_t co = co_base + lin / kTileK;
     zw_stage[rep] =
         co < out_channels
-            ? qconv_read_quant(weight_zero_points, co, weight_bits,
-                               weight_signed)
+            ? qconv_read_quant(weight_zero_points, co, WBits, WSigned)
+            : 0;
+  }
+  int zw_word[kWWordRepeats];
+#pragma unroll
+  for (int rep = 0; rep < kWWordRepeats; ++rep) {
+    const int64_t co = co_base + (rep * kTiledBlock + tid) / kWWordsPerRow;
+    zw_word[rep] =
+        co < out_channels
+            ? qconv_read_quant(weight_zero_points, co, WBits, WSigned)
             : 0;
   }
 
@@ -238,34 +289,65 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
                           : TAct{0};
     }
 
+    // Uniform across the block, so this is a scalar branch taken once per tile
+    // rather than anything the lanes diverge on.
+    if (word_staged) {
 #pragma unroll
-    for (int rep = 0; rep < kWRepeats; ++rep) {
-      const int lin = rep * kTiledBlock + tid;
-      const int sc = lin / kTileK;
-      const int sk = lin % kTileK;
-      const int64_t co = co_base + sc;
-      const int64_t k = k0 + sk;
-      int16_t v = 0;
-      if (co < out_channels && k < in_channels) {
-        const int wq = qconv_read_quant(weights, co * in_channels + k,
-                                        weight_bits, weight_signed);
-        v = static_cast<int16_t>(wq - zw_stage[rep]);
+      for (int rep = 0; rep < kWWordRepeats; ++rep) {
+        const int widx = rep * kTiledBlock + tid;
+        const int sc = widx / kWWordsPerRow;
+        const int wk = (widx % kWWordsPerRow) * kWElems;
+        const int64_t co = co_base + sc;
+        const int64_t k = k0 + wk;
+        const bool live = co < out_channels && k < in_channels;
+        const uint32_t word =
+            live ? reinterpret_cast<const uint32_t *>(
+                       weights)[(co * in_channels + k) / kWElems]
+                 : 0u;
+#pragma unroll
+        for (int j = 0; j < kWElems; ++j)
+          w_lds[wk + j][sc] = static_cast<int16_t>(
+              live ? qconv_unpack_word<WBits, WSigned>(&word, j) - zw_word[rep]
+                   : 0);
       }
-      w_lds[sc][sk] = v;
+    } else {
+#pragma unroll
+      for (int rep = 0; rep < kWRepeats; ++rep) {
+        const int lin = rep * kTiledBlock + tid;
+        const int sc = lin / kTileK;
+        const int sk = lin % kTileK;
+        const int64_t co = co_base + sc;
+        const int64_t k = k0 + sk;
+        int16_t v = 0;
+        if (co < out_channels && k < in_channels) {
+          const int wq =
+              qconv_read_quant(weights, co * in_channels + k, WBits, WSigned);
+          v = static_cast<int16_t>(wq - zw_stage[rep]);
+        }
+        w_lds[sk][sc] = v;
+      }
     }
 
     __syncthreads();
 
     // Exact in int32 for one tile: kTileK terms of at most ~1.7e7 each.
+    //
+    // The product goes through the 24-bit multiplier. A full 32x32 integer
+    // multiply is quarter rate here and does not fuse with the accumulate,
+    // while the 24-bit form is a single full-rate multiply-add, and this loop
+    // is the whole inner kernel. Both operands are in range by construction: a
+    // zero point is representable in the activation type, so x - z_x lands in
+    // +-65535, and a weight minus its zero point in +-255. Their product peaks
+    // at 1.7e7, well inside what the low 32 bits hold exactly.
     int32_t chunk[kThreadCo] = {};
-#pragma unroll
     for (int kk = 0; kk < kTileK; ++kk) {
       // Hoisted out of the channel loop: z_x is per-tensor, so this is the same
       // subtraction for all kThreadCo channels.
       const int32_t xv = static_cast<int32_t>(x_lds[kk][tx]) - input_zp;
 #pragma unroll
       for (int c = 0; c < kThreadCo; ++c)
-        chunk[c] += xv * static_cast<int32_t>(w_lds[ty * kThreadCo + c][kk]);
+        chunk[c] +=
+            __mul24(xv, static_cast<int32_t>(w_lds[kk][ty * kThreadCo + c]));
     }
 #pragma unroll
     for (int c = 0; c < kThreadCo; ++c)
@@ -578,11 +660,34 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
         static_cast<unsigned>((spatial_size + kTileP - 1) / kTileP),
         static_cast<unsigned>((out_channels + kTileCo - 1) / kTileCo),
         static_cast<unsigned>(batch));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_kernel<TAct>), grid,
-                       dim3(kTileP, kCoGroups), 0, stream, x, w, ws, wzp, b, y,
-                       in_channels, out_channels, spatial_size, weight_bits,
-                       weight_signed, act_out_scale_ratio, input_zp,
-                       inv_output_scale, output_zp);
+
+    // Word staging needs every channel's row to start on a word boundary and
+    // a thread's run of elements to stay inside one row, which both follow
+    // from in_channels dividing by the element count of a word. The pointer
+    // check covers the buffer itself, which the allocator aligns far past this
+    // but which nothing here guarantees.
+    const int64_t w_elems_per_word = 32 / weight_bits;
+    const bool word_staged =
+        (in_channels % w_elems_per_word) == 0 &&
+        (reinterpret_cast<uintptr_t>(w) % sizeof(uint32_t)) == 0;
+
+#define QCONV_LAUNCH_TILED(BITS, SIGNED)                                       \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_kernel<TAct, BITS, SIGNED>),  \
+                     grid, dim3(kTileP, kCoGroups), 0, stream, x, w, ws, wzp,  \
+                     b, y, in_channels, out_channels, spatial_size,            \
+                     word_staged, act_out_scale_ratio, input_zp,               \
+                     inv_output_scale, output_zp)
+
+    if (weight_bits == 4 && weight_signed)
+      QCONV_LAUNCH_TILED(4, true);
+    else if (weight_bits == 4)
+      QCONV_LAUNCH_TILED(4, false);
+    else if (weight_signed)
+      QCONV_LAUNCH_TILED(8, true);
+    else
+      QCONV_LAUNCH_TILED(8, false);
+
+#undef QCONV_LAUNCH_TILED
   }
   return 0;
 }
