@@ -16,7 +16,7 @@
 //   acc[co, p] = sum over ci of (X[ci, p] - z_x) * (W[co, ci] - z_w[co])
 //
 // with M = out_channels, K = in_channels, N = spatial_size. The caller has
-// already established that geometry (see QDQConvFusion.pdll), so no im2col
+// already established that geometry, so no im2col
 // gather and no per-axis extents appear here.
 //
 // Both scales leave the sum because neither depends on ci:
