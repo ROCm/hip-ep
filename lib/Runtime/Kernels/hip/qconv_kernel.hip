@@ -49,8 +49,8 @@
 // int32 (kTileK = 32 terms, ~5.4e8, exact) and flushes into an int64 total per
 // tile. The result is exact for any K while the inner loop stays 32-bit.
 //
-// The GEMV path accumulates in int64 directly: it is bandwidth-bound, so the
-// wider adds are free and the tiling would only add work.
+// The GEMV path chunks for the same reason: it stages kGemvVec terms, sums
+// them in int32, and flushes into an int64 total.
 
 #include "debug_log.h"
 #include "hip_custom_kernels.h"
@@ -102,6 +102,32 @@ __device__ inline int qconv_read_quant(const uint8_t *__restrict__ buf,
   if (is_signed)
     return static_cast<int>(static_cast<int8_t>(buf[lin]));
   return static_cast<int>(buf[lin]);
+}
+
+// Read one LOGICAL element out of a weight chunk that was staged as whole
+// 32-bit words.
+//
+// Loading by word rather than by element preserves the packing verbatim, so
+// the ONNX order still applies within the word: little-endian puts byte 0 in
+// the low bits, and byte 0 holds the earlier element in its low nibble, which
+// leaves logical element j at bit 4j at 4 bits and bit 8j at 8.
+//
+// Width and signedness are template parameters, not arguments. As arguments
+// they are two unpredictable branches per element in the innermost loop of the
+// kernel; as parameters the shift, the mask and the widening all fold away.
+template <int WBits, bool WSigned>
+__device__ inline int qconv_unpack_word(const uint32_t *__restrict__ words,
+                                        int j) {
+  if (WBits == 4) {
+    const uint32_t nibble = (words[j >> 3] >> ((j & 7) * 4)) & 0xF;
+    if (WSigned)
+      return static_cast<int>(static_cast<int8_t>(nibble << 4)) >> 4;
+    return static_cast<int>(nibble);
+  }
+  const uint32_t byte = (words[j >> 2] >> ((j & 3) * 8)) & 0xFF;
+  if (WSigned)
+    return static_cast<int>(static_cast<int8_t>(byte));
+  return static_cast<int>(byte);
 }
 
 // Requantize one accumulated output element. The narrowing to float is safe
@@ -319,6 +345,117 @@ __global__ __launch_bounds__(kGemvBlock) void qconv_gemv_kernel(
   }
 }
 
+// Logical weights one thread covers per step of the packed GEMV body. Sixteen
+// is eight bytes at 4 bits and sixteen at 8, so the whole step's weights come
+// in as a couple of dwords either way.
+//
+// The constant trades two things off. Raising it shortens the chain of waits a
+// thread walks -- that is the whole point of the rewrite -- but it also
+// coarsens the split of K across the block, and the last step of a K that does
+// not divide evenly leaves part of the block idle. At 16 a block covers 4096
+// logical weights per step, which puts the common decode widths at two or five
+// steps instead of the twenty or seventy the scalar loop needed.
+constexpr int kGemvVec = 16;
+constexpr int kGemvWords = kGemvVec / 8; // 4-bit; 8-bit needs twice this
+
+// Same reduction as qconv_gemv_kernel, but reading weights by the word.
+//
+// The scalar loop above fetches one weight per iteration and dereferences it
+// in the same breath, so every iteration ends in a wait for a single byte and
+// a thread walks K/kGemvBlock of those waits end to end. Nothing else is in
+// flight to cover them: the loads are one deep, and occupancy is already at
+// the maximum, so there are no further waves to interleave. The kernel spends
+// most of its time stalled while the memory system runs far below its rate.
+//
+// So stage first, use second. A step loads its weights and its activations
+// into registers and touches neither until both have arrived, which leaves the
+// loads outstanding together and collapses the step's waits into one. Reading
+// weights as words rather than bytes shortens the chain again, by the packing
+// factor, and makes the access a contiguous 128 bytes per wave.
+//
+// Requires kGemvVec to divide in_channels, which the caller checks. That is
+// what guarantees a thread's chunk lies wholly inside the row or wholly past
+// its end -- never straddling -- so no step needs a partial vector and the
+// nibble order never shifts.
+template <typename TAct, int WBits, bool WSigned>
+__global__ __launch_bounds__(kGemvBlock) void qconv_gemv_packed_kernel(
+    const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
+    const float *__restrict__ weight_scales,
+    const uint8_t *__restrict__ weight_zero_points,
+    const float *__restrict__ bias, TAct *__restrict__ output,
+    int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+    float act_out_scale_ratio, int32_t input_zp, float inv_output_scale,
+    int32_t output_zp) {
+  constexpr int kWords = WBits == 4 ? kGemvWords : kGemvWords * 2;
+
+  __shared__ int64_t reduce[kGemvBlock];
+
+  const int64_t co = blockIdx.x;
+  const int64_t p = blockIdx.y;
+  const int64_t n = blockIdx.z;
+
+  const TAct *x_n = input + n * in_channels * spatial_size;
+  const int zw = qconv_read_quant(weight_zero_points, co, WBits, WSigned);
+
+  // Byte where this output channel's weights start. Divisibility of
+  // in_channels by kGemvVec keeps it a multiple of four, so the word reads
+  // below stay naturally aligned.
+  const uint8_t *w_row =
+      weights + (WBits == 4 ? (co * in_channels) / 2 : co * in_channels);
+
+  int64_t acc = 0;
+  for (int64_t k0 = static_cast<int64_t>(threadIdx.x) * kGemvVec;
+       k0 < in_channels; k0 += static_cast<int64_t>(kGemvBlock) * kGemvVec) {
+    uint32_t wv[kWords];
+    {
+      const auto *src = reinterpret_cast<const uint32_t *>(
+          w_row + (WBits == 4 ? k0 / 2 : k0));
+#pragma unroll
+      for (int i = 0; i < kWords; ++i)
+        wv[i] = src[i];
+    }
+
+    TAct xs[kGemvVec];
+    if (spatial_size == 1) {
+      // Decode reads straight down the channel axis. Splitting the case out
+      // is what lets the compiler see the run as contiguous and widen it.
+      const TAct *xp = x_n + k0;
+#pragma unroll
+      for (int i = 0; i < kGemvVec; ++i)
+        xs[i] = xp[i];
+    } else {
+#pragma unroll
+      for (int i = 0; i < kGemvVec; ++i)
+        xs[i] = x_n[(k0 + i) * spatial_size + p];
+    }
+
+    // Nothing above this line reads a loaded value, so every load in the step
+    // is still outstanding when the first one is finally waited on.
+    int32_t part = 0;
+#pragma unroll
+    for (int i = 0; i < kGemvVec; ++i) {
+      const int32_t xv = static_cast<int32_t>(xs[i]) - input_zp;
+      part += xv * (qconv_unpack_word<WBits, WSigned>(wv, i) - zw);
+    }
+    acc += part;
+  }
+
+  reduce[threadIdx.x] = acc;
+  __syncthreads();
+  for (int stride = kGemvBlock / 2; stride > 0; stride >>= 1) {
+    if (static_cast<int>(threadIdx.x) < stride)
+      reduce[threadIdx.x] += reduce[threadIdx.x + stride];
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    const float m_co = act_out_scale_ratio * weight_scales[co];
+    output[n * out_channels * spatial_size + co * spatial_size + p] =
+        qconv_epilogue<TAct>(reduce[0], m_co, bias, co, inv_output_scale,
+                             output_zp);
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Dispatch
 //===----------------------------------------------------------------------===//
@@ -348,11 +485,39 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
     dim3 grid(static_cast<unsigned>(out_channels),
               static_cast<unsigned>(spatial_size),
               static_cast<unsigned>(batch));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_gemv_kernel<TAct>), grid,
-                       dim3(kGemvBlock), 0, stream, x, w, ws, wzp, b, y,
-                       in_channels, out_channels, spatial_size, weight_bits,
-                       weight_signed, act_out_scale_ratio, input_zp,
-                       inv_output_scale, output_zp);
+
+    // The packed body reads the weight row by the word, so the row has to
+    // start on one and a thread's chunk must never straddle the row's end.
+    // Both follow from kGemvVec dividing in_channels: it makes the row's byte
+    // offset a multiple of four and every chunk either wholly inside the row
+    // or wholly past it. The pointer check covers the buffer itself, which the
+    // allocator aligns far past this but which nothing here guarantees.
+    const bool packed = (in_channels % kGemvVec) == 0 &&
+                        (reinterpret_cast<uintptr_t>(w) % sizeof(uint32_t)) == 0;
+
+#define QCONV_LAUNCH_GEMV_PACKED(BITS, SIGNED)                                 \
+  hipLaunchKernelGGL(                                                          \
+      HIP_KERNEL_NAME(qconv_gemv_packed_kernel<TAct, BITS, SIGNED>), grid,     \
+      dim3(kGemvBlock), 0, stream, x, w, ws, wzp, b, y, in_channels,           \
+      out_channels, spatial_size, act_out_scale_ratio, input_zp,               \
+      inv_output_scale, output_zp)
+
+    if (packed && weight_bits == 4 && weight_signed)
+      QCONV_LAUNCH_GEMV_PACKED(4, true);
+    else if (packed && weight_bits == 4)
+      QCONV_LAUNCH_GEMV_PACKED(4, false);
+    else if (packed && weight_signed)
+      QCONV_LAUNCH_GEMV_PACKED(8, true);
+    else if (packed)
+      QCONV_LAUNCH_GEMV_PACKED(8, false);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_gemv_kernel<TAct>), grid,
+                         dim3(kGemvBlock), 0, stream, x, w, ws, wzp, b, y,
+                         in_channels, out_channels, spatial_size, weight_bits,
+                         weight_signed, act_out_scale_ratio, input_zp,
+                         inv_output_scale, output_zp);
+
+#undef QCONV_LAUNCH_GEMV_PACKED
   } else {
     dim3 grid(
         static_cast<unsigned>((spatial_size + kTileP - 1) / kTileP),
