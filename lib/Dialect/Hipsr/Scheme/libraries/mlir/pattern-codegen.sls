@@ -52,7 +52,7 @@
                ;; For :debug-ast mode, return list with AST data
                (let ([fname-sym (syntax->datum #'fname)]
                      [root-op-str (syntax->datum #'root-op-name)]
-                     [match-data (map match-expand->datum match-ops)]
+                     [match-data (map match-expand->datum (vector->list match-ops))]
                      [rewrite-data (map operation-expand->datum rewrite-ops)]
                      [where-data (map where-binding-expand->datum where-bindings)])
                  (with-syntax ([ast-list (datum->syntax #'macro-name
