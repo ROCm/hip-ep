@@ -93,7 +93,7 @@ func.func @decode_past(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
                        %pv: tensor<1x2x4x8xf16>)
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
-  %r:3 = hip.gqa(%ctx) ins(%q, %k, %v, %past_k, %past_v, %seqlens, %total : tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xf16>, tensor<1x2x3x8xf16>, tensor<1xi32>, tensor<i32>)
+  %r:3 = hip.gqa(%ctx) ins(%q, %seqlens, %total : tensor<1x1x16xf16>, tensor<1xi32>, tensor<i32>) key(%k : tensor<1x1x16xf16>) value(%v : tensor<1x1x16xf16>) past_key(%past_k : tensor<1x2x3x8xf16>) past_value(%past_v : tensor<1x2x3x8xf16>)
       outs(%o, %pk, %pv : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
       {num_heads = 2 : i64, kv_num_heads = 2 : i64, scale = 3.53553391e-01 : f32}
       : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -345,7 +345,7 @@ func.func @share_buffer_rejected(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   // expected-error@+1 {{failed to legalize operation 'hip.gqa'}}
-  %r:3 = hip.gqa(%ctx) ins(%q, %k, %v, %past_k, %past_v, %seqlens, %total : tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>, tensor<1xi32>, tensor<i32>)
+  %r:3 = hip.gqa(%ctx) ins(%q, %seqlens, %total : tensor<1x1x16xf16>, tensor<1xi32>, tensor<i32>) key(%k : tensor<1x1x16xf16>) value(%v : tensor<1x1x16xf16>) past_key(%past_k : tensor<1x2x4x8xf16>) past_value(%past_v : tensor<1x2x4x8xf16>)
       outs(%o, %pk, %pv : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
       {num_heads = 2 : i64, kv_num_heads = 2 : i64}
       : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
@@ -383,7 +383,7 @@ func.func @decode_rope_rejected(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
     -> (tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
     attributes {rock.kernel} {
   // expected-error@+1 {{failed to legalize operation 'hip.gqa'}}
-  %r:3 = hip.gqa(%ctx) ins(%q, %k, %v, %past_k, %past_v, %seqlens, %total, %cos, %sin : tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x1x16xf16>, tensor<1x2x3x8xf16>, tensor<1x2x3x8xf16>, tensor<1xi32>, tensor<i32>, tensor<8x4xf16>, tensor<8x4xf16>)
+  %r:3 = hip.gqa(%ctx) ins(%q, %seqlens, %total : tensor<1x1x16xf16>, tensor<1xi32>, tensor<i32>) key(%k : tensor<1x1x16xf16>) value(%v : tensor<1x1x16xf16>) past_key(%past_k : tensor<1x2x3x8xf16>) past_value(%past_v : tensor<1x2x3x8xf16>) cos_cache(%cos : tensor<8x4xf16>) sin_cache(%sin : tensor<8x4xf16>)
       outs(%o, %pk, %pv : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>)
       {num_heads = 2 : i64, kv_num_heads = 2 : i64, do_rotary = 1 : i64}
       : tensor<1x1x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x8xf16>
