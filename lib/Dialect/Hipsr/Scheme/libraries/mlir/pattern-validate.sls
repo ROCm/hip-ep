@@ -139,15 +139,16 @@
                     (ast-pattern-expand-root-op-name-set! ast-rec
                       (ast-match-expand-op-name match-op)))))))
 
-  ;; Validate a single operation and walk its structure
-  (define (validate-operation op)
-    ;; Validate result-var is identifier (or empty for void operations)
+  ;; Helper: validate result-var is identifier (or empty for void operations)
+  (define (validate-operation-result-var op)
     (let ([result (ast-operation-expand-result-var op)])
       (unless (or (identifier? result)
                   (null? (syntax->datum result)))
         (syntax-violation 'validate-operation "Operation result must be identifier or ()"
-                         result)))
-    ;; Validate and normalize op-name
+                         result))))
+
+  ;; Helper: validate and normalize operation op-name (string or symbol -> string)
+  (define (validate-and-normalize-operation-name op)
     (let* ([op-name-stx (ast-operation-expand-op-name op)]
            [op-name-datum (syntax->datum op-name-stx)])
       (unless (or (string? op-name-datum) (symbol? op-name-datum))
@@ -156,11 +157,19 @@
       ;; Normalize: convert symbol to string in-place
       (unless (string? op-name-datum)
         (ast-operation-expand-op-name-set! op
-          (datum->syntax op-name-stx (symbol->string op-name-datum)))))
-    ;; Walk regions - regions is a list of ast-region-expand records
+          (datum->syntax op-name-stx (symbol->string op-name-datum))))))
+
+  ;; Helper: validate operation regions (walk structure)
+  (define (validate-operation-regions op)
     (let ([regions (ast-operation-expand-regions op)])
       (when (pair? regions)  ;; Only walk if non-empty
         (for-each validate-region regions))))
+
+  ;; Validate a single operation and walk its structure
+  (define (validate-operation op)
+    (validate-operation-result-var op)
+    (validate-and-normalize-operation-name op)
+    (validate-operation-regions op))
 
   ;; Validate a region and walk its blocks
   (define (validate-region region)
