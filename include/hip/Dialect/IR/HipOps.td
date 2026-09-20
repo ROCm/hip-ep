@@ -2182,6 +2182,7 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
