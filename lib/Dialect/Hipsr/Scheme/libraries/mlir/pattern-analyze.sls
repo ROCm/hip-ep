@@ -27,7 +27,8 @@
     (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
            [root-idx (find-root-operation match-vec root-var)]
-           [root-op (vector-ref match-vec root-idx)])
+           [root-op (vector-ref match-vec root-idx)]
+           [root-result-idx (find-result-index root-op root-var)])
 
       ;; Extract root operation name
       (ast-pattern-expand-root-op-name-set! ast-rec
@@ -37,14 +38,18 @@
       (let* ([binding-mgr (collect-all-identifiers match-vec)]
              [visited (make-vector (vector-length match-vec) #f)])
 
-        ;; Build match actions (includes binding for all results and operands)
-        (let ([actions (build-match-actions match-vec root-idx visited binding-mgr)])
+        ;; Create initial action: bind root variable to root operation result
+        (let ([initial-action (list ':bind-root root-var root-idx root-result-idx)])
 
-          (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
-          (ast-pattern-expand-match-actions-set! ast-rec actions)
+          ;; Build match actions (includes binding for all results and operands)
+          (let ([actions (cons initial-action
+                              (build-match-actions match-vec root-idx visited binding-mgr))])
 
-          ;; Warn about unvisited operations
-          (warn-unvisited-operations match-vec visited)))))
+            (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
+            (ast-pattern-expand-match-actions-set! ast-rec actions)
+
+            ;; Warn about unvisited operations
+            (warn-unvisited-operations match-vec visited))))))
 
   ;;-----------------------------------------------------------------------
   ;; DAG traversal and action generation
@@ -212,6 +217,14 @@
                                       :break #t :if (bound-identifier=? var root-var)))
         #f))
 
+  (define (find-result-index match-op target-var)
+    ;; Find which result index target-var occupies in match-op
+    (let ([result-vars (ast-match-expand-result-var match-op)])
+      (loop :for var :in result-vars
+            :for idx :from 0
+            :when (bound-identifier=? var target-var)
+            :break idx
+            :finally #f)))
 
   (define (find-operation-by-result match-vec result-var)
     (or (loop :for op-idx :from 0 :below (vector-length match-vec)
