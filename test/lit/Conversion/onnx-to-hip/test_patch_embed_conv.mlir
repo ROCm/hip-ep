@@ -307,13 +307,16 @@ module {
   // CHECK:         hip.conv
 
   // --------------------------------------------------------------------------
-  // The unit-kernel guard is scoped to the gather path. A 1x1 kernel over a 1x1
-  // input still has exactly one patch, so both permutations are identities that
-  // are never emitted and the rewrite is a free reshape into a GEMM. Keep it.
+  // A single output position does not re-admit a unit kernel. Both permutations
+  // are identities here, so the rewrite would cost nothing, but a 1x1 kernel has
+  // nothing to gain from it either. Converting anyway also strands the
+  // contraction behind a reshape, out of reach of the quantized-conv fusion,
+  // which leaves the weights dequantized as gemm operands. LLM decode graphs are
+  // made of these shapes.
   // --------------------------------------------------------------------------
-  func.func @unit_kernel_single_patch(%x: tensor<1x1152x1x1xf16>,
-                                      %w: tensor<512x1152x1x1xf16>,
-                                      %b: tensor<512xf16>)
+  func.func @guard_unit_kernel_single_patch(%x: tensor<1x1152x1x1xf16>,
+                                            %w: tensor<512x1152x1x1xf16>,
+                                            %b: tensor<512xf16>)
       -> tensor<1x512x1x1xf16> {
     %y = "onnx.Conv"(%x, %w, %b) {
       kernel_shape = [1, 1],
@@ -325,10 +328,9 @@ module {
     return %y : tensor<1x512x1x1xf16>
   }
 
-  // CHECK-LABEL: func.func @unit_kernel_single_patch
-  // CHECK-NOT:     hip.conv
-  // CHECK:         hip.gemm
-  // CHECK-NOT:     hip.conv
+  // CHECK-LABEL: func.func @guard_unit_kernel_single_patch
+  // CHECK-NOT:     hip.transpose
+  // CHECK:         hip.conv
 
   // --------------------------------------------------------------------------
   // The guard must not catch a real patch embed with a small patch: convnext's

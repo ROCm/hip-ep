@@ -666,11 +666,13 @@ struct PatchEmbedConvToGemm : public mlir::RewritePattern {
     // ordinary conv path, which handles it as a K = C contraction with no data
     // movement at all.
     //
-    // The `outSpatialProd == 1` shapes are exempt: there the two permutations
-    // are identities on the linear layout and are never emitted, so the rewrite
-    // is a pure win regardless of patch size.
-    if (outSpatialProd != 1 &&
-        llvm::all_of(kernelSpatial, [](int64_t k) { return k == 1; }))
+    // A single output position is not an exemption. It makes both permutations
+    // identities on the linear layout, so they are never emitted and the
+    // rewrite costs nothing -- but a unit kernel still gains nothing, and a
+    // rewrite with no gain is declined whatever it costs. Converting anyway
+    // also puts the contraction out of reach of the quantized-conv fusion,
+    // which leaves the weights dequantized into plain gemm operands.
+    if (llvm::all_of(kernelSpatial, [](int64_t k) { return k == 1; }))
       return rewriter.notifyMatchFailure(op, "conv.unit_kernel");
 
     // The gather path splits every spatial axis in two, so the intermediate is
