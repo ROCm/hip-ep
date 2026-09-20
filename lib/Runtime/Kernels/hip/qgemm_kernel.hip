@@ -993,19 +993,23 @@ constexpr int kWmmaWave = 32;
 constexpr int kWmmaTileK = 32; // two WMMA k steps staged per round
 constexpr int kWmmaTileM = 128;
 constexpr int kWmmaTileN = 64;
-constexpr int kWmmaWaves = 4;
-constexpr int kWmmaBlock = kWmmaWaves * kWmmaWave;      // 128
 constexpr int kWmmaMFrag = kWmmaTileM / kWmmaFrag;      // 8
 constexpr int kWmmaNFrag = kWmmaTileN / kWmmaFrag;      // 4
-constexpr int kWmmaMPerWave = kWmmaMFrag / kWmmaWaves;  // 2
 // Padded so a fragment read stays one 16-byte LDS access while consecutive
 // rows do not start on the same bank group.
 constexpr int kWmmaARowStride = kWmmaTileK + 16;        // 48
 constexpr int kWmmaChunk = 8;                           // values per staged chunk
 constexpr int kWmmaASlots = kWmmaTileM * (kWmmaTileK / kWmmaChunk);
-constexpr int kWmmaARepeats = (kWmmaASlots + kWmmaBlock - 1) / kWmmaBlock;
 constexpr int kWmmaBSlots = kWmmaTileN * (kWmmaTileK / kWmmaChunk);
-constexpr int kWmmaBRepeats = (kWmmaBSlots + kWmmaBlock - 1) / kWmmaBlock;
+
+// Below this the k loop is too short to amortize the staging pipeline and the
+// path loses to the dot4 kernels -- by 24% at K=128 and 87% at K=32 for
+// N=2048, while every K from 256 up wins.
+constexpr int64_t kWmmaMinK = 256;
+// A long k loop covers the extra barrier traffic of a wider block and profits
+// from the waves; a short one does not. Measured against cold weights at
+// N=2048: 8 waves is 9% ahead at K=8192 and behind at K=3072.
+constexpr int64_t kWmmaWideBlockMinK = 4096;
 // Grid size from which WMMA is preferred over split-K. Swept at M=128: WMMA
 // wins from N=640 (10 blocks) upward, and smaller grids could not be measured
 // because split-K cannot be switched off for them.
@@ -1030,7 +1034,9 @@ __device__ __forceinline__ void qgemm_wmma_unpack_w4x8(uint32_t p, int32_t &lo,
   hi = static_cast<int32_t>(__builtin_amdgcn_perm(od, ev, 0x07030602u));
 }
 
-__global__ __launch_bounds__(kWmmaBlock) void qgemm_tiled_wmma_w4_kernel(
+template <int kWmmaWaves>
+__global__ __launch_bounds__(kWmmaWaves * kWmmaWave) void
+qgemm_tiled_wmma_w4_kernel(
     const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
     uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
     bool need_row_a, bool need_col_b) {
@@ -1041,6 +1047,11 @@ __global__ __launch_bounds__(kWmmaBlock) void qgemm_tiled_wmma_w4_kernel(
   (void)A; (void)B; (void)Y; (void)N; (void)K;
   (void)requant; (void)need_row_a; (void)need_col_b;
 #else
+  constexpr int kWmmaBlock = kWmmaWaves * kWmmaWave;
+  constexpr int kWmmaMPerWave = kWmmaMFrag / kWmmaWaves;
+  constexpr int kWmmaARepeats = (kWmmaASlots + kWmmaBlock - 1) / kWmmaBlock;
+  constexpr int kWmmaBRepeats = (kWmmaBSlots + kWmmaBlock - 1) / kWmmaBlock;
+
   const int tid = threadIdx.x;
   const int lane = tid % kWmmaWave;
   const int wave = tid / kWmmaWave;
@@ -2048,17 +2059,21 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
         qgemm_device_has_wmma() && qgemm_tiled_wmma_config() == 1 &&
         !g.trans_a && g.trans_b && g.b_bits == 4 &&
         (g.M % kWmmaTileM) == 0 && (g.N % kWmmaTileN) == 0 &&
-        (g.K % kWmmaTileK) == 0 &&
+        (g.K % kWmmaTileK) == 0 && g.K >= kWmmaMinK &&
         (reinterpret_cast<uintptr_t>(g.A) % 16) == 0 &&
         (reinterpret_cast<uintptr_t>(g.B) % 4) == 0) {
-      hipLaunchKernelGGL(
-          qgemm_tiled_wmma_w4_kernel,
-          dim3(static_cast<unsigned>(g.N / kWmmaTileN),
-               static_cast<unsigned>(g.M / kWmmaTileM)),
-          dim3(kWmmaBlock), 0, g.stream,
-          reinterpret_cast<const uint16_t *>(a_ptr), g.B,
-          reinterpret_cast<uint16_t *>(y_ptr), g.N, g.K, requant, need_row_a,
-          need_col_b);
+      const dim3 grid(static_cast<unsigned>(g.N / kWmmaTileN),
+                      static_cast<unsigned>(g.M / kWmmaTileM));
+      const auto *wa = reinterpret_cast<const uint16_t *>(a_ptr);
+      auto *wy = reinterpret_cast<uint16_t *>(y_ptr);
+      if (g.K >= kWmmaWideBlockMinK)
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<8>), grid,
+                           dim3(8 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
+                           g.K, requant, need_row_a, need_col_b);
+      else
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<4>), grid,
+                           dim3(4 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
+                           g.K, requant, need_row_a, need_col_b);
       return static_cast<int>(hipGetLastError());
     }
   }
