@@ -3949,7 +3949,8 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
+def Hip_CumSumOp : Hip_DpsOp<"cumsum",
+                             /*traits=*/[],
                              /*outsAccessor=*/"Y",
                              /*autoReify=*/1,
                              /*autoInfer=*/1,
@@ -3959,15 +3960,18 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
     Computes the cumulative sum of input tensor elements along the given axis.
     Implements the standard ONNX CumSum operator (opset 14+).
 
-    The `axis` input is a 0-D scalar tensor selecting the reduction axis. The
-    `exclusive` attribute (0 / 1) toggles inclusive vs exclusive accumulation,
-    and `reverse` (0 / 1) reverses the accumulation direction along the axis.
+    The optional `axis` input is a 0-D scalar tensor selecting the reduction
+    axis. Compile-time axes use `axis_attr` instead, allowing the tensor
+    constant to be dead-code eliminated. The `exclusive` attribute (0 / 1)
+    toggles inclusive vs exclusive accumulation, and `reverse` (0 / 1)
+    reverses the accumulation direction along the axis.
 
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
-    hip.cumsum(%ctx) ins(%x, %axis : memref<3x4xf32, 1>, memref<i64, 1>)
+    hip.cumsum(%ctx) ins(%x : memref<3x4xf32, 1>)
+                     axis(%axis : memref<i64, 1>)
                      outs(%y : memref<3x4xf32, 1>)
                      {exclusive = 0 : i64, reverse = 0 : i64}
     ```
@@ -3976,14 +3980,16 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
-    Hip_TensorOrMemRef:$axis,
+    Optional<Hip_TensorOrMemRef>:$axis,
     Hip_TensorOrMemRef:$y,
+    OptionalAttr<I64Attr>:$axis_attr,
     DefaultValuedAttr<I64Attr, "0">:$exclusive,
     DefaultValuedAttr<I64Attr, "0">:$reverse
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $x `,` $axis `:` type($x) `,` type($axis) `)`
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    (`axis` `(` $axis^ `:` type($axis) `)`)?
     `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -4028,7 +4034,10 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$pads_attr,
+    OptionalAttr<DenseI64ArrayAttr>:$axes_attr,
+    OptionalAttr<ElementsAttr>:$constant_value_attr
   );
 
   let assemblyFormat = [{
@@ -4271,7 +4280,11 @@ def Hip_SliceOp : Hip_DpsOp<"slice",
     Hip_TensorOrMemRef:$ends,
     Optional<Hip_TensorOrMemRef>:$axes,
     Optional<Hip_TensorOrMemRef>:$steps,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$starts_attr,
+    OptionalAttr<DenseI64ArrayAttr>:$ends_attr,
+    OptionalAttr<DenseI64ArrayAttr>:$axes_attr,
+    OptionalAttr<DenseI64ArrayAttr>:$steps_attr
   );
 
   let assemblyFormat = [{

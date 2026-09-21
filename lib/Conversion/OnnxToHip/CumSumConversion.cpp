@@ -4,6 +4,9 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
+
+#include <optional>
 
 namespace mlir {
 namespace hip {
@@ -38,11 +41,38 @@ struct CumSumToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("reverse"))
       reverse = attr.getValue().getSExtValue();
 
-    auto hipOp =
-        mlir::hip::CumSumOp::create(rewriter, loc, context, x, axis, init,
-                                    rewriter.getI64IntegerAttr(exclusive),
-                                    rewriter.getI64IntegerAttr(reverse));
-    rewriter.replaceOp(op, hipOp->getResult(0));
+    std::optional<int64_t> axisConst;
+    if (mlir::DenseElementsAttr dense = getConstantDense(axis)) {
+      auto elemTy = dense.getElementType();
+      if (dense.getNumElements() == 1 &&
+          (elemTy.isInteger(32) || elemTy.isInteger(64))) {
+        int64_t value =
+            (*dense.getValues<llvm::APInt>().begin()).getSExtValue();
+        int64_t rank = resultType.getRank();
+        if (value < 0)
+          value += rank;
+        if (value >= 0 && value < rank)
+          axisConst = value;
+      }
+    }
+
+    mlir::SmallVector<mlir::Value> operands{context, x};
+    if (!axisConst)
+      operands.push_back(axis);
+    operands.push_back(init);
+
+    mlir::OperationState state(loc, "hip.cumsum");
+    state.addOperands(operands);
+    state.addTypes({resultType});
+    if (axisConst)
+      state.addAttribute("axis_attr", rewriter.getI64IntegerAttr(*axisConst));
+    if (exclusive)
+      state.addAttribute("exclusive", rewriter.getI64IntegerAttr(exclusive));
+    if (reverse)
+      state.addAttribute("reverse", rewriter.getI64IntegerAttr(reverse));
+
+    mlir::Operation *hipOp = rewriter.create(state);
+    rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }
 };

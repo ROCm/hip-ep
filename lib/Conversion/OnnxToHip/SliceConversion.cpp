@@ -544,9 +544,9 @@ struct SliceToHip : public mlir::RewritePattern {
     // CompressConversion solves the same shrinking-extent problem by reading
     // the true count back from the device with `hip.ReadbackDimOp`. That is not
     // done here, but not because a readback is unaffordable on this op --
-    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
-    // so the sync is paid regardless. It is that a readback would add a second
-    // sync point, in the shape computation ahead of the slice, to serve a case
+    // Runtime-dynamic bounds already make `wrap_slice` D2H and synchronize, so
+    // that path pays the sync regardless. A readback here would add a second
+    // sync point in the shape computation ahead of the slice, to serve a case
     // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
     // bounds, and host arithmetic is strictly better than a readback wherever
     // it is available. If a model does land here, revisit it -- the cost is
@@ -613,8 +613,12 @@ struct SliceToHip : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
-                                            starts, ends, axes, steps, init);
+    auto hipOp = mlir::hip::SliceOp::create(
+        rewriter, loc, context, data, starts, ends, axes, steps, init,
+        op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_starts"),
+        op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_ends"),
+        op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_axes"),
+        op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_steps"));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

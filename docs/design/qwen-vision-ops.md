@@ -169,21 +169,17 @@ through, otherwise the runtime is forced into a per-call D2H. The
 template to follow is `lib/Conversion/HipToLLVM/TileLowering.cpp`'s
 `emitShapeArray` helper.
 
-### 3.2 D2H is sometimes unavoidable
+### 3.2 D2H is limited to dynamic controls
 
-Three ops still need synchronous D2H reads:
+CumSum and Pad fold compile-time controls into HIP dialect attributes.
+HipToLLVM materializes those values as host ABI values or stack arrays, so
+constant `axis`, `pads`, `axes`, and `constant_value` inputs do not incur a
+device copy or stream synchronization.
 
-| Op       | What is D2H-read                          | When                                  |
-|----------|-------------------------------------------|---------------------------------------|
-| CumSum   | `axis` scalar (int32 or int64)            | Once per call (one stall)             |
-| Pad      | `pads[]` (int64), optional `axes[]`, optional `constant_value` | Once per call (one stall, batched)    |
-
-Each stall is one `hipStreamSynchronize`. This is acceptable because both
-ops typically appear at most once or twice in a graph, but if either ever
-becomes hot the right fix is to **fold the constant tensor into an
-operator attribute at OnnxToHip time** — the way `Reshape`'s shape
-tensor is already folded today. That moves the value into the compiled
-DLL and eliminates the stall entirely.
+When one of those controls is genuinely runtime-dynamic (a function argument
+or GPU-produced tensor), its host attribute is absent and the wrapper retains
+the synchronized D2H fallback. All dynamic controls needed by one Pad call are
+copied before one `hipStreamSynchronize`.
 
 ### 3.3 Single fused kernel over multi-pass
 
@@ -247,17 +243,18 @@ index/control tensors:
 
 | Op        | Index-shaped inputs                                | Where they live       | What we do                                |
 |-----------|----------------------------------------------------|-----------------------|-------------------------------------------|
-| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | GPU tensors (graph inputs in the non-folded case) | D2H + `hipStreamSynchronize` once per call, then resolve per ONNX clamping rules host-side and pass the per-axis `(start, step)` arrays into the kernel as host int64 vectors |
+| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | Host arrays for constants; GPU tensors otherwise | Use host arrays directly, or D2H only dynamic controls and synchronize once before applying ONNX clamping |
 | ScatterND | `indices`                                           | GPU tensor             | **Stay on the device** — the kernel reads them inline. No D2H at all. |
 
-Slice has to D2H because per-axis (start, step) needs ONNX clamping
+Slice resolves per-axis (start, step) using ONNX clamping
 (`step > 0`: `start ∈ [0, dim]`, `end ∈ [0, dim]`; `step < 0`:
 `start ∈ [0, dim-1]`, `end ∈ [-1, dim-1]`) plus the optional `axes`
-list to know which axis each entry applies to. Doing this on the GPU
+list to know which axis each entry applies to. Compile-time controls are
+carried as HIP dialect attributes and materialized as host arrays. Dynamic
+controls still use D2H because doing this on the GPU
 would require either a launcher prepass or an oversized device kernel
 with the same per-axis state-machine — neither is worth it for a 4×
-int64 D2H. The matching pattern in `lib/Runtime/real/pad.cpp` and
-`lib/Runtime/real/cumsum.cpp` does the same thing (one stall per call).
+int64 D2H.
 
 ScatterND keeps indices on the device because there is no clamping
 state machine to run host-side — each thread does its own
@@ -431,8 +428,8 @@ doesn't re-discover them:
   `PadOpLowering::modeIdFromString`. Wrap mode is not in ORT's
   `pad_impl.cu` — we added it as a `%` of the axis length.
 
-- **`CumSum` axis is a 0-D scalar input**, not an attribute. Can be
-  int32 or int64; D2H + sync once per call to read it.
+- **`CumSum` axis is a 0-D scalar input** that becomes `axis_attr` when
+  compile-time constant. Dynamic int32/int64 axes retain D2H + sync.
 
 - **`LayerNormalization` stash_type is raw ONNX `TensorProto.DataType`**
   (1 = FLOAT, 10 = FLOAT16), **not** the HIPDNN_EP enum. The lowering
@@ -441,9 +438,9 @@ doesn't re-discover them:
 - **`Slice` non-constant indices / negative steps**: the graph-constant
   + positive-stride case folds to `tensor.extract_slice` in
   `lib/Conversion/OnnxToHip/SliceConversion.cpp` and never reaches the
-  runtime. The `hip_slice` kernel only services slices whose
-  `starts`/`ends`/`axes`/`steps` are graph inputs (D2H + sync once per
-  call) **or** that have at least one negative step. Indices are
+  runtime. Constant negative-step controls become host arrays with no D2H.
+  Runtime-dynamic `starts`/`ends`/`axes`/`steps` are copied D2H and synchronized
+  once per call. Indices are
   INT64 only — INT32 indices would need a stride-aware ABI bump.
 
 - **`Slice` end-sentinel for "all the way down" with `step < 0`**: per

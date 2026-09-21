@@ -9,19 +9,17 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.slice(ctx, data, starts, ends, [axes], [steps], output)
-//   -> wrap_slice(state, data_ptr, starts_ptr, ends_ptr,
-//                 axes_ptr (or null), steps_ptr (or null), out_ptr,
+// hip.slice(ctx, data, starts, ends, [axes], [steps], output, host attrs)
+//   -> wrap_slice(state, data_ptr, starts_device, starts_host,
+//                 ends_device, ends_host, axes_device, axes_host,
+//                 steps_device, steps_host, out_ptr,
 //                 data_shape_ptr, data_rank,
 //                 output_shape_ptr, output_rank,
 //                 starts_num_elements, axes_num_elements,
 //                 steps_num_elements, data_type)
 //
-// Today the runtime function is a no-op stub that only logs its parameters
-// (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
-// pipeline (bufferize -> hip-to-llvm -> generate-interface) functional even
-// when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
-// decompose pattern.
+// Constant arrays are materialized in host stack storage. Missing attributes
+// use null host pointers, selecting the runtime's device-readback fallback.
 struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -52,6 +50,7 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value axesPtr = extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
     Value stepsPtr =
         extractOptionalMemRefPtr(adaptor.getSteps(), rewriter, loc);
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -60,6 +59,24 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
     Value one = createI64Const(1);
+    auto emitI64Array = [&](mlir::DenseI64ArrayAttr attr) -> Value {
+      if (!attr)
+        return nullPtr;
+      int64_t count = static_cast<int64_t>(attr.size());
+      auto arrType =
+          LLVM::LLVMArrayType::get(i64Type, std::max(count, int64_t{1}));
+      Value arr =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+      for (auto [i, value] : llvm::enumerate(attr.asArrayRef())) {
+        Value idx = LLVM::ConstantOp::create(
+            rewriter, loc, i32Type,
+            rewriter.getI32IntegerAttr(static_cast<int32_t>(i)));
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+        LLVM::StoreOp::create(rewriter, loc, createI64Const(value), elemPtr);
+      }
+      return arr;
+    };
     auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
       int rank = type.getRank();
       int arrLen = std::max(rank, 1);
@@ -80,17 +97,32 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value dataShape = emitShapeArray(dataType, adaptor.getData());
     Value outShape = emitShapeArray(outputType, adaptor.getOutput());
 
+    auto startsAttr = op->getAttrOfType<mlir::DenseI64ArrayAttr>("starts_attr");
+    auto endsAttr = op->getAttrOfType<mlir::DenseI64ArrayAttr>("ends_attr");
+    auto axesAttr = op->getAttrOfType<mlir::DenseI64ArrayAttr>("axes_attr");
+    auto stepsAttr = op->getAttrOfType<mlir::DenseI64ArrayAttr>("steps_attr");
+    Value startsHost = emitI64Array(startsAttr);
+    Value endsHost = emitI64Array(endsAttr);
+    Value axesHost = emitI64Array(axesAttr);
+    Value stepsHost = emitI64Array(stepsAttr);
+
     Value startsNum =
-        computeNumElements(startsType, adaptor.getStarts(), rewriter, loc);
+        startsAttr ? createI64Const(static_cast<int64_t>(startsAttr.size()))
+                   : computeNumElements(startsType, adaptor.getStarts(),
+                                        rewriter, loc);
     Value axesNum;
-    if (op.getAxes()) {
+    if (axesAttr) {
+      axesNum = createI64Const(static_cast<int64_t>(axesAttr.size()));
+    } else if (op.getAxes()) {
       auto axesT = cast<MemRefType>(op.getAxes().getType());
       axesNum = computeNumElements(axesT, adaptor.getAxes(), rewriter, loc);
     } else {
       axesNum = createI64Const(0);
     }
     Value stepsNum;
-    if (op.getSteps()) {
+    if (stepsAttr) {
+      stepsNum = createI64Const(static_cast<int64_t>(stepsAttr.size()));
+    } else if (op.getSteps()) {
       auto stepsT = cast<MemRefType>(op.getSteps().getType());
       stepsNum = computeNumElements(stepsT, adaptor.getSteps(), rewriter, loc);
     } else {
@@ -101,9 +133,11 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value outRank = createI64Const(outputType.getRank());
     Value dataTypeVal = createI64Const(hipDtype);
 
-    SmallVector<Type, 16> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state, data, starts, ends
-        ptrType, ptrType, ptrType,          // axes, steps, output
+    SmallVector<Type, 19> paramTypes = {
+        ptrType, ptrType,                   // state, data
+        ptrType, ptrType, ptrType, ptrType, // starts/ends device + host
+        ptrType, ptrType, ptrType, ptrType, // axes/steps device + host
+        ptrType,                            // output
         ptrType, i64Type,                   // data_shape, data_rank
         ptrType, i64Type,                   // out_shape,  out_rank
         i64Type, i64Type, i64Type,          // starts_num, axes_num,
@@ -115,10 +149,11 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {statePtr, dataPtr,  startsPtr,  endsPtr,
-                                   axesPtr,  stepsPtr, outPtr,     dataShape,
-                                   dataRank, outShape, outRank,    startsNum,
-                                   axesNum,  stepsNum, dataTypeVal};
+    SmallVector<Value, 19> args = {statePtr, dataPtr,   startsPtr,  startsHost,
+                                   endsPtr,  endsHost,  axesPtr,    axesHost,
+                                   stepsPtr, stepsHost, outPtr,     dataShape,
+                                   dataRank, outShape,  outRank,    startsNum,
+                                   axesNum,  stepsNum,  dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -10,24 +10,16 @@
 // Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
-// Inputs that live in GPU memory (`pads`, `constant_value`, `axes`) are
-// D2H-read once per call. This adds one or two hipStreamSynchronize stalls
-// per Pad invocation -- acceptable because:
-//  - `pads` and `axes` are typically constant or initialiser-fed in vision
-//    graphs; the compile pipeline lowers them via the constants blob,
-//    so the D2H is from a stable device pointer.
-//  - Pad usually appears few times per graph.
-//
-// If the EP ever wants to avoid the stall, the right fix is to detect the
-// "pads is a graph-time constant" case in the OnnxToHip conversion and
-// fold the values into a host-side attribute (the way Reshape's shape
-// tensor is folded today). That's outside this op's scope.
+// Compile-time controls arrive through host pointers materialized by lowering.
+// Runtime-dynamic controls retain the synchronized GPU readback fallback.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <hip/hip_runtime.h>
 #include <vector>
 
@@ -46,8 +38,10 @@ static int pad_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   }
 }
 
-int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
-             void *axes, void *output, const int64_t *data_shape,
+int wrap_pad(RuntimeState *state, void *data, void *pads_device,
+             const int64_t *pads_host, void *constant_value_device,
+             const void *constant_value_host, void *axes_device,
+             const int64_t *axes_host, void *output, const int64_t *data_shape,
              int64_t data_rank, const int64_t *output_shape,
              int64_t output_rank, int64_t pads_num_elements,
              int64_t axes_num_elements, int64_t data_type, int64_t mode_id) {
@@ -68,7 +62,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   (void)output_shape;
   (void)output_rank;
 
-  if (!state || !data || !pads || !output || !data_shape) {
+  if (!state || !data || (!pads_device && !pads_host) || !output ||
+      !data_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_pad: null required argument\n");
     return -1;
   }
@@ -106,29 +101,43 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // D2H the pads (always int64) and optionally axes / constant_value.
+  // Before: all present controls were copied D2H followed by an unconditional
+  // stream synchronization. After: host attributes are consumed directly;
+  // only controls without a host form enqueue D2H and require a sync.
   // ONNX-18 pads layout: [begin_0, begin_1, ..., begin_K-1, end_0, ...,
   // end_K-1] where K = num_axes_padded (= data_rank if axes is omitted).
-  std::vector<int64_t> pads_host(pads_num_elements);
-  hipError_t err = hipMemcpyAsync(pads_host.data(), pads,
-                                  pads_num_elements * sizeof(int64_t),
-                                  hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
-
-  std::vector<int64_t> axes_host;
-  if (axes && axes_num_elements > 0) {
-    axes_host.resize(axes_num_elements);
-    err = hipMemcpyAsync(axes_host.data(), axes,
-                         axes_num_elements * sizeof(int64_t),
+  std::vector<int64_t> pads_values(pads_num_elements);
+  hipError_t err = hipSuccess;
+  bool copied_from_device = false;
+  if (pads_host) {
+    std::copy_n(pads_host, pads_num_elements, pads_values.begin());
+  } else {
+    err = hipMemcpyAsync(pads_values.data(), pads_device,
+                         pads_num_elements * sizeof(int64_t),
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: axes D2H failed: %s\n",
+      fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
               hipGetErrorString(err));
       return -1;
+    }
+    copied_from_device = true;
+  }
+
+  std::vector<int64_t> axes_values;
+  if (axes_num_elements > 0) {
+    axes_values.resize(axes_num_elements);
+    if (axes_host) {
+      std::copy_n(axes_host, axes_num_elements, axes_values.begin());
+    } else if (axes_device) {
+      err = hipMemcpyAsync(axes_values.data(), axes_device,
+                           axes_num_elements * sizeof(int64_t),
+                           hipMemcpyDeviceToHost, hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "[REAL] wrap_pad: axes D2H failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+      copied_from_device = true;
     }
   }
 
@@ -136,30 +145,39 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   // buffer so we can pass a typed pointer to the kernel launcher.
   alignas(8) unsigned char cv_buf[8] = {};
   bool have_cv = false;
-  if (constant_value && mode_id == 0) {
-    err = hipMemcpyAsync(cv_buf, constant_value, element_size,
-                         hipMemcpyDeviceToHost, hip_stream);
+  if (mode_id == 0) {
+    if (constant_value_host) {
+      std::memcpy(cv_buf, constant_value_host, element_size);
+      have_cv = true;
+    } else if (constant_value_device) {
+      err = hipMemcpyAsync(cv_buf, constant_value_device, element_size,
+                           hipMemcpyDeviceToHost, hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+      copied_from_device = true;
+      have_cv = true;
+    }
+  }
+
+  if (copied_from_device) {
+    err = hipStreamSynchronize(hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
+      fprintf(stderr, "[REAL] wrap_pad: stream sync after D2H failed: %s\n",
               hipGetErrorString(err));
       return -1;
     }
-    have_cv = true;
-  }
-
-  err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: stream sync after D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
   }
 
   // Build per-axis lower_pads[data_rank], defaulting to 0. If `axes` is
   // omitted, pads is laid out per-axis (length 2*data_rank). If `axes`
   // is given, pads has length 2 * len(axes), keyed by the axes vector.
   std::vector<int64_t> lower_pads(data_rank, 0);
-  int64_t num_axes_padded =
-      axes_host.empty() ? data_rank : static_cast<int64_t>(axes_host.size());
+  int64_t num_axes_padded = axes_values.empty()
+                                ? data_rank
+                                : static_cast<int64_t>(axes_values.size());
   if (pads_num_elements != 2 * num_axes_padded) {
     fprintf(stderr,
             "[REAL] wrap_pad: pads length(%lld) != 2 * num_axes(%lld)\n",
@@ -167,7 +185,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
   for (int64_t i = 0; i < num_axes_padded; ++i) {
-    int64_t axis = axes_host.empty() ? i : axes_host[i];
+    int64_t axis = axes_values.empty() ? i : axes_values[i];
     if (axis < 0)
       axis += data_rank;
     if (axis < 0 || axis >= data_rank) {
@@ -175,7 +193,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
               (long long)axis, (long long)data_rank);
       return -1;
     }
-    lower_pads[axis] = pads_host[i];
+    lower_pads[axis] = pads_values[i];
     // The kernel doesn't need upper pads (it uses output_shape - input
     // - lower implicitly via the out_coord >= lower + in_dim check).
   }

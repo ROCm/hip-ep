@@ -4,9 +4,9 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.cumsum lowers to llvm.call @wrap_cumsum with the full
-// 11-parameter signature:
+// 12-parameter signature:
 //   (state, x, axis, y, x_shape_ptr, x_rank,
-//    num_elements, data_type, axis_dtype, exclusive, reverse) -> i32.
+//    num_elements, data_type, axis_dtype, axis_host, exclusive, reverse) -> i32.
 // The x_shape buffer is an LLVM alloca that the lowering populates via
 // GEP + store of each dim size.
 // ============================================================================
@@ -22,12 +22,13 @@ module {
       %y: memref<3x4xf32, 1>) {
     // CHECK-LABEL: llvm.func @cumsum_static_default
 
-    hip.cumsum(%ctx) ins(%x, %axis : memref<3x4xf32, 1>, memref<i64, 1>)
+    hip.cumsum(%ctx) ins(%x : memref<3x4xf32, 1>)
+                     axis(%axis : memref<i64, 1>)
                      outs(%y : memref<3x4xf32, 1>)
 
     // The lowering stack-allocates an array for the input shape:
     // CHECK: llvm.alloca {{.*}} x !llvm.array<2 x i64>
-    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -39,11 +40,12 @@ module {
       %y: memref<3x4xf32, 1>) {
     // CHECK-LABEL: llvm.func @cumsum_attrs
 
-    hip.cumsum(%ctx) ins(%x, %axis : memref<3x4xf32, 1>, memref<i32, 1>)
+    hip.cumsum(%ctx) ins(%x : memref<3x4xf32, 1>)
+                     axis(%axis : memref<i32, 1>)
                      outs(%y : memref<3x4xf32, 1>)
                      {exclusive = 1 : i64, reverse = 1 : i64}
 
-    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -55,12 +57,27 @@ module {
       %y: memref<?x?xf32, 1>) {
     // CHECK-LABEL: llvm.func @cumsum_dynamic
 
-    hip.cumsum(%ctx) ins(%x, %axis : memref<?x?xf32, 1>, memref<i64, 1>)
+    hip.cumsum(%ctx) ins(%x : memref<?x?xf32, 1>)
+                     axis(%axis : memref<i64, 1>)
                      outs(%y : memref<?x?xf32, 1>)
 
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cumsum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+    return
+  }
+
+  func.func @cumsum_constant_axis(
+      %ctx: !hip.context,
+      %x: memref<3x4xf32, 1>,
+      %y: memref<3x4xf32, 1>) {
+    // CHECK-LABEL: llvm.func @cumsum_constant_axis
+
+    hip.cumsum(%ctx) ins(%x : memref<3x4xf32, 1>)
+                     outs(%y : memref<3x4xf32, 1>) {axis_attr = 1 : i64}
+
+    // CHECK: %[[NULL:.*]] = llvm.mlir.zero : !llvm.ptr
+    // CHECK: llvm.call @wrap_cumsum({{.*}}, %[[NULL]], {{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

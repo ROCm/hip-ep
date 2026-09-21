@@ -41,14 +41,13 @@
 namespace mlir {
 namespace hip {
 
-/// `dense` attribute (arith.constant or inline onnx.Constant `value`) backing
-/// `v`, or null when `v` is not such a constant.
+/// `dense` attribute (arith.constant or an inline ONNX/HIP carrier `value`)
+/// backing `v`, or null when `v` is not such a constant.
 inline mlir::DenseElementsAttr getConstantDense(mlir::Value v) {
   if (auto cst = v.getDefiningOp<mlir::arith::ConstantOp>())
     return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
   if (mlir::Operation *def = v.getDefiningOp())
-    if (def->getName().getStringRef() == "onnx.Constant")
-      return def->getAttrOfType<mlir::DenseElementsAttr>("value");
+    return def->getAttrOfType<mlir::DenseElementsAttr>("value");
   return nullptr;
 }
 
