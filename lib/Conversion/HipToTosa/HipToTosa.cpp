@@ -3000,7 +3000,10 @@ cloneOutlinedFuncIntoTosaRegion(func::FuncOp func, Region &region,
   for (Value value : returnOp.getOperands())
     yielded.push_back(mapping.lookupOrDefault(value));
   tosa::YieldOp::create(rewriter, func.getLoc(), yielded);
-  return success();
+  // The outlined callee is a private func without rock.kernel, so this pass
+  // never runs on it. Convert the cloned hip.* ops here with the same
+  // patterns that fire in the kernel body.
+  return rewriter.legalize(&region);
 }
 
 struct IfConverter final : public OpConversionPattern<IfOp> {
@@ -3068,7 +3071,7 @@ struct IfConverter final : public OpConversionPattern<IfOp> {
 
 static Value scalarToTensor(Value scalar, Type elementType, Location loc,
                             ConversionPatternRewriter &rewriter) {
-  auto tensorTy = RankedTensorType::get({1}, elementType);
+  auto tensorTy = RankedTensorType::get({}, elementType);
   if (scalar.getType() != elementType)
     scalar = arith::IndexCastOp::create(rewriter, loc, elementType, scalar);
   return tensor::FromElementsOp::create(rewriter, loc, tensorTy,
@@ -3119,8 +3122,11 @@ struct LoopConverter final : public OpConversionPattern<LoopOp> {
 
     Location loc = op.getLoc();
     Type i64Ty = rewriter.getI64Type();
-    auto scalarI64Ty = RankedTensorType::get({1}, i64Ty);
-    auto scalarI1Ty = RankedTensorType::get({1}, rewriter.getI1Type());
+    // The outlined body declares iter as tensor<i64> and cond_in as
+    // tensor<i1> (see LoopOutline.cpp). Carry them at that same rank so
+    // cloning the body maps its arguments to identically typed values.
+    auto scalarI64Ty = RankedTensorType::get({}, i64Ty);
+    auto scalarI1Ty = RankedTensorType::get({}, rewriter.getI1Type());
     Value zeroIter = tosa::ConstOp::create(
         rewriter, loc, scalarI64Ty,
         DenseElementsAttr::get(scalarI64Ty, rewriter.getI64IntegerAttr(0)));
@@ -3133,6 +3139,13 @@ struct LoopConverter final : public OpConversionPattern<LoopOp> {
       cond = tosa::ConstOp::create(
           rewriter, loc, scalarI1Ty,
           DenseElementsAttr::get(scalarI1Ty, rewriter.getBoolAttr(true)));
+
+    // A body that spells iter/cond_in differently would have its arguments
+    // mapped to mistyped values when it is cloned below.
+    if (source.getArgument(1).getType() != scalarI64Ty ||
+        source.getArgument(2).getType() != scalarI1Ty)
+      return rewriter.notifyMatchFailure(
+          op, "body iter/cond must be tensor<i64>/tensor<i1>");
 
     SmallVector<Value> inputs = {zeroIter, maxTrip, cond};
     llvm::append_range(inputs, adaptor.getVInit());
@@ -3204,6 +3217,11 @@ struct LoopConverter final : public OpConversionPattern<LoopOp> {
       tosa::YieldOp::create(rewriter, loc, yielded);
     }
 
+    if (failed(rewriter.legalize(&whileOp.getCondGraph())) ||
+        failed(rewriter.legalize(&whileOp.getBodyGraph())))
+      return rewriter.notifyMatchFailure(
+          op, "failed to convert the outlined loop body");
+
     rewriter.replaceOp(
         op, whileOp.getResults().slice(/*start=*/3, /*length=*/numCarried));
     return success();
@@ -3248,11 +3266,6 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // the canonicalizer that follows this pass removes the dead empty.
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp, tensor::FromElementsOp,
                           tosa::IfOp, tosa::WhileOp>();
-    // Newly created ops inside tosa.cond_if / tosa.while_loop are still
-    // legalized by applyPartialConversion. Mark the control-flow ops
-    // recursively legal so nested tosa.yield / arith.constant do not roll
-    // the hip.if / hip.loop rewrite back.
-    conversion.markOpRecursivelyLegal<tosa::IfOp, tosa::WhileOp>();
     conversion.addDynamicallyLegalOp<ExpandOp>(
         [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
     conversion.addDynamicallyLegalOp<CumSumOp>(
