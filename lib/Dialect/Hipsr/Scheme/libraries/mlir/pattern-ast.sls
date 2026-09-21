@@ -236,6 +236,12 @@
   ;;   1. Bind mode: (axis = $axis) - match any value, bind to $axis
   ;;   2. Constant mode: (axis = 0) - match only when attribute equals 0
   ;;
+  ;; TODO: Possible third mode (may not be good design):
+  ;;   3. Variable mode: (axis = ,var) - match runtime value of var from use-site
+  ;;      Macro cannot access var at expansion time, but can generate code
+  ;;      that references var for runtime evaluation in user's lexical scope.
+  ;;      This adds complexity and may blur macro/runtime boundary.
+  ;;
   ;; Example input syntax:
   ;;   ((axis = $axis) (keepdims = 1))
   ;;
