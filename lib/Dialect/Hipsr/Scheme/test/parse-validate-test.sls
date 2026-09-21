@@ -9,20 +9,20 @@
           (test test-framework)
           (mlir pattern-macro))
   
-  ;; Test 1: Basic pattern with :debug-ast - returns AST record
-  (define-conversion-pattern :debug-ast test-basic-ast
+  ;; Test 1: Basic pattern with :debug-parse - returns AST record
+  (define-conversion-pattern :debug-parse test-basic-ast
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
     ((%new = "new.op" (%in) -> !out-type)))
 
-  ;; Test 2: Pattern without :debug-ast - returns lambda
+  ;; Test 2: Pattern without :debug-parse - returns lambda
   (define-conversion-pattern test-lambda-mode
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
     ((%new = "new.op" (%in) -> !out-type)))
 
   ;; Test 3: Pattern with :where clause
-  (define-conversion-pattern :debug-ast test-with-where
+  (define-conversion-pattern :debug-parse test-with-where
     :match ((%out = "test.op" (%in) () : (!in-type) -> !out-type))
     :rewrite %out :with
     ((%new = "new.op" (%in) -> !out-type))
@@ -30,7 +30,7 @@
             (%val (compute-value))))
 
   ;; Test 4: Pattern with region containing blocks
-  (define-conversion-pattern :debug-ast test-with-region
+  (define-conversion-pattern :debug-parse test-with-region
     :match ((%out = "scf.if" (%cond) () : (!cond-type) -> !result-type))
     :rewrite %out :with
     ((%r = "scf.if" (%cond)
@@ -42,7 +42,7 @@
        -> i32)))
 
   ;; Test 5: func.func with block arguments - function that adds two i32s
-  (define-conversion-pattern :debug-ast test-func-func
+  (define-conversion-pattern :debug-parse test-func-func
     :match ((%func = "func.func" () () : () -> !func-type))
     :rewrite %func :with
     ((%new-func = "func.func" ()
@@ -69,7 +69,7 @@
     (test-equal "debug mode returns list" #t (list? test-basic-ast))
     (test-equal "function name" 'test-basic-ast (ast-get test-basic-ast 'function-name))
     (test-equal "root-op-name extracted" "test.op" (ast-get test-basic-ast 'root-op-name))
-    (test-equal "debug-ast flag" #t (ast-get test-basic-ast 'debug-ast?))
+    (test-equal "debug-parse flag" #t (ast-get test-basic-ast 'debug-parse?))
 
     ;; Match operations
     (test-equal "match ops captured" #t (list? (ast-get test-basic-ast 'match)))

@@ -22,24 +22,36 @@
                [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
                [where-bindings (ast-pattern-expand-where ast-rec)]
                [match-actions (ast-pattern-expand-match-actions ast-rec)]
-               [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
+               [debug-parse? (ast-pattern-expand-debug-parse? ast-rec)]
+               [debug-analyze? (ast-pattern-expand-debug-analyze? ast-rec)]
+               [debug-codegen? (ast-pattern-expand-debug-codegen? ast-rec)]
                [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
-           (if debug-ast?
-               ;; For :debug-ast mode, return list with AST data
+           (if (or debug-parse? debug-analyze? debug-codegen?)
+               ;; For debug modes, return list with requested data
                (let ([fname-sym (syntax->datum #'fname)]
                      [root-op-str (syntax->datum #'root-op-name)]
-                     [match-data (map match-expand->datum (vector->list match-ops))]
-                     [rewrite-data (map operation-expand->datum rewrite-ops)]
-                     [where-data (map where-binding-expand->datum where-bindings)]
-                     [actions-data (map action->datum match-actions)])
+                     [match-data (if debug-parse?
+                                     (map match-expand->datum (vector->list match-ops))
+                                     #f)]
+                     [rewrite-data (if debug-parse?
+                                       (map operation-expand->datum rewrite-ops)
+                                       #f)]
+                     [where-data (if debug-parse?
+                                     (map where-binding-expand->datum where-bindings)
+                                     #f)]
+                     [actions-data (if debug-analyze?
+                                       (map action->datum match-actions)
+                                       #f)])
                  (with-syntax ([ast-list (datum->syntax #'macro-name
                                            `(list 'function-name ',fname-sym
                                                   'root-op-name ,root-op-str
-                                                  'match ',match-data
-                                                  'rewrite ',rewrite-data
-                                                  'where ',where-data
-                                                  'match-actions ',actions-data
-                                                  'debug-ast? ,debug-ast?
+                                                  ,@(if match-data `('match ',match-data) '())
+                                                  ,@(if rewrite-data `('rewrite ',rewrite-data) '())
+                                                  ,@(if where-data `('where ',where-data) '())
+                                                  ,@(if actions-data `('match-actions ',actions-data) '())
+                                                  'debug-parse? ,debug-parse?
+                                                  'debug-analyze? ,debug-analyze?
+                                                  'debug-codegen? ,debug-codegen?
                                                   'debug-matching? ,debug-matching?))])
                    #'(define fname ast-list)))
                ;; For normal mode, generate lambda
@@ -48,7 +60,7 @@
                      #f)))))]))
 
   ;;-----------------------------------------------------------------------
-  ;; AST to datum conversion (for :debug-ast mode)
+  ;; AST to datum conversion (for debug modes)
   ;;-----------------------------------------------------------------------
 
   (define (match-expand->datum match-exp)

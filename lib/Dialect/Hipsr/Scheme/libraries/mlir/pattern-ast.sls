@@ -9,7 +9,9 @@
           ast-pattern-expand-match-actions ast-pattern-expand-match-actions-set!
           ast-pattern-expand-rewrite ast-pattern-expand-rewrite-set!
           ast-pattern-expand-where ast-pattern-expand-where-set!
-          ast-pattern-expand-debug-ast? ast-pattern-expand-debug-ast?-set!
+          ast-pattern-expand-debug-parse? ast-pattern-expand-debug-parse?-set!
+          ast-pattern-expand-debug-analyze? ast-pattern-expand-debug-analyze?-set!
+          ast-pattern-expand-debug-codegen? ast-pattern-expand-debug-codegen?-set!
           ast-pattern-expand-debug-matching? ast-pattern-expand-debug-matching?-set!
 
           ast-match-expand make-ast-match-expand ast-match-expand?
@@ -52,7 +54,9 @@
             (mutable match-actions)    ;; list of matchers (ordered, for codegen)
             (mutable rewrite)          ;; list of ast-operation-expand - parsed rewrite operations
             (mutable where)            ;; list of ast-where-binding-expand - parsed where bindings
-            (mutable debug-ast?)       ;; boolean - whether :debug-ast flag is present
+            (mutable debug-parse?)     ;; boolean - whether :debug-parse flag is present
+            (mutable debug-analyze?)   ;; boolean - whether :debug-analyze flag is present
+            (mutable debug-codegen?)   ;; boolean - whether :debug-codegen flag is present
             (mutable debug-matching?)))  ;; boolean - whether :debug-matching flag is present
 
   ;; Expansion-time AST record for match operations
