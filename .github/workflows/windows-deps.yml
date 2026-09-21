@@ -27,7 +27,10 @@ permissions:
   contents: read
 
 env:
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are sourced from the llvm-project subtree vendored inside
+  # rocmlirTriton (external/llvm-project). The repo + pinned commit are read
+  # from cmake/deps.txt (single source of truth with the from-source fallback
+  # in cmake/deps.cmake); the commit is the llvm-install cache key.
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
@@ -52,10 +55,26 @@ jobs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
+      - name: Checkout deps manifest
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: source-hip-ep
+          sparse-checkout: cmake
+          fetch-depth: 1
+          show-progress: false
+
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=dep-llvm-${{ env.LLVM_TAG }}" >> "$GITHUB_OUTPUT"
+        working-directory: source-hip-ep
+        run: |
+          set -euo pipefail
+          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
+          RT_URL=$(echo "$LINE" | cut -d';' -f2)
+          RT_COMMIT=$(echo "$LINE" | cut -d';' -f3)
+          echo "url=$RT_URL" >> "$GITHUB_OUTPUT"
+          echo "commit=$RT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "value=dep-llvm-rocmlirtriton-${RT_COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Probe llvm-install
         id: cache-llvm
@@ -99,12 +118,16 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          SRC="${{ runner.workspace }}/llvm-project"
+          # LLVM/MLIR/LLD come from the llvm-project subtree vendored inside
+          # rocmlirTriton (external/llvm-project); a shallow clone of the pinned
+          # commit already carries it (git subtree, not a submodule). Recipe
+          # matches cmake/deps.cmake's from-source fallback.
+          SRC="${{ runner.workspace }}/rocmlirTriton"
           git init "$SRC"
-          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
-          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" remote add origin "${{ steps.key.outputs.url }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.key.outputs.commit }}"
           git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \
