@@ -156,11 +156,19 @@
   ;; the operation's "operandSegmentSizes" attribute at runtime to calculate
   ;; actual operand positions. See AttrSizedOperandSegments trait in MLIR.
   ;;
-  ;; Attribute syntax (keyword-based, order-independent):
-  ;;   :attrs ((attr-name = $attr-value) ...)
-  ;;   - attr-name: symbol or string
-  ;;   - attr-value: $variable (bind mode) or constant (constant mode)
-  ;;   Example: :attrs ((axis = $axis) (keepdims = 1))
+  ;; Guard syntax (pure Scheme expression):
+  ;;   :where <scheme-expr>
+  ;;   - Expression must return truthy value for pattern to match
+  ;;   - Can bind local variables, access matched result/operands
+  ;;   - Early return: executes immediately after matching this operation
+  ;;   Example: :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
+  ;;                     (and $ks (is-1x1-kernel? $ks)))
+  ;;
+  ;; Rationale for removing special attribute syntax:
+  ;;   - `:where` is more flexible than `((attr = $var))` syntax
+  ;;   - Can do ANY computation, not just attribute extraction
+  ;;   - Attribute missing → mlir-operation-get-attribute returns null → guard fails
+  ;;   - One unified mechanism instead of two separate syntaxes
   ;;
   ;; Type matching: NOT SUPPORTED (intentionally omitted)
   ;;   Rationale: Type syntax is dialect-specific and unpredictable. MLIR's
@@ -170,13 +178,13 @@
   ;;   Complex type matching can be added later via C++ callbacks if needed.
   ;;
   ;; Complete syntax:
-  ;;   result = "op" (operands) [:attrs (...)]
+  ;;   result = "op" (operands) [:where <scheme-expr>]
   ;;
   ;; Examples:
   ;;   %a = "op" (%x %y)
   ;;   %a = "op" (%x (&optional %y))
   ;;   %a = "op" (%x (&optional %y %z) (&variadic %w))
-  ;;   %a = "op" (%x) :attrs ((axis = $axis) (keepdims = 1))
+  ;;   %a = "op" (%x) :where (mlir-operation-get-attribute %a "kernel_shape")
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;
@@ -192,14 +200,14 @@
 
   ;; Helper: parse optional keyword sections in match operation
   (define (parse-match-keywords result op-name operands rest)
-    (let ([attrs #'()])
+    (let ([where-expr #'#f])  ;; Default: no guard (always succeeds)
       ;; Extract keywords from rest
       (let loop ([remaining rest])
-        (syntax-case remaining (:attrs)
-          ;; :attrs keyword
-          [(:attrs attr-list . more)
+        (syntax-case remaining (:where)
+          ;; :where keyword
+          [(:where guard-expr . more)
            (begin
-             (set! attrs #'attr-list)
+             (set! where-expr #'guard-expr)
              (loop #'more))]
 
           ;; End of list
@@ -207,11 +215,11 @@
 
           ;; Unknown keyword
           [_ (syntax-violation 'parse-match-keywords
-               "Invalid keyword in match operation (expected :attrs)"
+               "Invalid keyword in match operation (expected :where)"
                remaining)]))
 
       ;; Create AST record with extracted parts
-      (make-ast-match-expand result op-name operands attrs)))
+      (make-ast-match-expand result op-name operands where-expr)))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-operation - Parse one rewrite operation
