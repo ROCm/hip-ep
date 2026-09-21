@@ -92,13 +92,16 @@
                              (cons (list ':check-eq op-idx operand-idx operand)
                                    actions))]
 
-                          ;; Case 4: Result binding not yet bound → TODO
+                          ;; Case 4: Result binding not yet bound → recurse to producer operation
                           [(and is-result (not is-bound))
-                           ;; TODO: Need to recurse to defining operation
-                           ;; Issue: May need different handling than simple recursion
-                           (error 'build-match-actions
-                                 "Case 4: result binding not yet bound"
-                                 operand)])))
+                           (let* ([producer-op-idx (find-operation-by-result match-vec operand)]
+                                  [producer-op (vector-ref match-vec producer-op-idx)]
+                                  [producer-result-idx (find-result-index producer-op operand)])
+                             ;; Recursively visit producer operation first
+                             (set! actions
+                               (append (build-match-actions match-vec producer-op-idx operand producer-result-idx
+                                                           visited binding-mgr)
+                                       actions)))])))
 
             (reverse actions)))))
 
