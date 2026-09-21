@@ -119,11 +119,14 @@
     ;; Rule: Root variable must appear as a result in at least one match operation
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
           [root-var (ast-pattern-expand-root-var ast-rec)])
-      (unless (loop :for op-idx :from 0 :below (vector-length match-vec)
+      (unless (loop :initially := #f
+                    :for op-idx :from 0 :below (vector-length match-vec)
                     :rime-with match-op := (vector-ref match-vec op-idx)
                     :rime-with result-vars := (ast-match-expand-result-var match-op)
-                    :break #t :if (loop :for var :in result-vars
-                                        :break #t :if (bound-identifier=? var root-var)))
+                    :break #t :if (loop :initially := #f
+                                        :for var :in result-vars
+                                        :when (bound-identifier=? var root-var)
+                                        :break #t))
         (syntax-violation 'validate-root-var-is-result
           "Root variable not found in any match operation result" root-var))))
 
