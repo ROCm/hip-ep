@@ -3,7 +3,8 @@
   (export generate-code)
   (import (rnrs)
           (for (only (chezscheme) syntax->list) expand)
-          (for (mlir pattern-ast) expand))
+          (for (mlir pattern-ast) expand)
+          (for (mlir pattern-analyze) expand))  ; for binding-manager-bindings
 
   ;;=======================================================================
   ;; Phase 4: Code generation - generate lambda from analyzed AST
@@ -25,7 +26,7 @@
        (generate-debug-codegen ast-rec)]
 
       [else
-       (generate-pattern-matcher ast-rec)]))
+       (generate-pattern-matchAndRewrite ast-rec)]))
 
   ;;-----------------------------------------------------------------------
   ;; Debug mode: AST output (parse phase)
@@ -81,24 +82,113 @@
 
   (define (generate-debug-codegen ast-rec)
     (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
-      (let ([fname-sym (syntax->datum #'fname)])
-        (with-syntax ([ast-list (datum->syntax #'fname
-                                  `(list 'function-name ',fname-sym
-                                         'debug-parse? #f
-                                         'debug-analyze? #f
-                                         'debug-codegen? #t
-                                         'debug-matching? #f))])
-          #'(define fname ast-list)))))
+      (let ([code-datum (syntax->datum (generate-pattern-matchAndRewrite ast-rec))])
+        (datum->syntax #'fname
+                       `(define ,(syntax->datum #'fname) ',code-datum)))))
 
   ;;-----------------------------------------------------------------------
   ;; Pattern matcher generation
   ;;-----------------------------------------------------------------------
 
-  (define (generate-pattern-matcher ast-rec)
-    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
-      #'(define fname
-          (lambda (op operands-ref rewriter type-converter)
-            #f))))
+  (define (generate-pattern-matchAndRewrite ast-rec)
+    (let* ([match-vec (ast-pattern-expand-match ast-rec)]
+           [binding-mgr (ast-pattern-expand-match-bindings ast-rec)]
+           [actions (ast-pattern-expand-match-actions ast-rec)]
+           [root-var (ast-pattern-expand-root-var ast-rec)]
+           [num-ops (vector-length match-vec)]
+
+           ;; Collect all variables from binding manager
+           [all-vars (collect-all-variables binding-mgr)]
+
+           ;; Generate check code from actions
+           [check-code (generate-check-code actions match-vec)])
+
+      (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                    [root root-var]
+                    [(var ...) all-vars]
+                    [num-operations num-ops]
+                    [checks check-code])
+        #'(define fname
+            (lambda (op operands-ref rewriter type-converter)
+              (let ([var (make-unbound-value)] ...
+                    [all-operations (make-vector num-operations (make-unbound-value))])
+                ;; Bind root variable to first result of input operation
+                (set! root (mlir-operation-get-result op 0))
+
+                ;; Match pattern and rewrite if successful
+                (if checks
+                    (error 'todo "rewrite not implemented yet")
+                    #f)))))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Collect all variables from binding manager
+  ;;-----------------------------------------------------------------------
+
+  (define (collect-all-variables binding-mgr)
+    (vector->list (hashtable-keys (binding-manager-bindings binding-mgr))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate check code from actions
+  ;;-----------------------------------------------------------------------
+
+  (define (generate-check-code actions match-vec)
+    (if (null? actions)
+        #'#t
+        (let ([checks (map (lambda (act) (action->check-code act match-vec)) actions)])
+          #`(and #,@checks))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Translate single action to check code
+  ;;-----------------------------------------------------------------------
+
+  (define (action->check-code action match-vec)
+    (let ([tag (car action)])
+      (case tag
+        [(:set-current-op)
+         (let* ([fields (cdr action)]
+                [op-idx (cdr (assq 'op-idx fields))]
+                [var (cdr (assq 'var fields))])
+           ;; Navigate: get defining operation of the value and store in all-operations
+           ;; Check for nullptr (block arguments have no defining op)
+           #`(let ([def-op (mlir-value-get-defining-op #,var)])
+               (and def-op
+                    (begin
+                      (vector-set! all-operations #,op-idx def-op)
+                      #t))))]
+
+        [(:check-op)
+         (let* ([fields (cdr action)]
+                [op-idx (cdr (assq 'op-idx fields))]
+                [match-op (vector-ref match-vec op-idx)]
+                [op-name (ast-match-expand-op-name match-op)]
+                [num-results (length (ast-match-expand-result-var match-op))])
+           #`(and (string=? (mlir-operation-name (vector-ref all-operations #,op-idx))
+                            #,(syntax->datum op-name))
+                  (= (mlir-operation-num-results (vector-ref all-operations #,op-idx))
+                     #,num-results)))]
+
+        [(:bind-operand)
+         (let* ([fields (cdr action)]
+                [op-idx (cdr (assq 'op-idx fields))]
+                [var (cdr (assq 'var fields))]
+                [operand-idx (cdr (assq 'operand-idx fields))])
+           #`(begin
+               (set! #,var (mlir-operation-get-operand-value
+                            (vector-ref all-operations #,op-idx)
+                            #,operand-idx))
+               #t))]
+
+        [(:check-eq)
+         (let* ([fields (cdr action)]
+                [op-idx (cdr (assq 'op-idx fields))]
+                [operand-idx (cdr (assq 'operand-idx fields))]
+                [var (cdr (assq 'var fields))])
+           #`(value-equal? (get-operand (vector-ref all-operations #,op-idx)
+                                        #,operand-idx)
+                           #,var))]
+
+        [else
+         (error 'action->check-code "Unknown action type" tag)])))
 
   ;;-----------------------------------------------------------------------
   ;; AST to datum conversion (for debug modes)

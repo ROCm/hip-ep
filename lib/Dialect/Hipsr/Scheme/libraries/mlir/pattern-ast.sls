@@ -49,9 +49,10 @@
     (fields (mutable function-name)    ;; syntax - identifier for pattern function
             (mutable root-var)         ;; syntax - identifier for root result var (e.g., #'%out)
             (mutable root-op-name)     ;; syntax - string literal for op name (e.g., #'"onnx.Cast")
-            (mutable match)            ;; list of ast-match-expand - parsed match operations
-            (mutable match-bindings)   ;; hashtable: identifier -> matcher (first occurrence)
-            (mutable match-actions)    ;; list of matchers (ordered, for codegen)
+            (mutable match)            ;; before validation: list of ast-match-expand
+                                       ;; after validation: vector of ast-match-expand
+            (mutable match-bindings)   ;; binding-manager record (set by analyze phase)
+            (mutable match-actions)    ;; list of actions (set by analyze phase)
             (mutable rewrite)          ;; list of ast-operation-expand - parsed rewrite operations
             (mutable where)            ;; list of ast-where-binding-expand - parsed where bindings
             (mutable debug-parse?)     ;; boolean - whether :debug-parse flag is present
@@ -63,7 +64,8 @@
   ;; Contains syntax objects for code generation
   ;; Mutable fields allow validation to normalize in-place
   (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
-    (fields (mutable result-var)     ;; syntax - identifier (e.g., #'%out)
+    (fields (mutable result-var)     ;; syntax - before validation: identifier (e.g., #'%out)
+                                     ;;          after validation: list of identifiers (e.g., (#'%out) or (#'%a #'%b))
             (mutable op-name)        ;; syntax - string literal (e.g., #'"onnx.Cast")
             (mutable operands)       ;; syntax - operand list (e.g., #'(%in))
             (mutable attributes)     ;; syntax - attribute list (e.g., #'())
