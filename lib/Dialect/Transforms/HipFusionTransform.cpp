@@ -4,15 +4,14 @@
  */
 //===- HipFusionTransform.cpp - HIP-to-HIP pattern rewriting -------------===//
 //
-// Applies the PDLL rewrite patterns in `fusion_pattern/` to the HIP dialect.
-// Both sides of every pattern are `hip.*`, and the pass places no restriction
-// on the arity of a rewrite: one op may become many, many may collapse into
-// one, or a subgraph may be replaced by a different subgraph.
+// Applies the rewrite patterns in `fusion_pattern/` to the HIP dialect. Both
+// sides of every pattern are `hip.*`, and the pass places no restriction on
+// the arity of a rewrite: one op may become many, many may collapse into one,
+// or a subgraph may be replaced by a different subgraph.
 //
-// The patterns are compiled into this library as a byte array by
-// `hip_add_pdll_patterns` (cmake/HipPdllPatterns.cmake); the native
-// constraints and rewrites they call, and the driver that binds them, live in
-// `fusion_pattern/hip_fusion_transform.hpp`.
+// How those patterns are written, built and ordered is `fusion_pattern/`'s
+// concern; `fusion_pattern/hip_fusion_transform.hpp` is the driver this pass
+// calls.
 //
 //===----------------------------------------------------------------------===//
 
@@ -61,12 +60,12 @@ public:
     // Unlike convert-onnx-to-hip, whose patterns are the lowering itself,
     // every pattern here is an optimization: a build without mlir-pdll
     // degrades to leaving the matched IR in place, which still compiles and
-    // runs.
-    if (hip_pdl_fusion_transform_size() == 0) {
-      LLVM_DEBUG(llvm::dbgs()
-                 << "no embedded patterns; HIP-to-HIP rewriting skipped\n");
-      return;
-    }
+    // runs. The native patterns are unaffected and run either way, so this is
+    // a diagnostic rather than an early exit.
+    LLVM_DEBUG({
+      if (hip_pdl_fusion_transform_size() == 0)
+        llvm::dbgs() << "no embedded PDLL patterns; only native rewrites run\n";
+    });
 
     const llvm::MemoryBufferRef patterns(
         llvm::StringRef(
