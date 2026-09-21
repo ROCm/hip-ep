@@ -1321,8 +1321,7 @@ struct RangeConverter final : public OpConversionPattern<RangeOp> {
       return rewriter.notifyMatchFailure(op, "empty range is not a TOSA value");
 
     Type elemType = resultType.getElementType();
-    if (!isa<FloatType, IntegerType>(elemType) ||
-        elemType.isUnsignedInteger())
+    if (!isa<FloatType, IntegerType>(elemType) || elemType.isUnsignedInteger())
       return rewriter.notifyMatchFailure(op, "unsupported range element type");
 
     Location loc = op.getLoc();
@@ -1345,9 +1344,9 @@ struct RangeConverter final : public OpConversionPattern<RangeOp> {
     }
     Value start = reshapeTo(adaptor.getStart(), {1}, rewriter);
     Value delta = reshapeTo(adaptor.getDelta(), {1}, rewriter);
-    Value scaled = emitTosaMul(rewriter, loc,
-                               emitIotaConst(rewriter, loc, resultType), delta,
-                               resultType);
+    Value scaled =
+        emitTosaMul(rewriter, loc, emitIotaConst(rewriter, loc, resultType),
+                    delta, resultType);
     rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, scaled, start);
     return success();
   }
