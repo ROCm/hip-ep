@@ -52,7 +52,15 @@ The capture scripts need a build containing the RGP capture fence
 
 ```powershell
 .\bench\bench_ttft.ps1 -Tag baseline -SeqLen 16384
+
+# MoE models: use real text, because random ids route differently -- see
+# https://github.com/ROCm/hip-ep/blob/main/tools/perf-harness/README.md#on-an-moe-model-synthetic-ids-are-a-different-workload
+.\bench\bench_ttft.ps1 -Tag baseline -PromptFile D:\prompts\16k.txt
 ```
+
+`-SeqLen` and `-PromptFile` are mutually exclusive here: the file fixes the
+length, and the CSV records the count the benchmark reports rather than the one
+requested.
 
 Nothing later means anything without this number, because a capture cannot tell
 you whether a change helped — see [RGP pegs clocks](#rgp-pegs-clocks-a-capture-win-is-not-a-ttft-win).
@@ -169,6 +177,19 @@ prompt is fed in 512-token chunks: decode step 1 at 16K is Run 32, not Run 1. It
 refuses to run with `-PromptFile`, where the token count is unknown — use
 `--use_random_tokens` for captures and real prompts for the timed runs.
 
+**Check that chunking assumption against the model in front of you.** It is the
+`-PrefillChunk` default, not a law, and a model whose generator does not chunk
+feeds the whole prompt as one Run: on a gpt-oss-120b proxy, 128, 2048 and 16384
+token prompts each arrived as a single Run with `sq` equal to the whole prompt,
+so decode step 1 was Run 1 at every length and `-DecodeStep` would have aimed 31
+Runs past the target at 16K. `trace_ops.py` prints the Run table with the per-Run
+`gqa` shape, which settles it in one run. For a prefill capture, positioning with
+`-AfterInferences` on a Run the trace actually shows avoids the question.
+
+Where prefill is a single Run, note also that `-w 0` in this script makes Run 0
+the cold one: prefills land at Runs 0, `-Gen`, `2*-Gen`, and only the second
+onward are past the autotuner.
+
 **`-Gen` is the whole game for decode captures.** RGP streams the trace out of
 the *live* process, and a decode step's worth of dispatches is a ~80 MB dump
 that takes far longer to drain than the few hundred milliseconds of work left
@@ -224,6 +245,39 @@ whole round of analysis on that basis; the same binaries measure 14,455-14,610
 ms once the variable is gone, and re-setting it reproduces 17,545 ms on demand.
 Cross-check any suspicious baseline by re-running it in a fresh shell.
 
+### On an MoE model, synthetic ids are a different workload
+
+`--use_random_tokens` is the default on the text path because it gives an exact
+length for free. On a mixture-of-experts model it also changes what you are
+measuring, because routing is a function of the embeddings: pass `-PromptFile`
+and use real text.
+
+Measured on a gpt-oss-120b 4-layer proxy at a matched 187 tokens, active experts
+out of 128 by layer:
+
+| input | layer 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| real prompt | 102 | 101 | 86 | 82 |
+| random ids, run 1 | 89 | 72 | 61 | 52 |
+| random ids, run 2 | 82 | 69 | 64 | 51 |
+| random ids, run 3 | 90 | 72 | 58 | 58 |
+
+Two separate problems. Random ids route *narrower* than text and the gap widens
+with depth (−13% at layer 0, −37% at layer 3), and expert breadth is what sets
+the per-expert M buckets that `expert_blocks.py` and `headroom.py` rank. They are
+also unseeded, so consecutive runs are not the same workload and a capture cannot
+be composed with a baseline taken separately.
+
+This is the mild version of the failure. Constant or zero ids — what
+`onnxruntime_perf_test -I` supplies — embed every token identically and collapse
+routing to top-k outright, giving 4 experts each seeing every token instead of
+~100 each seeing a few. That still prints a plausible tokens-per-second number.
+Check the count before believing anything:
+
+```
+HIPDNN_EP_DEBUG=1   ->   [REAL] wrap_qmoe: 102/128 experts active
+```
+
 ### Rank by utilisation, not by share of runtime
 
 A percentage of runtime says where time *goes*, not where it is *wasted*. The op
@@ -238,6 +292,14 @@ finds were a tier of small-M expert blocks at **18% of floor**, and an `lm_head`
 computing logits for all 512 rows of every chunk when only the last row is ever
 read — 0.60 s of work that should not run at all, invisible to a share ranking
 because it was only 7% of runtime.
+
+The `lm_head` row is labelled "as executed, all rows" because that assumption is
+not universal, and where it does not hold the row inverts into nonsense rather
+than failing: a gpt-oss-120b proxy emits a `gather` immediately before the
+`lm_head` and runs it at `m=1`, so the measured 7.0 ms sits against a 319.5 ms
+all-rows floor and the row reports 4564% utilisation and *negative* recoverable
+time. Read that as the optimisation already being present, not as a candidate.
+`trace_ops.py --sequence` shows the `m=` on the `n=vocab` matmul directly.
 
 ### Use published ceilings, not the best rate you happened to see
 
