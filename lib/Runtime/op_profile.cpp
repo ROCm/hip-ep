@@ -3,15 +3,89 @@
  * Licensed under the MIT License.
  */
 
+// The HIP types and entry points below arrive through op_profile.h ->
+// runtime_types.h, which resolves to real/ or mock/ depending on the build.
+// Including <hip/hip_runtime.h> directly here would be redundant for the real
+// runtime and fatal for the mock one, which has no ROCm headers on its include
+// path.
 #include "op_profile.h"
 #include "chrome_trace.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
+
+// Index of the ORT Run in flight, starting at 0. A chunked prefill spans
+// several Runs, so this is not a decode-step index; see op_profile.h. Written
+// from the input-prepare boundary, which runs at the start of a Run, hence the
+// -1 start.
+static std::atomic<int> g_rgp_fence_run{-1};
+
+void rgp_fence_note_run() {
+  g_rgp_fence_run.fetch_add(1, std::memory_order_acq_rel);
+}
+
+// One-shot RGP capture fence -- see op_profile.h for the rationale. Pure host
+// code (no kernel launch): drains the GPU and sleeps so RGP arms on the next
+// dispatch. All env reads are latched on first call; when RGP_FENCE is unset
+// the very first check returns and the whole thing compiles down to one load.
+void rgp_capture_fence(const char *opname) {
+  static const std::string target = hipdnn_ep::env_string("RGP_FENCE");
+  if (target.empty())
+    return;
+  static const int skip = [] {
+    const std::string s = hipdnn_ep::env_string("RGP_FENCE_SKIP");
+    return s.empty() ? 0 : std::atoi(s.c_str());
+  }();
+  static const int sleep_ms = [] {
+    const std::string s = hipdnn_ep::env_string("RGP_FENCE_MS");
+    return s.empty() ? 200 : std::atoi(s.c_str());
+  }();
+  static const int after_inferences = [] {
+    const std::string s = hipdnn_ep::env_string("RGP_FENCE_AFTER_INFERENCES");
+    return s.empty() ? 0 : std::atoi(s.c_str());
+  }();
+  static std::atomic<bool> fired{false};
+  static std::atomic<int> matches{0};
+
+  if (fired.load(std::memory_order_acquire))
+    return;
+  if (!opname || target != opname)
+    return;
+  // Hold off until the requested Run. Instance counting alone cannot express
+  // "a decode step": every layer asks for the same op within one step, so the
+  // instance index conflates layers with steps.
+  if (g_rgp_fence_run.load(std::memory_order_acquire) < after_inferences)
+    return;
+  // Arm only on the (skip)-th matching instance so callers can pick, e.g., a
+  // full-attention layer rather than the first (sliding) one.
+  int idx = matches.fetch_add(1, std::memory_order_acq_rel);
+  if (idx < skip)
+    return;
+  bool expected = false;
+  if (!fired.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    return;
+  // Drain all outstanding GPU work, THEN announce the idle window and hold. The
+  // marker is emitted BEFORE the wait so the capture orchestrator has the full
+  // window to detect it and trigger RGP; the GPU stays quiescent for the whole
+  // wait, so RGP arms cleanly and this op's kernels are the first dispatches
+  // after the gap. Busy-wait on the steady clock (no threading headers, no GPU
+  // work).
+  (void)hipDeviceSynchronize();
+  fprintf(
+      stderr, "[RGP_FENCE_ARMED] op=%s run=%d instance=%d idling sleep_ms=%d\n",
+      opname, g_rgp_fence_run.load(std::memory_order_acquire), idx, sleep_ms);
+  fflush(stderr);
+  const auto until =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(sleep_ms);
+  while (std::chrono::steady_clock::now() < until) { /* spin */
+  }
+}
 
 struct OpProfileState {
   struct ShapeEntry {
