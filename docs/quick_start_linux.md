@@ -71,6 +71,111 @@ python3 build.py
 #   --clean                   remove build/ and install/
 ```
 
+### Building ONNX Runtime + OGA from source (for Whisper/VLM models, no prebuilt)
+
+`model_benchmark` has no mechanism for audio or image input, only text-prompt options. 
+Whisper and VLM models require Microsoft's `onnxruntime-genai` Python example scripts
+(`examples/python/whisper.py`, `examples/python/model-mm.py`) to do audio/image
+feature extraction via `og.Audios.open()` / `create_multimodal_processor()`. These scripts 
+need a Python-importable `onnxruntime_genai` package, which the prebuilt package below does 
+**not** provide. On Linux you have to build both ONNX Runtime and OGA from source yourself with 
+`--build_wheel`.
+
+#### 1. Build ONNX Runtime from source
+
+```bash
+git clone --branch v1.27.0 https://github.com/microsoft/onnxruntime.git
+cd onnxruntime
+pip install --user wheel setuptools
+
+./build.sh --config Release --build_wheel --parallel \
+  --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF
+```
+
+The wheel lands at `build/Linux/Release/dist/onnxruntime-1.27.0-cp310-cp310-linux_x86_64.whl`
+(filename varies by Python version).
+
+#### 2. Build OGA (`onnxruntime-genai`) from source
+
+**Prepare `ORT_HOME`** (OGA's build expects an `include/`+`lib/` layout):
+
+```bash
+mkdir -p ../oga-ort-home/include ../oga-ort-home/lib
+ORT_HOME=$(cd ../oga-ort-home && pwd)
+cp -r onnxruntime/include/onnxruntime/* "$ORT_HOME/include/"
+cp onnxruntime/build/Linux/Release/libonnxruntime*.so* "$ORT_HOME/lib/"
+```
+
+**Clone and patch OGA:**
+
+```bash
+git clone --branch v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
+cd onnxruntime-genai
+git submodule update --init --recursive
+
+curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2194.patch -o /tmp/oga-2194.patch
+git am --3way --whitespace=nowarn /tmp/oga-2194.patch
+```
+
+The patch above is the AMDGPU integration PR.
+
+**Build:**
+
+```bash
+python build.py --config Release --ort_home "$ORT_HOME" \
+  --build_wheel --skip_tests --skip_examples --parallel
+```
+
+If this fails with `ModuleNotFoundError: No module named ...`, install the
+missing package directly (e.g. `pip install util requests`) and re-run.
+
+The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.14.0-cp310-cp310-linux_x86_64.whl`.
+
+#### 3. Install both wheels
+
+```bash
+pip install --user --ignore-requires-python \
+  onnxruntime-1.27.0-cp310-cp310-linux_x86_64.whl \
+  onnxruntime_genai-0.14.0-cp310-cp310-linux_x86_64.whl
+```
+
+`--ignore-requires-python` is needed because ONNX Runtime 1.27.0's own wheel
+metadata incorrectly declares `Requires-Python: >=3.11` despite being built
+and tagged for `cp310`.
+
+Verify:
+
+```bash
+python3 -c "import onnxruntime_genai; print('OGA import OK')"
+```
+
+If this fails with a `GLIBCXX_3.4.32 not found` error, fix with:
+
+```bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+```
+
+#### 4. Point OGA at the compiled AMD GPU EP
+
+`build.py`'s EP-renaming step (`libhipgpu.so` → `libamdgpu-ep.so`, needed for
+OGA's auto-discovery convention) only runs on Windows. Do it manually for Linux:
+
+```bash
+cp "$ROOT/lib/libhipgpu.so" "$ROOT/lib/libamdgpu-ep.so"
+export AMDGPU_EP_PATH="$ROOT/lib/libamdgpu-ep.so"
+```
+
+#### 5. Run the example scripts for Whisper and VLM models
+
+```bash
+python3 onnxruntime-genai/examples/python/whisper.py -m /path/to/whisper-model-dir
+python3 onnxruntime-genai/examples/python/model-mm.py -m /path/to/vlm-model-dir \
+  --image_paths /path/to/image.jpg --user_prompt "Describe this image." --non_interactive -v
+```
+
+Make sure `genai_config.json` `provider_options` are set to
+`{"AMDGPU": {"profile": "hip"}}` 
+
 ### Docker (optional, same driver inside a container)
 
 ```bash
@@ -104,7 +209,13 @@ A ready-to-run package is published for each green build. It contains every
 `hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
 `libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
 `bin/` (next to the other tools). TheRock is **not** included — install ROCm on
-the host. Download it with `gh` (no compile needed):
+the host. Download it with `gh` (no compile needed).
+
+> **Limitation:** `model_benchmark` only supports text-prompt models. It has
+> no mechanism for audio or image input. This package also only ships C++ binaries, 
+> not a Python-importable `onnxruntime_genai` package. For Whisper or VLM models, see
+> [Building ONNX Runtime + OGA from source](#building-onnx-runtime--oga-from-source-for-whispervlm-models-no-prebuilt)
+> above.
 
 ```bash
 git clone https://github.com/ROCm/hip-ep.git
