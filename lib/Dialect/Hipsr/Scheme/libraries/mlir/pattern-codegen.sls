@@ -21,6 +21,7 @@
          (let ([match-ops (ast-pattern-expand-match ast-rec)]
                [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
                [where-bindings (ast-pattern-expand-where ast-rec)]
+               [match-actions (ast-pattern-expand-match-actions ast-rec)]
                [debug-ast? (ast-pattern-expand-debug-ast? ast-rec)]
                [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
            (if debug-ast?
@@ -29,13 +30,15 @@
                      [root-op-str (syntax->datum #'root-op-name)]
                      [match-data (map match-expand->datum (vector->list match-ops))]
                      [rewrite-data (map operation-expand->datum rewrite-ops)]
-                     [where-data (map where-binding-expand->datum where-bindings)])
+                     [where-data (map where-binding-expand->datum where-bindings)]
+                     [actions-data (map action->datum match-actions)])
                  (with-syntax ([ast-list (datum->syntax #'macro-name
                                            `(list 'function-name ',fname-sym
                                                   'root-op-name ,root-op-str
                                                   'match ',match-data
                                                   'rewrite ',rewrite-data
                                                   'where ',where-data
+                                                  'match-actions ',actions-data
                                                   'debug-ast? ,debug-ast?
                                                   'debug-matching? ,debug-matching?))])
                    #'(define fname ast-list)))
@@ -68,4 +71,12 @@
 
   (define (where-binding-expand->datum where-exp)
     (list (syntax->datum (ast-where-binding-expand-var where-exp))
-          (syntax->datum (ast-where-binding-expand-expr where-exp)))))
+          (syntax->datum (ast-where-binding-expand-expr where-exp))))
+
+  (define (action->datum action)
+    ;; Convert action list to datum, handling syntax objects in action elements
+    (map (lambda (elem)
+           (if (identifier? elem)
+               (syntax->datum elem)
+               elem))
+         action)))
