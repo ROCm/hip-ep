@@ -8,6 +8,7 @@
 
 #include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/SmallVector.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
@@ -19,6 +20,7 @@
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Matchers.h>
 #include <mlir/IR/PatternMatch.h>
+#include <mlir/IR/SymbolTable.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Transforms/DialectConversion.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
@@ -2866,6 +2868,348 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
   }
 };
 
+// TOSA has no scan op. For a constant axis and static extent, spell cumsum as
+// one prefix reduction per output position followed by a concat.
+bool isTosaExpressibleCumSum(CumSumOp op) {
+  if (op.getNumResults() != 1)
+    return false;
+  auto inputTy = dyn_cast<RankedTensorType>(op.getX().getType());
+  auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inputTy || !resultTy || !inputTy.hasStaticShape() ||
+      inputTy != resultTy || inputTy.getRank() < 1)
+    return false;
+  SmallVector<int64_t, 1> axisValues;
+  if (!extractConstantInts(op.getAxis(), axisValues) || axisValues.size() != 1)
+    return false;
+  int64_t axis = axisValues.front();
+  if (axis < 0)
+    axis += inputTy.getRank();
+  if (axis < 0 || axis >= inputTy.getRank() || inputTy.getDimSize(axis) <= 0)
+    return false;
+  Type elemTy = inputTy.getElementType();
+  return isa<FloatType>(elemTy) ||
+         (isa<IntegerType>(elemTy) &&
+          cast<IntegerType>(elemTy).isSignlessInteger(32));
+}
+
+struct CumSumConverter final : public OpConversionPattern<CumSumOp> {
+  using OpConversionPattern<CumSumOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(CumSumOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleCumSum(op))
+      return rewriter.notifyMatchFailure(
+          op, "requires static tensor mode and one constant axis");
+
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    SmallVector<int64_t, 1> axisValues;
+    (void)extractConstantInts(op.getAxis(), axisValues);
+    int64_t axis = axisValues.front();
+    if (axis < 0)
+      axis += resultTy.getRank();
+
+    Location loc = op.getLoc();
+    Value input = adaptor.getX();
+    if (op.getReverse())
+      input = tosa::ReverseOp::create(rewriter, loc, resultTy, input,
+                                      static_cast<uint32_t>(axis));
+
+    SmallVector<int64_t> pieceShape(resultTy.getShape().begin(),
+                                    resultTy.getShape().end());
+    pieceShape[axis] = 1;
+    auto pieceTy = RankedTensorType::get(pieceShape, resultTy.getElementType());
+    Value zero = tosa::ConstOp::create(
+        rewriter, loc, pieceTy,
+        DenseElementsAttr::get(
+            pieceTy, rewriter.getZeroAttr(resultTy.getElementType())));
+
+    SmallVector<Value> pieces;
+    int64_t extent = resultTy.getDimSize(axis);
+    pieces.reserve(extent);
+    for (int64_t i = 0; i < extent; ++i) {
+      int64_t prefix = op.getExclusive() ? i : i + 1;
+      if (prefix == 0) {
+        pieces.push_back(zero);
+        continue;
+      }
+      SmallVector<int64_t> prefixShape(resultTy.getShape().begin(),
+                                       resultTy.getShape().end());
+      prefixShape[axis] = prefix;
+      Value slice = sliceTo(input, prefixShape, rewriter, loc);
+      pieces.push_back(tosa::ReduceSumOp::create(
+          rewriter, loc, pieceTy, slice,
+          rewriter.getI32IntegerAttr(static_cast<int32_t>(axis))));
+    }
+
+    Value result = pieces.size() == 1
+                       ? pieces.front()
+                       : tosa::ConcatOp::create(rewriter, loc, resultTy, pieces,
+                                                static_cast<uint32_t>(axis))
+                             .getResult();
+    if (op.getReverse())
+      result = tosa::ReverseOp::create(rewriter, loc, resultTy, result,
+                                       static_cast<uint32_t>(axis));
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+// Clone an outlined HIP control-flow function into a TOSA region. The first
+// function argument is !hip.context; the rest correspond to region inputs.
+LogicalResult
+cloneOutlinedFuncIntoTosaRegion(func::FuncOp func, Region &region,
+                                Value context, ValueRange regionInputs,
+                                ConversionPatternRewriter &rewriter) {
+  if (!func || func.isDeclaration() || !func.getBody().hasOneBlock())
+    return failure();
+  Block &source = func.getBody().front();
+  if (source.getNumArguments() != regionInputs.size() + 1 ||
+      !isa<ContextType>(source.getArgument(0).getType()))
+    return failure();
+  auto returnOp = dyn_cast<func::ReturnOp>(source.getTerminator());
+  if (!returnOp)
+    return failure();
+
+  SmallVector<Type> argTypes;
+  SmallVector<Location> argLocs;
+  argTypes.reserve(regionInputs.size());
+  argLocs.reserve(regionInputs.size());
+  for (Value input : regionInputs) {
+    argTypes.push_back(input.getType());
+    argLocs.push_back(func.getLoc());
+  }
+  while (!region.empty())
+    rewriter.eraseBlock(&region.front());
+  Block *block = rewriter.createBlock(&region, region.end(), argTypes, argLocs);
+  // SingleBlockImplicitTerminator inserts an empty tosa.yield on createBlock.
+  if (block->mightHaveTerminator())
+    rewriter.eraseOp(block->getTerminator());
+
+  IRMapping mapping;
+  mapping.map(source.getArgument(0), context);
+  for (auto [arg, mapped] :
+       llvm::zip(source.getArguments().drop_front(), block->getArguments()))
+    mapping.map(arg, mapped);
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(block);
+  for (Operation &nested : source.without_terminator())
+    rewriter.clone(nested, mapping);
+  SmallVector<Value> yielded;
+  for (Value value : returnOp.getOperands())
+    yielded.push_back(mapping.lookupOrDefault(value));
+  tosa::YieldOp::create(rewriter, func.getLoc(), yielded);
+  return success();
+}
+
+struct IfConverter final : public OpConversionPattern<IfOp> {
+  using OpConversionPattern<IfOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(IfOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != op.getNumOutputs())
+      return rewriter.notifyMatchFailure(op, "requires tensor mode");
+    if (llvm::any_of(op.getResultTypes(),
+                     [](Type type) { return !isa<RankedTensorType>(type); }))
+      return rewriter.notifyMatchFailure(op, "requires tensor results");
+
+    auto thenFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getThenFuncAttr());
+    auto elseFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getElseFuncAttr());
+    if (!thenFunc || !elseFunc)
+      return rewriter.notifyMatchFailure(op, "outlined branch not found");
+
+    SmallVector<Value> inputs(adaptor.getCaptures().begin(),
+                              adaptor.getCaptures().end());
+    auto validBranch = [&](func::FuncOp branch) {
+      if (branch.isDeclaration() || !branch.getBody().hasOneBlock())
+        return false;
+      Block &block = branch.getBody().front();
+      if (block.getNumArguments() != inputs.size() + 1 ||
+          !isa<ContextType>(block.getArgument(0).getType()))
+        return false;
+      for (auto [arg, input] :
+           llvm::zip(block.getArguments().drop_front(), inputs))
+        if (arg.getType() != input.getType())
+          return false;
+      auto ret = dyn_cast<func::ReturnOp>(block.getTerminator());
+      return ret && ret.getOperandTypes() == op.getResultTypes();
+    };
+    if (!validBranch(thenFunc) || !validBranch(elseFunc))
+      return rewriter.notifyMatchFailure(
+          op, "branches must match captures and result types");
+
+    Location loc = op.getLoc();
+    // TOSA forbids rank-0 tensors; a size-1 condition is tensor<1xi1>.
+    auto condTy = RankedTensorType::get({1}, rewriter.getI1Type());
+    Value cond = tensor::FromElementsOp::create(rewriter, loc, condTy,
+                                                ValueRange{adaptor.getCond()});
+    auto tosaIf =
+        tosa::IfOp::create(rewriter, loc, op.getResultTypes(), cond, inputs);
+
+    if (failed(cloneOutlinedFuncIntoTosaRegion(thenFunc, tosaIf.getThenGraph(),
+                                               adaptor.getCtx(), inputs,
+                                               rewriter)) ||
+        failed(cloneOutlinedFuncIntoTosaRegion(elseFunc, tosaIf.getElseGraph(),
+                                               adaptor.getCtx(), inputs,
+                                               rewriter))) {
+      rewriter.eraseOp(tosaIf);
+      return rewriter.notifyMatchFailure(
+          op, "branches must take context plus all captures");
+    }
+
+    rewriter.replaceOp(op, tosaIf.getResults());
+    return success();
+  }
+};
+
+static Value scalarToTensor(Value scalar, Type elementType, Location loc,
+                            ConversionPatternRewriter &rewriter) {
+  auto tensorTy = RankedTensorType::get({1}, elementType);
+  if (scalar.getType() != elementType)
+    scalar = arith::IndexCastOp::create(rewriter, loc, elementType, scalar);
+  return tensor::FromElementsOp::create(rewriter, loc, tensorTy,
+                                        ValueRange{scalar});
+}
+
+struct LoopConverter final : public OpConversionPattern<LoopOp> {
+  using OpConversionPattern<LoopOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(LoopOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != op.getNumLoopCarried())
+      return rewriter.notifyMatchFailure(op, "requires tensor mode");
+    if (llvm::any_of(adaptor.getVInit(), [](Value value) {
+          return !isa<RankedTensorType>(value.getType());
+        }))
+      return rewriter.notifyMatchFailure(op, "requires carried tensors");
+
+    auto bodyFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getBodyFuncAttr());
+    if (!bodyFunc || bodyFunc.isDeclaration() ||
+        !bodyFunc.getBody().hasOneBlock())
+      return rewriter.notifyMatchFailure(op, "outlined body not found");
+    Block &source = bodyFunc.getBody().front();
+    auto returnOp = dyn_cast<func::ReturnOp>(source.getTerminator());
+    if (!returnOp)
+      return rewriter.notifyMatchFailure(op, "body must end in func.return");
+
+    unsigned numCarried = op.getNumLoopCarried();
+    unsigned numCaptures = adaptor.getCaptures().size();
+    if (source.getNumArguments() != 3 + numCarried + numCaptures ||
+        !isa<ContextType>(source.getArgument(0).getType()))
+      return rewriter.notifyMatchFailure(op,
+                                         "outlined body signature mismatch");
+    bool passthrough = op.getCondIsPassthrough();
+    if (returnOp.getNumOperands() != numCarried + (passthrough ? 0 : 1))
+      return rewriter.notifyMatchFailure(op, "body result count mismatch");
+    for (unsigned i = 0; i < numCarried; ++i)
+      if (source.getArgument(3 + i).getType() !=
+          adaptor.getVInit()[i].getType())
+        return rewriter.notifyMatchFailure(op, "carried type mismatch");
+    unsigned capturesStart = 3 + numCarried;
+    for (unsigned i = 0; i < numCaptures; ++i)
+      if (source.getArgument(capturesStart + i).getType() !=
+          adaptor.getCaptures()[i].getType())
+        return rewriter.notifyMatchFailure(op, "capture type mismatch");
+
+    Location loc = op.getLoc();
+    Type i64Ty = rewriter.getI64Type();
+    auto scalarI64Ty = RankedTensorType::get({1}, i64Ty);
+    auto scalarI1Ty = RankedTensorType::get({1}, rewriter.getI1Type());
+    Value zeroIter = tosa::ConstOp::create(
+        rewriter, loc, scalarI64Ty,
+        DenseElementsAttr::get(scalarI64Ty, rewriter.getI64IntegerAttr(0)));
+    Value maxTrip =
+        scalarToTensor(adaptor.getMaxTripCount(), i64Ty, loc, rewriter);
+    Value cond;
+    if (Value condInit = adaptor.getCondInit())
+      cond = scalarToTensor(condInit, rewriter.getI1Type(), loc, rewriter);
+    else
+      cond = tosa::ConstOp::create(
+          rewriter, loc, scalarI1Ty,
+          DenseElementsAttr::get(scalarI1Ty, rewriter.getBoolAttr(true)));
+
+    SmallVector<Value> inputs = {zeroIter, maxTrip, cond};
+    llvm::append_range(inputs, adaptor.getVInit());
+    llvm::append_range(inputs, adaptor.getCaptures());
+    SmallVector<Type> resultTypes;
+    llvm::transform(inputs, std::back_inserter(resultTypes),
+                    [](Value value) { return value.getType(); });
+    auto whileOp = tosa::WhileOp::create(rewriter, loc, resultTypes, inputs,
+                                         ArrayRef<NamedAttribute>{});
+
+    auto addRegionBlock = [&](Region &region) {
+      SmallVector<Location> argLocs(resultTypes.size(), loc);
+      while (!region.empty())
+        rewriter.eraseBlock(&region.front());
+      Block *block =
+          rewriter.createBlock(&region, region.end(), resultTypes, argLocs);
+      if (block->mightHaveTerminator())
+        rewriter.eraseOp(block->getTerminator());
+      return block;
+    };
+
+    // cond_graph: current condition && iter < max_trip_count.
+    Block *condBlock = addRegionBlock(whileOp.getCondGraph());
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(condBlock);
+      Value underTrip = tosa::GreaterOp::create(rewriter, loc, scalarI1Ty,
+                                                condBlock->getArgument(1),
+                                                condBlock->getArgument(0));
+      Value keepGoing = tosa::LogicalAndOp::create(
+          rewriter, loc, scalarI1Ty, underTrip, condBlock->getArgument(2));
+      tosa::YieldOp::create(rewriter, loc, ValueRange{keepGoing});
+    }
+
+    Block *bodyBlock = addRegionBlock(whileOp.getBodyGraph());
+    IRMapping mapping;
+    mapping.map(source.getArgument(0), adaptor.getCtx());
+    mapping.map(source.getArgument(1), bodyBlock->getArgument(0));
+    mapping.map(source.getArgument(2), bodyBlock->getArgument(2));
+    for (unsigned i = 0; i < numCarried; ++i)
+      mapping.map(source.getArgument(3 + i), bodyBlock->getArgument(3 + i));
+    for (unsigned i = 0; i < numCaptures; ++i)
+      mapping.map(source.getArgument(capturesStart + i),
+                  bodyBlock->getArgument(capturesStart + i));
+
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(bodyBlock);
+      for (Operation &nested : source.without_terminator())
+        rewriter.clone(nested, mapping);
+      SmallVector<Value> outlinedResults;
+      for (Value value : returnOp.getOperands())
+        outlinedResults.push_back(mapping.lookupOrDefault(value));
+
+      unsigned carriedStart = passthrough ? 0 : 1;
+      Value nextCond =
+          passthrough ? bodyBlock->getArgument(2) : outlinedResults.front();
+      Value one = tosa::ConstOp::create(
+          rewriter, loc, scalarI64Ty,
+          DenseElementsAttr::get(scalarI64Ty, rewriter.getI64IntegerAttr(1)));
+      Value nextIter = tosa::AddOp::create(rewriter, loc, scalarI64Ty,
+                                           bodyBlock->getArgument(0), one);
+      SmallVector<Value> yielded = {nextIter, bodyBlock->getArgument(1),
+                                    nextCond};
+      for (unsigned i = 0; i < numCarried; ++i)
+        yielded.push_back(outlinedResults[carriedStart + i]);
+      for (unsigned i = 0; i < numCaptures; ++i)
+        yielded.push_back(bodyBlock->getArgument(capturesStart + i));
+      tosa::YieldOp::create(rewriter, loc, yielded);
+    }
+
+    rewriter.replaceOp(
+        op, whileOp.getResults().slice(/*start=*/3, /*length=*/numCarried));
+    return success();
+  }
+};
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -2887,23 +3231,32 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // guarantee: a hip op this pass claims still has to convert or the pass
     // fails.
     ConversionTarget conversion(*ctx);
-    conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
+    conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect,
+                               arith::ArithDialect>();
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        MultiHeadAttentionOp, IfOp, LoopOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
     // requires every remaining op to be legal -- the framework does not DCE
     // this pre-existing op on its own. Mark it legal so conversion succeeds;
     // the canonicalizer that follows this pass removes the dead empty.
-    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
+    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp, tensor::FromElementsOp,
+                          tosa::IfOp, tosa::WhileOp>();
+    // Newly created ops inside tosa.cond_if / tosa.while_loop are still
+    // legalized by applyPartialConversion. Mark the control-flow ops
+    // recursively legal so nested tosa.yield / arith.constant do not roll
+    // the hip.if / hip.loop rewrite back.
+    conversion.markOpRecursivelyLegal<tosa::IfOp, tosa::WhileOp>();
     conversion.addDynamicallyLegalOp<ExpandOp>(
         [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+    conversion.addDynamicallyLegalOp<CumSumOp>(
+        [](CumSumOp op) { return !isTosaExpressibleCumSum(op); });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
         [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
@@ -2937,7 +3290,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        MhaConverter, CumSumConverter, IfConverter, LoopConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
