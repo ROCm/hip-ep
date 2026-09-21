@@ -141,72 +141,84 @@
   ;;   - Symbol: onnx.Add or arith.addi
   ;;
   ;; Operand syntax:
-  ;;   - Variables: (%x %y) - identifiers starting with %
-  ;;   - Can be result variables from other operations or free variables
+  ;;   - Required: %x %y - identifiers starting with %
+  ;;   - Optional group: (&optional %y %z) - all operands in group are optional
+  ;;   - Variadic group: (&variadic %rest) - captures variable number of operands
   ;;
-  ;; Attribute syntax (when present):
-  ;;   - Each attribute: (attr-name = $attr-value)
-  ;;   - Example: ((axis = $axis) (keepdims = $keepdims))
+  ;; Operand groups (explicit parentheses for clarity):
+  ;;   (%x %y)                      - all required
+  ;;   (%x (&optional %y %z))       - x required, y,z optional
+  ;;   (%x (&optional %y) %z)       - x required, y optional, z required
+  ;;   (%x (&variadic %rest))       - x required, rest variadic
+  ;;   (%x (&optional %y) (&variadic %rest)) - combined
+  ;;
+  ;; Implementation note: Optional and variadic operands require reading
+  ;; the operation's "operandSegmentSizes" attribute at runtime to calculate
+  ;; actual operand positions. See AttrSizedOperandSegments trait in MLIR.
+  ;;
+  ;; Attribute syntax (keyword-based, order-independent):
+  ;;   :attrs ((attr-name = $attr-value) ...)
   ;;   - attr-name: symbol or string
-  ;;   - $attr-value: identifier starting with $ (attribute variable)
+  ;;   - attr-value: $variable (bind mode) or constant (constant mode)
+  ;;   Example: :attrs ((axis = $axis) (keepdims = 1))
   ;;
-  ;; Syntax variants (attributes and types are both optional):
-  ;;   1. Full:     result = "op" (operands) ((attr = $val) ...) : (types) -> type
-  ;;   2. No attrs: result = "op" (operands) : (types) -> type
-  ;;   3. No types: result = "op" (operands) ((attr = $val) ...)
-  ;;   4. Minimal:  result = "op" (operands)
+  ;; Type syntax (keyword-based, order-independent):
+  ;;   : (input-types) -> (output-types)
+  ;;   Example: : (!t1 !t2) -> !t3
   ;;
-  ;; Note: (operands) is required; (attrs) and types are optional
+  ;; Complete syntax:
+  ;;   result = "op" (operands) [:attrs (...)] [: (types) -> types]
   ;;
-  ;; Both string and symbol forms work identically.
+  ;; Examples:
+  ;;   %a = "op" (%x %y)
+  ;;   %a = "op" (%x (&optional %y))
+  ;;   %a = "op" (%x (&optional %y %z) (&variadic %w))
+  ;;   %a = "op" (%x) :attrs ((a = $a)) : (!t) -> !t2
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;
   (define (parse-match-operation op-stx)
     (syntax-case op-stx (= : ->)
-      ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-types)
-      [(result = op-name operands attrs : input-types -> output-types)
-       (make-ast-match-expand
-         #'result
-         #'op-name
-         #'operands
-         #'attrs
-         #'input-types
-         #'output-types)]
-
-      ;; No types: (result = "op.name" (operands ...) (attrs ...))
-      [(result = op-name operands attrs)
-       (make-ast-match-expand
-         #'result
-         #'op-name
-         #'operands
-         #'attrs
-         #'()              ;; Empty input-types
-         #'())]            ;; Empty output-types
-
-      ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-types)
-      [(result = op-name operands : input-types -> output-types)
-       (make-ast-match-expand
-         #'result
-         #'op-name
-         #'operands
-         #'()              ;; Empty attrs
-         #'input-types
-         #'output-types)]
-
-      ;; Minimal: (result = "op.name" (operands ...))
-      [(result = op-name operands)
-       (make-ast-match-expand
-         #'result
-         #'op-name
-         #'operands
-         #'()              ;; Empty attrs
-         #'()              ;; Empty input-types
-         #'())]            ;; Empty output-types
+      ;; New keyword-based syntax: (result = op-name operands . rest)
+      [(result = op-name operands . rest)
+       (parse-match-keywords #'result #'op-name #'operands #'rest)]
 
       [_ (syntax-violation 'parse-match-operation
-           "Invalid match operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
+           "Invalid match operation syntax (expected: result = \"op.name\" (operands) [:attrs (...)] [: (...) -> (...)])"
            op-stx)]))
+
+  ;; Helper: parse optional keyword sections in match operation
+  (define (parse-match-keywords result op-name operands rest)
+    (let ([attrs #'()]
+          [input-types #'()]
+          [output-types #'()])
+      ;; Extract keywords from rest
+      (let loop ([remaining rest])
+        (syntax-case remaining (:attrs : ->)
+          ;; :attrs keyword
+          [(:attrs attr-list . more)
+           (begin
+             (set! attrs #'attr-list)
+             (loop #'more))]
+
+          ;; : types -> types
+          [(: input-list -> output-list . more)
+           (begin
+             (set! input-types #'input-list)
+             (set! output-types #'output-list)
+             (loop #'more))]
+
+          ;; End of list
+          [() (void)]
+
+          ;; Unknown keyword
+          [_ (syntax-violation 'parse-match-keywords
+               "Invalid keyword in match operation (expected :attrs or : -> )"
+               remaining)]))
+
+      ;; Create AST record with extracted parts
+      (make-ast-match-expand result op-name operands
+                             attrs input-types output-types)))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-operation - Parse one rewrite operation

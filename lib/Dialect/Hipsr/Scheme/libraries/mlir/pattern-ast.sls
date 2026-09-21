@@ -35,7 +35,8 @@
           ast-match-expand make-ast-match-expand ast-match-expand?
           ast-match-expand-result-var ast-match-expand-result-var-set!
           ast-match-expand-op-name ast-match-expand-op-name-set!
-          ast-match-expand-operands ast-match-expand-operands-set!
+          ast-match-expand-required-operands ast-match-expand-required-operands-set!
+          ast-match-expand-optional-operands ast-match-expand-optional-operands-set!
           ast-match-expand-attributes ast-match-expand-attributes-set!
           ast-match-expand-input-types ast-match-expand-input-types-set!
           ast-match-expand-output-types ast-match-expand-output-types-set!
@@ -146,9 +147,15 @@
                                ;; Phase 2 (validate): syntax string (normalized)
                                ;;          Symbol converted: #'op2 → #'"op2"
 
-      (mutable operands)       ;; syntax list - operand variables
-                               ;; Example: #'(%a) means operation takes %a as input
+      (mutable operands)       ;; syntax list - operand variables (with optional/variadic groups)
+                               ;; Required: #'%a - single identifier
+                               ;; Optional group: #'(&optional %b %c) - group of optional operands
+                               ;; Variadic group: #'(&variadic %rest) - variable-length operand list
+                               ;; Example: #'(%a (&optional %b) %c) - a required, b optional, c required
                                ;; Operands can be result variables (from other ops) or free variables
+                               ;;
+                               ;; Note: Optional/variadic require AttrSizedOperandSegments trait
+                               ;; and runtime operandSegmentSizes attribute to calculate positions
 
       (mutable attributes)     ;; Phase 1 (parse): syntax list (unparsed)
                                ;;          Example: #'((axis = $axis) (keepdims = 1))
