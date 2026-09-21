@@ -101,7 +101,9 @@
                              (set! actions
                                (append (build-match-actions match-vec producer-op-idx operand producer-result-idx
                                                            visited binding-mgr)
-                                       actions)))])))
+                                       actions))
+                             ;; Mark result variable as bound after recursion
+                             (binding-entry-bound?-set! entry #t))])))
 
             (reverse actions)))))
 

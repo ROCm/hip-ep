@@ -54,7 +54,16 @@
   ((%out = "op4" (%c) -> !t4)))
 
 (show-actions "Chain 3 ops: %c uses %b uses %a" test-chain-3ops)
-(format #t "  Expected: bind-root %c → recurse to op2 → recurse to op1 → bind all\n")
+(verify-actions "Chain 3 ops"
+                test-chain-3ops
+                '((:bind-root %c 2 0)
+                  (:set-current-op 2 %c 0)
+                  (:check-op 2)
+                  (:set-current-op 0 %a 0)
+                  (:check-op 0)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 1)
+                  (:set-current-op 1 %b 0)))
 
 ;; Test 3: Diamond - two paths converge
 (define-conversion-pattern :debug-analyze test-diamond
@@ -66,7 +75,19 @@
   ((%out = "op5" (%d) -> !t5)))
 
 (show-actions "Diamond: %d uses %b and %c, both use %a" test-diamond)
-(format #t "  Expected: %a visited once, then %b and %c, then %d\n")
+(verify-actions "Diamond"
+                test-diamond
+                '((:bind-root %d 3 0)
+                  (:set-current-op 3 %d 0)
+                  (:check-op 3)
+                  (:set-current-op 0 %a 0)
+                  (:check-op 0)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 1)
+                  (:set-current-op 1 %b 0)
+                  (:check-eq 2 0 %a)
+                  (:check-op 2)
+                  (:set-current-op 2 %c 0)))
 
 ;; Test 4: Multiple operands - same operation
 (define-conversion-pattern :debug-analyze test-multi-operands
@@ -76,7 +97,15 @@
   ((%out = "op3" (%b) -> !t3)))
 
 (show-actions "Multi operands: %b uses %a twice" test-multi-operands)
-(format #t "  Expected: First %a binds, second %a checks equality\n")
+(verify-actions "Multi operands"
+                test-multi-operands
+                '((:bind-root %b 1 0)
+                  (:set-current-op 1 %b 0)
+                  (:check-op 1)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 0)
+                  (:set-current-op 0 %a 0)
+                  (:check-eq 1 1 %a)))
 
 ;; Test 5: Tree - one source, multiple consumers
 (define-conversion-pattern :debug-analyze test-tree
@@ -87,6 +116,16 @@
   ((%out = "op4" (%a %b %c) -> !t5)))
 
 (show-actions "Tree: %c references %a, %b, %c" test-tree)
+(verify-actions "Tree"
+                test-tree
+                '((:bind-root %c 2 0)
+                  (:set-current-op 2 %c 0)
+                  (:check-op 2)
+                  (:set-current-op 0 %a 0)
+                  (:check-op 0)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 1)
+                  (:set-current-op 1 %b 0)))
 
 ;; Test 6: Multiple results - TODO: syntax not supported yet
 ;; (define-conversion-pattern :debug-analyze test-multi-results
@@ -105,7 +144,12 @@
   ((%out = "op3" (%b) -> !t4)))
 
 (show-actions "Unreachable: op1 not reachable from root %b" test-unreachable)
-(format #t "  Expected: WARNING about op1 being unreachable\n")
+(verify-actions "Unreachable"
+                test-unreachable
+                '((:bind-root %b 1 0)
+                  (:set-current-op 1 %b 0)
+                  (:check-op 1)
+                  (:bind-operand 1 %y 0)))
 
 ;; Test 8: Complex DAG
 (define-conversion-pattern :debug-analyze test-complex-dag
@@ -118,7 +162,21 @@
   ((%out = "op6" (%e) -> !t6)))
 
 (show-actions "Complex DAG: 5 ops with diamond + chain" test-complex-dag)
-(format #t "  Expected: Proper DAG traversal visiting each op once\n")
+(verify-actions "Complex DAG"
+                test-complex-dag
+                '((:bind-root %e 4 0)
+                  (:set-current-op 4 %e 0)
+                  (:check-op 4)
+                  (:set-current-op 2 %c 0)
+                  (:check-op 2)
+                  (:check-eq 2 0 %a)
+                  (:set-current-op 1 %b 0)
+                  (:check-op 1)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 0)
+                  (:set-current-op 0 %a 0)
+                  (:check-op 3)
+                  (:set-current-op 3 %d 0)))
 
 (format #t "\n=== All test cases complete ===\n")
-(format #t "Manually verify action sequences match expected DAG traversal order.\n")
+(format #t "All action sequences verified automatically.\n")
