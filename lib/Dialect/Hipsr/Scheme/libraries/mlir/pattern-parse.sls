@@ -162,18 +162,21 @@
   ;;   - attr-value: $variable (bind mode) or constant (constant mode)
   ;;   Example: :attrs ((axis = $axis) (keepdims = 1))
   ;;
-  ;; Type syntax (keyword-based, order-independent):
-  ;;   : (input-types) -> (output-types)
-  ;;   Example: : (!t1 !t2) -> !t3
+  ;; Type matching: NOT SUPPORTED (intentionally omitted)
+  ;;   Rationale: Type syntax is dialect-specific and unpredictable. MLIR's
+  ;;   own pattern systems (DRR, PDLL) make type constraints optional.
+  ;;   Most patterns match structurally without type constraints - type
+  ;;   verification happens in MLIR's operation verifiers, not patterns.
+  ;;   Complex type matching can be added later via C++ callbacks if needed.
   ;;
   ;; Complete syntax:
-  ;;   result = "op" (operands) [:attrs (...)] [: (types) -> types]
+  ;;   result = "op" (operands) [:attrs (...)]
   ;;
   ;; Examples:
   ;;   %a = "op" (%x %y)
   ;;   %a = "op" (%x (&optional %y))
   ;;   %a = "op" (%x (&optional %y %z) (&variadic %w))
-  ;;   %a = "op" (%x) :attrs ((a = $a)) : (!t) -> !t2
+  ;;   %a = "op" (%x) :attrs ((axis = $axis) (keepdims = 1))
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;
@@ -189,23 +192,14 @@
 
   ;; Helper: parse optional keyword sections in match operation
   (define (parse-match-keywords result op-name operands rest)
-    (let ([attrs #'()]
-          [input-types #'()]
-          [output-types #'()])
+    (let ([attrs #'()])
       ;; Extract keywords from rest
       (let loop ([remaining rest])
-        (syntax-case remaining (:attrs : ->)
+        (syntax-case remaining (:attrs)
           ;; :attrs keyword
           [(:attrs attr-list . more)
            (begin
              (set! attrs #'attr-list)
-             (loop #'more))]
-
-          ;; : types -> types
-          [(: input-list -> output-list . more)
-           (begin
-             (set! input-types #'input-list)
-             (set! output-types #'output-list)
              (loop #'more))]
 
           ;; End of list
@@ -213,12 +207,11 @@
 
           ;; Unknown keyword
           [_ (syntax-violation 'parse-match-keywords
-               "Invalid keyword in match operation (expected :attrs or : -> )"
+               "Invalid keyword in match operation (expected :attrs)"
                remaining)]))
 
       ;; Create AST record with extracted parts
-      (make-ast-match-expand result op-name operands
-                             attrs input-types output-types)))
+      (make-ast-match-expand result op-name operands attrs)))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-operation - Parse one rewrite operation

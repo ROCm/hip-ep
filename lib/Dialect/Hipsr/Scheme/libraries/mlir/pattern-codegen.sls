@@ -232,9 +232,7 @@
           (syntax->datum (ast-match-expand-result-var match-exp))
           (syntax->datum (ast-match-expand-op-name match-exp))
           (syntax->datum (ast-match-expand-operands match-exp))
-          (syntax->datum (ast-match-expand-attributes match-exp))
-          (syntax->datum (ast-match-expand-input-types match-exp))
-          (syntax->datum (ast-match-expand-output-types match-exp))))
+          (syntax->datum (ast-match-expand-attributes match-exp))))
 
   (define (operation-expand->datum op-exp)
     (list 'rewrite
