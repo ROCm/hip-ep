@@ -34,76 +34,78 @@
       (ast-pattern-expand-root-op-name-set! ast-rec
         (ast-match-expand-op-name root-op))
 
-      ;; Collect all identifiers (binding-manager)
-      ;; Note: visited vector is technically redundant (is-bound? prevents revisiting),
-      ;; but needed for warn-unvisited-operations due to rime loop macro expansion timing
-      (let* ([binding-mgr (collect-all-identifiers match-vec)]
-             [visited (make-vector (vector-length match-vec) #f)])
+      ;; Build match actions starting from root operation
+      (let* ([bindings-and-actions (build-bindings-and-actions match-vec root-op-idx root-var)]
+             [binding-mgr (car bindings-and-actions)]
+             [actions (cdr bindings-and-actions)])
 
-        ;; Build match actions starting from root operation
-        (let ([actions (build-match-actions match-vec root-op-idx root-var
-                                            visited binding-mgr)])
-
-          (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
-          (ast-pattern-expand-match-actions-set! ast-rec actions)
-
-          ;; Warn about unvisited operations
-          (warn-unvisited-operations match-vec visited)))))
+        (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
+        (ast-pattern-expand-match-actions-set! ast-rec actions))))
 
   ;;-----------------------------------------------------------------------
   ;; DAG traversal and action generation
   ;;-----------------------------------------------------------------------
 
-  (define (build-match-actions match-vec op-idx result-var visited binding-mgr)
-    (if (vector-ref visited op-idx)
-        '()  ; Already visited - return early
-        (begin
+  (define (build-bindings-and-actions match-vec root-op-idx root-var)
+    ;; Create binding manager and visited vector locally
+    (let* ([binding-mgr (collect-all-identifiers match-vec)]
+           [visited (make-vector (vector-length match-vec) #f)]
+           [acc '()])
+
+      ;; Named let for DAG traversal
+      (let traverse ([op-idx root-op-idx]
+                     [result-var root-var])
+        (unless (vector-ref visited op-idx)
           ;; Mark as visited
           (vector-set! visited op-idx #t)
 
           (let* ([match-op (vector-ref match-vec op-idx)]
                  [operands (syntax->list (ast-match-expand-operands match-op))]
-                 [actions '()])
+                 ;; Cache binding entries - avoid repeated hashtable lookups
+                 [entries (map (lambda (op) (find-binding-entry binding-mgr op)) operands)])
 
-            ;; Emit current operation check (build forwards with append)
-            (set! actions (append actions (list (action:set-current-op op-idx result-var))))
-            (set! actions (append actions (list (action:check-op op-idx))))
+            ;; Emit header actions (building backwards, will reverse at end)
+            (set! acc (cons (action:set-current-op op-idx result-var) acc))
+            (set! acc (cons (action:check-op op-idx) acc))
 
-            ;; Phase 1: Process operands - recurse for result variables, check bound variables
+            ;; Bind ALL result variables of this operation
+            (loop :for res-var :in (ast-match-expand-result-var match-op)
+                  :for result-idx :from 0
+                  :rime-with result-entry := (find-binding-entry binding-mgr res-var)
+                  :do (begin
+                        (set! acc (cons (action:bind-result op-idx result-idx res-var) acc))
+                        (binding-entry-bound?-set! result-entry #t)))
+
+            ;; Process operands - handle all 4 cases
             (loop :for operand :in operands
+                  :for entry :in entries
                   :for operand-idx :from 0
-                  :rime-with entry := (find-binding-entry binding-mgr operand)
                   :rime-with is-result := (binding-entry-is-result? entry)
                   :rime-with is-bound := (binding-entry-bound? entry)
                   :do (cond
-                        ;; Already bound variable → check equality
-                        [is-bound
-                         (set! actions
-                           (append actions (list (action:check-eq op-idx operand-idx operand))))]
+                        ;; Case 1: is-bound AND is-result → check equality
+                        [(and is-bound is-result)
+                         (set! acc (cons (action:check-eq op-idx operand-idx operand) acc))]
 
-                        ;; Result variable not yet bound → recurse to producer
-                        [(and is-result (not is-bound))
+                        ;; Case 2: is-bound AND NOT is-result → check equality
+                        [(and is-bound (not is-result))
+                         (set! acc (cons (action:check-eq op-idx operand-idx operand) acc))]
+
+                        ;; Case 3: NOT is-bound AND is-result → recurse to producer
+                        [(and (not is-bound) is-result)
                          (let ([producer-op-idx (find-operation-by-result match-vec operand)])
-                           ;; Recursively visit producer operation first
-                           (set! actions
-                             (append actions
-                                     (build-match-actions match-vec producer-op-idx operand
-                                                         visited binding-mgr)))
-                           ;; Mark result variable as bound after recursion
-                           (binding-entry-bound?-set! entry #t))]))
+                           (traverse producer-op-idx operand))]
 
-            ;; Phase 2: Bind free variables (after all recursion complete)
-            (loop :for operand :in operands
-                  :rime-with entry := (find-binding-entry binding-mgr operand)
-                  :rime-with is-result := (binding-entry-is-result? entry)
-                  :rime-with is-bound := (binding-entry-bound? entry)
-                  :when (and (not is-result) (not is-bound))
-                  :do (begin
-                        (set! actions
-                          (append actions (list (action:bind-operand op-idx operand))))
-                        (binding-entry-bound?-set! entry #t)))
+                        ;; Case 4: NOT is-bound AND NOT is-result → bind free variable
+                        [(and (not is-bound) (not is-result))
+                         (set! acc (cons (action:bind-operand op-idx operand) acc))
+                         (binding-entry-bound?-set! entry #t)])))))
 
-            actions))))
+      ;; Warn about unvisited operations
+      (warn-unvisited-operations match-vec visited)
+
+      ;; Return (binding-mgr . reversed-actions)
+      (cons binding-mgr (reverse acc))))
 
   ;;-----------------------------------------------------------------------
   ;; Identifier collection and binding manager construction

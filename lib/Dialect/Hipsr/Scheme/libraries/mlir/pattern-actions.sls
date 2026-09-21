@@ -3,6 +3,7 @@
   (export action:set-current-op
           action:check-op
           action:bind-operand
+          action:bind-result
           action:check-eq)
   (import (rnrs))
 
@@ -27,6 +28,12 @@
   (define (action:bind-operand op-idx var)
     (list ':bind-operand
           (cons 'op-idx op-idx)
+          (cons 'var var)))
+
+  (define (action:bind-result op-idx result-idx var)
+    (list ':bind-result
+          (cons 'op-idx op-idx)
+          (cons 'result-idx result-idx)
           (cons 'var var)))
 
   (define (action:check-eq op-idx operand-idx var)

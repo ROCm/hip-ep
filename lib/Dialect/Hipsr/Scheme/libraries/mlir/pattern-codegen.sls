@@ -13,51 +13,92 @@
   ;; Main entry point
   ;;-----------------------------------------------------------------------
 
-  (define (generate-code whole-stx ast-rec)
-    (syntax-case whole-stx ()
-      [(macro-name . _)
-       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
-                    [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
-         (let ([match-ops (ast-pattern-expand-match ast-rec)]
-               [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
-               [where-bindings (ast-pattern-expand-where ast-rec)]
-               [match-actions (ast-pattern-expand-match-actions ast-rec)]
-               [debug-parse? (ast-pattern-expand-debug-parse? ast-rec)]
-               [debug-analyze? (ast-pattern-expand-debug-analyze? ast-rec)]
-               [debug-codegen? (ast-pattern-expand-debug-codegen? ast-rec)]
-               [debug-matching? (ast-pattern-expand-debug-matching? ast-rec)])
-           (if (or debug-parse? debug-analyze? debug-codegen?)
-               ;; For debug modes, return list with requested data
-               (let ([fname-sym (syntax->datum #'fname)]
-                     [root-op-str (syntax->datum #'root-op-name)]
-                     [match-data (if debug-parse?
-                                     (map match-expand->datum (vector->list match-ops))
-                                     #f)]
-                     [rewrite-data (if debug-parse?
-                                       (map operation-expand->datum rewrite-ops)
-                                       #f)]
-                     [where-data (if debug-parse?
-                                     (map where-binding-expand->datum where-bindings)
-                                     #f)]
-                     [actions-data (if debug-analyze?
-                                       (map action->datum match-actions)
-                                       #f)])
-                 (with-syntax ([ast-list (datum->syntax #'macro-name
-                                           `(list 'function-name ',fname-sym
-                                                  'root-op-name ,root-op-str
-                                                  ,@(if match-data `('match ',match-data) '())
-                                                  ,@(if rewrite-data `('rewrite ',rewrite-data) '())
-                                                  ,@(if where-data `('where ',where-data) '())
-                                                  ,@(if actions-data `('match-actions ',actions-data) '())
-                                                  'debug-parse? ,debug-parse?
-                                                  'debug-analyze? ,debug-analyze?
-                                                  'debug-codegen? ,debug-codegen?
-                                                  'debug-matching? ,debug-matching?))])
-                   #'(define fname ast-list)))
-               ;; For normal mode, generate lambda
-               #'(define fname
-                   (lambda (op operands-ref rewriter type-converter)
-                     #f)))))]))
+  (define (generate-code ast-rec)
+    (cond
+      [(ast-pattern-expand-debug-parse? ast-rec)
+       (generate-debug-ast ast-rec)]
+
+      [(ast-pattern-expand-debug-analyze? ast-rec)
+       (generate-debug-actions ast-rec)]
+
+      [(ast-pattern-expand-debug-codegen? ast-rec)
+       (generate-debug-codegen ast-rec)]
+
+      [else
+       (generate-pattern-matcher ast-rec)]))
+
+  ;;-----------------------------------------------------------------------
+  ;; Debug mode: AST output (parse phase)
+  ;;-----------------------------------------------------------------------
+
+  (define (generate-debug-ast ast-rec)
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                  [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
+      (let* ([fname-sym (syntax->datum #'fname)]
+             [root-op-str (syntax->datum #'root-op-name)]
+             [match-data (map match-expand->datum
+                              (vector->list (ast-pattern-expand-match ast-rec)))]
+             [rewrite-data (map operation-expand->datum
+                                (ast-pattern-expand-rewrite ast-rec))]
+             [where-data (map where-binding-expand->datum
+                              (ast-pattern-expand-where ast-rec))])
+        (with-syntax ([ast-list (datum->syntax #'fname
+                                  `(list 'function-name ',fname-sym
+                                         'root-op-name ,root-op-str
+                                         'match ',match-data
+                                         'rewrite ',rewrite-data
+                                         'where ',where-data
+                                         'debug-parse? #t
+                                         'debug-analyze? #f
+                                         'debug-codegen? #f
+                                         'debug-matching? #f))])
+          #'(define fname ast-list)))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Debug mode: Actions output (analyze phase)
+  ;;-----------------------------------------------------------------------
+
+  (define (generate-debug-actions ast-rec)
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                  [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
+      (let* ([fname-sym (syntax->datum #'fname)]
+             [root-op-str (syntax->datum #'root-op-name)]
+             [actions-data (map action->datum
+                                (ast-pattern-expand-match-actions ast-rec))])
+        (with-syntax ([ast-list (datum->syntax #'fname
+                                  `(list 'function-name ',fname-sym
+                                         'root-op-name ,root-op-str
+                                         'match-actions ',actions-data
+                                         'debug-parse? #f
+                                         'debug-analyze? #t
+                                         'debug-codegen? #f
+                                         'debug-matching? #f))])
+          #'(define fname ast-list)))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Debug mode: Codegen output (codegen phase)
+  ;;-----------------------------------------------------------------------
+
+  (define (generate-debug-codegen ast-rec)
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
+      (let ([fname-sym (syntax->datum #'fname)])
+        (with-syntax ([ast-list (datum->syntax #'fname
+                                  `(list 'function-name ',fname-sym
+                                         'debug-parse? #f
+                                         'debug-analyze? #f
+                                         'debug-codegen? #t
+                                         'debug-matching? #f))])
+          #'(define fname ast-list)))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Pattern matcher generation
+  ;;-----------------------------------------------------------------------
+
+  (define (generate-pattern-matcher ast-rec)
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
+      #'(define fname
+          (lambda (op operands-ref rewriter type-converter)
+            #f))))
 
   ;;-----------------------------------------------------------------------
   ;; AST to datum conversion (for debug modes)
