@@ -35,11 +35,8 @@
           ast-match-expand make-ast-match-expand ast-match-expand?
           ast-match-expand-result-var ast-match-expand-result-var-set!
           ast-match-expand-op-name ast-match-expand-op-name-set!
-          ast-match-expand-required-operands ast-match-expand-required-operands-set!
-          ast-match-expand-optional-operands ast-match-expand-optional-operands-set!
+          ast-match-expand-operands ast-match-expand-operands-set!
           ast-match-expand-attributes ast-match-expand-attributes-set!
-          ast-match-expand-input-types ast-match-expand-input-types-set!
-          ast-match-expand-output-types ast-match-expand-output-types-set!
 
           ast-operation-expand make-ast-operation-expand ast-operation-expand?
           ast-operation-expand-result-var ast-operation-expand-result-var-set!
@@ -157,25 +154,11 @@
                                ;; Note: Optional/variadic require AttrSizedOperandSegments trait
                                ;; and runtime operandSegmentSizes attribute to calculate positions
 
-      (mutable attributes)     ;; Phase 1 (parse): syntax list (unparsed)
+      (mutable attributes)))   ;; Phase 1 (parse): syntax list (unparsed)
                                ;;          Example: #'((axis = $axis) (keepdims = 1))
                                ;; Phase 2+ (after attr parsing): list of ast-attribute-binding-expand
                                ;;          Each binding parsed into structured record
                                ;; Empty: #'() for operations with no attributes
-
-      (mutable input-types)    ;; syntax list - input type variables
-                               ;; Example: #'(!t2) means operand has type !t2
-                               ;; Currently unused (type matching not implemented)
-
-      (mutable output-types))) ;; Phase 1 (parse): syntax identifier OR syntax list
-                               ;;          Single (shorthand): #'!t3
-                               ;;          Single (explicit): #'(!t3)
-                               ;;          Multiple: #'(!t2 !t3)
-                               ;; Phase 2 (validate): list of syntax identifiers (normalized)
-                               ;;          Single becomes: (#'!t3)
-                               ;;          Multiple: (#'!t2 #'!t3)
-                               ;; Normalization: same pattern as result-var
-                               ;; Currently unused (type matching not implemented)
 
   ;;-----------------------------------------------------------------------
   ;; Rewrite operation record
