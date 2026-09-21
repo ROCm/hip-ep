@@ -35,6 +35,8 @@
         (ast-match-expand-op-name root-op))
 
       ;; Collect all identifiers (binding-manager)
+      ;; Note: visited vector is technically redundant (is-bound? prevents revisiting),
+      ;; but needed for warn-unvisited-operations due to rime loop macro expansion timing
       (let* ([binding-mgr (collect-all-identifiers match-vec)]
              [visited (make-vector (vector-length match-vec) #f)])
 
