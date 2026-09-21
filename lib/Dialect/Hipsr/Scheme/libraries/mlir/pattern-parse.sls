@@ -129,8 +129,6 @@
   ;; Naming rules:
   ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
   ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
-  ;;   - Type variables: identifiers starting with ! (e.g., !t1, !f32)
-  ;;   - Operation names: string literals OR symbols (e.g., "onnx.Add" or onnx.Add)
   ;;
   ;; Result syntax (all supported):
   ;;   - Single result:     %r = "op" (...)  or  %r = op (...)
@@ -146,12 +144,13 @@
   ;;   - Variables: (%x %y) - identifiers starting with %
   ;;   - Can be result variables from other operations or free variables
   ;;
-  ;; Attributes and types are optional (4 variants for each result form):
+  ;; Syntax variants (attributes and types are both optional):
   ;;   1. Full:     result = "op" (operands) (attrs) : (types) -> type
-  ;;                or:     result = op (operands) (attrs) : (types) -> type
   ;;   2. No attrs: result = "op" (operands) : (types) -> type
   ;;   3. No types: result = "op" (operands) (attrs)
   ;;   4. Minimal:  result = "op" (operands)
+  ;;
+  ;; Note: (operands) is required; (attrs) and types are optional
   ;;
   ;; Both string and symbol forms work identically.
   ;;
