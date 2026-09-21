@@ -58,19 +58,20 @@
   ;; parse-rest - Tail-recursive parser with accumulator AST
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Parses debug flags first, then the main pattern structure.
+  ;; Parses fname and debug flags (in any order), then the main pattern.
   ;; Uses tail recursion to handle optional debug flags.
   ;;
   ;; Pattern syntax:
-  ;;   [:debug-parse]? [:debug-analyze]? [:debug-codegen]? [:debug-matching]?
-  ;;   function-name
+  ;;   function-name [:debug-flags]* OR [:debug-flags]* function-name
   ;;   :match (match-operations...)
   ;;   :rewrite root-var :with (rewrite-operations...)
   ;;   [:where ((var expr)...)]?
   ;;
+  ;; Strategy: Parse fname and debug flags until we hit :match, then parse main structure.
+  ;;
   (define (parse-rest rest ast)
     (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :rewrite :with :where)
-      ;; Debug flags
+      ;; Debug flags - continue parsing
       [(:debug-parse . more)
        (begin
          (ast-pattern-expand-debug-parse?-set! ast #t)
@@ -91,18 +92,24 @@
          (ast-pattern-expand-debug-matching?-set! ast #t)
          (parse-rest #'more ast))]
 
-      ;; Main pattern structure with guards
-      [(fname
-        :match (match-op ...)
+      ;; Function name (if not already set) - continue parsing
+      [(fname . more)
+       (and (identifier? #'fname)
+            (not (ast-pattern-expand-function-name ast)))
+       (begin
+         (ast-pattern-expand-function-name-set! ast #'fname)
+         (parse-rest #'more ast))]
+
+      ;; Main pattern structure - fname must be set by now
+      [(:match (match-op ...)
         :rewrite root :with (rewrite-op ...)
         . where-rest)
-       (and (identifier? #'fname)
+       (and (ast-pattern-expand-function-name ast)  ; fname already parsed
             (identifier? #'root)
             (not (null? (syntax->list #'(match-op ...))))
             (not (null? (syntax->list #'(rewrite-op ...)))))
        (begin
          ;; Store syntax objects, not datums
-         (ast-pattern-expand-function-name-set! ast #'fname)
          (ast-pattern-expand-root-var-set! ast #'root)
          ;; Parse each match operation into ast-match-expand using map
          (ast-pattern-expand-match-set! ast
