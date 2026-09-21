@@ -523,6 +523,9 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
 
 void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
+  // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
+  // plain convolutions before anything tries to outline a kernel around it.
+  pm.addPass(mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::hip::createFuseROCMlirPass());
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());

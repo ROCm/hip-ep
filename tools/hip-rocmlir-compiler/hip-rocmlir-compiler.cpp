@@ -43,6 +43,8 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -557,7 +559,11 @@ int main(int argc, char **argv) {
 
   std::string inputFilename;
   std::string outputPath;
-  std::string userPerfConfig;
+  // A bare --perf-config applies to every kernel; `<kernel>=<config>` targets
+  // one. A config is always `<anchor>:<field>=<value>,...`, so the text before
+  // the first '=' contains a ':' exactly when the argument is unkeyed.
+  std::string defaultPerfConfig;
+  llvm::StringMap<std::string> perfConfigByKernel;
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
@@ -566,7 +572,12 @@ int main(int argc, char **argv) {
     if (arg == "-o" && i + 1 < argc) {
       outputPath = argv[++i];
     } else if (arg == "--perf-config" && i + 1 < argc) {
-      userPerfConfig = argv[++i];
+      llvm::StringRef value(argv[++i]);
+      auto [head, tail] = value.split('=');
+      if (!tail.empty() && !head.contains(':'))
+        perfConfigByKernel[head] = tail.str();
+      else
+        defaultPerfConfig = value.str();
     } else if (arg == "--dump-hip" && i + 1 < argc) {
       dumpHipPath = argv[++i];
     } else if (arg == "--dump-tosa" && i + 1 < argc) {
@@ -590,6 +601,11 @@ int main(int argc, char **argv) {
            "instead of\n"
         << "                       enumerating the tuning space and taking "
            "the first.\n"
+        << "                       Use <kernel>=<config> to target one kernel; "
+           "repeat\n"
+        << "                       the flag to configure several. A bare "
+           "config applies\n"
+        << "                       to every kernel without one of its own.\n"
         << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
            "passes\n"
         << "                       and fuse-rocmlir, then keep going.\n"
@@ -643,6 +659,11 @@ int main(int argc, char **argv) {
   pm.addPass(mlir::hip::createOnnxIfOutlinePass());
   pm.addPass(mlir::hip::createInferLoopBodyShapesPass());
   pm.addPass(mlir::hip::createConvertOnnxToHipPass());
+  // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
+  // plain convolutions before fuse-rocmlir outlines a kernel around it.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::hip::createDecomposeConvTransposePass());
+  pm.addPass(mlir::createCanonicalizerPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
   pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
 
@@ -684,36 +705,84 @@ int main(int argc, char **argv) {
   // registered dialects). So hand it ONLY the `rock.kernel` functions: drop
   // everything else (e.g. `main_graph` and its hip.* ops). Generic-form text is
   // the portable interchange between this executable's MLIR and the .so's.
-  for (auto func :
-       llvm::make_early_inc_range(tosaModule->getOps<mlir::func::FuncOp>())) {
-    if (!func->hasAttr("rock.kernel"))
-      func.erase();
-  }
-  std::string moduleText;
-  {
-    llvm::raw_string_ostream os(moduleText);
-    mlir::OpPrintingFlags flags;
-    flags.printGenericOpForm();
-    tosaModule->print(os, flags);
-  }
-
-  CompiledKernel compiled;
-  if (!runRocmlirInSo(moduleText, resolveSoPath(), resolveArch(),
-                      userPerfConfig, dumpHighLevel, compiled))
+  llvm::SmallVector<std::string> kernelNames;
+  for (auto func : tosaModule->getOps<mlir::func::FuncOp>())
+    if (func->hasAttr("rock.kernel"))
+      kernelNames.push_back(func.getSymName().str());
+  if (kernelNames.empty()) {
+    llvm::errs() << "error: no rock.kernel func to compile\n";
     return 1;
+  }
 
-  // --dump-high-level: write the rock MLIR (text) to <output> and stop.
-  if (dumpHighLevel) {
-    std::error_code ec;
-    llvm::raw_fd_ostream os(outputPath, ec);
-    if (ec) {
-      llvm::errs() << "error: cannot open '" << outputPath
-                   << "': " << ec.message() << "\n";
-      return 1;
+  // A keyed --perf-config naming a kernel that does not exist would otherwise
+  // be dropped on the floor and that kernel compiled with the default config,
+  // so a typo or a stale name reads as a successful run of a configuration
+  // that was never applied. Tuning decisions get made off those numbers, so
+  // refuse the run instead.
+  for (const auto &entry : perfConfigByKernel) {
+    if (llvm::is_contained(kernelNames, entry.getKey()))
+      continue;
+    llvm::errs() << "error: --perf-config names unknown kernel '"
+                 << entry.getKey() << "'; this module has:\n";
+    for (const std::string &name : kernelNames)
+      llvm::errs() << "  " << name << "\n";
+    return 1;
+  }
+
+  // The .so's tuning and backend entry points are module-scoped and assume a
+  // single anchor op per module, so a graph with several outlined kernels (a
+  // decomposed conv_transpose, say) has to be compiled one kernel at a time.
+  // Each module keeps the original module-level attributes; only the sibling
+  // kernel funcs are dropped.
+  llvm::StringMap<CompiledKernel> compiledByKernel;
+  const std::string soPath = resolveSoPath();
+  const std::string arch = resolveArch();
+  for (auto [index, name] : llvm::enumerate(kernelNames)) {
+    mlir::OwningOpRef<mlir::ModuleOp> single = tosaModule->clone();
+    for (auto func :
+         llvm::make_early_inc_range(single->getOps<mlir::func::FuncOp>()))
+      if (func.getSymName() != name)
+        func.erase();
+
+    std::string moduleText;
+    {
+      llvm::raw_string_ostream os(moduleText);
+      mlir::OpPrintingFlags flags;
+      flags.printGenericOpForm();
+      single->print(os, flags);
     }
-    os << compiled.highLevelMlir << "\n";
-    llvm::errs() << "[hip-rocmlir-compiler] wrote rock high-level MLIR to "
-                 << outputPath << "\n";
+
+    auto it = perfConfigByKernel.find(name);
+    const std::string &perfConfig =
+        it != perfConfigByKernel.end() ? it->second : defaultPerfConfig;
+    if (kernelNames.size() > 1)
+      llvm::errs() << "[hip-rocmlir-compiler] compiling kernel '" << name
+                   << "' (" << (index + 1) << " of " << kernelNames.size()
+                   << ")\n";
+    if (!runRocmlirInSo(moduleText, soPath, arch, perfConfig, dumpHighLevel,
+                        compiledByKernel[name]))
+      return 1;
+  }
+
+  // --dump-high-level: write the rock MLIR (text) and stop. A single kernel
+  // writes <output> verbatim so existing tuning scripts keep working; several
+  // get one file each, since rocmlir-tuning-driver takes one kernel at a time.
+  if (dumpHighLevel) {
+    for (const std::string &name : kernelNames) {
+      std::string path = kernelNames.size() == 1
+                             ? outputPath
+                             : outputPath + "." + name + ".mlir";
+      std::error_code ec;
+      llvm::raw_fd_ostream os(path, ec);
+      if (ec) {
+        llvm::errs() << "error: cannot open '" << path << "': " << ec.message()
+                     << "\n";
+        return 1;
+      }
+      os << compiledByKernel[name].highLevelMlir << "\n";
+      llvm::errs() << "[hip-rocmlir-compiler] wrote rock high-level MLIR to "
+                   << path << "\n";
+    }
     return 0;
   }
 
@@ -722,13 +791,10 @@ int main(int argc, char **argv) {
   // now-compiled `rock.kernel` funcs. This matches what hip-compiler consumes:
   // a self-contained hip module carrying the GPU binary inline.
   //
-  // The .so tuning/backend path is single-GEMM, so exactly one kernel binary is
-  // produced; stamp it onto every hip.rocmlir op whose callee is a compiled
-  // rock.kernel func.
+  // Each dispatch names its kernel func, so give it that kernel's binary and
+  // launch geometry. hip.rocmlir -> wrap_rocmlir lowering already reads both
+  // per op, so several kernels in one module need nothing further downstream.
   mlir::Builder b(&context);
-  auto binaryAttr =
-      mlir::StringAttr::get(&context, llvm::StringRef(compiled.binary.data(),
-                                                      compiled.binary.size()));
   auto i64 = mlir::IntegerType::get(&context, 64);
 
   llvm::SmallVector<mlir::func::FuncOp> kernelFuncs;
@@ -737,14 +803,25 @@ int main(int argc, char **argv) {
       kernelFuncs.push_back(func);
 
   unsigned stamped = 0;
-  module->walk([&](mlir::Operation *op) {
-    if (op->getName().getStringRef() != "hip.rocmlir")
-      return;
-    op->setAttr("kernel_binary", binaryAttr);
-    op->setAttr("grid_size", mlir::IntegerAttr::get(i64, compiled.gridSize));
-    op->setAttr("block_size", mlir::IntegerAttr::get(i64, compiled.blockSize));
+  size_t totalBytes = 0;
+  mlir::WalkResult walked = module->walk([&](mlir::hip::RocMlirOp op) {
+    llvm::StringRef callee = op.getKernel();
+    auto it = compiledByKernel.find(callee);
+    if (it == compiledByKernel.end()) {
+      op.emitError() << "no compiled kernel for '" << callee << "'";
+      return mlir::WalkResult::interrupt();
+    }
+    const CompiledKernel &kernel = it->second;
+    op.setKernelBinaryAttr(mlir::StringAttr::get(
+        &context, llvm::StringRef(kernel.binary.data(), kernel.binary.size())));
+    op.setGridSizeAttr(mlir::IntegerAttr::get(i64, kernel.gridSize));
+    op.setBlockSizeAttr(mlir::IntegerAttr::get(i64, kernel.blockSize));
     ++stamped;
+    totalBytes += kernel.binary.size();
+    return mlir::WalkResult::advance();
   });
+  if (walked.wasInterrupted())
+    return 1;
   if (stamped == 0) {
     llvm::errs() << "error: no hip.rocmlir op found to embed the binary into\n";
     return 1;
@@ -755,10 +832,21 @@ int main(int argc, char **argv) {
   for (auto func : kernelFuncs)
     func.erase();
 
-  llvm::errs() << "[hip-rocmlir-compiler] embedded " << compiled.binary.size()
+  // Keep the single-kernel line byte-for-byte what it was; log the geometry
+  // per kernel first when there is more than one, since they differ.
+  if (kernelNames.size() > 1)
+    for (const std::string &name : kernelNames) {
+      const CompiledKernel &kernel = compiledByKernel[name];
+      llvm::errs() << "[hip-rocmlir-compiler]   " << name << ": "
+                   << kernel.binary.size()
+                   << "-byte binary, grid_size=" << kernel.gridSize
+                   << " block_size=" << kernel.blockSize << "\n";
+    }
+  const CompiledKernel &first = compiledByKernel[kernelNames.front()];
+  llvm::errs() << "[hip-rocmlir-compiler] embedded " << totalBytes
                << "-byte binary into " << stamped << " hip.rocmlir op(s); "
-               << "grid_size=" << compiled.gridSize
-               << " block_size=" << compiled.blockSize << "; deleted "
+               << "grid_size=" << first.gridSize
+               << " block_size=" << first.blockSize << "; deleted "
                << kernelFuncs.size() << " kernel func(s)\n";
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
