@@ -1,0 +1,105 @@
+//===- QdqRoundTrip.pdll --------------------------------------------------===//
+//
+// Eliminate a redundant Q/DQ round trip around an op that only moves or
+// relabels elements.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+// When both ends carry identical per-tensor parameters, such an op commutes
+// with quantization:
+//
+//   Q(LAYOUT(DQ(x))) == LAYOUT(x)
+//
+// So these are eliminations, not fusions: the dequantize and the quantize go
+// away and the layout op is rebuilt over the quantized tensor. No fused
+// `hip.q*` op and no quantized-specific kernel are involved, which is why
+// CanRequantizeLayoutOp has to assert that the op's existing lowering already
+// accepts narrow integer storage.
+//
+// Three patterns, because the middle op sits in three structurally different
+// places:
+//
+//   * a hip DPS op takes `ctx` at operand 0 and carries its own init;
+//   * the reshape-class ops convert-onnx-to-hip emits are tensor ops, which
+//     put the data at operand 0 and carry no init;
+//   * Identity dissolves during conversion and leaves nothing in between.
+//
+// Within the first two the op is left unnamed, so extending the mechanism to
+// another layout op is one entry in CanRequantizeLayoutOp's name list rather
+// than another copy of a pattern.
+//===----------------------------------------------------------------------===//
+
+// ===== hip DPS layout op =====
+Pattern HipQdqRoundTripDpsLayout with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  // Unnamed: `ctx` at operand 0 pins this to a hip op and the name list in
+  // CanRequantizeLayoutOp decides which of those are safe. The trailing
+  // ValueRange absorbs the init along with anything else describing the
+  // layout; the init is located through the DPS interface in the native
+  // rewrite, because its operand index differs per op.
+  let layout = op<>(ctx, dq.0, layout_tail: ValueRange);
+  let q = op<hip.quantize_linear>(ctx, layout.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  HasMatchingHipQdqParams(dq, q);
+  CanRequantizeLayoutOp(layout, output_type);
+  // A second consumer of the float layout result would keep the
+  // dequantize/layout chain alive beside the quantized copy, so the graph
+  // would move the same elements twice. The dequantize result is deliberately
+  // not constrained: one shared dequantize still lets this fire, it just
+  // survives for its other users.
+  HasSingleUseResult(layout);
+
+  rewrite q with {
+    let requantized = CreateRequantizedLayoutOp(dq, layout, q);
+    replace q with requantized;
+  };
+}
+
+// ===== tensor layout op =====
+Pattern HipQdqRoundTripTensorLayout with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  // No `ctx`, so this reaches the tensor dialect rather than a hip op. Those
+  // are pure metadata and carry their result type directly, so the rebuilt
+  // copy needs no init.
+  let layout = op<>(dq.0, layout_tail: ValueRange);
+  let q = op<hip.quantize_linear>(ctx, layout.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  HasMatchingHipQdqParams(dq, q);
+  CanRequantizeLayoutOp(layout, output_type);
+  HasSingleUseResult(layout);
+
+  rewrite q with {
+    let requantized = CreateRequantizedLayoutOp(dq, layout, q);
+    replace q with requantized;
+  };
+}
+
+// ===== nothing in between =====
+//
+// onnx.Identity is replaced by its operand during conversion instead of
+// becoming a hip op, so the chain it used to sit in the middle of arrives as
+// an adjacent pair. Matching parameters make the pair a no-op on every code,
+// so the quantize's users can read the dequantize's input directly.
+Pattern HipQdqRoundTripPair with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  let q = op<hip.quantize_linear>(ctx, dq.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  HasMatchingHipQdqParams(dq, q);
+  IsHipQdqIdentityRoundTrip(dq, q);
+
+  rewrite q with {
+    replace q with input;
+  };
+}

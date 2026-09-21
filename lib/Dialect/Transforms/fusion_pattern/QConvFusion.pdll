@@ -1,0 +1,84 @@
+//===- QConvFusion.pdll ---------------------------------------------------===//
+//
+// PDLL pattern for HIP-level QDQ Conv fusion (W4A16).
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// constraints and rewrites used below. Not compilable on its own.
+//
+// Unlike the Add and Mul patterns, the weight scale and zero point stay
+// OPERANDS rather than folding into attributes. They hold one value per output
+// channel, and they routinely arrive as external constants whose bytes are not
+// in the IR, so there is nothing to fold -- the kernel has to index them by
+// channel.
+//===----------------------------------------------------------------------===//
+
+// ===== UINT16 activation, per-output-channel packed 4-bit weights =====
+Pattern HipQConv with benefit(10) {
+  let dq_input = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                           input_scale: Value,
+                                           input_tail: ValueRange);
+  // Five operands pin the zero point as present, because without it the DPS
+  // init would occupy that slot and the op would be four operands wide. The
+  // per-channel form passes the weight scale and zero point straight through
+  // to hip.qconv; `weights_init` is bound only to make the arity exact.
+  let dq_weights = op<hip.dequantize_linear>(ctx, weights: Value,
+                                             weight_scales: Value,
+                                             weight_zero_points: Value,
+                                             weights_init: Value);
+
+  // Four operands mean no bias: no kernel folds one into the requantization
+  // yet, and a bias would otherwise sit between the weights and the DPS init.
+  let conv = op<hip.conv>(ctx, dq_input.0, dq_weights.0, conv_init: Value);
+  let q = op<hip.quantize_linear>(ctx, conv.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  // Geometry the hard-coded attributes in the rewrite below stand for.
+  IsHipFusableQConvGeometry(conv);
+  // A conv filter is [Cout, Cin/group, kH, kW], so the rank implied by that
+  // 2-entry kernel_shape is 4 and the output channel is axis 0 -- which is
+  // what the hard-coded weight_axis in the rewrite stands for.
+  IsHipPerAxisQuantizedWeight(dq_weights, attr<"4 : i64">, attr<"0 : i64">,
+                              attr<"true">);
+  // Activation and result width the fused kernel implements.
+  IsHipQdqQuantizedWidth(dq_input, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(dq_input);
+  IsHipQdqQuantizedWidth(q, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(q);
+
+  // Activation and result quantization must be per-tensor for their scales to
+  // fold into a single coefficient; the weight side is deliberately exempt.
+  IsHipSplatScale(input_scale);
+  IsHipSplatScale(output_scale);
+  HasExtractableQdqZeropoint(dq_input);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(output_type, conv_init);
+  HasSingleUseResult(conv);
+
+  rewrite q with {
+    let input_scale_attr = ExtractHipSplatScale(input_scale);
+    let output_scale_attr = ExtractHipSplatScale(output_scale);
+    let input_zp_attr = ExtractHipQdqZeropoint(dq_input, attr<"0 : i64">);
+    let output_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    let init = BuildInit(output_type, conv_init);
+    // Geometry is written out rather than copied from `conv`: every value here
+    // is one IsHipFusableQConvGeometry already established, and pads is the
+    // only one whose length (2 * spatial rank) differs from the others.
+    let qconv = op<hip.qconv>(ctx, input, weights, weight_scales,
+                              weight_zero_points, init) {
+      input_scale = input_scale_attr,
+      input_zp = input_zp_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zp_attr,
+      weight_axis = attr<"0 : i64">,
+      kernel_shape = attr<"[1 : i64, 1 : i64]">,
+      strides = attr<"[1 : i64, 1 : i64]">,
+      pads = attr<"[0 : i64, 0 : i64, 0 : i64, 0 : i64]">,
+      dilations = attr<"[1 : i64, 1 : i64]">,
+      group = attr<"1 : i64">,
+      packed_int4 = attr<"unit">
+    } -> (output_type);
+    replace q with qconv;
+  };
+}
