@@ -26,7 +26,8 @@ supported family) makes that family emit the wrong barrier there; reverting to a
 denylist is instead caught by the simulated future-family check below.
 
 Run directly, or via CTest. Set HIP_CLANG/CLANG to point at the compiler; else
-amdclang++ / clang from PATH is used.
+amdclang++ / clang++ / hipcc from PATH is used (hipcc works too -- the flags
+below pass through the wrapper unchanged).
 """
 import os
 import re
@@ -48,13 +49,17 @@ ARCHS = {
 
 
 def find_clang():
-    for cand in (os.environ.get("HIP_CLANG"), os.environ.get("CLANG"), "amdclang++", "clang"):
+    # amdclang++ or the hipcc wrapper both work; the flags below pass through
+    # hipcc unchanged (hipcc is the compiler exposed on Windows CI).
+    for cand in (os.environ.get("HIP_CLANG"), os.environ.get("CLANG"),
+                 "amdclang++", "clang++", "clang", "hipcc"):
         if not cand:
             continue
         path = cand if os.path.isabs(cand) else shutil.which(cand)
         if path and os.path.exists(path):
             return path
-    sys.exit("ERROR: no amdclang++/clang found (set HIP_CLANG or CLANG).")
+    sys.exit("ERROR: no HIP compiler found (set HIP_CLANG, or put amdclang++/"
+             "clang++/hipcc on PATH).")
 
 
 def extract_barrier_block(src_path):
