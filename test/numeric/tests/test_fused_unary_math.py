@@ -18,8 +18,9 @@ does not map the op onto anything -- it expands it into a Cephes minimax
 polynomial behind a two-threshold domain fold. A wrong coefficient, a
 threshold on the wrong side of its comparison, or a dropped sign would all
 survive the LIT coverage, which only asserts the shape of the emitted graph.
-Round is the cheaper companion: its lowering is exact, so it is checked
-bit-for-bit.
+Round is the cheaper companion: its lowering is exact, so it is checked at
+zero tolerance, with the sign of the half-tie zeros asserted separately --
+np.allclose cannot see the difference between -0.0 and 0.0.
 
 Each test puts a MatMul in front of the op purely as a fusion anchor. The
 weight is the identity, so the product is the crafted input exactly and what
@@ -94,6 +95,27 @@ def _atan_probe_row(dtype) -> np.ndarray:
     return np.array(values, dtype=dtype).reshape(1, len(values))
 
 
+def _assert_round_half_tie_signs(x: np.ndarray, out: np.ndarray) -> None:
+    """Check the sign on the zeros that the half-to-even ties produce.
+
+    compare_outputs ends in np.allclose, which holds -0.0 equal to 0.0, so a
+    lowering that dropped the sign on the negative tie would still pass it.
+    ONNX Round sends 0.5 to +0.0 and -0.5 to -0.0, and those are the only two
+    lanes here that reach a zero from a nonzero input. The +-0.0 inputs cannot
+    carry this check: the identity matmul in front of the op adds -0.0 to +0.0
+    and yields +0.0 before Round ever sees it.
+    """
+    for value, want_negative in ((0.5, False), (-0.5, True)):
+        lanes = out[x == value]
+        assert lanes.size, f"no lane holds the input {value}"
+        assert np.all(lanes == 0), f"round({value}) must be a zero, got {lanes}"
+        sign = "-" if want_negative else "+"
+        assert np.all(np.signbit(lanes) == want_negative), (
+            f"round({value}) must be {sign}0.0, got {lanes} "
+            f"with sign bits {np.signbit(lanes)}"
+        )
+
+
 class TestFusedAtan:
     """Atan behind a matmul anchor, which is the TOSA expansion rather than
     the device atanf the standalone tests reach."""
@@ -121,7 +143,7 @@ class TestFusedAtan:
 
 class TestFusedRound:
     """Round behind the same anchor. Its lowering is exact -- a floor with the
-    halfway cases pushed to even -- so it is compared bit-for-bit."""
+    halfway cases pushed to even -- so it is compared at zero tolerance."""
 
     @pytest.mark.parametrize("dtype", [np.float16, np.float32])
     def test_round_fused_ties(self, model_runner, dtype):
@@ -132,6 +154,7 @@ class TestFusedRound:
         model = _make_fused_unary_model("Round", dtype, x.shape[0], x.shape[1])
         actual, expected = model_runner.run_sample(model, [x], reference="cpu")
         compare_outputs(actual, expected, atol=0)
+        _assert_round_half_tie_signs(x, actual[0].reshape(x.shape))
 
     @pytest.mark.parametrize("dtype", [np.float16, np.float32])
     def test_round_fused_sweep(self, model_runner, dtype):
