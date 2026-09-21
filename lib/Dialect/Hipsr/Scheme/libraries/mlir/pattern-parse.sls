@@ -13,15 +13,25 @@
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
-       (parse-rest #'rest (make-ast-pattern-expand #f #f #f '() #f #f '() '() #f #f))]))
+       (parse-rest #'rest (make-ast-pattern-expand #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
   ;; Parse flags and clauses
   (define (parse-rest rest ast)
-    (syntax-case rest (:debug-ast :debug-matching :match :rewrite :with :where)
+    (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :rewrite :with :where)
       ;; Debug flags
-      [(:debug-ast . more)
+      [(:debug-parse . more)
        (begin
-         (ast-pattern-expand-debug-ast?-set! ast #t)
+         (ast-pattern-expand-debug-parse?-set! ast #t)
+         (parse-rest #'more ast))]
+
+      [(:debug-analyze . more)
+       (begin
+         (ast-pattern-expand-debug-analyze?-set! ast #t)
+         (parse-rest #'more ast))]
+
+      [(:debug-codegen . more)
+       (begin
+         (ast-pattern-expand-debug-codegen?-set! ast #t)
          (parse-rest #'more ast))]
 
       [(:debug-matching . more)

@@ -1,7 +1,8 @@
 #!r6rs
 (library (mlir pattern-macro)
   (export define-conversion-pattern
-          :match :rewrite :with :where :debug-ast :debug-matching
+          :match :rewrite :with :where
+          :debug-parse :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions :attrs)
   (import (except (rnrs) =)
           (mlir pattern-keywords)  ;; Import keywords at run time for re-export

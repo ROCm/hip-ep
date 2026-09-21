@@ -6,25 +6,47 @@
         (only (chezscheme) pretty-print format)
         (mlir pattern-macro))
 
+(define (get-actions pattern-data)
+  (cadr (memq 'match-actions pattern-data)))
+
 (define (show-actions name pattern-data)
   (format #t "\n=== ~a ===\n" name)
-  (let ([actions-list (cadr (memq 'match-actions pattern-data))])
+  (let ([actions-list (get-actions pattern-data)])
+    (format #t "Actions as s-expr:\n  ~s\n\n" actions-list)
+    (format #t "Actions formatted:\n")
     (for-each (lambda (action)
                 (format #t "  ~a\n" action))
               actions-list)))
 
+(define (verify-actions name pattern-data expected-actions)
+  (let ([actual (get-actions pattern-data)])
+    (if (equal? actual expected-actions)
+        (format #t "  ✓ PASS\n")
+        (begin
+          (format #t "  ✗ FAIL\n")
+          (format #t "    Expected: ~a\n" expected-actions)
+          (format #t "    Actual:   ~a\n" actual)
+          (error 'verify-actions "Test failed" name)))))
+
 ;; Test 1: Simple chain - A uses result from B
-(define-conversion-pattern :debug-ast test-chain-2ops
+(define-conversion-pattern :debug-analyze test-chain-2ops
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3))
   :rewrite %b :with
   ((%out = "op3" (%a) -> !t3)))
 
 (show-actions "Chain 2 ops: %b uses %a" test-chain-2ops)
-(format #t "  Expected: bind-root %b → check op2 → recurse to op1 → check op1 → bind %x\n")
+(verify-actions "Chain 2 ops"
+                test-chain-2ops
+                '((:bind-root %b 1 0)
+                  (:set-current-op 1 %b 0)
+                  (:check-op 1)
+                  (:bind-operand 0 %x 0)
+                  (:check-op 0)
+                  (:set-current-op 0 %a 0)))
 
 ;; Test 2: Chain of 3 operations
-(define-conversion-pattern :debug-ast test-chain-3ops
+(define-conversion-pattern :debug-analyze test-chain-3ops
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3)
           (%c = "op3" (%b) () : (!t3) -> !t4))
@@ -35,7 +57,7 @@
 (format #t "  Expected: bind-root %c → recurse to op2 → recurse to op1 → bind all\n")
 
 ;; Test 3: Diamond - two paths converge
-(define-conversion-pattern :debug-ast test-diamond
+(define-conversion-pattern :debug-analyze test-diamond
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3)
           (%c = "op3" (%a) () : (!t2) -> !t4)
@@ -47,7 +69,7 @@
 (format #t "  Expected: %a visited once, then %b and %c, then %d\n")
 
 ;; Test 4: Multiple operands - same operation
-(define-conversion-pattern :debug-ast test-multi-operands
+(define-conversion-pattern :debug-analyze test-multi-operands
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a %a) () : (!t2 !t2) -> !t3))
   :rewrite %b :with
@@ -57,7 +79,7 @@
 (format #t "  Expected: First %a binds, second %a checks equality\n")
 
 ;; Test 5: Tree - one source, multiple consumers
-(define-conversion-pattern :debug-ast test-tree
+(define-conversion-pattern :debug-analyze test-tree
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3)
           (%c = "op3" (%b) () : (!t3) -> !t4))
@@ -67,7 +89,7 @@
 (show-actions "Tree: %c references %a, %b, %c" test-tree)
 
 ;; Test 6: Multiple results - TODO: syntax not supported yet
-;; (define-conversion-pattern :debug-ast test-multi-results
+;; (define-conversion-pattern :debug-analyze test-multi-results
 ;;   :match ((%a %b = "op1" (%x) () : (!t1) -> !t2 !t3)
 ;;           (%c = "op2" (%a %b) () : (!t2 !t3) -> !t4))
 ;;   :rewrite %c :with
@@ -76,7 +98,7 @@
 (format #t "\n=== Multi results: SKIPPED (syntax not supported yet) ===\n")
 
 ;; Test 7: Unreachable operation (negative case)
-(define-conversion-pattern :debug-ast test-unreachable
+(define-conversion-pattern :debug-analyze test-unreachable
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%y) () : (!t3) -> !t4))
   :rewrite %b :with
@@ -86,7 +108,7 @@
 (format #t "  Expected: WARNING about op1 being unreachable\n")
 
 ;; Test 8: Complex DAG
-(define-conversion-pattern :debug-ast test-complex-dag
+(define-conversion-pattern :debug-analyze test-complex-dag
   :match ((%a = "op1" (%x) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3)
           (%c = "op3" (%a) () : (!t2) -> !t4)

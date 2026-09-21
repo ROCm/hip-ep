@@ -6,7 +6,7 @@
         (mlir pattern-macro))
 
 ;; Pattern where %b uses %a (result from op1) as operand
-(define-conversion-pattern :debug-ast test-case4
+(define-conversion-pattern :debug-parse test-case4
   :match ((%a = "op1" (%input) () : (!t1) -> !t2)
           (%b = "op2" (%a) () : (!t2) -> !t3))
   :rewrite %b :with
