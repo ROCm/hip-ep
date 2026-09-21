@@ -211,26 +211,31 @@
                       (syntax->datum (ast-match-expand-op-name match-op)) op-idx)))
 
   (define (find-root-operation match-vec root-var)
-    (or (loop :for op-idx :from 0 :below (vector-length match-vec)
-              :rime-with match-op := (vector-ref match-vec op-idx)
-              :rime-with result-vars := (ast-match-expand-result-var match-op)
-              :break op-idx :if (loop :for var :in result-vars
-                                      :break #t :if (bound-identifier=? var root-var)))
-        #f))
+    ;; Find which operation index produces root-var as a result
+    (loop :initially := #f
+          :for idx :from 0 :below (vector-length match-vec)
+          :rime-with match-op := (vector-ref match-vec idx)
+          :rime-with result-vars := (ast-match-expand-result-var match-op)
+          :break idx :if (loop :initially := #f
+                               :for var :in result-vars
+                               :when (bound-identifier=? var root-var)
+                               :break #t)))
 
   (define (find-result-index match-op target-var)
     ;; Find which result index target-var occupies in match-op
     (let ([result-vars (ast-match-expand-result-var match-op)])
-      (loop :for var :in result-vars
+      (loop :initially := #f
+            :for var :in result-vars
             :for idx :from 0
             :when (bound-identifier=? var target-var)
-            :break idx
-            :finally #f)))
+            :break idx)))
 
   (define (find-operation-by-result match-vec result-var)
-    (or (loop :for op-idx :from 0 :below (vector-length match-vec)
-              :rime-with match-op := (vector-ref match-vec op-idx)
-              :rime-with result-vars := (ast-match-expand-result-var match-op)
-              :break op-idx :if (loop :for var :in result-vars
-                                      :break #t :if (bound-identifier=? var result-var)))
-        #f)))
+    (loop :initially := #f
+          :for op-idx :from 0 :below (vector-length match-vec)
+          :rime-with match-op := (vector-ref match-vec op-idx)
+          :rime-with result-vars := (ast-match-expand-result-var match-op)
+          :break op-idx :if (loop :initially := #f
+                                  :for var :in result-vars
+                                  :when (bound-identifier=? var result-var)
+                                  :break #t))))
