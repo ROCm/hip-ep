@@ -21,9 +21,10 @@ concurrency:
 
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
-  # only invalidates the llvm-install cache.
-  LLVM_TAG: llvmorg-22.1.0
+  # LLVM/MLIR/LLD are built from source from the llvm-project subtree vendored
+  # inside rocmlirTriton (external/llvm-project); the repo + pinned commit are
+  # read from cmake/deps.txt at build time and the commit keys the llvm-install
+  # cache. Bumping the pin only invalidates that cache.
   ONNXRUNTIME_VERSION: "1.27.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
@@ -132,27 +133,41 @@ jobs:
 
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Recipe
-      # matches cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
+      # concern, so the prefix build lives here (not in build.py). Source is the
+      # llvm-project subtree vendored inside rocmlirTriton (external/llvm-project);
+      # repo + pinned commit come from cmake/deps.txt. Recipe matches
+      # cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
       # RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
+      - name: Resolve rocmlirTriton pin
+        id: rocmlir
+        run: |
+          set -euo pipefail
+          LINE=$(grep -E '^rocmlirtriton;' cmake/deps.txt)
+          echo "url=$(echo "$LINE" | cut -d';' -f2)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(echo "$LINE" | cut -d';' -f3)" >> "$GITHUB_OUTPUT"
+
       - name: Cache LLVM install prefix
         id: cache-llvm
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed only on the LLVM tag: a protobuf/ORT bump must not evict the
-          # multi-hour LLVM cache.
-          key: linux-llvm-${{ env.LLVM_TAG }}
+          # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
+          # evict the multi-hour LLVM cache.
+          key: linux-llvm-rocmlirtriton-${{ steps.rocmlir.outputs.commit }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          SRC="${{ runner.workspace }}/llvm-project"
-          git clone --depth 1 --branch "${{ env.LLVM_TAG }}" \
-            https://github.com/llvm/llvm-project.git "$SRC"
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
+          # A shallow clone of the pinned commit already carries
+          # external/llvm-project (git subtree, not a submodule).
+          SRC="${{ runner.workspace }}/rocmlirTriton"
+          git init "$SRC"
+          git -C "$SRC" remote add origin "${{ steps.rocmlir.outputs.url }}"
+          git -C "$SRC" fetch --depth 1 origin "${{ steps.rocmlir.outputs.commit }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
             -DLLVM_TARGETS_TO_BUILD=X86 \

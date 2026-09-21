@@ -938,7 +938,8 @@ RankedTensorType keepdimsReduceType(RankedTensorType dataType, int32_t axis) {
 }
 
 // TOSA has no reduce_mean. Scale by 1/N then reduce_sum on one axis
-// (keepdims=1). Used by hip.global_pool average mode.
+// (keepdims=1). Used by hip.global_pool average mode, hip.reduce_mean, and
+// RMS/LN over several axes.
 FailureOr<Value> emitTosaKeepdimsReduceMean(Value data, int32_t axis,
                                             ConversionPatternRewriter &rewriter,
                                             Location loc, Operation *op) {
@@ -1124,31 +1125,11 @@ struct ReduceMeanConverter final : public OpConversionPattern<ReduceMeanOp> {
       rewriter.replaceOp(op, data);
       return success();
     }
-    auto dataType = cast<RankedTensorType>(data.getType());
-    if (!isa<FloatType>(dataType.getElementType()))
-      return rewriter.notifyMatchFailure(
-          op, "tosa reduce_mean lowering requires a float tensor");
-    int64_t n = dataType.getDimSize(axis);
-    if (n <= 0)
-      return rewriter.notifyMatchFailure(op, "reduce axis extent must be > 0");
-
-    Location loc = op.getLoc();
-    Type elemType = dataType.getElementType();
-    auto oneType = RankedTensorType::get({1}, elemType);
-    Value nConst =
-        createSplatFloat(rewriter, loc, oneType, static_cast<double>(n));
-    auto inv = tosa::ReciprocalOp::create(rewriter, loc, oneType, nConst);
-    SmallVector<int64_t> ones(dataType.getRank(), 1);
-    Value onesShape = tosa::getTosaConstShape(rewriter, loc, ones);
-    auto invTy = RankedTensorType::get(ones, elemType);
-    Value invShaped =
-        tosa::ReshapeOp::create(rewriter, loc, invTy, inv, onesShape);
-    Value scaled = tosa::MulOp::create(rewriter, loc, dataType, data, invShaped,
-                                       createZeroMulShift(rewriter, loc));
-    auto reducedTy = keepdimsReduceType(dataType, axis);
-    auto reduced = tosa::ReduceSumOp::create(rewriter, loc, reducedTy, scaled,
-                                             rewriter.getI32IntegerAttr(axis));
-    replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
+    FailureOr<Value> reduced =
+        emitTosaKeepdimsReduceMean(data, axis, rewriter, op.getLoc(), op);
+    if (failed(reduced))
+      return failure();
+    replaceWithTosaReduce(op, *reduced, resultType, keepdims, rewriter);
     return success();
   }
 };
@@ -1538,6 +1519,201 @@ struct GlobalPoolConverter final : public OpConversionPattern<GlobalPoolOp> {
   }
 };
 
+int64_t normalizeNormAxis(int64_t axis, int64_t rank) {
+  if (axis < 0)
+    axis += rank;
+  return axis;
+}
+
+// Keepdims mean over [firstAxis, rank): one TOSA mean per axis.
+FailureOr<Value> emitReduceMeanFromAxis(Value input, int64_t firstAxis,
+                                        ConversionPatternRewriter &rewriter,
+                                        Location loc, Operation *op) {
+  auto ty = dyn_cast<RankedTensorType>(input.getType());
+  if (!ty || !ty.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "norm input must be static");
+  int64_t rank = ty.getRank();
+  if (firstAxis < 0 || firstAxis >= rank)
+    return rewriter.notifyMatchFailure(op, "norm axis out of range");
+  Value reduced = input;
+  for (int64_t a : llvm::seq(firstAxis, rank)) {
+    FailureOr<Value> next = emitTosaKeepdimsReduceMean(
+        reduced, static_cast<int32_t>(a), rewriter, loc, op);
+    if (failed(next))
+      return failure();
+    reduced = *next;
+  }
+  return reduced;
+}
+
+LogicalResult matchSuffixNormParam(Value &param, RankedTensorType dataTy,
+                                   int64_t firstAxis,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc, Operation *op) {
+  auto paramType = dyn_cast<RankedTensorType>(param.getType());
+  if (!paramType || !paramType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op,
+                                       "norm param must be a static tensor");
+  int64_t rank = dataTy.getRank();
+  if (firstAxis < 0 || firstAxis >= rank)
+    return rewriter.notifyMatchFailure(op, "norm axis out of range");
+
+  if (paramType.getRank() == rank) {
+    auto asDataRank =
+        RankedTensorType::get(dataTy.getShape(), paramType.getElementType());
+    if (!isTosaBroadcastableShape(paramType, asDataRank))
+      return rewriter.notifyMatchFailure(op, "norm param not broadcastable");
+    return success();
+  }
+
+  ArrayRef<int64_t> suffix = dataTy.getShape().drop_front(firstAxis);
+  int64_t suffixNumel = 1;
+  for (int64_t d : suffix)
+    suffixNumel *= d;
+
+  SmallVector<int64_t> targetShape(rank, 1);
+  if (paramType.getRank() == 0 ||
+      (paramType.getRank() == 1 && paramType.getDimSize(0) == 1)) {
+    // scalar / size-1 vector: all-ones of the data rank
+  } else if (paramType.getRank() == static_cast<int64_t>(suffix.size()) &&
+             paramType.getShape() == suffix) {
+    for (int64_t i : llvm::seq<int64_t>(0, suffix.size()))
+      targetShape[firstAxis + i] = suffix[i];
+  } else if (paramType.getRank() == 1 &&
+             paramType.getDimSize(0) == suffixNumel) {
+    for (int64_t i : llvm::seq<int64_t>(0, suffix.size()))
+      targetShape[firstAxis + i] = suffix[i];
+  } else {
+    return rewriter.notifyMatchFailure(
+        op, "norm param must match the normalized suffix (or flatten it)");
+  }
+
+  auto newType = RankedTensorType::get(targetShape, paramType.getElementType());
+  if (paramType == newType)
+    return success();
+  Value shape = tosa::getTosaConstShape(rewriter, loc, targetShape);
+  param = tosa::ReshapeOp::create(rewriter, loc, newType, param, shape);
+  return success();
+}
+
+FailureOr<Value> emitAffineScaleBias(Value normalized, Value scale, Value bias,
+                                     RankedTensorType outTy, int64_t axis,
+                                     ConversionPatternRewriter &rewriter,
+                                     Location loc, Operation *op,
+                                     bool perAxis = false) {
+  auto matchParam = [&](Value &p) {
+    return perAxis ? reshapeQdqParam(rewriter, loc, p, outTy, axis, op)
+                   : matchSuffixNormParam(p, outTy, axis, rewriter, loc, op);
+  };
+  Value s = scale;
+  if (failed(matchParam(s)))
+    return failure();
+  if (failed(tosa::EqualizeRanks(rewriter, loc, normalized, s)))
+    return rewriter.notifyMatchFailure(op, "norm scale not broadcastable");
+  Value y = emitTosaMul(rewriter, loc, normalized, s, outTy);
+  if (!bias)
+    return y;
+  Value b = bias;
+  if (failed(matchParam(b)))
+    return failure();
+  if (failed(tosa::EqualizeRanks(rewriter, loc, y, b)))
+    return rewriter.notifyMatchFailure(op, "norm bias not broadcastable");
+  return tosa::AddOp::create(rewriter, loc, outTy, y, b).getResult();
+}
+
+// RMS: y = x * rsqrt(mean(x^2) + eps) * scale. Optional FP32 stash for the
+// stats, matching hip.rms_norm / SimplifiedLayerNormalization /
+// RMSNormalization.
+FailureOr<Value> emitRmsNorm(Value input, Value scale, int64_t axis,
+                             float epsilon, bool stash,
+                             ConversionPatternRewriter &rewriter, Location loc,
+                             Operation *op) {
+  auto inTy = dyn_cast<RankedTensorType>(input.getType());
+  if (!inTy || !inTy.hasStaticShape() || !isa<FloatType>(inTy.getElementType()))
+    return rewriter.notifyMatchFailure(op, "RMS input must be a static float");
+  int64_t rank = inTy.getRank();
+  axis = normalizeNormAxis(axis, rank);
+  if (axis < 0 || axis >= rank)
+    return rewriter.notifyMatchFailure(op, "RMS axis out of range");
+
+  Type origElem = inTy.getElementType();
+  Type workElem =
+      (stash && !origElem.isF32()) ? rewriter.getF32Type() : origElem;
+  Value x = emitTosaCast(rewriter, loc, input, workElem);
+  auto xTy = cast<RankedTensorType>(x.getType());
+  Value xSq = emitTosaMul(rewriter, loc, x, x, xTy);
+  FailureOr<Value> meanOr =
+      emitReduceMeanFromAxis(xSq, axis, rewriter, loc, op);
+  if (failed(meanOr))
+    return failure();
+  Value mean = *meanOr;
+  auto meanTy = cast<RankedTensorType>(mean.getType());
+  Value eps = createSplatFloat(rewriter, loc, meanTy, epsilon);
+  Value varEps = tosa::AddOp::create(rewriter, loc, meanTy, mean, eps);
+  Value rrms = tosa::RsqrtOp::create(rewriter, loc, meanTy, varEps);
+  Value n = emitTosaMul(rewriter, loc, x, rrms, xTy);
+  n = emitTosaCast(rewriter, loc, n, origElem);
+  return emitAffineScaleBias(n, scale, Value(), inTy, axis, rewriter, loc, op);
+}
+
+// (x - mean) * rsqrt(var + eps) over [firstAxis, rank). Optional stash.
+FailureOr<Value> emitLayerNormCore(Value input, int64_t firstAxis,
+                                   float epsilon, bool stash,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc, Operation *op, Value &meanOut,
+                                   Value &invStdOut) {
+  auto inTy = dyn_cast<RankedTensorType>(input.getType());
+  if (!inTy || !inTy.hasStaticShape() || !isa<FloatType>(inTy.getElementType()))
+    return rewriter.notifyMatchFailure(op, "LN input must be a static float");
+  Type origElem = inTy.getElementType();
+  Type workElem =
+      (stash && !origElem.isF32()) ? rewriter.getF32Type() : origElem;
+  Value x = emitTosaCast(rewriter, loc, input, workElem);
+  auto xTy = cast<RankedTensorType>(x.getType());
+  FailureOr<Value> meanOr =
+      emitReduceMeanFromAxis(x, firstAxis, rewriter, loc, op);
+  if (failed(meanOr))
+    return failure();
+  meanOut = *meanOr;
+  Value delta = tosa::SubOp::create(rewriter, loc, xTy, x, meanOut);
+  Value sq = emitTosaMul(rewriter, loc, delta, delta, xTy);
+  FailureOr<Value> varOr =
+      emitReduceMeanFromAxis(sq, firstAxis, rewriter, loc, op);
+  if (failed(varOr))
+    return failure();
+  auto varTy = cast<RankedTensorType>((*varOr).getType());
+  Value eps = createSplatFloat(rewriter, loc, varTy, epsilon);
+  Value varEps = tosa::AddOp::create(rewriter, loc, varTy, *varOr, eps);
+  invStdOut = tosa::RsqrtOp::create(rewriter, loc, varTy, varEps);
+  Value n = emitTosaMul(rewriter, loc, delta, invStdOut, xTy);
+  return emitTosaCast(rewriter, loc, n, origElem);
+}
+
+struct RmsNormConverter final : public OpConversionPattern<RmsNormOp> {
+  using OpConversionPattern<RmsNormOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RmsNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultTy || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getInput().getType() != resultTy)
+      return rewriter.notifyMatchFailure(op,
+                                         "RMS input/result types must match");
+    FailureOr<Value> y =
+        emitRmsNorm(adaptor.getInput(), adaptor.getScale(), op.getAxis(),
+                    op.getEpsilon().convertToFloat(), op.getStashType() != 0,
+                    rewriter, op.getLoc(), op);
+    if (failed(y))
+      return failure();
+    rewriter.replaceOp(op, *y);
+    return success();
+  }
+};
+
 // Geometry of the 2D TOSA pool that implements a hip.pool, normalized to NCHW.
 struct TosaPoolWindow {
   SmallVector<int64_t, 2> kernel;
@@ -1759,6 +1935,138 @@ struct PoolConverter final : public OpConversionPattern<PoolOp> {
     if (resultTy.getRank() != 4)
       result = reshapeTo(result, resultTy.getShape(), rewriter);
     rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+struct LayerNormConverter final : public OpConversionPattern<LayerNormOp> {
+  using OpConversionPattern<LayerNormOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(LayerNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() < 1 || op.getNumResults() > 3)
+      return rewriter.notifyMatchFailure(op, "expected 1-3 tensor results");
+    auto yTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!yTy || !yTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static Y tensor");
+    if (adaptor.getInput().getType() != yTy)
+      return rewriter.notifyMatchFailure(op, "LN input/Y types must match");
+    auto inTy = cast<RankedTensorType>(adaptor.getInput().getType());
+    int64_t axis = normalizeNormAxis(op.getAxis(), inTy.getRank());
+    Value mean, invStd;
+    FailureOr<Value> n = emitLayerNormCore(
+        adaptor.getInput(), axis, op.getEpsilon().convertToFloat(),
+        op.getStashType() != 0, rewriter, op.getLoc(), op, mean, invStd);
+    if (failed(n))
+      return failure();
+    FailureOr<Value> y =
+        emitAffineScaleBias(*n, adaptor.getScale(), adaptor.getBias(), yTy,
+                            axis, rewriter, op.getLoc(), op);
+    if (failed(y))
+      return failure();
+    SmallVector<Value> results = {*y};
+    if (op.getNumResults() >= 2) {
+      auto meanTy = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+      if (!meanTy || !meanTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op, "mean must be a static tensor");
+      Value m =
+          emitTosaCast(rewriter, op.getLoc(), mean, meanTy.getElementType());
+      if (cast<RankedTensorType>(m.getType()).getShape() != meanTy.getShape())
+        m = reshapeTo(m, meanTy.getShape(), rewriter);
+      results.push_back(m);
+    }
+    if (op.getNumResults() == 3) {
+      auto isTy = dyn_cast<RankedTensorType>(op.getResult(2).getType());
+      if (!isTy || !isTy.hasStaticShape())
+        return rewriter.notifyMatchFailure(op,
+                                           "inv_std must be a static tensor");
+      Value isv =
+          emitTosaCast(rewriter, op.getLoc(), invStd, isTy.getElementType());
+      if (cast<RankedTensorType>(isv.getType()).getShape() != isTy.getShape())
+        isv = reshapeTo(isv, isTy.getShape(), rewriter);
+      results.push_back(isv);
+    }
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+};
+
+struct InstanceNormConverter final
+    : public OpConversionPattern<InstanceNormOp> {
+  using OpConversionPattern<InstanceNormOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(InstanceNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto yTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!yTy || !yTy.hasStaticShape() || yTy.getRank() < 3)
+      return rewriter.notifyMatchFailure(
+          op, "instance_norm expects a static rank >= 3 tensor");
+    if (adaptor.getInput().getType() != yTy)
+      return rewriter.notifyMatchFailure(op, "IN input/Y types must match");
+    Value mean, invStd;
+    FailureOr<Value> n = emitLayerNormCore(
+        adaptor.getInput(), /*firstAxis=*/2, op.getEpsilon().convertToFloat(),
+        /*stash=*/true, rewriter, op.getLoc(), op, mean, invStd);
+    if (failed(n))
+      return failure();
+    FailureOr<Value> y =
+        emitAffineScaleBias(*n, adaptor.getScale(), adaptor.getBias(), yTy,
+                            /*axis=*/1, rewriter, op.getLoc(), op,
+                            /*perAxis=*/true);
+    if (failed(y))
+      return failure();
+    rewriter.replaceOp(op, *y);
+    return success();
+  }
+};
+
+struct SkipRmsNormConverter final : public OpConversionPattern<SkipRmsNormOp> {
+  using OpConversionPattern<SkipRmsNormOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SkipRmsNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() < 1 || op.getNumResults() > 2)
+      return rewriter.notifyMatchFailure(op, "expected 1-2 tensor results");
+    auto yTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!yTy || !yTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static Y tensor");
+    Value x = adaptor.getInput();
+    Value skip = adaptor.getSkip();
+    Location loc = op.getLoc();
+    if (failed(tosa::EqualizeRanks(rewriter, loc, x, skip)))
+      return rewriter.notifyMatchFailure(op, "skip not broadcastable");
+    auto sumTy = dyn_cast<RankedTensorType>(x.getType());
+    if (!sumTy || sumTy != yTy)
+      return rewriter.notifyMatchFailure(op, "skip-sum type must match Y");
+    Value sum = tosa::AddOp::create(rewriter, loc, yTy, x, skip);
+    if (Value bias = adaptor.getBias()) {
+      Value b = bias;
+      if (failed(matchSuffixNormParam(b, yTy, yTy.getRank() - 1, rewriter, loc,
+                                      op)))
+        return failure();
+      if (failed(tosa::EqualizeRanks(rewriter, loc, sum, b)))
+        return rewriter.notifyMatchFailure(op, "skip bias not broadcastable");
+      sum = tosa::AddOp::create(rewriter, loc, yTy, sum, b);
+    }
+    FailureOr<Value> y = emitRmsNorm(sum, adaptor.getGamma(), /*axis=*/-1,
+                                     op.getEpsilon().convertToFloat(),
+                                     /*stash=*/true, rewriter, loc, op);
+    if (failed(y))
+      return failure();
+    SmallVector<Value> results = {*y};
+    if (op.getNumResults() == 2) {
+      auto skipTy = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+      if (!skipTy || skipTy != yTy)
+        return rewriter.notifyMatchFailure(op,
+                                           "input_skip_bias_sum must match Y");
+      results.push_back(sum);
+    }
+    rewriter.replaceOp(op, results);
     return success();
   }
 };
@@ -3299,7 +3607,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp>();
+        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -3346,7 +3655,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter, GlobalPoolConverter, PoolConverter>(ctx);
+        MhaConverter, RmsNormConverter, LayerNormConverter,
+        InstanceNormConverter, SkipRmsNormConverter, GlobalPoolConverter,
+        PoolConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
