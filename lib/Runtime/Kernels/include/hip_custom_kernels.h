@@ -2986,6 +2986,25 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      int64_t outer_total);
 
 /* =========================================================================
+ * In-place strided scale
+ * =========================================================================
+ *
+ * data[i * stride] *= beta for i in [0, count). Element stride, not bytes.
+ * HIP-graph-captureable (kernel launch only; no host memcpy).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT64, HIP_DTYPE_BFLOAT16. Scale accumulates in float except
+ * FLOAT64 (double). Returns hipSuccess (0) or a hipError_t / -1.
+ */
+HIP_KERNEL_API int hip_scale_strided(
+    void* stream,
+    void* data,
+    int64_t count,
+    int64_t stride,
+    float beta,
+    int hip_dtype);
+
+/* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
  *

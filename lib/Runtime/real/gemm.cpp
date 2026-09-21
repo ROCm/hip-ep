@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -14,7 +15,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -138,6 +138,16 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
 //
 // Device copies double a filled prefix (rows or columns) so a scalar, a
 // row, or a column becomes a full [M, N] buffer without a library op.
+//
+// Before:
+//   beta not in {0, 1}: hipMemcpy DeviceToHost the C seed, scaleHostC on the
+//   CPU, then blocking hipMemcpy / hipMemcpy2D HostToDevice into output.
+// After:
+//   Always D2D-copy the C seed into output (hipMemcpyAsync /
+//   hipMemcpy2DAsync). If beta != 1, hip_scale_strided scales that seed in
+//   output only (C is not written). Then expandFilledPrefix /
+//   expandFilledColumns. beta == 0 hipMemsetAsync's the full output and
+//   returns. All work is stream-ordered async (HIP-graph capturable).
 
 static size_t gemmElemSize(int64_t typeCode) {
   if (typeCode == kTypeFloat64)
@@ -147,114 +157,37 @@ static size_t gemmElemSize(int64_t typeCode) {
   return 2;
 }
 
-static float f16ToFloat(uint16_t h) {
-  const uint32_t sign = (static_cast<uint32_t>(h & 0x8000u) << 16);
-  const uint32_t exp = (h >> 10) & 0x1fu;
-  uint32_t mant = h & 0x3ffu;
-  uint32_t bits;
-  if (exp == 0) {
-    if (mant == 0) {
-      bits = sign;
-    } else {
-      int32_t e = 127 - 15 + 1;
-      while ((mant & 0x400u) == 0) {
-        mant <<= 1;
-        --e;
-      }
-      mant &= 0x3ffu;
-      bits = sign | (static_cast<uint32_t>(e) << 23) | (mant << 13);
-    }
-  } else if (exp == 31) {
-    bits = sign | 0x7f800000u | (mant << 13);
-  } else {
-    bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+static int gemmTypeToHipDtype(int64_t typeCode) {
+  switch (typeCode) {
+  case kTypeFloat16:
+    return HIP_DTYPE_FLOAT16;
+  case kTypeFloat32:
+    return HIP_DTYPE_FLOAT32;
+  case kTypeFloat64:
+    return HIP_DTYPE_FLOAT64;
+  case kTypeBFloat16:
+    return HIP_DTYPE_BFLOAT16;
+  default:
+    return -1;
   }
-  float value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
 }
 
-static uint16_t floatToF16(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  const uint32_t sign = (bits >> 16) & 0x8000u;
-  const uint32_t absBits = bits & 0x7fffffffu;
-  if (absBits > 0x7f800000u)
-    return static_cast<uint16_t>(sign | 0x7e00u | ((absBits >> 13) & 0x3ffu));
-  int32_t exp = static_cast<int32_t>((bits >> 23) & 0xffu) - 127;
-  uint32_t mant = bits & 0x7fffffu;
-  if (exp > 15)
-    return static_cast<uint16_t>(sign | 0x7c00u);
-  if (exp >= -14) {
-    uint32_t half = (static_cast<uint32_t>(exp + 15) << 10) | (mant >> 13);
-    const uint32_t remainder = mant & 0x1fffu;
-    if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
-      ++half;
-    return static_cast<uint16_t>(sign | half);
+static int scaleSeed(void *data, int64_t count, int64_t stride, float beta,
+                     int64_t typeCode, hipStream_t stream) {
+  const int hip_dtype = gemmTypeToHipDtype(typeCode);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "wrap_gemm: writeBroadcastC unsupported typeCode %lld\n",
+            (long long)typeCode);
+    return -1;
   }
-  if (exp < -24)
-    return static_cast<uint16_t>(sign);
-  mant |= 0x800000u;
-  const int shift = -14 - exp;
-  uint32_t half = mant >> (13 + shift);
-  const uint32_t halfBit = 1u << (12 + shift);
-  const uint32_t rem = mant & ((1u << (13 + shift)) - 1u);
-  if ((rem & halfBit) && ((rem & (halfBit - 1u)) || (half & 1u)))
-    ++half;
-  return static_cast<uint16_t>(sign | half);
-}
-
-static float bf16ToFloat(uint16_t value) {
-  const uint32_t bits = static_cast<uint32_t>(value) << 16;
-  float out;
-  std::memcpy(&out, &bits, sizeof(out));
-  return out;
-}
-
-static uint16_t floatToBf16(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(bits));
-  bits += 0x7fffu + ((bits >> 16) & 1u);
-  return static_cast<uint16_t>(bits >> 16);
-}
-
-static void scaleHostC(unsigned char *data, size_t count, size_t elemSize,
-                       int64_t typeCode, float beta) {
-  for (size_t i = 0; i < count; ++i) {
-    unsigned char *elem = data + i * elemSize;
-    switch (typeCode) {
-    case kTypeFloat32: {
-      float value;
-      std::memcpy(&value, elem, sizeof(value));
-      value *= beta;
-      std::memcpy(elem, &value, sizeof(value));
-      break;
-    }
-    case kTypeFloat64: {
-      double value;
-      std::memcpy(&value, elem, sizeof(value));
-      value *= static_cast<double>(beta);
-      std::memcpy(elem, &value, sizeof(value));
-      break;
-    }
-    case kTypeFloat16: {
-      uint16_t bits;
-      std::memcpy(&bits, elem, sizeof(bits));
-      bits = floatToF16(f16ToFloat(bits) * beta);
-      std::memcpy(elem, &bits, sizeof(bits));
-      break;
-    }
-    case kTypeBFloat16: {
-      uint16_t bits;
-      std::memcpy(&bits, elem, sizeof(bits));
-      bits = floatToBf16(bf16ToFloat(bits) * beta);
-      std::memcpy(elem, &bits, sizeof(bits));
-      break;
-    }
-    default:
-      break;
-    }
+  const int err =
+      hip_scale_strided(stream, data, count, stride, beta, hip_dtype);
+  if (err != 0) {
+    fprintf(stderr, "wrap_gemm: writeBroadcastC hip_scale_strided failed (%d)\n",
+            err);
+    return -1;
   }
+  return 0;
 }
 
 static int expandFilledPrefix(void *dst, size_t blockBytes, size_t count,
@@ -337,49 +270,28 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
     return 0;
   }
 
-  const void *src = C;
-  hipMemcpyKind kind = hipMemcpyDeviceToDevice;
-  std::vector<unsigned char> host;
-  if (beta != 1.0f) {
-    const size_t count =
-        static_cast<size_t>(cDim0) * static_cast<size_t>(cDim1);
-    const size_t srcBytes = count * elemSize;
-    host.resize(srcBytes);
-    hipError_t err = hipMemcpy(host.data(), C, srcBytes, hipMemcpyDeviceToHost);
-    if (err != hipSuccess) {
-      fprintf(stderr, "wrap_gemm: writeBroadcastC D2H failed (%s)\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    scaleHostC(host.data(), count, elemSize, typeCode, beta);
-    src = host.data();
-    kind = hipMemcpyHostToDevice;
-  }
-
   const bool broadcastRows = (cDim0 == 1);
   const bool broadcastCols = (cDim1 == 1);
+  const bool needScale = (beta != 1.0f);
   hipError_t err;
-  const bool fromHost = (kind == hipMemcpyHostToDevice);
   auto copySeed = [&](void *dst, const void *s, size_t bytes) -> hipError_t {
-    if (fromHost)
-      return hipMemcpy(dst, s, bytes, kind);
-    return hipMemcpyAsync(dst, s, bytes, kind, stream);
+    return hipMemcpyAsync(dst, s, bytes, hipMemcpyDeviceToDevice, stream);
   };
   auto copySeed2D = [&](void *dst, size_t dpitch, const void *s, size_t spitch,
                         size_t width, size_t height) -> hipError_t {
-    if (fromHost)
-      return hipMemcpy2D(dst, dpitch, s, spitch, width, height, kind);
-    return hipMemcpy2DAsync(dst, dpitch, s, spitch, width, height, kind,
-                            stream);
+    return hipMemcpy2DAsync(dst, dpitch, s, spitch, width, height,
+                            hipMemcpyDeviceToDevice, stream);
   };
 
   if (broadcastRows && broadcastCols) {
-    err = copySeed(output, src, elemSize);
+    err = copySeed(output, C, elemSize);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC scalar copy failed (%s)\n",
               hipGetErrorString(err));
       return -1;
     }
+    if (needScale && scaleSeed(output, 1, 1, beta, typeCode, stream) != 0)
+      return -1;
     if (expandFilledPrefix(output, elemSize, static_cast<size_t>(N), stream) !=
         0)
       return -1;
@@ -390,32 +302,39 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
   }
   if (broadcastRows) {
     const size_t rowBytes = static_cast<size_t>(N) * elemSize;
-    err = copySeed(output, src, rowBytes);
+    err = copySeed(output, C, rowBytes);
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC row copy failed (%s)\n",
               hipGetErrorString(err));
       return -1;
     }
+    if (needScale && scaleSeed(output, N, 1, beta, typeCode, stream) != 0)
+      return -1;
     return expandFilledPrefix(output, rowBytes, static_cast<size_t>(M), stream);
   }
   if (broadcastCols) {
     const size_t pitch = static_cast<size_t>(N) * elemSize;
-    err = copySeed2D(output, pitch, src, elemSize, elemSize,
+    err = copySeed2D(output, pitch, C, elemSize, elemSize,
                      static_cast<size_t>(M));
     if (err != hipSuccess) {
       fprintf(stderr, "wrap_gemm: writeBroadcastC col copy failed (%s)\n",
               hipGetErrorString(err));
       return -1;
     }
+    if (needScale && scaleSeed(output, M, N, beta, typeCode, stream) != 0)
+      return -1;
     return expandFilledColumns(output, elemSize, M, N, stream);
   }
 
-  err = copySeed(output, src, outBytes);
+  err = copySeed(output, C, outBytes);
   if (err != hipSuccess) {
     fprintf(stderr, "wrap_gemm: writeBroadcastC full copy failed (%s)\n",
             hipGetErrorString(err));
     return -1;
   }
+  if (needScale &&
+      scaleSeed(output, M * N, 1, beta, typeCode, stream) != 0)
+    return -1;
   return 0;
 }
 
