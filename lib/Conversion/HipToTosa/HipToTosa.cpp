@@ -1789,6 +1789,15 @@ planGatherBlockQuantized(hip::GatherBlockQuantizedOp op) {
   if (!outElem.isF32() && !outElem.isF16() && !outElem.isBF16())
     return std::nullopt;
 
+  // The op contract is that output takes its element type from scales, but
+  // nothing verifies it, so the mismatch has to be declined here. Letting it
+  // through would not be harmless: the converter casts scales to the output
+  // type, which silently rewrites the arithmetic when the two are merely
+  // different, and for f64 scales the gather is emitted on a tensor TOSA
+  // cannot represent before that cast is ever reached.
+  if (scalesTy.getElementType() != outElem)
+    return std::nullopt;
+
   plan.vocab = dataTy.getDimSize(0);
   if (scalesTy.getDimSize(0) != plan.vocab)
     return std::nullopt;

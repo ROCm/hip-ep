@@ -282,6 +282,54 @@ func.func @gbq_reject_f64(%ctx: !hip.context, %data: tensor<8x16xui8>,
 
 // -----
 
+// The op takes its output element type from scales, but nothing verifies it,
+// so the mismatch has to be caught here. f64 scales are the sharp case: the
+// output type alone looks supported, and the gather is emitted on the scales
+// before any cast could rescue it -- on a tensor TOSA cannot represent.
+// CHECK-LABEL: func.func @gbq_reject_scales_f64_output_f32
+// CHECK: hip.gather_block_quantized
+// CHECK-NOT: tosa.gather
+func.func @gbq_reject_scales_f64_output_f32(%ctx: !hip.context,
+                                            %data: tensor<8x16xui8>,
+                                            %indices: tensor<3xi64>,
+                                            %scales: tensor<8x2xf64>,
+                                            %init: tensor<3x32xf32>)
+    -> tensor<3x32xf32> attributes {rock.kernel} {
+  %r = hip.gather_block_quantized(%ctx) ins(%data, %indices, %scales :
+        tensor<8x16xui8>, tensor<3xi64>, tensor<8x2xf64>)
+        outs(%init : tensor<3x32xf32>)
+        {bits = 4 : i64, block_size = 16 : i64, gather_axis = 0 : i64,
+         quantize_axis = 1 : i64}
+        : tensor<3x32xf32>
+  return %r : tensor<3x32xf32>
+}
+
+// -----
+
+// Both types are representable here, which is what makes this one worth
+// declining rather than converting: casting the scales up to the output type
+// would produce plausible IR that computes in a precision the op never asked
+// for.
+// CHECK-LABEL: func.func @gbq_reject_scales_output_mismatch
+// CHECK: hip.gather_block_quantized
+// CHECK-NOT: tosa.gather
+func.func @gbq_reject_scales_output_mismatch(%ctx: !hip.context,
+                                             %data: tensor<8x16xui8>,
+                                             %indices: tensor<3xi64>,
+                                             %scales: tensor<8x2xf16>,
+                                             %init: tensor<3x32xf32>)
+    -> tensor<3x32xf32> attributes {rock.kernel} {
+  %r = hip.gather_block_quantized(%ctx) ins(%data, %indices, %scales :
+        tensor<8x16xui8>, tensor<3xi64>, tensor<8x2xf16>)
+        outs(%init : tensor<3x32xf32>)
+        {bits = 4 : i64, block_size = 16 : i64, gather_axis = 0 : i64,
+         quantize_axis = 1 : i64}
+        : tensor<3x32xf32>
+  return %r : tensor<3x32xf32>
+}
+
+// -----
+
 // zero_points must carry one value per block. The packed-nibble form is
 // ambiguous with the per-byte form when there is a single block.
 // CHECK-LABEL: func.func @gbq_reject_packed_zp
