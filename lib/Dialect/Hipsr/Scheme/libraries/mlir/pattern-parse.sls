@@ -126,13 +126,11 @@
   ;; parse-match-operation - Parse one match operation
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Naming convention (enforced by validation, not parser):
+  ;; Naming conventions:
   ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
   ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
   ;;   - Type variables: identifiers starting with ! (e.g., !t1, !f32)
-  ;;   - Operation names: string literals OR symbols
-  ;;       Parser accepts: "onnx.Add" or onnx.Add
-  ;;       Validation normalizes symbols to strings: 'onnx.Add → "onnx.Add"
+  ;;   - Operation names: string literals OR symbols (e.g., "onnx.Add" or onnx.Add)
   ;;
   ;; Result syntax (all supported):
   ;;   - Single result:     %r = "op" (...)  or  %r = op (...)
@@ -142,7 +140,7 @@
   ;;
   ;; Operation name syntax:
   ;;   - String literal: "onnx.Add" or "arith.addi"
-  ;;   - Symbol: onnx.Add or arith.addi (normalized to string by validation)
+  ;;   - Symbol: onnx.Add or arith.addi
   ;;
   ;; Operand syntax:
   ;;   - Variables: (%x %y) - identifiers starting with %
@@ -155,7 +153,7 @@
   ;;   3. No types: result = "op" (operands) (attrs)
   ;;   4. Minimal:  result = "op" (operands)
   ;;
-  ;; Parser accepts result/operands as-is, validation checks naming conventions.
+  ;; Both string and symbol forms work identically.
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;
