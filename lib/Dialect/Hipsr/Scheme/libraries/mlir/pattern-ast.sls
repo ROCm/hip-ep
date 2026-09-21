@@ -140,8 +140,11 @@
                                ;;          Multiple becomes: (#'%a #'%b)
                                ;; Normalization: syntax->list converts all forms to uniform list
 
-      (mutable op-name)        ;; syntax string - operation name to match
-                               ;; Example: #'"op2"
+      (mutable op-name)        ;; Phase 1 (parse): syntax string OR syntax symbol
+                               ;;          String: #'"op2"
+                               ;;          Symbol: #'op2
+                               ;; Phase 2 (validate): syntax string (normalized)
+                               ;;          Symbol converted: #'op2 → #'"op2"
 
       (mutable operands)       ;; syntax list - operand variables
                                ;; Example: #'(%a) means operation takes %a as input

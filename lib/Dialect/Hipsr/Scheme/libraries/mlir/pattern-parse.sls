@@ -130,9 +130,12 @@
   ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
   ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
   ;;   - Type variables: identifiers starting with ! (e.g., !t1, !f32)
+  ;;   - Operation names: string literals OR symbols
+  ;;       Parser accepts: "onnx.Add" or onnx.Add
+  ;;       Validation normalizes symbols to strings: 'onnx.Add → "onnx.Add"
   ;;
   ;; Result syntax (all supported):
-  ;;   - Single result:     %r = "op" (...)
+  ;;   - Single result:     %r = "op" (...)  or  %r = op (...)
   ;;   - Multiple results:  (%a %b) = "op" (...)
   ;;   - Variadic (future): (%a ...) = "op" (...)      [not validated yet]
   ;;   - Dotted (future):   (%a %b . %rest) = "op" (...) [not validated yet]
