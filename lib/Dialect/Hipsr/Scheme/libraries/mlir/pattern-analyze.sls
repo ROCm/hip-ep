@@ -28,8 +28,7 @@
     (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
            [root-op-idx (find-root-operation match-vec root-var)]
-           [root-op (vector-ref match-vec root-op-idx)]
-           [root-result-idx (find-result-index root-op root-var)])
+           [root-op (vector-ref match-vec root-op-idx)])
 
       ;; Extract root operation name
       (ast-pattern-expand-root-op-name-set! ast-rec
@@ -39,25 +38,21 @@
       (let* ([binding-mgr (collect-all-identifiers match-vec)]
              [visited (make-vector (vector-length match-vec) #f)])
 
-        ;; Create initial action: bind root variable to root operation result
-        (let ([initial-action (action:bind-root root-var root-op-idx root-result-idx)])
+        ;; Build match actions starting from root operation
+        (let ([actions (build-match-actions match-vec root-op-idx root-var
+                                            visited binding-mgr)])
 
-          ;; Build match actions (includes binding for all results and operands)
-          (let ([actions (cons initial-action
-                              (build-match-actions match-vec root-op-idx root-var root-result-idx
-                                                  visited binding-mgr))])
+          (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
+          (ast-pattern-expand-match-actions-set! ast-rec actions)
 
-            (ast-pattern-expand-match-bindings-set! ast-rec binding-mgr)
-            (ast-pattern-expand-match-actions-set! ast-rec actions)
-
-            ;; Warn about unvisited operations
-            (warn-unvisited-operations match-vec visited))))))
+          ;; Warn about unvisited operations
+          (warn-unvisited-operations match-vec visited)))))
 
   ;;-----------------------------------------------------------------------
   ;; DAG traversal and action generation
   ;;-----------------------------------------------------------------------
 
-  (define (build-match-actions match-vec op-idx result-var result-var-idx visited binding-mgr)
+  (define (build-match-actions match-vec op-idx result-var visited binding-mgr)
     (if (vector-ref visited op-idx)
         '()  ; Already visited - return early
         (begin
@@ -65,48 +60,48 @@
           (vector-set! visited op-idx #t)
 
           (let* ([match-op (vector-ref match-vec op-idx)]
+                 [operands (syntax->list (ast-match-expand-operands match-op))]
                  [actions '()])
 
-            ;; Generate check actions for this operation
-            (set! actions (cons (action:set-current-op op-idx result-var result-var-idx) actions))
-            (set! actions (cons (action:check-op op-idx) actions))
+            ;; Emit current operation check (build forwards with append)
+            (set! actions (append actions (list (action:set-current-op op-idx result-var))))
+            (set! actions (append actions (list (action:check-op op-idx))))
 
-            ;; Process operands: bind or check equality
-            (let ([operands (syntax->list (ast-match-expand-operands match-op))])
-              (loop :for operand :in operands
-                    :for operand-idx :from 0
-                    :rime-with entry := (find-binding-entry binding-mgr operand)
-                    :rime-with is-result := (binding-entry-is-result? entry)
-                    :rime-with is-bound := (binding-entry-bound? entry)
-                    :do (cond
-                          ;; Case 1: Operand binding (not result) and not bound → bind it
-                          [(and (not is-result) (not is-bound))
+            ;; Phase 1: Process operands - recurse for result variables, check bound variables
+            (loop :for operand :in operands
+                  :for operand-idx :from 0
+                  :rime-with entry := (find-binding-entry binding-mgr operand)
+                  :rime-with is-result := (binding-entry-is-result? entry)
+                  :rime-with is-bound := (binding-entry-bound? entry)
+                  :do (cond
+                        ;; Already bound variable → check equality
+                        [is-bound
+                         (set! actions
+                           (append actions (list (action:check-eq op-idx operand-idx operand))))]
+
+                        ;; Result variable not yet bound → recurse to producer
+                        [(and is-result (not is-bound))
+                         (let ([producer-op-idx (find-operation-by-result match-vec operand)])
+                           ;; Recursively visit producer operation first
                            (set! actions
-                             (cons (action:bind-operand op-idx operand
-                                                       (binding-entry-operand-idx entry))
-                                   actions))
-                           (binding-entry-bound?-set! entry #t)]
+                             (append actions
+                                     (build-match-actions match-vec producer-op-idx operand
+                                                         visited binding-mgr)))
+                           ;; Mark result variable as bound after recursion
+                           (binding-entry-bound?-set! entry #t))]))
 
-                          ;; Cases 2 & 3: Variable is bound (operand or result) → check equality
-                          [is-bound
-                           (set! actions
-                             (cons (action:check-eq op-idx operand-idx operand)
-                                   actions))]
+            ;; Phase 2: Bind free variables (after all recursion complete)
+            (loop :for operand :in operands
+                  :rime-with entry := (find-binding-entry binding-mgr operand)
+                  :rime-with is-result := (binding-entry-is-result? entry)
+                  :rime-with is-bound := (binding-entry-bound? entry)
+                  :when (and (not is-result) (not is-bound))
+                  :do (begin
+                        (set! actions
+                          (append actions (list (action:bind-operand op-idx operand))))
+                        (binding-entry-bound?-set! entry #t)))
 
-                          ;; Case 4: Result binding not yet bound → recurse to producer operation
-                          [(and is-result (not is-bound))
-                           (let* ([producer-op-idx (find-operation-by-result match-vec operand)]
-                                  [producer-op (vector-ref match-vec producer-op-idx)]
-                                  [producer-result-idx (find-result-index producer-op operand)])
-                             ;; Recursively visit producer operation first
-                             (set! actions
-                               (append (build-match-actions match-vec producer-op-idx operand producer-result-idx
-                                                           visited binding-mgr)
-                                       actions))
-                             ;; Mark result variable as bound after recursion
-                             (binding-entry-bound?-set! entry #t))])))
-
-            (reverse actions)))))
+            actions))))
 
   ;;-----------------------------------------------------------------------
   ;; Identifier collection and binding manager construction
