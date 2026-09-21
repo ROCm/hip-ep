@@ -1,4 +1,33 @@
 #!r6rs
+;;=======================================================================
+;; Pattern Parser - Phase 1
+;;=======================================================================
+;;
+;; Parses pattern DSL syntax into AST records (defined in pattern-ast.sls).
+;; This is phase 1 of the 4-phase macro expansion pipeline.
+;;
+;; INPUT:  Raw syntax from define-conversion-pattern macro
+;; OUTPUT: ast-pattern-expand record with parsed structure
+;;
+;; Key responsibilities:
+;; - Pattern match syntax structure and extract components
+;; - Create AST records with syntax objects (NOT datums)
+;; - Handle optional clauses (attributes, types, regions, where)
+;; - Parse debug flags (:debug-parse, :debug-analyze, etc.)
+;; - Validate basic syntax structure (guards in syntax-case)
+;;
+;; Does NOT:
+;; - Validate semantics (that's phase 2: pattern-validate.sls)
+;; - Build bindings or actions (that's phase 3: pattern-analyze.sls)
+;; - Generate code (that's phase 4: pattern-codegen.sls)
+;;
+;; Strategy:
+;; - Tail-recursive parsing with accumulator AST record
+;; - Mutable AST fields allow incremental construction
+;; - Keywords imported at expansion time (for syntax-case matching)
+;;
+;;=======================================================================
+
 (library (mlir pattern-parse)
   (export parse-to-ast)
   (import (except (rnrs) =)
@@ -7,15 +36,38 @@
           (for (mlir pattern-ast) expand))
 
   ;;=======================================================================
-  ;; Phase 1: Parse whole syntax to AST record - pure pattern matching
+  ;; Main entry point
   ;;=======================================================================
 
+  ;;-----------------------------------------------------------------------
+  ;; parse-to-ast - Entry point for parsing
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; INPUT:  whole-stx - entire syntax from (define-conversion-pattern ...)
+  ;; OUTPUT: ast-pattern-expand record
+  ;;
+  ;; Strips the macro name and delegates to parse-rest for actual parsing.
+  ;;
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
+       ;; Create empty AST record and parse incrementally
        (parse-rest #'rest (make-ast-pattern-expand #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
-  ;; Parse flags and clauses
+  ;;-----------------------------------------------------------------------
+  ;; parse-rest - Tail-recursive parser with accumulator AST
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Parses debug flags first, then the main pattern structure.
+  ;; Uses tail recursion to handle optional debug flags.
+  ;;
+  ;; Pattern syntax:
+  ;;   [:debug-parse]? [:debug-analyze]? [:debug-codegen]? [:debug-matching]?
+  ;;   function-name
+  ;;   :match (match-operations...)
+  ;;   :rewrite root-var :with (rewrite-operations...)
+  ;;   [:where ((var expr)...)]?
+  ;;
   (define (parse-rest rest ast)
     (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :rewrite :with :where)
       ;; Debug flags
@@ -63,7 +115,18 @@
 
       [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match (...) :rewrite root :with (...))" rest)]))
 
-  ;; Parse individual match operation
+  ;;-----------------------------------------------------------------------
+  ;; parse-match-operation - Parse one match operation
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Handles 4 syntax variants (attributes and types are optional):
+  ;;   1. Full:    (result = "op" (operands) (attrs) : (types) -> type)
+  ;;   2. No attrs: (result = "op" (operands) : (types) -> type)
+  ;;   3. No types: (result = "op" (operands) (attrs))
+  ;;   4. Minimal:  (result = "op" (operands))
+  ;;
+  ;; Returns ast-match-expand record with syntax objects.
+  ;;
   (define (parse-match-operation op-stx)
     (syntax-case op-stx (= : ->)
       ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
@@ -110,7 +173,18 @@
            "Invalid match operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
            op-stx)]))
 
-  ;; Parse individual rewrite operation
+  ;;-----------------------------------------------------------------------
+  ;; parse-rewrite-operation - Parse one rewrite operation
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Two-step parsing strategy:
+  ;;   Step 1: Extract result(s), op-name (this function)
+  ;;   Step 2: Parse rest: operands, optional sections (parse-rewrite-rest)
+  ;;
+  ;; Handles operations with/without results:
+  ;;   With result:  (%out = "op" (operands) -> !type)
+  ;;   Without:      ("op" (operands) -> ())
+  ;;
   (define (parse-rewrite-operation op-stx)
     ;; Step 1: Extract result(s), =, op-name, and rest
     (syntax-case op-stx (=)
@@ -127,7 +201,16 @@
            "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ...)"
            op-stx)]))
 
-  ;; Step 2: Parse the rest: (operands) [:regions (...)]? [:attrs [...]]? [-> result-types]?
+  ;;-----------------------------------------------------------------------
+  ;; parse-rewrite-rest - Parse operation body after result and op-name
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Required: (operands)
+  ;; Optional: :regions (...) :attrs [...] -> result-types
+  ;;
+  ;; The -> result-types is REQUIRED for operations with results.
+  ;; Delegates to parse-rewrite-optional to handle optional sections.
+  ;;
   (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
     (syntax-case rest-stx ()
       [(operands . more)
@@ -141,7 +224,18 @@
          (parse-rewrite-optional rec #'more)
          rec)]))
 
-  ;; Helper: parse sections :regions, :attrs, then REQUIRED -> result-types
+  ;;-----------------------------------------------------------------------
+  ;; parse-rewrite-optional - Parse optional sections after operands
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Handles three optional sections in this order:
+  ;;   :regions (region...)  - one or more regions
+  ;;   :attrs [attr...]      - attribute list
+  ;;   -> result-types       - REQUIRED if operation has results
+  ;;
+  ;; Uses accumulator pattern for :regions and :attrs sections
+  ;; (parse-regions-section and parse-attrs-section).
+  ;;
   (define (parse-rewrite-optional rec rest-stx)
     (syntax-case rest-stx (:regions :attrs ->)
       ;; :regions starts region section - accumulate until :attrs, ->, or end
@@ -161,7 +255,16 @@
            "Missing -> result-types (required for operations with results)"
            rest-stx)]))
 
-  ;; Accumulate regions until hitting :attrs, ->, or end
+  ;;-----------------------------------------------------------------------
+  ;; parse-regions-section - Accumulate regions
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Tail-recursive accumulator pattern. Collects regions until hitting:
+  ;;   - :attrs keyword (start attrs section)
+  ;;   - -> keyword (parse result types, end)
+  ;;
+  ;; Regions are accumulated in reverse order (cons), then reversed when done.
+  ;;
   (define (parse-regions-section rec rest-stx regions-acc)
     (syntax-case rest-stx (:attrs ->)
       ;; Hit :attrs - done with regions, start attrs section
@@ -186,7 +289,15 @@
            "Expected region, :attrs, or -> result-types"
            rest-stx)]))
 
-  ;; Parse a region: a list of blocks wrapped in parens
+  ;;-----------------------------------------------------------------------
+  ;; parse-region - Parse a single region (list of blocks)
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Regions are wrapped in parens:
+  ;;   :regions ((block1 block2) (block3))
+  ;;            ^^^^^^^^^^^^^^^^  ^^^^^^^^
+  ;;             region 1        region 2
+  ;;
   (define (parse-region region-stx)
     (syntax-case region-stx ()
       [(block ...)
@@ -196,7 +307,18 @@
            "Invalid region syntax (expected: list of blocks)"
            region-stx)]))
 
-  ;; Parse a block: (^label (args...) operations...)
+  ;;-----------------------------------------------------------------------
+  ;; parse-block - Parse a single block
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Block syntax:
+  ;;   (^label ((%arg : type)...) operations...)
+  ;;
+  ;; Example:
+  ;;   (^bb0 ((%x : !t1) (%y : !t2))
+  ;;     (%sum = "arith.addi" (%x %y) -> !t1)
+  ;;     ("scf.yield" (%sum) -> ()))
+  ;;
   (define (parse-block block-stx)
     (syntax-case block-stx (:)
       ;; ((%var : type) ...) matches zero or more arguments
@@ -209,7 +331,15 @@
            "Invalid block syntax (expected: (^label ((%var : type) ...) operations...))"
            block-stx)]))
 
-  ;; Accumulate attrs until hitting -> or end
+  ;;-----------------------------------------------------------------------
+  ;; parse-attrs-section - Accumulate attributes
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Tail-recursive accumulator pattern. Collects attributes until hitting:
+  ;;   - -> keyword (parse result types, end)
+  ;;
+  ;; Attributes are accumulated in reverse order (cons), then reversed when done.
+  ;;
   (define (parse-attrs-section rec rest-stx attrs-acc)
     (syntax-case rest-stx (->)
       ;; Hit -> - done with attrs, parse result types
@@ -227,7 +357,16 @@
            "Expected attr or -> result-types"
            rest-stx)]))
 
-  ;; Helper: parse optional :where clause
+  ;;-----------------------------------------------------------------------
+  ;; parse-where - Parse optional :where clause
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Where clause syntax:
+  ;;   :where ((var1 expr1) (var2 expr2) ...)
+  ;;
+  ;; Each binding is (var expr) where expr is arbitrary Scheme code.
+  ;; Used to compute additional values for the rewrite.
+  ;;
   (define (parse-where rest-stx ast)
     (syntax-case rest-stx (:where)
       [(:where ((var expr) ...))
