@@ -3043,7 +3043,7 @@ struct IfConverter final : public OpConversionPattern<IfOp> {
           op, "branches must match captures and result types");
 
     Location loc = op.getLoc();
-    // TOSA forbids rank-0 tensors; a size-1 condition is tensor<1xi1>.
+    // tosa.cond_if requires a size-1 condition tensor.
     auto condTy = RankedTensorType::get({1}, rewriter.getI1Type());
     Value cond = tensor::FromElementsOp::create(rewriter, loc, condTy,
                                                 ValueRange{adaptor.getCond()});
