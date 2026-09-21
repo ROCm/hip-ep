@@ -169,17 +169,17 @@ through, otherwise the runtime is forced into a per-call D2H. The
 template to follow is `lib/Conversion/HipToLLVM/TileLowering.cpp`'s
 `emitShapeArray` helper.
 
-### 3.2 D2H is limited to dynamic controls
+### 3.2 Dynamic controls stay on the device
 
 CumSum and Pad fold compile-time controls into HIP dialect attributes.
 HipToLLVM materializes those values as host ABI values or stack arrays, so
 constant `axis`, `pads`, `axes`, and `constant_value` inputs do not incur a
 device copy or stream synchronization.
 
-When one of those controls is genuinely runtime-dynamic (a function argument
-or GPU-produced tensor), its host attribute is absent and the wrapper retains
-the synchronized D2H fallback. All dynamic controls needed by one Pad call are
-copied before one `hipStreamSynchronize`.
+When Pad controls are genuinely runtime-dynamic, a one-thread device prepass
+maps ONNX-18 pads and optional axes into a per-axis lower-pads table. A
+device-only constant value is loaded by the Pad kernel. CumSum's scalar axis
+still uses synchronized readback.
 
 ### 3.3 Single fused kernel over multi-pass
 
@@ -236,14 +236,14 @@ the existing Add/Mul/Sub family in `elementwise_kernel.hip`. If a graph
 arrives with implicit broadcasting it will fail at the lowering stage,
 not at runtime.
 
-### 3.7 Slice and ScatterND — host-side indices
+### 3.7 Slice and ScatterND — device-resident dynamic indices
 
 `Slice` and `ScatterND` both move tensor data based on small INT64
 index/control tensors:
 
 | Op        | Index-shaped inputs                                | Where they live       | What we do                                |
 |-----------|----------------------------------------------------|-----------------------|-------------------------------------------|
-| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | Host arrays for constants; GPU tensors otherwise | Use host arrays directly, or D2H only dynamic controls and synchronize once before applying ONNX clamping |
+| Slice     | `starts`, `ends`, optional `axes`, optional `steps` | Host arrays for constants; GPU tensors otherwise | Resolve host arrays directly; resolve dynamic controls with a one-thread GPU prepass |
 | ScatterND | `indices`                                           | GPU tensor             | **Stay on the device** — the kernel reads them inline. No D2H at all. |
 
 Slice resolves per-axis (start, step) using ONNX clamping
@@ -251,10 +251,9 @@ Slice resolves per-axis (start, step) using ONNX clamping
 `start ∈ [0, dim-1]`, `end ∈ [-1, dim-1]`) plus the optional `axes`
 list to know which axis each entry applies to. Compile-time controls are
 carried as HIP dialect attributes and materialized as host arrays. Dynamic
-controls still use D2H because doing this on the GPU
-would require either a launcher prepass or an oversized device kernel
-with the same per-axis state-machine — neither is worth it for a 4×
-int64 D2H.
+controls use a small device resolver that writes start, step, and logical
+extent tables into RuntimeState workspace; the copy kernel consumes those
+tables on the same stream without a host synchronization.
 
 ScatterND keeps indices on the device because there is no clamping
 state machine to run host-side — each thread does its own
@@ -439,9 +438,9 @@ doesn't re-discover them:
   + positive-stride case folds to `tensor.extract_slice` in
   `lib/Conversion/OnnxToHip/SliceConversion.cpp` and never reaches the
   runtime. Constant negative-step controls become host arrays with no D2H.
-  Runtime-dynamic `starts`/`ends`/`axes`/`steps` are copied D2H and synchronized
-  once per call. Indices are
-  INT64 only — INT32 indices would need a stride-aware ABI bump.
+  Runtime-dynamic `starts`/`ends`/`axes`/`steps` are resolved on device with no
+  D2H or stream synchronization. Indices are INT64 only — INT32 indices would
+  need a stride-aware ABI bump.
 
 - **`Slice` end-sentinel for "all the way down" with `step < 0`**: per
   ONNX-13+ spec, any `end < 0` is normalised via `end += dim` **before**

@@ -11,17 +11,17 @@
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
 // Compile-time controls arrive through host pointers materialized by lowering.
-// Runtime-dynamic controls retain the synchronized GPU readback fallback.
+// Runtime-dynamic controls are mapped to per-axis lower pads on the GPU.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
-#include <algorithm>
 #include <cstdio>
-#include <cstring>
 #include <hip/hip_runtime.h>
 #include <vector>
+
+static constexpr int kPadMaxRank = 8;
 
 static int pad_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
@@ -72,6 +72,11 @@ int wrap_pad(RuntimeState *state, void *data, void *pads_device,
             (long long)data_rank);
     return -1;
   }
+  if (data_rank > kPadMaxRank) {
+    fprintf(stderr, "[REAL] wrap_pad: data_rank=%lld exceeds max %d\n",
+            (long long)data_rank, kPadMaxRank);
+    return -1;
+  }
   if (data_rank != output_rank) {
     fprintf(stderr, "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
             (long long)data_rank, (long long)output_rank);
@@ -98,104 +103,75 @@ int wrap_pad(RuntimeState *state, void *data, void *pads_device,
     return -1;
   }
 
-  hipStream_t hip_stream =
-      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-
-  // Before: all present controls were copied D2H followed by an unconditional
-  // stream synchronization. After: host attributes are consumed directly;
-  // only controls without a host form enqueue D2H and require a sync.
   // ONNX-18 pads layout: [begin_0, begin_1, ..., begin_K-1, end_0, ...,
   // end_K-1] where K = num_axes_padded (= data_rank if axes is omitted).
-  std::vector<int64_t> pads_values(pads_num_elements);
-  hipError_t err = hipSuccess;
-  bool copied_from_device = false;
-  if (pads_host) {
-    std::copy_n(pads_host, pads_num_elements, pads_values.begin());
-  } else {
-    err = hipMemcpyAsync(pads_values.data(), pads_device,
-                         pads_num_elements * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    copied_from_device = true;
+  const bool axes_present = axes_num_elements > 0;
+  if (axes_present && !axes_host && !axes_device) {
+    fprintf(stderr,
+            "[REAL] wrap_pad: axes count is nonzero but axes is null\n");
+    return -1;
   }
-
-  std::vector<int64_t> axes_values;
-  if (axes_num_elements > 0) {
-    axes_values.resize(axes_num_elements);
-    if (axes_host) {
-      std::copy_n(axes_host, axes_num_elements, axes_values.begin());
-    } else if (axes_device) {
-      err = hipMemcpyAsync(axes_values.data(), axes_device,
-                           axes_num_elements * sizeof(int64_t),
-                           hipMemcpyDeviceToHost, hip_stream);
-      if (err != hipSuccess) {
-        fprintf(stderr, "[REAL] wrap_pad: axes D2H failed: %s\n",
-                hipGetErrorString(err));
-        return -1;
-      }
-      copied_from_device = true;
-    }
+  int64_t num_axes_padded = axes_present ? axes_num_elements : data_rank;
+  if (num_axes_padded > kPadMaxRank) {
+    fprintf(stderr, "[REAL] wrap_pad: num_axes=%lld exceeds max %d\n",
+            (long long)num_axes_padded, kPadMaxRank);
+    return -1;
   }
-
-  // constant_value: 0-D scalar of `data_type`. Read into a local 8-byte
-  // buffer so we can pass a typed pointer to the kernel launcher.
-  alignas(8) unsigned char cv_buf[8] = {};
-  bool have_cv = false;
-  if (mode_id == 0) {
-    if (constant_value_host) {
-      std::memcpy(cv_buf, constant_value_host, element_size);
-      have_cv = true;
-    } else if (constant_value_device) {
-      err = hipMemcpyAsync(cv_buf, constant_value_device, element_size,
-                           hipMemcpyDeviceToHost, hip_stream);
-      if (err != hipSuccess) {
-        fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
-                hipGetErrorString(err));
-        return -1;
-      }
-      copied_from_device = true;
-      have_cv = true;
-    }
-  }
-
-  if (copied_from_device) {
-    err = hipStreamSynchronize(hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: stream sync after D2H failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-  }
-
-  // Build per-axis lower_pads[data_rank], defaulting to 0. If `axes` is
-  // omitted, pads is laid out per-axis (length 2*data_rank). If `axes`
-  // is given, pads has length 2 * len(axes), keyed by the axes vector.
-  std::vector<int64_t> lower_pads(data_rank, 0);
-  int64_t num_axes_padded = axes_values.empty()
-                                ? data_rank
-                                : static_cast<int64_t>(axes_values.size());
   if (pads_num_elements != 2 * num_axes_padded) {
     fprintf(stderr,
             "[REAL] wrap_pad: pads length(%lld) != 2 * num_axes(%lld)\n",
             (long long)pads_num_elements, (long long)num_axes_padded);
     return -1;
   }
-  for (int64_t i = 0; i < num_axes_padded; ++i) {
-    int64_t axis = axes_values.empty() ? i : axes_values[i];
-    if (axis < 0)
-      axis += data_rank;
-    if (axis < 0 || axis >= data_rank) {
-      fprintf(stderr, "[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
-              (long long)axis, (long long)data_rank);
+
+  // Host-known pads/axes keep the by-value PadParams fast path. If either
+  // control is device-only, a one-thread prepass builds lower_pads in the
+  // RuntimeState workspace. Invalid axes are skipped and duplicates are
+  // deterministic last-writer-wins in that device path.
+  std::vector<int64_t> lower_pads;
+  const int64_t *lower_pads_arg = nullptr;
+  bool lower_pads_on_device = !pads_host || (axes_present && !axes_host);
+  if (!lower_pads_on_device) {
+    lower_pads.assign(data_rank, 0);
+    for (int64_t i = 0; i < num_axes_padded; ++i) {
+      int64_t axis = axes_present ? axes_host[i] : i;
+      if (axis < 0)
+        axis += data_rank;
+      if (axis < 0 || axis >= data_rank) {
+        fprintf(stderr, "[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
+                (long long)axis, (long long)data_rank);
+        return -1;
+      }
+      lower_pads[axis] = pads_host[i];
+    }
+    lower_pads_arg = lower_pads.data();
+  } else {
+    const size_t workspace_bytes = kPadMaxRank * sizeof(int64_t);
+    if (hipdnn_ep_state_ensure_workspace(state, workspace_bytes) != 0) {
+      fprintf(stderr, "[REAL] wrap_pad: failed to allocate lower-pads table\n");
       return -1;
     }
-    lower_pads[axis] = pads_values[i];
-    // The kernel doesn't need upper pads (it uses output_shape - input
-    // - lower implicitly via the out_coord >= lower + in_dim check).
+    auto *lower_pads_device =
+        static_cast<int64_t *>(hipdnn_ep_state_get_workspace(state));
+    int status = hip_pad_resolve(
+        hipdnn_ep_state_get_stream(state),
+        pads_host ? nullptr : static_cast<const int64_t *>(pads_device),
+        pads_host,
+        axes_present && !axes_host ? static_cast<const int64_t *>(axes_device)
+                                   : nullptr,
+        axes_present ? axes_host : nullptr, static_cast<int>(num_axes_padded),
+        static_cast<int>(data_rank), lower_pads_device);
+    if (status != 0)
+      return status;
+    lower_pads_arg = lower_pads_device;
+  }
+
+  const void *pad_value = nullptr;
+  bool pad_value_on_device = false;
+  if (mode_id == 0) {
+    pad_value =
+        constant_value_host ? constant_value_host : constant_value_device;
+    pad_value_on_device = !constant_value_host && constant_value_device;
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_pad: rank=%lld, data_type=%s, mode=%lld, "
@@ -204,7 +180,7 @@ int wrap_pad(RuntimeState *state, void *data, void *pads_device,
                     (long long)mode_id, (long long)num_axes_padded);
 
   return hip_pad(hipdnn_ep_state_get_stream(state), data, output, data_shape,
-                 output_shape, lower_pads.data(), static_cast<int>(data_rank),
-                 hip_dtype, static_cast<int>(mode_id),
-                 have_cv ? static_cast<const void *>(cv_buf) : nullptr);
+                 output_shape, lower_pads_arg, lower_pads_on_device,
+                 static_cast<int>(data_rank), hip_dtype,
+                 static_cast<int>(mode_id), pad_value, pad_value_on_device);
 }
