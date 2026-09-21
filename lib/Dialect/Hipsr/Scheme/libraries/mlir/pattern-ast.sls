@@ -150,9 +150,11 @@
                                ;; Example: #'(%a) means operation takes %a as input
                                ;; Operands can be result variables (from other ops) or free variables
 
-      (mutable attributes)     ;; syntax list - attribute constraints
-                               ;; Example: #'() for no attributes
-                               ;; Currently unused (attribute matching not implemented)
+      (mutable attributes)     ;; Phase 1 (parse): syntax list (unparsed)
+                               ;;          Example: #'((axis = $axis) (keepdims = 1))
+                               ;; Phase 2+ (after attr parsing): list of ast-attribute-binding-expand
+                               ;;          Each binding parsed into structured record
+                               ;; Empty: #'() for operations with no attributes
 
       (mutable input-types)    ;; syntax list - input type variables
                                ;; Example: #'(!t2) means operand has type !t2
@@ -224,6 +226,31 @@
       (mutable expr)))         ;; syntax expression - Scheme expression to evaluate
                                ;; Example: #'(compute-type !old-type)
                                ;; Currently unused (rewrite not implemented)
+
+  ;;-----------------------------------------------------------------------
+  ;; Attribute binding record
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Represents a single attribute constraint in match operations.
+  ;; Two matching modes:
+  ;;   1. Bind mode: (axis = $axis) - match any value, bind to $axis
+  ;;   2. Constant mode: (axis = 0) - match only when attribute equals 0
+  ;;
+  ;; Example input syntax:
+  ;;   ((axis = $axis) (keepdims = 1))
+  ;;
+  (define-record-type (ast-attribute-binding-expand make-ast-attribute-binding-expand ast-attribute-binding-expand?)
+    (fields
+      (mutable name)           ;; Phase 1 (parse): syntax symbol OR syntax string
+                               ;;          Symbol: #'axis
+                               ;;          String: #'"axis"
+                               ;; Phase 2 (validate): syntax string (normalized)
+                               ;;          Symbol converted: #'axis → #'"axis"
+
+      (mutable value)))        ;; syntax - attribute value (not normalized)
+                               ;; Bind mode: identifier starting with $ (e.g., #'$axis)
+                               ;; Constant mode: literal value (e.g., #'0, #'1, #'"NCHW")
+                               ;; Validation checks: $ prefix for bind mode
 
   ;;-----------------------------------------------------------------------
   ;; Region record (for control flow operations)
