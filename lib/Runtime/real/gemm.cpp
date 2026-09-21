@@ -183,8 +183,8 @@ static int scaleSeed(void *data, int64_t count, int64_t stride, float beta,
   const int err =
       hip_scale_strided(stream, data, count, stride, beta, hip_dtype);
   if (err != 0) {
-    fprintf(stderr, "wrap_gemm: writeBroadcastC hip_scale_strided failed (%d)\n",
-            err);
+    fprintf(stderr,
+            "wrap_gemm: writeBroadcastC hip_scale_strided failed (%d)\n", err);
     return -1;
   }
   return 0;
@@ -332,8 +332,7 @@ static int writeBroadcastC(RuntimeState *state, const void *C, void *output,
             hipGetErrorString(err));
     return -1;
   }
-  if (needScale &&
-      scaleSeed(output, M * N, 1, beta, typeCode, stream) != 0)
+  if (needScale && scaleSeed(output, M * N, 1, beta, typeCode, stream) != 0)
     return -1;
   return 0;
 }

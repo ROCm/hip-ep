@@ -241,7 +241,8 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
         static_cast<size_t>(present_seq) * d * cache_elem_sz;
     const size_t byte_off = static_cast<size_t>(copy_begin) * d * cache_elem_sz;
     if (width > 0) {
-      if (hipMemcpy2DAsync(static_cast<char *>(present_key) + byte_off, dst_pitch,
+      if (hipMemcpy2DAsync(static_cast<char *>(present_key) + byte_off,
+                           dst_pitch,
                            static_cast<const char *>(past_key) + byte_off,
                            src_pitch, width, static_cast<size_t>(B) * G,
                            hipMemcpyDeviceToDevice, stream) != hipSuccess)
