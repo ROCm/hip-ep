@@ -1934,6 +1934,19 @@ struct ModConverter final : public OpConversionPattern<hip::ModOp> {
     if (!isTosaExpressibleModType(elementType))
       return op->emitError("hip.mod has no TOSA spelling for element type ")
              << elementType << ": tosa.intdiv takes signless i32 and i64 only";
+    // Past here the element type is signless i32 or i64, where fmod = 1 is
+    // outside the contract rather than merely unimplemented. Hip_ModOp
+    // documents it as the floating-point rule and wrap_mod refuses it on an
+    // integer data type, which is ONNX Mod-13's constraint -- opset 13 ties
+    // fmod = 0 to the integer types and fmod = 1 to the float ones. Emitting
+    // the truncated remainder here is the Mod-28 reading instead, and it would
+    // answer inside a fused kernel what the runtime declines outside one, so
+    // the same graph would give two different results depending on whether it
+    // happened to be fused. Widening this belongs in the runtime first.
+    if (op.getFmod() != 0)
+      return op->emitError("hip.mod with fmod = 1 needs a floating-point "
+                           "element type, got ")
+             << elementType;
 
     Location loc = op.getLoc();
     Value lhs = adaptor.getLhs();
@@ -1965,11 +1978,6 @@ struct ModConverter final : public OpConversionPattern<hip::ModOp> {
                             createZeroMulShift(rewriter, loc));
     Value remainder =
         tosa::SubOp::create(rewriter, loc, resultType, lhs, product);
-
-    if (op.getFmod() != 0) {
-      rewriter.replaceOp(op, remainder);
-      return success();
-    }
 
     Value zero = createSplatInt(rewriter, loc, resultType, 0);
     Value signsDiffer = tosa::BitwiseXorOp::create(

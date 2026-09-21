@@ -39,7 +39,8 @@
 //   value over -1 is undefined behaviour once tosa.intdiv becomes an sdiv
 // - Neither expansion emits a tosa.logical_* op
 // - Mod with the default fmod = 0 emits the remainder plus the divisor-sign
-//   correction; fmod = 1 stops at the bare remainder with no select
+//   correction; fmod = 1 on an integer is rejected, since ONNX Mod-13 and
+//   wrap_mod both tie that attribute to the floating-point types
 // - Signless i32 and i64, the only widths tosa.intdiv accepts, both convert
 // - A lower-rank divisor is reshaped with leading 1s first, since TOSA
 //   broadcasts size-1 dimensions only once both operands carry the result rank
@@ -160,25 +161,35 @@ func.func @mod_i32(%ctx: !hip.context, %a: tensor<4xi32>, %b: tensor<4xi32>,
 
 // -----
 
-// fmod = 1 asks for the dividend's sign, which is what the truncated remainder
-// already has, so the correction is absent entirely rather than emitted and
-// folded later.
-// CHECK-LABEL: func.func @mod_fmod_i32
-// CHECK: %[[DIV:.*]] = tosa.select %{{.*}}, %{{.*}}, %arg2
-// CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %[[DIV]]
-// CHECK: %[[P:.*]] = tosa.mul %[[Q]], %[[DIV]]
-// CHECK: tosa.sub %arg1, %[[P]]
-// The sign correction is absent, so the only select left is the overflow
-// substitution matched above.
-// CHECK-NOT: tosa.select
-// CHECK-NOT: tosa.bitwise_xor
-// CHECK-NOT: hip.mod
+// fmod = 1 asks for C's rule, whose sign follows the dividend. The truncated
+// remainder this expansion already computes is exactly that, so it would cost
+// nothing to emit -- but ONNX Mod-13 ties fmod = 1 to the floating-point types,
+// which is the reading Hip_ModOp documents and the one wrap_mod enforces by
+// refusing a nonzero fmod on an integer data_type. Answering here what the
+// runtime declines would make the result depend on whether the op was fused,
+// so it is named as the contract violation it is.
 func.func @mod_fmod_i32(%ctx: !hip.context, %a: tensor<4xi32>,
                         %b: tensor<4xi32>, %init: tensor<4xi32>) -> tensor<4xi32>
     attributes {rock.kernel} {
+  // expected-error @+2 {{hip.mod with fmod = 1 needs a floating-point element type, got 'i32'}}
+  // expected-error @+1 {{failed to legalize operation 'hip.mod'}}
   %r = hip.mod(%ctx) ins(%a, %b : tensor<4xi32>, tensor<4xi32>)
                      outs(%init : tensor<4xi32>) {fmod = 1 : i64} : tensor<4xi32>
   return %r : tensor<4xi32>
+}
+
+// -----
+
+// The same on i64, the other width tosa.intdiv takes, since the rejection is
+// on the fmod/element-type pair rather than on the width.
+func.func @mod_fmod_i64(%ctx: !hip.context, %a: tensor<4xi64>,
+                        %b: tensor<4xi64>, %init: tensor<4xi64>) -> tensor<4xi64>
+    attributes {rock.kernel} {
+  // expected-error @+2 {{hip.mod with fmod = 1 needs a floating-point element type, got 'i64'}}
+  // expected-error @+1 {{failed to legalize operation 'hip.mod'}}
+  %r = hip.mod(%ctx) ins(%a, %b : tensor<4xi64>, tensor<4xi64>)
+                     outs(%init : tensor<4xi64>) {fmod = 1 : i64} : tensor<4xi64>
+  return %r : tensor<4xi64>
 }
 
 // -----
