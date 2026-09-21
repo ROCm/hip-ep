@@ -36,7 +36,7 @@
           ast-match-expand-result-var ast-match-expand-result-var-set!
           ast-match-expand-op-name ast-match-expand-op-name-set!
           ast-match-expand-operands ast-match-expand-operands-set!
-          ast-match-expand-attributes ast-match-expand-attributes-set!
+          ast-match-expand-where-expr ast-match-expand-where-expr-set!
 
           ast-operation-expand make-ast-operation-expand ast-operation-expand?
           ast-operation-expand-result-var ast-operation-expand-result-var-set!
@@ -154,11 +154,12 @@
                                ;; Note: Optional/variadic require AttrSizedOperandSegments trait
                                ;; and runtime operandSegmentSizes attribute to calculate positions
 
-      (mutable attributes)))   ;; Phase 1 (parse): syntax list (unparsed)
-                               ;;          Example: #'((axis = $axis) (keepdims = 1))
-                               ;; Phase 2+ (after attr parsing): list of ast-attribute-binding-expand
-                               ;;          Each binding parsed into structured record
-                               ;; Empty: #'() for operations with no attributes
+      (mutable where-expr)))   ;; syntax object - pure Scheme guard expression
+                               ;; Executes after matching this operation (early return on failure)
+                               ;; Default: #'#f (no guard, always succeeds)
+                               ;; Example: #'(let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
+                               ;;             (and $ks (is-1x1-kernel? $ks)))
+                               ;; Can access: matched result-var, operands, any previously bound vars
 
   ;;-----------------------------------------------------------------------
   ;; Rewrite operation record
@@ -223,36 +224,6 @@
                                ;; Example: #'(compute-type !old-type)
                                ;; Currently unused (rewrite not implemented)
 
-  ;;-----------------------------------------------------------------------
-  ;; Attribute binding record
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Represents a single attribute constraint in match operations.
-  ;; Two matching modes:
-  ;;   1. Bind mode: (axis = $axis) - match any value, bind to $axis
-  ;;   2. Constant mode: (axis = 0) - match only when attribute equals 0
-  ;;
-  ;; TODO: Possible third mode (may not be good design):
-  ;;   3. Variable mode: (axis = ,var) - match runtime value of var from use-site
-  ;;      Macro cannot access var at expansion time, but can generate code
-  ;;      that references var for runtime evaluation in user's lexical scope.
-  ;;      This adds complexity and may blur macro/runtime boundary.
-  ;;
-  ;; Example input syntax:
-  ;;   ((axis = $axis) (keepdims = 1))
-  ;;
-  (define-record-type (ast-attribute-binding-expand make-ast-attribute-binding-expand ast-attribute-binding-expand?)
-    (fields
-      (mutable name)           ;; Phase 1 (parse): syntax symbol OR syntax string
-                               ;;          Symbol: #'axis
-                               ;;          String: #'"axis"
-                               ;; Phase 2 (validate): syntax string (normalized)
-                               ;;          Symbol converted: #'axis → #'"axis"
-
-      (mutable value)))        ;; syntax - attribute value (not normalized)
-                               ;; Bind mode: identifier starting with $ (e.g., #'$axis)
-                               ;; Constant mode: literal value (e.g., #'0, #'1, #'"NCHW")
-                               ;; Validation checks: $ prefix for bind mode
 
   ;;-----------------------------------------------------------------------
   ;; Region record (for control flow operations)
