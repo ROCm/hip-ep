@@ -144,10 +144,16 @@
   ;;   - Variables: (%x %y) - identifiers starting with %
   ;;   - Can be result variables from other operations or free variables
   ;;
+  ;; Attribute syntax (when present):
+  ;;   - Each attribute: (attr-name = $attr-value)
+  ;;   - Example: ((axis = $axis) (keepdims = $keepdims))
+  ;;   - attr-name: symbol or string
+  ;;   - $attr-value: identifier starting with $ (attribute variable)
+  ;;
   ;; Syntax variants (attributes and types are both optional):
-  ;;   1. Full:     result = "op" (operands) (attrs) : (types) -> type
+  ;;   1. Full:     result = "op" (operands) ((attr = $val) ...) : (types) -> type
   ;;   2. No attrs: result = "op" (operands) : (types) -> type
-  ;;   3. No types: result = "op" (operands) (attrs)
+  ;;   3. No types: result = "op" (operands) ((attr = $val) ...)
   ;;   4. Minimal:  result = "op" (operands)
   ;;
   ;; Note: (operands) is required; (attrs) and types are optional
