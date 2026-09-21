@@ -38,7 +38,7 @@
           ast-match-expand-operands ast-match-expand-operands-set!
           ast-match-expand-attributes ast-match-expand-attributes-set!
           ast-match-expand-input-types ast-match-expand-input-types-set!
-          ast-match-expand-output-type ast-match-expand-output-type-set!
+          ast-match-expand-output-types ast-match-expand-output-types-set!
 
           ast-operation-expand make-ast-operation-expand ast-operation-expand?
           ast-operation-expand-result-var ast-operation-expand-result-var-set!
@@ -160,8 +160,14 @@
                                ;; Example: #'(!t2) means operand has type !t2
                                ;; Currently unused (type matching not implemented)
 
-      (mutable output-type)))  ;; syntax type - output type variable
-                               ;; Example: #'!t3 means result has type !t3
+      (mutable output-types))) ;; Phase 1 (parse): syntax identifier OR syntax list
+                               ;;          Single (shorthand): #'!t3
+                               ;;          Single (explicit): #'(!t3)
+                               ;;          Multiple: #'(!t2 !t3)
+                               ;; Phase 2 (validate): list of syntax identifiers (normalized)
+                               ;;          Single becomes: (#'!t3)
+                               ;;          Multiple: (#'!t2 #'!t3)
+                               ;; Normalization: same pattern as result-var
                                ;; Currently unused (type matching not implemented)
 
   ;;-----------------------------------------------------------------------

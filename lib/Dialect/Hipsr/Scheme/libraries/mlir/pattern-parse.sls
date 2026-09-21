@@ -164,15 +164,15 @@
   ;;
   (define (parse-match-operation op-stx)
     (syntax-case op-stx (= : ->)
-      ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-type)
-      [(result = op-name operands attrs : input-types -> output-type)
+      ;; Full pattern: (result = "op.name" (operands ...) (attrs ...) : (input-types ...) -> output-types)
+      [(result = op-name operands attrs : input-types -> output-types)
        (make-ast-match-expand
          #'result
          #'op-name
          #'operands
          #'attrs
          #'input-types
-         #'output-type)]
+         #'output-types)]
 
       ;; No types: (result = "op.name" (operands ...) (attrs ...))
       [(result = op-name operands attrs)
@@ -182,17 +182,17 @@
          #'operands
          #'attrs
          #'()              ;; Empty input-types
-         #'())]            ;; Empty output-type
+         #'())]            ;; Empty output-types
 
-      ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-type)
-      [(result = op-name operands : input-types -> output-type)
+      ;; No attrs, with types: (result = "op.name" (operands ...) : (input-types ...) -> output-types)
+      [(result = op-name operands : input-types -> output-types)
        (make-ast-match-expand
          #'result
          #'op-name
          #'operands
          #'()              ;; Empty attrs
          #'input-types
-         #'output-type)]
+         #'output-types)]
 
       ;; Minimal: (result = "op.name" (operands ...))
       [(result = op-name operands)
@@ -202,7 +202,7 @@
          #'operands
          #'()              ;; Empty attrs
          #'()              ;; Empty input-types
-         #'())]            ;; Empty output-type
+         #'())]            ;; Empty output-types
 
       [_ (syntax-violation 'parse-match-operation
            "Invalid match operation syntax (expected: result = \"op.name\" operands [attrs] [: types -> type])"
