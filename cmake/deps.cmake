@@ -400,6 +400,7 @@ if(ENABLE_ROCMLIRTRITON)
         CACHE PATH "LLVM build prefix consumed by rocmlirTriton/Triton" FORCE)
   endif()
 
+  set(ROCM_PATH "${THEROCK_DIST}")
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
 
