@@ -2458,7 +2458,7 @@ HIP_KERNEL_API int hip_dequantize_linear(
  *
  * Individual kernel launchers for QMoE (Quantized Mixture-of-Experts).
  * These only launch GPU kernels — no memory allocation, no stream sync.
- * The runtime wrapper (wrap_qmoe) orchestrates the expert loop.
+ * The runtime wrapper selects fixed-sequence decode/prefill dispatch.
  *
  * All functions take element_size_bytes: 2 for fp16, 4 for fp32.
  */
@@ -2606,6 +2606,30 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* output,
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* Fixed-sequence prefill dispatch. Each (token, top-k slot) directly selects
+ * its expert weights on device, FC1 fuses SwiGLU, FC2 writes a weighted slot,
+ * and a final kernel reduces the k slots per token. There is no expert-count
+ * D2H, host branch, allocation, or stream synchronization.
+ */
+HIP_KERNEL_API int hip_qmoe_prefill_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t num_tokens,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k,
+    int64_t expert_weight_bits, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
@@ -2758,6 +2782,31 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
     void* acc,
     int64_t num_tokens,
     int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* Fixed-sequence wave64 prefill path. It dispatches every (token, top-k slot)
+ * through device-selected expert FC1/relu2 and FC2 kernels, then reduces the
+ * weighted slots per token. Unlike the wave32 WMMA path it does not bucket
+ * rows by expert, and it requires no expert-count D2H or host dispatch.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wave64(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* act_scratch,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
     int64_t latent_size,
     int64_t moe_intermediate_size,
     int64_t k,
