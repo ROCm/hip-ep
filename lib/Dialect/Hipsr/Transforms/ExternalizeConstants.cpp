@@ -111,9 +111,8 @@ struct HipsrExternalizeConstantsPass
       fs = dialect->getFileSystem();
     }
     if (fs && !entries.empty()) {
-      if (!hip::writeConstantsBinToFileSystem(
-              fs, constantsFile, entries,
-              llvm::alignTo(filePos, kConstantAlignment))) {
+      if (!hip::writeConstantsBinToFileSystem(fs, constantsFile, entries,
+                                              filePos)) {
         module.emitError("failed to write constants file: ") << constantsFile;
         signalPassFailure();
       }

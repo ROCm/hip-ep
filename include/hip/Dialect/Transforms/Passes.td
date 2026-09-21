@@ -92,9 +92,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::tensor::TensorDialect",
     "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
-    "mlir::bufferization::BufferizationDialect",
-    "mlir::pdl::PDLDialect",
-    "mlir::pdl_interp::PDLInterpDialect"
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 
@@ -180,6 +178,24 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::ub::UBDialect"
+  ];
+}
+
+def HipFusionTransformPass
+    : Pass<"hip-fusion-transform", "mlir::ModuleOp"> {
+  let summary = "Rewrite HIP operations into other HIP operations via PDLL "
+                "patterns";
+  let description = [{
+    HIP-to-HIP rewriting at unrestricted arity: one operation may become many,
+    many may collapse into one, or a subgraph may be replaced by another.
+    Native constraints and rewrites let a pattern fold an operand payload into
+    an attribute of the replacement, or decline a match it cannot express.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::pdl::PDLDialect",
+    "mlir::pdl_interp::PDLInterpDialect"
   ];
 }
 

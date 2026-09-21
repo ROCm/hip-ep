@@ -58,12 +58,12 @@ if(NOT THEROCK_DIST)
     "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
 endif()
 
-if(NOT TARGET HipPdllPatterns)
+if(NOT TARGET HipFusionTransformPdll)
   message(FATAL_ERROR
     "PDL fusion patterns are unavailable (mlir-pdll was not found); the wheel "
     "would ship an EP that cannot compile any model.")
 endif()
-list(APPEND _wheel_deps HipPdllPatterns)
+list(APPEND _wheel_deps HipFusionTransformPdll)
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   set(_ck_target custom_kernels_${_arch})
