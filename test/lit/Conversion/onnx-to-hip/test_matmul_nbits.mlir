@@ -20,7 +20,7 @@
 module {
   // ===== Test 1: Basic MatMulNBits (3 operands: A, B, scales) =====
 
-  func.func @main_graph(%A: tensor<1x128x2880xf16>) -> tensor<1x128x5120xf16> {
+  func.func @main_graph(%A: tensor<1x128x2880xf16>) -> (tensor<1x128x5120xf16> {onnx.name = "logits"}) {
     %B = "onnx.Constant"() {value = dense<1> : tensor<5120x90x16xui8>} : () -> tensor<5120x90x16xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<5120x90xf16>} : () -> tensor<5120x90xf16>
     %Y = "onnx.Custom"(%A, %B, %scales) {
@@ -41,6 +41,7 @@ module {
   // CHECK-SAME: N = 5120
   // CHECK-SAME: bits = 4
   // CHECK-SAME: block_size = 32
+  // CHECK-SAME: prune_logits_candidate = true
   // CHECK-NOT: onnx.Custom
 
   // ===== Test 2: MatMulNBits with zero_points =====

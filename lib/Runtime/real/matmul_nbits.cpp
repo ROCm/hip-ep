@@ -261,6 +261,15 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 
 namespace {
 
+static bool pruneLogitsEnabled() {
+  // Default-on so CI and packaged consumers benefit without environment
+  // configuration. Set HIPDNN_EP_PRUNE_LOGITS=0 for callers that consume the
+  // complete prompt logits rather than only the final sequence row.
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_PRUNE_LOGITS");
+  return enabled;
+}
+
 // True when the arrival row stride K/2 falls in a cache-aliasing regime.
 //
 // Rows a tile reads in one K-step sit stride_lines = (K/2)/128 cache lines
@@ -576,7 +585,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size,
+                      int64_t prune_logits_candidate) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -609,6 +619,44 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   if (g_idx) {
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
     return -1;
+  }
+
+  // Online scheme-1 prune-logits: preserve ORT/OGA's original
+  // [batch_count, M, N] output allocation and shape, but compute only the last
+  // sequence row of a MatMulNBits proven at compile time to directly produce
+  // the graph output named `logits`. OGA already consumes only that row.
+  //
+  // Run each batch separately because the retained rows have the original
+  // M*K / M*N batch strides, whereas a normal batched M=1 invocation assumes
+  // dense K / N strides. The recursive M=1 call has candidate=0, so it executes
+  // the regular decode kernel and cannot re-enter this branch.
+  if (prune_logits_candidate && pruneLogitsEnabled() && M > 1 &&
+      batch_count > 0) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] matmul_nbits prune-logits: M=%lld -> 1, batch=%lld\n",
+        (long long)M, (long long)batch_count);
+    const size_t a_batch_elements =
+        static_cast<size_t>(M) * static_cast<size_t>(K);
+    const size_t y_batch_elements =
+        static_cast<size_t>(M) * static_cast<size_t>(N);
+    const auto *a_bytes = static_cast<const unsigned char *>(A);
+    auto *y_bytes = static_cast<unsigned char *>(output);
+    for (int64_t batch = 0; batch < batch_count; ++batch) {
+      const size_t a_row = static_cast<size_t>(batch) * a_batch_elements +
+                           static_cast<size_t>(M - 1) * static_cast<size_t>(K);
+      const size_t y_row = static_cast<size_t>(batch) * y_batch_elements +
+                           static_cast<size_t>(M - 1) * static_cast<size_t>(N);
+      int rc = wrap_matmul_nbits(
+          state, op_state_slot,
+          a_bytes + a_row * static_cast<size_t>(elem_size), B, scales,
+          zero_points, nullptr, bias,
+          y_bytes + y_row * static_cast<size_t>(elem_size),
+          /*M=*/1, N, K, /*batch_count=*/1, bits, block_size, elem_size,
+          zp_elem_size, scale_elem_size, /*prune_logits_candidate=*/0);
+      if (rc != 0)
+        return rc;
+    }
+    return 0;
   }
 
   // ONNX MatMulNBits allows `scales` to be fp16 or fp32 independent of the
