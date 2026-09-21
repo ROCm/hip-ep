@@ -136,7 +136,10 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   unset, so the standard LLVM_*/MLIR_* consumer variables come from the
 #   package configs.
 # Tier 2 (fallback): build LLVM/MLIR/LLD from source as a FetchContent
-#   subdirectory. The build tree has no consumable package config during the
+#   subdirectory. The source is the llvm-project subtree vendored inside
+#   rocmlirTriton (external/llvm-project); we clone rocmlirTriton and configure
+#   only that nested llvm-project via SOURCE_SUBDIR -- no rocMLIR/Triton targets
+#   are built here. The build tree has no consumable package config during the
 #   same configure, so we set the consumer variables by hand and rely on the
 #   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
 #   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
@@ -158,7 +161,7 @@ endif()
 if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
   find_package(LLVM REQUIRED CONFIG)
 else()
-  message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
+  message(STATUS "LLVM/MLIR not found; building from rocmlirTriton's external/llvm-project (${DEP_HASH_rocmlirtriton})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
   # lib/Runtime gets a version-matched clang for runtime bitcode with no
   # external dependency. Kept identical to the CI LLVM build so the prefix that
@@ -179,10 +182,25 @@ else()
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
-  FetchContent_Declare(llvm-project
-    GIT_REPOSITORY ${DEP_URL_llvm}
-    GIT_TAG ${DEP_HASH_llvm}
+  # rocmlirTriton vendors llvm-project as a git subtree (not a submodule), so a
+  # plain shallow clone already carries external/llvm-project -- no submodule
+  # init needed. Two-step fetch: (1) populate the rocmlirTriton checkout without
+  # configuring it -- SOURCE_SUBDIR points at external/, which has no
+  # CMakeLists.txt, so MakeAvailable clones but skips add_subdirectory, leaving
+  # rocMLIR/Triton untouched; (2) declare the vendored llvm-project under its own
+  # name so add_subdirectory builds only LLVM/MLIR/LLD/clang. Keeping the second
+  # name "llvm-project" matters: morphizen's subtree redeclares llvm-project and
+  # relies on FetchContent's first-populated-wins to reuse this build, and the
+  # _deps/llvm-project-build tree is referenced by name downstream.
+  FetchContent_Declare(rocmlirtriton
+    GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
+    GIT_TAG ${DEP_HASH_rocmlirtriton}
     GIT_SHALLOW TRUE
+    SOURCE_SUBDIR external
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(rocmlirtriton)
+  FetchContent_Declare(llvm-project
+    SOURCE_DIR "${rocmlirtriton_SOURCE_DIR}/external/llvm-project"
     SOURCE_SUBDIR llvm
     EXCLUDE_FROM_ALL)
   # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
