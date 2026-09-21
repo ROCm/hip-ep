@@ -38,12 +38,11 @@
 (show-actions "Chain 2 ops: %b uses %a" test-chain-2ops)
 (verify-actions "Chain 2 ops"
                 test-chain-2ops
-                '((:bind-root (var . %b) (op-idx . 1) (result-idx . 0))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))
+                '((:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
+                  (:set-current-op (op-idx . 0) (var . %a))
                   (:check-op (op-idx . 0))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))))
+                  (:bind-operand (op-idx . 0) (var . %x))))
 
 ;; Test 2: Chain of 3 operations
 (define-conversion-pattern :debug-analyze test-chain-3ops
@@ -56,14 +55,13 @@
 (show-actions "Chain 3 ops: %c uses %b uses %a" test-chain-3ops)
 (verify-actions "Chain 3 ops"
                 test-chain-3ops
-                '((:bind-root (var . %c) (op-idx . 2) (result-idx . 0))
-                  (:set-current-op (op-idx . 2) (var . %c) (result-idx . 0))
+                '((:set-current-op (op-idx . 2) (var . %c))
                   (:check-op (op-idx . 2))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))
-                  (:check-op (op-idx . 0))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
+                  (:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))))
+                  (:set-current-op (op-idx . 0) (var . %a))
+                  (:check-op (op-idx . 0))
+                  (:bind-operand (op-idx . 0) (var . %x))))
 
 ;; Test 3: Diamond - two paths converge
 (define-conversion-pattern :debug-analyze test-diamond
@@ -77,17 +75,14 @@
 (show-actions "Diamond: %d uses %b and %c, both use %a" test-diamond)
 (verify-actions "Diamond"
                 test-diamond
-                '((:bind-root (var . %d) (op-idx . 3) (result-idx . 0))
-                  (:set-current-op (op-idx . 3) (var . %d) (result-idx . 0))
+                '((:set-current-op (op-idx . 3) (var . %d))
                   (:check-op (op-idx . 3))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))
-                  (:check-op (op-idx . 0))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
+                  (:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))
-                  (:check-eq (op-idx . 2) (operand-idx . 0) (var . %a))
-                  (:check-op (op-idx . 2))
-                  (:set-current-op (op-idx . 2) (var . %c) (result-idx . 0))))
+                  (:set-current-op (op-idx . 0) (var . %a))
+                  (:check-op (op-idx . 0))
+                  (:bind-operand (op-idx . 0) (var . %x))
+                  (:check-eq (op-idx . 3) (operand-idx . 1) (var . %c))))
 
 ;; Test 4: Multiple operands - same operation
 (define-conversion-pattern :debug-analyze test-multi-operands
@@ -99,12 +94,11 @@
 (show-actions "Multi operands: %b uses %a twice" test-multi-operands)
 (verify-actions "Multi operands"
                 test-multi-operands
-                '((:bind-root (var . %b) (op-idx . 1) (result-idx . 0))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))
+                '((:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
+                  (:set-current-op (op-idx . 0) (var . %a))
                   (:check-op (op-idx . 0))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))
+                  (:bind-operand (op-idx . 0) (var . %x))
                   (:check-eq (op-idx . 1) (operand-idx . 1) (var . %a))))
 
 ;; Test 5: Tree - one source, multiple consumers
@@ -118,14 +112,13 @@
 (show-actions "Tree: %c references %a, %b, %c" test-tree)
 (verify-actions "Tree"
                 test-tree
-                '((:bind-root (var . %c) (op-idx . 2) (result-idx . 0))
-                  (:set-current-op (op-idx . 2) (var . %c) (result-idx . 0))
+                '((:set-current-op (op-idx . 2) (var . %c))
                   (:check-op (op-idx . 2))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))
-                  (:check-op (op-idx . 0))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
+                  (:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))))
+                  (:set-current-op (op-idx . 0) (var . %a))
+                  (:check-op (op-idx . 0))
+                  (:bind-operand (op-idx . 0) (var . %x))))
 
 ;; Test 6: Multiple results - TODO: syntax not supported yet
 ;; (define-conversion-pattern :debug-analyze test-multi-results
@@ -146,10 +139,9 @@
 (show-actions "Unreachable: op1 not reachable from root %b" test-unreachable)
 (verify-actions "Unreachable"
                 test-unreachable
-                '((:bind-root (var . %b) (op-idx . 1) (result-idx . 0))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))
+                '((:set-current-op (op-idx . 1) (var . %b))
                   (:check-op (op-idx . 1))
-                  (:bind-operand (op-idx . 1) (var . %y) (operand-idx . 0))))
+                  (:bind-operand (op-idx . 1) (var . %y))))
 
 ;; Test 8: Complex DAG
 (define-conversion-pattern :debug-analyze test-complex-dag
@@ -164,19 +156,16 @@
 (show-actions "Complex DAG: 5 ops with diamond + chain" test-complex-dag)
 (verify-actions "Complex DAG"
                 test-complex-dag
-                '((:bind-root (var . %e) (op-idx . 4) (result-idx . 0))
-                  (:set-current-op (op-idx . 4) (var . %e) (result-idx . 0))
+                '((:set-current-op (op-idx . 4) (var . %e))
                   (:check-op (op-idx . 4))
-                  (:set-current-op (op-idx . 2) (var . %c) (result-idx . 0))
-                  (:check-op (op-idx . 2))
-                  (:check-eq (op-idx . 2) (operand-idx . 0) (var . %a))
-                  (:set-current-op (op-idx . 1) (var . %b) (result-idx . 0))
-                  (:check-op (op-idx . 1))
-                  (:bind-operand (op-idx . 0) (var . %x) (operand-idx . 0))
-                  (:check-op (op-idx . 0))
-                  (:set-current-op (op-idx . 0) (var . %a) (result-idx . 0))
+                  (:set-current-op (op-idx . 3) (var . %d))
                   (:check-op (op-idx . 3))
-                  (:set-current-op (op-idx . 3) (var . %d) (result-idx . 0))))
+                  (:set-current-op (op-idx . 1) (var . %b))
+                  (:check-op (op-idx . 1))
+                  (:set-current-op (op-idx . 0) (var . %a))
+                  (:check-op (op-idx . 0))
+                  (:bind-operand (op-idx . 0) (var . %x))
+                  (:check-eq (op-idx . 3) (operand-idx . 1) (var . %c))))
 
 (format #t "\n=== All test cases complete ===\n")
 (format #t "All action sequences verified automatically.\n")
