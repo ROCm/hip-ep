@@ -86,9 +86,15 @@
           (syntax->datum (ast-where-binding-expand-expr where-exp))))
 
   (define (action->datum action)
-    ;; Convert action list to datum, handling syntax objects in action elements
-    (map (lambda (elem)
-           (if (identifier? elem)
-               (syntax->datum elem)
-               elem))
-         action)))
+    ;; Convert action list to datum, handling syntax objects in labeled fields
+    ;; Action format: (:tag (field-name . value) ...)
+    (cons (car action)  ; Keep tag as-is
+          (map (lambda (field)
+                 ;; field is (field-name . value)
+                 (let ([field-name (car field)]
+                       [field-value (cdr field)])
+                   (cons field-name
+                         (if (identifier? field-value)
+                             (syntax->datum field-value)
+                             field-value))))
+               (cdr action)))))
