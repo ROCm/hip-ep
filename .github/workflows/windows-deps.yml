@@ -322,13 +322,12 @@ jobs:
           AMDPR_KEY="${AMDPR_KEY// /-}"
           echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
-      - name: Probe amdgpu-artifacts
+      - name: Restore amdgpu-artifacts
         id: cache-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -484,6 +483,14 @@ jobs:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload amdgpu-artifacts fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-amdgpu-artifacts
+          path: ${{ runner.workspace }}/amdgpu-artifacts
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Save sccache directory
         if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
@@ -508,13 +515,12 @@ jobs:
         shell: bash
         run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
-      - name: Probe oga-artifacts
+      - name: Restore oga-artifacts
         id: cache-oga
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
-          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -677,6 +683,14 @@ jobs:
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
+
+      - name: Upload oga-artifacts fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-oga-artifacts
+          path: ${{ runner.workspace }}/oga-artifacts
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Save sccache directory
         if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'
