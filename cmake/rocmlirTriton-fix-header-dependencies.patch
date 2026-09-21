@@ -1,4 +1,4 @@
-From 391f40f86a430a345fcf9351f3cee8899776b70d Mon Sep 17 00:00:00 2001
+From c100a684adbf0db891143d70c7eecfe31226e884 Mon Sep 17 00:00:00 2001
 From: Ilango Rajagopal <ilangokul@gmail.com>
 Date: Mon, 21 Sep 2026 01:28:28 -0600
 Subject: [PATCH] Fix header dependencies
@@ -15,7 +15,7 @@ index 177db851d..ad4f7b853 100644
 @@ -343,16 +343,32 @@ endif()
  # Helper Functions for rocMLIR Libraries
  #===----------------------------------------------------------------------===//
-
+ 
 +# rocMLIR's own public + generated headers are made visible to its libraries
 +# via directory-scoped include_directories() in mlir/CMakeLists.txt. That does
 +# not attach them to any target's INTERFACE_INCLUDE_DIRECTORIES, so out-of-tree
@@ -36,14 +36,14 @@ index 177db851d..ad4f7b853 100644
    add_mlir_library(${ARGV} DEPENDS mlir-headers)
 +  _rocmlir_propagate_public_includes(${name})
  endfunction(add_rocmlir_dialect_library)
-
+ 
  function(add_rocmlir_conversion_library name)
    set_property(GLOBAL APPEND PROPERTY ROCMLIR_CONVERSION_LIBS ${name})
    set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
    add_mlir_library(${ARGV} DEPENDS mlir-headers)
 +  _rocmlir_propagate_public_includes(${name})
  endfunction(add_rocmlir_conversion_library)
-
+ 
  function(add_rocmlir_test_library name)
 @@ -400,9 +416,17 @@ endfunction(add_rocmlir_triton_library)
  # add_mlir_library). Marked SYSTEM so our strict warnings (-Wshadow, -Wundef,
@@ -66,7 +66,7 @@ index 177db851d..ad4f7b853 100644
 +    endif()
 +  endforeach()
  endfunction(rocmlir_add_triton_includes)
-
+ 
 diff --git a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
 index 16ff81ded..3fe395ee7 100644
 --- a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
@@ -74,7 +74,7 @@ index 16ff81ded..3fe395ee7 100644
 @@ -1,6 +1,18 @@
  add_rocmlir_dialect_library(MLIRRockPipeline
    Pipelines.cpp
-
+ 
 +  # Pipelines.cpp includes mlir/Conversion/RocMLIRPasses.h, which transitively
 +  # pulls the MIGraphX dialect's TableGen-generated headers
 +  # (MIGraphXDialect/Types/Enums/MIGraphX.h.inc via MIGraphXToTosa.h ->
@@ -90,5 +90,6 @@ index 16ff81ded..3fe395ee7 100644
    LINK_LIBS PUBLIC
    MLIRAMDGPUTransforms
    MLIRCpuTransforms
---
+-- 
 2.43.0
+

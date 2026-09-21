@@ -1,4 +1,4 @@
-From 29ea7a22cde5c46062dadd2828511b7f8cb344f1 Mon Sep 17 00:00:00 2001
+From 28c7bde6009cf1fb0093c0e0974ea0ec9839bde3 Mon Sep 17 00:00:00 2001
 From: Ilango Rajagopal <ilangokul@gmail.com>
 Date: Fri, 18 Sep 2026 01:50:33 -0600
 Subject: [PATCH] Use external LLVM when provided
@@ -14,7 +14,7 @@ index 177db851d..7f469d7e9 100644
 @@ -26,6 +26,47 @@ set(ROCMLIR_LLVM_PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/llvm-project"
  # code keep working unchanged.
  #===----------------------------------------------------------------------===//
-
+ 
 +# When embedded in a larger build (e.g. hip-ep) that has already provided
 +# LLVM/MLIR -- either via find_package or via its own add_subdirectory of the
 +# same vendored external/llvm-project -- the MLIRSupport target already exists.
@@ -62,11 +62,12 @@ index 177db851d..7f469d7e9 100644
 @@ -152,6 +193,8 @@ message(STATUS "LLD_DIR: ${LLD_DIR}")
  message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
  message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
-
+ 
 +endif() # ROCMLIR_EXTERNAL_LLVM
 +
  #===----------------------------------------------------------------------===//
  # ROCm Configuration
  #
---
+-- 
 2.43.0
+
