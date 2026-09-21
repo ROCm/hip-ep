@@ -126,7 +126,7 @@
   ;; parse-match-operation - Parse one match operation
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Naming conventions:
+  ;; Naming rules:
   ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
   ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
   ;;   - Type variables: identifiers starting with ! (e.g., !t1, !f32)
