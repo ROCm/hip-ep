@@ -1652,6 +1652,203 @@ struct PadConverter final : public OpConversionPattern<hip::PadOp> {
   }
 };
 
+// hip.constant carries a statically-shaped constant from the importer to
+// hip-externalize-constants, which is the only pass allowed to choose between
+// inline and external storage. Only the inline form has data to hand to TOSA;
+// the file-backed and memory-address forms name a byte range that nothing has
+// read yet, so there is nothing to put in a tosa.const and they decline.
+//
+// This is a coverage op rather than a live one today. The ONNX-to-HIP pipeline
+// externalizes every carrier and then runs VerifyNoConstantCarriersPass, which
+// fails the compile if one survives, so a carrier does not normally reach this
+// pass at all. It matters the moment a constant does land inside a rock.kernel,
+// because rocMLIR is handed that function on its own and knows no hip op.
+static bool isTosaExpressibleConstant(hip::ConstantOp op) {
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return false;
+  // tosa.const takes the attribute as-is, so it has to be an elements
+  // attribute whose type already matches the result.
+  auto value = dyn_cast_or_null<DenseElementsAttr>(op.getValueAttr());
+  if (!value || value.getType() != resultType)
+    return false;
+  Type elementType = resultType.getElementType();
+  return isa<FloatType>(elementType) || isa<IntegerType>(elementType);
+}
+
+struct ConstantConverter final : public OpConversionPattern<hip::ConstantOp> {
+  using OpConversionPattern<hip::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleConstant(op))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible constant");
+
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::ConstOp>(
+        op, resultType, cast<DenseElementsAttr>(op.getValueAttr()));
+    return success();
+  }
+};
+
+// TOSA resizes with an integer rational scale rather than a float one. The
+// input coordinate it samples for output index `o` on an axis is
+//
+//   in = (o * scale_d + offset) / scale_n
+//
+// and it derives the output extent back out of that, requiring
+//
+//   out - 1 == ((in_extent - 1) * scale_n - offset + border) / scale_d
+//
+// to divide exactly. Each ONNX coordinate_transformation_mode is an affine map
+// from `o` to the input coordinate, so each one is just a choice of the triple.
+// Writing OUT and IN for the extents of one axis:
+//
+//   asymmetric      in = o * IN/OUT
+//                   n = OUT, d = IN, offset = 0
+//   half_pixel      in = (o + 0.5) * IN/OUT - 0.5
+//                   n = 2*OUT, d = 2*IN, offset = IN - OUT
+//   align_corners   in = o * (IN-1)/(OUT-1)
+//                   n = OUT-1, d = IN-1, offset = 0
+//
+// half_pixel doubles the ratio because its offset is a half-integer otherwise;
+// TOSA takes integers only, so the whole triple is scaled by two instead of
+// rounding, which keeps the map exact. align_corners needs both extents above
+// one, or its ratio has a zero in it.
+//
+// The border is not a fourth choice -- it is whatever makes TOSA's derived
+// extent come back as OUT, so solving the relation above for it makes the
+// divisibility hold by construction rather than by luck.
+struct ResizeAxisParams {
+  int64_t scaleN, scaleD, offset, border;
+};
+
+static std::optional<ResizeAxisParams>
+planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
+  if (inExtent <= 0 || outExtent <= 0)
+    return std::nullopt;
+
+  ResizeAxisParams p;
+  switch (coordTransform) {
+  case 0: // half_pixel
+    p.scaleN = 2 * outExtent;
+    p.scaleD = 2 * inExtent;
+    p.offset = inExtent - outExtent;
+    break;
+  case 1: // asymmetric
+    p.scaleN = outExtent;
+    p.scaleD = inExtent;
+    p.offset = 0;
+    break;
+  case 2: // align_corners
+    if (inExtent < 2 || outExtent < 2)
+      return std::nullopt;
+    p.scaleN = outExtent - 1;
+    p.scaleD = inExtent - 1;
+    p.offset = 0;
+    break;
+  default:
+    return std::nullopt;
+  }
+  p.border = (outExtent - 1) * p.scaleD + p.offset - (inExtent - 1) * p.scaleN;
+  // tosa.resize requires every scale value to be positive.
+  if (p.scaleN <= 0 || p.scaleD <= 0)
+    return std::nullopt;
+  return p;
+}
+
+// hip.resize is (N, C, D_1..D_k) with the spatial axes trailing; tosa.resize is
+// 4-D NHWC with exactly two spatial axes, so only the k == 2 case maps and it
+// needs a transpose on each side.
+//
+// Nearest is declined rather than lowered. TOSA's NEAREST_NEIGHBOR breaks a tie
+// upward, hip.resize carries ONNX's round_prefer_floor, which breaks it
+// downward, and the tie is reachable: an asymmetric 2x upsample lands exactly
+// halfway on every odd output index, so the two disagree on half the output.
+//
+// Integers are declined for a different reason: TOSA's integer BILINEAR leaves
+// the result scaled by scale_y_n * scale_x_n for a following rescale to undo,
+// and this pass emits no such rescale. ONNX Resize on a real model is float.
+static bool isTosaExpressibleResize(hip::ResizeOp op) {
+  if (op->getNumResults() != 1)
+    return false;
+
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !inputType.hasStaticShape() || !resultType ||
+      !resultType.hasStaticShape())
+    return false;
+  if (inputType.getElementType() != resultType.getElementType())
+    return false;
+
+  Type elementType = resultType.getElementType();
+  if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+    return false;
+
+  // N, C, H, W: the two leading axes are carried through untouched.
+  if (inputType.getRank() != 4 || resultType.getRank() != 4)
+    return false;
+  if (inputType.getDimSize(0) != resultType.getDimSize(0) ||
+      inputType.getDimSize(1) != resultType.getDimSize(1))
+    return false;
+
+  if (op.getMode() != 1)
+    return false;
+  if (op.getNearestMode() != 0)
+    return false;
+
+  int64_t coordTransform = op.getCoordTransform();
+  return planResizeAxis(inputType.getDimSize(2), resultType.getDimSize(2),
+                        coordTransform)
+             .has_value() &&
+         planResizeAxis(inputType.getDimSize(3), resultType.getDimSize(3),
+                        coordTransform)
+             .has_value();
+}
+
+struct ResizeConverter final : public OpConversionPattern<hip::ResizeOp> {
+  using OpConversionPattern<hip::ResizeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ResizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleResize(op))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible resize");
+
+    Location loc = op.getLoc();
+    auto inputType = cast<RankedTensorType>(op.getInput().getType());
+    auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+    Type elementType = resultType.getElementType();
+
+    int64_t coordTransform = op.getCoordTransform();
+    ResizeAxisParams y = *planResizeAxis(
+        inputType.getDimSize(2), resultType.getDimSize(2), coordTransform);
+    ResizeAxisParams x = *planResizeAxis(
+        inputType.getDimSize(3), resultType.getDimSize(3), coordTransform);
+
+    Value nhwc = transposePerm(adaptor.getInput(), {0, 2, 3, 1}, rewriter, loc);
+    auto resizedType = RankedTensorType::get(
+        {resultType.getDimSize(0), resultType.getDimSize(2),
+         resultType.getDimSize(3), resultType.getDimSize(1)},
+        elementType);
+    // Bound rather than passed inline: C++ leaves the evaluation order of call
+    // arguments unspecified, so building these in the argument list would let
+    // the order they are emitted in vary by host compiler.
+    Value scale = createConstShape(rewriter, loc,
+                                   {y.scaleN, y.scaleD, x.scaleN, x.scaleD});
+    Value offset = createConstShape(rewriter, loc, {y.offset, x.offset});
+    Value border = createConstShape(rewriter, loc, {y.border, x.border});
+    Value resized = tosa::ResizeOp::create(
+                        rewriter, loc, resizedType, nhwc, scale, offset, border,
+                        tosa::ResizeModeAttr::get(rewriter.getContext(),
+                                                  tosa::ResizeMode::BILINEAR))
+                        .getResult();
+    rewriter.replaceOp(op, transposePerm(resized, {0, 3, 1, 2}, rewriter, loc));
+    return success();
+  }
+};
+
 // ONNX Gather indexes one axis with an indices tensor of arbitrary rank. TOSA
 // gather has the canonical batched form [N,K,C] x [N,W] -> [N,W,C]. Flatten
 // the dimensions around the gathered axis into N/C, replicate the common ONNX
@@ -3125,6 +3322,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](hip::TileOp op) { return !isTosaExpressibleTile(op); });
     conversion.addDynamicallyLegalOp<hip::PadOp>(
         [](hip::PadOp op) { return !isTosaExpressiblePad(op); });
+    conversion.addDynamicallyLegalOp<hip::ResizeOp>(
+        [](hip::ResizeOp op) { return !isTosaExpressibleResize(op); });
+    conversion.addDynamicallyLegalOp<hip::ConstantOp>(
+        [](hip::ConstantOp op) { return !isTosaExpressibleConstant(op); });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
         [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
@@ -3133,33 +3334,33 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
 
     RewritePatternSet patterns(ctx);
-    patterns.add<ConvConverter, MatMulConverter, GemmConverter,
-                 TransposeConverter, TileConverter, PadConverter,
-                 ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
-                 ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
-                 DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
-                 BinaryConverter<SubOp, tosa::SubOp>,
-                 BinaryConverter<MinOp, tosa::MinimumOp>,
-                 BinaryConverter<MaxOp, tosa::MaximumOp>,
-                 BinaryConverter<MulOp, tosa::MulOp>,
-                 UnaryConverter<AbsOp, tosa::AbsOp>,
-                 UnaryConverter<NegOp, tosa::NegateOp>,
-                 UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
-                 UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>,
-                 UnaryConverter<LogOp, tosa::LogOp, /*FloatOnly=*/true>,
-                 UnaryConverter<SinOp, tosa::SinOp, /*FloatOnly=*/true>,
-                 UnaryConverter<CosOp, tosa::CosOp, /*FloatOnly=*/true>,
-                 UnaryConverter<TanhOp, tosa::TanhOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ErfOp, tosa::ErfOp, /*FloatOnly=*/true>,
-                 UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
-                 UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
-                                /*FloatOnly=*/true>,
-                 SqrtConverter, WhereConverter, LeakyReluConverter,
-                 SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
-                 CastConverter, DequantizeLinearConverter,
-                 QuantizeLinearConverter, MatMulNBitsConverter, GatherConverter,
-                 RopeConverter, GqaConverter, MhaConverter>(ctx);
+    patterns.add<
+        ConvConverter, MatMulConverter, GemmConverter, TransposeConverter,
+        TileConverter, PadConverter, ResizeConverter, ConstantConverter,
+        ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
+        ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
+        DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
+        BinaryConverter<SubOp, tosa::SubOp>,
+        BinaryConverter<MinOp, tosa::MinimumOp>,
+        BinaryConverter<MaxOp, tosa::MaximumOp>,
+        BinaryConverter<MulOp, tosa::MulOp>, UnaryConverter<AbsOp, tosa::AbsOp>,
+        UnaryConverter<NegOp, tosa::NegateOp>,
+        UnaryConverter<CeilOp, tosa::CeilOp, /*FloatOnly=*/true>,
+        UnaryConverter<FloorOp, tosa::FloorOp, /*FloatOnly=*/true>,
+        UnaryConverter<ExpOp, tosa::ExpOp, /*FloatOnly=*/true>,
+        UnaryConverter<LogOp, tosa::LogOp, /*FloatOnly=*/true>,
+        UnaryConverter<SinOp, tosa::SinOp, /*FloatOnly=*/true>,
+        UnaryConverter<CosOp, tosa::CosOp, /*FloatOnly=*/true>,
+        UnaryConverter<TanhOp, tosa::TanhOp, /*FloatOnly=*/true>,
+        UnaryConverter<ErfOp, tosa::ErfOp, /*FloatOnly=*/true>,
+        UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
+        UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
+                       /*FloatOnly=*/true>,
+        SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
+        ReduceSumConverter, ReduceMeanConverter, CastConverter,
+        DequantizeLinearConverter, QuantizeLinearConverter,
+        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
+        MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
