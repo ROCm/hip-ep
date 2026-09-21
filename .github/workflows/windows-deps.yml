@@ -19,9 +19,15 @@ on:
       amdgpu_cache_key:
         description: Cache key holding the amdgpu-ep build artifacts.
         value: ${{ jobs.amdgpu.outputs.cache_key }}
+      amdgpu_artifact_name:
+        description: Artifact name holding the amdgpu-ep fallback artifacts.
+        value: ${{ jobs.amdgpu.outputs.artifact_name }}
       oga_cache_key:
         description: Cache key holding the OGA artifact set.
         value: ${{ jobs.oga.outputs.cache_key }}
+      oga_artifact_name:
+        description: Artifact name holding the OGA fallback artifacts.
+        value: ${{ jobs.oga.outputs.artifact_name }}
 
 permissions:
   contents: read
@@ -53,8 +59,14 @@ jobs:
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
+      artifact_name: ${{ steps.artifact-name.outputs.value }}
 
     steps:
+      - name: Compute fallback artifact name
+        id: artifact-name
+        shell: bash
+        run: echo "value=prebuild-amdgpu-artifacts-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout deps manifest
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -486,7 +498,7 @@ jobs:
       - name: Upload amdgpu-artifacts fallback
         uses: actions/upload-artifact@v4
         with:
-          name: prebuild-amdgpu-artifacts
+          name: ${{ steps.artifact-name.outputs.value }}
           path: ${{ runner.workspace }}/amdgpu-artifacts
           if-no-files-found: error
           retention-days: 1
@@ -508,8 +520,14 @@ jobs:
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
+      artifact_name: ${{ steps.artifact-name.outputs.value }}
 
     steps:
+      - name: Compute fallback artifact name
+        id: artifact-name
+        shell: bash
+        run: echo "value=prebuild-oga-artifacts-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
       - name: Compute cache key
         id: key
         shell: bash
@@ -687,7 +705,7 @@ jobs:
       - name: Upload oga-artifacts fallback
         uses: actions/upload-artifact@v4
         with:
-          name: prebuild-oga-artifacts
+          name: ${{ steps.artifact-name.outputs.value }}
           path: ${{ runner.workspace }}/oga-artifacts
           if-no-files-found: error
           retention-days: 1

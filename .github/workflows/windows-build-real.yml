@@ -19,8 +19,16 @@ on:
         description: Cache key of the prebuilt amdgpu-ep build artifacts.
         required: true
         type: string
+      amdgpu_artifact_name:
+        description: Artifact name of the prebuilt amdgpu-ep fallback artifacts.
+        required: true
+        type: string
       oga_cache_key:
         description: Cache key of the prebuilt OGA artifact set.
+        required: true
+        type: string
+      oga_artifact_name:
+        description: Artifact name of the prebuilt OGA fallback artifacts.
         required: true
         type: string
 
@@ -83,7 +91,7 @@ jobs:
         if: steps.restore-amdgpu.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: prebuild-amdgpu-artifacts
+          name: ${{ inputs.amdgpu_artifact_name }}
           path: ${{ runner.workspace }}/amdgpu-artifacts
 
       - name: Restore oga-artifacts
@@ -97,7 +105,7 @@ jobs:
         if: steps.restore-oga.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: prebuild-oga-artifacts
+          name: ${{ inputs.oga_artifact_name }}
           path: ${{ runner.workspace }}/oga-artifacts
 
       - name: Setup Python 3.14
