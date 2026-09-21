@@ -122,17 +122,23 @@
   ;; Represents a single operation to match in the pattern.
   ;; Corresponds to one line in the :match clause.
   ;;
-  ;; Example input syntax:
+  ;; Example input syntax (single result):
   ;;   (%b = "op2" (%a) () : (!t2) -> !t3)
+  ;;
+  ;; Example input syntax (multiple results):
+  ;;   ((%a %b) = "op2" (%x) () : (!t) -> (!t1 !t2))
   ;;
   (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
     (fields
-      (mutable result-var)     ;; Phase 1: syntax identifier - single result variable
-                               ;;          Example: #'%b
-                               ;; Phase 2: list of syntax identifiers - normalized
-                               ;;          Example: (#'%b) for single result
-                               ;;          Example: (#'%a #'%b) for multiple results
-                               ;; Normalization allows uniform handling of single/multiple results
+      (mutable result-var)     ;; Phase 1 (parse): syntax identifier OR syntax list
+                               ;;          Single: #'%b
+                               ;;          Multiple: #'(%a %b)
+                               ;;          Variadic (future): #'(%a ...)
+                               ;;          Dotted (future): #'(%a %b . %rest)
+                               ;; Phase 2 (validate): list of syntax identifiers (normalized)
+                               ;;          Single becomes: (#'%b)
+                               ;;          Multiple becomes: (#'%a #'%b)
+                               ;; Normalization: syntax->list converts all forms to uniform list
 
       (mutable op-name)        ;; syntax string - operation name to match
                                ;; Example: #'"op2"
