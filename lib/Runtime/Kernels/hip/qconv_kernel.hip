@@ -545,6 +545,254 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_dot_kernel(
 }
 
 //===----------------------------------------------------------------------===//
+// Wave-matrix path (prefill, gfx11 WMMA encoding)
+//===----------------------------------------------------------------------===//
+
+// A 16-bit activation reaches an integer matrix unit as two byte planes, so a
+// MAC group costs two instructions however it is issued. What differs is how
+// much each instruction retires: v_dot4 does 4 MACs per lane, the 16x16x16
+// wave-matrix op does 4096 per wave. This path is issue-bound rather than
+// bandwidth-bound, so collapsing the arithmetic onto the wider instruction is
+// the whole point of it.
+//
+// The tile shapes below mirror the dot-product kernel so the staged layouts
+// stay comparable; only the weight tile is transposed, because a fragment is
+// one channel's run of k and k therefore has to be the fast axis.
+
+typedef int32_t qconv_i32x4 __attribute__((ext_vector_type(4)));
+typedef int32_t qconv_i32x8 __attribute__((ext_vector_type(8)));
+
+#if HIPDNN_HAS_WMMA && !HIPDNN_WMMA_GFX12
+// Both operands are unsigned: the weights are shifted onto the unsigned range
+// by kSignFlip and the activation arrives as raw bytes, whose high plane
+// reaches 255.
+#  define QCONV_WMMA_IU8(a, b, c)                                              \
+    __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(false, (a), false, (b), (c),    \
+                                               false)
+#else
+// Keeps the kernel compilable where the encoding is absent; the launcher never
+// selects it on those targets.
+__device__ inline qconv_i32x8 qconv_wmma_unavailable(qconv_i32x4, qconv_i32x4,
+                                                     qconv_i32x8 c) {
+  return c;
+}
+#  define QCONV_WMMA_IU8(a, b, c) qconv_wmma_unavailable((a), (b), (c))
+#endif
+
+constexpr int kWmmaDim = 16;
+constexpr int kWQuads = kTileK / kDotQuad; // 8, and kWQuads == kDotTileKQ
+constexpr int kWSteps = kTileK / kWmmaDim; // 2
+// 16-row and 16-column tiles one wave accumulates. Two of each keeps the
+// accumulators (two planes of kWFragM*kWFragN eight-register tiles) inside the
+// register budget that holds occupancy, while still amortizing each staged
+// fragment over four matrix ops.
+constexpr int kWFragM = 2;
+constexpr int kWFragN = 2;
+constexpr int kWWavesM = kTileCo / (kWFragM * kWmmaDim); // 2
+constexpr int kWWavesN = kTileP / (kWFragN * kWmmaDim);  // 2
+constexpr int kWmmaBlock = kWWavesM * kWWavesN * HIPDNN_WAVE_SIZE;
+
+// Row stride of every staged tile, in dwords.
+//
+// A fragment load is a single 128-bit read, so the stride has to keep rows
+// 16-byte aligned, which means a multiple of four dwords. The 16 rows a wave
+// reads then land on gcd(stride, 32) distinct banks, and no 4-dword-aligned
+// stride reaches 16 of them -- but the wave only asks for 64 distinct dwords
+// against 32 banks, so two cycles is the floor regardless. 12 attains it; 8
+// would quarter the banks and cost four.
+constexpr int kWLdsStride = kWQuads + 4;
+static_assert(kWLdsStride * sizeof(uint32_t) % 16 == 0,
+              "fragment rows must stay 16-byte aligned");
+static_assert(kTileP == kTileCo,
+              "one thread reduces one column of both staged tiles");
+
+// OUT[n, co, p] as in the dot-product kernel, with the reduction issued as
+// 16x16x16 integer matrix ops over the same staged tiles.
+//
+// Grid: (ceil(P/kTileP), ceil(Cout/kTileCo), batch). Block: kWmmaBlock.
+template <typename TAct, int WBits, bool WSigned>
+__global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
+    const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
+    const float *__restrict__ weight_scales,
+    const uint8_t *__restrict__ weight_zero_points,
+    const float *__restrict__ bias, TAct *__restrict__ output,
+    int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+    float act_out_scale_ratio, int32_t input_zp, float inv_output_scale,
+    int32_t output_zp) {
+  static_assert(sizeof(TAct) <= 2, "activation splits into two bytes");
+  constexpr int kWElems = 32 / WBits;
+  constexpr int kWordsPerRow = kTileK / kWElems;
+  constexpr int kWordRepeats = (kTileCo * kWordsPerRow) / kWmmaBlock;
+  constexpr int kXQRepeats = (kTileP * kWQuads) / kWmmaBlock;
+  static_assert(kTileCo * kWordsPerRow == kWordRepeats * kWmmaBlock,
+                "w word slab must divide");
+  static_assert(kTileP * kWQuads == kXQRepeats * kWmmaBlock,
+                "x quad slab must divide");
+  constexpr uint32_t kSignFlip =
+      WSigned ? (WBits == 4 ? 0x88888888u : 0x80808080u) : 0u;
+  constexpr int kZeroBias = WSigned ? (1 << (WBits - 1)) : 0;
+  constexpr uint32_t kOnes = 0x01010101u;
+  // Quad rows one thread folds into a column sum; two threads cover a column.
+  constexpr int kRedQuads = kWQuads / 2;
+
+  __shared__ uint32_t xh_lds[kTileP][kWLdsStride];
+  __shared__ uint32_t xl_lds[kTileP][kWLdsStride];
+  __shared__ uint32_t w_lds[kTileCo][kWLdsStride];
+  __shared__ int32_t sx_hi_lds[2][kTileP];
+  __shared__ int32_t sx_lo_lds[2][kTileP];
+  __shared__ int32_t cw_lds[2][kTileCo];
+
+  const int64_t n = blockIdx.z;
+  const int64_t p_base = static_cast<int64_t>(blockIdx.x) * kTileP;
+  const int64_t co_base = static_cast<int64_t>(blockIdx.y) * kTileCo;
+
+  const int tid = threadIdx.x;
+  const int lane = tid % HIPDNN_WAVE_SIZE;
+  const int lane16 = lane % kWmmaDim;
+  const int pair = lane / kWmmaDim;
+  const int wave = tid / HIPDNN_WAVE_SIZE;
+  const int co_frag0 = (wave % kWWavesM) * kWFragM * kWmmaDim;
+  const int p_frag0 = (wave / kWWavesM) * kWFragN * kWmmaDim;
+
+  const TAct *x_n = input + n * in_channels * spatial_size;
+  TAct *y_n = output + n * out_channels * spatial_size;
+
+  const int red_col = tid % kTileP;
+  const int red_half = tid / kTileP;
+  const int red_q0 = red_half * kRedQuads;
+
+  qconv_i32x8 acc_hi[kWFragM][kWFragN];
+  qconv_i32x8 acc_lo[kWFragM][kWFragN];
+#pragma unroll
+  for (int i = 0; i < kWFragM; ++i)
+#pragma unroll
+    for (int j = 0; j < kWFragN; ++j) {
+      acc_hi[i][j] = static_cast<qconv_i32x8>(0);
+      acc_lo[i][j] = static_cast<qconv_i32x8>(0);
+    }
+
+  int32_t sx_hi = 0;
+  int32_t sx_lo = 0;
+  int32_t cw_part = 0;
+
+  for (int64_t k0 = 0; k0 < in_channels; k0 += kTileK) {
+#pragma unroll
+    for (int rep = 0; rep < kXQRepeats; ++rep) {
+      const int lin = rep * kWmmaBlock + tid;
+      const int sq = lin / kTileP;
+      const int sp = lin % kTileP;
+      const int64_t p = p_base + sp;
+      uint32_t hi = 0;
+      uint32_t lo = 0;
+#pragma unroll
+      for (int i = 0; i < kDotQuad; ++i) {
+        const int64_t k = k0 + qconv_dot_k<WBits>(sq, i);
+        const uint32_t v = (k < in_channels && p < spatial_size)
+                               ? static_cast<uint32_t>(x_n[k * spatial_size + p])
+                               : 0u;
+        hi |= (v >> 8) << (8 * i);
+        lo |= (v & 0xFFu) << (8 * i);
+      }
+      xh_lds[sp][sq] = hi;
+      xl_lds[sp][sq] = lo;
+    }
+
+#pragma unroll
+    for (int rep = 0; rep < kWordRepeats; ++rep) {
+      const int widx = rep * kWmmaBlock + tid;
+      const int sc = widx / kWordsPerRow;
+      const int wq = widx % kWordsPerRow;
+      const int64_t co = co_base + sc;
+      const int64_t k = k0 + wq * kWElems;
+      const uint32_t word =
+          (co < out_channels && k < in_channels)
+              ? reinterpret_cast<const uint32_t *>(
+                    weights)[(co * in_channels + k) / kWElems] ^
+                    kSignFlip
+              : 0u;
+      if constexpr (WBits == 4) {
+        w_lds[sc][2 * wq] = word & 0x0F0F0F0Fu;
+        w_lds[sc][2 * wq + 1] = (word >> 4) & 0x0F0F0F0Fu;
+      } else {
+        w_lds[sc][wq] = word;
+      }
+    }
+
+    __syncthreads();
+
+    // Column sums for the zero-point correction. The matrix ops cannot produce
+    // them, so they stay on the dot product, which is cheap at one pass over
+    // the staged tiles against a vector of ones.
+#pragma unroll
+    for (int r = 0; r < kRedQuads; ++r) {
+      sx_hi = qconv_dot4(xh_lds[red_col][red_q0 + r], kOnes, sx_hi);
+      sx_lo = qconv_dot4(xl_lds[red_col][red_q0 + r], kOnes, sx_lo);
+      cw_part = qconv_dot4(w_lds[red_col][red_q0 + r], kOnes, cw_part);
+    }
+
+#pragma unroll
+    for (int s = 0; s < kWSteps; ++s) {
+      qconv_i32x4 a[kWFragM];
+      qconv_i32x4 bh[kWFragN];
+      qconv_i32x4 bl[kWFragN];
+#pragma unroll
+      for (int i = 0; i < kWFragM; ++i)
+        a[i] = *reinterpret_cast<const qconv_i32x4 *>(
+            &w_lds[co_frag0 + i * kWmmaDim + lane16][s * kDotQuad]);
+#pragma unroll
+      for (int j = 0; j < kWFragN; ++j) {
+        const int row = p_frag0 + j * kWmmaDim + lane16;
+        bh[j] = *reinterpret_cast<const qconv_i32x4 *>(&xh_lds[row][s * kDotQuad]);
+        bl[j] = *reinterpret_cast<const qconv_i32x4 *>(&xl_lds[row][s * kDotQuad]);
+      }
+#pragma unroll
+      for (int i = 0; i < kWFragM; ++i)
+#pragma unroll
+        for (int j = 0; j < kWFragN; ++j) {
+          acc_hi[i][j] = QCONV_WMMA_IU8(a[i], bh[j], acc_hi[i][j]);
+          acc_lo[i][j] = QCONV_WMMA_IU8(a[i], bl[j], acc_lo[i][j]);
+        }
+    }
+
+    __syncthreads();
+  }
+
+  sx_hi_lds[red_half][red_col] = sx_hi;
+  sx_lo_lds[red_half][red_col] = sx_lo;
+  cw_lds[red_half][red_col] = cw_part;
+  __syncthreads();
+
+#pragma unroll
+  for (int j = 0; j < kWFragN; ++j) {
+    const int p_local = p_frag0 + j * kWmmaDim + lane16;
+    const int64_t p = p_base + p_local;
+    if (p >= spatial_size)
+      continue;
+    const int64_t sx =
+        256LL * (sx_hi_lds[0][p_local] + sx_hi_lds[1][p_local]) +
+        (sx_lo_lds[0][p_local] + sx_lo_lds[1][p_local]);
+#pragma unroll
+    for (int i = 0; i < kWFragM; ++i)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int co_local = co_frag0 + i * kWmmaDim + 2 * e + pair;
+        const int64_t co = co_base + co_local;
+        if (co >= out_channels)
+          continue;
+        const int32_t sw = cw_lds[0][co_local] + cw_lds[1][co_local];
+        const int64_t zw =
+            qconv_read_quant(weight_zero_points, co, WBits, WSigned) + kZeroBias;
+        const int64_t total = 256LL * acc_hi[i][j][e] + acc_lo[i][j][e] -
+                              zw * sx - static_cast<int64_t>(input_zp) * sw +
+                              in_channels * static_cast<int64_t>(input_zp) * zw;
+        const float m_co = act_out_scale_ratio * weight_scales[co];
+        y_n[co * spatial_size + p] = qconv_epilogue<TAct>(
+            total, m_co, bias, co, inv_output_scale, output_zp);
+      }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // GEMV path (small spatial_size, i.e. LLM decode)
 //===----------------------------------------------------------------------===//
 
@@ -770,6 +1018,24 @@ __global__ __launch_bounds__(kGemvBlock) void qconv_gemv_packed_kernel(
 // a correctness boundary: either kernel computes any shape.
 constexpr int64_t kGemvSpatialThreshold = 8;
 
+// Whether the device uses the gfx11 wave-matrix fragment encoding, in which an
+// A/B operand carries the whole of K=16 replicated across the wave's two lane
+// halves. gfx12 splits K between the halves instead, so the same kernel would
+// read the wrong elements there, and gfx9 has no such instruction at all.
+static bool device_has_gfx11_wmma() {
+  static const bool ok = [] {
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess)
+      return false;
+    const char *arch = prop.gcnArchName;
+    return arch[0] == 'g' && arch[1] == 'f' && arch[2] == 'x' &&
+           arch[3] == '1' && arch[4] == '1';
+  }();
+  return ok;
+}
+
 template <typename TAct>
 int launch_qconv(hipStream_t stream, const void *input, const void *weights,
                  const void *weight_scales, const void *weight_zero_points,
@@ -857,9 +1123,26 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
                      in_channels, out_channels, spatial_size,                  \
                      act_out_scale_ratio, input_zp, inv_output_scale,          \
                      output_zp)
+    // The wave-matrix body reads the same staged tiles as the dot-product one
+    // and accumulates in the same int32, so it inherits both of those
+    // preconditions and only adds the encoding requirement.
+    const bool wmma_capable = dot_capable && device_has_gfx11_wmma();
+
+#define QCONV_LAUNCH_WMMA(BITS, SIGNED)                                        \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_wmma_kernel<TAct, BITS,       \
+                                                             SIGNED>),         \
+                     grid, dim3(kWmmaBlock), 0, stream, x, w, ws, wzp, b, y,   \
+                     in_channels, out_channels, spatial_size,                  \
+                     act_out_scale_ratio, input_zp, inv_output_scale,          \
+                     output_zp)
+
 #define QCONV_LAUNCH_TILED_BITS(BITS)                                          \
   do {                                                                         \
-    if (dot_capable && weight_signed)                                          \
+    if (wmma_capable && weight_signed)                                         \
+      QCONV_LAUNCH_WMMA(BITS, true);                                           \
+    else if (wmma_capable)                                                     \
+      QCONV_LAUNCH_WMMA(BITS, false);                                          \
+    else if (dot_capable && weight_signed)                                     \
       QCONV_LAUNCH_TILED(qconv_tiled_dot_kernel, BITS, true);                  \
     else if (dot_capable)                                                      \
       QCONV_LAUNCH_TILED(qconv_tiled_dot_kernel, BITS, false);                 \
@@ -875,6 +1158,7 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
       QCONV_LAUNCH_TILED_BITS(8);
 
 #undef QCONV_LAUNCH_TILED_BITS
+#undef QCONV_LAUNCH_WMMA
 #undef QCONV_LAUNCH_TILED
   }
   return 0;
