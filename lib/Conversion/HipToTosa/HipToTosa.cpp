@@ -1482,8 +1482,14 @@ struct TileConverter final : public OpConversionPattern<hip::TileOp> {
       return rewriter.notifyMatchFailure(op, "not a tosa-expressible tile");
 
     auto resultType = cast<RankedTensorType>(op.getResult(0).getType());
+    // Read the operand the legality predicate read, not the adaptor's: the
+    // repeats only become a multiples attribute, never an operand of the op
+    // being built, so there is nothing to gain from the remapped value and a
+    // materialization standing in its place would make the extraction fail
+    // here after the predicate had already claimed the op.
     SmallVector<int64_t, 4> repeats;
-    (void)extractConstantInts(adaptor.getRepeats(), repeats);
+    if (!extractConstantInts(op.getRepeats(), repeats))
+      return rewriter.notifyMatchFailure(op, "repeats must be constant");
     rewriter.replaceOp(op, tileMultiples(adaptor.getInput(), repeats,
                                          resultType.getShape(), rewriter,
                                          op.getLoc()));
@@ -1602,8 +1608,14 @@ static bool matchPadConstant(hip::PadOp op, Type elementType, double &fpFill,
     return false;
   }
 
+  // A splat collapses to its single value whatever its extent, which is what
+  // the float path above already accepts. Requiring exactly one element here
+  // instead would decline an integer fill spelled dense<5> : tensor<4xi32>
+  // while converting the f32 spelling of the same thing.
   SmallVector<int64_t, 1> ints;
-  if (!extractConstantInts(cval, ints) || ints.size() != 1)
+  if (!extractConstantInts(cval, ints) || ints.empty())
+    return false;
+  if (!llvm::all_equal(ints))
     return false;
   intFill = ints.front();
   return true;

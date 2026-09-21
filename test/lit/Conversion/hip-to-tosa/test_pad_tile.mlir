@@ -162,6 +162,39 @@ func.func @pad_integer(%ctx: !hip.context, %x: tensor<4xi32>,
   return %r : tensor<7xi32>
 }
 
+// A splat holds one value however many elements it is spelled with, so it
+// collapses to the one-element pad_const the same way a rank-0 fill does.
+// The float and integer fills accept the same shapes.
+// CHECK-LABEL: func.func @pad_splat_cval
+// CHECK: %[[PCF:.*]] = "tosa.const"() <{values = dense<2.500000e+00> : tensor<1xf32>}>
+// CHECK: tosa.pad %arg1, %{{.*}}, %[[PCF]]
+func.func @pad_splat_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
+                          %init: tensor<4x9xf32>) -> tensor<4x9xf32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[1, 3, 2, 4]> : tensor<4xi64>
+  %cval = arith.constant dense<2.500000e+00> : tensor<2xf32>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<1x2xf32>, tensor<4xi64>)
+                     cval(%cval : tensor<2xf32>)
+                     outs(%init : tensor<4x9xf32>)
+                     {mode = "constant"} : tensor<4x9xf32>
+  return %r : tensor<4x9xf32>
+}
+
+// CHECK-LABEL: func.func @pad_int_splat_cval
+// CHECK: %[[PCI:.*]] = "tosa.const"() <{values = dense<5> : tensor<1xi32>}>
+// CHECK: tosa.pad %arg1, %{{.*}}, %[[PCI]]
+func.func @pad_int_splat_cval(%ctx: !hip.context, %x: tensor<4xi32>,
+                              %init: tensor<7xi32>) -> tensor<7xi32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[1, 2]> : tensor<2xi64>
+  %cval = arith.constant dense<5> : tensor<4xi32>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<4xi32>, tensor<2xi64>)
+                     cval(%cval : tensor<4xi32>)
+                     outs(%init : tensor<7xi32>)
+                     {mode = "constant"} : tensor<7xi32>
+  return %r : tensor<7xi32>
+}
+
 //===----------------------------------------------------------------------===//
 // The rock.kernel guard, which is a property of the pass rather than of any
 // one op.
@@ -279,6 +312,22 @@ func.func @pad_non_splat_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
                      outs(%init : tensor<4x9xf32>)
                      {mode = "constant"} : tensor<4x9xf32>
   return %r : tensor<4x9xf32>
+}
+
+// Distinct values have nothing to collapse to on the integer side either.
+// CHECK-LABEL: func.func @pad_non_splat_int_cval
+// CHECK: hip.pad
+// CHECK-NOT: tosa.pad
+func.func @pad_non_splat_int_cval(%ctx: !hip.context, %x: tensor<4xi32>,
+                                  %init: tensor<7xi32>) -> tensor<7xi32>
+    attributes {rock.kernel} {
+  %pads = arith.constant dense<[1, 2]> : tensor<2xi64>
+  %cval = arith.constant dense<[1, 2]> : tensor<2xi32>
+  %r = hip.pad(%ctx) ins(%x, %pads : tensor<4xi32>, tensor<2xi64>)
+                     cval(%cval : tensor<2xi32>)
+                     outs(%init : tensor<7xi32>)
+                     {mode = "constant"} : tensor<7xi32>
+  return %r : tensor<7xi32>
 }
 
 // A fill whose type does not match the tensor it fills is not read either.
