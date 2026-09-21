@@ -15,7 +15,9 @@
 //
 // These helpers fold compile-time constants (no device traffic) and otherwise
 // emit `hip.readback_scalar` (D2H + stream sync) so the host observes what the
-// producing kernel actually wrote.
+// producing kernel actually wrote. That wait is a HIP-graph break; do not
+// delete it to keep a GPU-only extent while hip.alloc_output still needs a
+// host index (docs/design/hip-graph-capture.md).
 //
 //   Before:  %v = tensor.extract %t[]              // host load of device mem
 //   After:   %v = hip.readback_scalar(%ctx, %t : tensor<i64>) -> i64

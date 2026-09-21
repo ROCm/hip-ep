@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-07-24
 **Document Type:** Design
 **Status:** Implemented
-**Related:** [unranked-tensor-handling.md](unranked-tensor-handling.md), [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [output-allocator-design.md](output-allocator-design.md), [compiler-runtime-contract.md](compiler-runtime-contract.md), [pipeline_pass_menu.md](../pipeline_pass_menu.md)
+**Related:** [unranked-tensor-handling.md](unranked-tensor-handling.md), [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [output-allocator-design.md](output-allocator-design.md), [compiler-runtime-contract.md](compiler-runtime-contract.md), [hip-graph-capture.md](hip-graph-capture.md), [pipeline_pass_menu.md](../pipeline_pass_menu.md)
 
 ## Purpose
 
@@ -190,6 +190,8 @@ Canonicalization and CSE run immediately afterward to fold dimensions made stati
 Static refinements propagate into bufferization sizing and downstream pool planning. For graph outputs they may also simplify `hip.alloc_output` shape operands; extents that remain dynamic are represented as `-1` in model metadata and are sized in-graph at runtime. Runtime-dependent counts such as `hip.nonzero` remain dynamic at both levels.
 
 A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
+
+That synchronized readback is a HIP-graph break. Do not try to keep Compress / Range / dynamic Pad output extents on the GPU while `hip.alloc_output` still needs a host `index`. Policy: [hip-graph-capture.md](hip-graph-capture.md).
 
 ## Pre-conversion loop-body rank inference
 

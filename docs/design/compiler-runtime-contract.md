@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-03-05
 **Document Type:** Design
 **Status:** Draft
-**Related:** [constant-handling-design.md](constant-handling-design.md), [morphizen-ep-integration.md](morphizen-ep-integration.md)
+**Related:** [constant-handling-design.md](constant-handling-design.md), [morphizen-ep-integration.md](morphizen-ep-integration.md), [hip-graph-capture.md](hip-graph-capture.md)
 
 ---
 
@@ -210,3 +210,4 @@ described as part of `__metadata_blob`.
 - [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) — generated-code-only pool attributes and runtime calls
 - [morphizen-ep-integration.md](morphizen-ep-integration.md) — JIT loader contract; `inference_init` public interface
 - [compilation-options.md](compilation-options.md) — `constants_file` compilation option
+- [hip-graph-capture.md](hip-graph-capture.md) — which host readbacks stay as HIP-graph breaks; do not drop the `hip.alloc_output` host extent
