@@ -126,11 +126,19 @@
   ;; parse-match-operation - Parse one match operation
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Handles 4 syntax variants (attributes and types are optional):
-  ;;   1. Full:    (result = "op" (operands) (attrs) : (types) -> type)
-  ;;   2. No attrs: (result = "op" (operands) : (types) -> type)
-  ;;   3. No types: (result = "op" (operands) (attrs))
-  ;;   4. Minimal:  (result = "op" (operands))
+  ;; Result syntax (all supported):
+  ;;   - Single result:     %r = "op" (...)
+  ;;   - Multiple results:  (%a %b) = "op" (...)
+  ;;   - Variadic (future): (%a ...) = "op" (...)      [not validated yet]
+  ;;   - Dotted (future):   (%a %b . %rest) = "op" (...) [not validated yet]
+  ;;
+  ;; Attributes and types are optional (4 variants for each result form):
+  ;;   1. Full:     result = "op" (operands) (attrs) : (types) -> type
+  ;;   2. No attrs: result = "op" (operands) : (types) -> type
+  ;;   3. No types: result = "op" (operands) (attrs)
+  ;;   4. Minimal:  result = "op" (operands)
+  ;;
+  ;; Parser accepts result as-is (identifier or list), validation normalizes.
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;

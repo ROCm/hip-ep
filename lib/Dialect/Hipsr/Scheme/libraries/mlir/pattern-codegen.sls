@@ -2,7 +2,8 @@
 (library (mlir pattern-codegen)
   (export generate-code)
   (import (rnrs)
-          (for (only (chezscheme) syntax->list) expand)
+          (for (only (chezscheme) syntax->list syntax->datum) expand)
+          (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
           (for (mlir pattern-analyze) expand))  ; for binding-manager-bindings
 
@@ -95,7 +96,15 @@
            [binding-mgr (ast-pattern-expand-match-bindings ast-rec)]
            [actions (ast-pattern-expand-match-actions ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
+           [root-op-name (ast-pattern-expand-root-op-name ast-rec)]
            [num-ops (vector-length match-vec)]
+
+           ;; Find root operation to get all its result variables
+           [root-op (find-root-op match-vec root-op-name)]
+           [root-result-vars (ast-match-expand-result-var root-op)]
+
+           ;; Generate root initialization code (bind all result variables)
+           [root-inits (generate-root-inits root-result-vars)]
 
            ;; Collect all variables from binding manager
            [all-vars (collect-all-variables binding-mgr)]
@@ -104,21 +113,45 @@
            [check-code (generate-check-code actions match-vec)])
 
       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
-                    [root root-var]
                     [(var ...) all-vars]
                     [num-operations num-ops]
+                    [(root-init ...) root-inits]
                     [checks check-code])
         #'(define fname
             (lambda (op operands-ref rewriter type-converter)
               (let ([var (make-unbound-value)] ...
                     [all-operations (make-vector num-operations (make-unbound-value))])
-                ;; Bind root variable to first result of input operation
-                (set! root (mlir-operation-get-result op 0))
+                ;; Bind all result variables of root operation
+                root-init ...
 
                 ;; Match pattern and rewrite if successful
                 (if checks
                     (error 'todo "rewrite not implemented yet")
                     #f)))))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate root initialization statements
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; For each root result variable, generate: (set! var (mlir-operation-get-result op idx))
+  ;;
+  (define (generate-root-inits root-result-vars)
+    (loop :for var :in root-result-vars
+          :for idx :from 0
+          :collect #`(set! #,var (mlir-operation-get-result op #,idx))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Find root operation by name
+  ;;-----------------------------------------------------------------------
+
+  (define (find-root-op match-vec root-op-name-stx)
+    (let ([root-op-name (syntax->datum root-op-name-stx)])
+      (loop :initially := #f
+            :for idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec idx)
+            :rime-with op-name := (syntax->datum (ast-match-expand-op-name match-op))
+            :when (string=? op-name root-op-name)
+            :break match-op)))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Collect all variables from binding manager

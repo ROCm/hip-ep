@@ -73,8 +73,15 @@
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
             :rime-with result-var := (ast-match-expand-result-var match-op)
-            :when (identifier? result-var)
-            :do (ast-match-expand-result-var-set! match-op (list result-var)))))
+            :do (cond
+                  ;; Single identifier: %r → (#'%r)
+                  [(identifier? result-var)
+                   (ast-match-expand-result-var-set! match-op (list result-var))]
+
+                  ;; List syntax: #'(%a %b) → (#'%a #'%b)
+                  ;; Also handles future variadic: #'(%a ...) and dotted: #'(%a . %rest)
+                  [else
+                   (ast-match-expand-result-var-set! match-op (syntax->list result-var))]))))
 
   (define (normalize-match-op-names ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
