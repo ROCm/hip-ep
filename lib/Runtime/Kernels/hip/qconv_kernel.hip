@@ -643,8 +643,16 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
   __shared__ int32_t cw_lds[2][kTileCo];
 
   const int64_t n = blockIdx.z;
-  const int64_t p_base = static_cast<int64_t>(blockIdx.x) * kTileP;
-  const int64_t co_base = static_cast<int64_t>(blockIdx.y) * kTileCo;
+  // The launcher guarantees every index formed below fits an unsigned 32-bit
+  // offset from a wave-uniform base, which is the addressing mode a global
+  // load takes directly. The 64-bit form costs an add pair per address, and
+  // once the arithmetic collapses onto the matrix unit that staging overhead
+  // is what is left.
+  const uint32_t ss = static_cast<uint32_t>(spatial_size);
+  const uint32_t ic = static_cast<uint32_t>(in_channels);
+  const uint32_t oc = static_cast<uint32_t>(out_channels);
+  const uint32_t p_base = blockIdx.x * kTileP;
+  const uint32_t co_base = blockIdx.y * kTileCo;
 
   const int tid = threadIdx.x;
   const int lane = tid % HIPDNN_WAVE_SIZE;
@@ -675,20 +683,22 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
   int32_t sx_lo = 0;
   int32_t cw_part = 0;
 
-  for (int64_t k0 = 0; k0 < in_channels; k0 += kTileK) {
+  for (uint32_t k0 = 0; k0 < ic; k0 += kTileK) {
 #pragma unroll
     for (int rep = 0; rep < kXQRepeats; ++rep) {
       const int lin = rep * kWmmaBlock + tid;
       const int sq = lin / kTileP;
       const int sp = lin % kTileP;
-      const int64_t p = p_base + sp;
+      const uint32_t p = p_base + sp;
+      const bool p_ok = p < ss;
       uint32_t hi = 0;
       uint32_t lo = 0;
 #pragma unroll
       for (int i = 0; i < kDotQuad; ++i) {
-        const int64_t k = k0 + qconv_dot_k<WBits>(sq, i);
-        const uint32_t v = (k < in_channels && p < spatial_size)
-                               ? static_cast<uint32_t>(x_n[k * spatial_size + p])
+        const uint32_t k =
+            k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(sq, i));
+        const uint32_t v = (k < ic && p_ok)
+                               ? static_cast<uint32_t>(x_n[k * ss + p])
                                : 0u;
         hi |= (v >> 8) << (8 * i);
         lo |= (v & 0xFFu) << (8 * i);
@@ -702,12 +712,12 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
       const int widx = rep * kWmmaBlock + tid;
       const int sc = widx / kWordsPerRow;
       const int wq = widx % kWordsPerRow;
-      const int64_t co = co_base + sc;
-      const int64_t k = k0 + wq * kWElems;
+      const uint32_t co = co_base + sc;
+      const uint32_t k = k0 + wq * kWElems;
       const uint32_t word =
-          (co < out_channels && k < in_channels)
-              ? reinterpret_cast<const uint32_t *>(
-                    weights)[(co * in_channels + k) / kWElems] ^
+          (co < oc && k < ic)
+              ? reinterpret_cast<const uint32_t *>(weights)[(co * ic + k) /
+                                                            kWElems] ^
                     kSignFlip
               : 0u;
       if constexpr (WBits == 4) {
@@ -765,8 +775,8 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
 #pragma unroll
   for (int j = 0; j < kWFragN; ++j) {
     const int p_local = p_frag0 + j * kWmmaDim + lane16;
-    const int64_t p = p_base + p_local;
-    if (p >= spatial_size)
+    const uint32_t p = p_base + p_local;
+    if (p >= ss)
       continue;
     const int64_t sx =
         256LL * (sx_hi_lds[0][p_local] + sx_hi_lds[1][p_local]) +
@@ -776,8 +786,8 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
 #pragma unroll
       for (int e = 0; e < 8; ++e) {
         const int co_local = co_frag0 + i * kWmmaDim + 2 * e + pair;
-        const int64_t co = co_base + co_local;
-        if (co >= out_channels)
+        const uint32_t co = co_base + co_local;
+        if (co >= oc)
           continue;
         const int32_t sw = cw_lds[0][co_local] + cw_lds[1][co_local];
         const int64_t zw =
@@ -786,8 +796,8 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
                               zw * sx - static_cast<int64_t>(input_zp) * sw +
                               in_channels * static_cast<int64_t>(input_zp) * zw;
         const float m_co = act_out_scale_ratio * weight_scales[co];
-        y_n[co * spatial_size + p] = qconv_epilogue<TAct>(
-            total, m_co, bias, co, inv_output_scale, output_zp);
+        y_n[co * ss + p] = qconv_epilogue<TAct>(total, m_co, bias, co,
+                                                inv_output_scale, output_zp);
       }
   }
 }
@@ -1125,8 +1135,18 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
                      output_zp)
     // The wave-matrix body reads the same staged tiles as the dot-product one
     // and accumulates in the same int32, so it inherits both of those
-    // preconditions and only adds the encoding requirement.
-    const bool wmma_capable = dot_capable && device_has_gfx11_wmma();
+    // preconditions. It adds two: the gfx11 fragment encoding, and every
+    // global index fitting an unsigned 32-bit offset from a wave-uniform
+    // base. The second is what lets a staging load address in one instruction
+    // instead of an add pair, and it holds for any shape a decoder pipeline
+    // produces -- it takes a weight matrix or an activation plane past four
+    // billion elements to break.
+    constexpr int64_t kMaxOffset = 0xFFFFFFFF;
+    const bool offsets_fit = in_channels * spatial_size <= kMaxOffset &&
+                             out_channels * spatial_size <= kMaxOffset &&
+                             out_channels * in_channels <= kMaxOffset;
+    const bool wmma_capable =
+        dot_capable && offsets_fit && device_has_gfx11_wmma();
 
 #define QCONV_LAUNCH_WMMA(BITS, SIGNED)                                        \
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_wmma_kernel<TAct, BITS,       \
