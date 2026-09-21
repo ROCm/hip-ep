@@ -1,6 +1,7 @@
 #!r6rs
 (library (mlir pattern-analyze)
-  (export analyze-ast)
+  (export analyze-ast
+          binding-manager-bindings)
   (import (rnrs)
           (only (chezscheme) syntax->list format printf)
           (for (rename (rime loop) (:with :rime-with)) expand)
@@ -53,6 +54,7 @@
            [acc '()])
 
       ;; Named let for DAG traversal
+      ;; Precondition: result-var must be bound (used to navigate to operation)
       (let traverse ([op-idx root-op-idx]
                      [result-var root-var])
         (unless (vector-ref visited op-idx)
@@ -72,9 +74,8 @@
             (loop :for res-var :in (ast-match-expand-result-var match-op)
                   :for result-idx :from 0
                   :rime-with result-entry := (find-binding-entry binding-mgr res-var)
-                  :do (begin
-                        (set! acc (cons (action:bind-result op-idx result-idx res-var) acc))
-                        (binding-entry-bound?-set! result-entry #t)))
+                  :do (binding-entry-bound?-set! result-entry #t))
+                    
 
             ;; Process operands - handle all 4 cases
             (loop :for operand :in operands
@@ -91,14 +92,16 @@
                         [(and is-bound (not is-result))
                          (set! acc (cons (action:check-eq op-idx operand-idx operand) acc))]
 
-                        ;; Case 3: NOT is-bound AND is-result → recurse to producer
+                        ;; Case 3: NOT is-bound AND is-result → bind first, then recurse to producer
                         [(and (not is-bound) is-result)
+                         (set! acc (cons (action:bind-operand op-idx operand-idx operand) acc))
+                         (binding-entry-bound?-set! entry #t)
                          (let ([producer-op-idx (find-operation-by-result match-vec operand)])
                            (traverse producer-op-idx operand))]
 
                         ;; Case 4: NOT is-bound AND NOT is-result → bind free variable
                         [(and (not is-bound) (not is-result))
-                         (set! acc (cons (action:bind-operand op-idx operand) acc))
+                         (set! acc (cons (action:bind-operand op-idx operand-idx operand) acc))
                          (binding-entry-bound?-set! entry #t)])))))
 
       ;; Warn about unvisited operations
