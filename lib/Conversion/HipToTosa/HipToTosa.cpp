@@ -1532,8 +1532,12 @@ Value unpackInt4LastDim(Value packed, ConversionPatternRewriter &rewriter,
   Value mask = createSplatInt(rewriter, loc, i32Ty, 0x0F);
   Value shift = createSplatInt(rewriter, loc, i32Ty, 4);
   Value lo = tosa::BitwiseAndOp::create(rewriter, loc, i32Ty, asI32, mask);
+  // tosa.cast sign-extends signless storage, so for a byte >= 0x80 the shift
+  // pulls copies of the sign bit down into the high nibble. Mask after
+  // shifting; this is a no-op for ui8 operands, which zero-extend instead.
   Value hi =
       tosa::LogicalRightShiftOp::create(rewriter, loc, i32Ty, asI32, shift);
+  hi = tosa::BitwiseAndOp::create(rewriter, loc, i32Ty, hi, mask);
 
   SmallVector<int64_t> unsqueeze(i32Ty.getShape().begin(),
                                  i32Ty.getShape().end());
@@ -1716,6 +1720,247 @@ struct MatMulNBitsConverter final
     }
 
     rewriter.replaceOp(op, y);
+    return success();
+  }
+};
+
+// Shape and storage plan for hip.gather_block_quantized. The legality gate and
+// the rewrite both derive it from the same function so the set of shapes the
+// pass claims cannot drift from the set it can actually emit.
+struct GbqPlan {
+  int64_t vocab;       // gathered extent of `data` (axis 0)
+  int64_t mid;         // product of the dims between gather and quantize axes
+  int64_t dataLast;    // storage extent of the quantized axis (bytes)
+  int64_t scalesLast;  // per-block extent of the quantized axis
+  int64_t logicalLast; // scalesLast * block_size
+  int64_t rows;        // indices count * mid
+  int64_t w;           // indices count
+  int64_t bits;
+  int64_t blockSize;
+  bool isUnsigned;
+};
+
+std::optional<GbqPlan>
+planGatherBlockQuantized(hip::GatherBlockQuantizedOp op) {
+  if (op.getNumResults() != 1)
+    return std::nullopt;
+
+  auto dataTy = dyn_cast<RankedTensorType>(op.getData().getType());
+  auto indicesTy = dyn_cast<RankedTensorType>(op.getIndices().getType());
+  auto scalesTy = dyn_cast<RankedTensorType>(op.getScales().getType());
+  auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!dataTy || !indicesTy || !scalesTy || !resultTy ||
+      !dataTy.hasStaticShape() || !indicesTy.hasStaticShape() ||
+      !scalesTy.hasStaticShape() || !resultTy.hasStaticShape())
+    return std::nullopt;
+
+  GbqPlan plan;
+  plan.bits = op.getBits();
+  if (plan.bits != 4 && plan.bits != 8)
+    return std::nullopt;
+
+  plan.blockSize = op.getBlockSize();
+  if (plan.blockSize < 16 || (plan.blockSize & (plan.blockSize - 1)) != 0)
+    return std::nullopt;
+
+  int64_t rank = dataTy.getRank();
+  if (rank < 2 || scalesTy.getRank() != rank)
+    return std::nullopt;
+
+  // gather_axis == 0 is what ONNX mandates for uint8 data and is the quantized
+  // embedding lookup the op exists for. quantize_axis must be the trailing
+  // axis, which is where sub-byte values are packed.
+  int64_t gatherAxis = op.getGatherAxis();
+  if (gatherAxis < 0)
+    gatherAxis += rank;
+  int64_t quantizeAxis = op.getQuantizeAxis();
+  if (quantizeAxis < 0)
+    quantizeAxis += rank;
+  if (gatherAxis != 0 || quantizeAxis != rank - 1)
+    return std::nullopt;
+
+  if (!isa<IntegerType>(dataTy.getElementType()) ||
+      !isa<IntegerType>(indicesTy.getElementType()) ||
+      !isa<FloatType>(scalesTy.getElementType()))
+    return std::nullopt;
+
+  // TOSA has no f64 tensor type; decline rather than emit unverifiable ops.
+  Type outElem = resultTy.getElementType();
+  if (!outElem.isF32() && !outElem.isF16() && !outElem.isBF16())
+    return std::nullopt;
+
+  plan.vocab = dataTy.getDimSize(0);
+  if (scalesTy.getDimSize(0) != plan.vocab)
+    return std::nullopt;
+  plan.mid = 1;
+  for (int64_t i = 1; i < rank - 1; ++i) {
+    if (scalesTy.getDimSize(i) != dataTy.getDimSize(i))
+      return std::nullopt;
+    plan.mid *= dataTy.getDimSize(i);
+  }
+
+  plan.dataLast = dataTy.getDimSize(rank - 1);
+  plan.scalesLast = scalesTy.getDimSize(rank - 1);
+  plan.logicalLast = plan.scalesLast * plan.blockSize;
+  if (plan.scalesLast <= 0 || plan.vocab <= 0)
+    return std::nullopt;
+
+  // The runtime always unpacks two nibbles per byte for bits == 4, so the byte
+  // extent has to be exactly half the logical extent. bits == 8 is unpacked.
+  if (plan.bits == 4) {
+    if (plan.logicalLast != plan.dataLast * 2)
+      return std::nullopt;
+  } else if (plan.logicalLast != plan.dataLast) {
+    return std::nullopt;
+  }
+
+  // zero_points carries one value per block in its own byte. The packed-nibble
+  // form is declined: with scalesLast == 1 it is indistinguishable from the
+  // per-byte form, the same ambiguity MatMulNBits resolves via zp_elem_size.
+  if (Value zp = op.getZeroPoints()) {
+    auto zpTy = dyn_cast<RankedTensorType>(zp.getType());
+    if (!zpTy || !zpTy.hasStaticShape() ||
+        !isa<IntegerType>(zpTy.getElementType()) ||
+        zpTy.getShape() != scalesTy.getShape())
+      return std::nullopt;
+  }
+
+  plan.w = indicesTy.getNumElements();
+  plan.rows = plan.w * plan.mid;
+
+  // Output rank is q + (r - 1) over the logical, not the packed, extent.
+  SmallVector<int64_t> expected(indicesTy.getShape().begin(),
+                                indicesTy.getShape().end());
+  for (int64_t i = 1; i < rank - 1; ++i)
+    expected.push_back(dataTy.getDimSize(i));
+  expected.push_back(plan.logicalLast);
+  if (resultTy.getShape() != ArrayRef<int64_t>(expected))
+    return std::nullopt;
+
+  plan.isUnsigned = op.getUnsignedQuantStorage() ||
+                    dataTy.getElementType().isUnsignedInteger();
+  return plan;
+}
+
+bool isTosaExpressibleGatherBlockQuantized(hip::GatherBlockQuantizedOp op) {
+  return planGatherBlockQuantized(op).has_value();
+}
+
+// Gather `perBlock`-shaped side data (scales / zero points) with the same
+// index vector that drives the data gather, then collapse to [rows, trailing].
+Value gatherRows(Value table, Value indices, const GbqPlan &plan,
+                 int64_t trailing, ConversionPatternRewriter &rewriter,
+                 Location loc) {
+  auto elemTy = cast<RankedTensorType>(table.getType()).getElementType();
+  int64_t rowWidth = plan.mid * trailing;
+  Value values = reshapeTo(table, {1, plan.vocab, rowWidth}, rewriter);
+  auto gatheredTy = RankedTensorType::get({1, plan.w, rowWidth}, elemTy);
+  Value gathered =
+      tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
+  return reshapeTo(gathered, {plan.rows, trailing}, rewriter);
+}
+
+// hip.gather_block_quantized -> tosa.gather on the packed rows + block dequant.
+//
+// Dequantization is elementwise, so gathering first and dequantizing second
+// matches dequantizing the whole table and then gathering -- and it only ever
+// touches the rows the indices name, which is the point of the fused op.
+// `scales` and `zero_points` share `data`'s layout on every axis except
+// quantize_axis, so one index vector drives all three gathers.
+struct GatherBlockQuantizedConverter final
+    : public OpConversionPattern<hip::GatherBlockQuantizedOp> {
+  using OpConversionPattern<hip::GatherBlockQuantizedOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::GatherBlockQuantizedOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<GbqPlan> maybePlan = planGatherBlockQuantized(op);
+    if (!maybePlan)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported gather_block_quantized configuration");
+    const GbqPlan &plan = *maybePlan;
+
+    Location loc = op.getLoc();
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Type computeElem = resultTy.getElementType();
+    Type i32 = rewriter.getI32Type();
+
+    // ONNX permits indices in [-vocab, vocab-1]; TOSA requires them in range.
+    auto idxTy = RankedTensorType::get({1, plan.w}, i32);
+    Value indices = emitTosaCast(rewriter, loc, adaptor.getIndices(), i32);
+    indices = reshapeTo(indices, {1, plan.w}, rewriter);
+    Value zero = createSplatInt(rewriter, loc, idxTy, 0);
+    Value extent = createSplatInt(rewriter, loc, idxTy, plan.vocab);
+    Value isNegative = tosa::GreaterOp::create(
+        rewriter, loc, RankedTensorType::get({1, plan.w}, rewriter.getI1Type()),
+        zero, indices);
+    Value wrapped = tosa::AddOp::create(rewriter, loc, idxTy, indices, extent);
+    indices = tosa::SelectOp::create(rewriter, loc, idxTy, isNegative, wrapped,
+                                     indices);
+
+    // Gather the packed rows, then widen them to logical values.
+    Value q = gatherRows(adaptor.getData(), indices, plan, plan.dataLast,
+                         rewriter, loc);
+    if (plan.bits == 4)
+      q = unpackInt4LastDim(q, rewriter, loc);
+    else
+      q = emitTosaCast(rewriter, loc, q, i32);
+
+    auto qIntTy = RankedTensorType::get({plan.rows, plan.logicalLast}, i32);
+    if (plan.isUnsigned) {
+      // unpackInt4LastDim already masks both nibbles; only whole bytes need
+      // clamping back out of tosa.cast's sign extension.
+      if (plan.bits == 8) {
+        Value mask = createSplatInt(rewriter, loc, qIntTy, 0xFF);
+        q = tosa::BitwiseAndOp::create(rewriter, loc, qIntTy, q, mask);
+      }
+    } else if (plan.bits == 4) {
+      // Sign-extend the nibble. (v ^ 8) - 8 maps [0,15] onto [-8,7] and is the
+      // branch-free equivalent of the runtime's shl-then-arithmetic-shr.
+      Value eight = createSplatInt(rewriter, loc, qIntTy, 8);
+      q = tosa::BitwiseXorOp::create(rewriter, loc, qIntTy, q, eight);
+      q = tosa::SubOp::create(rewriter, loc, qIntTy, q, eight);
+    }
+
+    // Per-block scales follow the same rows, then repeat across their block.
+    Value scales = gatherRows(adaptor.getScales(), indices, plan,
+                              plan.scalesLast, rewriter, loc);
+    scales = emitTosaCast(rewriter, loc, scales, computeElem);
+    scales =
+        broadcastBlocksAlongK(scales, plan.rows, plan.logicalLast,
+                              plan.scalesLast, plan.blockSize, rewriter, loc);
+
+    auto computeTy =
+        RankedTensorType::get({plan.rows, plan.logicalLast}, computeElem);
+    Value zeroPoint;
+    if (Value zp = adaptor.getZeroPoints()) {
+      zp = gatherRows(zp, indices, plan, plan.scalesLast, rewriter, loc);
+      zp = emitTosaCast(rewriter, loc, zp, i32);
+      auto zpIntTy = RankedTensorType::get({plan.rows, plan.scalesLast}, i32);
+      if (plan.isUnsigned) {
+        Value mask = createSplatInt(rewriter, loc, zpIntTy,
+                                    plan.bits == 4 ? 0x0F : 0xFF);
+        zp = tosa::BitwiseAndOp::create(rewriter, loc, zpIntTy, zp, mask);
+      }
+      zp =
+          broadcastBlocksAlongK(zp, plan.rows, plan.logicalLast,
+                                plan.scalesLast, plan.blockSize, rewriter, loc);
+      zeroPoint = emitTosaCast(rewriter, loc, zp, computeElem);
+    } else {
+      // ONNX defaults: 0 for signed storage, 2^(bits-1) for unsigned. Leaving
+      // this at 0 for uint4 shifts every value by +8*scale.
+      double defaultZp =
+          plan.isUnsigned ? static_cast<double>(1LL << (plan.bits - 1)) : 0.0;
+      zeroPoint = createSplatFloat(
+          rewriter, loc, RankedTensorType::get({1, 1}, computeElem), defaultZp);
+    }
+
+    Value shifted = tosa::SubOp::create(
+        rewriter, loc, computeTy, emitTosaCast(rewriter, loc, q, computeElem),
+        zeroPoint);
+    Value dequantized = emitTosaMul(rewriter, loc, shifted, scales, computeTy);
+    rewriter.replaceOp(op,
+                       reshapeTo(dequantized, resultTy.getShape(), rewriter));
     return success();
   }
 };
@@ -2866,6 +3111,387 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
   }
 };
 
+// ---------------------------------------------------------------------------
+// hip.qmoe
+// ---------------------------------------------------------------------------
+
+// TOSA cannot express the runtime's sparse expert dispatch (bucket tokens by
+// expert, run each expert over just its rows, scatter-add back), because the
+// per-expert row counts are data dependent. The decomposition is dense
+// instead: every expert runs over every token and is folded in weighted by its
+// routing weight, which the top-k mask has already zeroed for tokens that did
+// not select it. That is numerically equivalent and costs E/k times the work,
+// so the expert count is capped to keep both the IR and the arithmetic bounded.
+constexpr int64_t kMaxQMoEExperts = 64;
+
+struct QMoEPlan {
+  int64_t tokens;
+  int64_t hidden;
+  int64_t inter;
+  int64_t experts;
+  int64_t k;
+  int64_t blockSize;
+  int64_t fc1Rows; // 2 * inter: gate and linear interleaved
+  int64_t hiddenBlocks;
+  int64_t interBlocks;
+  bool normalize;
+};
+
+std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
+  if (op.getNumResults() != 1)
+    return std::nullopt;
+
+  // The runtime supports exactly this envelope: interleaved SwiGLU, no fc3.
+  // activation_type is ignored there too, so it is not gated here.
+  if (op.getSwigluFusion() != 1 || op.getUseSparseMixer() != 0)
+    return std::nullopt;
+  if (op.getFc3ExpertsWeights() || op.getFc3Scales() ||
+      op.getFc3ExpertsBias() || op.getFc3ZeroPoints())
+    return std::nullopt;
+  // router_weights overrides router_probs and skips the softmax; not modelled.
+  if (op.getRouterWeights())
+    return std::nullopt;
+  if (op.getExpertWeightBits() != 4)
+    return std::nullopt;
+
+  QMoEPlan plan;
+  plan.blockSize = op.getBlockSize();
+  if (plan.blockSize < 16 || (plan.blockSize & (plan.blockSize - 1)) != 0)
+    return std::nullopt;
+
+  auto inputTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto routerTy = dyn_cast<RankedTensorType>(op.getRouterProbs().getType());
+  auto fc1wTy = dyn_cast<RankedTensorType>(op.getFc1ExpertsWeights().getType());
+  auto fc1sTy = dyn_cast<RankedTensorType>(op.getFc1Scales().getType());
+  auto fc2wTy = dyn_cast<RankedTensorType>(op.getFc2ExpertsWeights().getType());
+  auto fc2sTy = dyn_cast<RankedTensorType>(op.getFc2Scales().getType());
+  auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inputTy || !routerTy || !fc1wTy || !fc1sTy || !fc2wTy || !fc2sTy ||
+      !resultTy || !inputTy.hasStaticShape() || !routerTy.hasStaticShape() ||
+      !fc1wTy.hasStaticShape() || !fc1sTy.hasStaticShape() ||
+      !fc2wTy.hasStaticShape() || !fc2sTy.hasStaticShape() ||
+      !resultTy.hasStaticShape())
+    return std::nullopt;
+
+  Type computeElem = resultTy.getElementType();
+  if (!computeElem.isF32() && !computeElem.isF16() && !computeElem.isBF16())
+    return std::nullopt;
+  if (inputTy.getElementType() != computeElem ||
+      resultTy.getShape() != inputTy.getShape())
+    return std::nullopt;
+  if (!isa<FloatType>(routerTy.getElementType()) ||
+      !isa<FloatType>(fc1sTy.getElementType()) ||
+      !isa<FloatType>(fc2sTy.getElementType()))
+    return std::nullopt;
+  if (!isa<IntegerType>(fc1wTy.getElementType()) ||
+      !isa<IntegerType>(fc2wTy.getElementType()))
+    return std::nullopt;
+
+  if (inputTy.getRank() < 2 || fc1wTy.getRank() != 3 || fc1sTy.getRank() != 3 ||
+      fc2wTy.getRank() != 3 || fc2sTy.getRank() != 3 || routerTy.getRank() != 2)
+    return std::nullopt;
+
+  plan.hidden = inputTy.getShape().back();
+  plan.tokens = 1;
+  for (int64_t d : inputTy.getShape().drop_back())
+    plan.tokens *= d;
+
+  plan.experts = fc1wTy.getDimSize(0);
+  plan.fc1Rows = fc1wTy.getDimSize(1);
+  if (plan.experts <= 0 || plan.experts > kMaxQMoEExperts)
+    return std::nullopt;
+  if (routerTy.getDimSize(0) != plan.tokens ||
+      routerTy.getDimSize(1) != plan.experts)
+    return std::nullopt;
+
+  plan.k = op.getK();
+  if (plan.k < 1 || plan.k > plan.experts)
+    return std::nullopt;
+  plan.normalize = op.getNormalizeRoutingWeights() != 0;
+
+  // fc1: [E, 2*inter, hidden/2] packed, [E, 2*inter, hidden/block] scales.
+  if (fc1wTy.getDimSize(2) * 2 != plan.hidden)
+    return std::nullopt;
+  if (fc1sTy.getDimSize(0) != plan.experts ||
+      fc1sTy.getDimSize(1) != plan.fc1Rows)
+    return std::nullopt;
+  plan.hiddenBlocks = fc1sTy.getDimSize(2);
+  if (plan.hiddenBlocks * plan.blockSize != plan.hidden)
+    return std::nullopt;
+
+  // fc2: [E, hidden, inter/2] packed, [E, hidden, inter/block] scales.
+  if (fc2wTy.getDimSize(0) != plan.experts ||
+      fc2wTy.getDimSize(1) != plan.hidden)
+    return std::nullopt;
+  plan.inter = fc2wTy.getDimSize(2) * 2;
+  if (plan.fc1Rows != 2 * plan.inter)
+    return std::nullopt;
+  if (fc2sTy.getDimSize(0) != plan.experts ||
+      fc2sTy.getDimSize(1) != plan.hidden)
+    return std::nullopt;
+  plan.interBlocks = fc2sTy.getDimSize(2);
+  if (plan.interBlocks * plan.blockSize != plan.inter)
+    return std::nullopt;
+
+  auto checkBias = [&](Value bias, int64_t width) {
+    if (!bias)
+      return true;
+    auto ty = dyn_cast<RankedTensorType>(bias.getType());
+    return ty && ty.hasStaticShape() && ty.getRank() == 2 &&
+           ty.getDimSize(0) == plan.experts && ty.getDimSize(1) == width;
+  };
+  if (!checkBias(op.getFc1ExpertsBias(), plan.fc1Rows) ||
+      !checkBias(op.getFc2ExpertsBias(), plan.hidden))
+    return std::nullopt;
+
+  auto checkZp = [&](Value zp, int64_t rows, int64_t blocks) {
+    if (!zp)
+      return true;
+    auto ty = dyn_cast<RankedTensorType>(zp.getType());
+    if (!ty || !ty.hasStaticShape() || ty.getRank() != 3 ||
+        !isa<IntegerType>(ty.getElementType()))
+      return false;
+    if (ty.getDimSize(0) != plan.experts || ty.getDimSize(1) != rows)
+      return false;
+    // Either one zero point per block, or the MatMulNBits packed nibble
+    // stream of ceil(blocks / 2) bytes.
+    int64_t cols = ty.getDimSize(2);
+    return cols == blocks || cols == (blocks + 1) / 2;
+  };
+  if (!checkZp(op.getFc1ZeroPoints(), plan.fc1Rows, plan.hiddenBlocks) ||
+      !checkZp(op.getFc2ZeroPoints(), plan.hidden, plan.interBlocks))
+    return std::nullopt;
+
+  return plan;
+}
+
+bool isTosaExpressibleQMoE(hip::QMoEOp op) { return planQMoE(op).has_value(); }
+
+// k rounds of "take the largest, break ties toward the lower expert index,
+// mask the winner", which is the order the routing kernel's block argmax
+// produces. Returns [tokens, experts] weights that are zero off the top-k.
+Value qmoeRoutingWeights(Value probs, const QMoEPlan &plan, Type computeElem,
+                         ConversionPatternRewriter &rewriter, Location loc) {
+  auto probsTy =
+      RankedTensorType::get({plan.tokens, plan.experts}, computeElem);
+  auto boolTy =
+      RankedTensorType::get({plan.tokens, plan.experts}, rewriter.getI1Type());
+  auto i32Ty =
+      RankedTensorType::get({plan.tokens, plan.experts}, rewriter.getI32Type());
+  auto reducedF = keepdimsReduceType(probsTy, 1);
+  auto reducedI = keepdimsReduceType(i32Ty, 1);
+  IntegerAttr axisAttr = rewriter.getI32IntegerAttr(1);
+
+  SmallVector<int32_t> iotaVals(plan.experts);
+  for (int64_t e = 0; e < plan.experts; ++e)
+    iotaVals[e] = static_cast<int32_t>(e);
+  Value iota = createI32Dense(rewriter, loc, {1, plan.experts}, iotaVals);
+  if (plan.tokens != 1)
+    iota = tileMultiples(iota, {plan.tokens, 1}, {plan.tokens, plan.experts},
+                         rewriter, loc);
+
+  // Softmax output is in [0, 1], so any negative value loses every later round.
+  Value losing = createSplatFloat(rewriter, loc, probsTy, -1.0);
+  Value outOfRange = createSplatInt(rewriter, loc, i32Ty, plan.experts);
+
+  Value selected;
+  Value cur = probs;
+  for (int64_t round = 0; round < plan.k; ++round) {
+    Value rmax =
+        tosa::ReduceMaxOp::create(rewriter, loc, reducedF, cur, axisAttr);
+    Value isMax = tosa::EqualOp::create(rewriter, loc, boolTy, cur, rmax);
+    // Reduce the tied positions to the smallest index so ties resolve the same
+    // way the kernel's `v == bv && e < bi` comparison does.
+    Value candidates =
+        tosa::SelectOp::create(rewriter, loc, i32Ty, isMax, iota, outOfRange);
+    Value first = tosa::ReduceMinOp::create(rewriter, loc, reducedI, candidates,
+                                            axisAttr);
+    Value hit = tosa::EqualOp::create(rewriter, loc, boolTy, iota, first);
+    // On i1 bitwise_or and logical_or coincide; the bitwise form is the one
+    // PR #1041 settled on for boolean masks in this pass.
+    selected = round == 0 ? hit
+                          : tosa::BitwiseOrOp::create(rewriter, loc, boolTy,
+                                                      selected, hit)
+                                .getResult();
+    cur = tosa::SelectOp::create(rewriter, loc, probsTy, hit, losing, cur);
+  }
+
+  Value zeros = createSplatFloat(rewriter, loc, probsTy, 0.0);
+  Value weights =
+      tosa::SelectOp::create(rewriter, loc, probsTy, selected, probs, zeros);
+  if (plan.normalize) {
+    Value sum =
+        tosa::ReduceSumOp::create(rewriter, loc, reducedF, weights, axisAttr);
+    Value rec = tosa::ReciprocalOp::create(rewriter, loc, reducedF, sum);
+    weights = emitTosaMul(rewriter, loc, weights, rec, probsTy);
+  }
+  return weights;
+}
+
+// Slice one expert out of [E, rows, cols/2], unpack the nibbles and apply the
+// per-block scale. Packing and the implicit zero point of 8 follow the
+// MatMulNBits convention the QMoE weights are stored in.
+Value qmoeDequantExpert(Value packedAll, Value scalesAll, Value zpAll,
+                        int64_t expert, int64_t rows, int64_t cols,
+                        int64_t blocks, int64_t blockSize, Type computeElem,
+                        ConversionPatternRewriter &rewriter, Location loc) {
+  int64_t packedCols =
+      cast<RankedTensorType>(packedAll.getType()).getDimSize(2);
+  Value packed = sliceOffsetSize(packedAll, {expert, 0, 0},
+                                 {1, rows, packedCols}, rewriter, loc);
+  packed = reshapeTo(packed, {rows, packedCols}, rewriter);
+  Value q = unpackInt4LastDim(packed, rewriter, loc);
+  q = sliceLastDimTo(q, cols, rewriter, loc);
+
+  Value scales = sliceOffsetSize(scalesAll, {expert, 0, 0}, {1, rows, blocks},
+                                 rewriter, loc);
+  scales = reshapeTo(scales, {rows, blocks}, rewriter);
+  scales = emitTosaCast(rewriter, loc, scales, computeElem);
+  scales = broadcastBlocksAlongK(scales, rows, cols, blocks, blockSize,
+                                 rewriter, loc);
+
+  Value zeroPoint;
+  if (zpAll) {
+    int64_t zpCols = cast<RankedTensorType>(zpAll.getType()).getDimSize(2);
+    Value zp = sliceOffsetSize(zpAll, {expert, 0, 0}, {1, rows, zpCols},
+                               rewriter, loc);
+    zp = reshapeTo(zp, {rows, zpCols}, rewriter);
+    if (zpCols != blocks) {
+      zp = unpackInt4LastDim(zp, rewriter, loc);
+      zp = sliceLastDimTo(zp, blocks, rewriter, loc);
+    }
+    zp =
+        broadcastBlocksAlongK(zp, rows, cols, blocks, blockSize, rewriter, loc);
+    zeroPoint = emitTosaCast(rewriter, loc, zp, computeElem);
+  } else {
+    zeroPoint = createSplatFloat(
+        rewriter, loc, RankedTensorType::get({1, 1}, computeElem), 8.0);
+  }
+
+  auto weightTy = RankedTensorType::get({rows, cols}, computeElem);
+  Value shifted = tosa::SubOp::create(
+      rewriter, loc, weightTy, emitTosaCast(rewriter, loc, q, computeElem),
+      zeroPoint);
+  return emitTosaMul(rewriter, loc, shifted, scales, weightTy);
+}
+
+// fc1 emits gate and linear interleaved on the trailing axis: gate at even
+// columns, linear at odd. De-interleave, clamp, then
+// G * sigmoid(alpha * G) * (L + beta). The gate is clamped from above only;
+// the linear side is clamped on both ends.
+Value qmoeSwiglu(Value fc1Out, const QMoEPlan &plan, Type computeElem,
+                 double alpha, double beta, double limit,
+                 ConversionPatternRewriter &rewriter, Location loc) {
+  Value pairs = reshapeTo(fc1Out, {plan.tokens, plan.inter, 2}, rewriter);
+  Value gate = sliceOffsetSize(pairs, {0, 0, 0}, {plan.tokens, plan.inter, 1},
+                               rewriter, loc);
+  Value linear = sliceOffsetSize(pairs, {0, 0, 1}, {plan.tokens, plan.inter, 1},
+                                 rewriter, loc);
+  auto actTy = RankedTensorType::get({plan.tokens, plan.inter}, computeElem);
+  gate = reshapeTo(gate, {plan.tokens, plan.inter}, rewriter);
+  linear = reshapeTo(linear, {plan.tokens, plan.inter}, rewriter);
+
+  Value hi = createSplatFloat(rewriter, loc, actTy, limit);
+  Value lo = createSplatFloat(rewriter, loc, actTy, -limit);
+  Value g = tosa::MinimumOp::create(rewriter, loc, actTy, gate, hi);
+  Value l = tosa::MinimumOp::create(rewriter, loc, actTy, linear, hi);
+  l = tosa::MaximumOp::create(rewriter, loc, actTy, l, lo);
+
+  Value alphaC = createSplatFloat(rewriter, loc, actTy, alpha);
+  Value sigmoid = tosa::SigmoidOp::create(
+      rewriter, loc, actTy, emitTosaMul(rewriter, loc, g, alphaC, actTy));
+  Value betaC = createSplatFloat(rewriter, loc, actTy, beta);
+  Value shiftedLinear = tosa::AddOp::create(rewriter, loc, actTy, l, betaC);
+  return emitTosaMul(rewriter, loc,
+                     emitTosaMul(rewriter, loc, g, sigmoid, actTy),
+                     shiftedLinear, actTy);
+}
+
+// hip.qmoe -> softmax routing + top-k mask, then every expert's dequantized
+// FC1/SwiGLU/FC2 folded in weighted by its routing weight.
+struct QMoEConverter final : public OpConversionPattern<hip::QMoEOp> {
+  using OpConversionPattern<hip::QMoEOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::QMoEOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<QMoEPlan> maybePlan = planQMoE(op);
+    if (!maybePlan)
+      return rewriter.notifyMatchFailure(op, "unsupported qmoe configuration");
+    const QMoEPlan &plan = *maybePlan;
+
+    Location loc = op.getLoc();
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Type computeElem = resultTy.getElementType();
+
+    double alpha = op.getActivationAlphaAttr().getValueAsDouble();
+    double beta = op.getActivationBetaAttr().getValueAsDouble();
+    double limit = op.getSwigluLimitAttr().getValueAsDouble();
+
+    auto tokenTy =
+        RankedTensorType::get({plan.tokens, plan.hidden}, computeElem);
+    auto fc1Ty =
+        RankedTensorType::get({plan.tokens, plan.fc1Rows}, computeElem);
+
+    Value input =
+        reshapeTo(adaptor.getInput(), {plan.tokens, plan.hidden}, rewriter);
+    Value router =
+        emitTosaCast(rewriter, loc, adaptor.getRouterProbs(), computeElem);
+    router = reshapeTo(router, {plan.tokens, plan.experts}, rewriter);
+    // The routing kernel softmaxes the logits before selecting, so the weights
+    // are softmax probabilities, not raw logits.
+    Value probs = softmaxLastDim(router, /*extraDenom=*/Value(), rewriter, loc);
+    Value weights = qmoeRoutingWeights(probs, plan, computeElem, rewriter, loc);
+
+    Value acc = createSplatFloat(rewriter, loc, tokenTy, 0.0);
+    for (int64_t e = 0; e < plan.experts; ++e) {
+      Value w1 = qmoeDequantExpert(
+          adaptor.getFc1ExpertsWeights(), adaptor.getFc1Scales(),
+          adaptor.getFc1ZeroPoints(), e, plan.fc1Rows, plan.hidden,
+          plan.hiddenBlocks, plan.blockSize, computeElem, rewriter, loc);
+      Value fc1 =
+          emitUnbatchedMatmul(input, transposePerm(w1, {1, 0}, rewriter, loc),
+                              fc1Ty, rewriter, loc);
+      if (Value bias = adaptor.getFc1ExpertsBias()) {
+        Value row =
+            sliceOffsetSize(bias, {e, 0}, {1, plan.fc1Rows}, rewriter, loc);
+        fc1 =
+            tosa::AddOp::create(rewriter, loc, fc1Ty, fc1,
+                                emitTosaCast(rewriter, loc, row, computeElem));
+      }
+
+      Value act =
+          qmoeSwiglu(fc1, plan, computeElem, alpha, beta, limit, rewriter, loc);
+
+      Value w2 = qmoeDequantExpert(
+          adaptor.getFc2ExpertsWeights(), adaptor.getFc2Scales(),
+          adaptor.getFc2ZeroPoints(), e, plan.hidden, plan.inter,
+          plan.interBlocks, plan.blockSize, computeElem, rewriter, loc);
+      Value fc2 =
+          emitUnbatchedMatmul(act, transposePerm(w2, {1, 0}, rewriter, loc),
+                              tokenTy, rewriter, loc);
+      if (Value bias = adaptor.getFc2ExpertsBias()) {
+        Value row =
+            sliceOffsetSize(bias, {e, 0}, {1, plan.hidden}, rewriter, loc);
+        fc2 =
+            tosa::AddOp::create(rewriter, loc, tokenTy, fc2,
+                                emitTosaCast(rewriter, loc, row, computeElem));
+      }
+
+      // Zero for every token that did not route to this expert, so the dense
+      // sum reproduces the sparse dispatch.
+      Value expertWeight =
+          sliceOffsetSize(weights, {0, e}, {plan.tokens, 1}, rewriter, loc);
+      acc = tosa::AddOp::create(
+          rewriter, loc, tokenTy, acc,
+          emitTosaMul(rewriter, loc, fc2, expertWeight, tokenTy));
+    }
+
+    rewriter.replaceOp(op, reshapeTo(acc, resultTy.getShape(), rewriter));
+    return success();
+  }
+};
+
 class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
   void runOnOperation() override {
     auto funcOp = getOperation();
@@ -2910,6 +3536,19 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    // Neither op is a FuseROCMlir anchor or a pointwise op, so neither reaches
+    // this pass from buildRocMlirPipeline today -- only from a hand-written
+    // rock.kernel. Declining therefore leaves the op in place rather than
+    // failing the pass, which keeps the unsupported configurations testable.
+    // If either becomes a fusion anchor this has to turn into a hard failure
+    // like hip.div's: a hip op surviving inside a rock.kernel fails in rocMLIR,
+    // it does not fall back to the HIP kernel.
+    conversion.addDynamicallyLegalOp<GatherBlockQuantizedOp>(
+        [](GatherBlockQuantizedOp op) {
+          return !isTosaExpressibleGatherBlockQuantized(op);
+        });
+    conversion.addDynamicallyLegalOp<QMoEOp>(
+        [](QMoEOp op) { return !isTosaExpressibleQMoE(op); });
 
     RewritePatternSet patterns(ctx);
     patterns.add<
@@ -2936,8 +3575,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         SqrtConverter, WhereConverter, LeakyReluConverter, SoftmaxConverter,
         ReduceSumConverter, ReduceMeanConverter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter>(ctx);
+        MatMulNBitsConverter, GatherConverter, GatherBlockQuantizedConverter,
+        QMoEConverter, RopeConverter, GqaConverter, MhaConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
