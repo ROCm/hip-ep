@@ -126,11 +126,20 @@
   ;; parse-match-operation - Parse one match operation
   ;;-----------------------------------------------------------------------
   ;;
+  ;; Naming convention (enforced by validation, not parser):
+  ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
+  ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
+  ;;   - Type variables: identifiers starting with ! (e.g., !t1, !f32)
+  ;;
   ;; Result syntax (all supported):
   ;;   - Single result:     %r = "op" (...)
   ;;   - Multiple results:  (%a %b) = "op" (...)
   ;;   - Variadic (future): (%a ...) = "op" (...)      [not validated yet]
   ;;   - Dotted (future):   (%a %b . %rest) = "op" (...) [not validated yet]
+  ;;
+  ;; Operand syntax:
+  ;;   - Variables: (%x %y) - identifiers starting with %
+  ;;   - Can be result variables from other operations or free variables
   ;;
   ;; Attributes and types are optional (4 variants for each result form):
   ;;   1. Full:     result = "op" (operands) (attrs) : (types) -> type
@@ -138,7 +147,7 @@
   ;;   3. No types: result = "op" (operands) (attrs)
   ;;   4. Minimal:  result = "op" (operands)
   ;;
-  ;; Parser accepts result as-is (identifier or list), validation normalizes.
+  ;; Parser accepts result/operands as-is, validation checks naming conventions.
   ;;
   ;; Returns ast-match-expand record with syntax objects.
   ;;
