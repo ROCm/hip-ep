@@ -179,17 +179,17 @@ constexpr int kWRepeats = (kTileCo * kTileK) / kTiledBlock; // 8
 static_assert(kTileK * kTileP == kXRepeats * kTiledBlock, "x tile must divide");
 static_assert(kTileCo * kTileK == kWRepeats * kTiledBlock, "w tile must divide");
 
-// Padding on the channel axis of the staged weights, in int16 elements.
+// Padding on the channel axis of the staged weights, in elements.
 //
 // The inner loop wants the kThreadCo weights of one k contiguous so they arrive
-// as two 128-bit reads instead of kThreadCo separate ones, which needs the row
-// stride to stay a multiple of 16 bytes. 8 is the smallest padding that keeps
-// that while moving the staging writes off a single bank: writes step by one
-// row and (kTileCo + 8) * 2 / 4 is 36 dwords, so they spread over 8 banks
-// rather than colliding on one. The writes are outnumbered 4 to 1 by the reads,
-// so the read side is what the padding is chosen for.
-constexpr int kWPad = 8;
-static_assert((kTileCo + kWPad) * sizeof(int16_t) % 16 == 0,
+// as 128-bit reads instead of kThreadCo separate ones, which needs the row
+// stride to stay a multiple of 16 bytes. 4 is the smallest padding that keeps
+// that. Nothing smaller in the staging writes is available: any stride that is
+// a multiple of four dwords puts the eight rows one thread writes onto the same
+// bank, and the reads outnumber those writes by more than an order of
+// magnitude, so the read alignment is what the padding is chosen for.
+constexpr int kWPad = 4;
+static_assert((kTileCo + kWPad) * sizeof(int32_t) % 16 == 0,
               "staged weight rows must stay 16-byte aligned");
 
 // OUT[n, co, p] = requantize(sum_ci (X[n, ci, p] - z_x) * (W[co, ci] - z_w[co]))
@@ -236,8 +236,16 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
   __shared__ TAct x_lds[kTileK][kTileP];
   // Indexed [k][co], the transpose of the weight layout in memory, so that the
   // channels one thread multiplies against a single activation are adjacent.
-  // int16, not int8: an 8-bit weight minus its zero point reaches +-255.
-  __shared__ int16_t w_lds[kTileK][kTileCo + kWPad];
+  //
+  // Stored one weight per dword even though a weight minus its zero point only
+  // needs 16 bits. The inner loop feeds these to a 24-bit multiply-add, which
+  // reads the low 24 bits of a register, so a packed pair costs a shift or a
+  // bitfield extract per weight before it can be multiplied -- as many extra
+  // instructions as there are multiplies. Widening here moves that sign
+  // extension to the staging write, where it happens once per staged element
+  // instead of once per use, and doubles the shared-memory footprint of the
+  // slab, which has headroom because occupancy is register-limited.
+  __shared__ int32_t w_lds[kTileK][kTileCo + kWPad];
 
   const int64_t n = blockIdx.z;
   const int64_t p_base = static_cast<int64_t>(blockIdx.x) * kTileP;
@@ -306,9 +314,9 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
                  : 0u;
 #pragma unroll
         for (int j = 0; j < kWElems; ++j)
-          w_lds[wk + j][sc] = static_cast<int16_t>(
+          w_lds[wk + j][sc] =
               live ? qconv_unpack_word<WBits, WSigned>(&word, j) - zw_word[rep]
-                   : 0);
+                   : 0;
       }
     } else {
 #pragma unroll
@@ -318,11 +326,11 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
         const int sk = lin % kTileK;
         const int64_t co = co_base + sc;
         const int64_t k = k0 + sk;
-        int16_t v = 0;
+        int32_t v = 0;
         if (co < out_channels && k < in_channels) {
           const int wq =
               qconv_read_quant(weights, co * in_channels + k, WBits, WSigned);
-          v = static_cast<int16_t>(wq - zw_stage[rep]);
+          v = wq - zw_stage[rep];
         }
         w_lds[sk][sc] = v;
       }
@@ -346,8 +354,7 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
       const int32_t xv = static_cast<int32_t>(x_lds[kk][tx]) - input_zp;
 #pragma unroll
       for (int c = 0; c < kThreadCo; ++c)
-        chunk[c] +=
-            __mul24(xv, static_cast<int32_t>(w_lds[kk][ty * kThreadCo + c]));
+        chunk[c] += __mul24(xv, w_lds[kk][ty * kThreadCo + c]);
     }
 #pragma unroll
     for (int c = 0; c < kThreadCo; ++c)
