@@ -738,8 +738,7 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  int64_t output_rank, const int64_t *indices_shape,
                  const int64_t *output_shape, int64_t num_indices,
                  int64_t num_output_elements, int64_t element_size_bytes,
-                 int64_t indices_element_size_bytes,
-                 int64_t depth_element_size_bytes) {
+                 int64_t indices_element_size_bytes) {
   (void)indices;
   (void)depth;
   (void)values;
@@ -751,13 +750,11 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_one_hot(axis=%lld, idx_rank=%lld, out_rank=%lld, "
-             "num_idx=%lld, num_out=%lld, elem=%lld, idx_elem=%lld, "
-             "depth_elem=%lld)\n",
+             "num_idx=%lld, num_out=%lld, elem=%lld, idx_elem=%lld)\n",
              (long long)axis, (long long)indices_rank, (long long)output_rank,
              (long long)num_indices, (long long)num_output_elements,
              (long long)element_size_bytes,
-             (long long)indices_element_size_bytes,
-             (long long)depth_element_size_bytes);
+             (long long)indices_element_size_bytes);
   return 0;
 }
 
@@ -834,12 +831,11 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
-int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
-               void *indices, int64_t axis, int64_t largest, int64_t sorted,
-               int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes) {
+int wrap_top_k(RuntimeState *state, void *x, void *values, void *indices,
+               int64_t axis, int64_t largest, int64_t sorted, int64_t rank,
+               const int64_t *x_shape, int64_t num_elements,
+               int64_t element_size_bytes, int64_t k) {
   (void)x;
-  (void)k;
   (void)values;
   (void)indices;
   (void)x_shape;
@@ -848,10 +844,10 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_top_k(axis=%lld, largest=%lld, sorted=%lld, "
-             "rank=%lld, num_elements=%lld, element_size=%lld)\n",
+             "rank=%lld, num_elements=%lld, element_size=%lld, k=%lld)\n",
              (long long)axis, (long long)largest, (long long)sorted,
              (long long)rank, (long long)num_elements,
-             (long long)element_size_bytes);
+             (long long)element_size_bytes, (long long)k);
   return 0;
 }
 

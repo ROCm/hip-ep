@@ -1142,10 +1142,13 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          int64_t element_size_bytes,
                          int64_t indices_element_size_bytes);
 
-int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
-               void *indices, int64_t axis, int64_t largest, int64_t sorted,
-               int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes);
+// Host `k` is the values (or indices) result extent at `axis`. OnnxToHip
+// already materializes K on the host to size the result; do not D2H the GPU
+// K tensor here.
+int wrap_top_k(RuntimeState *state, void *x, void *values, void *indices,
+               int64_t axis, int64_t largest, int64_t sorted, int64_t rank,
+               const int64_t *x_shape, int64_t num_elements,
+               int64_t element_size_bytes, int64_t k);
 
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
@@ -1162,13 +1165,14 @@ int wrap_compress(RuntimeState *state, void *input, void *condition,
                   int64_t condition_len, int64_t num_output_elements,
                   int64_t element_size_bytes);
 
+// Host depth is output_shape[axis]. OnnxToHip already materializes depth on
+// the host to size the output; do not D2H the GPU depth tensor here.
 int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  void *output, int64_t axis, int64_t indices_rank,
                  int64_t output_rank, const int64_t *indices_shape,
                  const int64_t *output_shape, int64_t num_indices,
                  int64_t num_output_elements, int64_t element_size_bytes,
-                 int64_t indices_element_size_bytes,
-                 int64_t depth_element_size_bytes);
+                 int64_t indices_element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,

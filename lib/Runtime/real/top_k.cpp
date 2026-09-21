@@ -9,12 +9,15 @@
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
-#include <hip/hip_runtime.h>
 
-int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
-               void *indices, int64_t axis, int64_t largest, int64_t sorted,
-               int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes) {
+// Before: D2H memcpy of GPU K plus hipStreamSynchronize, then
+//         hip_top_k(..., k_val, ...).
+// After:  host `k` is the values memref dim at `axis` (passed from HipToLLVM).
+//         OnnxToHip already materialized K to size tensor.empty.
+int wrap_top_k(RuntimeState *state, void *x, void *values, void *indices,
+               int64_t axis, int64_t largest, int64_t sorted, int64_t rank,
+               const int64_t *x_shape, int64_t num_elements,
+               int64_t element_size_bytes, int64_t k) {
   OP_PROFILE(
       "top_k",
       [&] {
@@ -26,32 +29,22 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
       state);
 
   (void)num_elements;
-  if (!state || !x || !k || !values || !indices || !x_shape) {
+  if (!state || !x || !values || !indices || !x_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: null argument\n");
     return -1;
   }
+  if (rank < 1 || rank > 8) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: rank must be in [1, 8]\n");
+    return -1;
+  }
 
-  int64_t k_val = 0;
   void *stream = hipdnn_ep_state_get_stream(state);
-  hipError_t err = hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
-  err = hipStreamSynchronize(static_cast<hipStream_t>(stream));
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_top_k: stream sync failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
-
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_top_k: axis=%lld, k=%lld, rank=%lld, largest=%lld, "
       "sorted=%lld -> hip_top_k\n",
-      (long long)axis, (long long)k_val, (long long)rank, (long long)largest,
+      (long long)axis, (long long)k, (long long)rank, (long long)largest,
       (long long)sorted);
 
   return hip_top_k(stream, x, values, indices, axis, largest, sorted, rank,
-                   x_shape, k_val, static_cast<int>(element_size_bytes));
+                   x_shape, k, static_cast<int>(element_size_bytes));
 }
