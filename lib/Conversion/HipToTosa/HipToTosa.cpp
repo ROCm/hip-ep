@@ -109,6 +109,20 @@ static Value sliceTo(Value input, ArrayRef<int64_t> shape,
                                size);
 }
 
+// Same as sliceTo, but the crop is allowed to start off the origin.
+static Value sliceAt(Value input, ArrayRef<int64_t> start,
+                     ArrayRef<int64_t> size,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  auto shapeType = tosa::shapeType::get(rewriter.getContext(), size.size());
+  auto startConst = tosa::ConstShapeOp::create(
+      rewriter, loc, shapeType, rewriter.getIndexTensorAttr(start));
+  auto sizeConst = tosa::ConstShapeOp::create(
+      rewriter, loc, shapeType, rewriter.getIndexTensorAttr(size));
+  return tosa::SliceOp::create(rewriter, loc, type.clone(size), input,
+                               startConst, sizeConst);
+}
+
 static SmallVector<int64_t> getI64Values(ArrayAttr attrs) {
   SmallVector<int64_t> values;
   values.reserve(attrs.size());
@@ -358,6 +372,158 @@ Value createSplatFloat(ConversionPatternRewriter &rewriter, Location loc,
       rewriter, loc, type,
       DenseElementsAttr::get(type, rewriter.getFloatAttr(elemType, ap)));
 }
+
+// ONNX CausalConvWithState / hip.causal_conv_with_state is Concat(past, x) +
+// depthwise Conv + Slice(present). TOSA has no causal or 1-D depthwise op, so
+// the same expansion is spelled with tosa.concat (or a zero past),
+// tosa.depthwise_conv2d (length as W, H=1), and tosa.slice.
+//
+//   Before (channels-first, k=4):
+//     %y, %s = hip.causal_conv_with_state(%x, %w, %b, %past)
+//         : tensor<1x64x128xf16>, tensor<1x64x3xf16>
+//   After:
+//     %p = tosa.concat %past, %x {axis = 2}
+//         : tensor<1x64x131xf16>
+//     %s = tosa.slice %p  // last k-1 = 3 along the length
+//     %y = NCHW<->NHWC around tosa.depthwise_conv2d, then optional SiLU
+//
+// present_state is the last (k-1) values of the concatenated sequence, which
+// is the ONNX contract including the short-input / zero-pad case. k=1 makes
+// that tensor empty, which TOSA forbids, so it is rejected.
+struct CausalConvWithStateConverter final
+    : public OpConversionPattern<CausalConvWithStateOp> {
+  using OpConversionPattern<CausalConvWithStateOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(CausalConvWithStateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 2)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    if (op.getNdim() != 1)
+      return rewriter.notifyMatchFailure(op, "only 1-D causal conv is TOSA");
+
+    Location loc = op.getLoc();
+    auto inType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    auto wType = dyn_cast<RankedTensorType>(adaptor.getWeight().getType());
+    auto yType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto sType = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+    if (!inType || !wType || !yType || !sType || !inType.hasStaticShape() ||
+        !wType.hasStaticShape() || !yType.hasStaticShape() ||
+        !sType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (inType.getRank() != 3 || wType.getRank() != 3 || yType.getRank() != 3 ||
+        sType.getRank() != 3)
+      return rewriter.notifyMatchFailure(op, "expected rank-3 1-D tensors");
+    if (wType.getDimSize(1) != 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "weight must be depthwise [C,1,k]");
+
+    Type elemType = yType.getElementType();
+    Type accType;
+    if (elemType.isF16() || elemType.isBF16() || elemType.isF32())
+      accType = rewriter.getF32Type();
+    else
+      return rewriter.notifyMatchFailure(op, "only f16, bf16, and f32");
+    if (inType.getElementType() != elemType ||
+        wType.getElementType() != elemType)
+      return rewriter.notifyMatchFailure(op, "element types must match");
+
+    int64_t channels = wType.getDimSize(0);
+    int64_t k = wType.getDimSize(2);
+    int64_t stateLen = k - 1;
+    if (stateLen <= 0)
+      return rewriter.notifyMatchFailure(
+          op, "k=1 present_state is an empty TOSA tensor");
+
+    bool channelsLast = op.getChannelsLast();
+    int64_t batch = inType.getDimSize(0);
+    int64_t length = channelsLast ? inType.getDimSize(1) : inType.getDimSize(2);
+    int64_t inChannels =
+        channelsLast ? inType.getDimSize(2) : inType.getDimSize(1);
+    if (inChannels != channels || yType.getShape() != inType.getShape() ||
+        sType.getShape() != ArrayRef<int64_t>({batch, channels, stateLen}))
+      return rewriter.notifyMatchFailure(op, "incompatible conv shapes");
+
+    StringRef activation = op.getActivation();
+    if (activation != "none" && activation != "silu" && activation != "swish")
+      return rewriter.notifyMatchFailure(op, "unsupported fused activation");
+
+    Value nchw = adaptor.getInput();
+    if (channelsLast)
+      nchw = transposeTo(nchw, {batch, channels, length}, {0, 2, 1}, rewriter,
+                         loc);
+
+    Value past = adaptor.getPastState();
+    if (past) {
+      auto pastType = dyn_cast<RankedTensorType>(past.getType());
+      if (!pastType || pastType.getShape() != sType.getShape() ||
+          pastType.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "incompatible past_state");
+    } else {
+      past = tosa::ConstOp::create(
+          rewriter, loc, sType,
+          DenseElementsAttr::get(sType, rewriter.getZeroAttr(elemType)));
+    }
+
+    int64_t paddedLen = stateLen + length;
+    auto paddedType =
+        RankedTensorType::get({batch, channels, paddedLen}, elemType);
+    Value padded = tosa::ConcatOp::create(rewriter, loc, paddedType,
+                                          ValueRange{past, nchw},
+                                          rewriter.getI32IntegerAttr(2));
+    Value present = sliceAt(padded, {0, 0, length}, {batch, channels, stateLen},
+                            rewriter, loc);
+
+    Value bias = adaptor.getBias();
+    if (bias) {
+      auto biasType = dyn_cast<RankedTensorType>(bias.getType());
+      if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1 ||
+          biasType.getElementType() != elemType ||
+          (biasType.getDimSize(0) != channels && biasType.getDimSize(0) != 1))
+        return rewriter.notifyMatchFailure(op, "incompatible bias tensor");
+    } else {
+      auto biasType = RankedTensorType::get({channels}, elemType);
+      bias = tosa::ConstOp::create(
+          rewriter, loc, biasType,
+          DenseElementsAttr::get(biasType, rewriter.getZeroAttr(elemType)));
+    }
+
+    Value inputNhwc =
+        reshapeTo(padded, {batch, channels, 1, paddedLen}, rewriter);
+    inputNhwc = transposeTo(inputNhwc, {batch, 1, paddedLen, channels},
+                            {0, 2, 3, 1}, rewriter, loc);
+    Value weightTosa = transposeTo(adaptor.getWeight(), {1, k, channels},
+                                   {1, 2, 0}, rewriter, loc);
+    weightTosa = reshapeTo(weightTosa, {1, k, channels, 1}, rewriter);
+
+    auto nhwcOutType =
+        RankedTensorType::get({batch, 1, length, channels}, elemType);
+    Value conv =
+        tosa::DepthwiseConv2DOp::create(
+            rewriter, loc, nhwcOutType, inputNhwc, weightTosa, bias,
+            rewriter.getDenseI64ArrayAttr({0, 0, 0, 0}),
+            rewriter.getDenseI64ArrayAttr({1, 1}),
+            rewriter.getDenseI64ArrayAttr({1, 1}), TypeAttr::get(accType))
+            .getResult();
+    Value nchwOut = transposeTo(conv, {batch, channels, 1, length},
+                                {0, 3, 1, 2}, rewriter, loc);
+    nchwOut = reshapeTo(nchwOut, {batch, channels, length}, rewriter);
+
+    if (activation == "silu" || activation == "swish") {
+      Value sigmoid = tosa::SigmoidOp::create(
+          rewriter, loc,
+          RankedTensorType::get({batch, channels, length}, elemType), nchwOut);
+      nchwOut = tosa::MulOp::create(rewriter, loc, nchwOut.getType(), nchwOut,
+                                    sigmoid, createZeroMulShift(rewriter, loc));
+    }
+
+    Value y = nchwOut;
+    if (channelsLast)
+      y = transposeTo(y, yType.getShape(), {0, 2, 1}, rewriter, loc);
+    rewriter.replaceOp(op, {y, present});
+    return success();
+  }
+};
 
 // Multiply by a scalar that ONNX carries as an f32 attribute. hipBLASLt scales
 // in f32 even when the data is f16 or bf16 (scaleType = HIP_R_32F while
@@ -3231,13 +3397,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
     conversion.addIllegalOp<
-        ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
-        MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        ConvOp, CausalConvWithStateOp, MatmulOp, GemmOp, TransposeOp, AddOp,
+        SubOp, MinOp, MaxOp, MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp,
+        LogOp, SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
+        WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp,
+        CastOp, QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
+        RopeOp, GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp,
+        InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -3256,8 +3422,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        ConvConverter, MatMulConverter, GemmConverter, TransposeConverter,
-        ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
+        ConvConverter, CausalConvWithStateConverter, MatMulConverter,
+        GemmConverter, TransposeConverter, ExpandConverter,
+        ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
         DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
         BinaryConverter<SubOp, tosa::SubOp>,
