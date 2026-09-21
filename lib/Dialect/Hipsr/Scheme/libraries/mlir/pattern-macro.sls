@@ -22,5 +22,5 @@
       (let* ([ast-rec (parse-to-ast stx)]
              [validated (validate-ast ast-rec)]
              [analyzed (analyze-ast validated)])
-        (generate-code stx analyzed))))
+        (generate-code analyzed))))
 )
