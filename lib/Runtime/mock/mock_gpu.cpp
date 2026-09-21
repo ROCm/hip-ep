@@ -77,6 +77,11 @@ extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipDeviceSynchronize(void) {
+  MOCK_PRINT("[MOCK] hipDeviceSynchronize()\n");
+  return hipSuccess;
+}
+
 extern "C" hipError_t hipEventCreate(hipEvent_t *event) {
   *event = malloc(sizeof(void *));
   return hipSuccess;

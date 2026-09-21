@@ -52,6 +52,35 @@ void op_profile_add_cpu_total(OpProfileState *ps, const std::string &name,
                               double cpuStartUs, double cpuMs);
 bool op_profile_is_active(OpProfileState *ps);
 
+// One-shot RGP capture fence. Gated on the RGP_FENCE env var; a no-op (single
+// cached check) when unset, so it costs nothing on normal runs. When RGP_FENCE
+// names this op, the fence drains the GPU (hipDeviceSynchronize) and sleeps
+// RGP_FENCE_MS ms to manufacture an idle window, so an RGP dispatch-mode
+// auto-capture arms deterministically on THIS op's first dispatch after the gap
+// (dispatch-index positioning is unreliable in this build). RGP_FENCE_SKIP=N
+// arms on the (N+1)-th matching instance instead of the first (e.g. to target a
+// full-attention layer rather than layer-0 sliding attention). Fires once per
+// process and emits a "[RGP_FENCE_ARMED]" stderr marker the orchestrator waits
+// on before triggering the capture.
+//
+// RGP_FENCE_AFTER_INFERENCES=N holds the fence off until the N-th Run of the
+// process, so N picks the phase -- which a plain instance skip cannot do,
+// because every layer requests the same op within one step. Counting is driven
+// by rgp_fence_note_run below.
+//
+// N counts ORT Runs, NOT prompt tokens or decode steps: the generator feeds a
+// long prompt in fixed-size chunks, so a 16K prefill is 32 Runs and decode step
+// 1 is Run 32, not Run 1. Reaching a decode step means N = prefill_chunks + k.
+// The armed marker echoes the index it fired on so the choice can be checked
+// against the capture rather than assumed.
+void rgp_capture_fence(const char *opname);
+
+// Called once per ORT Run from the runtime's input-prepare boundary. Kept
+// separate from the profiler's own per-inference bookkeeping so the fence works
+// without HIPDNN_EP_PERF, whose stream sync would change the measured
+// throughput.
+void rgp_fence_note_run();
+
 // Absolute microseconds on the shared steady_clock axis. A plain time
 // conversion tied to no session: the trace axis is process-global, so all
 // sessions and inferences land on it without any captured baseline.
@@ -125,6 +154,7 @@ struct OpProfileScope {
 // [PERF] table can report achieved GB/s and % of the memory roofline. bytes_fn
 // is a callable returning int64_t, invoked only when profiling is active.
 #define OP_PROFILE_BYTES(opname, shape_fn, bytes_fn, state_arg)                \
+  rgp_capture_fence(opname);                                                   \
   std::optional<OpProfileScope> _opProf;                                       \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
@@ -140,6 +170,7 @@ struct OpProfileScope {
   }
 
 #define OP_PROFILE_CPU(opname, state_arg)                                      \
+  rgp_capture_fence(opname);                                                   \
   std::optional<OpProfileCpuScope> _opProfCpu;                                 \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
