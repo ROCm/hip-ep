@@ -14,7 +14,7 @@ onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.27.0
 ## LLVM/MLIR/LLD are sourced from the llvm-project subtree vendored inside
 ## rocmlirTriton (external/llvm-project). We clone rocmlirTriton and build only
 ## that nested llvm-project; no rocMLIR/Triton targets are configured here.
-rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;df7aa538c3c75697b292a79ca0a621003d129bd0
+rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;229f2662af0f793d2be3572720302cfa3ba79042
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##

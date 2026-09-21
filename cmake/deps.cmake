@@ -212,13 +212,14 @@ else()
   # external dependency. Kept identical to the CI LLVM build so the prefix that
   # CI caches (find_package path) and this fallback produce equivalent toolsets.
   set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
-  # rocMLIR/Triton needs the AMDGPU backend and matching assertions. When
-  # ENABLE_ROCMLIRTRITON is on, the single in-tree LLVM must be a superset that
-  # satisfies both hip-ep and rocmlirTriton (which is added as a subdirectory
-  # later and reuses these targets instead of building its own LLVM).
+  # rocMLIR/Triton needs the AMDGPU backend. When ENABLE_ROCMLIRTRITON is on,
+  # the single in-tree LLVM must be a superset that satisfies both hip-ep and
+  # rocmlirTriton (which is added as a subdirectory later and reuses these
+  # targets instead of building its own LLVM). Assertions are left at the
+  # build-type default (OFF for Release) to match the CI prebuilt LLVM prefix,
+  # so the from-source and find_package paths produce equivalent toolsets.
   if(ENABLE_ROCMLIRTRITON)
     set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
-    set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "" FORCE)
     # rocMLIR's Rock libraries link Triton targets and get registered into
     # MLIR's MLIRTargets install-export set; Triton targets are not in any
     # export set, so install(EXPORT MLIRTargets) errors at generate time.
