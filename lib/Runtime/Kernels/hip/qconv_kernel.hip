@@ -183,11 +183,11 @@ static_assert(kTileCo * kTileK == kWRepeats * kTiledBlock, "w tile must divide")
 //
 // The inner loop wants the kThreadCo weights of one k contiguous so they arrive
 // as 128-bit reads instead of kThreadCo separate ones, which needs the row
-// stride to stay a multiple of 16 bytes. 4 is the smallest padding that keeps
-// that. Nothing smaller in the staging writes is available: any stride that is
-// a multiple of four dwords puts the eight rows one thread writes onto the same
-// bank, and the reads outnumber those writes by more than an order of
-// magnitude, so the read alignment is what the padding is chosen for.
+// stride to stay a multiple of 16 bytes, and 4 is the smallest padding that
+// keeps that. No padding can also spread the staging writes, which step by a
+// whole row: every stride that is a multiple of four dwords lands them on one
+// bank. The reads outnumber those writes by more than an order of magnitude, so
+// the read alignment is what the padding is chosen for.
 constexpr int kWPad = 4;
 static_assert((kTileCo + kWPad) * sizeof(int32_t) % 16 == 0,
               "staged weight rows must stay 16-byte aligned");
@@ -209,15 +209,11 @@ static_assert((kTileCo + kWPad) * sizeof(int32_t) % 16 == 0,
 // activation has z_x subtracted from it, so a zero there would contribute
 // -z_x * w instead of nothing.
 //
-// word_staged picks how the weight slab is fetched. Element-at-a-time, a wave
-// spends 64 byte loads to collect the 32 bytes of one staging round, because
-// two lanes share every byte at 4 bits and the unpack has to happen before the
-// value can be stored. By the word each lane instead brings in 32/WBits
-// logical weights in one read, which is the same slab in a quarter of the
-// requests and with the shifts folded away by WBits and WSigned. It needs
-// in_channels to be a multiple of that element count so a word never straddles
-// the end of a channel's row; the caller checks, and the element path stays for
-// the shapes where it does not hold.
+// This is the general fallback. It reads the weight buffer one logical element
+// at a time, which costs a wave 64 byte loads to collect the 32 bytes of a
+// staging round at 4 bits because two lanes share every byte. The dot-product
+// kernel below covers the shapes where the buffer can instead be read by the
+// word.
 template <typename TAct, int WBits, bool WSigned>
 __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
     const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
@@ -225,14 +221,8 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
     const uint8_t *__restrict__ weight_zero_points,
     const float *__restrict__ bias, TAct *__restrict__ output,
     int64_t in_channels, int64_t out_channels, int64_t spatial_size,
-    bool word_staged, float act_out_scale_ratio, int32_t input_zp,
-    float inv_output_scale, int32_t output_zp) {
-  // Logical weights per 32-bit word, and how the tile's slab divides into them.
-  constexpr int kWElems = 32 / WBits;
-  constexpr int kWWordsPerRow = kTileK / kWElems;
-  constexpr int kWWordRepeats = (kTileCo * kWWordsPerRow) / kTiledBlock;
-  static_assert(kTileCo * kWWordsPerRow == kWWordRepeats * kTiledBlock,
-                "w word slab must divide");
+    float act_out_scale_ratio, int32_t input_zp, float inv_output_scale,
+    int32_t output_zp) {
   __shared__ TAct x_lds[kTileK][kTileP];
   // Indexed [k][co], the transpose of the weight layout in memory, so that the
   // channels one thread multiplies against a single activation are adjacent.
@@ -272,16 +262,6 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
             ? qconv_read_quant(weight_zero_points, co, WBits, WSigned)
             : 0;
   }
-  int zw_word[kWWordRepeats];
-#pragma unroll
-  for (int rep = 0; rep < kWWordRepeats; ++rep) {
-    const int64_t co = co_base + (rep * kTiledBlock + tid) / kWWordsPerRow;
-    zw_word[rep] =
-        co < out_channels
-            ? qconv_read_quant(weight_zero_points, co, WBits, WSigned)
-            : 0;
-  }
-
   int64_t acc[kThreadCo] = {};
 
   for (int64_t k0 = 0; k0 < in_channels; k0 += kTileK) {
@@ -297,43 +277,20 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
                           : TAct{0};
     }
 
-    // Uniform across the block, so this is a scalar branch taken once per tile
-    // rather than anything the lanes diverge on.
-    if (word_staged) {
 #pragma unroll
-      for (int rep = 0; rep < kWWordRepeats; ++rep) {
-        const int widx = rep * kTiledBlock + tid;
-        const int sc = widx / kWWordsPerRow;
-        const int wk = (widx % kWWordsPerRow) * kWElems;
-        const int64_t co = co_base + sc;
-        const int64_t k = k0 + wk;
-        const bool live = co < out_channels && k < in_channels;
-        const uint32_t word =
-            live ? reinterpret_cast<const uint32_t *>(
-                       weights)[(co * in_channels + k) / kWElems]
-                 : 0u;
-#pragma unroll
-        for (int j = 0; j < kWElems; ++j)
-          w_lds[wk + j][sc] =
-              live ? qconv_unpack_word<WBits, WSigned>(&word, j) - zw_word[rep]
-                   : 0;
+    for (int rep = 0; rep < kWRepeats; ++rep) {
+      const int lin = rep * kTiledBlock + tid;
+      const int sc = lin / kTileK;
+      const int sk = lin % kTileK;
+      const int64_t co = co_base + sc;
+      const int64_t k = k0 + sk;
+      int32_t v = 0;
+      if (co < out_channels && k < in_channels) {
+        const int wq =
+            qconv_read_quant(weights, co * in_channels + k, WBits, WSigned);
+        v = wq - zw_stage[rep];
       }
-    } else {
-#pragma unroll
-      for (int rep = 0; rep < kWRepeats; ++rep) {
-        const int lin = rep * kTiledBlock + tid;
-        const int sc = lin / kTileK;
-        const int sk = lin % kTileK;
-        const int64_t co = co_base + sc;
-        const int64_t k = k0 + sk;
-        int32_t v = 0;
-        if (co < out_channels && k < in_channels) {
-          const int wq =
-              qconv_read_quant(weights, co * in_channels + k, WBits, WSigned);
-          v = wq - zw_stage[rep];
-        }
-        w_lds[sk][sc] = v;
-      }
+      w_lds[sk][sc] = v;
     }
 
     __syncthreads();
@@ -374,6 +331,215 @@ __global__ __launch_bounds__(kTiledBlock) void qconv_tiled_kernel(
     const float m_co = act_out_scale_ratio * weight_scales[co];
     y_n[co * spatial_size + p] = qconv_epilogue<TAct>(
         acc[c], m_co, bias, co, inv_output_scale, output_zp);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Tiled path, integer dot product
+//===----------------------------------------------------------------------===//
+
+// Same tiling as above, but the reduction runs on v_dot4_i32_iu8, which folds
+// four multiply-accumulates into one instruction. The loop is issue-limited, so
+// what matters is how few instructions a multiply-accumulate costs; the
+// multiply-add form pays roughly two, this pays roughly two thirds of one.
+//
+// Two things have to change to reach the instruction, and both pay for
+// themselves elsewhere.
+//
+// The operands are four packed BYTES, so a 16-bit activation is split into its
+// high and low halves and each half gets its own dot and its own accumulator:
+//   sum x*w = 256 * sum xhi*w + sum xlo*w
+//
+// Both operands are read as UNSIGNED, which rules out subtracting a zero point
+// before the dot. Expanding the product instead removes the subtraction from
+// the loop entirely:
+//   sum (x - zx)(w - zw) = sum x*w - zw * sum x - zx * sum w + K * zx * zw
+// The two column sums are the only extra work. sum x is over the position a
+// thread already owns, so it is two more dots per tile, and sum w is a
+// block-wide reduction over the staged slab that costs a handful of
+// instructions per tile. The weights then reach shared memory with no unpacking
+// at all: at 4 bits a masked word IS a valid operand.
+//
+// A signed weight is staged as raw ^ (1 << (WBits - 1)), which maps it onto the
+// unsigned range by adding the same bias to the weight and to its zero point.
+// The bias cancels in w - zw, so nothing downstream has to know.
+//
+// K is counted as in_channels, not as the padded tile span: a tail tile stages
+// zeros for both operands, and the K * zx * zw term would otherwise charge for
+// elements that do not exist.
+
+// Reduction lanes folded into one dot, and the resulting dwords per K-tile.
+constexpr int kDotQuad = 4;
+constexpr int kDotTileKQ = kTileK / kDotQuad;
+
+// Odd stride so that the positions a wave reads land on distinct banks: a
+// thread reads down one row of [p][quad] and consecutive threads are
+// consecutive p.
+constexpr int kXQPad = 1;
+
+// Slots of the staged activation each thread assembles per K-tile.
+constexpr int kXQRepeats = (kTileP * kDotTileKQ) / kTiledBlock;
+static_assert(kTileP * kDotTileKQ == kXQRepeats * kTiledBlock,
+              "x quad slab must divide");
+static_assert(kTiledBlock == kCoGroups * kTileCo,
+              "column-sum reduction assigns one thread per (group, channel)");
+static_assert(kDotTileKQ % kCoGroups == 0,
+              "column-sum reduction splits the quad rows across the groups");
+
+__device__ inline int qconv_dot4(uint32_t a, uint32_t b, int acc) {
+  return __builtin_amdgcn_sudot4(false, static_cast<int>(a), false,
+                                 static_cast<int>(b), acc, false);
+}
+
+// Which k of the tile lands in byte i of quad q.
+//
+// At 8 bits a word already holds four consecutive weights, so a quad is a word.
+// At 4 bits masking a word to one nibble per byte necessarily takes every other
+// nibble, so a word splits into an even quad and an odd quad.
+template <int WBits> __device__ constexpr int qconv_dot_k(int q, int i) {
+  return WBits == 4 ? (q >> 1) * 8 + (q & 1) + 2 * i : q * kDotQuad + i;
+}
+
+template <typename TAct, int WBits, bool WSigned>
+__global__ __launch_bounds__(kTiledBlock) void qconv_tiled_dot_kernel(
+    const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
+    const float *__restrict__ weight_scales,
+    const uint8_t *__restrict__ weight_zero_points,
+    const float *__restrict__ bias, TAct *__restrict__ output,
+    int64_t in_channels, int64_t out_channels, int64_t spatial_size,
+    float act_out_scale_ratio, int32_t input_zp, float inv_output_scale,
+    int32_t output_zp) {
+  static_assert(sizeof(TAct) <= 2, "activation splits into two bytes");
+  constexpr int kWElems = 32 / WBits;
+  constexpr int kWordsPerRow = kTileK / kWElems;
+  constexpr int kWordRepeats = (kTileCo * kWordsPerRow) / kTiledBlock;
+  static_assert(kTileCo * kWordsPerRow == kWordRepeats * kTiledBlock,
+                "w word slab must divide");
+  // Maps a raw signed weight onto the unsigned range the dot product reads.
+  constexpr uint32_t kSignFlip =
+      WSigned ? (WBits == 4 ? 0x88888888u : 0x80808080u) : 0u;
+  constexpr int kZeroBias = WSigned ? (1 << (WBits - 1)) : 0;
+  constexpr uint32_t kOnes = 0x01010101u;
+
+  __shared__ uint32_t xh_lds[kTileP][kDotTileKQ + kXQPad];
+  __shared__ uint32_t xl_lds[kTileP][kDotTileKQ + kXQPad];
+  __shared__ uint32_t w_lds[kDotTileKQ][kTileCo + kWPad];
+  __shared__ int32_t cw_lds[kCoGroups][kTileCo];
+
+  const int64_t n = blockIdx.z;
+  const int64_t p_base = static_cast<int64_t>(blockIdx.x) * kTileP;
+  const int64_t co_base = static_cast<int64_t>(blockIdx.y) * kTileCo;
+
+  const int tx = threadIdx.x;
+  const int ty = threadIdx.y;
+  const int tid = ty * kTileP + tx;
+
+  const TAct *x_n = input + n * in_channels * spatial_size;
+  TAct *y_n = output + n * out_channels * spatial_size;
+
+  // The channel this thread folds the weight column sum for, and the quad rows
+  // it covers. Fixed for the whole K loop, so the partial stays in a register
+  // and the block only exchanges once, after the loop.
+  const int cw_co = tid % kTileCo;
+  const int cw_row0 = (tid / kTileCo) * (kDotTileKQ / kCoGroups);
+
+  int32_t acc_hi[kThreadCo] = {};
+  int32_t acc_lo[kThreadCo] = {};
+  int32_t sx_hi = 0;
+  int32_t sx_lo = 0;
+  int32_t cw_part = 0;
+
+  for (int64_t k0 = 0; k0 < in_channels; k0 += kTileK) {
+#pragma unroll
+    for (int rep = 0; rep < kXQRepeats; ++rep) {
+      const int lin = rep * kTiledBlock + tid;
+      const int sq = lin / kTileP;
+      const int sp = lin % kTileP;
+      const int64_t p = p_base + sp;
+      uint32_t hi = 0;
+      uint32_t lo = 0;
+#pragma unroll
+      for (int i = 0; i < kDotQuad; ++i) {
+        const int64_t k = k0 + qconv_dot_k<WBits>(sq, i);
+        const uint32_t v = (k < in_channels && p < spatial_size)
+                               ? static_cast<uint32_t>(x_n[k * spatial_size + p])
+                               : 0u;
+        hi |= (v >> 8) << (8 * i);
+        lo |= (v & 0xFFu) << (8 * i);
+      }
+      xh_lds[sp][sq] = hi;
+      xl_lds[sp][sq] = lo;
+    }
+
+#pragma unroll
+    for (int rep = 0; rep < kWordRepeats; ++rep) {
+      const int widx = rep * kTiledBlock + tid;
+      const int sc = widx / kWordsPerRow;
+      const int wq = widx % kWordsPerRow;
+      const int64_t co = co_base + sc;
+      const int64_t k = k0 + wq * kWElems;
+      const uint32_t word =
+          (co < out_channels && k < in_channels)
+              ? reinterpret_cast<const uint32_t *>(
+                    weights)[(co * in_channels + k) / kWElems] ^
+                    kSignFlip
+              : 0u;
+      if constexpr (WBits == 4) {
+        w_lds[2 * wq][sc] = word & 0x0F0F0F0Fu;
+        w_lds[2 * wq + 1][sc] = (word >> 4) & 0x0F0F0F0Fu;
+      } else {
+        w_lds[wq][sc] = word;
+      }
+    }
+
+    __syncthreads();
+
+    for (int q = 0; q < kDotTileKQ; ++q) {
+      const uint32_t xh = xh_lds[tx][q];
+      const uint32_t xl = xl_lds[tx][q];
+      sx_hi = qconv_dot4(xh, kOnes, sx_hi);
+      sx_lo = qconv_dot4(xl, kOnes, sx_lo);
+#pragma unroll
+      for (int c = 0; c < kThreadCo; ++c) {
+        const uint32_t wv = w_lds[q][ty * kThreadCo + c];
+        acc_hi[c] = qconv_dot4(xh, wv, acc_hi[c]);
+        acc_lo[c] = qconv_dot4(xl, wv, acc_lo[c]);
+      }
+    }
+
+#pragma unroll
+    for (int r = 0; r < kDotTileKQ / kCoGroups; ++r)
+      cw_part = qconv_dot4(w_lds[cw_row0 + r][cw_co], kOnes, cw_part);
+
+    __syncthreads();
+  }
+
+  cw_lds[tid / kTileCo][cw_co] = cw_part;
+  __syncthreads();
+
+  const int64_t p = p_base + tx;
+  if (p >= spatial_size)
+    return;
+
+  const int64_t sx = 256LL * sx_hi + sx_lo;
+#pragma unroll
+  for (int c = 0; c < kThreadCo; ++c) {
+    const int lane = ty * kThreadCo + c;
+    const int64_t co = co_base + lane;
+    if (co >= out_channels)
+      break;
+    int32_t sw = 0;
+#pragma unroll
+    for (int g = 0; g < kCoGroups; ++g)
+      sw += cw_lds[g][lane];
+    const int64_t zw =
+        qconv_read_quant(weight_zero_points, co, WBits, WSigned) + kZeroBias;
+    const int64_t total = 256LL * acc_hi[c] + acc_lo[c] - zw * sx -
+                          static_cast<int64_t>(input_zp) * sw +
+                          in_channels * static_cast<int64_t>(input_zp) * zw;
+    const float m_co = act_out_scale_ratio * weight_scales[co];
+    y_n[co * spatial_size + p] =
+        qconv_epilogue<TAct>(total, m_co, bias, co, inv_output_scale, output_zp);
   }
 }
 
@@ -668,32 +834,46 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
         static_cast<unsigned>((out_channels + kTileCo - 1) / kTileCo),
         static_cast<unsigned>(batch));
 
-    // Word staging needs every channel's row to start on a word boundary and
-    // a thread's run of elements to stay inside one row, which both follow
-    // from in_channels dividing by the element count of a word. The pointer
-    // check covers the buffer itself, which the allocator aligns far past this
-    // but which nothing here guarantees.
+    // The dot-product kernel reads the weight buffer by the word, which needs
+    // every channel's row to start on a word boundary and a quad to stay inside
+    // one row; both follow from in_channels dividing by the element count of a
+    // word. The pointer check covers the buffer itself, which the allocator
+    // aligns far past this but which nothing here guarantees.
+    //
+    // It also keeps its two accumulators in int32 for the whole reduction
+    // rather than widening per tile, so K has to stay under what 255 times the
+    // largest unsigned weight can sum to without wrapping.
     const int64_t w_elems_per_word = 32 / weight_bits;
-    const bool word_staged =
-        (in_channels % w_elems_per_word) == 0 &&
+    const int64_t dot_max_k =
+        (int64_t{1} << 31) / (255 * ((int64_t{1} << weight_bits) - 1));
+    const bool dot_capable =
+        (in_channels % w_elems_per_word) == 0 && in_channels <= dot_max_k &&
         (reinterpret_cast<uintptr_t>(w) % sizeof(uint32_t)) == 0;
 
-#define QCONV_LAUNCH_TILED(BITS, SIGNED)                                       \
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_kernel<TAct, BITS, SIGNED>),  \
-                     grid, dim3(kTileP, kCoGroups), 0, stream, x, w, ws, wzp,  \
-                     b, y, in_channels, out_channels, spatial_size,            \
-                     word_staged, act_out_scale_ratio, input_zp,               \
-                     inv_output_scale, output_zp)
+#define QCONV_LAUNCH_TILED(KERNEL, BITS, SIGNED)                               \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(KERNEL<TAct, BITS, SIGNED>), grid,        \
+                     dim3(kTileP, kCoGroups), 0, stream, x, w, ws, wzp, b, y,  \
+                     in_channels, out_channels, spatial_size,                  \
+                     act_out_scale_ratio, input_zp, inv_output_scale,          \
+                     output_zp)
+#define QCONV_LAUNCH_TILED_BITS(BITS)                                          \
+  do {                                                                         \
+    if (dot_capable && weight_signed)                                          \
+      QCONV_LAUNCH_TILED(qconv_tiled_dot_kernel, BITS, true);                  \
+    else if (dot_capable)                                                      \
+      QCONV_LAUNCH_TILED(qconv_tiled_dot_kernel, BITS, false);                 \
+    else if (weight_signed)                                                    \
+      QCONV_LAUNCH_TILED(qconv_tiled_kernel, BITS, true);                      \
+    else                                                                       \
+      QCONV_LAUNCH_TILED(qconv_tiled_kernel, BITS, false);                     \
+  } while (0)
 
-    if (weight_bits == 4 && weight_signed)
-      QCONV_LAUNCH_TILED(4, true);
-    else if (weight_bits == 4)
-      QCONV_LAUNCH_TILED(4, false);
-    else if (weight_signed)
-      QCONV_LAUNCH_TILED(8, true);
+    if (weight_bits == 4)
+      QCONV_LAUNCH_TILED_BITS(4);
     else
-      QCONV_LAUNCH_TILED(8, false);
+      QCONV_LAUNCH_TILED_BITS(8);
 
+#undef QCONV_LAUNCH_TILED_BITS
 #undef QCONV_LAUNCH_TILED
   }
   return 0;
