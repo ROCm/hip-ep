@@ -53,6 +53,7 @@
 // them in int32, and flushes into an int64 total.
 
 #include "debug_log.h"
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
@@ -387,8 +388,8 @@ static_assert(kDotTileKQ % kCoGroups == 0,
               "column-sum reduction splits the quad rows across the groups");
 
 __device__ inline int qconv_dot4(uint32_t a, uint32_t b, int acc) {
-  return __builtin_amdgcn_sudot4(false, static_cast<int>(a), false,
-                                 static_cast<int>(b), acc, false);
+  return hipdnn_dot4<false, false>(static_cast<int>(a), static_cast<int>(b),
+                                   acc);
 }
 
 // Which k of the tile lands in byte i of quad q.
