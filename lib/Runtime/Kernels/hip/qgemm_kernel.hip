@@ -1117,13 +1117,26 @@ __device__ void qgemm_gemv_nk_columns(const TA *__restrict__ A,
   const int64_t k_mid =
       wide_ok ? k_begin + (span / kWideStride) * kWideStride : k_begin;
 
-  for (int64_t k = k_begin + static_cast<int64_t>(lane) * kWideStep; k < k_mid;
-       k += kWideStride) {
+  // Step pointers rather than recompute an int64 offset per column per
+  // iteration. The address arithmetic costs more latency than the
+  // multiply-accumulates it feeds, and none of it depends on anything the loop
+  // body produces.
+  constexpr int64_t kWideByteStep = kWideStride * kBits / 8;
+  const int64_t k_wide0 = k_begin + static_cast<int64_t>(lane) * kWideStep;
+  const uint8_t *bp[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    bp[c] = B + col_offsets[c] + k_wide0 * kBits / 8;
+  const TA *ap = A + k_wide0;
+
+  for (int64_t k = k_wide0; k < k_mid;
+       k += kWideStride, ap += kWideStride) {
     uint4 packed[kCols];
 #pragma unroll
-    for (int c = 0; c < kCols; ++c)
-      packed[c] =
-          *reinterpret_cast<const uint4 *>(B + col_offsets[c] + k * kBits / 8);
+    for (int c = 0; c < kCols; ++c) {
+      packed[c] = *reinterpret_cast<const uint4 *>(bp[c]);
+      bp[c] += kWideByteStep;
+    }
 
 #pragma unroll
     for (int d = 0; d < 4; ++d) {
@@ -1136,8 +1149,7 @@ __device__ void qgemm_gemv_nk_columns(const TA *__restrict__ A,
                           : packed[c].w;
 #pragma unroll
       for (int j = 0; j < kDwordStep; ++j) {
-        const int32_t a_val =
-            static_cast<int32_t>(A[k + d * kDwordStep + j]);
+        const int32_t a_val = static_cast<int32_t>(ap[d * kDwordStep + j]);
         if (need_row_a)
           p_row_a += a_val;
 #pragma unroll
@@ -1159,17 +1171,26 @@ __device__ void qgemm_gemv_nk_columns(const TA *__restrict__ A,
     }
   }
 
-  for (int64_t k = k_mid + static_cast<int64_t>(lane) * kStep;
-       k + kStep <= k_end; k += kStride) {
+  constexpr int64_t kNarrowByteStep = kStride * kBits / 8;
+  const int64_t k_narrow0 = k_mid + static_cast<int64_t>(lane) * kStep;
+  const uint8_t *np[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    np[c] = B + col_offsets[c] + k_narrow0 * kBits / 8;
+  const TA *nap = A + k_narrow0;
+
+  for (int64_t k = k_narrow0; k + kStep <= k_end;
+       k += kStride, nap += kStride) {
     uint32_t packed[kCols];
 #pragma unroll
-    for (int c = 0; c < kCols; ++c)
-      packed[c] = *reinterpret_cast<const uint32_t *>(B + col_offsets[c] +
-                                                      k * kBits / 8);
+    for (int c = 0; c < kCols; ++c) {
+      packed[c] = *reinterpret_cast<const uint32_t *>(np[c]);
+      np[c] += kNarrowByteStep;
+    }
 
 #pragma unroll
     for (int j = 0; j < kStep; ++j) {
-      const int32_t a_val = static_cast<int32_t>(A[k + j]);
+      const int32_t a_val = static_cast<int32_t>(nap[j]);
       if (need_row_a)
         p_row_a += a_val;
 #pragma unroll
@@ -1447,7 +1468,7 @@ int qgemm_gemv_launch(const QGemmArgs &g, const QGemmRequant &requant,
 // Column groups per block, and how many of them a block carries. Four waves
 // keeps the tail waste under a wave on the narrow shapes while still giving
 // the scheduler whole-block granularity.
-constexpr int kGemvNkCols = 4;
+constexpr int kGemvNkCols = 2;
 constexpr int kGemvNkWaves = 4;
 constexpr int kGemvNkGroup = kGemvNkCols * kGemvNkWaves;
 
