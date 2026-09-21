@@ -4,7 +4,8 @@
   (import (rnrs)
           (only (chezscheme) syntax->list format printf)
           (for (rename (rime loop) (:with :rime-with)) expand)
-          (mlir pattern-ast))
+          (mlir pattern-ast)
+          (mlir pattern-actions))
 
   ;;=======================================================================
   ;; Phase 3: Analysis - build bindings and actions for pattern matching
@@ -39,7 +40,7 @@
              [visited (make-vector (vector-length match-vec) #f)])
 
         ;; Create initial action: bind root variable to root operation result
-        (let ([initial-action (list ':bind-root root-var root-op-idx root-result-idx)])
+        (let ([initial-action (action:bind-root root-var root-op-idx root-result-idx)])
 
           ;; Build match actions (includes binding for all results and operands)
           (let ([actions (cons initial-action
@@ -67,8 +68,8 @@
                  [actions '()])
 
             ;; Generate check actions for this operation
-            (set! actions (cons (list ':set-current-op op-idx result-var result-var-idx) actions))
-            (set! actions (cons (list ':check-op op-idx) actions))
+            (set! actions (cons (action:set-current-op op-idx result-var result-var-idx) actions))
+            (set! actions (cons (action:check-op op-idx) actions))
 
             ;; Process operands: bind or check equality
             (let ([operands (syntax->list (ast-match-expand-operands match-op))])
@@ -81,15 +82,15 @@
                           ;; Case 1: Operand binding (not result) and not bound → bind it
                           [(and (not is-result) (not is-bound))
                            (set! actions
-                             (cons (list ':bind-operand op-idx operand
-                                        (binding-entry-operand-idx entry))
+                             (cons (action:bind-operand op-idx operand
+                                                       (binding-entry-operand-idx entry))
                                    actions))
                            (binding-entry-bound?-set! entry #t)]
 
                           ;; Cases 2 & 3: Variable is bound (operand or result) → check equality
                           [is-bound
                            (set! actions
-                             (cons (list ':check-eq op-idx operand-idx operand)
+                             (cons (action:check-eq op-idx operand-idx operand)
                                    actions))]
 
                           ;; Case 4: Result binding not yet bound → recurse to producer operation
