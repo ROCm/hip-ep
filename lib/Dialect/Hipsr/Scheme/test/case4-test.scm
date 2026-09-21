@@ -82,7 +82,9 @@
                   (:set-current-op (op-idx . 0) (var . %a))
                   (:check-op (op-idx . 0))
                   (:bind-operand (op-idx . 0) (var . %x))
-                  (:check-eq (op-idx . 3) (operand-idx . 1) (var . %c))))
+                  (:set-current-op (op-idx . 2) (var . %c))
+                  (:check-op (op-idx . 2))
+                  (:check-eq (op-idx . 2) (operand-idx . 0) (var . %a))))
 
 ;; Test 4: Multiple operands - same operation
 (define-conversion-pattern :debug-analyze test-multi-operands
@@ -165,7 +167,9 @@
                   (:set-current-op (op-idx . 0) (var . %a))
                   (:check-op (op-idx . 0))
                   (:bind-operand (op-idx . 0) (var . %x))
-                  (:check-eq (op-idx . 3) (operand-idx . 1) (var . %c))))
+                  (:set-current-op (op-idx . 2) (var . %c))
+                  (:check-op (op-idx . 2))
+                  (:check-eq (op-idx . 2) (operand-idx . 0) (var . %a))))
 
 (format #t "\n=== All test cases complete ===\n")
 (format #t "All action sequences verified automatically.\n")
