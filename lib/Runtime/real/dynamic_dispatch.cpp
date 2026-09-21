@@ -17,27 +17,28 @@
 #include <string>
 #include <vector>
 
-// DynamicDispatch headers
-// Note: Include paths are configured in CMakeLists.txt to work with both
-// install layout (ryzenai/dynamic_dispatch/...) and source layout
-#include <ops/dmacompiler/combined_gemm/combined_gemm.hpp>
-#include <ops/dmacompiler/iconv/iconv.hpp>
-#include <ops/op_interface.hpp>
-#include <xrt_context/xrt_context.hpp>
+// DynamicDispatch C API header
+// This provides stable C ABI functions that avoid vtable/template issues across DLL boundaries
+#include <ops/dd_c_api.h>
 
 //===----------------------------------------------------------------------===//
 // Helper Functions
 //===----------------------------------------------------------------------===//
 
 // Convert HIPDNN_EP_DATATYPE_* to DynamicDispatch dtype string
+// NOTE: DynamicDispatch combined_gemm only supports specific dtypes:
+//   - Activation/Output: "uint16" (float16)
+//   - Weights: "uint8" or "int8"
 static const char *hipdnn_datatype_to_dd_string(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
-    return "float32";
+    // DynamicDispatch doesn't support float32 for combined_gemm
+    // Return nullptr to trigger an error
+    return nullptr;
   case HIPDNN_EP_DATATYPE_HALF:
-    return "float16";
+    return "uint16";  // DynamicDispatch uses uint16 for float16
   case HIPDNN_EP_DATATYPE_BFLOAT16:
-    return "bfloat16";
+    return nullptr;  // Not supported by combined_gemm
   case HIPDNN_EP_DATATYPE_INT8:
     return "int8";
   case HIPDNN_EP_DATATYPE_UINT8:
@@ -53,80 +54,45 @@ static const char *hipdnn_datatype_to_dd_string(int64_t data_type) {
   }
 }
 
-// Get or create XRT context from RuntimeState
-// Lazily initialized on first DynamicDispatch operation call
-static std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context>
-get_xrt_context(RuntimeState *state) {
-  if (!state) {
-    fprintf(stderr, "get_xrt_context: null RuntimeState\n");
-    return nullptr;
-  }
-
-  // If XRT context already exists, return it
-  if (state->xrt_context) {
-    auto *ctx_ptr = static_cast<
-        std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context> *>(
-        state->xrt_context);
-    return *ctx_ptr;
-  }
-
-  // Lazy initialization: create XRT context on first use
-  // XRT context requires an XRT device. For now, we'll use the default device.
-  // In a multi-device setup, this could be configured via environment variable
-  // or passed through RuntimeState initialization.
-  try {
-    auto ctx = std::make_shared<ryzenai::dynamic_dispatch::xrt_context>();
-
-    // Store the shared_ptr in RuntimeState for reuse
-    // Allocate on heap so it persists beyond this function
-    auto *ctx_ptr =
-        new std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context>(ctx);
-    state->xrt_context = static_cast<void *>(ctx_ptr);
-
-    fprintf(stderr,
-            "[DynamicDispatch] Initialized XRT context for NPU/IPU backend\n");
-    return ctx;
-  } catch (const std::exception &e) {
-    fprintf(stderr, "get_xrt_context: failed to create XRT context: %s\n",
-            e.what());
-    return nullptr;
-  }
-}
+// Note: XRT context initialization is now handled internally by the DD C API
+// when creating operators with load_xrt=true
 
 //===----------------------------------------------------------------------===//
 // Op-State Management for DynamicDispatch Operators
 //===----------------------------------------------------------------------===//
 //
-// DynamicDispatch operators are C++ objects with initialization overhead
+// DynamicDispatch operators are opaque C handles with initialization overhead
 // (XRT context binding, transaction binary loading, etc.). We cache them
 // in RuntimeState's op_state slots to avoid recreating them per inference.
 //
 // Each DD operator uses the OpStateT<T> CRTP base for lifecycle management.
-//
-// IMPORTANT: The template instantiations below must be provided by
-// dyn_dispatch_core.lib. Currently required instantiations:
-//   - ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>
-//   - ryzenai::iconv<uint16_t, uint8_t, uint16_t>
-//
-// These correspond to float16 activations/outputs with uint8 weights.
-// If these are not exported from dyn_dispatch_core.lib, the linker will
-// report unresolved external symbols.
+// We use the C API (dd_c_api.h) to avoid C++ ABI/vtable issues across DLL boundaries.
 //===----------------------------------------------------------------------===//
 
-// GEMM operator state
+// GEMM operator state - stores opaque C API handle
 struct DDGemmState : OpStateT<DDGemmState> {
-  using GemmOp = ryzenai::combined_gemm<uint16_t, uint8_t, uint16_t>;
-  std::unique_ptr<GemmOp> op;
+  dd_gemm_handle_t handle;
 
-  DDGemmState(std::unique_ptr<GemmOp> &&gemm_op) : op(std::move(gemm_op)) {}
+  DDGemmState(dd_gemm_handle_t h) : handle(h) {}
+
+  ~DDGemmState() {
+    if (handle) {
+      dd_combined_gemm_destroy(handle);
+    }
+  }
 };
 
-// Conv2D operator state
+// Conv2D operator state - stores opaque C API handle
 struct DDConvState : OpStateT<DDConvState> {
-  using ConvOp = ryzenai::iconv<uint16_t, uint8_t, uint16_t>;
-  std::unique_ptr<ConvOp> op;
+  dd_conv_handle_t handle;
 
-  DDConvState(std::unique_ptr<ConvOp> &&conv_op) : op(std::move(conv_op)) {}
+  DDConvState(dd_conv_handle_t h) : handle(h) {}
+
+  ~DDConvState() {
+    if (handle) {
+      dd_iconv_destroy(handle);
+    }
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -148,96 +114,96 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
   if (!dtype_str) {
     fprintf(stderr, "wrap_dd_matmul: unsupported data type %lld\n",
             (long long)data_type);
+    fprintf(stderr, "  DynamicDispatch combined_gemm only supports:\n");
+    fprintf(stderr, "    - Activation/Output: float16 (HIPDNN_EP_DATATYPE_HALF)\n");
+    fprintf(stderr, "    - Weights: int8 or uint8\n");
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  // Get XRT context
-  auto xrt_ctx = get_xrt_context(state);
-  if (!xrt_ctx) {
-    fprintf(stderr, "wrap_dd_matmul: XRT context not initialized\n");
-    fprintf(stderr, "  (XRT context management not yet implemented in RuntimeState)\n");
-    return -1;
-  }
-
+#if 0
+  // HACK to always create cached operator handle
+  DDGemmState *gemm_state = nullptr;
+#else
+  // Get or create cached operator handle
   DDGemmState *gemm_state = DDGemmState::get_op_state(state, op_state_slot);
+#endif
 
   if (!gemm_state) {
-    // First call: create operator instance
-    try {
-      // Create DynamicDispatch combined_gemm operator
-      // Constructor: combined_gemm(a_dtype, b_dtype, c_dtype, load_xrt, attr={})
-      std::map<std::string, std::any> attr;
-fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp \n");
-      auto gemm_op = std::make_unique<DDGemmState::GemmOp>(
-          dtype_str, dtype_str, dtype_str, true, attr);
+    // First call: create operator instance via C API
+    // For combined_gemm, we use: a_dtype="uint16", b_dtype="uint8", c_dtype="uint16"
+    const char *weight_dtype = "uint8";
 
-fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp state \n");
-      // Create state and store in slot
-      auto state_ptr = DDGemmState::create(std::move(gemm_op));
-fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp get state \n");
-      gemm_state = state_ptr.get();
-fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp set state \n");
-      hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
-fprintf(stderr, "wrap_dd_matmul: Creating DDGemmState::GemmOp created \n");
-
-    } catch (const std::exception &e) {
-      fprintf(stderr, "wrap_dd_matmul: failed to create operator: %s\n",
-                  e.what());
+    fprintf(stderr, "[DD] Creating combined_gemm: a=%s, b=%s, c=%s\n",  dtype_str, weight_dtype, dtype_str);
+    dd_gemm_handle_t handle = dd_combined_gemm_create(                  dtype_str, weight_dtype, dtype_str, true);  // load_xrt=true
+    if (!handle) {
+      fprintf(stderr, "[DD] wrap_dd_matmul: dd_combined_gemm_create failed\n");
       return -1;
     }
-  }
-  else {
-fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp existed: gemm_state= %p size= %u\n", (void*)gemm_state, sizeof(*gemm_state));
-fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp existed:         op= %p size= %u\n", (void*)gemm_state->op.get(), sizeof(*(gemm_state->op.get())));
-  }
+    fprintf(stderr, "[DD] wrap_dd_matmul: dd_combined_gemm_create: handle= %p\n", (void*) handle);
 
-  // Prepare input/output tensors
-  std::vector<Tensor> inputs;
-  std::vector<Tensor> outputs;
+    // Create state and store in slot
+    auto state_ptr = DDGemmState::create(handle);
 
-  // Input A tensor
-  Tensor tensor_a;
-  tensor_a.data = const_cast<void *>(input_a);
-  tensor_a.shape = {static_cast<size_t>(M), static_cast<size_t>(K)};
-  tensor_a.dtype = dtype_str;
-  inputs.push_back(tensor_a);
+    gemm_state = state_ptr.get();
+    hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
 
-  // Input B tensor (weights)
-  Tensor tensor_b;
-  tensor_b.data = const_cast<void *>(input_b);
-  tensor_b.shape = {static_cast<size_t>(K), static_cast<size_t>(N)};
-  tensor_b.dtype = dtype_str;
-  inputs.push_back(tensor_b);
-
-  // Bias tensor (if provided)
-  if (bias) {
-    Tensor tensor_bias;
-    tensor_bias.data = const_cast<void *>(bias);
-    tensor_bias.shape = {static_cast<size_t>(N)};
-    tensor_bias.dtype = dtype_str;
-    inputs.push_back(tensor_bias);
+    fprintf(stderr, "[DD] combined_gemm created  successfully, gemm_state handle=%p  handle=%p"     "\n", (void*) gemm_state->handle, (void*) handle);
+  } else {
+    fprintf(stderr, "[DD] combined_gemm obtained successfully, gemm_state handle=%p"                "\n", (void*) gemm_state->handle);
   }
 
-  // Output tensor
-  Tensor tensor_out;
-  tensor_out.data = output;
-  tensor_out.shape = {static_cast<size_t>(M), static_cast<size_t>(N)};
-  tensor_out.dtype = dtype_str;
-  outputs.push_back(tensor_out);
+  // Initialize weights if this is the first call or weights changed
+  // For now, we'll initialize weights on every call (DD caches internally)
+  dd_tensor_t weight_tensor;
+  weight_tensor.data = const_cast<void*>(input_b);
+  weight_tensor.shape[0] = static_cast<size_t>(K);
+  weight_tensor.shape[1] = static_cast<size_t>(N);
+  weight_tensor.shape[2] = 0;
+  weight_tensor.shape[3] = 0;
+  weight_tensor.ndim = 2;
+  weight_tensor.dtype = "uint8";  // Weights are uint8
 
-  // Execute the operator
-  try {
-fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp execute \n");
-    gemm_state->op->execute(inputs, outputs);
-fprintf(stderr, "wrap_dd_matmul: DDGemmState::GemmOp finished \n");
-  } catch (const std::exception &e) {
-    fprintf(stderr, "wrap_dd_matmul: execution failed: %s\n", e.what());
-    fprintf(stderr, "  M=%lld, N=%lld, K=%lld, dtype=%s\n", (long long)M,
-            (long long)N, (long long)K, dtype_str);
+  fprintf(stderr, "[DD] initializing weights combined_gemm"                                         "\n");
+  int ret = dd_combined_gemm_initialize_weights(gemm_state->handle, &weight_tensor);
+  if (ret != 0) {
+    fprintf(stderr, "wrap_dd_matmul: dd_combined_gemm_initialize_weights failed: %d\n", ret);
     return -1;
   }
+  fprintf(stderr, "[DD] wrap_dd_matmul: dd_combined_gemm_initialize_weights: ret= %d\n", ret);
 
-  (void)alpha; (void)beta; (void)transA; (void)transB;  // TODO: Handle these parameters
+  // Setup input tensor (activation)
+  dd_tensor_t input_tensor;
+  input_tensor.data = const_cast<void*>(input_a);
+  input_tensor.shape[0] = static_cast<size_t>(M);
+  input_tensor.shape[1] = static_cast<size_t>(K);
+  input_tensor.shape[2] = 0;
+  input_tensor.shape[3] = 0;
+  input_tensor.ndim = 2;
+  input_tensor.dtype = dtype_str;
+
+  // Setup output tensor
+  dd_tensor_t output_tensor;
+  output_tensor.data = output;
+  output_tensor.shape[0] = static_cast<size_t>(M);
+  output_tensor.shape[1] = static_cast<size_t>(N);
+  output_tensor.shape[2] = 0;
+  output_tensor.shape[3] = 0;
+  output_tensor.ndim = 2;
+  output_tensor.dtype = dtype_str;
+
+  // Execute via C API
+  fprintf(stderr, "[DD] executing combined_gemm"                                         "\n");
+  ret = dd_combined_gemm_execute(gemm_state->handle, &input_tensor, &output_tensor);
+  if (ret != 0) {
+    fprintf(stderr, "wrap_dd_matmul: dd_combined_gemm_execute failed: %d\n", ret);
+    fprintf(stderr, "  M=%lld, N=%lld, K=%lld, dtype=%s\n",         (long long)M, (long long)N, (long long)K, dtype_str);
+    return -1;
+  }
+  fprintf(stderr, "[DD] wrap_dd_matmul: execute: ret= %d\n", ret);
+
+  // TODO: Handle bias, alpha, beta, transA, transB parameters
+  (void)bias; (void)alpha; (void)beta; (void)transA; (void)transB;
+
   return 0;
 }
 
@@ -266,76 +232,106 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  // Get XRT context
-  auto xrt_ctx = get_xrt_context(state);
-  if (!xrt_ctx) {
-    fprintf(stderr, "wrap_dd_conv2d: XRT context not initialized\n");
-    fprintf(stderr, "  (XRT context management not yet implemented in RuntimeState)\n");
+#if 1
+  // HACK to always create cached operator handle
+  DDConvState *conv_state = nullptr;
+#else
+  // Get or create cached operator handle
+  DDConvState *conv_state = DDConvState::get_op_state(state, op_state_slot);
+#endif
+
+  if (!conv_state) {
+    // First call: create operator instance via C API
+    const char *weight_dtype = "uint8";
+
+    fprintf(stderr, "[DD] Creating iconv: a=%s, b=%s, c=%s\n",
+            dtype_str, weight_dtype, dtype_str);
+
+    dd_conv_handle_t handle = dd_iconv_create(
+        dtype_str, weight_dtype, dtype_str, true);  // load_xrt=true
+
+    if (!handle) {
+      fprintf(stderr, "wrap_dd_conv2d: dd_iconv_create failed\n");
+      return -1;
+    }
+
+    // Create state and store in slot
+    auto state_ptr = DDConvState::create(handle);
+    conv_state = state_ptr.get();
+    hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
+
+    fprintf(stderr, "[DD] iconv created successfully, handle=%p\n", handle);
+  }
+
+  // Initialize weights
+  dd_tensor_t weight_tensor;
+  weight_tensor.data = const_cast<void*>(weights);
+  weight_tensor.shape[0] = static_cast<size_t>(k);
+  weight_tensor.shape[1] = static_cast<size_t>(c);
+  weight_tensor.shape[2] = static_cast<size_t>(kernel_h);
+  weight_tensor.shape[3] = static_cast<size_t>(kernel_w);
+  weight_tensor.ndim = 4;
+  weight_tensor.dtype = "uint8";
+
+  int ret = dd_iconv_initialize_weights(conv_state->handle, &weight_tensor);
+  if (ret != 0) {
+    fprintf(stderr, "wrap_dd_conv2d: dd_iconv_initialize_weights failed: %d\n", ret);
     return -1;
   }
 
-  DDConvState *conv_state = DDConvState::get_op_state(state, op_state_slot);
+  // Setup input tensor (NCHW format)
+  dd_tensor_t input_tensor;
+  input_tensor.data = const_cast<void*>(input);
+  input_tensor.shape[0] = static_cast<size_t>(n);
+  input_tensor.shape[1] = static_cast<size_t>(c);
+  input_tensor.shape[2] = static_cast<size_t>(h);
+  input_tensor.shape[3] = static_cast<size_t>(w);
+  input_tensor.ndim = 4;
+  input_tensor.dtype = dtype_str;
 
-  if (!conv_state) {
-    // First call: create operator instance
-    try {
-      // Create DynamicDispatch iconv operator
-      // Constructor: iconv(a_dtype, b_dtype, c_dtype, load_xrt, attr)
-      std::map<std::string, std::any> attr;
-      auto conv_op = std::make_unique<DDConvState::ConvOp>(
-              dtype_str, dtype_str, dtype_str, true, attr);
+  // Setup output tensor
+  dd_tensor_t output_tensor;
+  output_tensor.data = output;
+  output_tensor.shape[0] = static_cast<size_t>(n);
+  output_tensor.shape[1] = static_cast<size_t>(k);
+  output_tensor.shape[2] = static_cast<size_t>(out_h);
+  output_tensor.shape[3] = static_cast<size_t>(out_w);
+  output_tensor.ndim = 4;
+  output_tensor.dtype = dtype_str;
 
-      // Create state and store in slot
-      auto state_ptr = DDConvState::create(std::move(conv_op));
-      conv_state = state_ptr.get();
-      hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
-
-    } catch (const std::exception &e) {
-      fprintf(stderr, "wrap_dd_conv2d: failed to create operator: %s\n",
-                  e.what());
-      return -1;
-    }
+  // Execute via C API
+  ret = dd_iconv_execute(conv_state->handle, &input_tensor, &output_tensor);
+  if (ret != 0) {
+    fprintf(stderr, "wrap_dd_conv2d: dd_iconv_execute failed: %d\n", ret);
+    return -1;
   }
 
-  // TODO: Implement tensor preparation and execution for Conv2D
-  // This requires understanding the DynamicDispatch iconv tensor format
-  (void)conv_state;
-  (void)input; (void)n; (void)c; (void)h; (void)w;
-  (void)weights; (void)k; (void)bias; (void)output;
-  (void)out_h; (void)out_w; (void)kernel_h; (void)kernel_w;
-  (void)stride_h; (void)stride_w; (void)pad_top; (void)pad_left;
-  (void)pad_bottom; (void)pad_right; (void)dilation_h; (void)dilation_w;
-  (void)group;
+  // TODO: Handle bias and other conv parameters in DD C API
+  (void)bias; (void)stride_h; (void)stride_w;
+  (void)pad_top; (void)pad_left; (void)pad_bottom; (void)pad_right;
+  (void)dilation_h; (void)dilation_w; (void)group;
 
-  fprintf(stderr, "wrap_dd_conv2d: tensor preparation not yet implemented\n");
-  return -1;
+  return 0;
 }
 
 //===----------------------------------------------------------------------===//
-// XRT Context Accessors
+// XRT Context Accessors (Optional - for future use)
+//===----------------------------------------------------------------------===//
+//
+// XRT context is now managed internally by DynamicDispatch C API.
+// These functions are kept for potential future extensions.
 //===----------------------------------------------------------------------===//
 
 extern "C" {
 
-// Get XRT device from RuntimeState
-// Currently returns nullptr as device selection is handled by xrt_context
 void *hipdnn_ep_state_get_xrt_device(RuntimeState *state) {
   (void)state;
-  // XRT device selection is handled internally by xrt_context
-  // In a multi-device setup, this could return the selected device ID
-  return nullptr;
+  return nullptr;  // XRT device managed by DD C API
 }
 
-// Get XRT context from RuntimeState
-// Returns the cached context or creates it lazily on first call
 void *hipdnn_ep_state_get_xrt_context(RuntimeState *state) {
-  if (!state) {
-    return nullptr;
-  }
-
-  // Lazy initialization via get_xrt_context helper
-  auto ctx = get_xrt_context(state);
-  return ctx ? ctx.get() : nullptr;
+  (void)state;
+  return nullptr;  // XRT context managed by DD C API
 }
 
 } // extern "C"

@@ -630,6 +630,12 @@ if(NOT BUILD_MOCK_RUNTIME)
             ${DYNAMICDISPATCH_ROOT}/boost/include
         )
     endif()
+    # Also add DD_ROOT/include for C API headers (if not installed to DYNAMICDISPATCH_ROOT)
+    if(DEFINED ENV{DD_ROOT})
+        list(APPEND DD_SEARCH_PATHS
+            $ENV{DD_ROOT}/src
+        )
+    endif()
     # Add common installation paths as fallbacks
     list(APPEND DD_SEARCH_PATHS
         /opt/xilinx/xrt/include
