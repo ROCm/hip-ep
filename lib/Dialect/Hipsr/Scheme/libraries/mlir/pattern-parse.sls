@@ -140,12 +140,17 @@
   ;;   - Variadic (future): (%a ...) = "op" (...)      [not validated yet]
   ;;   - Dotted (future):   (%a %b . %rest) = "op" (...) [not validated yet]
   ;;
+  ;; Operation name syntax:
+  ;;   - String literal: "onnx.Add" or "arith.addi"
+  ;;   - Symbol: onnx.Add or arith.addi (normalized to string by validation)
+  ;;
   ;; Operand syntax:
   ;;   - Variables: (%x %y) - identifiers starting with %
   ;;   - Can be result variables from other operations or free variables
   ;;
   ;; Attributes and types are optional (4 variants for each result form):
   ;;   1. Full:     result = "op" (operands) (attrs) : (types) -> type
+  ;;                or:     result = op (operands) (attrs) : (types) -> type
   ;;   2. No attrs: result = "op" (operands) : (types) -> type
   ;;   3. No types: result = "op" (operands) (attrs)
   ;;   4. Minimal:  result = "op" (operands)
