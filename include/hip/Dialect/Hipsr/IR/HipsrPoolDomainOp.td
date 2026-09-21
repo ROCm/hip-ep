@@ -13,7 +13,8 @@
 
 def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
     DeclareOpInterfaceMethods<RegionBranchOpInterface,
-                              ["getEntrySuccessorOperands"]>,
+                              ["getEntrySuccessorOperands",
+                               "getSuccessorInputs"]>,
     IsolatedFromAbove,
     RecursiveMemoryEffects,
     SingleBlockImplicitTerminator<"PoolDomainYieldOp">
