@@ -3387,8 +3387,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, GeluOp, BiasGeluOp,
         FastGeluOp, WhereOp, LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp,
         ReduceMeanOp, CastOp, QuantizeLinearOp, DequantizeLinearOp,
-        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp,
-        RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        MatMulNBitsOp, GatherOp, RopeOp, GqaOp, MultiHeadAttentionOp, RmsNormOp,
+        LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
