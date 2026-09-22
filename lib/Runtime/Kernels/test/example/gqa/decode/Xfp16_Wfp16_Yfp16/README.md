@@ -34,9 +34,9 @@ edits a shape list -- there is no `shapes.csv` or `gen_data.py` in this
 leaf. Decode's reference cost scales ~linearly with context length (one
 query against `eff` keys), so no threading was needed here.
 
-`MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
-the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls
-back to `autotune` if the `.fb` is missing). `MODE=lut` needs `flatc` + its
+`MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
+exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
+warning. `MODE=lookup` needs `flatc` + its
 `include/` (a build tool, not part of this repo):
 `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>` -- see
 `example/README.md`.
@@ -44,7 +44,7 @@ back to `autotune` if the `.fb` is missing). `MODE=lut` needs `flatc` + its
 `gqa_kernel.hip` never calls the autotune resolver itself (only production
 `real/gqa.cpp` does); `MODE=autotune` (the fallback, and the only path when
 no `.fb` exists) runs the kernel's own internal runtime autotune + cache,
-independent of `MODE`. `MODE=lut` instead has *this test* call
+independent of `MODE`. `MODE=lookup` instead has *this test* call
 `hip_gqa_autotune_resolve_decode()` (the same resolver `real/gqa.cpp` calls in
 production) and dispatch the resolved config through
 `hip_gqa_flash_decode_configured()`. Both modes append to `out/results.csv`.

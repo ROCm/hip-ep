@@ -134,8 +134,14 @@ inline std::vector<std::string> captureLogLines(
 }
 }  // namespace hipdnn_ep_test
 
+static bool kernel_ut_lookup_mode() {
+  const char* mode = std::getenv("HIPDNN_KERNEL_UT_MODE");
+  return !mode || std::strcmp(mode, "autotune") != 0;
+}
+
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
+#ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 // One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
 // tiny Makefile-generated header (a plain #define, not a data file) so the
 // path never has to survive hipcc's Windows -D quoting (which mangles
@@ -147,6 +153,7 @@ static const unsigned char kLutBlob0[] = {
 extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
 extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
 extern "C" const size_t               kGqaLutBlobCount    = 1;
+#endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 #endif
 
 // Launcher under test (implemented in hip/gqa_kernel.hip).
@@ -393,7 +400,8 @@ static double run_kernel_lut(const Case& c, float scale,
                              __half* dO, float* dPart, const int* dSeq,
                              const __half* dSink, int iters,
                              std::vector<float>& host_O,
-                             hipdnn_ep::GqaTuneSource& out_source) {
+                             hipdnn_ep::GqaTuneSource& out_source,
+                             hipdnn_ep::GqaDecodeConfig& out_config) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
   const int eff_skv = (c.window > 0 && c.total > c.window) ? c.window : c.total;
@@ -413,6 +421,7 @@ static double run_kernel_lut(const Case& c, float scale,
   hip_gqa_autotune_resolve_decode(policy, &req, &res);
   hip_gqa_autotune_destroy(policy);
   out_source = res.source;
+  out_config = res.config;
 
   const int use_wmma = res.config.use_wmma ? 1 : 0;
   const int splits = res.config.splits;
@@ -534,13 +543,36 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
   std::vector<float> O_auto, O_base, O_wmma, O_scalar;
-  double ms_auto = run_kernel(MODE_AUTO, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+
+  // Every launch runs inside a capture window so the config that was actually
+  // dispatched can be recorded. The op's [gqa-cfg] diagnostic latches on at its
+  // first read and then prints once per dispatch, so a launch left outside a
+  // window would spill those lines onto the console.
+  std::string launched_cfg;
+  auto timed = [&](DecodeMode mode, std::vector<float>& out, std::string* cfg) {
+    double ms = 0.0;
+    const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
+        "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+          ms = run_kernel(mode, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
+                          iters, out);
+        });
+    if (cfg)
+      for (const std::string& line : lines) {
+        const size_t knobs = line.find("-> ");
+        if (line.find("[gqa-cfg]") != std::string::npos &&
+            knobs != std::string::npos)
+          *cfg = line.substr(knobs + 3);
+      }
+    return ms;
+  };
+
+  double ms_auto = timed(MODE_AUTO, O_auto, &launched_cfg);
   double ms_base = 0.0, ms_wmma = 0.0, ms_scalar = 0.0;
   double l2_base = 0.0, l2_wmma = 0.0, l2_scalar = 0.0, l2_ab = 0.0;
   if (!g_prod_only) {
-    ms_base   = run_kernel(MODE_BASELINE, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_base);
-    ms_wmma   = run_kernel(MODE_WMMA8,    c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_wmma);
-    ms_scalar = run_kernel(MODE_SCALAR8,  c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_scalar);
+    ms_base   = timed(MODE_BASELINE, O_base,   nullptr);
+    ms_wmma   = timed(MODE_WMMA8,    O_wmma,   nullptr);
+    ms_scalar = timed(MODE_SCALAR8,  O_scalar, nullptr);
     l2_base   = rel_l2(O_base, ref);
     l2_wmma   = rel_l2(O_wmma, ref);
     l2_scalar = rel_l2(O_scalar, ref);
@@ -572,40 +604,47 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   std::snprintf(csv_shape, sizeof(csv_shape), "%s_H%d_G%d_D%d_len%d_win%d",
                 c.name, H, G, D, c.total, c.window);
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-  {
+  if (kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded()) {
     using namespace hipdnn_ep_test;
     std::vector<float> O_lut;
     double ms_lut = 0.0;
     hipdnn_ep::GqaTuneSource src{};
-    std::string lut_source, lut_config;
-    std::vector<std::string> lut_lines = captureLogLines(
-        "HIPDNN_GQA_LUT_LOG", "out/_lut_capture.tmp", [&]() {
-          ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
-                                  iters, O_lut, src);
-        });
-    for (const std::string& line : lut_lines) {
-      if (line.find("[gqa-lut] decode ") == std::string::npos) continue;
-      if (line.find(" exact ") != std::string::npos) lut_source = "exact";
-      else if (line.find(" nearest ") != std::string::npos) lut_source = "nearest";
-      else if (line.find(" fallback") != std::string::npos) lut_source = "fallback";
-      else if (line.find(" heuristic") != std::string::npos) lut_source = "heuristic";
-      const size_t arrow = line.find("-> ");
-      if (arrow != std::string::npos) lut_config = line.substr(arrow + 3);
-    }
+    hipdnn_ep::GqaDecodeConfig lut_cfg{};
+    // The resolver hands back the config and where it came from, so both are
+    // read from it directly. The capture window is only here to keep the op's
+    // per-dispatch diagnostic off the console.
+    captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+      ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
+                              iters, O_lut, src, lut_cfg);
+    });
+    char lut_config[96];
+    std::snprintf(lut_config, sizeof(lut_config),
+                  "lookup:impl=%s splits=%d bkv=%d (%s)",
+                  lut_cfg.use_wmma ? "wmma" : "scalar", lut_cfg.splits,
+                  lut_cfg.bkv, hipdnn_ep::gqa_tune_source_name(src));
     const double l2_lut = rel_l2(O_lut, ref);
     const bool lut_ok = l2_lut < tol;
     ok = ok && lut_ok;
-    printf("   [lut] source=%-7s %s relL2=%.2e  %.4f ms  %s\n",
-           lut_source.empty() ? "none" : lut_source.c_str(),
-           lut_config.c_str(), l2_lut, ms_lut, lut_ok ? "PASS" : "*** FAIL ***");
+    printf("   [lut] %s relL2=%.2e  %.4f ms  %s\n", lut_config, l2_lut, ms_lut,
+           lut_ok ? "PASS" : "*** FAIL ***");
 
     CsvWriter csv;
     CsvRow row;
     row.shape = csv_shape;
-    row.config = lut_config.empty() ? "lut:none" : lut_config;
+    row.config = lut_config;
     row.time_ms = ms_lut;
     row.rel_l2 = l2_lut;
     row.verdict = lut_ok ? "PASS" : "FAIL";
+    csv.write(row);
+  } else {
+    using namespace hipdnn_ep_test;
+    CsvWriter csv;
+    CsvRow row;
+    row.shape = csv_shape;
+    row.config = launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
+    row.time_ms = ms_auto;
+    row.rel_l2 = l2_auto;
+    row.verdict = ok ? "PASS" : "FAIL";
     csv.write(row);
   }
 #else
@@ -614,7 +653,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
     CsvWriter csv;
     CsvRow row;
     row.shape = csv_shape;
-    row.config = "final";
+    row.config = launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
     row.time_ms = ms_auto;
     row.rel_l2 = l2_auto;
     row.verdict = ok ? "PASS" : "FAIL";

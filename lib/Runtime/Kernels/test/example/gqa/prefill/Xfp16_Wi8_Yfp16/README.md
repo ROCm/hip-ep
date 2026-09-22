@@ -39,14 +39,14 @@ over `(batch, query-head)` pairs (`forEachBH()`), which is what makes adding
 `128` (short) and `2048` (long) to the length list affordable without a
 full-cross budget blowup.
 
-`MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
-the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls
-back to `autotune` if the `.fb` is missing). Both build and run fine either
+`MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
+exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
+warning. Both build and run fine either
 way -- the prefill launchers here never call the autotune-LUT resolver
-directly (only production `real/gqa.cpp` does), so `MODE=lut` only needs to
+directly (only production `real/gqa.cpp` does), so `MODE=lookup` only needs to
 satisfy `gqa_autotune.cpp`'s (unused) LUT-data symbols so the link succeeds;
 they always self-tune their launch configuration per shape, independent of
-`MODE`. `MODE=lut` needs `flatc` + its `include/` (a build tool, not part of
+`MODE`. `MODE=lookup` needs `flatc` + its `include/` (a build tool, not part of
 this repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`
 -- see `example/README.md`.
 

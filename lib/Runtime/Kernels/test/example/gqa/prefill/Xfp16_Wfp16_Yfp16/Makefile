@@ -5,9 +5,10 @@
 #   make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 SQ=512
 #   make clean
 #
-# MODE=auto (default) -- lut if AUTOTUNE_DIR/lut/<arch>.fb exists, else
-# autotune. MODE=lut forces lut (falls back to autotune with a warning if the
-# .fb is missing). MODE=lut needs flatc + its include/ (a build tool, not part
+# MODE=lookup (default) -- resolves the config from AUTOTUNE_DIR/lut/<arch>.fb,
+# falling back to autotune when this arch has no table (warned, never a hard
+# failure). MODE=autotune always sweeps. lookup needs flatc + its include/ (a
+# build tool, not part
 # of this repo -- see README): FLATC=<path to flatc(.exe)>
 # FLATBUFFERS_INC=<its include dir>.
 # ============================================================
@@ -24,7 +25,7 @@ endif
 
 OFFLOAD  ?= --offload-arch=gfx1151
 HIP_SDK  ?= $(HIP_PATH)
-MODE     ?= auto
+MODE     ?= lookup
 COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
@@ -45,13 +46,16 @@ RESULTS_CSV := $(BUILD_DIR)/results.csv
 ARCH   := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 LUT_FB := $(AUTOTUNE_DIR)/lut/$(ARCH).fb
 
-ifeq ($(MODE),auto)
-    MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lut,autotune)
-else ifeq ($(MODE),lut)
-    MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lut,autotune)
+ifeq ($(MODE),lookup)
+    MODE_RESOLVED := $(if $(wildcard $(LUT_FB)),lookup,autotune)
 else
     MODE_RESOLVED := autotune
 endif
+
+# The kernel picks its own source from this; MODE only decides whether the
+# real resolver and table are linked, so both must agree or a run labelled
+# autotune would still be resolving from a table.
+KERNEL_MODE := $(if $(filter lookup,$(MODE_RESOLVED)),lookup,online)
 
 FLATC ?= flatc
 FLATBUFFERS_INC ?=
@@ -75,13 +79,13 @@ WINDOW ?= 0
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_GQA_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=prefill/Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -92,7 +96,7 @@ RESET_RESULTS_CSV = if exist $(subst /,\,$(RESULTS_CSV)) del $(subst /,\,$(RESUL
 
 # ============================================================
 # Build -- gqa_kernel.hip does not call the autotune-LUT resolver itself (only
-# real/gqa.cpp does, in production); MODE=lut instead has THIS test call
+# real/gqa.cpp does, in production); MODE=lookup instead has THIS test call
 # hip_gqa_autotune_resolve_prefill() then dispatch through
 # hip_gqa_flash_prefill_v3_configured() (see test_gqa_prefill.cpp, guarded by
 # HIPDNN_LUT_LINKED_EXTERNALLY). MODE=autotune links no LUT at all.
@@ -114,7 +118,7 @@ $(GEN_DIR): | $(BUILD_DIR)
 TEST_OBJ   := $(BUILD_DIR)/prefill_test.obj
 KERNEL_OBJ := $(BUILD_DIR)/prefill_kernel.obj
 
-# ---- MODE=lut extras: flatc-generated header (kept, not python) + the real
+# ---- MODE=lookup extras: flatc-generated header (kept, not python) + the real
 # resolver, reused unmodified from hip/autotune/gqa/. The LUT bytes themselves
 # are embedded directly into test_gqa_prefill.cpp via a one-line C23 #embed
 # (see the HIPDNN_LUT_LINKED_EXTERNALLY block there) -- LUT_FB_HEADER just
@@ -134,7 +138,7 @@ $(LUT_FB_HEADER): | $(GEN_DIR)
 $(AUTOTUNE_OBJ): $(AUTOTUNE_DIR)/gqa_autotune.cpp $(LUT_GENERATED_H) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) -x hip -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC) $(AUTOTUNE_DIR)/gqa_autotune.cpp -o $(AUTOTUNE_OBJ)
 
-ifeq ($(MODE_RESOLVED),lut)
+ifeq ($(MODE_RESOLVED),lookup)
     TEST_DEFINES       := -DHIPDNN_LUT_LINKED_EXTERNALLY=1
     LUT_EXTRA_INCLUDES := -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
     LUT_OBJS           := $(AUTOTUNE_OBJ)
@@ -153,14 +157,14 @@ $(TARGET): FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 
 mode_info:
 	@echo [MODE=$(MODE) -^> $(MODE_RESOLVED)] arch=$(ARCH) lut_fb=$(LUT_FB)
-ifeq ($(MODE),lut)
-ifneq ($(MODE_RESOLVED),lut)
-	@echo [MODE=lut] no LUT for $(ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+ifeq ($(MODE),lookup)
+ifneq ($(MODE_RESOLVED),lookup)
+	@echo [MODE=lookup] no LUT for $(ARCH) at $(LUT_FB) -- falling back to MODE=autotune
 endif
 endif
-ifeq ($(MODE_RESOLVED),lut)
+ifeq ($(MODE_RESOLVED),lookup)
 ifeq ($(FLATBUFFERS_INC),)
-	@echo ERROR: MODE=lut needs FLATBUFFERS_INC=^<flatbuffers include dir^> (flatc's include/, a build tool outside the repo -- see README) 1>&2
+	@echo ERROR: MODE=lookup needs FLATBUFFERS_INC=^<flatbuffers include dir^> (flatc's include/, a build tool outside the repo -- see README) 1>&2
 	@exit /b 1
 endif
 endif

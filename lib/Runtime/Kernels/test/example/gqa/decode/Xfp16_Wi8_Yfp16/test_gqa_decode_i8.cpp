@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <random>
 #include <string>
 #include <vector>
@@ -50,6 +51,75 @@ inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
     if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
       tier = std::atoi(argv[++i]);
   return tier < 1 ? 1 : (tier > 3 ? 3 : tier);
+}
+
+// Tiny out/results.csv writer (op,leaf,arch,mode,shape,config,time_ms,relL2,
+// verdict), opt-in via HIPDNN_RESULTS_CSV (set by the Makefile).
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "gqa"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+
+// Redirects stderr to `tmp_path` for the duration of `fn` (with `env_var=1`
+// set) so the op's own diagnostics land in a file instead of the console, then
+// returns them split by line.
+inline std::vector<std::string> captureLogLines(
+    const char* env_var, const std::string& tmp_path,
+    const std::function<void()>& fn) {
+  std::vector<std::string> lines;
+  _putenv_s(env_var, "1");
+  std::fflush(stderr);
+  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
+  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  fn();
+  std::fflush(stderr);
+  std::freopen("CON", "w", stderr);
+  _putenv_s(env_var, "");
+  std::ifstream in(tmp_path);
+  std::string line;
+  while (std::getline(in, line)) lines.push_back(line);
+  in.close();
+  std::remove(tmp_path.c_str());
+  return lines;
 }
 }  // namespace hipdnn_ep_test
 
@@ -299,11 +369,19 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dVsc, vscale.data(), vscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
 
-  // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8).
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-      nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
-      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc));
-  HIP_CHECK(hipDeviceSynchronize());
+  // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8). Every
+  // launch in this function runs inside a capture window: the op's [gqa-cfg]
+  // diagnostic latches its enable flag on the first read, so it has to be on
+  // from the very first launch or nothing is logged for the whole process --
+  // and once on it prints per dispatch, which would otherwise reach the console.
+  hipdnn_ep_test::captureLogLines(
+      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+        HIP_CHECK((hipError_t)hip_gqa_flash_decode(
+            nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
+            MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc,
+            dVsc));
+        HIP_CHECK(hipDeviceSynchronize());
+      });
   std::vector<float> O_int8((size_t)B * H * D);
   {
     std::vector<__half> tmp((size_t)B * H * D);
@@ -312,11 +390,14 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   }
 
   // Warmup fp16 kernel (also its correctness for reference; kv_dtype = FP16).
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-      nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
-      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
-      nullptr));
-  HIP_CHECK(hipDeviceSynchronize());
+  hipdnn_ep_test::captureLogLines(
+      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+        HIP_CHECK((hipError_t)hip_gqa_flash_decode(
+            nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
+            MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
+            nullptr));
+        HIP_CHECK(hipDeviceSynchronize());
+      });
 
   auto bench = [&](auto&& launch) -> double {
     for (int w = 0; w < 5; ++w) launch();
@@ -335,16 +416,37 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     return ms / iters;
   };
 
-  double ms_int8 = bench([&]() {
-    hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
-                            c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                            nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
-  });
-  double ms_fp16 = bench([&]() {
-    hip_gqa_flash_decode(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
-                            c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                            nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr);
-  });
+  // The op names the config it dispatched in its own [gqa-cfg] diagnostic;
+  // capture it so results.csv records what ran instead of a placeholder. The
+  // diagnostic latches on at its first read and then prints per dispatch, so
+  // both benches run inside a window to keep it off the console.
+  std::string launched_cfg;
+  double ms_int8 = 0.0;
+  {
+    const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
+        "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+          ms_int8 = bench([&]() {
+            hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
+                                    c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
+                                    nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
+          });
+        });
+    for (const std::string& line : lines) {
+      const size_t knobs = line.find("-> ");
+      if (line.find("[gqa-cfg]") != std::string::npos &&
+          knobs != std::string::npos)
+        launched_cfg = line.substr(knobs + 3);
+    }
+  }
+  double ms_fp16 = 0.0;
+  hipdnn_ep_test::captureLogLines(
+      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+        ms_fp16 = bench([&]() {
+          hip_gqa_flash_decode(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
+                                  c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
+                                  nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr);
+        });
+      });
 
   Result r;
   r.c = c;
@@ -358,6 +460,23 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
          c.name, B, H, G, hpg, D, c.total, r.relL2_kernel_vs_i8ref, r.relL2_i8_vs_fp16);
   printf("   latency  int8=%.4f ms  fp16=%.4f ms  speedup(fp16/int8)=%.2fx   %s\n",
          ms_int8, ms_fp16, ms_fp16 / ms_int8, r.pass ? "PASS" : "*** FAIL ***");
+
+  {
+    hipdnn_ep_test::CsvWriter csv;
+    char shape_buf[96];
+    std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_len%d", c.name,
+                  H, G, D, c.total);
+    hipdnn_ep_test::CsvRow row;
+    row.shape = shape_buf;
+    row.config =
+        launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
+    // The int8-KV path is what this leaf covers; the fp16 run above is only a
+    // reference point, and its time is in the stdout line.
+    row.time_ms = ms_int8;
+    row.rel_l2 = r.relL2_kernel_vs_i8ref;
+    row.verdict = r.pass ? "PASS" : "FAIL";
+    csv.write(row);
+  }
 
   hipFree(dQ); hipFree(dKh); hipFree(dVh); hipFree(dK8); hipFree(dV8);
   hipFree(dKsc); hipFree(dVsc); hipFree(dO16); hipFree(dO8);

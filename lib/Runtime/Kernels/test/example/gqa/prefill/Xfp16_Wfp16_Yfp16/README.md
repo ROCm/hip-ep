@@ -63,9 +63,9 @@ gpt_oss-both, llama-win-d128, and the d128-sink-must-decline case; plus 2
 long pure-prefill (`sq=8192`, `past=0`) rows at D=64 (gpt_oss-20b) and D=128
 (llama-3.1-8b).
 
-`MODE=auto` (default): `lut` if `hip/autotune/gqa/lut/<arch>.fb` exists for
-the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it (warns + falls
-back to `autotune` if the `.fb` is missing). `MODE=lut` needs `flatc` + its
+`MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
+exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
+warning. `MODE=lookup` needs `flatc` + its
 `include/` (a build tool, not part of this repo):
 `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>` -- see
 `example/README.md`.
@@ -73,7 +73,7 @@ back to `autotune` if the `.fb` is missing). `MODE=lut` needs `flatc` + its
 The prefill kernel never calls the autotune resolver itself (only production
 `real/gqa.cpp` does); `MODE=autotune` (the fallback, and the only path when no
 `.fb` exists) has the launchers self-tune their configuration per shape,
-independent of `MODE`. `MODE=lut` instead has *this test* call
+independent of `MODE`. `MODE=lookup` instead has *this test* call
 `hip_gqa_autotune_resolve_prefill()` (the same resolver `real/gqa.cpp` calls in
 production) and dispatch the resolved config through
 `hip_gqa_flash_prefill_v3_configured()`. Both modes append to
