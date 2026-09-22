@@ -2082,22 +2082,38 @@ static int wmmaMinM() {
     return ov > 0 ? ov : kWmmaMinMDefault;
 }
 
-// Tier tuning is on unless a fixed cutoff is pinned or it is switched off with
-// HIPDNN_EP_MATMUL_TIER_TUNE=0.
+// Whether the WMMA-vs-GEMV tier is decided by measurement rather than by the
+// fixed kWmmaMinM cutoff.
+//
+// Timing both families is a runtime sweep, and it has no offline-LUT
+// representation (matmul_nbits_autotune.fbs answers with a tile geometry, not
+// with a family), so leaving it on by default would make normal execution pay a
+// mandatory probe on the first call of every new (M,N,K,gs,zp,bias) a model
+// produces. It is therefore confined to online mode -- the same lever that
+// governs every other sweep in this file. In lookup mode the cutoff decides,
+// which is the heuristic the crossover table at preferWmmaTier validates.
+//
+//   HIPDNN_EP_MATMUL_TIER_TUNE=1  opt a lookup-mode process back in
+//   HIPDNN_EP_MATMUL_TIER_TUNE=0  off in either mode
+//   HIPDNN_EP_MATMUL_WMMA_MIN_M   pins the cutoff, which also switches it off
 static bool wmmaTierTuningEnabled() {
     if (wmmaMinMOverride() > 0) return false;
-    static const bool on = [] {
+    // -1 unset, 0 off, 1 on.
+    static const int lever = [] {
 #ifdef _WIN32
         char buf[8];
         unsigned long n = GetEnvironmentVariableA(
             "HIPDNN_EP_MATMUL_TIER_TUNE", buf, sizeof(buf));
-        return !(n > 0 && buf[0] == '0');
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        return buf[0] == '0' ? 0 : 1;
 #else
         const char* v = getenv("HIPDNN_EP_MATMUL_TIER_TUNE");
-        return !(v && v[0] == '0');
+        if (!v || v[0] == '\0') return -1;
+        return v[0] == '0' ? 0 : 1;
 #endif
     }();
-    return on;
+    if (lever >= 0) return lever == 1;
+    return !matmulNbitsLutLookupEnabled();
 }
 
 struct GemvMConfig {
@@ -2105,6 +2121,126 @@ struct GemvMConfig {
     int tile_n;
     int tile_m;
 };
+
+/* -----------------------------------------------------------------------
+ * Candidate selection shared by the three small-M tables (int4, dp4a, int8)
+ *
+ * Weight reads per call: grid.y = ceil(M/tile_m) threadblocks each stream the
+ * whole packed weight, so tile_m is the traffic multiplier and nothing else in
+ * the config changes it. Only configs that achieve the minimum are considered.
+ *
+ * WHY restrict instead of letting the measurement decide: a tuning pass times
+ * launches close together on one weight, so from the second launch on it is
+ * resident in the 32 MB Infinity Cache, where re-reading it per row is nearly
+ * free. That makes the measurement blind to precisely the quantity that
+ * dominates a real forward pass, where every layer's weight arrives cold from
+ * DRAM. Measured in-model at M=4 on a 12288x4096 layer: the unrestricted
+ * tuner's pick costs 41.0 ms against 36.3 ms for a minimum-traffic config, and
+ * 58.5 ms for the tile_m=1 config a warm ranking prefers. Comparisons *within*
+ * one traffic class are still latency comparisons, which the timing does
+ * handle, so the measurement keeps its job of choosing threads and tile_n --
+ * it just no longer gets to choose traffic.
+ *
+ * Keeping every candidate in one traffic class is also why the sweep below
+ * passes nullptr for timeConfigPeak's eviction buffer: all candidates move the
+ * same bytes, so there is nothing for a cold probe to expose, and the 64 MB
+ * memset per timed launch would only add noise. The M==1 tuners, which do
+ * compare across traffic classes, still evict.
+ * ----------------------------------------------------------------------- */
+struct GemvMCandidates {
+    int ids[64];
+    int count;
+    int heuristic;   // -1 when no config in the table fits the shape
+};
+
+static GemvMCandidates gemvMCandidates(const GemvMConfig* table, int n,
+                                       int64_t M, int64_t N) {
+    GemvMCandidates c{};
+    c.count = 0;
+    c.heuristic = -1;
+    if (n > 64) n = 64;
+
+    int min_reads = 1 << 30;
+    for (int cid = 0; cid < n; cid++) {
+        // A tile wider than N only adds bounds-checked lanes.
+        if (table[cid].tile_n > N) continue;
+        const int reads =
+            static_cast<int>((M + table[cid].tile_m - 1) / table[cid].tile_m);
+        if (reads < min_reads) min_reads = reads;
+    }
+
+    long long best_rank = -1;
+    for (int cid = 0; cid < n; cid++) {
+        if (table[cid].tile_n > N) continue;
+        // A tile taller than M is *not* excluded: at M=3 only tile_m=4 reads the
+        // weight once, and at M=5..7 only tile_m=8 does. The rows beyond M are
+        // clamped and discarded at the store, so the cost is wasted FMAs against
+        // an already-loaded weight -- which is the cheap half of this kernel.
+        if ((M + table[cid].tile_m - 1) / table[cid].tile_m > min_reads)
+            continue;
+        c.ids[c.count++] = cid;
+
+        /* Heuristic pick, for lookup mode (see getOrTuneGemvMConfig).
+         *
+         * Fitted to the sweep rather than argued from the hardware model,
+         * which is the second thing tried here: the first was argued, ranked
+         * candidates by outstanding loads, and lost.
+         *
+         *   tile_m   smallest that still reads the weight once (the filter
+         *            above already restricts to those)
+         *   tile_n   4 only when tile_m is 4 and N leaves room; 2 otherwise.
+         *            tile_m and tile_n bound the same partial[][] accumulator,
+         *            so tile_m is what decides how much is left across N, and
+         *            narrow N cannot fill a wide tile either way.
+         *   threads  64. Not a fitted threshold: across the 133 measured
+         *            points the sweep picks 64 in all but seven, and no
+         *            k_steps threshold separating the exceptions survives the
+         *            held-out model.
+         *
+         * Keying tile_n off tile_m rather than off M matters only at M>=5, and
+         * is why this rule is not the one first written. M picks tile_m
+         * (M<=2 -> 2, 3..4 -> 4, 5..7 -> 8), so while the fit only reached M=4
+         * the two were the same variable and "tile_n=4 above M=2" looked
+         * right. At M=5..7, which all force tile_m=8, it asks for
+         * partial[8][4] and spills: measured 2.35x at M=5 on 5120x6144 uint4
+         * and 2.2x on 17408x5120, against the tile_n=2 the sweep picks.
+         *
+         * Scored per shape against the sweep's own winner and weighted by how
+         * many nodes of that shape the graph runs, since a projection this
+         * gets wrong runs once per layer while the lm_head runs once per
+         * token -- an earlier rule that looked good unweighted lost 22% of
+         * Qwen3.8-27B's k=1 throughput to one 85 us miss on a 64-node shape.
+         * Three sets, ranked by the worst rather than the mean, because the
+         * rule this replaces passed on a mean: Qwen3.8-27B and the held-out
+         * Qwen3.5-9B in-model on the dp4a table, and Qwen3.8-27B on the uint4
+         * table, a different kernel with its own register pressure and where
+         * the tile_m=8 spill shows up largest. Weighted regret is
+         * 1.13x / 1.23x / 1.08x against 1.14x / 1.51x / 1.59x.
+         *
+         * The wide end of the table stays excluded on hardware grounds:
+         * threads=512 tile_n=16 exceeds the register file (see the comment on
+         * those rows), and any rule that ranks by outstanding loads picks
+         * exactly those -- measured at 1.6x-2.1x worse at M=2..7. */
+        const int want_tile_n = (table[cid].tile_m == 4 && N > 1024) ? 4 : 2;
+        constexpr int kWantThreads = 64;
+        const int d_tile_n = table[cid].tile_n > want_tile_n
+                                 ? table[cid].tile_n - want_tile_n
+                                 : want_tile_n - table[cid].tile_n;
+        const int d_threads = table[cid].threads > kWantThreads
+                                  ? table[cid].threads - kWantThreads
+                                  : kWantThreads - table[cid].threads;
+        // Lower is better here, so it is negated into the same
+        // higher-is-better comparison the loop already uses.
+        const long long rank = -((static_cast<long long>(table[cid].tile_m) << 32) +
+                                 (static_cast<long long>(d_tile_n) << 16) +
+                                 d_threads);
+        if (c.heuristic < 0 || rank > best_rank) {
+            best_rank = rank;
+            c.heuristic = cid;
+        }
+    }
+    return c;
+}
 
 // Three parameters, and the one that turned out to dominate is not tile shape:
 //
@@ -2213,72 +2349,48 @@ static int tuneGemvMConfig(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    const GemvMCandidates cand =
+        gemvMCandidates(kGemvMConfigs, kNumGemvMConfigs, M, N);
+    // 512 threads, tile_n 16, tile_m 1: launchable for any shape this kernel
+    // reaches, so it is what an empty candidate set degrades to.
+    int best_id = cand.heuristic >= 0 ? cand.heuristic : 25;
+    if (cand.count == 0) return best_id;
+
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
 
-    float best_ms = 1e30f;
-    int   best_id = 25;  // 512 threads, tile_n 16, tile_m 1: safe default
-    constexpr int WARMUP = 1;
+    // Same methodology as the M==1 tuners above, and for the same reason: this
+    // APU boosts cold and throttles under sustained load, so candidates have to
+    // be judged at one settled clock and by their least-throttled sample, or
+    // the ranking follows table position instead of speed.
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
-    // Weight reads per call: grid.y = ceil(M/tile_m) threadblocks each stream the
-    // whole packed weight, so this is the traffic multiplier and nothing else in
-    // the config changes it. Only configs that achieve the minimum are timed.
-    //
-    // WHY restrict instead of letting the measurement decide: the loop below
-    // times 5 back-to-back launches on one weight, so from the second launch on
-    // it is resident in the 32 MB Infinity Cache, where re-reading it per row is
-    // nearly free. That makes the measurement blind to precisely the quantity
-    // that dominates a real forward pass, where every layer's weight arrives
-    // cold from DRAM. Measured in-model at M=4 on a 12288x4096 layer: the
-    // tuner's own pick costs 41.0 ms against 36.3 ms for a minimum-traffic
-    // config, and 58.5 ms for the tile_m=1 config the warm ranking prefers.
-    // Comparisons *within* one traffic class are still latency comparisons,
-    // which back-to-back timing does handle, so the measurement keeps its job of
-    // choosing threads and tile_n -- it just no longer gets to choose traffic.
-    int min_reads = 1 << 30;
-    for (int cid = 0; cid < kNumGemvMConfigs; cid++) {
-        if (kGemvMConfigs[cid].tile_n > N) continue;
-        const int reads =
-            static_cast<int>((M + kGemvMConfigs[cid].tile_m - 1) /
-                             kGemvMConfigs[cid].tile_m);
-        if (reads < min_reads) min_reads = reads;
-    }
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvMConfig(cand.ids[0], stream, A, B, sc, zp, bi, out,
+                          M, N, K, batch, bs);
+    });
 
-    for (int cid = 0; cid < kNumGemvMConfigs; cid++) {
-        // A tile wider than N only adds bounds-checked lanes.
-        if (kGemvMConfigs[cid].tile_n > N) continue;
-        // A tile taller than M is *not* excluded: at M=3 only tile_m=4 reads the
-        // weight once, and at M=5..7 only tile_m=8 does. The rows beyond M are
-        // clamped and discarded at the store, so the cost is wasted FMAs against
-        // an already-loaded weight -- which is the cheap half of this kernel.
-        if ((M + kGemvMConfigs[cid].tile_m - 1) / kGemvMConfigs[cid].tile_m >
-            min_reads)
-            continue;
-
-        for (int w = 0; w < WARMUP; w++)
+    float best_ms = 1e30f;
+    for (int i = 0; i < cand.count; i++) {
+        const int cid = cand.ids[i];
+        // nullptr evict: one traffic class, see gemvMCandidates.
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                           kFloorIters, 0.1f, nullptr, [&]{
             launchGemvMConfig(cid, stream, A, B, sc, zp, bi, out,
                               M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvMConfig(cid, stream, A, B, sc, zp, bi, out,
-                              M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         CUSTOM_KERNELS_DEBUG_LOG(
             "[custom_kernels]   configM[%2d] threads=%3d tile_n=%d tile_m=%d "
             ": %.4f ms\n",
             cid, kGemvMConfigs[cid].threads, kGemvMConfigs[cid].tile_n,
-            kGemvMConfigs[cid].tile_m, ms / ITERS);
+            kGemvMConfigs[cid].tile_m, cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -2288,11 +2400,12 @@ static int tuneGemvMConfig(
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV-M autotune: M=%lld N=%lld K=%lld bs=%lld -> "
-        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter, "
+        "heuristic was configM[%d])\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvMConfigs[best_id].threads,
         kGemvMConfigs[best_id].tile_n, kGemvMConfigs[best_id].tile_m,
-        best_ms / ITERS);
+        best_ms, cand.heuristic);
 
     return best_id;
 }
@@ -2300,11 +2413,9 @@ static int tuneGemvMConfig(
 static std::unordered_map<std::string, int> gemv_m_cache;
 static std::mutex gemv_m_tune_mutex;
 
-// HIPDNN_EP_MATMUL_SMALLM_CFG=<id> pins the config, bypassing the autotune.
-// The autotune measures 5 back-to-back launches on the first call, which ranks
-// configs under conditions a real decode loop does not reproduce -- its winner
-// for lm_head at M=4 measured 5.5 ms while the same config measured 14.7 ms in
-// steady state. Pinning lets a config be evaluated the way it will be used.
+// HIPDNN_EP_MATMUL_SMALLM_CFG=<id> pins the config, bypassing both the
+// heuristic and the autotune, so a candidate can be evaluated in a real forward
+// pass rather than in the conditions a tuning pass measures in.
 static int gemvMConfigOverride() {
     static const int cfg = [] {
 #ifdef _WIN32
@@ -2333,6 +2444,21 @@ static int getOrTuneGemvMConfig(
     if (forced >= 0 && forced < kNumGemvMConfigs &&
         kGemvMConfigs[forced].tile_m <= M)
         return forced;
+
+    /* Lookup mode -- the default -- answers from gemvMCandidates' heuristic and
+     * never sweeps. The M-blocked tables have no offline-LUT representation
+     * (matmul_nbits_autotune.fbs stores a (threads, tile_n) GemvAnswer with no
+     * tile_m field, and no sweep tool emits rows for them), so a sweep on this
+     * path is unconditional: it would fire on the first call of every new
+     * (M,N,K,bs) a model produces, inside the inference the user is timing.
+     * Online mode (HIPDNN_MATMUL_AUTOTUNE_MODE=online, or the
+     * matmul_autotune_mode provider option) opts into the sweep, which is how
+     * the heuristic is validated and how new tile shapes are evaluated. */
+    if (matmulNbitsLutLookupEnabled()) {
+        const GemvMCandidates cand =
+            gemvMCandidates(kGemvMConfigs, kNumGemvMConfigs, M, N);
+        return cand.heuristic >= 0 ? cand.heuristic : 25;
+    }
 
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(bs) + "_" +
@@ -2560,6 +2686,64 @@ static void launchDp4aMConfig(
 static std::unordered_map<std::string, int> dp4a_m_cache;
 static std::mutex dp4a_m_tune_mutex;
 
+static int tuneDp4aMConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K, int64_t bs)
+{
+    const GemvMCandidates cand =
+        gemvMCandidates(kGemvMDp4aConfigs, kNumGemvMDp4aConfigs, M, N);
+    // 512 threads, tile_n 8, tile_m 4: read-once default.
+    int best_id = cand.heuristic >= 0 ? cand.heuristic : 29;
+    if (cand.count == 0) return best_id;
+
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    constexpr int WARMUP = 3;
+    constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchDp4aMConfig(cand.ids[0], stream, a_qb, a_scale, B, sc, zp, bi,
+                          out, M, N, K, bs);
+    });
+
+    float best_ms = 1e30f;
+    for (int i = 0; i < cand.count; i++) {
+        const int cid = cand.ids[i];
+        // nullptr evict: one traffic class, see gemvMCandidates.
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                           kFloorIters, 0.1f, nullptr, [&]{
+            launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                              M, N, K, bs);
+        });
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   dp4a configM[%2d] threads=%3d tile_n=%d "
+            "tile_m=%d : %.4f ms\n",
+            cid, kGemvMDp4aConfigs[cid].threads, kGemvMDp4aConfigs[cid].tile_n,
+            kGemvMDp4aConfigs[cid].tile_m, cfg_best_ms);
+
+        if (cfg_best_ms < best_ms) { best_ms = cfg_best_ms; best_id = cid; }
+    }
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] dp4a-M autotune: M=%lld N=%lld K=%lld bs=%lld -> "
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter, "
+        "heuristic was configM[%d])\n",
+        (long long)M, (long long)N, (long long)K, (long long)bs, best_id,
+        kGemvMDp4aConfigs[best_id].threads, kGemvMDp4aConfigs[best_id].tile_n,
+        kGemvMDp4aConfigs[best_id].tile_m, best_ms, cand.heuristic);
+
+    return best_id;
+}
+
 static int getOrTuneDp4aMConfig(
     hipStream_t stream,
     const int8_t* a_qb, const float* a_scale,
@@ -2567,6 +2751,14 @@ static int getOrTuneDp4aMConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K, int64_t bs)
 {
+    // Lookup mode answers from the heuristic and never sweeps; see
+    // getOrTuneGemvMConfig for why this table cannot come from the offline LUT.
+    if (matmulNbitsLutLookupEnabled()) {
+        const GemvMCandidates cand =
+            gemvMCandidates(kGemvMDp4aConfigs, kNumGemvMDp4aConfigs, M, N);
+        return cand.heuristic >= 0 ? cand.heuristic : 29;
+    }
+
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(bs) + "_" +
                       (zp ? "1" : "0");
@@ -2576,65 +2768,10 @@ static int getOrTuneDp4aMConfig(
     if (it != dp4a_m_cache.end())
         return it->second;
 
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-    float best_ms = 1e30f;
-    int   best_id = 29;  // 512 threads, tile_n 8, tile_m 4: read-once default
-    constexpr int WARMUP = 1;
-    constexpr int ITERS  = 5;
-
-    // Only minimum-traffic configs are timed, for the reason spelled out in
-    // tuneGemvMConfig: five back-to-back launches leave the weight in the
-    // Infinity Cache, so this measurement cannot see traffic, only latency.
-    int min_reads = 1 << 30;
-    for (int cid = 0; cid < kNumGemvMDp4aConfigs; cid++) {
-        if (kGemvMDp4aConfigs[cid].tile_n > N) continue;
-        const int reads =
-            static_cast<int>((M + kGemvMDp4aConfigs[cid].tile_m - 1) /
-                             kGemvMDp4aConfigs[cid].tile_m);
-        if (reads < min_reads) min_reads = reads;
-    }
-
-    for (int cid = 0; cid < kNumGemvMDp4aConfigs; cid++) {
-        if (kGemvMDp4aConfigs[cid].tile_n > N) continue;
-        if ((M + kGemvMDp4aConfigs[cid].tile_m - 1) /
-                kGemvMDp4aConfigs[cid].tile_m > min_reads)
-            continue;
-
-        for (int w = 0; w < WARMUP; w++)
-            launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                              M, N, K, bs);
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
-                              M, N, K, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   dp4a configM[%2d] threads=%3d tile_n=%d "
-            "tile_m=%d : %.4f ms\n",
-            cid, kGemvMDp4aConfigs[cid].threads, kGemvMDp4aConfigs[cid].tile_n,
-            kGemvMDp4aConfigs[cid].tile_m, ms / ITERS);
-
-        if (ms < best_ms) { best_ms = ms; best_id = cid; }
-    }
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] dp4a-M autotune: M=%lld N=%lld K=%lld bs=%lld -> "
-        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
-        (long long)M, (long long)N, (long long)K, (long long)bs, best_id,
-        kGemvMDp4aConfigs[best_id].threads, kGemvMDp4aConfigs[best_id].tile_n,
-        kGemvMDp4aConfigs[best_id].tile_m, best_ms / ITERS);
-
-    dp4a_m_cache[key] = best_id;
-    return best_id;
+    int best = tuneDp4aMConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
+                               M, N, K, bs);
+    dp4a_m_cache[key] = best;
+    return best;
 }
 
 // Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
@@ -2945,61 +3082,43 @@ static int tuneGemvMConfigI8(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    const GemvMCandidates cand =
+        gemvMCandidates(kGemvMI8Configs, kNumGemvMI8Configs, M, N);
+    // 512 threads, tile_n 8, tile_m 4: read-once default.
+    int best_id = cand.heuristic >= 0 ? cand.heuristic : 29;
+    if (cand.count == 0) return best_id;
+
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
 
-    float best_ms = 1e30f;
-    int   best_id = 29;  // 512 threads, tile_n 8, tile_m 4: read-once default
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
-    // Weight reads per call: grid.y = ceil(M/tile_m) threadblocks each stream
-    // the whole weight, so this is the traffic multiplier and nothing else in
-    // the config changes it. Only configs that achieve the minimum are timed --
-    // the loop below runs 5 back-to-back launches on one weight, which is
-    // resident in the 32 MB Infinity Cache from the second launch on, so it
-    // cannot see traffic at all. Comparisons within one traffic class are still
-    // valid latency comparisons, which is the job the measurement keeps.
-    int min_reads = 1 << 30;
-    for (int cid = 0; cid < kNumGemvMI8Configs; cid++) {
-        if (kGemvMI8Configs[cid].tile_n > N) continue;
-        const int reads =
-            static_cast<int>((M + kGemvMI8Configs[cid].tile_m - 1) /
-                             kGemvMI8Configs[cid].tile_m);
-        if (reads < min_reads) min_reads = reads;
-    }
+    settleClock(ev0, ev1, stream, [&]{
+        launchGemvMConfigI8(cand.ids[0], stream, A, B, sc, zp, bi, out,
+                            M, N, K, batch, bs);
+    });
 
-    for (int cid = 0; cid < kNumGemvMI8Configs; cid++) {
-        if (kGemvMI8Configs[cid].tile_n > N) continue;
-        // A tile taller than M is not excluded: at M=3 only tile_m=4 reads the
-        // weight once, and at M=5..7 only tile_m=8 does.
-        if ((M + kGemvMI8Configs[cid].tile_m - 1) / kGemvMI8Configs[cid].tile_m >
-            min_reads)
-            continue;
-
-        for (int w = 0; w < WARMUP; w++)
+    float best_ms = 1e30f;
+    for (int i = 0; i < cand.count; i++) {
+        const int cid = cand.ids[i];
+        // nullptr evict: one traffic class, see gemvMCandidates.
+        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                           kFloorIters, 0.1f, nullptr, [&]{
             launchGemvMConfigI8(cid, stream, A, B, sc, zp, bi, out,
                                 M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvMConfigI8(cid, stream, A, B, sc, zp, bi, out,
-                                M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         CUSTOM_KERNELS_DEBUG_LOG(
             "[custom_kernels]   i8 configM[%2d] threads=%3d tile_n=%d "
             "tile_m=%d : %.4f ms\n",
             cid, kGemvMI8Configs[cid].threads, kGemvMI8Configs[cid].tile_n,
-            kGemvMI8Configs[cid].tile_m, ms / ITERS);
+            kGemvMI8Configs[cid].tile_m, cfg_best_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_best_ms < best_ms) {
+            best_ms = cfg_best_ms;
             best_id = cid;
         }
     }
@@ -3009,11 +3128,12 @@ static int tuneGemvMConfigI8(
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV-M-i8 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
-        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter, "
+        "heuristic was configM[%d])\n",
         (long long)M, (long long)N, (long long)K, (long long)bs,
         best_id, kGemvMI8Configs[best_id].threads,
         kGemvMI8Configs[best_id].tile_n, kGemvMI8Configs[best_id].tile_m,
-        best_ms / ITERS);
+        best_ms, cand.heuristic);
 
     return best_id;
 }
@@ -3069,6 +3189,14 @@ static int getOrTuneGemvMConfigI8(
     const int forced = gemvMI8ConfigOverride();
     if (forced >= 0 && forced < kNumGemvMI8Configs)
         return forced;
+
+    // Lookup mode answers from the heuristic and never sweeps; see
+    // getOrTuneGemvMConfig for why this table cannot come from the offline LUT.
+    if (matmulNbitsLutLookupEnabled()) {
+        const GemvMCandidates cand =
+            gemvMCandidates(kGemvMI8Configs, kNumGemvMI8Configs, M, N);
+        return cand.heuristic >= 0 ? cand.heuristic : 29;
+    }
 
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K) + "_" + std::to_string(bs) + "_" +
@@ -5492,9 +5620,19 @@ static int getOrTuneWmmaConfig(
  * depends on how much N-parallelism the grid has. So this does not become a
  * formula. It becomes a measurement, cached per shape like every other tuning
  * decision in this file.
+ *
+ * Which is why it is not what runs by default. A measurement here is a runtime
+ * sweep with no offline-LUT row behind it, so normal execution would pay one
+ * on the first call of every new shape. The table above is instead the
+ * evidence for the single cutoff that lookup mode uses: 8 is the value that
+ * costs least across these four shapes, and the gpt-oss-20b A/B at
+ * kWmmaMinMDefault records what choosing it is worth. Online mode
+ * (HIPDNN_MATMUL_AUTOTUNE_MODE=online) runs the measurement, which is how the
+ * crossovers above were produced and how the cutoff gets re-checked on a new
+ * part; HIPDNN_EP_MATMUL_TIER_TUNE=1 opts a single lookup-mode process in.
  * ----------------------------------------------------------------------- */
 
-// Median wall time of ITERS launches, each isolated by a stream sync.
+// Wall time of one launch, isolated by a stream sync.
 //
 // WHY isolate: timing a burst of back-to-back launches and dividing lets each
 // launch's tail overlap the next one's head, which flatters exactly the
@@ -5503,44 +5641,42 @@ static int getOrTuneWmmaConfig(
 // configuration that costs 14.7 ms per step in a real decode loop -- a 2.7x
 // error, and more than enough to invert a tier choice. A decode step waits for
 // its own result, so the tuner has to as well.
-static float timeLaunchIsolated(hipStream_t stream,
-                                const std::function<void()>& launch,
-                                int iters = 5) {
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
-    launch();                       // warm up JIT, caches, and any lazy alloc
-    hipStreamSynchronize(stream);
-
-    float samples[16];
-    if (iters > 16) iters = 16;
-    for (int i = 0; i < iters; i++) {
-        hipEventRecord(ev0, stream);
-        launch();
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-        hipEventElapsedTime(&samples[i], ev0, ev1);
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    // Median, not min: min rewards a lucky run that found the weight already
-    // resident, which is not what a steady decode loop sees.
-    std::sort(samples, samples + iters);
-    return samples[iters / 2];
+static float timeLaunchIsolated(hipEvent_t ev0, hipEvent_t ev1,
+                                hipStream_t stream,
+                                const std::function<void()>& launch) {
+    hipEventRecord(ev0, stream);
+    launch();
+    hipEventRecord(ev1, stream);
+    hipEventSynchronize(ev1);
+    float ms = 0.0f;
+    hipEventElapsedTime(&ms, ev0, ev1);
+    return ms;
 }
 
 static std::unordered_map<std::string, int> tier_cache;
 static std::mutex tier_tune_mutex;
+
+// Rounds of (WMMA, GEMV). Even rounds run WMMA first, odd rounds GEMV first,
+// so neither family is systematically the one that pays for a cold cache or
+// for a clock that has not finished ramping. Four is enough for a median of
+// two per family without making the probe itself expensive on a 311 MB shape.
+static constexpr int kTierRounds = 4;
+
 // Returns true if WMMA should serve this shape, false for the col-major GEMV.
-// Times both once per (M,N,K,gs,zp) and remembers the answer.
+// Times both once per (M,N,K,gs,zp,bias) and remembers the answer.
+//
+// The key carries has_bias because the two families add the bias differently:
+// GEMV folds it into the kernel, while WMMA applies it in a separate pass
+// afterwards. That is a whole extra launch plus an [M,N] read-modify-write on
+// one side only, so a biased call and a bias-free call of the same shape can
+// have different winners and must not share a cache entry.
 static bool preferWmmaTier(hipStream_t stream,
                            int M, int N, int K, int gs, bool has_zp,
+                           bool has_bias,
                            const std::function<void()>& wmma_launch,
                            const std::function<void()>& gemv_launch) {
-    std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
+    std::string key =
+        wmmaCacheKey(M, N, K, gs, has_zp) + (has_bias ? "_b1" : "_b0");
 
     std::lock_guard<std::mutex> lock(tier_tune_mutex);
 
@@ -5548,8 +5684,56 @@ static bool preferWmmaTier(hipStream_t stream,
     if (it != tier_cache.end())
         return it->second != 0;
 
-    float wmma_ms = timeLaunchIsolated(stream, wmma_launch);
-    float gemv_ms = timeLaunchIsolated(stream, gemv_launch);
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    // 1. Resolve each family's own config before timing anything. Both
+    //    callbacks run a getOrTune* on their first call, so without this the
+    //    first launch of each would carry that family's config sweep -- and the
+    //    two sweeps differ in length, so the family measured second would be
+    //    the one timed on a hotter, more throttled part. After these two calls
+    //    every launch below is a fixed-config launch.
+    wmma_launch();
+    gemv_launch();
+    hipStreamSynchronize(stream);
+
+    // 2. Settle the clock on both families together, so the plateau is reached
+    //    under the mix that is about to be measured rather than under one side
+    //    of it. This APU boosts cold and throttles under sustained load; a
+    //    comparison started before the plateau measures the ramp.
+    settleClock(ev0, ev1, stream, [&]{
+        wmma_launch();
+        gemv_launch();
+    });
+
+    // 3. Interleaved, order-reversed rounds.
+    float wmma_s[kTierRounds], gemv_s[kTierRounds];
+    for (int r = 0; r < kTierRounds; r++) {
+        if ((r & 1) == 0) {
+            wmma_s[r] = timeLaunchIsolated(ev0, ev1, stream, wmma_launch);
+            gemv_s[r] = timeLaunchIsolated(ev0, ev1, stream, gemv_launch);
+        } else {
+            gemv_s[r] = timeLaunchIsolated(ev0, ev1, stream, gemv_launch);
+            wmma_s[r] = timeLaunchIsolated(ev0, ev1, stream, wmma_launch);
+        }
+    }
+
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    // Median, not min: min rewards a lucky round that found the weight already
+    // resident, which is not what a steady decode loop sees. A sample <= 0 is
+    // Windows HIP event-timer noise rather than a duration, and is pushed to
+    // the top of the sort so it cannot become the median of a real one.
+    auto median = [](float* s) {
+        for (int i = 0; i < kTierRounds; i++)
+            if (!(s[i] > 0.0f)) s[i] = 1e30f;
+        std::sort(s, s + kTierRounds);
+        return s[kTierRounds / 2];
+    };
+    const float wmma_ms = median(wmma_s);
+    const float gemv_ms = median(gemv_s);
 
     // Ties go to WMMA: it is the path whose cost stays flat as M grows, so it
     // is the safer side of a coin flip if M rises later in the same shape.
@@ -5557,10 +5741,10 @@ static bool preferWmmaTier(hipStream_t stream,
     tier_cache[key] = wmma ? 1 : 0;
 
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] tier autotune: M=%d N=%d K=%d gs=%d zp=%s -> %s "
-        "(wmma %.4f ms vs gemv %.4f ms)\n",
-        M, N, K, gs, has_zp ? "yes" : "no", wmma ? "WMMA" : "GEMV",
-        wmma_ms, gemv_ms);
+        "[custom_kernels] tier autotune: M=%d N=%d K=%d gs=%d zp=%s bias=%s -> "
+        "%s (wmma %.4f ms vs gemv %.4f ms, median of %d interleaved rounds)\n",
+        M, N, K, gs, has_zp ? "yes" : "no", has_bias ? "yes" : "no",
+        wmma ? "WMMA" : "GEMV", wmma_ms, gemv_ms, kTierRounds);
 
     return wmma;
 }
@@ -8893,9 +9077,10 @@ extern "C" int hip_matmul_nbits(
   /* -------------------------------------------------------------------
    * Tier selection between the two paths above.
    *
-   * In the tuned window both are timed once for this shape and the winner is
-   * cached (preferWmmaTier); outside it, or when tuning is pinned off, the
-   * fixed kWmmaMinM cutoff decides. M == 1 belongs to neither: it takes the
+   * The fixed kWmmaMinM cutoff decides, which is what a lookup-mode process
+   * (the default) always does. In online mode, and inside the tuned M window,
+   * both families are instead timed once for this shape and the winner is
+   * cached (preferWmmaTier). M == 1 belongs to neither: it takes the
    * per-row col-major GEMV directly when its zero points are already FP16
    * (just below), and otherwise falls through to the row-major GEMV, which
    * skips the transposes and the zero-point conversion entirely.
@@ -8921,7 +9106,7 @@ extern "C" int hip_matmul_nbits(
       use_wmma = preferWmmaTier(
           hip_stream, static_cast<int>(M), static_cast<int>(N),
           static_cast<int>(K), static_cast<int>(block_size),
-          zp_for_fp16_paths != nullptr,
+          zp_for_fp16_paths != nullptr, bias != nullptr,
           [&]() { run_wmma_int4(); }, [&]() { run_gemv(); });
     } else {
       use_wmma = (M >= kWmmaMinM);
