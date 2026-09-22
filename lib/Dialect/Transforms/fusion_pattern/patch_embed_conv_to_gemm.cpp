@@ -90,14 +90,11 @@ struct PatchEmbedPlan {
 /// Decide whether a Conv partitions its input into disjoint patches, which is
 /// what makes it expressible as a GEMM. On failure, `reason` names the guard
 /// that declined, for the caller to hand to `notifyMatchFailure`.
-std::optional<PatchEmbedPlan>
-analyzePatchEmbedConv(mlir::RankedTensorType xType,
-                      mlir::RankedTensorType wType,
-                      mlir::RankedTensorType yType,
-                      llvm::ArrayRef<int64_t> strides,
-                      llvm::ArrayRef<int64_t> pads,
-                      llvm::ArrayRef<int64_t> dilations, int64_t group,
-                      llvm::StringRef &reason) {
+std::optional<PatchEmbedPlan> analyzePatchEmbedConv(
+    mlir::RankedTensorType xType, mlir::RankedTensorType wType,
+    mlir::RankedTensorType yType, llvm::ArrayRef<int64_t> strides,
+    llvm::ArrayRef<int64_t> pads, llvm::ArrayRef<int64_t> dilations,
+    int64_t group, llvm::StringRef &reason) {
   auto decline = [&](llvm::StringRef why) -> std::optional<PatchEmbedPlan> {
     reason = why;
     return std::nullopt;
@@ -241,9 +238,9 @@ struct PatchEmbedConvToGemm : public mlir::OpRewritePattern<mlir::hip::ConvOp> {
     llvm::SmallVector<int64_t> dilations = readI64Array(conv.getDilations());
 
     llvm::StringRef reason;
-    std::optional<PatchEmbedPlan> plan = analyzePatchEmbedConv(
-        xType, wType, yType, strides, pads, dilations,
-        static_cast<int64_t>(conv.getGroup()), reason);
+    std::optional<PatchEmbedPlan> plan =
+        analyzePatchEmbedConv(xType, wType, yType, strides, pads, dilations,
+                              static_cast<int64_t>(conv.getGroup()), reason);
     if (!plan)
       return rewriter.notifyMatchFailure(conv, reason);
 

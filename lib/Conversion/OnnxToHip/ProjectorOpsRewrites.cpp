@@ -479,8 +479,8 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 
 void populateProjectorOpsRewritePatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
-  patterns.add<PowToMul, AveragePoolToReshapeMean,
-               BroadcastDivToMulReciprocal>(ctx);
+  patterns.add<PowToMul, AveragePoolToReshapeMean, BroadcastDivToMulReciprocal>(
+      ctx);
 }
 
 } // namespace hip
