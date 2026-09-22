@@ -33,6 +33,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>")
   endif()
 
   option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" ON)
@@ -97,6 +98,13 @@ option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+
+# Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
+# same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
+# the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
+# assertions) and rocmlirTriton is added with add_subdirectory; its own CMake
+# detects the already-defined MLIRSupport target and skips rebuilding LLVM.
+option(ENABLE_ROCMLIRTRITON "Build rocmlirTriton (rocMLIR/Triton) in-tree, reusing this project's LLVM" OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
 # cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
