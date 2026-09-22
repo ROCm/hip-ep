@@ -1261,11 +1261,15 @@ Value emitRangeConst(ConversionPatternRewriter &rewriter, Location loc,
     }
     values = DenseElementsAttr::get(type, elements);
   } else {
-    APInt first = start.getSplatValue<APInt>();
-    APInt step = delta.getSplatValue<APInt>();
+    auto intType = cast<IntegerType>(type.getElementType());
+    unsigned width = intType.getWidth();
+    unsigned mathWidth = std::max(64u, width + 1);
+    APInt first = start.getSplatValue<APInt>().sextOrTrunc(mathWidth);
+    APInt step = delta.getSplatValue<APInt>().sextOrTrunc(mathWidth);
     SmallVector<APInt> elements;
     for (int64_t i : llvm::seq<int64_t>(length))
-      elements.push_back(first + step * APInt(first.getBitWidth(), i));
+      elements.push_back((first + step * APInt(mathWidth, i, /*isSigned=*/true))
+                             .trunc(width));
     values = DenseElementsAttr::get(type, elements);
   }
   return tosa::ConstOp::create(rewriter, loc, type, values);
