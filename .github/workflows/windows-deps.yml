@@ -484,6 +484,15 @@ jobs:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
 
+      - name: Upload amdgpu-artifacts
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/amdgpu-artifacts
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Save sccache directory
         if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
@@ -677,6 +686,15 @@ jobs:
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
+
+      - name: Upload oga-artifacts
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.value }}
+          path: ${{ runner.workspace }}/oga-artifacts
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Save sccache directory
         if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'
