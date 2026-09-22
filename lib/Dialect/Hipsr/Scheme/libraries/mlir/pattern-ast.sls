@@ -65,82 +65,186 @@
           ast-operand-var ast-operand-var-set!)
   (import (rnrs))
 
+  ;;=======================================================================
+  ;; AST RECORD HIERARCHY (depth-first order: leaf → root)
+  ;;=======================================================================
+  ;;
+  ;; Tree structure of pattern AST:
+  ;;
+  ;; ast-pattern-expand (root)
+  ;; ├── match: list of ast-match-expand
+  ;; │   ├── result-var: identifier or list
+  ;; │   ├── op-name: string
+  ;; │   ├── operands: list of ast-operand (LEAF)
+  ;; │   └── where-expr: optional guard expression
+  ;; ├── where: list of ast-where-binding-expand
+  ;; │   ├── var: identifier
+  ;; │   └── expr: Scheme expression
+  ;; └── rewrite: list of ast-operation-expand
+  ;;     ├── result-var: identifier or list
+  ;;     ├── op-name: string
+  ;;     ├── operands: list of syntax identifiers
+  ;;     ├── regions: list of ast-region-expand
+  ;;     │   └── blocks: list of ast-block-expand
+  ;;     │       ├── label: identifier
+  ;;     │       ├── arguments: list of (var type) pairs
+  ;;     │       └── operations: list of ast-operation-expand (RECURSIVE)
+  ;;     ├── attributes: syntax list
+  ;;     └── result-types: syntax
+  ;;
+  ;;=======================================================================
+
   ;;-----------------------------------------------------------------------
-  ;; Top-level pattern record
+  ;; LEAF RECORD: ast-operand (no child records)
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Represents a complete pattern definition across all phases.
-  ;; Created by parse phase, enriched by validate/analyze phases, consumed by codegen.
+  ;; Used by: ast-match-expand (operands field)
   ;;
-  (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
+  ;; Represents a single operand in a match operation with its kind tag.
+  ;; The (&optional ...) and (&variadic ...) groups in the DSL syntax are
+  ;; flattened during parsing - each variable gets its own record.
+  ;;
+  ;; Example DSL input: (%x (&optional %y %z) %w (&variadic %rest))
+  ;; Phase 1 (parse): Flattened to list of ast-operand records:
+  ;;   [ast-operand('required, #'%x),
+  ;;    ast-operand('optional, #'%y),
+  ;;    ast-operand('optional, #'%z),
+  ;;    ast-operand('required, #'%w),
+  ;;    ast-operand('variadic, #'%rest)]
+  ;;
+  ;; Note: Optional/variadic require AttrSizedOperandSegments trait and
+  ;; runtime operandSegmentSizes attribute to calculate access positions.
+  ;;
+  (define-record-type (ast-operand make-ast-operand ast-operand?)
     (fields
-      (mutable function-name)    ;; syntax identifier - name of generated pattern function
-                                 ;; Example: #'my-pattern
+      (mutable kind)           ;; Phase 1 (parse): symbol - 'required, 'optional, or 'variadic
+                               ;; Phase 2 (validate): unchanged
+                               ;; Phase 3 (analyze): used to compute operand segment positions
 
-      (mutable root-var)         ;; syntax identifier - result variable of the root operation
-                                 ;; Example: #'%out
-                                 ;; The root operation is the one matched against the input op
-
-      (mutable root-op-name)     ;; syntax string - operation name of root operation
-                                 ;; Example: #'"onnx.Cast"
-                                 ;; Set by validate phase after finding root operation
-
-      (mutable root-op-index)    ;; integer - index of root operation in match vector
-                                 ;; Example: 2 (if root is 3rd operation in :match clause)
-                                 ;; Set by validate phase (cached for efficiency)
-                                 ;; Used by codegen to initialize root variable
-
-      (mutable root-result-idx)  ;; integer - index of root var in root operation's result list
-                                 ;; Example: 0 (if root var is first result)
-                                 ;;          1 (if root var is second result in (%a %b) = "op"(...))
-                                 ;; Set by validate phase (cached for efficiency)
-                                 ;; Used by codegen with mlir-operation-get-result
-
-      (mutable match)            ;; Phase 1: list of ast-match-expand (parsed)
-                                 ;; Phase 2: vector of ast-match-expand (normalized by validate)
-                                 ;; Indexing: vector index = operation index in DAG
-
-      (mutable match-bindings)   ;; Phase 3: binding-manager record (analyze phase)
-                                 ;; Maps all identifiers (results and operands) to binding-entry records
-                                 ;; Used by codegen to collect all variables
-
-      (mutable match-actions)    ;; Phase 3: list of actions (analyze phase)
-                                 ;; Ordered sequence of runtime matching actions
-                                 ;; Actions: :set-current-op, :check-op, :bind-operand, :check-eq
-                                 ;; Used by codegen to generate pattern matching code
-
-      (mutable rewrite)          ;; list of ast-operation-expand - rewrite operations
-                                 ;; Operations to construct when pattern matches
-                                 ;; Currently unused (rewrite not implemented yet)
-
-      (mutable where)            ;; list of ast-where-binding-expand - constraint bindings
-                                 ;; Additional computed bindings for rewrite
-                                 ;; Currently unused (rewrite not implemented yet)
-
-      (mutable debug-parse?)     ;; boolean - :debug-parse flag
-                                 ;; When true, codegen outputs parsed AST as datum
-
-      (mutable debug-analyze?)   ;; boolean - :debug-analyze flag
-                                 ;; When true, codegen outputs match-actions as datum
-
-      (mutable debug-codegen?)   ;; boolean - :debug-codegen flag
-                                 ;; When true, codegen outputs generated code as quoted datum
-
-      (mutable debug-matching?)))  ;; boolean - :debug-matching flag
-                                   ;; When true, generated code prints trace during matching
-                                   ;; Currently unused (not implemented yet)
+      (mutable var)))          ;; Phase 1 (parse): syntax identifier (e.g., #'%x)
+                               ;; Phase 2 (validate): validated to start with %
+                               ;; Phase 3 (analyze): used to bind/access this operand
 
   ;;-----------------------------------------------------------------------
-  ;; Match operation record
+  ;; BLOCK-LEVEL RECORD: ast-block-expand
   ;;-----------------------------------------------------------------------
+  ;;
+  ;; Used by: ast-region-expand (blocks field)
+  ;;
+  ;; Represents a block in MLIR (a sequence of operations with a label).
+  ;; Blocks can take arguments like function parameters.
+  ;;
+  ;; Example DSL input:
+  ;;   (^bb0 ((%arg0 : !t1) (%arg1 : !t2))
+  ;;     (%sum = "arith.addi" (%arg0 %arg1) -> !t1)
+  ;;     ("scf.yield" (%sum) -> ()))
+  ;;
+  (define-record-type (ast-block-expand make-ast-block-expand ast-block-expand?)
+    (fields
+      (mutable label)          ;; Phase 1 (parse): syntax identifier - block label
+                               ;; Example: #'^bb0 (^ prefix is convention)
+
+      (mutable arguments)      ;; Phase 1 (parse): list of (var type) syntax pairs
+                               ;; Example: ((#'%arg0 #'!t1) (#'%arg1 #'!t2))
+                               ;; Block arguments are like function parameters
+
+      (mutable operations)))   ;; Phase 1 (parse): list of ast-operation-expand
+                               ;; Operations in this block (can be recursive - blocks in regions in ops)
+
+  ;;-----------------------------------------------------------------------
+  ;; REGION-LEVEL RECORD: ast-region-expand
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Used by: ast-operation-expand (regions field)
+  ;;
+  ;; Represents a region in MLIR (a list of blocks).
+  ;; Used by operations like scf.if, scf.while that contain nested code.
+  ;;
+  (define-record-type (ast-region-expand make-ast-region-expand ast-region-expand?)
+    (fields
+      (mutable blocks)))       ;; Phase 1 (parse): list of ast-block-expand
+                               ;; Each region contains one or more blocks
+
+  ;;-----------------------------------------------------------------------
+  ;; OPERATION-LEVEL RECORD: ast-operation-expand
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Used by: ast-pattern-expand (rewrite field), ast-block-expand (operations field)
+  ;;
+  ;; Represents a single operation to construct in the rewrite.
+  ;; Corresponds to one line in the :rewrite :with clause.
+  ;;
+  ;; Example DSL input:
+  ;;   (%out = "hipsr.cast" (%x) :regions (...) :attrs [("to", !t3)] -> !t3)
+  ;;
+  ;; Field order matches MLIR generic operation syntax:
+  ;;   result = op-name (operands) :regions (...) :attrs [...] -> result-types
+  ;;
+  ;; Note: No input-types field. Input types are implicit in operand Values
+  ;;       (each Value has .getType()). Only result types need to be specified.
+  ;;
+  (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
+    (fields
+      (mutable result-var)     ;; Phase 1 (parse): syntax identifier or list - result variable(s)
+                               ;; Example: #'%out for single result
+                               ;; Example: #'(%a %b) for multiple results
+                               ;; Empty #'() for operations with no results
+
+      (mutable op-name)        ;; Phase 1 (parse): syntax string - operation name to construct
+                               ;; Example: #'"hipsr.cast"
+
+      (mutable operands)       ;; Phase 1 (parse): syntax list - operand expressions
+                               ;; Example: #'(%x) means pass bound variable %x
+                               ;; Operands must be bound by match or where clauses
+
+      (mutable regions)        ;; Phase 1 (parse): list of ast-region-expand - nested regions
+                               ;; Example: control flow ops like scf.if have regions
+                               ;; Currently unused (region construction not implemented)
+
+      (mutable attributes)     ;; Phase 1 (parse): syntax list - attribute expressions
+                               ;; Example: #'(("to" !t3)) for typed attribute
+                               ;; Currently unused (attribute construction not implemented)
+
+      (mutable result-types))) ;; Phase 1 (parse): syntax - result type expression(s)
+                               ;; Example: #'!t3 for single result type
+                               ;; Example: #'(!t1 !t2) for multiple result types
+                               ;; Currently unused (rewrite not implemented)
+
+  ;;-----------------------------------------------------------------------
+  ;; OPERATION-LEVEL RECORD: ast-where-binding-expand
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Used by: ast-pattern-expand (where field)
+  ;;
+  ;; Represents a computed binding in the :where clause.
+  ;; Used to compute additional values needed for rewrite.
+  ;;
+  ;; Example DSL input:
+  ;;   :where ((!new-type (compute-type !old-type))
+  ;;           (%ctx (get-context)))
+  ;;
+  (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
+    (fields
+      (mutable var)            ;; Phase 1 (parse): syntax identifier - variable to bind
+                               ;; Example: #'!new-type or #'%ctx
+
+      (mutable expr)))         ;; Phase 1 (parse): syntax expression - Scheme expression to evaluate
+                               ;; Example: #'(compute-type !old-type)
+                               ;; Currently unused (rewrite not implemented)
+
+  ;;-----------------------------------------------------------------------
+  ;; MATCH-LEVEL RECORD: ast-match-expand
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Used by: ast-pattern-expand (match field)
   ;;
   ;; Represents a single operation to match in the pattern.
   ;; Corresponds to one line in the :match clause.
   ;;
-  ;; Example input syntax (single result):
+  ;; Example DSL input (single result):
   ;;   (%b = "op2" (%a) () : (!t2) -> !t3)
   ;;
-  ;; Example input syntax (multiple results):
+  ;; Example DSL input (multiple results):
   ;;   ((%a %b) = "op2" (%x) () : (!t) -> (!t1 !t2))
   ;;
   (define-record-type (ast-match-expand make-ast-match-expand ast-match-expand?)
@@ -163,6 +267,7 @@
 
       (mutable operands)       ;; Phase 1 (parse): list of ast-operand records (flattened)
                                ;; Phase 2 (validate): unchanged (records already validated during parse)
+                               ;; Phase 3 (analyze): used to generate operand binding actions
                                ;;
                                ;; Input syntax: (%x (&optional %y %z) %w (&variadic %rest))
                                ;; Parsed to flat list:
@@ -178,7 +283,7 @@
                                ;; Note: Optional/variadic require AttrSizedOperandSegments trait
                                ;; and runtime operandSegmentSizes attribute to calculate positions
 
-      (mutable where-expr)))   ;; syntax object - pure Scheme guard expression
+      (mutable where-expr)))   ;; Phase 1 (parse): syntax object - pure Scheme guard expression
                                ;; Executes after matching this operation (early return on failure)
                                ;; Default: #'#f (no guard, always succeeds)
                                ;; Example: #'(let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
@@ -186,135 +291,74 @@
                                ;; Can access: matched result-var, operands, any previously bound vars
 
   ;;-----------------------------------------------------------------------
-  ;; Rewrite operation record
+  ;; ROOT RECORD: ast-pattern-expand
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Represents a single operation to construct in the rewrite.
-  ;; Corresponds to one line in the :rewrite :with clause.
+  ;; Represents a complete pattern definition across all phases.
+  ;; Created by parse phase, enriched by validate/analyze phases, consumed by codegen.
   ;;
-  ;; Example input syntax:
-  ;;   (%out = "hipsr.cast" (%x) :attrs [("to", !t3)] -> !t3)
-  ;;
-  ;; Field order matches MLIR generic operation syntax:
-  ;;   result = op-name (operands) :regions (...) :attrs [...] -> result-types
-  ;;
-  ;; Note: No input-types field. Input types are implicit in operand Values
-  ;;       (each Value has .getType()). Only result types need to be specified.
-  ;;
-  (define-record-type (ast-operation-expand make-ast-operation-expand ast-operation-expand?)
+  (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
     (fields
-      (mutable result-var)     ;; syntax identifier or list - result variable(s)
-                               ;; Example: #'%out for single result
-                               ;; Example: (#'%a #'%b) for multiple results
-                               ;; Empty #'() for operations with no results
+      (mutable function-name)    ;; Phase 1 (parse): syntax identifier - name of generated pattern function
+                                 ;; Example: #'my-pattern
 
-      (mutable op-name)        ;; syntax string - operation name to construct
-                               ;; Example: #'"hipsr.cast"
+      (mutable root-var)         ;; Phase 1 (parse): syntax identifier - result variable of the root operation
+                                 ;; Example: #'%out
+                                 ;; The root operation is the one matched against the input op
+                                 ;; Phase 2 (validate): validated and confirmed to be a result var
 
-      (mutable operands)       ;; syntax list - operand expressions
-                               ;; Example: #'(%x) means pass bound variable %x
-                               ;; Operands must be bound by match or where clauses
+      (mutable root-op-name)     ;; Phase 1 (parse): not set (initialized to #f)
+                                 ;; Phase 2 (validate): syntax string - operation name of root operation
+                                 ;; Example: #'"onnx.Cast"
+                                 ;; Set after finding which match operation defines root-var
 
-      (mutable regions)        ;; list of ast-region-expand - nested regions
-                               ;; Example: control flow ops like scf.if have regions
-                               ;; Currently unused (region construction not implemented)
+      (mutable root-op-index)    ;; Phase 1 (parse): not set (initialized to #f)
+                                 ;; Phase 2 (validate): integer - index of root operation in match vector
+                                 ;; Example: 2 (if root is 3rd operation in :match clause)
+                                 ;; Cached for efficiency, used by codegen to initialize root variable
 
-      (mutable attributes)     ;; syntax list - attribute expressions
-                               ;; Example: #'(("to" !t3)) for typed attribute
-                               ;; Currently unused (attribute construction not implemented)
+      (mutable root-result-idx)  ;; Phase 1 (parse): not set (initialized to #f)
+                                 ;; Phase 2 (validate): integer - index of root var in root operation's result list
+                                 ;; Example: 0 (if root var is first result)
+                                 ;;          1 (if root var is second result in (%a %b) = "op"(...))
+                                 ;; Cached for efficiency, used by codegen with mlir-operation-get-result
 
-      (mutable result-types))) ;; syntax - result type expression(s)
-                               ;; Example: #'!t3 for single result type
-                               ;; Example: #'(!t1 !t2) for multiple result types
-                               ;; Currently unused (rewrite not implemented)
+      (mutable match)            ;; Phase 1 (parse): list of ast-match-expand (parsed in order)
+                                 ;; Phase 2 (validate): vector of ast-match-expand (normalized for indexing)
+                                 ;; Indexing: vector index = operation index in DAG
+                                 ;; Phase 3 (analyze): used to generate match-actions
 
-  ;;-----------------------------------------------------------------------
-  ;; Where binding record
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Represents a computed binding in the :where clause.
-  ;; Used to compute additional values needed for rewrite.
-  ;;
-  ;; Example input syntax:
-  ;;   :where ((!new-type (compute-type !old-type))
-  ;;           (%ctx (get-context)))
-  ;;
-  (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
-    (fields
-      (mutable var)            ;; syntax identifier - variable to bind
-                               ;; Example: #'!new-type or #'%ctx
+      (mutable match-bindings)   ;; Phase 1 (parse): not set (initialized to #f)
+                                 ;; Phase 2 (validate): not set (still #f)
+                                 ;; Phase 3 (analyze): binding-manager record
+                                 ;; Maps all identifiers (results and operands) to binding-entry records
+                                 ;; Used by codegen to collect all variables
 
-      (mutable expr)))         ;; syntax expression - Scheme expression to evaluate
-                               ;; Example: #'(compute-type !old-type)
-                               ;; Currently unused (rewrite not implemented)
+      (mutable match-actions)    ;; Phase 1 (parse): not set (initialized to #f)
+                                 ;; Phase 2 (validate): not set (still #f)
+                                 ;; Phase 3 (analyze): list of actions
+                                 ;; Ordered sequence of runtime matching actions
+                                 ;; Actions: :set-current-op, :check-op, :bind-operand, :check-eq
+                                 ;; Used by codegen to generate pattern matching code
 
+      (mutable rewrite)          ;; Phase 1 (parse): list of ast-operation-expand - rewrite operations
+                                 ;; Operations to construct when pattern matches
+                                 ;; Currently unused (rewrite not implemented yet)
 
-  ;;-----------------------------------------------------------------------
-  ;; Region record (for control flow operations)
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Represents a region in MLIR (a list of blocks).
-  ;; Used by operations like scf.if, scf.while that contain nested code.
-  ;;
-  (define-record-type (ast-region-expand make-ast-region-expand ast-region-expand?)
-    (fields
-      (mutable blocks)))       ;; list of ast-block-expand
-                               ;; Each region contains one or more blocks
+      (mutable where)            ;; Phase 1 (parse): list of ast-where-binding-expand - constraint bindings
+                                 ;; Additional computed bindings for rewrite
+                                 ;; Currently unused (rewrite not implemented yet)
 
-  ;;-----------------------------------------------------------------------
-  ;; Block record (for control flow)
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Represents a block in MLIR (a sequence of operations with a label).
-  ;; Blocks can take arguments like function parameters.
-  ;;
-  ;; Example input syntax:
-  ;;   (^bb0 ((%arg0 : !t1) (%arg1 : !t2))
-  ;;     (%sum = "arith.addi" (%arg0 %arg1) -> !t1)
-  ;;     ("scf.yield" (%sum) -> ()))
-  ;;
-  (define-record-type (ast-block-expand make-ast-block-expand ast-block-expand?)
-    (fields
-      (mutable label)          ;; syntax identifier - block label
-                               ;; Example: #'^bb0
-                               ;; Labels start with ^ by convention
+      (mutable debug-parse?)     ;; Phase 1 (parse): boolean - :debug-parse flag
+                                 ;; When true, codegen outputs parsed AST as datum
 
-      (mutable arguments)      ;; list of (var type) syntax pairs
-                               ;; Example: ((#'%arg0 #'!t1) (#'%arg1 #'!t2))
-                               ;; Block arguments are like function parameters
+      (mutable debug-analyze?)   ;; Phase 1 (parse): boolean - :debug-analyze flag
+                                 ;; When true, codegen outputs match-actions as datum
 
-      (mutable operations)))   ;; list of ast-operation-expand
-                               ;; Operations in this block
+      (mutable debug-codegen?)   ;; Phase 1 (parse): boolean - :debug-codegen flag
+                                 ;; When true, codegen outputs generated code as quoted datum
 
-  ;;-----------------------------------------------------------------------
-  ;; Operand record (for match operations)
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Each operand is tagged with its kind: required, optional, or variadic.
-  ;; The (&optional ...) and (&variadic ...) groups in the DSL syntax are
-  ;; flattened during parsing - each variable gets its own record.
-  ;;
-  ;; Example input: (%x (&optional %y %z) %w (&variadic %rest))
-  ;; Phase 1 (parse): Flattened to list of ast-operand records:
-  ;;   [ast-operand('required, %x),
-  ;;    ast-operand('optional, %y),
-  ;;    ast-operand('optional, %z),
-  ;;    ast-operand('required, %w),
-  ;;    ast-operand('variadic, %rest)]
-  ;; Phase 2 (validate): Each var validated to start with %
-  ;; Phase 3 (analyze): Kind used to compute operand segment positions
-  ;;
-  ;; Note: Optional/variadic require AttrSizedOperandSegments trait and
-  ;; runtime operandSegmentSizes attribute to calculate access positions.
-  ;;
-
-  (define-record-type (ast-operand make-ast-operand ast-operand?)
-    (fields
-      (mutable kind)               ;; Phase 1 (parse): symbol - 'required, 'optional, or 'variadic
-                                   ;; Phase 2 (validate): unchanged
-                                   ;; Used in analyze to compute segment positions
-
-      (mutable var)))              ;; Phase 1 (parse): syntax identifier (e.g., #'%x)
-                                   ;; Phase 2 (validate): unchanged - validated to start with %
-                                   ;; Used in analyze/codegen to bind/access this operand
+      (mutable debug-matching?)))  ;; Phase 1 (parse): boolean - :debug-matching flag
+                                   ;; When true, generated code prints trace during matching
+                                   ;; Currently unused (not implemented yet)
 )
