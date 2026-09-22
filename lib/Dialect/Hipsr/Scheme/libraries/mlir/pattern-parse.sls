@@ -154,6 +154,61 @@
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
+  ;; parse-operands - Parse operand list, flattening groups
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Parses operand syntax and flattens (&optional ...) and (&variadic ...)
+  ;; groups into individual ast-operand records tagged with their kind.
+  ;;
+  ;; Input syntax: (%x (&optional %y %z) %w (&variadic %rest))
+  ;; Output: list of ast-operand records:
+  ;;   [ast-operand('required, #'%x),
+  ;;    ast-operand('optional, #'%y),
+  ;;    ast-operand('optional, #'%z),
+  ;;    ast-operand('required, #'%w),
+  ;;    ast-operand('variadic, #'%rest)]
+  ;;
+  ;; Phase 1 (parse) checks:
+  ;; - All operands are identifiers (syntax structure)
+  ;; - (&variadic ...) has exactly one variable
+  ;;
+  ;; Phase 2 (validate) checks:
+  ;; - All identifiers start with % (semantic rule)
+  ;;
+  (define (parse-operands operands-stx)
+    (define (parse-one operand-stx)
+      (syntax-case operand-stx (&optional &variadic)
+        ;; Optional group: (&optional %y %z) → flatten to multiple optional operands
+        [(&optional var ...)
+         (let ([vars (syntax->list #'(var ...))])
+           (for-each check-identifier vars)
+           (map (lambda (v) (make-ast-operand 'optional v)) vars))]
+
+        ;; Variadic group: (&variadic %rest) → single variadic operand
+        [(&variadic var)
+         (begin
+           (check-identifier #'var)
+           (list (make-ast-operand 'variadic #'var)))]
+
+        ;; Required operand: %x → single required operand
+        [var
+         (identifier? #'var)
+         (list (make-ast-operand 'required #'var))]
+
+        [_
+         (syntax-violation 'parse-operands
+           "Invalid operand syntax (expected: identifier, (&optional ...), or (&variadic var))"
+           operand-stx)]))
+
+    ;; Helper: check syntax structure (identifier check only, no % validation)
+    (define (check-identifier var)
+      (unless (identifier? var)
+        (syntax-violation 'parse-operands "Operand must be identifier" var)))
+
+    ;; Main: parse each operand-or-group and flatten results
+    (apply append (map parse-one (syntax->list operands-stx))))
+
+  ;;-----------------------------------------------------------------------
   ;; parse-match-ops-recursive - Collect match operations
   ;;-----------------------------------------------------------------------
   ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
@@ -378,61 +433,6 @@
       [_ (syntax-violation 'parse-region
            "Invalid region syntax (expected: list of blocks)"
            region-stx)]))
-
-  ;;-----------------------------------------------------------------------
-  ;; parse-operands - Parse operand list, flattening groups
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Parses operand syntax and flattens (&optional ...) and (&variadic ...)
-  ;; groups into individual ast-operand records tagged with their kind.
-  ;;
-  ;; Input syntax: (%x (&optional %y %z) %w (&variadic %rest))
-  ;; Output: list of ast-operand records:
-  ;;   [ast-operand('required, #'%x),
-  ;;    ast-operand('optional, #'%y),
-  ;;    ast-operand('optional, #'%z),
-  ;;    ast-operand('required, #'%w),
-  ;;    ast-operand('variadic, #'%rest)]
-  ;;
-  ;; Phase 1 (parse) checks:
-  ;; - All operands are identifiers (syntax structure)
-  ;; - (&variadic ...) has exactly one variable
-  ;;
-  ;; Phase 2 (validate) checks:
-  ;; - All identifiers start with % (semantic rule)
-  ;;
-  (define (parse-operands operands-stx)
-    (define (parse-one operand-stx)
-      (syntax-case operand-stx (&optional &variadic)
-        ;; Optional group: (&optional %y %z) → flatten to multiple optional operands
-        [(&optional var ...)
-         (let ([vars (syntax->list #'(var ...))])
-           (for-each check-identifier vars)
-           (map (lambda (v) (make-ast-operand 'optional v)) vars))]
-
-        ;; Variadic group: (&variadic %rest) → single variadic operand
-        [(&variadic var)
-         (begin
-           (check-identifier #'var)
-           (list (make-ast-operand 'variadic #'var)))]
-
-        ;; Required operand: %x → single required operand
-        [var
-         (identifier? #'var)
-         (list (make-ast-operand 'required #'var))]
-
-        [_
-         (syntax-violation 'parse-operands
-           "Invalid operand syntax (expected: identifier, (&optional ...), or (&variadic var))"
-           operand-stx)]))
-
-    ;; Helper: check syntax structure (identifier check only, no % validation)
-    (define (check-identifier var)
-      (unless (identifier? var)
-        (syntax-violation 'parse-operands "Operand must be identifier" var)))
-
-    ;; Main: parse each operand-or-group and flatten results
-    (apply append (map parse-one (syntax->list operands-stx))))
 
   ;;-----------------------------------------------------------------------
   ;; parse-block - Parse a single block
