@@ -320,9 +320,6 @@ cd ../build/hip-ep
 python _deps/llvm-project-build/bin/llvm-lit.py -v test/lit/Conversion/hip-to-tosa
 ```
 
-`Conversion/onnx-to-hip/test_qadd.mlir` fails on this branch already; it never
-runs `convert-hip-to-tosa`, so ignore it.
-
 Confirm the output contains no residual `hip.*` compute ops. Anything left
 behind will fail later in rocMLIR, not here.
 
