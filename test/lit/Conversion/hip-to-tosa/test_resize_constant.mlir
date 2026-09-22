@@ -155,6 +155,23 @@ func.func @resize_height_only(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>,
 
 // -----
 
+// nearest_mode is ignored for bilinear resize, so a nonzero value still lowers.
+// CHECK-LABEL: func.func @resize_bilinear_ignores_nearest_mode
+// CHECK: tosa.resize %{{.*}} {mode = BILINEAR}
+// CHECK-NOT: hip.resize
+func.func @resize_bilinear_ignores_nearest_mode(
+    %ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
+    %init: tensor<1x3x32x32xf32>)
+    -> tensor<1x3x32x32xf32> attributes {rock.kernel} {
+  %r = hip.resize(%ctx) ins(%x : tensor<1x3x16x16xf32>)
+                        outs(%init : tensor<1x3x32x32xf32>)
+       {mode = 1 : i64, coord_transform = 0 : i64, nearest_mode = 7 : i64}
+       : tensor<1x3x32x32xf32>
+  return %r : tensor<1x3x32x32xf32>
+}
+
+// -----
+
 //===----------------------------------------------------------------------===//
 // hip.resize forms the pass declines.
 //===----------------------------------------------------------------------===//
