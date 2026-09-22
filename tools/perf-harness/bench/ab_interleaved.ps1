@@ -152,8 +152,16 @@ function Invoke-Arm {
   New-Item -ItemType Directory -Force -Path $temp | Out-Null
   $env:TEMP = $temp; $env:TMP = $temp
 
-  $common = @{ Tag = $Tag; Reps = $RunReps; Warmup = 1; SeqLen = $SeqLen
+  $common = @{ Tag = $Tag; Reps = $RunReps; Warmup = 1
                SetEnv = $setEnv; OutDir = $OutDir } + $passThru
+  # -SeqLen and -PromptFile are mutually exclusive on bench_ttft's text path,
+  # where the file fixes the length. Both still apply on the other two paths:
+  # 'vlm' uses -SeqLen to size the KV cache rather than the prompt, and 'tps'
+  # reads it as the KV length. So only the text-TTFT combination drops it.
+  if (-not ($Metric -eq 'ttft' -and $passThru.ContainsKey('PromptFile') -and
+            $Driver -ne 'vlm')) {
+    $common.SeqLen = $SeqLen
+  }
   if ($Metric -eq 'tps') { $common.Gen = $Gen }
   & $benchScript @common 2>&1 | Where-Object { $_ -match $echoRe }
 }
