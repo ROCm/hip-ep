@@ -181,28 +181,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
     list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
     list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
-
-    # hip-config-amd.cmake attaches the compiler-rt builtins lib to hip::host /
-    # hip::device by querying `${HIP_CXX_COMPILER} -print-libgcc-file-name
-    # --rtlib=compiler-rt`, defaulting HIP_CXX_COMPILER to CMAKE_CXX_COMPILER.
-    # On Windows CMAKE_CXX_COMPILER is often an external LLVM/clang-cl built
-    # without compiler-rt, so that query returns a clang_rt.builtins path that
-    # does not exist and every HIP link (custom kernels, hipgpu.dll) fails with
-    # "missing and no known rule to make it". TheRock's own clang ships a
-    # matching compiler-rt, so point HIP_CXX_COMPILER at it (unless the user
-    # already set one) to resolve a builtins lib that actually exists.
-    if(WIN32 AND NOT HIP_CXX_COMPILER)
-      find_program(_therock_hip_clang
-        NAMES clang++ clang++.exe
-        HINTS "${THEROCK_DIST}/bin"
-        NO_DEFAULT_PATH)
-      if(_therock_hip_clang)
-        set(HIP_CXX_COMPILER "${_therock_hip_clang}"
-            CACHE FILEPATH "Compiler hip-config queries for compiler-rt builtins")
-        message(STATUS "[onnx-hipdnn-ep] HIP_CXX_COMPILER (for compiler-rt "
-          "builtins resolution): ${HIP_CXX_COMPILER}")
-      endif()
-    endif()
   endif()
 endif()
 
