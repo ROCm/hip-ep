@@ -81,8 +81,16 @@ Clear-HarnessProfilingEnv
 Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS -EA SilentlyContinue
 $env:HIPDNN_EP_AUTOTUNE = '1'
 $env:HIPDNN_EP_MATMUL_CUSTOM_WMMA = '1'
+# Env: is process-wide and a script shares it with the session that invoked it,
+# so a -SetEnv key with no teardown outlives this run and silently applies to
+# every later one. That is not hypothetical: a kill switch set for one arm of a
+# config sweep survived into all twelve of the following runs, which disabled the
+# feature being swept and turned the whole sweep into noise that still looked
+# like a result. Record what we set and undo it on the way out.
+$setEnvKeys = @()
 foreach ($kv in $SetEnv) {
   $k, $v = $kv -split '=', 2
+  $setEnvKeys += $k
   Set-Item -Path "Env:$k" -Value $v
   Write-Host "    env $k=$v"
 }
@@ -174,4 +182,7 @@ if ($ttft) {
   Get-Content $log -Tail 25
 }
 
-} finally { Exit-HarnessLock $harnessLock }
+} finally {
+  foreach ($k in $setEnvKeys) { Remove-Item "Env:$k" -EA SilentlyContinue }
+  Exit-HarnessLock $harnessLock
+}
