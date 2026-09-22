@@ -110,10 +110,9 @@
                   ;; Validate result variables start with %
                   (loop :for var :in (ast-match-expand-result-var match-op)
                         :do (validate-%-identifier var "Result"))
-                  ;; Validate operand variables start with %
-                  ;; Handle &optional and &variadic groups
-                  (loop :for operand-or-group :in (syntax->list (ast-match-expand-operands match-op))
-                        :do (validate-operand-or-group operand-or-group))))))
+                  ;; Operands already validated during parse phase (parse-operands)
+                  ;; No validation needed here - operands field is list of ast-operand records
+                  ))))
 
   (define (validate-no-duplicate-result-variables ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
@@ -203,35 +202,6 @@
 
   (define (validate-block block)
     (for-each validate-operation (ast-block-expand-operations block)))
-
-  ;;-----------------------------------------------------------------------
-  ;; Operand group validation (&optional, &variadic)
-  ;;-----------------------------------------------------------------------
-
-  (define (validate-operand-or-group operand-stx)
-    ;; Operand can be:
-    ;;   1. Simple identifier: %x
-    ;;   2. Optional group: (&optional %y %z)
-    ;;   3. Variadic group: (&variadic %rest)
-    (syntax-case operand-stx (&optional &variadic)
-      [(&optional var ...)
-       ;; Optional group - validate all vars start with %
-       (for-each (lambda (v) (validate-%-identifier v "Optional operand"))
-                 (syntax->list #'(var ...)))]
-
-      [(&variadic var)
-       ;; Variadic group - single variable
-       (validate-%-identifier #'var "Variadic operand")]
-
-      [var
-       ;; Simple operand
-       (identifier? #'var)
-       (validate-%-identifier #'var "Operand")]
-
-      [_
-       (syntax-violation 'validate-operand-or-group
-         "Invalid operand syntax (expected: %var, (&optional ...), or (&variadic var))"
-         operand-stx)]))
 
   ;;-----------------------------------------------------------------------
   ;; Where binding validation

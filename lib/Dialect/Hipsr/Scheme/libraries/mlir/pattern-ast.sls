@@ -58,7 +58,11 @@
           ast-block-expand make-ast-block-expand ast-block-expand?
           ast-block-expand-label ast-block-expand-label-set!
           ast-block-expand-arguments ast-block-expand-arguments-set!
-          ast-block-expand-operations ast-block-expand-operations-set!)
+          ast-block-expand-operations ast-block-expand-operations-set!
+
+          ast-operand make-ast-operand ast-operand?
+          ast-operand-kind ast-operand-kind-set!
+          ast-operand-var ast-operand-var-set!)
   (import (rnrs))
 
   ;;-----------------------------------------------------------------------
@@ -157,12 +161,19 @@
                                ;; Phase 2 (validate): syntax string (normalized)
                                ;;          Symbol converted: #'op2 → #'"op2"
 
-      (mutable operands)       ;; syntax list - operand variables (with optional/variadic groups)
-                               ;; Required: #'%a - single identifier
-                               ;; Optional group: #'(&optional %b %c) - group of optional operands
-                               ;; Variadic group: #'(&variadic %rest) - variable-length operand list
-                               ;; Example: #'(%a (&optional %b) %c) - a required, b optional, c required
-                               ;; Operands can be result variables (from other ops) or free variables
+      (mutable operands)       ;; Phase 1 (parse): list of ast-operand records (flattened)
+                               ;; Phase 2 (validate): unchanged (records already validated during parse)
+                               ;;
+                               ;; Input syntax: (%x (&optional %y %z) %w (&variadic %rest))
+                               ;; Parsed to flat list:
+                               ;;   [ast-operand('required, #'%x),
+                               ;;    ast-operand('optional, #'%y),
+                               ;;    ast-operand('optional, #'%z),
+                               ;;    ast-operand('required, #'%w),
+                               ;;    ast-operand('variadic, #'%rest)]
+                               ;;
+                               ;; Each operand is tagged with kind: 'required, 'optional, or 'variadic
+                               ;; Operand vars can be result variables (from other ops) or free variables
                                ;;
                                ;; Note: Optional/variadic require AttrSizedOperandSegments trait
                                ;; and runtime operandSegmentSizes attribute to calculate positions
@@ -274,4 +285,36 @@
 
       (mutable operations)))   ;; list of ast-operation-expand
                                ;; Operations in this block
+
+  ;;-----------------------------------------------------------------------
+  ;; Operand record (for match operations)
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Each operand is tagged with its kind: required, optional, or variadic.
+  ;; The (&optional ...) and (&variadic ...) groups in the DSL syntax are
+  ;; flattened during parsing - each variable gets its own record.
+  ;;
+  ;; Example input: (%x (&optional %y %z) %w (&variadic %rest))
+  ;; Phase 1 (parse): Flattened to list of ast-operand records:
+  ;;   [ast-operand('required, %x),
+  ;;    ast-operand('optional, %y),
+  ;;    ast-operand('optional, %z),
+  ;;    ast-operand('required, %w),
+  ;;    ast-operand('variadic, %rest)]
+  ;; Phase 2 (validate): Each var validated to start with %
+  ;; Phase 3 (analyze): Kind used to compute operand segment positions
+  ;;
+  ;; Note: Optional/variadic require AttrSizedOperandSegments trait and
+  ;; runtime operandSegmentSizes attribute to calculate access positions.
+  ;;
+
+  (define-record-type (ast-operand make-ast-operand ast-operand?)
+    (fields
+      (mutable kind)               ;; Phase 1 (parse): symbol - 'required, 'optional, or 'variadic
+                                   ;; Phase 2 (validate): unchanged
+                                   ;; Used in analyze to compute segment positions
+
+      (mutable var)))              ;; Phase 1 (parse): syntax identifier (e.g., #'%x)
+                                   ;; Phase 2 (validate): unchanged - validated to start with %
+                                   ;; Used in analyze/codegen to bind/access this operand
 )
