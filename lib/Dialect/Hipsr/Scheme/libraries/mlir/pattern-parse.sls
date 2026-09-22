@@ -3,7 +3,7 @@
 ;; Pattern Parser - Phase 1
 ;;=======================================================================
 ;;
-;; Parses pattern DSL syntax into AST records (defined in pattern-ast.sls).
+;; Parses pattern DSL syntax into ast-pattern-expand records (defined in pattern-ast.sls).
 ;; This is phase 1 of the 4-phase macro expansion pipeline.
 ;;
 ;; INPUT:  Raw syntax from define-conversion-pattern macro
@@ -11,7 +11,7 @@
 ;;
 ;; Key responsibilities:
 ;; - Pattern match syntax structure and extract components
-;; - Create AST records with syntax objects (NOT datums)
+;; - Create ast-pattern-expand, ast-match-expand, ast-operation-expand records (NOT datums)
 ;; - Handle optional clauses (attributes, types, regions, where)
 ;; - Parse debug flags (:debug-parse, :debug-analyze, etc.)
 ;; - Validate basic syntax structure (guards in syntax-case)
@@ -22,8 +22,8 @@
 ;; - Generate code (that's phase 4: pattern-codegen.sls)
 ;;
 ;; Strategy:
-;; - Tail-recursive parsing with accumulator AST record
-;; - Mutable AST fields allow incremental construction
+;; - Tail-recursive parsing with accumulator ast-pattern-expand record
+;; - Mutable fields allow incremental construction
 ;; - Keywords imported at expansion time (for syntax-case matching)
 ;;
 ;;=======================================================================
@@ -84,7 +84,7 @@
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
-       ;; Create empty AST record and parse incrementally
+       ;; Create empty ast-pattern-expand record and parse incrementally
        (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
@@ -138,15 +138,15 @@
   ;;
   ;; Call graph:
   ;;   parse-match-ops-recursive  → parse-after-match → parse-rewrite-ops-recursive
-  ;;        ↓ creates AST directly         ↓ parses :then-let         ↓ calls detail parser
-  ;;   make-ast-match-expand          parse-rewrite-ops...    parse-rewrite-operation
+  ;;        ↓ creates ast-match-expand    ↓ parses :then-let         ↓ calls detail parser
+  ;;                                 parse-rewrite-ops...    parse-rewrite-operation
   ;;
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
   ;; parse-match-ops-recursive - Collect match operations
   ;;-----------------------------------------------------------------------
-  ;; Stops at :then-let or :rewrite. Creates AST records directly.
+  ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
   ;;
   (define (parse-match-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (:then-let :rewrite :where =)
