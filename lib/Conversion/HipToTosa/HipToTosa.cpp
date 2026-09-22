@@ -2121,8 +2121,11 @@ planGatherBlockQuantized(hip::GatherBlockQuantizedOp op) {
   if (gatherAxis != 0 || quantizeAxis != rank - 1)
     return std::nullopt;
 
-  if (!isa<IntegerType>(dataTy.getElementType()) ||
-      !isa<IntegerType>(indicesTy.getElementType()) ||
+  auto dataElem = dyn_cast<IntegerType>(dataTy.getElementType());
+  auto idxElem = dyn_cast<IntegerType>(indicesTy.getElementType());
+  if (!dataElem || dataElem.getWidth() != 8 || !idxElem ||
+      !(idxElem.isSignlessInteger(32) || idxElem.isSignedInteger(32) ||
+        idxElem.isSignlessInteger(64) || idxElem.isSignedInteger(64)) ||
       !isa<FloatType>(scalesTy.getElementType()))
     return std::nullopt;
 
