@@ -296,7 +296,10 @@ def parse_op_line(line: str) -> dict | None:
 
 
 def build_single_op_module(
-    src_lines: list[str], def_index: dict[str, int], line_no: int
+    src_lines: list[str],
+    def_index: dict[str, int],
+    line_no: int,
+    type_override: tuple[int, str] | None = None,
 ) -> str | None:
     """Wrap one operation in a self-contained module.
 
@@ -316,16 +319,34 @@ def build_single_op_module(
     if not parsed:
         return None
 
+    if type_override is not None:
+        idx, new_type = type_override
+        if not 0 <= idx < len(parsed["in_types"]):
+            return None
+        parsed = dict(parsed, in_types=list(parsed["in_types"]))
+        parsed["in_types"][idx] = new_type
+        # An inlined constant carries its own type, which would now disagree
+        # with the operand's. Forcing the operand to an argument keeps the
+        # module consistent; the attribution test only varies types anyway.
+        parsed["_force_arg"] = idx
+
     preamble: list[str] = []
     args: list[str] = []
     remap: dict[str, str] = {}
     none_ssa: str | None = None
 
-    for operand, ty in zip(parsed["operands"], parsed["in_types"]):
+    forced_arg = parsed.get("_force_arg")
+    for pos, (operand, ty) in enumerate(zip(parsed["operands"], parsed["in_types"])):
         ref = _SSA_REF.match(operand)
         base = ref.group(1) if ref else operand
         def_line_no = def_index.get(base)
         def_line = src_lines[def_line_no - 1] if def_line_no else ""
+
+        if pos == forced_arg:
+            arg = f"%arg{len(args)}"
+            args.append(f"{arg}: {ty}")
+            remap[operand] = arg
+            continue
 
         if ty.strip() == "none" or '"onnx.NoValue"' in def_line:
             if none_ssa is None:
@@ -384,6 +405,95 @@ def build_single_op_module(
         "",
     ]
     return "\n".join(body)
+
+
+# Element types worth trying when looking for the operand that blocks a
+# conversion. Converters most often accept a narrower set than the model
+# supplies -- MatMulNBits takes i8 or f16 zero_points but not f32.
+_DTYPE_ALTERNATIVES = {
+    "f32": ["f16", "i8"],
+    "f16": ["f32"],
+    "f64": ["f32"],
+    "bf16": ["f16", "f32"],
+    "i8": ["f16"],
+    "ui8": ["i8", "f16"],
+    "i64": ["i32"],
+    "i32": ["i64"],
+}
+# The element type is the final `x`-separated field. Anchoring on the
+# separator matters: a looser pattern lets backtracking pull the separator
+# into the element name, turning tensor<512x16xf32> into elem "xf32" and
+# rebuilding it as the malformed tensor<512x16f16>.
+_ELEM_OF_TENSOR = re.compile(r"^tensor<(|.*x)([A-Za-z]+\d*)>$")
+
+
+def _retype(tensor_type: str, new_elem: str) -> str | None:
+    m = _ELEM_OF_TENSOR.match(tensor_type.strip())
+    if not m:
+        return None
+    return f"tensor<{m.group(1)}{new_elem}>"
+
+
+def _converts_cleanly(opt: Path, module: str, path: Path, out: Path) -> bool:
+    """True when nothing named onnx.* survives conversion of this module."""
+    path.write_text(module, encoding="utf-8")
+    code, _ = run_opt(opt, path, STAGE1_PASSES[:-1], out, debug=False)
+    if code != 0 or not out.exists():
+        return False
+    return not re.search(r'"onnx\.[A-Za-z0-9_]+"\s*\(', out.read_text(encoding="utf-8"))
+
+
+def attribution_probe(
+    opt: Path,
+    src_lines: list[str],
+    def_index: dict[str, int],
+    line_no: int,
+    op_type: str,
+    work_dir: Path,
+) -> dict:
+    """For an operator that did not convert, find which operand blocks it.
+
+    Change one operand's element type at a time and retry. If the conversion
+    then succeeds, that operand is the reason -- a single-variable result
+    that names the fix, rather than just reporting that something failed.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    parsed = parse_op_line(src_lines[line_no - 1])
+    if not parsed:
+        return {"found": False, "reason": "could not parse the operation"}
+
+    for idx, ty in enumerate(parsed["in_types"]):
+        m = _ELEM_OF_TENSOR.match(ty.strip())
+        if not m:
+            continue
+        elem = m.group(2)
+        for alt in _DTYPE_ALTERNATIVES.get(elem, []):
+            new_type = _retype(ty, alt)
+            if not new_type:
+                continue
+            module = build_single_op_module(
+                src_lines, def_index, line_no, type_override=(idx, new_type)
+            )
+            if module is None:
+                continue
+            tag = f"{op_type}.operand{idx}_{alt}"
+            if _converts_cleanly(
+                opt, module, work_dir / f"{tag}.mlir", work_dir / f"{tag}.out.mlir"
+            ):
+                return {
+                    "found": True,
+                    "operand_index": idx,
+                    "operand_type": ty,
+                    "accepted_type": new_type,
+                    "summary": (
+                        f"operand {idx} is {ty}; converting it to {new_type} "
+                        f"makes the conversion succeed"
+                    ),
+                }
+    return {
+        "found": False,
+        "reason": "no single operand element type change made it convert",
+    }
 
 
 def build_def_index(src_lines: list[str]) -> dict[str, int]:
@@ -580,14 +690,29 @@ def stage2(
         if op_type.startswith("_"):
             continue
         s1 = stage1_results.get(op_type, {})
-        if s1.get("unconverted"):
-            # No converter ran, so there is no lowering to test.
-            results[op_type] = {"status": "skipped", "reason": "unconverted in stage1"}
-            continue
-
         instances = info["instances"]
         if not instances:
             results[op_type] = {"status": "skipped", "reason": "no instances"}
+            continue
+
+        if s1.get("unconverted"):
+            # Nothing converted, so there is no lowering to test. Ask instead
+            # which operand the converter objects to -- that is the finding
+            # the report needs for a blocked operator.
+            bad_line = (s1.get("unconverted_lines") or [instances[0]["line_no"]])[0]
+            print(f"  attribution {op_type} ...", flush=True)
+            results[op_type] = {
+                "status": "skipped",
+                "reason": "unconverted in stage1",
+                "attribution": attribution_probe(
+                    opt,
+                    src_lines,
+                    def_index,
+                    bad_line,
+                    op_type,
+                    out_dir / "attribution",
+                ),
+            }
             continue
 
         line_no = instances[0]["line_no"]

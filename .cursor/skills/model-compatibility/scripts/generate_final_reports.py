@@ -3,553 +3,310 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
+"""Render the compatibility report from report_input.json.
+
+The report leads with a worklist rather than a distribution table. Knowing
+that an operator is unsupported is only useful alongside what to do about
+it, and the four non-supported statuses call for four different things --
+writing an operator, relaxing a restriction in one, adding a lowering, or
+teaching a converter an attribute.
+
+Reads only report_input.json (plus the optional distribution comparison);
+every verdict was decided upstream.
+
+Usage:
+  python generate_final_reports.py <analysis_dir>
+"""
+
+from __future__ import annotations
+
+import argparse
 import json
-import sys
-import re
 from pathlib import Path
-from datetime import datetime, timezone
+
+WORKLIST_SECTIONS = [
+    (
+        "unsupported",
+        "Implement the operator",
+        "No implementation exists anywhere in the tree.",
+    ),
+    (
+        "blocked",
+        "Extend an existing operator",
+        "An implementation exists but rejects this model's variant. Usually a "
+        "dtype, shape or attribute restriction in the converter.",
+    ),
+    (
+        "lowering-broken",
+        "Complete the lowering chain",
+        "The front end converts the operator but the back end does not follow. "
+        "Missing HipToLLVM lowering or runtime function.",
+    ),
+    (
+        "partial",
+        "Handle an ignored attribute",
+        "Conversion succeeds, but the converter never reads an attribute this "
+        "model sets, so the generated code silently means something else.",
+    ),
+]
+
+EVIDENCE_BADGE = {
+    "A": None,
+    "B": "Whole-graph probe failed; results come from per-operator slices and "
+    "under-report support, since fusions that need surrounding context cannot fire.",
+    "C": "Whole-graph MLIR was unavailable; results come from single-operator "
+    "models built from the original ONNX.",
+    "D": "**Support was read from documentation only.** No compilation happened, "
+    "so operators whose implementation rejects this model's variant are reported "
+    "as supported. Treat the numbers as an upper bound.",
+}
 
 
-def read_json(path: Path):
-    return json.loads(path.read_text(encoding="utf-8"))
+def fmt(value, dash: str = "—") -> str:
+    if value is None or value == "" or value == []:
+        return dash
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
 
 
-def load_op_distribution_comparison(analysis_dir: Path):
-    """Load op_distribution_comparison.json from analysis_dir or its parent (EP pipeline layout)."""
-    candidates = [
-        analysis_dir / "op_distribution_comparison.json",
-        analysis_dir.parent / "op_distribution_comparison.json",
+def render_summary(summary: dict) -> list[str]:
+    inst = summary["instances"]
+    types = summary["operator_types"]
+    out = [
+        "## Summary\n\n",
+        f"- Total node instances: {summary['total_node_instances']}",
     ]
-    for path in candidates:
-        if path.is_file():
-            try:
-                return read_json(path)
-            except Exception:
-                continue
-    return None
-
-
-def render_op_distribution_comparison_section(comp: dict) -> list:
-    """Markdown lines for original vs EP input (from compare_op_distribution.py JSON)."""
-    meta = comp.get("meta") or {}
-    summary = comp.get("summary") or {}
-    rows = comp.get("rows") or []
-
-    out = []
-    out.append("## Original vs EP input (operator distribution)\n\n")
+    excluded = summary.get("weight_constants_excluded", 0)
+    if excluded:
+        out.append(f" (excluding {excluded} weight constants)")
+    out.append("\n")
     out.append(
-        "Compatibility analysis below uses the **EP input** graph (`onnx.onnx`). "
-        "This section compares it to the packaged **original** ONNX.\n\n"
+        f"- Supported: **{inst['supported']} ({summary['supported_pct']}%)** "
+        f"across {types['supported']} operator types\n"
     )
-    out.append(f"- **Original model:** `{meta.get('original_model', '—')}`\n")
-    out.append(f"- **EP input (analyzed):** `{meta.get('ep_model', '—')}`\n\n")
-
-    out.append("| Metric | Original | EP input | Delta |\n")
-    out.append("|---|---:|---:|---:|\n")
-    out.append(
-        f"| Total node instances | {summary.get('original_total_nodes', 0)} | "
-        f"{summary.get('ep_total_nodes', 0)} | {summary.get('node_delta', 0):+d} |\n"
-    )
-    out.append(
-        f"| Unique operator types | {summary.get('original_unique_ops', 0)} | "
-        f"{summary.get('ep_unique_ops', 0)} | "
-        f"{int(summary.get('ep_unique_ops', 0)) - int(summary.get('original_unique_ops', 0)):+d} |\n\n"
-    )
-
-    only_orig = summary.get("only_in_original") or []
-    only_ep = summary.get("only_in_ep") or []
-    if only_orig:
+    for key, label, _ in WORKLIST_SECTIONS:
         out.append(
-            "**Operators only in original:** "
-            + ", ".join(f"`{x}`" for x in only_orig)
-            + "\n\n"
-        )
-    if only_ep:
-        out.append(
-            "**Operators only in EP input:** "
-            + ", ".join(f"`{x}`" for x in only_ep)
-            + "\n\n"
-        )
-
-    out.append("| Op Type | Original | EP input | Delta |\n")
-    out.append("|---|---:|---:|---:|\n")
-    for row in rows:
-        d = int(row.get("delta", 0))
-        mark = " **+**" if d > 0 else (" **-**" if d < 0 else "")
-        out.append(
-            f"| {row.get('op_type', '')} | {row.get('original_count', 0)} | "
-            f"{row.get('ep_count', 0)} | {d:+d}{mark} |\n"
+            f"- {label.split()[0]} ({key}): {inst[key]} instances, "
+            f"{types[key]} operator types\n"
         )
     out.append("\n")
     return out
 
 
-def parse_step2_operator_summary(step2_md: Path):
-    if not step2_md.exists():
-        return []
-    lines = step2_md.read_text(encoding="utf-8").splitlines()
-    in_section = False
-    table_lines = []
-    for line in lines:
-        if line.strip() == "## Operator Summary":
-            in_section = True
+def render_worklist(worklist: dict) -> list[str]:
+    total = sum(len(v) for v in worklist.values())
+    out = ["## What needs doing\n\n"]
+    if not total:
+        out.append("Nothing: every operator in this model is fully supported.\n\n")
+        return out
+
+    for key, label, why in WORKLIST_SECTIONS:
+        items = worklist.get(key) or []
+        if not items:
             continue
-        if in_section and line.startswith("## "):
-            break
-        if in_section and line.strip().startswith("|"):
-            table_lines.append(line)
-    return table_lines
-
-
-def status_display(status: str) -> str:
-    return "supported" if status == "full" else status
-
-
-def compile_time_reason(reason_texts):
-    terms = [
-        "compile time",
-        "compile-time",
-        "constant folding",
-        "shape inference",
-        "shape manipulation",
-        "type-canonicalization",
-    ]
-    merged = " ".join(reason_texts or []).lower()
-    return any(t in merged for t in terms)
-
-
-def load_reco_rules(script_dir: Path):
-    cfg = script_dir / "unsupported_reco_rules.json"
-    if cfg.exists():
-        try:
-            return read_json(cfg)
-        except Exception:
-            pass
-    return {}
-
-
-def compile_time_reason_with_rules(reason_texts, rules):
-    terms = (
-        ((rules or {}).get("compile_time_rule") or {}).get("when_reason_contains_any")
-    ) or []
-    if not terms:
-        return compile_time_reason(reason_texts)
-    merged = " ".join(reason_texts or []).lower()
-    return any(str(t).lower() in merged for t in terms)
-
-
-def format_reco(path: str, target: str):
-    p = (path or "").strip()
-    t = (target or "").strip()
-    if not p:
-        return "Custom Hip Kernel"
-    if not t or t in {"none", "-"}:
-        return p
-    return f"{p} (extend `{t}`)"
-
-
-def infer_unsupported_reco(op_name: str, op_description: str, rules):
-    name_l = (op_name or "").lower()
-    desc_l = (op_description or "").lower()
-
-    def has_keyword(text: str, kw: str) -> bool:
-        return (
-            re.search(rf"(^|[^a-z0-9]){re.escape(kw)}([^a-z0-9]|$)", text) is not None
+        out.append(
+            f"### {label} — {len(items)} operator(s), "
+            f"{sum(i['count'] for i in items)} instances\n\n"
         )
-
-    # Exact op override has the highest priority.
-    for item in rules.get("op_overrides") or []:
-        if (item.get("op_name") or "").lower() == name_l:
-            return {
-                "recommended": format_reco(
-                    item.get("recommended_path"), item.get("wrapper_extension_target")
-                ),
-                "source": "op_override",
-                "matched_rule": item.get("op_name"),
-                "rationale": item.get("rationale", ""),
-            }
-
-    # Family routing by op name / description semantics.
-    for fam in rules.get("family_routing") or []:
-        kws = [str(x).lower() for x in (fam.get("op_name_keywords_any") or [])]
-        if any(k and (has_keyword(name_l, k) or has_keyword(desc_l, k)) for k in kws):
-            return {
-                "recommended": format_reco(
-                    fam.get("preferred_path"), fam.get("wrapper_extension_target")
-                ),
-                "source": "family_routing",
-                "matched_rule": fam.get("family"),
-                "rationale": fam.get("notes", ""),
-            }
-
-    # Fallback
-    default_fb = rules.get("default_fallback") or {}
-    return {
-        "recommended": format_reco(
-            default_fb.get("recommended_path"),
-            default_fb.get("wrapper_extension_target"),
-        ),
-        "source": "default_fallback",
-        "matched_rule": "default_fallback",
-        "rationale": default_fb.get("rationale", ""),
-    }
-
-
-def recommended_impl_with_trace(op_row, compat_row, reco_rules):
-    status = op_row.get("status")
-    hip_op = op_row.get("hip_op")
-    backend = op_row.get("backend")
-    runtime = op_row.get("runtime_func")
-    if status in {"full", "partial"}:
-        if hip_op and hip_op.startswith("tensor."):
-            return {
-                "recommended": "Compile Time Optimization",
-                "source": "supported_tensor_compile_time",
-                "matched_rule": "tensor.*",
-                "rationale": "Mapped tensor op handled at compile time.",
-            }
-        if backend and backend != "Unknown" and runtime:
-            return {
-                "recommended": f"{backend} (`{runtime}`)",
-                "source": "supported_backend_runtime",
-                "matched_rule": "backend+runtime",
-                "rationale": "",
-            }
-        if backend and backend != "Unknown":
-            return {
-                "recommended": backend,
-                "source": "supported_backend_only",
-                "matched_rule": "backend",
-                "rationale": "",
-            }
-        if runtime:
-            return {
-                "recommended": f"`{runtime}`",
-                "source": "supported_runtime_only",
-                "matched_rule": "runtime",
-                "rationale": "",
-            }
-        return {
-            "recommended": "Unknown",
-            "source": "supported_unknown",
-            "matched_rule": "unknown",
-            "rationale": "",
-        }
-
-    if compile_time_reason_with_rules(
-        (compat_row or {}).get("reason_texts") or [], reco_rules
-    ):
-        return {
-            "recommended": "Compile Time Optimization",
-            "source": "compile_time_reason",
-            "matched_rule": "compile_time_rule",
-            "rationale": ((reco_rules.get("compile_time_rule") or {}).get("rationale"))
-            or "",
-        }
-    return infer_unsupported_reco(
-        op_row.get("onnx_op", ""),
-        resolve_op_description(op_row),
-        reco_rules or {},
-    )
-
-
-def recommended_impl(op_row, compat_row, reco_rules):
-    return recommended_impl_with_trace(op_row, compat_row, reco_rules)["recommended"]
-
-
-def fmt_data_types(dtypes):
-    return ", ".join(dtypes) if dtypes else "-"
-
-
-def humanize_camel(name: str) -> str:
-    out = []
-    for i, ch in enumerate(name):
-        if i > 0 and ch.isupper() and (not name[i - 1].isupper()):
-            out.append(" ")
-        out.append(ch)
-    return "".join(out)
-
-
-def resolve_op_description(op_row):
-    op = op_row.get("onnx_op", "") or ""
-    domain = op_row.get("domain", "") or ""
-    existing = op_row.get("op_description")
-    if isinstance(existing, str) and existing.strip() and existing.strip() != "—":
-        return existing.strip()
-
-    # Try ONNX schema docs first for standard domain.
-    if domain in {"onnx", "ai.onnx", ""}:
-        try:
-            from onnx import defs
-
-            schema = defs.get_schema(op, domain="")
-            doc = " ".join((schema.doc or "").split())
-            if doc:
-                return doc.split(". ")[0].strip().rstrip(".")
-        except Exception:
-            pass
-
-    # Curated custom-domain descriptions.
-    custom_map = {
-        "CausalConvWithState": "Causal convolution with recurrent state cache update (com.microsoft)",
-        "LinearAttention": "Linear attention operator with stateful/key-value efficient computation (com.microsoft)",
-    }
-    if op in custom_map:
-        return custom_map[op]
-
-    # Last-resort semantic description from op name.
-    return f"{humanize_camel(op)} operation ({domain})"
-
-
-def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python generate_final_reports.py <analysis_dir>")
-
-    analysis_dir = Path(sys.argv[1])
-    script_dir = Path(__file__).resolve().parent
-    reco_rules = load_reco_rules(script_dir)
-    report_input = read_json(analysis_dir / "report_input.json")
-    step2_table = parse_step2_operator_summary(analysis_dir / "step2_hip_ops.md")
-    op_dist_comparison = load_op_distribution_comparison(analysis_dir)
-
-    meta = report_input["meta"]
-    summary = report_input["summary"]
-    op_dist = report_input["operator_distribution"]
-    mapping_chain = report_input["mapping_chain"]
-    compatibility = report_input["compatibility"]
-
-    compat_map = {(c.get("onnx_op"), c.get("domain")): c for c in compatibility}
-
-    total_instances = summary["total_node_instances"]
-    supported_instances = summary["supported_instances"]
-    supported_pct = (
-        (supported_instances / total_instances * 100.0) if total_instances else 0.0
-    )
-
-    # Main report
-    lines = []
-    lines.append("# Model compatibility report\n")
-    lines.append(f"- **EP input (compatibility target):** `{meta['model_path']}`\n")
-    if op_dist_comparison:
-        orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
-        if orig_path:
-            lines.append(f"- **Original model:** `{orig_path}`\n")
-    lines.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n\n")
-    lines.append("## Summary\n\n")
-    lines.append(f"- Total node instances: {summary['total_node_instances']}\n")
-    lines.append(
-        f"- Supported instances: {summary['supported_instances']} ({supported_pct:.1f}%)\n"
-    )
-    lines.append(f"- Unsupported instances: {summary['unsupported_instances']}\n")
-    lines.append(f"- Total Operator Types: {summary['total_operator_types']}\n")
-    lines.append(f"- Fully Compatible: {summary['fully_compatible_operator_types']}\n")
-    lines.append(
-        f"- Partially Compatible: {summary['partially_compatible_operator_types']}\n"
-    )
-    lines.append(f"- Unsupported: {summary['unsupported_operator_types']}\n\n")
-
-    if op_dist_comparison:
-        lines.extend(render_op_distribution_comparison_section(op_dist_comparison))
-
-    lines.append("## Operator Distribution with Compatibility Status\n\n")
-    lines.append(
-        "_Counts and status below refer to the **EP input** graph only._\n\n"
-        if op_dist_comparison
-        else ""
-    )
-    lines.append(
-        "| Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description |\n"
-    )
-    lines.append("|---|---|---:|---|---|---|---|\n")
-
-    unsupported_buckets = {}
-    supported_ops = []
-    partial_ops = []
-    unsupported_ops = []
-    unsupported_runtime_entries = []
-
-    for row in op_dist:
-        key = (row.get("onnx_op"), row.get("domain"))
-        comp = compat_map.get(key, {})
-        reco_trace = recommended_impl_with_trace(row, comp, reco_rules)
-        reco = reco_trace["recommended"]
-        disp = status_display(row.get("status", ""))
-        op = row.get("onnx_op", "")
-        dom = row.get("domain", "")
-        cnt = row.get("count", 0)
-        desc = resolve_op_description(row)
-        lines.append(
-            f"| {op} | {dom} | {cnt} | {fmt_data_types(row.get('data_types') or [])} | {reco} | {disp} | {desc} |\n"
-        )
-        if disp == "supported":
-            supported_ops.append(
-                {
-                    "onnx_op": op,
-                    "hip_op": row.get("hip_op") or "-",
-                }
-            )
-        elif disp == "partial":
-            partial_ops.append(op)
-        else:
-            reason_texts = comp.get("reason_texts") or []
-            reason_text = (
-                "; ".join(reason_texts)
-                if reason_texts
-                else "No Hip Dialect implementation available."
-            )
-            unsupported_ops.append(
-                {
-                    "onnx_op": op,
-                    "reason": reason_text,
-                }
-            )
-            unsupported_buckets.setdefault(reco, []).append(op)
-            unsupported_runtime_entries.append(
-                {
-                    "onnx_op": op,
-                    "domain": dom,
-                    "count": row.get("count", 0),
-                    "op_description": desc,
-                    "reason_codes": comp.get("reason_codes") or [],
-                    "reason_texts": comp.get("reason_texts") or [],
-                    "recommended_path": reco,
-                    "recommendation_source": reco_trace.get("source", ""),
-                    "matched_rule": reco_trace.get("matched_rule", ""),
-                    "rationale": reco_trace.get("rationale", ""),
-                }
-            )
-
-    lines.append("\n### Compatibility Summary\n\n")
-    lines.append(f"#### Fully Compatible Operator ({len(supported_ops)})\n\n")
-    for item in supported_ops:
-        lines.append(f"- `{item['onnx_op']}` -> `{item['hip_op']}`\n")
-    lines.append("\n")
-    lines.append(f"#### Partially Compatible Operators ({len(partial_ops)}):\n\n")
-    for p in partial_ops:
-        c = compat_map.get(
-            (p, next((r["domain"] for r in op_dist if r["onnx_op"] == p), "onnx")), {}
-        )
-        reasons = c.get("reason_texts") or []
-        reason_text = "; ".join(reasons) if reasons else "Schema mismatch."
-        lines.append(f"- `{p}`: {reason_text}\n")
-    lines.append("\n")
-    lines.append(f"#### Unsupported Operators ({len(unsupported_ops)}):\n\n")
-    for item in unsupported_ops:
-        lines.append(f"- {item['onnx_op']}: {item['reason']}\n")
-    lines.append("\n")
-
-    lines.append("Unsupported operator recommendation buckets\n\n")
-    for k, ops in sorted(unsupported_buckets.items(), key=lambda x: x[0]):
-        lines.append(f"- {k}: " + ", ".join(f"`{x}`" for x in ops) + "\n")
-    lines.append("\n")
-
-    lines.append("## Hip Ops Summary\n\n")
-    if step2_table:
-        for tl in step2_table:
-            lines.append(tl + "\n")
-    else:
-        lines.append("| Metric | Value |\n|---|---:|\n| Hip operator summary | — |\n")
-    lines.append("\n")
-
-    lines.append("## ONNX-HIP-RUNTIME Mapping\n\n")
-    lines.append("| ONNX Op | Domain | Hip Op | Runtime Func | Backend |\n")
-    lines.append("|---|---|---|---|---|\n")
-    for m in mapping_chain:
-        runtime = m.get("runtime_func") or "-"
-        backend = m.get("backend") or "Unknown"
-        lines.append(
-            f"| {m.get('onnx_op', '')} | {m.get('domain', '')} | {m.get('hip_op', '')} | {runtime} | {backend} |\n"
-        )
-    lines.append(
-        "\nDetailed compatibility diagnostics are in model_compatibility_details.md\n"
-    )
-
-    (analysis_dir / "model_compatibility_report.md").write_text(
-        "".join(lines), encoding="utf-8"
-    )
-
-    # Details report
-    d = []
-    d.append("# Model compatibility details\n\n")
-    d.append(f"- **EP input (compatibility target):** `{meta['model_path']}`\n")
-    if op_dist_comparison:
-        orig_path = (op_dist_comparison.get("meta") or {}).get("original_model", "")
-        if orig_path:
-            d.append(f"- **Original model:** `{orig_path}`\n")
-    d.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n\n")
-    if op_dist_comparison:
-        d.extend(render_op_distribution_comparison_section(op_dist_comparison))
-
-    d.append("## Supported operators table (full)\n\n")
-    d.append("| Op Type | Domain | Count | Recommended Rocm Implementation |\n")
-    d.append("|---|---|---:|---|\n")
-    for row in op_dist:
-        if status_display(row.get("status", "")) == "supported":
-            comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
-            d.append(
-                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {recommended_impl(row, comp, reco_rules)} |\n"
-            )
-
-    d.append("\n## Partially compatible details\n\n")
-    d.append("| Op Type | Domain | Reason Codes | Reason Texts | Evidence |\n")
-    d.append("|---|---|---|---|---|\n")
-    for row in compatibility:
-        if row.get("status") == "partial":
-            ev = row.get("evidence") or []
-            ev_text = (
-                "; ".join(
-                    f"{e.get('source_file', '')}:{e.get('json_pointer', '')}"
-                    for e in ev
+        out.append(f"{why}\n\n")
+        for item in items:
+            dom = f" ({item['domain']})" if item["domain"] != "onnx" else ""
+            out.append(f"**{item['onnx_op']}**{dom} — {item['count']} instances\n\n")
+            if item.get("signature"):
+                out.append(f"- Signature: `{item['signature']}`\n")
+            if item.get("data_types"):
+                out.append(f"- Data types: {fmt(item['data_types'])}\n")
+            if item.get("shape_types"):
+                out.append(f"- Shapes: {fmt(item['shape_types'])}\n")
+            if item.get("attributes"):
+                attrs = ", ".join(f"{k}={v}" for k, v in item["attributes"].items())
+                out.append(f"- Attributes: `{attrs}`\n")
+            if item.get("implementation"):
+                out.append(f"- Existing implementation: {item['implementation']}\n")
+            if item.get("blocking_operand"):
+                out.append(f"- **Why it fails**: {item['blocking_operand']}\n")
+            if item.get("ignored_attributes"):
+                names = ", ".join(
+                    f"`{a['name']}={a['value']}`" for a in item["ignored_attributes"]
                 )
-                if ev
-                else "-"
-            )
-            d.append(
-                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {', '.join(row.get('reason_codes') or []) or '-'} | {'; '.join(row.get('reason_texts') or []) or '-'} | {ev_text} |\n"
-            )
+                out.append(f"- Ignored by the converter: {names}\n")
+            if item.get("error"):
+                out.append(f"- Error: `{item['error']}`\n")
+            if item.get("source_line"):
+                out.append(f"- EP input MLIR line: {item['source_line']}\n")
+            out.append("- Converter source: _to be filled in_\n")
+            out.append("- Root cause: _to be filled in_\n\n")
+    return out
 
-    d.append("\n## Unsupported operators\n\n")
-    d.append("| Op Type | Domain | Count | Reason |\n")
-    d.append("|---|---|---:|---|\n")
-    for row in op_dist:
-        if status_display(row.get("status", "")) == "unsupported":
-            comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
-            reason = (
-                "; ".join(comp.get("reason_texts") or [])
-                or "No Hip Dialect implementation available."
-            )
-            d.append(
-                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {reason} |\n"
-            )
 
-    d.append("\n## Data quality notes\n\n")
-    d.append("- None.\n")
+def render_distribution(rows: list[dict]) -> list[str]:
+    out = [
+        "## Operator distribution\n\n",
+        "| Op Type | Domain | Count | Data Types | Shapes | Status | Target | "
+        "Backend (runtime) | Description |\n",
+        "|---|---|---:|---|---|---|---|---|---|\n",
+    ]
+    for r in rows:
+        out.append(
+            f"| {r['onnx_op']} | {r['domain']} | {r['count']} | "
+            f"{fmt(r.get('data_types'))} | {fmt(r.get('shape_types'))} | "
+            f"{r['status']} | {fmt(r.get('target'))} | {fmt(r.get('backend'))} | "
+            f"{fmt(r.get('op_description'))} |\n"
+        )
+    out.append("\n")
+    return out
 
-    (analysis_dir / "model_compatibility_details.md").write_text(
-        "".join(d), encoding="utf-8"
+
+def render_capability_gaps(gaps: list[dict]) -> list[str]:
+    if not gaps:
+        return []
+    out = [
+        "## Capability gaps\n\n",
+        "Attributes the converter does not read. Proven by changing the value "
+        "and re-converting: the output was byte-for-byte identical.\n\n",
+        "| Op Type | Target | Attribute | Value in this model | Set by the model |\n",
+        "|---|---|---|---|---|\n",
+    ]
+    for g in gaps:
+        out.append(
+            f"| {g['onnx_op']} | {fmt(g.get('target'))} | `{g['attribute']}` | "
+            f"`{fmt(g.get('value'))}` | {'yes' if g.get('set_by_model') else 'no'} |\n"
+        )
+    out.append(
+        "\nA gap with `set_by_model = no` does not affect this model -- the value "
+        "came from ORT filling in a schema default -- but a model that sets it "
+        "would be miscompiled without warning.\n\n"
     )
-    runtime_json = {
-        "meta": {
-            "model_path": meta.get("model_path"),
-            "generated_at_utc": datetime.now(timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "rules_version": reco_rules.get("version", "unknown"),
-        },
-        "summary": {
-            "unsupported_operator_types": len(unsupported_runtime_entries),
-            "unsupported_node_instances": int(
-                sum(int(x.get("count", 0)) for x in unsupported_runtime_entries)
-            ),
-        },
-        "unsupported_recommendations": unsupported_runtime_entries,
-    }
-    (analysis_dir / "unsupported_reco_runtime.json").write_text(
-        json.dumps(runtime_json, indent=2, ensure_ascii=False), encoding="utf-8"
+    return out
+
+
+def render_doc_stale(stale: list[dict]) -> list[str]:
+    if not stale:
+        return []
+    out = [
+        "## Documentation drift\n\n",
+        "Operators that compile but are absent from `docs/supported-operations.md`:\n\n",
+    ]
+    for s in stale:
+        dom = f" ({s['domain']})" if s["domain"] != "onnx" else ""
+        out.append(f"- `{s['onnx_op']}`{dom} lowers to {fmt(s.get('target'))}\n")
+    out.append("\n")
+    return out
+
+
+def render_comparison(comp: dict) -> list[str]:
+    """Full operator distribution on both sides of the EP's rewrites.
+
+    Every operator is listed, not just the ones whose count moved: the point
+    is to see the distribution, with the rewrites visible inside it.
+    """
+    summary = comp.get("summary", {})
+    orig_types = summary.get("original_unique_ops", 0)
+    ep_types = summary.get("ep_unique_ops", 0)
+    out = [
+        "## Original ONNX vs EP input\n\n",
+        "The EP rewrites the graph before compiling it. Compatibility above "
+        "describes the EP input; this is how it differs from the model as "
+        "authored.\n\n",
+        "| Metric | Original | EP input | Delta |\n|---|---:|---:|---:|\n",
+        f"| Node instances | {summary.get('original_total_nodes', 0)} | "
+        f"{summary.get('ep_total_nodes', 0)} | {summary.get('node_delta', 0):+d} |\n",
+        f"| Operator types | {orig_types} | {ep_types} | {ep_types - orig_types:+d} |\n\n",
+    ]
+
+    only_orig = summary.get("only_in_original") or []
+    only_ep = summary.get("only_in_ep") or []
+    if only_orig:
+        out.append(
+            "Removed by the rewrites: "
+            + ", ".join(f"`{x}`" for x in only_orig)
+            + "\n\n"
+        )
+    if only_ep:
+        out.append(
+            "Introduced by the rewrites: "
+            + ", ".join(f"`{x}`" for x in only_ep)
+            + "\n\n"
+        )
+
+    out.append("| Op Type | Original | EP input | Delta |\n|---|---:|---:|---:|\n")
+    for r in comp.get("rows", []):
+        d = r.get("delta", 0)
+        mark = " **+**" if d > 0 else (" **-**" if d < 0 else "")
+        out.append(
+            f"| {r['op_type']} | {r['original_count']} | {r['ep_count']} | "
+            f"{d:+d}{mark} |\n"
+        )
+    out.append("\n")
+    return out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Render the compatibility report")
+    ap.add_argument("analysis_dir", type=Path)
+    args = ap.parse_args()
+
+    data = json.loads(
+        (args.analysis_dir / "report_input.json").read_text(encoding="utf-8")
     )
-    print(f"Wrote {(analysis_dir / 'model_compatibility_report.md')}")
-    print(f"Wrote {(analysis_dir / 'model_compatibility_details.md')}")
-    print(f"Wrote {(analysis_dir / 'unsupported_reco_runtime.json')}")
+    meta, summary = data["meta"], data["summary"]
+
+    comp = None
+    for candidate in (
+        args.analysis_dir / "op_distribution_comparison.json",
+        args.analysis_dir.parent / "op_distribution_comparison.json",
+    ):
+        if candidate.is_file():
+            comp = json.loads(candidate.read_text(encoding="utf-8"))
+            break
+
+    lines = ["# Model compatibility report\n\n"]
+    if meta.get("model_path"):
+        lines.append(f"- Model: `{meta['model_path']}`\n")
+    lines.append(f"- EP input: `{meta.get('ep_input_path', '')}`\n")
+    lines.append(f"- Generated: `{meta['generated_at_utc']}`\n")
+    lines.append(f"- Evidence level: **{meta.get('evidence_level', 'A')}**\n\n")
+
+    badge = EVIDENCE_BADGE.get(meta.get("evidence_level", "A"))
+    if badge:
+        lines.append(f"> {badge}\n\n")
+    if meta.get("evidence_note"):
+        lines.append(f"> {meta['evidence_note']}\n\n")
+
+    lines += render_summary(summary)
+    lines += render_worklist(data.get("worklist", {}))
+    if comp:
+        lines += render_comparison(comp)
+    lines += render_distribution(data.get("operator_distribution", []))
+    lines += render_capability_gaps(data.get("capability_gaps", []))
+    lines += render_doc_stale(data.get("doc_stale", []))
+    lines.append("Per-operator detail is in `model_compatibility_details.md`.\n")
+
+    report = args.analysis_dir / "model_compatibility_report.md"
+    report.write_text("".join(lines), encoding="utf-8")
+
+    # Details: the full per-operator record, including what the report omits.
+    det = ["# Model compatibility details\n\n"]
+    det.append(f"- EP input: `{meta.get('ep_input_path', '')}`\n")
+    det.append(f"- Generated: `{meta['generated_at_utc']}`\n\n")
+    det.append("## Every operator\n\n")
+    det.append(
+        "| Op Type | Domain | Count | Status | Target | Runtime | Data Types | "
+        "Ignored Attributes |\n|---|---|---:|---|---|---|---|---|\n"
+    )
+    for r in data.get("operator_distribution", []):
+        det.append(
+            f"| {r['onnx_op']} | {r['domain']} | {r['count']} | {r['status']} | "
+            f"{fmt(r.get('target'))} | {fmt(r.get('runtime_func'))} | "
+            f"{fmt(r.get('data_types'))} | {fmt(r.get('ignored_attributes'))} |\n"
+        )
+    det.append("\n")
+    details = args.analysis_dir / "model_compatibility_details.md"
+    details.write_text("".join(det), encoding="utf-8")
+
+    print(f"[OK] {report}")
+    print(f"[OK] {details}")
 
 
 if __name__ == "__main__":
