@@ -1451,8 +1451,8 @@ Value emitRangeConst(ConversionPatternRewriter &rewriter, Location loc,
     APInt step = delta.getSplatValue<APInt>().sextOrTrunc(mathWidth);
     SmallVector<APInt> elements;
     for (int64_t i : llvm::seq<int64_t>(length))
-      elements.push_back((first + step * APInt(mathWidth, i, /*isSigned=*/true))
-                             .trunc(width));
+      elements.push_back(
+          (first + step * APInt(mathWidth, i, /*isSigned=*/true)).trunc(width));
     values = DenseElementsAttr::get(type, elements);
   }
   return tosa::ConstOp::create(rewriter, loc, type, values);
@@ -4323,9 +4323,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RangeOp, RopeOp,
-        GqaOp, MultiHeadAttentionOp, RoundOp, ModOp, AtanOp,
-        RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RangeOp, RopeOp, GqaOp,
+        MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp,
+        InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
