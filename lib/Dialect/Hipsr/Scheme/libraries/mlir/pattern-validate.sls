@@ -110,9 +110,10 @@
                   ;; Validate result variables start with %
                   (loop :for var :in (ast-match-expand-result-var match-op)
                         :do (validate-%-identifier var "Result"))
-                  ;; Operands already validated during parse phase (parse-operands)
-                  ;; No validation needed here - operands field is list of ast-operand records
-                  ))))
+                  ;; Validate operand variables start with %
+                  ;; Operands are ast-operand records (parsed and flattened in phase 1)
+                  (loop :for operand :in (ast-match-expand-operands match-op)
+                        :do (validate-%-identifier (ast-operand-var operand) "Operand"))))))
 
   (define (validate-no-duplicate-result-variables ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)]

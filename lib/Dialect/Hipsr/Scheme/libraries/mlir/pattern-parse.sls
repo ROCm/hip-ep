@@ -153,7 +153,7 @@
   ;;-----------------------------------------------------------------------
   ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
   ;; Note: Operands are parsed and flattened to ast-operand records in phase 1.
-  ;; Validation (% prefix check) happens during parsing (parse-operands).
+  ;; Validation (% prefix check) happens in phase 2 (pattern-validate.sls).
   ;;
   (define (parse-match-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (:then-let :rewrite :where =)
@@ -389,10 +389,12 @@
   ;;    ast-operand('required, #'%w),
   ;;    ast-operand('variadic, #'%rest)]
   ;;
-  ;; Validates:
-  ;; - All variables are identifiers
-  ;; - All variables start with %
+  ;; Phase 1 (parse) checks:
+  ;; - All operands are identifiers (syntax structure)
   ;; - (&variadic ...) has exactly one variable
+  ;;
+  ;; Phase 2 (validate) checks:
+  ;; - All identifiers start with % (semantic rule)
   ;;
   (define (parse-operands operands-stx)
     (define (parse-one operand-stx)
@@ -400,34 +402,29 @@
         ;; Optional group: (&optional %y %z) → flatten to multiple optional operands
         [(&optional var ...)
          (let ([vars (syntax->list #'(var ...))])
-           (for-each validate-%-identifier vars)
+           (for-each check-identifier vars)
            (map (lambda (v) (make-ast-operand 'optional v)) vars))]
 
         ;; Variadic group: (&variadic %rest) → single variadic operand
         [(&variadic var)
          (begin
-           (validate-%-identifier #'var)
+           (check-identifier #'var)
            (list (make-ast-operand 'variadic #'var)))]
 
         ;; Required operand: %x → single required operand
         [var
          (identifier? #'var)
-         (begin
-           (validate-%-identifier #'var)
-           (list (make-ast-operand 'required #'var)))]
+         (list (make-ast-operand 'required #'var))]
 
         [_
          (syntax-violation 'parse-operands
-           "Invalid operand syntax (expected: %var, (&optional ...), or (&variadic var))"
+           "Invalid operand syntax (expected: identifier, (&optional ...), or (&variadic var))"
            operand-stx)]))
 
-    ;; Helper: validate identifier starts with %
-    (define (validate-%-identifier var)
+    ;; Helper: check syntax structure (identifier check only, no % validation)
+    (define (check-identifier var)
       (unless (identifier? var)
-        (syntax-violation 'parse-operands "Operand must be identifier" var))
-      (let ([var-name (symbol->string (syntax->datum var))])
-        (unless (char=? (string-ref var-name 0) #\%)
-          (syntax-violation 'parse-operands "Operand must start with %" var))))
+        (syntax-violation 'parse-operands "Operand must be identifier" var)))
 
     ;; Main: parse each operand-or-group and flatten results
     (apply append (map parse-one (syntax->list operands-stx))))
