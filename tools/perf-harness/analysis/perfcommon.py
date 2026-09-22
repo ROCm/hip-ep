@@ -241,6 +241,16 @@ class ExpertBlock:
     dequant_us: float = 0.0
     gemm_us: float = 0.0
     kernels: set = field(default_factory=set)
+    # Bytes the parser measured moving, from SPM: mem_gbps x duration, summed over
+    # the block's dispatches. Carried so a bandwidth floor can be checked against
+    # what the hardware actually moved instead of being believed on its own -- see
+    # `achieved_gbps` and the note on ModelSpec.expert_weight_bytes.
+    mem_bytes: float = 0.0
+
+    @property
+    def achieved_gbps(self) -> float:
+        """Measured bandwidth over the whole block, 0 when SPM was not captured."""
+        return (self.mem_bytes / (self.dur_us * 1e-6) / 1e9) if self.dur_us else 0.0
 
 
 class Capture:
@@ -300,6 +310,12 @@ class Capture:
                 cur = ExpertBlock(m=round(int(r["threads"]) / self.spec.hidden))
             elif cur is not None:
                 cur.dur_us += dur
+                # mem_gbps is absent without -Counters and 0 where the parser
+                # could not classify; either way it contributes nothing.
+                try:
+                    cur.mem_bytes += float(r.get("mem_gbps") or 0.0) * 1e9 * dur * 1e-6
+                except ValueError:
+                    pass
                 if fam in GEMM_FAMILIES:
                     cur.kernels.add(fam)
                     cur.gemm_us += dur
