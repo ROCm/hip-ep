@@ -4076,8 +4076,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, OneHotOp, RangeOp, RopeOp,
-        GqaOp,
-        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
         SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
@@ -4163,9 +4162,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
         MatMulNBitsConverter, GatherConverter, OneHotConverter, RangeConverter,
-        RopeConverter,
-        GqaConverter, MhaConverter, RmsNormConverter, LayerNormConverter,
-        InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
+        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
