@@ -152,6 +152,8 @@
   ;; parse-match-ops-recursive - Collect match operations
   ;;-----------------------------------------------------------------------
   ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
+  ;; Note: Operands are captured as syntax, not parsed. Structure validation
+  ;; (&optional, &variadic) happens in phase 2 (pattern-validate.sls).
   ;;
   (define (parse-match-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (:then-let :rewrite :where =)
