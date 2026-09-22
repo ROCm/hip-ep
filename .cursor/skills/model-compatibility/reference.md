@@ -154,7 +154,15 @@ misaligns every `com.microsoft` row.
 
 ## Recommending a path for `unsupported`
 
-[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)
-maps operator families to ROCm paths. It applies to `unsupported` only:
-a `blocked` operator already has an implementation, and the work is to
-extend that one rather than to choose a path.
+There is no rule table for this; the recommendation is yours to make while
+filling in the root cause.
+
+A keyword-matched one used to exist and was removed. It aged badly -- four
+of its ten families still pointed at MIOpen after the dependency was taken
+out of the tree, so it recommended paths that no longer existed. Matching on
+the operator name is also weak: `conv` catches `ConvTranspose` and
+`CausalConvWithState` alike.
+
+You are already reading the converter to explain a failure. Naming the
+closest existing implementation from what is actually in
+`lib/Runtime/real/` is both more accurate and cannot go stale.
