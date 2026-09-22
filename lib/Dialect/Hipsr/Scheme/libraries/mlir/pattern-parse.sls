@@ -152,8 +152,8 @@
   ;; parse-match-ops-recursive - Collect match operations
   ;;-----------------------------------------------------------------------
   ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
-  ;; Note: Operands are captured as syntax, not parsed. Structure validation
-  ;; (&optional, &variadic) happens in phase 2 (pattern-validate.sls).
+  ;; Note: Operands are parsed and flattened to ast-operand records in phase 1.
+  ;; Validation (% prefix check) happens during parsing (parse-operands).
   ;;
   (define (parse-match-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (:then-let :rewrite :where =)
@@ -171,13 +171,15 @@
       ;; Match operation WITH :where guard
       [(result = op-name (operand ...) :where guard-expr . rest)
        (identifier? #'result)
-       (let ([match-op (make-ast-match-expand #'result #'op-name #'(operand ...) #'guard-expr)])
+       (let* ([operands (parse-operands #'(operand ...))]
+              [match-op (make-ast-match-expand #'result #'op-name operands #'guard-expr)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       ;; Match operation WITHOUT :where guard
       [(result = op-name (operand ...) . rest)
        (identifier? #'result)
-       (let ([match-op (make-ast-match-expand #'result #'op-name #'(operand ...) #f)])
+       (let* ([operands (parse-operands #'(operand ...))]
+              [match-op (make-ast-match-expand #'result #'op-name operands #f)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       [_ (syntax-violation 'parse-match-ops-recursive
@@ -371,6 +373,64 @@
       [_ (syntax-violation 'parse-region
            "Invalid region syntax (expected: list of blocks)"
            region-stx)]))
+
+  ;;-----------------------------------------------------------------------
+  ;; parse-operands - Parse operand list, flattening groups
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Parses operand syntax and flattens (&optional ...) and (&variadic ...)
+  ;; groups into individual ast-operand records tagged with their kind.
+  ;;
+  ;; Input syntax: (%x (&optional %y %z) %w (&variadic %rest))
+  ;; Output: list of ast-operand records:
+  ;;   [ast-operand('required, #'%x),
+  ;;    ast-operand('optional, #'%y),
+  ;;    ast-operand('optional, #'%z),
+  ;;    ast-operand('required, #'%w),
+  ;;    ast-operand('variadic, #'%rest)]
+  ;;
+  ;; Validates:
+  ;; - All variables are identifiers
+  ;; - All variables start with %
+  ;; - (&variadic ...) has exactly one variable
+  ;;
+  (define (parse-operands operands-stx)
+    (define (parse-one operand-stx)
+      (syntax-case operand-stx (&optional &variadic)
+        ;; Optional group: (&optional %y %z) → flatten to multiple optional operands
+        [(&optional var ...)
+         (let ([vars (syntax->list #'(var ...))])
+           (for-each validate-%-identifier vars)
+           (map (lambda (v) (make-ast-operand 'optional v)) vars))]
+
+        ;; Variadic group: (&variadic %rest) → single variadic operand
+        [(&variadic var)
+         (begin
+           (validate-%-identifier #'var)
+           (list (make-ast-operand 'variadic #'var)))]
+
+        ;; Required operand: %x → single required operand
+        [var
+         (identifier? #'var)
+         (begin
+           (validate-%-identifier #'var)
+           (list (make-ast-operand 'required #'var)))]
+
+        [_
+         (syntax-violation 'parse-operands
+           "Invalid operand syntax (expected: %var, (&optional ...), or (&variadic var))"
+           operand-stx)]))
+
+    ;; Helper: validate identifier starts with %
+    (define (validate-%-identifier var)
+      (unless (identifier? var)
+        (syntax-violation 'parse-operands "Operand must be identifier" var))
+      (let ([var-name (symbol->string (syntax->datum var))])
+        (unless (char=? (string-ref var-name 0) #\%)
+          (syntax-violation 'parse-operands "Operand must start with %" var))))
+
+    ;; Main: parse each operand-or-group and flatten results
+    (apply append (map parse-one (syntax->list operands-stx))))
 
   ;;-----------------------------------------------------------------------
   ;; parse-block - Parse a single block
