@@ -53,11 +53,16 @@
 ;;   - Returns truthy to match, falsy to fail
 ;;   - Early return (executes immediately after matching operation)
 ;;   - Can access result variables, call FFI functions
-;;   Example: :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
-;;                     (and $ks (is-1x1-kernel? $ks)))
 ;;
-;; Complete syntax:
-;;   result = "op" (operands) [:where <expr>]
+;; Complete match operation examples:
+;;   %a = "onnx.Conv" (%x %w)
+;;
+;;   %a = "onnx.Conv" (%x %w)
+;;      :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
+;;               (and $ks (is-1x1-kernel? $ks)))
+;;
+;;   %b = "test.op" (%x (&optional %y %z))
+;;      :where (mlir-operation-has-one-use %b)
 ;;
 ;; Type matching: NOT SUPPORTED
 ;;   - MLIR's DRR/PDLL also make types optional
