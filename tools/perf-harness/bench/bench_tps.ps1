@@ -48,8 +48,13 @@ Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS,
             Env:RGP_FENCE_AFTER_INFERENCES -EA SilentlyContinue
 $env:HIPDNN_EP_AUTOTUNE = '1'
 $env:HIPDNN_EP_MATMUL_CUSTOM_WMMA = '1'
+# Recorded so they can be undone below: Env: is process-wide and outlives this
+# script, so a key set here otherwise applies to every later run in the session.
+# See the same teardown in bench_ttft.ps1 for what that cost once.
+$setEnvKeys = @()
 foreach ($kv in $SetEnv) {
   $k, $v = $kv -split '=', 2
+  $setEnvKeys += $k
   Set-Item -Path "Env:$k" -Value $v
   Write-Host "    env $k=$v"
 }
@@ -124,7 +129,9 @@ if ($genBlk -and $genBlk.tps) {
     when = (Get-Date -Format s)
   } | Export-Csv -Path $csv -NoTypeInformation -Append
   Write-Host "    appended -> $csv"
-} else {
-  Write-Host "`n=== TPS [$Tag] PARSE FAILED (exit=$rc) -- inspect $log"
-  Get-Content $log -Tail 25
-}
+  } else {
+    Write-Host "`n=== TPS [$Tag] PARSE FAILED (exit=$rc) -- inspect $log"
+    Get-Content $log -Tail 25
+  }
+
+foreach ($k in $setEnvKeys) { Remove-Item "Env:$k" -EA SilentlyContinue }
