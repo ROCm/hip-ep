@@ -73,6 +73,9 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $log = Join-Path $OutDir "ttft_$Tag.log"
 $csv = Join-Path $OutDir 'ttft_summary.csv'
 
+$harnessLock = Enter-HarnessLock
+try {
+
 Set-HarnessPath
 Clear-HarnessProfilingEnv
 Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS -EA SilentlyContinue
@@ -170,3 +173,5 @@ if ($ttft) {
   Write-Host "`n=== TTFT [$Tag] PARSE FAILED (exit=$rc) -- inspect $log"
   Get-Content $log -Tail 25
 }
+
+} finally { Exit-HarnessLock $harnessLock }

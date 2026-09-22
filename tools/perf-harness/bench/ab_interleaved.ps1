@@ -106,6 +106,9 @@ if ($Metric -eq 'tps') {
   }
 }
 
+$harnessLock = Enter-HarnessLock
+try {
+
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
 if (-not $Arms) { $Arms = $allArms }
@@ -187,3 +190,5 @@ Write-Host ("  {0} {1} {2} --metric {3} --baseline {4}" -f
             (Join-Path $PSScriptRoot 'ab_summary.py'),
             (Join-Path $OutDir "${metricDir}_summary.csv"),
             $Metric, $Arms[0])
+
+} finally { Exit-HarnessLock $harnessLock }
