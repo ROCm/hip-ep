@@ -1602,9 +1602,123 @@ LogicalResult matchQdqCommon(Operation *op, Value input, Value scale,
   return success();
 }
 
+// The i'th element of an ONNX Range, start + i * delta, evaluated in the
+// result element type.
+Value emitRangeConst(ConversionPatternRewriter &rewriter, Location loc,
+                     RankedTensorType type, DenseElementsAttr start,
+                     DenseElementsAttr delta) {
+  int64_t length = type.getDimSize(0);
+  DenseElementsAttr values;
+  if (auto floatType = dyn_cast<FloatType>(type.getElementType())) {
+    APFloat first = start.getSplatValue<APFloat>();
+    APFloat step = delta.getSplatValue<APFloat>();
+    SmallVector<APFloat> elements;
+    for (int64_t i : llvm::seq<int64_t>(length)) {
+      APFloat index(floatType.getFloatSemantics());
+      index.convertFromAPInt(APInt(64, i), /*IsSigned=*/true,
+                             APFloat::rmNearestTiesToEven);
+      elements.push_back(first + step * index);
+    }
+    values = DenseElementsAttr::get(type, elements);
+  } else {
+    APInt first = start.getSplatValue<APInt>();
+    APInt step = delta.getSplatValue<APInt>();
+    SmallVector<APInt> elements;
+    for (int64_t i : llvm::seq<int64_t>(length))
+      elements.push_back(first + step * APInt(first.getBitWidth(), i));
+    values = DenseElementsAttr::get(type, elements);
+  }
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+// [0, 1, ..., length-1] in the range's element type.
+Value emitIotaConst(ConversionPatternRewriter &rewriter, Location loc,
+                    RankedTensorType type) {
+  int64_t length = type.getDimSize(0);
+  DenseElementsAttr values;
+  if (auto floatType = dyn_cast<FloatType>(type.getElementType())) {
+    SmallVector<APFloat> elements;
+    for (int64_t i : llvm::seq<int64_t>(length)) {
+      APFloat index(floatType.getFloatSemantics());
+      index.convertFromAPInt(APInt(64, i), /*IsSigned=*/true,
+                             APFloat::rmNearestTiesToEven);
+      elements.push_back(index);
+    }
+    values = DenseElementsAttr::get(type, elements);
+  } else {
+    unsigned width = type.getElementType().getIntOrFloatBitWidth();
+    SmallVector<APInt> elements;
+    for (int64_t i : llvm::seq<int64_t>(length))
+      elements.push_back(APInt(width, i));
+    values = DenseElementsAttr::get(type, elements);
+  }
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+// ONNX Range has no TOSA counterpart -- TOSA has no iota or arange. The
+// sequence is affine in the index (output[i] = start + i * delta), so a range
+// whose length is statically known is start + delta * iota, and constant
+// bounds collapse that to a single tosa.const. The limit operand is dropped:
+// the trip count it determines is already the result extent.
+//
+// A dynamic length has no TOSA spelling, so it is rejected rather than lowered
+// to invalid TOSA.
+struct RangeConverter final : public OpConversionPattern<RangeOp> {
+  using OpConversionPattern<RangeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RangeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || resultType.getRank() != 1 ||
+        !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static 1-D result");
+    // ONNX admits an empty Range, but a TOSA number tensor cannot be empty.
+    if (resultType.getDimSize(0) <= 0)
+      return rewriter.notifyMatchFailure(op, "empty range is not a TOSA value");
+
+    Type elemType = resultType.getElementType();
+    if (!isa<FloatType, IntegerType>(elemType) || elemType.isUnsignedInteger())
+      return rewriter.notifyMatchFailure(op, "unsupported range element type");
+
+    Location loc = op.getLoc();
+    DenseElementsAttr startAttr, deltaAttr;
+    if (matchPattern(adaptor.getStart(), m_Constant(&startAttr)) &&
+        matchPattern(adaptor.getDelta(), m_Constant(&deltaAttr)) &&
+        startAttr.isSplat() && deltaAttr.isSplat()) {
+      rewriter.replaceOp(
+          op, emitRangeConst(rewriter, loc, resultType, startAttr, deltaAttr));
+      return success();
+    }
+
+    // Runtime bounds: scale the iota instead of folding it. ONNX Range bounds
+    // are scalars, so reshaping them to rank 1 is all TOSA broadcasting needs.
+    for (Value bound : {adaptor.getStart(), adaptor.getDelta()}) {
+      auto boundType = dyn_cast<RankedTensorType>(bound.getType());
+      if (!boundType || boundType.getNumElements() != 1 ||
+          boundType.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "expected scalar range bounds");
+    }
+    Value start = reshapeTo(adaptor.getStart(), {1}, rewriter);
+    Value delta = reshapeTo(adaptor.getDelta(), {1}, rewriter);
+    Value scaled =
+        emitTosaMul(rewriter, loc, emitIotaConst(rewriter, loc, resultType),
+                    delta, resultType);
+    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, scaled, start);
+    return success();
+  }
+};
+
 // hip.cast is 1-1 with tosa.cast when both endpoints are signed or float.
 // Float->int and any unsigned endpoint go through rocMLIR tosa.custom, because
 // rock-tosa-to-elementwise rejects tosa.cast float->int.
+//
+// ONNX CastLike shares this path: simplify-onnx rewrites it to a plain
+// onnx.Cast (the target dtype is carried by the result type, and the type
+// donor is never read), which convert-onnx-to-hip lowers to hip.cast.
 struct CastConverter final : public OpConversionPattern<CastOp> {
   using OpConversionPattern<CastOp>::OpConversionPattern;
 
@@ -4015,7 +4129,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp, GqaOp,
+        DequantizeLinearOp, MatMulNBitsOp, GatherOp, RangeOp, RopeOp, GqaOp,
         MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
         SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
@@ -4102,8 +4216,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         LeakyReluConverter, SoftmaxConverter, ReduceSumConverter,
         ReduceMeanConverter, CastConverter, DequantizeLinearConverter,
         QuantizeLinearConverter, MatMulNBitsConverter, GatherConverter,
-        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
-        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        RangeConverter, RopeConverter, GqaConverter, MhaConverter,
+        RmsNormConverter, LayerNormConverter, InstanceNormConverter,
+        SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
