@@ -1,36 +1,35 @@
-// Gemm offline autotune lookup table.
+// Gemm offline autotune lookup table -- schema v3.
 //
 // Same design as matmul_nbits_autotune.fbs (read that file's header for the
-// rationale): a set of measured points plus a per-phase fallback; a lookup
+// rationale): a set of measured points plus a per-group fallback; a lookup
 // matches the categorical fields exactly then takes the nearest measured point
 // in log space over (M, N, K). Nearest-neighbour in log space is what Tensile
 // does for the same problem and it degrades smoothly.
 //
-// Gemm has no quantization, so the categorical key is just the dispatch kind,
-// the element size, and the transpose mode -- the exact fields gemm_kernel.hip
-// keys its runtime tune caches on.
+// v2 replaces the v1 `type_bytes` categorical key (2/4/8 -- indistinguishable
+// for fp16 vs bf16, and meaningless for activation != weights or sub-byte
+// weights) with three explicit HipdnnDType fields: act_dtype / wts_dtype /
+// out_dtype. See autotune/gemm/plan.md §1 D2 and §2 for the full rationale;
+// matmul_nbits's u2/u3/u4/i8 migration to the same vocabulary is documented
+// (not yet implemented) in autotune/matmul_nbits/README.md.
+
+include "../common/hipdnn_dtype.fbs";
 
 namespace hipdnn_ep.gemm_autotune.fbs;
 
 // Any = 0 so a memset field reads as "unclassified" and is rejected at load.
 
-// Which kernel serves the shape: the WMMA prefill tiles (kWmma) or the N-major
-// GEMV decode path (kGemvNt). They rank their config tables differently and
-// keep separate runtime tune caches, so they are separate groups here.
+// Which kernel serves the shape. Wmma = the WMMA prefill tiles (fp16/bf16
+// only). GemvNt / GemvNn = the two decode GEMV layouts (N-major / N-parallel).
+// TiledFma = the plain-FMA tiled path that serves fp32, fp64, and wave64
+// fp16/bf16 (no WMMA on wave64 hardware). Each keeps its own runtime tune
+// cache, so each is a separate group here.
 enum GemmPhase : ubyte {
   Any = 0,
   Wmma = 1,
-  GemvNt = 2
-}
-
-// Element size in bytes: 2 = f16/bf16, 4 = f32, 8 = f64. f16 and bf16 share a
-// size because they share the WMMA tile geometry (only the intrinsic differs),
-// which is what the tile choice keys on.
-enum GemmTypeBytes : ubyte {
-  Any = 0,
-  B2 = 1,
-  B4 = 2,
-  B8 = 3
+  GemvNt = 2,
+  GemvNn = 3,
+  TiledFma = 4
 }
 
 // ONNX Gemm transB. NN = plain, NT = B transposed (the common weight layout).
@@ -44,14 +43,15 @@ enum GemmTransB : ubyte {
 // phase being resolved is rejected at load.
 enum GemmConfigKind : ubyte {
   None = 0,
-  Wmma = 1,   // bm/bn/swizzle/wt_m/wt_n/bk/split_k
-  Gemv = 2    // threads/tile_n
+  Wmma = 1,      // bm16/bn16/swizzle/wt_m/wt_n/bk/split_k
+  Gemv = 2,      // threads/tile_n
+  TiledFma = 3   // bm16/bn16/wt_m/wt_n(=TM/TN)/bk/threads; split_k/swizzle 0
 }
 
 // De-duplicated answer geometry, referenced by index from the points. Stored as
-// geometry rather than a kWmma/kGemvNt index because those indices shift when
-// the tables are edited and a stale index silently launches the wrong kernel;
-// geometry is checked against the live table at load.
+// geometry rather than a kWmma/kGemvNt/kTiledFma index because those indices
+// shift when the tables are edited and a stale index silently launches the
+// wrong kernel; geometry is checked against the live table at load.
 struct GemmTuneConfig {
   kind: GemmConfigKind;
 
@@ -64,48 +64,80 @@ struct GemmTuneConfig {
   bk: ubyte;
   split_k: ubyte;
 
-  // Gemv payload. Zero on Wmma configs.
+  // Gemv payload. Zero on Wmma/TiledFma configs.
   threads: uint16;
   tile_n: ubyte;
+
+  // TiledFma reuses bm16/bn16 (tile BM/BN, /16) + bk (tile BK, exact -- always
+  // <=64 so it fits the same ubyte) + wt_m/wt_n (per-thread TM/TN) + threads
+  // (block size). swizzle/split_k/tile_n are 0 on this kind. No new fields:
+  // every payload slot the FMA tile needs already exists in this struct.
 }
 
 // One measured winner for a (categorical key, M, N, K). M/N/K are literal dims.
 // K reaches 28672 and N reaches the vocab projection (262208) so N is uint32;
-// M and K fit uint16.
+// M and K fit uint16. `config` is uint16 (D6): the dtype/phase expansion grows
+// the config pool past the old ubyte(256) cap.
 struct GemmTunePoint {
   phase: GemmPhase;
-  type_bytes: GemmTypeBytes;
+  act_dtype: hipdnn_ep.common.fbs.HipdnnDType;
+  wts_dtype: hipdnn_ep.common.fbs.HipdnnDType;
+  // out_dtype is stored but NOT part of the grouping key (see the README):
+  // every measured point today has out == act, and out only changes the
+  // epilogue store, never the tile choice. Promote it into the key later if a
+  // measured out != act point ever changes the winner -- that is a pure data
+  // change, not a re-measurement.
+  out_dtype: hipdnn_ep.common.fbs.HipdnnDType;
   trans_b: GemmTransB;
-  config: ubyte;   // index into GemmAutotuneLut.configs
+  config: uint8;    // index into GemmAutotuneLut.configs
   m: uint16;
   n: uint32;
   k: uint16;
 }
 
-// Last resort for a (phase, type) group with no usable measured point.
+// Last resort for a (phase, act_dtype, wts_dtype, trans_b) group with no
+// usable measured point. Not populated this round (see plan.md §1 D5 note):
+// an empty fallback table plus exact-match-only groups is what gives the
+// negative-case behaviour the user wants (a dtype with no points MISSES and
+// falls back to the static heuristic default, never borrows another dtype's
+// point). The field carries trans_b (fixing v1's D5 bug) so a future fill-in
+// cannot conflate NN and NT winners.
 struct GemmFallback {
   phase: GemmPhase;
-  type_bytes: GemmTypeBytes;
-  config: ubyte;
+  act_dtype: hipdnn_ep.common.fbs.HipdnnDType;
+  wts_dtype: hipdnn_ep.common.fbs.HipdnnDType;
+  trans_b: GemmTransB;
+  config: uint8;
 }
 
 table GemmAutotuneLut {
-  schema_version: uint32 = 1;
+  schema_version: uint32 = 3;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
   rocm_version: int32;      // advisory
-  kernel_abi: string;       // "gemm-wmma-v1"
+  kernel_abi: string;       // "gemm-v2"
   model_key: string;        // provenance label for logging
 
   // Per-dimension weights of the log-space distance:
   //   d = sqrt((wm*log2(M/Mp))^2 + (wn*log2(N/Np))^2 + (wk*log2(K/Kp))^2)
+  // A single weight triple for the whole table, same as v1 (see plan.md §1 D8:
+  // fitting per-group weights needs this to become a [GemmGroupWeights] table
+  // first -- flatbuffers table field-adds are backward compatible, so that is
+  // a future schema_version-free addition, not something to stub out now).
   weight_m: float = 1.0;
   weight_n: float = 1.0;
   weight_k: float = 1.0;
 
-  configs: [GemmTuneConfig];   // at most 256 (point index is a ubyte)
+  // Stage C verdict: whether a BF16 query with no BF16 points in its group may
+  // fall back to the F16 group of the same (phase, wts_dtype, trans_b) and be
+  // reported as `alias` (never silently reported as `exact`/`nearest`). See
+  // plan.md §5 Stage C and the README for the measured numbers behind this
+  // flag's value for gfx1151.
+  bf16_aliases_f16: bool = false;
+
+  configs: [GemmTuneConfig];   // config pool, indexed by point.config (uint16)
   points: [GemmTunePoint];
   fallbacks: [GemmFallback];
 }
 
 root_type GemmAutotuneLut;
-file_identifier "GEML";
+file_identifier "GEM2";

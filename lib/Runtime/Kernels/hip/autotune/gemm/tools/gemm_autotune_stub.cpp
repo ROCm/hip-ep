@@ -16,7 +16,8 @@
 namespace hipdnn_ep {
 namespace gemm_autotune {
 
-Result resolve(const Request &, WmmaValidator, GemvValidator, void *) {
+Result resolve(const Request &, WmmaValidator, GemvValidator,
+               TiledFmaValidator, void *) {
   return Result{};
 }
 

@@ -23,6 +23,7 @@
 #include "hip_custom_kernels.h"
 #include "hip_arch_compat.h"
 #include "debug_log.h"
+#include "autotune/common/hipdnn_dtype.h"
 #include "autotune/gemm/gemm_autotune.h"
 
 #include <hip/hip_runtime.h>
@@ -112,6 +113,34 @@ template <> struct GemmElem<double> {
   __device__ static inline float tof(double x) { return (float)x; }
   __device__ static inline double fromf(float x) { return (double)x; }
 };
+
+/* Maps each element type this kernel dispatches on to the shared HipdnnDType
+ * vocabulary the LUT keys on (gemm_autotune.fbs / hipdnn_dtype.h). This
+ * replaces the old `sizeof(T)` element-size key, which could not tell fp16
+ * from bf16 (both 2 bytes) -- see plan.md §1 D2. gemm has no activation/weight
+ * split yet (hip_gemm takes a single `type_code`), so act == wts == out for
+ * every call site today; the three-field Request already has room for that to
+ * change without another schema break (plan.md §2.2). */
+template <typename T> struct GemmDTypeOf;
+template <> struct GemmDTypeOf<_Float16> {
+  static constexpr hipdnn_ep::common::HipdnnDType value =
+      hipdnn_ep::common::HipdnnDType::F16;
+};
+template <> struct GemmDTypeOf<__hip_bfloat16> {
+  static constexpr hipdnn_ep::common::HipdnnDType value =
+      hipdnn_ep::common::HipdnnDType::BF16;
+};
+template <> struct GemmDTypeOf<float> {
+  static constexpr hipdnn_ep::common::HipdnnDType value =
+      hipdnn_ep::common::HipdnnDType::F32;
+};
+template <> struct GemmDTypeOf<double> {
+  static constexpr hipdnn_ep::common::HipdnnDType value =
+      hipdnn_ep::common::HipdnnDType::F64;
+};
+template <typename T> constexpr hipdnn_ep::common::HipdnnDType gemmDType() {
+  return GemmDTypeOf<T>::value;
+}
 
 template <typename T>
 __device__ __forceinline__ float gemmLoadC(const T *C, int r, int c,
@@ -373,15 +402,40 @@ static void launchGemvNt(int id, hipStream_t s, const T *A, const T *B,
 #undef GEMM_GEMV_NT
 }
 
+/* NN decode config table (Stage A7): one axis, the block/thread count -- the
+ * NN kernel is one output column per thread, so "tile_n" has no meaning here
+ * (the GemvCfg.tile_n field is unused/0 for every NN entry, matching the fbs
+ * comment). Previously launchGemvNn hardcoded BLOCK=256 with no config table
+ * and no tuning at all; fp32 NN decode shapes therefore had zero LUT coverage
+ * (plan.md §0.1). */
+static constexpr GemvCfg kGemvNn[] = {
+    {32, 0}, {64, 0}, {128, 0}, {256, 0}, {512, 0},
+};
+static constexpr int kNumGemvNn =
+    static_cast<int>(sizeof(kGemvNn) / sizeof(kGemvNn[0]));
+
 template <typename T>
-static void launchGemvNn(hipStream_t s, const T *A, const T *B, const T *C,
-                          T *Y, int M, int N, int K, float alpha, float beta,
-                          int cDim0, int cDim1) {
-  constexpr int BLOCK = 256;
-  dim3 grid((N + BLOCK - 1) / BLOCK, M);
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_nn_kernel<T, BLOCK>), grid,
-                     dim3(BLOCK), 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
-                     cDim1);
+static void launchGemvNn(int id, hipStream_t s, const T *A, const T *B,
+                          const T *C, T *Y, int M, int N, int K, float alpha,
+                          float beta, int cDim0, int cDim1) {
+  const int threads = kGemvNn[id].threads;
+  dim3 grid((N + threads - 1) / threads, M);
+#define GEMM_GEMV_NN(ID, BS)                                                 \
+  case ID:                                                                   \
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_nn_kernel<T, BS>), grid,    \
+                       dim3(BS), 0, s, A, B, C, Y, M, N, K, alpha, beta,     \
+                       cDim0, cDim1);                                        \
+    break
+  switch (id) {
+    GEMM_GEMV_NN(0, 32);
+    GEMM_GEMV_NN(1, 64);
+    GEMM_GEMV_NN(2, 128);
+    GEMM_GEMV_NN(3, 256);
+    GEMM_GEMV_NN(4, 512);
+  default:
+    break;
+  }
+#undef GEMM_GEMV_NN
 }
 
 static int gemmEnvInt(const char *name, int defv) {
@@ -510,6 +564,58 @@ static void *ensureSkBuf(size_t bytes) {
   return g_sk_buf;
 }
 
+/* Clock settle loop (hip-kernel-perf-measurement skill): drive a representative
+ * config until per-iter latency plateaus (>=60 ms total, then 3 consecutive
+ * reps within 2%), BEFORE the candidate loop. This is the piece the old
+ * tuneGemvNt was missing entirely (WARMUP=1, no settle, averaged) -- the exact
+ * shape of the gfx1152 decode-tuner incident the skill documents. `launch1`
+ * is a zero-arg thunk that issues one representative-config launch. */
+template <typename Launch1>
+static void gemmSettleClock(hipStream_t s, hipEvent_t e0, hipEvent_t e1,
+                            Launch1 &&launch1, int init_warm) {
+  float prev = 1e30f, total = 0.0f;
+  int stable = 0;
+  for (int i = 0; i < init_warm && stable < 3 && total < 200.0f; ++i) {
+    hipEventRecord(e0, s);
+    launch1();
+    hipEventRecord(e1, s);
+    hipEventSynchronize(e1);
+    float cur = 0.f;
+    hipEventElapsedTime(&cur, e0, e1);
+    if (total >= 60.0f && cur <= prev * 1.02f)
+      ++stable;
+    else
+      stable = 0;
+    prev = cur;
+    total += cur;
+  }
+}
+
+/* Time one candidate: WARMUP launches (untimed, re-equilibrate), then ITERS
+ * timed launches, keeping the MIN (peak, least-throttled) with the mandatory
+ * negative-value guard -- hipEventElapsedTime occasionally returns a small
+ * negative on sub-0.1 ms kernels, and an ungated min always "wins" with it,
+ * picking a garbage config (hip-kernel-perf-measurement skill, rule 3). */
+template <typename LaunchCid>
+static float gemmTimeConfigPeak(hipStream_t s, hipEvent_t e0, hipEvent_t e1,
+                                LaunchCid &&launch_cid, int warmup, int iters) {
+  for (int w = 0; w < warmup; ++w)
+    launch_cid();
+  float best = 1e30f;
+  for (int i = 0; i < iters; ++i) {
+    hipEventRecord(e0, s);
+    launch_cid();
+    hipEventRecord(e1, s);
+    if (hipEventSynchronize(e1) != hipSuccess)
+      continue;
+    float ms = 0.f;
+    hipEventElapsedTime(&ms, e0, e1);
+    if (ms > 0.0f && ms < best)
+      best = ms;
+  }
+  return best;
+}
+
 /* Geometry <-> config-index bridge for the GEMV NT LUT (see gemm_lut). */
 static int gemvNtConfigFromGeom(const gemm_lut::GemvAnswer &g) {
   for (int cid = 0; cid < kNumGemvNt; ++cid)
@@ -526,13 +632,13 @@ static int gemmLutGemvNtConfig(int M, int N, int K, int transB) {
     return -1; /* online mode: skip the LUT and sweep */
   gemm_lut::Request req;
   req.kind = gemm_lut::Kind::GemvNt;
-  req.type_bytes = sizeof(T);
+  req.act_dtype = req.wts_dtype = req.out_dtype = gemmDType<T>();
   req.trans_b = transB;
   req.m = M;
   req.n = N;
   req.k = K;
   const gemm_lut::Result r =
-      gemm_lut::resolve(req, nullptr, gemvNtLutValidator, nullptr);
+      gemm_lut::resolve(req, nullptr, gemvNtLutValidator, nullptr, nullptr);
   if (r.source == gemm_lut::Source::None)
     return -1;
   return gemvNtConfigFromGeom(r.gemv);
@@ -542,7 +648,8 @@ template <typename T>
 static int tuneGemvNt(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
                        int M, int N, int K, float alpha, float beta, int cDim0,
                        int cDim1) {
-  std::string key = std::string("nt_") + std::to_string(sizeof(T)) + "_" +
+  std::string key = std::string("nt_") +
+                      hipdnn_ep::common::toString(gemmDType<T>()) + "_" +
                       std::to_string(M) + "_" + std::to_string(N) + "_" +
                       std::to_string(K);
   {
@@ -559,11 +666,15 @@ static int tuneGemvNt(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
   } else if (int lut = gemmLutGemvNtConfig<T>(M, N, K, /*transB=*/1);
              lut >= 0) {
     best = lut;
-    CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-nt LUT hit M=%d N=%d K=%d -> cfg[%d]\n",
-                             M, N, K, best);
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[gemm] gemv-nt LUT hit M=%d N=%d K=%d -> cfg[%d] th=%d tn=%d\n", M, N,
+        K, best, kGemvNt[best].threads, kGemvNt[best].tile_n);
   } else if (gemmLutLookupEnabled()) {
     /* Default (lookup) mode, LUT miss: keep the static default (best=6). The
      * on-device sweep runs only in `online` mode, for LUT generation. */
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[gemm] gemv-nt default M=%d N=%d K=%d -> cfg[%d] th=%d tn=%d\n", M, N,
+        K, best, kGemvNt[best].threads, kGemvNt[best].tile_n);
   } else if (gemmAutotuneOn()) {
     hipEvent_t e0, e1;
     hipEventCreate(&e0);
@@ -571,21 +682,35 @@ static int tuneGemvNt(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
     T *scratch = static_cast<T *>(
         ensureTuneOut(static_cast<size_t>(M) * N * sizeof(T)));
     T *out = scratch ? scratch : Y;
+
+    /* Sub-0.1 ms decode GEMV sits near the hipEventElapsedTime floor, so this
+     * phase gets more iters than tuneWmma's compute-bound tiles (skill rule 4:
+     * raise iters only in this regime). Env-tunable per plan.md §4.1. */
+    const int kInitWarm =
+        gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_INITWARM", 60);
+    const int kWarm = gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_WARM", 3);
+    const int kIters = gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_ITERS", 7);
+
+    gemmSettleClock(
+        s, e0, e1,
+        [&] {
+          launchGemvNt<T>(best, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
+                          cDim1);
+        },
+        kInitWarm);
+
     float best_ms = 1e30f;
     for (int cid = 0; cid < kNumGemvNt; ++cid) {
-      launchGemvNt<T>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
-                      cDim1);
-      hipEventRecord(e0, s);
-      for (int i = 0; i < 3; ++i)
-        launchGemvNt<T>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
-                        cDim1);
-      hipEventRecord(e1, s);
-      hipEventSynchronize(e1);
-      float ms = 0.f;
-      hipEventElapsedTime(&ms, e0, e1);
+      const float ms = gemmTimeConfigPeak(
+          s, e0, e1,
+          [&] {
+            launchGemvNt<T>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
+                            cDim1);
+          },
+          kWarm, kIters);
       CUSTOM_KERNELS_DEBUG_LOG(
-          "[gemm] gemv-nt cfg[%d] th=%d tn=%d : %.4f ms\n", cid,
-          kGemvNt[cid].threads, kGemvNt[cid].tile_n, ms / 3.f);
+          "[gemm] gemv-nt cfg[%d] th=%d tn=%d : %.4f ms (peak)\n", cid,
+          kGemvNt[cid].threads, kGemvNt[cid].tile_n, ms);
       if (ms < best_ms) {
         best_ms = ms;
         best = cid;
@@ -594,11 +719,123 @@ static int tuneGemvNt(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
     hipEventDestroy(e0);
     hipEventDestroy(e1);
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[gemm] gemv-nt autotune M=%d N=%d K=%d -> cfg[%d]\n", M, N, K, best);
+        "[gemm] gemv-nt autotune M=%d N=%d K=%d -> cfg[%d] th=%d tn=%d\n", M, N,
+        K, best, kGemvNt[best].threads, kGemvNt[best].tile_n);
   }
 
   std::lock_guard<std::mutex> lk(g_tune_mu);
   g_gemv_nt_cache[key] = best;
+  return best;
+}
+
+/* Geometry <-> config-index bridge for the GEMV NN LUT (Stage A7; mirrors the
+ * NT bridge above). */
+static int gemvNnConfigFromGeom(const gemm_lut::GemvAnswer &g) {
+  for (int cid = 0; cid < kNumGemvNn; ++cid)
+    if (kGemvNn[cid].threads == g.threads)
+      return cid;
+  return -1;
+}
+static bool gemvNnLutValidator(void *, const gemm_lut::GemvAnswer &g) {
+  return gemvNnConfigFromGeom(g) >= 0;
+}
+template <typename T>
+static int gemmLutGemvNnConfig(int M, int N, int K) {
+  if (!gemmLutLookupEnabled())
+    return -1;
+  gemm_lut::Request req;
+  req.kind = gemm_lut::Kind::GemvNn;
+  req.act_dtype = req.wts_dtype = req.out_dtype = gemmDType<T>();
+  req.trans_b = 0;
+  req.m = M;
+  req.n = N;
+  req.k = K;
+  const gemm_lut::Result r =
+      gemm_lut::resolve(req, nullptr, gemvNnLutValidator, nullptr, nullptr);
+  if (r.source == gemm_lut::Source::None)
+    return -1;
+  return gemvNnConfigFromGeom(r.gemv);
+}
+
+static std::unordered_map<std::string, int> g_gemv_nn_cache;
+
+/* Same settle-once & peak(min) protocol as tuneGemvNt (Stage A7: previously
+ * launchGemvNn had a single hardcoded BLOCK=256, no config table and no
+ * tuning at all, so fp32 NN decode had zero LUT coverage -- plan.md §0.1). */
+template <typename T>
+static int tuneGemvNn(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
+                       int M, int N, int K, float alpha, float beta, int cDim0,
+                       int cDim1) {
+  std::string key = std::string("nn_") +
+                      hipdnn_ep::common::toString(gemmDType<T>()) + "_" +
+                      std::to_string(M) + "_" + std::to_string(N) + "_" +
+                      std::to_string(K);
+  {
+    std::lock_guard<std::mutex> lk(g_tune_mu);
+    auto it = g_gemv_nn_cache.find(key);
+    if (it != g_gemv_nn_cache.end())
+      return it->second;
+  }
+
+  const int forced = gemmEnvInt("HIPDNN_EP_GEMM_GEMV_NN_CFG", -1);
+  int best = 3; /* 256 threads, the old hardcoded default */
+  if (forced >= 0 && forced < kNumGemvNn) {
+    best = forced;
+  } else if (int lut = gemmLutGemvNnConfig<T>(M, N, K); lut >= 0) {
+    best = lut;
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[gemm] gemv-nn LUT hit M=%d N=%d K=%d -> cfg[%d] th=%d\n", M, N, K,
+        best, kGemvNn[best].threads);
+  } else if (gemmLutLookupEnabled()) {
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[gemm] gemv-nn default M=%d N=%d K=%d -> cfg[%d] th=%d\n", M, N, K,
+        best, kGemvNn[best].threads);
+  } else if (gemmAutotuneOn()) {
+    hipEvent_t e0, e1;
+    hipEventCreate(&e0);
+    hipEventCreate(&e1);
+    T *scratch = static_cast<T *>(
+        ensureTuneOut(static_cast<size_t>(M) * N * sizeof(T)));
+    T *out = scratch ? scratch : Y;
+
+    const int kInitWarm =
+        gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_INITWARM", 60);
+    const int kWarm = gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_WARM", 3);
+    const int kIters = gemmEnvInt("HIPDNN_GEMM_GEMV_TUNE_ITERS", 7);
+
+    gemmSettleClock(
+        s, e0, e1,
+        [&] {
+          launchGemvNn<T>(best, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
+                          cDim1);
+        },
+        kInitWarm);
+
+    float best_ms = 1e30f;
+    for (int cid = 0; cid < kNumGemvNn; ++cid) {
+      const float ms = gemmTimeConfigPeak(
+          s, e0, e1,
+          [&] {
+            launchGemvNn<T>(cid, s, A, B, C, out, M, N, K, alpha, beta, cDim0,
+                            cDim1);
+          },
+          kWarm, kIters);
+      CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-nn cfg[%d] th=%d : %.4f ms (peak)\n",
+                               cid, kGemvNn[cid].threads, ms);
+      if (ms < best_ms) {
+        best_ms = ms;
+        best = cid;
+      }
+    }
+    hipEventDestroy(e0);
+    hipEventDestroy(e1);
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[gemm] gemv-nn autotune M=%d N=%d K=%d -> cfg[%d] th=%d\n", M, N, K,
+        best, kGemvNn[best].threads);
+  }
+
+  std::lock_guard<std::mutex> lk(g_tune_mu);
+  g_gemv_nn_cache[key] = best;
   return best;
 }
 
@@ -618,7 +855,8 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
     int cfg = tuneGemvNt<T>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
     launchGemvNt<T>(cfg, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
   } else {
-    launchGemvNn<T>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+    int cfg = tuneGemvNn<T>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+    launchGemvNn<T>(cfg, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
   }
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
@@ -1175,14 +1413,14 @@ static int gemmLutWmmaConfig(int M, int N, int K, int transB) {
     return -1; /* online mode: skip the LUT and sweep */
   gemm_lut::Request req;
   req.kind = gemm_lut::Kind::Wmma;
-  req.type_bytes = sizeof(T);
+  req.act_dtype = req.wts_dtype = req.out_dtype = gemmDType<T>();
   req.trans_b = transB;
   req.m = M;
   req.n = N;
   req.k = K;
   GemmWmmaLutCtx ctx{M, N, K};
   const gemm_lut::Result r =
-      gemm_lut::resolve(req, wmmaLutValidator, nullptr, &ctx);
+      gemm_lut::resolve(req, wmmaLutValidator, nullptr, nullptr, &ctx);
   if (r.source == gemm_lut::Source::None)
     return -1;
   return wmmaConfigFromGeom(r.wmma, M, N, K);
@@ -1505,9 +1743,15 @@ template <typename T, bool TransB>
 static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
                      int M, int N, int K, float alpha, float beta, int cDim0,
                      int cDim1, int ldb) {
+  /* D1 fix: this key used to be sizeof(T), so an fp16 GEMM and a bf16 GEMM on
+   * the same shape collided (both 2 bytes) and the SECOND dtype to run in a
+   * process silently reused the FIRST's config -- resolve() was never called
+   * for it. Stage E.4 pins this with a same-process fp16-then-bf16 regression
+   * test. */
   std::string key = std::string(TransB ? "tb1_" : "tb0_") +
-                    std::to_string(sizeof(T)) + "_" + std::to_string(M) + "_" +
-                    std::to_string(N) + "_" + std::to_string(K);
+                    hipdnn_ep::common::toString(gemmDType<T>()) + "_" +
+                    std::to_string(M) + "_" + std::to_string(N) + "_" +
+                    std::to_string(K);
   {
     std::lock_guard<std::mutex> lk(g_tune_mu);
     auto it = g_wmma_cache.find(key);
@@ -1525,8 +1769,11 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
      * so the lookup happens once per shape per process. */
     best = lut;
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[gemm] wmma LUT hit M=%d N=%d K=%d tb=%d -> cfg[%d]\n", M, N, K,
-        (int)TransB, best);
+        "[gemm] wmma LUT hit M=%d N=%d K=%d tb=%d -> cfg[%d] %dx%d wt=%dx%d "
+        "sw=%d sk=%d bk=%d\n",
+        M, N, K, (int)TransB, best, kWmma[best].bm, kWmma[best].bn,
+        kWmma[best].wt_m, kWmma[best].wt_n, kWmma[best].swizzle_n,
+        kWmma[best].split_k, kWmma[best].bk);
   } else if (gemmLutLookupEnabled()) {
     /* Default (lookup) mode, LUT miss: use the static occupancy heuristic, NOT
      * the on-device sweep. On this gfx1151 APU compute-bound tiles throttle
@@ -1538,8 +1785,11 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
      * controlled conditions -- see HIPDNN_GEMM_AUTOTUNE_MODE. */
     best = pickWmmaHeuristic(M, N, K);
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[gemm] wmma heuristic M=%d N=%d K=%d tb=%d -> cfg[%d]\n", M, N, K,
-        (int)TransB, best);
+        "[gemm] wmma heuristic M=%d N=%d K=%d tb=%d -> cfg[%d] %dx%d wt=%dx%d "
+        "sw=%d sk=%d bk=%d\n",
+        M, N, K, (int)TransB, best, kWmma[best].bm, kWmma[best].bn,
+        kWmma[best].wt_m, kWmma[best].wt_n, kWmma[best].swizzle_n,
+        kWmma[best].split_k, kWmma[best].bk);
   } else if (gemmAutotuneOn()) {
     hipEvent_t e0, e1;
     hipEventCreate(&e0);
@@ -1656,8 +1906,11 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
     hipEventDestroy(e0);
     hipEventDestroy(e1);
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[gemm] wmma autotune M=%d N=%d K=%d tb=%d -> cfg[%d]\n", M, N, K,
-        (int)TransB, best);
+        "[gemm] wmma autotune M=%d N=%d K=%d tb=%d -> cfg[%d] %dx%d wt=%dx%d "
+        "sw=%d sk=%d bk=%d\n",
+        M, N, K, (int)TransB, best, kWmma[best].bm, kWmma[best].bn,
+        kWmma[best].wt_m, kWmma[best].wt_n, kWmma[best].swizzle_n,
+        kWmma[best].split_k, kWmma[best].bk);
   }
 
   std::lock_guard<std::mutex> lk(g_tune_mu);
@@ -1686,23 +1939,33 @@ static int launchWmmaGemm(hipStream_t s, const T *A, const T *B, const T *C,
 }
 
 /* =========================================================================
- * fp32 / fp64 tiled FMA (no WMMA). 64x64x16, 256 threads, 4x4 per thread.
- * Templates cover all four (transA, transB) combinations.
+ * fp32 / fp64 tiled FMA (no WMMA). Also serves wave64 fp16/bf16 (no WMMA on
+ * that hardware). Templated on tile geometry (Stage A8): BM/BN/BK/TM/TN pick
+ * the tile, THREADS the block size (THREADS == (BM/TM)*(BN/TN)). Covers all
+ * four (transA, transB) combinations. Accumulation is always float regardless
+ * of T (matches the original untemplated kernel this replaces).
  * ========================================================================= */
 
-template <typename T, bool TransA, bool TransB>
-__global__ void __launch_bounds__(256)
+template <typename T, bool TransA, bool TransB, int BM, int BN, int BK,
+          int TM, int TN, int THREADS>
+__global__ void __launch_bounds__(THREADS)
     gemm_tiled_fma_kernel(const T *__restrict__ A, const T *__restrict__ B,
                          const T *__restrict__ C, T *__restrict__ Y, int M,
                          int N, int K, float alpha, float beta, int cDim0,
                          int cDim1) {
-  constexpr int BM = 64, BN = 64, BK = 16;
-  constexpr int TM = 4, TN = 4;
+  constexpr int THREADS_X = BN / TN;
+  constexpr int THREADS_Y = BM / TM;
+  static_assert(THREADS_X * THREADS_Y == THREADS, "tile/thread mismatch");
+  constexpr int A_PER_THREAD = (BM * BK) / THREADS;
+  constexpr int B_PER_THREAD = (BK * BN) / THREADS;
+  static_assert(A_PER_THREAD >= 1 && (BM * BK) % THREADS == 0, "A load tile");
+  static_assert(B_PER_THREAD >= 1 && (BK * BN) % THREADS == 0, "B load tile");
+
   __shared__ float smA[BM][BK + 1];
   __shared__ float smB[BK][BN + 1];
 
-  const int tx = threadIdx.x % 16;
-  const int ty = threadIdx.x / 16;
+  const int tx = threadIdx.x % THREADS_X;
+  const int ty = threadIdx.x / THREADS_X;
   const int row0 = blockIdx.y * BM;
   const int col0 = blockIdx.x * BN;
 
@@ -1717,10 +1980,9 @@ __global__ void __launch_bounds__(256)
   const int ldb = TransB ? K : N;
 
   for (int k0 = 0; k0 < K; k0 += BK) {
-    /* 256 threads fill 64*16 = 1024 A elems (4 each) and 16*64 B. */
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int idx = threadIdx.x + i * 256;
+    for (int i = 0; i < A_PER_THREAD; ++i) {
+      const int idx = threadIdx.x + i * THREADS;
       const int ar = idx / BK;
       const int ak = idx % BK;
       float av = 0.f;
@@ -1733,8 +1995,8 @@ __global__ void __launch_bounds__(256)
       smA[ar][ak] = av;
     }
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int idx = threadIdx.x + i * 256;
+    for (int i = 0; i < B_PER_THREAD; ++i) {
+      const int idx = threadIdx.x + i * THREADS;
       const int bk = idx / BN;
       const int bn = idx % BN;
       float bv = 0.f;
@@ -1773,30 +2035,224 @@ __global__ void __launch_bounds__(256)
   }
 }
 
+struct TiledFmaCfg {
+  int bm, bn, bk, tm, tn, threads;
+};
+
+/* Config table (Stage A8). Index 0 is the original hardcoded 64x64x16/4x4/256
+ * geometry, kept as entry 0 so the pre-LUT behaviour is exactly reproducible
+ * (HIPDNN_EP_GEMM_TILEDFMA_CFG=0 or any miss/no-table path). The other three
+ * give real occupancy/traffic tradeoffs to tune between (a smaller 32x32 tile
+ * for small/grid-starved shapes, two rectangular 512-thread tiles). Every
+ * entry needs a matching GEMM_TILEDFMA_TRY dispatch branch below or it
+ * silently falls through to the default (plan.md R10). */
+static constexpr TiledFmaCfg kTiledFma[] = {
+    {64, 64, 16, 4, 4, 256},
+    {128, 64, 16, 4, 4, 512},
+    {64, 128, 16, 4, 4, 512},
+    {32, 32, 16, 2, 2, 256},
+};
+static constexpr int kNumTiledFma =
+    static_cast<int>(sizeof(kTiledFma) / sizeof(kTiledFma[0]));
+
 template <typename T>
-static int launchTiledFma(hipStream_t s, const T *A, const T *B, const T *C,
-                          T *Y, int M, int N, int K, int transA, int transB,
-                          float alpha, float beta, int cDim0, int cDim1) {
+static int launchTiledFma(int id, hipStream_t s, const T *A, const T *B,
+                          const T *C, T *Y, int M, int N, int K, int transA,
+                          int transB, float alpha, float beta, int cDim0,
+                          int cDim1) {
   (void)hipGetLastError();
-  dim3 grid((N + 63) / 64, (M + 63) / 64);
-  dim3 block(256);
-  if (!transA && !transB)
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_tiled_fma_kernel<T, false, false>),
-                       grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta,
-                       cDim0, cDim1);
-  else if (!transA && transB)
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_tiled_fma_kernel<T, false, true>),
-                       grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta,
-                       cDim0, cDim1);
-  else if (transA && !transB)
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_tiled_fma_kernel<T, true, false>),
-                       grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta,
-                       cDim0, cDim1);
-  else
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_tiled_fma_kernel<T, true, true>),
-                       grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta,
-                       cDim0, cDim1);
+  const TiledFmaCfg &c = kTiledFma[id];
+  dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm);
+  dim3 block(c.threads);
+
+#define GEMM_TILEDFMA_ONE(BM, BN, BK, TM, TN, THR)                            \
+  do {                                                                       \
+    if (!transA && !transB)                                                  \
+      hipLaunchKernelGGL(                                                    \
+          HIP_KERNEL_NAME(                                                   \
+              gemm_tiled_fma_kernel<T, false, false, BM, BN, BK, TM, TN,     \
+                                    THR>),                                   \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
+          cDim1);                                                            \
+    else if (!transA && transB)                                              \
+      hipLaunchKernelGGL(                                                    \
+          HIP_KERNEL_NAME(                                                   \
+              gemm_tiled_fma_kernel<T, false, true, BM, BN, BK, TM, TN,      \
+                                    THR>),                                   \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
+          cDim1);                                                            \
+    else if (transA && !transB)                                              \
+      hipLaunchKernelGGL(                                                    \
+          HIP_KERNEL_NAME(                                                   \
+              gemm_tiled_fma_kernel<T, true, false, BM, BN, BK, TM, TN,      \
+                                    THR>),                                   \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
+          cDim1);                                                            \
+    else                                                                     \
+      hipLaunchKernelGGL(                                                    \
+          HIP_KERNEL_NAME(                                                   \
+              gemm_tiled_fma_kernel<T, true, true, BM, BN, BK, TM, TN,       \
+                                    THR>),                                   \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
+          cDim1);                                                            \
+  } while (0)
+
+#define GEMM_TILEDFMA_TRY(BM, BN, BK, TM, TN, THR)                            \
+  if (c.bm == BM && c.bn == BN && c.bk == BK && c.tm == TM && c.tn == TN &&   \
+      c.threads == THR) {                                                    \
+    GEMM_TILEDFMA_ONE(BM, BN, BK, TM, TN, THR);                              \
+  } else
+
+  GEMM_TILEDFMA_TRY(64, 64, 16, 4, 4, 256)
+  GEMM_TILEDFMA_TRY(128, 64, 16, 4, 4, 512)
+  GEMM_TILEDFMA_TRY(64, 128, 16, 4, 4, 512)
+  GEMM_TILEDFMA_TRY(32, 32, 16, 2, 2, 256)
+  {
+    /* Unreachable for any id in kTiledFma[]; kept as a safe, explicit default
+     * (never a silent wrong-grid launch) if a stale LUT geometry index ever
+     * reached here -- it cannot, since launchTiledFma is only ever called
+     * with an id from kTiledFma or from tiledFmaConfigFromGeom(), which
+     * returns -1 (never dispatched) for anything not in this exact list. */
+    GEMM_TILEDFMA_ONE(64, 64, 16, 4, 4, 256);
+  }
+#undef GEMM_TILEDFMA_TRY
+#undef GEMM_TILEDFMA_ONE
+
   return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
+/* Geometry <-> config-index bridge for the TiledFma LUT (Stage A8). */
+static int tiledFmaConfigFromGeom(const gemm_lut::TiledFmaAnswer &g) {
+  for (int cid = 0; cid < kNumTiledFma; ++cid) {
+    const TiledFmaCfg &c = kTiledFma[cid];
+    if (c.bm == g.bm && c.bn == g.bn && c.bk == g.bk && c.tm == g.tm &&
+        c.tn == g.tn && c.threads == g.threads)
+      return cid;
+  }
+  return -1;
+}
+static bool tiledFmaLutValidator(void *, const gemm_lut::TiledFmaAnswer &g) {
+  return tiledFmaConfigFromGeom(g) >= 0;
+}
+template <typename T>
+static int gemmLutTiledFmaConfig(int M, int N, int K, int transB) {
+  if (!gemmLutLookupEnabled())
+    return -1;
+  gemm_lut::Request req;
+  req.kind = gemm_lut::Kind::TiledFma;
+  req.act_dtype = req.wts_dtype = req.out_dtype = gemmDType<T>();
+  req.trans_b = transB;
+  req.m = M;
+  req.n = N;
+  req.k = K;
+  const gemm_lut::Result r = gemm_lut::resolve(req, nullptr, nullptr,
+                                               tiledFmaLutValidator, nullptr);
+  if (r.source == gemm_lut::Source::None)
+    return -1;
+  return tiledFmaConfigFromGeom(r.tiled_fma);
+}
+
+static std::unordered_map<std::string, int> g_tiled_fma_cache;
+
+/* tuneTiledFma follows the same in-process-map -> LUT -> heuristic-default ->
+ * (online mode only) settle+peak sweep dispatch every other tuner here uses.
+ * transA is folded into the cache key (the FMA kernel has real transA support,
+ * unlike the WMMA/GEMV paths which route transA into launchSmallM before
+ * reaching here for fp16/bf16 -- only fp32/fp64 can reach tuneTiledFma with
+ * transA=1). transA=1 is NOT looked up in the LUT or online-tuned this round
+ * (plan.md's Stage B matrix only measures transA=0; transposed-A prefill does
+ * not occur in the real models this table targets): it always keeps `best`
+ * at its cfg-0 default, i.e. exactly this kernel's pre-LUT behaviour, so a
+ * transA=1 caller is never worse off than before the LUT existed. */
+template <typename T>
+static int tuneTiledFma(hipStream_t s, const T *A, const T *B, const T *C,
+                        T *Y, int M, int N, int K, int transA, int transB,
+                        float alpha, float beta, int cDim0, int cDim1) {
+  std::string key = std::string(transA ? "ta1_" : "ta0_") +
+                    (transB ? "tb1_" : "tb0_") +
+                    hipdnn_ep::common::toString(gemmDType<T>()) + "_" +
+                    std::to_string(M) + "_" + std::to_string(N) + "_" +
+                    std::to_string(K);
+  {
+    std::lock_guard<std::mutex> lk(g_tune_mu);
+    auto it = g_tiled_fma_cache.find(key);
+    if (it != g_tiled_fma_cache.end())
+      return it->second;
+  }
+
+  const int forced = gemmEnvInt("HIPDNN_EP_GEMM_TILEDFMA_CFG", -1);
+  int best = 0; /* 64x64x16 4x4, the original hardcoded geometry */
+  if (forced >= 0 && forced < kNumTiledFma) {
+    best = forced;
+  } else if (!transA) {
+    if (int lut = gemmLutTiledFmaConfig<T>(M, N, K, transB); lut >= 0) {
+      best = lut;
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[gemm] tiledfma LUT hit M=%d N=%d K=%d ta=%d tb=%d -> cfg[%d] "
+          "%dx%d bk=%d tm=%d tn=%d th=%d\n",
+          M, N, K, transA, transB, best, kTiledFma[best].bm,
+          kTiledFma[best].bn, kTiledFma[best].bk, kTiledFma[best].tm,
+          kTiledFma[best].tn, kTiledFma[best].threads);
+    } else if (gemmLutLookupEnabled()) {
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[gemm] tiledfma default M=%d N=%d K=%d ta=%d tb=%d -> cfg[%d] "
+          "%dx%d bk=%d tm=%d tn=%d th=%d\n",
+          M, N, K, transA, transB, best, kTiledFma[best].bm,
+          kTiledFma[best].bn, kTiledFma[best].bk, kTiledFma[best].tm,
+          kTiledFma[best].tn, kTiledFma[best].threads);
+    } else if (gemmAutotuneOn()) {
+      hipEvent_t e0, e1;
+      hipEventCreate(&e0);
+      hipEventCreate(&e1);
+      T *scratch = static_cast<T *>(
+          ensureTuneOut(static_cast<size_t>(M) * N * sizeof(T)));
+      T *out = scratch ? scratch : Y;
+
+      const int kInitWarm = gemmEnvInt("HIPDNN_GEMM_TILEDFMA_TUNE_INITWARM", 40);
+      const int kWarm = gemmEnvInt("HIPDNN_GEMM_TILEDFMA_TUNE_WARM", 5);
+      const int kIters = gemmEnvInt("HIPDNN_GEMM_TILEDFMA_TUNE_ITERS", 5);
+
+      gemmSettleClock(
+          s, e0, e1,
+          [&] {
+            launchTiledFma<T>(best, s, A, B, C, out, M, N, K, transA, transB,
+                              alpha, beta, cDim0, cDim1);
+          },
+          kInitWarm);
+
+      float best_ms = 1e30f;
+      for (int cid = 0; cid < kNumTiledFma; ++cid) {
+        const float ms = gemmTimeConfigPeak(
+            s, e0, e1,
+            [&] {
+              launchTiledFma<T>(cid, s, A, B, C, out, M, N, K, transA, transB,
+                                alpha, beta, cDim0, cDim1);
+            },
+            kWarm, kIters);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[gemm] tiledfma cfg[%d] %dx%d bk=%d tm=%d tn=%d th=%d : %.4f ms "
+            "(peak)\n",
+            cid, kTiledFma[cid].bm, kTiledFma[cid].bn, kTiledFma[cid].bk,
+            kTiledFma[cid].tm, kTiledFma[cid].tn, kTiledFma[cid].threads, ms);
+        if (ms < best_ms) {
+          best_ms = ms;
+          best = cid;
+        }
+      }
+      hipEventDestroy(e0);
+      hipEventDestroy(e1);
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[gemm] tiledfma autotune M=%d N=%d K=%d ta=%d tb=%d -> cfg[%d] "
+          "%dx%d bk=%d tm=%d tn=%d th=%d\n",
+          M, N, K, transA, transB, best, kTiledFma[best].bm,
+          kTiledFma[best].bn, kTiledFma[best].bk, kTiledFma[best].tm,
+          kTiledFma[best].tn, kTiledFma[best].threads);
+    }
+  }
+
+  std::lock_guard<std::mutex> lk(g_tune_mu);
+  g_tiled_fma_cache[key] = best;
+  return best;
 }
 
 template <typename T>
@@ -2073,9 +2529,12 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (M < kWmmaM || transA)
       return launchSmallM<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                              beta, cDim0, cDim1);
-    if (wave64)
-      return launchTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
+    if (wave64) {
+      int cfg = tuneTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                                 beta, cDim0, cDim1);
+      return launchTiledFma<T>(cfg, s, a, b, c, y, M, N, K, transA, transB,
+                               alpha, beta, cDim0, cDim1);
+    }
     int ldb = K, kk = K, lda = -1;
     if (gemmPadKEligible(M, N, K, transA, transB, sizeof(T))) {
       int kpad = K;
@@ -2102,9 +2561,12 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (M < kWmmaM || transA)
       return launchSmallM<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                              beta, cDim0, cDim1);
-    if (wave64)
-      return launchTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
+    if (wave64) {
+      int cfg = tuneTiledFma<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                                 beta, cDim0, cDim1);
+      return launchTiledFma<T>(cfg, s, a, b, c, y, M, N, K, transA, transB,
+                               alpha, beta, cDim0, cDim1);
+    }
     int ldb = K, kk = K, lda = -1;
     if (gemmPadKEligible(M, N, K, transA, transB, sizeof(T))) {
       int kpad = K;
@@ -2134,8 +2596,12 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (M < kWmmaM)
       return launchSmallM<float>(s, a, b, c, y, M, N, K, transA, transB,
                                  alpha, beta, cDim0, cDim1);
-    return launchTiledFma<float>(s, a, b, c, y, M, N, K, transA, transB, alpha,
-                                  beta, cDim0, cDim1);
+    {
+      int cfg = tuneTiledFma<float>(s, a, b, c, y, M, N, K, transA, transB,
+                                    alpha, beta, cDim0, cDim1);
+      return launchTiledFma<float>(cfg, s, a, b, c, y, M, N, K, transA, transB,
+                                   alpha, beta, cDim0, cDim1);
+    }
   }
   if (type_code == kTypeFloat64) {
     auto *a = static_cast<const double *>(A);
@@ -2145,8 +2611,12 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     if (M < kWmmaM)
       return launchSmallM<double>(s, a, b, c, y, M, N, K, transA, transB,
                                   alpha, beta, cDim0, cDim1);
-    return launchTiledFma<double>(s, a, b, c, y, M, N, K, transA, transB,
-                                   alpha, beta, cDim0, cDim1);
+    {
+      int cfg = tuneTiledFma<double>(s, a, b, c, y, M, N, K, transA, transB,
+                                     alpha, beta, cDim0, cDim1);
+      return launchTiledFma<double>(cfg, s, a, b, c, y, M, N, K, transA,
+                                    transB, alpha, beta, cDim0, cDim1);
+    }
   }
   return -1;
 }
