@@ -63,9 +63,11 @@
   ;;
   ;; Pattern syntax:
   ;;   function-name [:debug-flags]* OR [:debug-flags]* function-name
-  ;;   :match (match-operations...)
+  ;;   :match match-operations...
   ;;   [:then-let ((var expr)...)]?
-  ;;   :rewrite root-var :with (rewrite-operations...)
+  ;;   :rewrite root-var :with rewrite-operations...
+  ;;
+  ;; Note: No outer parentheses around match/rewrite operations (MLIR-like syntax)
   ;;
   ;; Strategy: Parse fname and debug flags until we hit :match, then parse main structure.
   ;;
@@ -101,8 +103,7 @@
          (parse-rest #'more ast))]
 
       ;; Main pattern structure - fname must be set by now
-      [(:match (match-op ...)
-        . rest-after-match)
+      [(:match match-op ... . rest-after-match)
        (and (ast-pattern-expand-function-name ast)  ; fname already parsed
             (not (null? (syntax->list #'(match-op ...)))))
        (begin
@@ -112,7 +113,7 @@
          ;; Continue parsing :then-let and :rewrite
          (parse-after-match #'rest-after-match ast))]
 
-      [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match (...) :rewrite root :with (...))" rest)]))
+      [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match match-ops... :rewrite root :with rewrite-ops...)" rest)]))
 
   ;;-----------------------------------------------------------------------
   ;; parse-match-operation - Parse one match operation
@@ -402,14 +403,16 @@
   ;;-----------------------------------------------------------------------
   ;;
   ;; Handles two syntax patterns:
-  ;;   1. :match (...) :then-let (...) :rewrite ... :with (...)
-  ;;   2. :match (...) :rewrite ... :with (...)
+  ;;   1. :match ... :then-let (...) :rewrite ... :with ...
+  ;;   2. :match ... :rewrite ... :with ...
+  ;;
+  ;; Note: No outer parentheses around rewrite operations (MLIR-like)
   ;;
   (define (parse-after-match rest-stx ast)
     (syntax-case rest-stx (:then-let :rewrite :with)
       ;; Pattern 1: :then-let followed by :rewrite
       [(:then-let ((var expr) ...)
-        :rewrite root :with (rewrite-op ...))
+        :rewrite root :with rewrite-op ...)
        (and (identifier? #'root)
             (not (null? (syntax->list #'(rewrite-op ...)))))
        (begin
@@ -427,7 +430,7 @@
          ast)]
 
       ;; Pattern 2: :rewrite without :then-let
-      [(:rewrite root :with (rewrite-op ...))
+      [(:rewrite root :with rewrite-op ...)
        (and (identifier? #'root)
             (not (null? (syntax->list #'(rewrite-op ...)))))
        (begin
@@ -437,5 +440,5 @@
          ast)]
 
       [_ (syntax-violation 'define-conversion-pattern
-           "Expected [:then-let (...)] :rewrite root :with (...)" rest-stx)]))
+           "Expected [:then-let (...)] :rewrite root :with rewrite-ops..." rest-stx)]))
 )
