@@ -81,6 +81,27 @@ struct OpProfileCpuScope {
   OpProfileCpuScope &operator=(const OpProfileCpuScope &) = delete;
 };
 
+// Lightweight semantic annotation independent of HIPDNN_EP_PERF. The native
+// bridge returns -1 when HIPDNN_EP_ROCTX is disabled or ROCTx is unavailable,
+// so the default path is one cheap no-op call and no dynamic allocation.
+// RAII keeps ranges balanced across early returns and cleanup gotos.
+struct OpRoctxScope {
+  bool active = false;
+
+  explicit OpRoctxScope(const char *name)
+      : active(hipdnn_ep_roctx_range_push(name) >= 0) {}
+
+  explicit OpRoctxScope(const std::string &name) : OpRoctxScope(name.c_str()) {}
+
+  ~OpRoctxScope() {
+    if (active)
+      hipdnn_ep_roctx_range_pop();
+  }
+
+  OpRoctxScope(const OpRoctxScope &) = delete;
+  OpRoctxScope &operator=(const OpRoctxScope &) = delete;
+};
+
 struct OpProfileScope {
   OpProfileState *ps;
   std::string name;
@@ -117,6 +138,11 @@ struct OpProfileScope {
   OpProfileScope &operator=(const OpProfileScope &) = delete;
 };
 
+#define HIPDNN_EP_DETAIL_CONCAT_INNER(a, b) a##b
+#define HIPDNN_EP_DETAIL_CONCAT(a, b) HIPDNN_EP_DETAIL_CONCAT_INNER(a, b)
+#define OP_ROCTX_SCOPE(opname)                                                 \
+  OpRoctxScope HIPDNN_EP_DETAIL_CONCAT(_opRoctxScope_, __LINE__)(opname)
+
 #define OP_PROFILE(opname, shape_fn, state_arg)                                \
   OP_PROFILE_BYTES(                                                            \
       opname, shape_fn, [] { return (int64_t)0; }, state_arg)
@@ -125,6 +151,7 @@ struct OpProfileScope {
 // [PERF] table can report achieved GB/s and % of the memory roofline. bytes_fn
 // is a callable returning int64_t, invoked only when profiling is active.
 #define OP_PROFILE_BYTES(opname, shape_fn, bytes_fn, state_arg)                \
+  OP_ROCTX_SCOPE(opname);                                                      \
   std::optional<OpProfileScope> _opProf;                                       \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
@@ -140,6 +167,7 @@ struct OpProfileScope {
   }
 
 #define OP_PROFILE_CPU(opname, state_arg)                                      \
+  OP_ROCTX_SCOPE(opname);                                                      \
   std::optional<OpProfileCpuScope> _opProfCpu;                                 \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
