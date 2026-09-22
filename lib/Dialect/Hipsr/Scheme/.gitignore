@@ -1,2 +1,8 @@
 *.so
 *.wpo
+
+# Editor backup and temporary files
+*.backup
+*~
+\#*\#
+.\#*
