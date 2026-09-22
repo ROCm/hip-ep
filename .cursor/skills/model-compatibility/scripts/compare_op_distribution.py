@@ -149,7 +149,8 @@ def write_markdown(comp: dict, out_md: Path) -> None:
 
     lines.append(
         "\n---\n\n"
-        "Compatibility analysis (step2–final) uses **EP input** (`onnx.onnx`) as the graph seen by the EP.\n"
+        "Compatibility analysis uses the **EP input** graph (`ep_input.mlir`), "
+        "which is what the EP actually compiles.\n"
     )
     out_md.write_text("".join(lines), encoding="utf-8")
 
