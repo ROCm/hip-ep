@@ -938,35 +938,30 @@ bool extractConstantInts(Value v, SmallVectorImpl<int64_t> &out) {
 // TOSA reduce ops take one i32 axis and always leave that dim as size 1.
 // hip.reduce_* carry ONNX axes as a tensor plus keepdims /
 // noop_with_empty_axes.
-FailureOr<int32_t> matchSingleReduceAxis(Value axes, int64_t rank,
-                                         int64_t noopWithEmptyAxes,
-                                         ConversionPatternRewriter &rewriter,
-                                         Operation *op) {
+// Rewriter-free single-axis match. Returns an empty StringRef on success and
+// the reason otherwise, so a caller that wants a diagnostic can report it and
+// a caller that only wants a yes/no answer can ignore it. That split is what
+// lets the legality predicates below ask exactly the question the patterns
+// will answer, rather than a similar-looking one.
+StringRef findSingleReduceAxis(Value axes, int64_t rank,
+                               int64_t noopWithEmptyAxes, int32_t &axis) {
   SmallVector<int64_t, 4> axesVals;
-  if (!extractConstantInts(axes, axesVals)) {
-    (void)rewriter.notifyMatchFailure(op, "axes must be a constant");
-    return failure();
-  }
-  if (axesVals.empty()) {
-    (void)rewriter.notifyMatchFailure(
-        op, noopWithEmptyAxes ? "empty axes identity"
-                              : "empty axes reduce-all is not a single tosa "
-                                "reduce");
-    return failure();
-  }
-  if (axesVals.size() != 1) {
-    (void)rewriter.notifyMatchFailure(op, "tosa reduce supports a single axis");
-    return failure();
-  }
+  if (!extractConstantInts(axes, axesVals))
+    return "axes must be a constant";
+  if (axesVals.empty())
+    return noopWithEmptyAxes
+               ? "empty axes identity"
+               : "empty axes reduce-all is not a single tosa reduce";
+  if (axesVals.size() != 1)
+    return "tosa reduce supports a single axis";
 
-  int64_t axis = axesVals[0];
-  if (axis < 0)
-    axis += rank;
-  if (axis < 0 || axis >= rank) {
-    (void)rewriter.notifyMatchFailure(op, "axis out of range");
-    return failure();
-  }
-  return static_cast<int32_t>(axis);
+  int64_t resolved = axesVals[0];
+  if (resolved < 0)
+    resolved += rank;
+  if (resolved < 0 || resolved >= rank)
+    return "axis out of range";
+  axis = static_cast<int32_t>(resolved);
+  return StringRef();
 }
 
 RankedTensorType keepdimsReduceType(RankedTensorType dataType, int32_t axis) {
@@ -1065,58 +1060,158 @@ void replaceWithTosaReduce(Operation *op, Value reduced,
   rewriter.replaceOpWithNewOp<tosa::ReshapeOp>(op, resultType, reduced, shape);
 }
 
+struct HipReduceMatch {
+  RankedTensorType resultType;
+  int32_t axis = 0;
+  bool keepdims = false;
+  bool identity = false;
+};
+
+// Everything the hip reductions share, with no rewriter: the single constant
+// axis, keepdims, and the noop_with_empty_axes identity. Empty StringRef on
+// success, reason otherwise.
+//
+// This exists as one implementation on purpose. The reductions are claimed by
+// dynamic legality, and that only avoids aborting a conversion while the
+// predicate claims exactly what the pattern accepts. A predicate that checks
+// the element type and leaves the structure to the pattern will claim a
+// dynamic, multi-axis or non-constant-axis reduction that the pattern then
+// refuses, and an op marked illegal that no pattern rewrites takes the whole
+// function's conversion down with it -- including the fusible ops around it.
+// Both the patterns and the predicates therefore go through here.
+StringRef matchHipReduceCore(Operation *op, Value data, Value axes,
+                             int64_t keepdims, int64_t noopWithEmptyAxes,
+                             HipReduceMatch &match) {
+  match = HipReduceMatch{};
+  if (op->getNumResults() != 1)
+    return "expected tensor mode";
+  match.resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!match.resultType || !match.resultType.hasStaticShape())
+    return "expected a static ranked tensor";
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return "expected static ranked data";
+  if (dataType.getRank() < 1)
+    return "tosa reduce requires rank >= 1";
+
+  match.keepdims = keepdims != 0;
+  SmallVector<int64_t, 4> axesVals;
+  if (!extractConstantInts(axes, axesVals))
+    return "axes must be a constant";
+  if (axesVals.empty() && noopWithEmptyAxes) {
+    if (data.getType() != match.resultType)
+      return "identity type mismatch";
+    match.identity = true;
+    return StringRef();
+  }
+
+  StringRef reason = findSingleReduceAxis(axes, dataType.getRank(),
+                                          noopWithEmptyAxes, match.axis);
+  if (!reason.empty())
+    return reason;
+  auto reducedTy = keepdimsReduceType(dataType, match.axis);
+  if (match.keepdims && match.resultType != reducedTy)
+    return "keepdims result type mismatch";
+  if (!match.keepdims && match.resultType.getRank() != dataType.getRank() - 1)
+    return "keepdims=0 rank mismatch";
+  return StringRef();
+}
+
 LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
                              int64_t keepdims, int64_t noopWithEmptyAxes,
                              ConversionPatternRewriter &rewriter,
                              RankedTensorType &resultType, Value &dataOut,
                              int32_t &axis, bool &keepdimsOut, bool &identity) {
-  identity = false;
-  if (op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(op, "expected tensor mode");
-  resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
-  if (!resultType || !resultType.hasStaticShape())
-    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
-  auto dataType = dyn_cast<RankedTensorType>(data.getType());
-  if (!dataType || !dataType.hasStaticShape())
-    return rewriter.notifyMatchFailure(op, "expected static ranked data");
-  if (dataType.getRank() < 1)
-    return rewriter.notifyMatchFailure(op, "tosa reduce requires rank >= 1");
-
-  SmallVector<int64_t, 4> axesVals;
-  if (!extractConstantInts(axes, axesVals))
-    return rewriter.notifyMatchFailure(op, "axes must be a constant");
-  if (axesVals.empty() && noopWithEmptyAxes) {
-    if (data.getType() != resultType)
-      return rewriter.notifyMatchFailure(op, "identity type mismatch");
-    identity = true;
-    dataOut = data;
-    keepdimsOut = keepdims != 0;
-    return success();
-  }
-
-  FailureOr<int32_t> axisOr = matchSingleReduceAxis(
-      axes, dataType.getRank(), noopWithEmptyAxes, rewriter, op);
-  if (failed(axisOr))
-    return failure();
-  axis = *axisOr;
-  keepdimsOut = keepdims != 0;
+  HipReduceMatch match;
+  StringRef reason =
+      matchHipReduceCore(op, data, axes, keepdims, noopWithEmptyAxes, match);
+  if (!reason.empty())
+    return rewriter.notifyMatchFailure(op, reason);
+  resultType = match.resultType;
   dataOut = data;
-  identity = false;
-  auto reducedTy = keepdimsReduceType(dataType, axis);
-  if (keepdimsOut && resultType != reducedTy)
-    return rewriter.notifyMatchFailure(op, "keepdims result type mismatch");
-  if (!keepdimsOut && resultType.getRank() != dataType.getRank() - 1)
-    return rewriter.notifyMatchFailure(op, "keepdims=0 rank mismatch");
+  axis = match.axis;
+  keepdimsOut = match.keepdims;
+  identity = match.identity;
   return success();
 }
 
-// hip.reduce_sum -> tosa.reduce_sum. One constant axis, TOSA keepdims=1,
-// optional reshape.
-struct ReduceSumConverter final : public OpConversionPattern<ReduceSumOp> {
-  using OpConversionPattern<ReduceSumOp>::OpConversionPattern;
+// The element types this pass can actually put through TOSA.
+//
+// Both are allow-lists rather than "everything except the type we know is
+// broken". Tosa_FloatTensor is AnyFloat and Tosa_Int is any signless or
+// unsigned integer, so f64, f80, f128, the float8 variants, i4 and i128 all
+// satisfy the op verifiers while nothing downstream can lower them -- and
+// onnx.ReduceL2 explicitly permits f64 input. The float set is the one
+// GemmConverter above already uses; the integer set names the widths ONNX
+// produces.
+static bool isTosaExpressibleFloat(Type elementType) {
+  return elementType.isF16() || elementType.isBF16() || elementType.isF32();
+}
+
+static bool isTosaExpressibleInt(Type elementType) {
+  return elementType.isSignlessInteger(1) || elementType.isSignlessInteger(8) ||
+         elementType.isSignlessInteger(16) ||
+         elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
+}
+
+// ONNX reductions accept unsigned element types and OnnxToHip preserves them,
+// but no TOSA lowering takes an unsigned tensor: `tosa.reduce_product` on
+// tensor<2x8xui32> dies in tosa-to-linalg with "'arith.constant' op integer
+// return type must be signless", where the signless i32 form lowers to a
+// linalg.reduce. So this one predicate covers every reduction here, ordered or
+// not.
+//
+// Worth recording why reinterpreting the bits is not a shortcut: for sum and
+// product it would actually work, since two's-complement add and multiply give
+// the same bits whichever way the sign bit is read, but tosa.reduce_max and
+// tosa.reduce_min are ordered and would read a ui8 255 as -1, turning a
+// maximum into a minimum. Any future unsigned support has to handle those two
+// differently rather than uniformly.
+static bool isTosaReduceType(Type elementType) {
+  return isTosaExpressibleFloat(elementType) ||
+         isTosaExpressibleInt(elementType);
+}
+
+// A reduction is expressible when its element type has a TOSA spelling *and*
+// matchHipReduceCore accepts its structure. Checking only the element type
+// would leave a dynamic, multi-axis or non-constant-axis reduction claimed for
+// a pattern that refuses it, which aborts the function's whole conversion
+// instead of leaving the op for the runtime kernel that handles it.
+template <typename ReduceOpTy>
+static bool isTosaExpressibleReduce(ReduceOpTy op,
+                                    bool (*elementTypeOk)(Type)) {
+  auto dataType = dyn_cast<RankedTensorType>(op.getData().getType());
+  if (!dataType || !elementTypeOk(dataType.getElementType()))
+    return false;
+  HipReduceMatch match;
+  return matchHipReduceCore(op, op.getData(), op.getAxes(), op.getKeepdims(),
+                            op.getNoopWithEmptyAxes(), match)
+      .empty();
+}
+
+// Covers the hip reductions that map 1-1 onto a TOSA reduce: reduce_sum,
+// reduce_max, reduce_min and reduce_prod. matchHipReduce already does
+// everything the hip reductions share -- the single constant axis, keepdims,
+// and the noop_with_empty_axes identity -- so only the op mapping varies. TOSA
+// always reduces with keepdims=1, hence the optional reshape at the end.
+//
+// hip.reduce_mean and hip.reduce_l2 are not in this set: TOSA has neither, so
+// each spells out its own expansion below.
+//
+// tosa.reduce_max and tosa.reduce_min additionally carry a nan_mode attribute,
+// but ODS defaults it to PROPAGATE, which is what ONNX ReduceMax/ReduceMin do,
+// so the builder below is correct for them unchanged.
+//
+// The element type is not re-checked here: these ops are claimed by
+// isTosaExpressibleReduce, which asks isTosaReduceType before marking one
+// illegal, so a type this pass cannot express never reaches the pattern.
+template <typename HipOpTy, typename TosaOpTy>
+struct ReduceConverter final : public OpConversionPattern<HipOpTy> {
+  using OpConversionPattern<HipOpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<HipOpTy>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(ReduceSumOp op, OpAdaptor adaptor,
+  matchAndRewrite(HipOpTy op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     RankedTensorType resultType;
     Value data;
@@ -1132,11 +1227,10 @@ struct ReduceSumConverter final : public OpConversionPattern<ReduceSumOp> {
       rewriter.replaceOp(op, data);
       return success();
     }
-    auto reducedTy =
-        keepdimsReduceType(cast<RankedTensorType>(data.getType()), axis);
-    auto reduced =
-        tosa::ReduceSumOp::create(rewriter, op.getLoc(), reducedTy, data,
-                                  rewriter.getI32IntegerAttr(axis));
+    auto dataType = cast<RankedTensorType>(data.getType());
+    auto reducedTy = keepdimsReduceType(dataType, axis);
+    auto reduced = TosaOpTy::create(rewriter, op.getLoc(), reducedTy, data,
+                                    rewriter.getI32IntegerAttr(axis));
     replaceWithTosaReduce(op, reduced, resultType, keepdims, rewriter);
     return success();
   }
@@ -1168,6 +1262,95 @@ struct ReduceMeanConverter final : public OpConversionPattern<ReduceMeanOp> {
     if (failed(reduced))
       return failure();
     replaceWithTosaReduce(op, *reduced, resultType, keepdims, rewriter);
+    return success();
+  }
+};
+
+// TOSA has no reduce_l2. ONNX ReduceL2 is sqrt(sum(x^2)), which hip.reduce_l2's
+// own description spells out, so it expands to mul + reduce_sum + square root.
+//
+// The square root is reciprocal(rsqrt(x)), because TOSA has no sqrt either;
+// this is the expansion SqrtConverter already uses for hip.sqrt. It stays
+// correct on an all-zero reduction, where rsqrt(0) is +inf and
+// reciprocal(+inf) is 0, which is the norm ONNX asks for.
+//
+// The squaring is a plain tosa.mul of the data with itself rather than a
+// tosa.pow, so it holds for every float type TOSA accepts instead of only
+// those with a pow lowering.
+//
+// The square and the sum are computed in f32 even for an f16 input, and the
+// result narrowed at the end. Squaring in f16 overflows well inside the range
+// ONNX considers valid: 300 is an ordinary f16, but 300^2 is 90000 against an
+// f16 maximum of 65504, so the norm of a single 300 would come back +inf
+// instead of 300. reduce_l2_f16_kernel in lib/Runtime/Kernels/hip is the
+// contract to match -- it widens with __half2float, squares and accumulates
+// in float, and narrows once with __float2half at the end -- and a fused
+// kernel that disagreed with it would be a silent numerical difference rather
+// than a failure.
+//
+// Before:
+//   %r = hip.reduce_l2(%ctx) ins(%data, %axes : tensor<2x8xf16>, tensor<1xi64>)
+//                            outs(%init : tensor<2x1xf16>) {keepdims = 1}
+//
+// After:
+//   %wide = tosa.cast %data                     : tensor<2x8xf16> -> 2x8xf32
+//   %sq   = tosa.mul %wide, %wide, %shift       : tensor<2x8xf32>
+//   %sum  = tosa.reduce_sum %sq {axis = 1}      : tensor<2x1xf32>
+//   %rs   = tosa.rsqrt %sum                     : tensor<2x1xf32>
+//   %norm = tosa.reciprocal %rs                 : tensor<2x1xf32>
+//   %r    = tosa.cast %norm                     : tensor<2x1xf32> -> 2x1xf16
+struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
+  using OpConversionPattern<ReduceL2Op>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ReduceL2Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    Value data;
+    int32_t axis = 0;
+    bool keepdims = true;
+    bool identity = false;
+    if (failed(matchHipReduce(op, adaptor.getData(), adaptor.getAxes(),
+                              op.getKeepdims(), op.getNoopWithEmptyAxes(),
+                              rewriter, resultType, data, axis, keepdims,
+                              identity)))
+      return failure();
+    // noop_with_empty_axes reduces nothing, so ONNX defines the result as the
+    // input itself rather than as an elementwise norm.
+    if (identity) {
+      rewriter.replaceOp(op, data);
+      return success();
+    }
+    auto dataType = cast<RankedTensorType>(data.getType());
+    if (!isTosaExpressibleFloat(dataType.getElementType()))
+      return rewriter.notifyMatchFailure(
+          op, "tosa reduce_l2 lowering requires a tosa-expressible float "
+              "tensor");
+
+    Location loc = op.getLoc();
+    // Widen a narrower float so the square and the accumulation happen in f32,
+    // matching the runtime kernel. f32 input needs no cast.
+    Type f32 = rewriter.getF32Type();
+    Type elementType = dataType.getElementType();
+    bool widen = elementType != f32;
+    Value wide = data;
+    RankedTensorType wideTy = dataType;
+    if (widen) {
+      wideTy = dataType.clone(f32);
+      wide = tosa::CastOp::create(rewriter, loc, wideTy, data);
+    }
+
+    Value squared = tosa::MulOp::create(rewriter, loc, wideTy, wide, wide,
+                                        createZeroMulShift(rewriter, loc));
+    auto reducedTy = keepdimsReduceType(wideTy, axis);
+    Value sum = tosa::ReduceSumOp::create(rewriter, loc, reducedTy, squared,
+                                          rewriter.getI32IntegerAttr(axis));
+    Value rsqrt = tosa::RsqrtOp::create(rewriter, loc, reducedTy, sum);
+    Value norm = tosa::ReciprocalOp::create(rewriter, loc, reducedTy, rsqrt);
+    if (widen)
+      norm = tosa::CastOp::create(rewriter, loc,
+                                  keepdimsReduceType(dataType, axis), norm);
+    replaceWithTosaReduce(op, norm, resultType, keepdims, rewriter);
     return success();
   }
 };
@@ -1296,9 +1479,123 @@ LogicalResult matchQdqCommon(Operation *op, Value input, Value scale,
   return success();
 }
 
+// The i'th element of an ONNX Range, start + i * delta, evaluated in the
+// result element type.
+Value emitRangeConst(ConversionPatternRewriter &rewriter, Location loc,
+                     RankedTensorType type, DenseElementsAttr start,
+                     DenseElementsAttr delta) {
+  int64_t length = type.getDimSize(0);
+  DenseElementsAttr values;
+  if (auto floatType = dyn_cast<FloatType>(type.getElementType())) {
+    APFloat first = start.getSplatValue<APFloat>();
+    APFloat step = delta.getSplatValue<APFloat>();
+    SmallVector<APFloat> elements;
+    for (int64_t i : llvm::seq<int64_t>(length)) {
+      APFloat index(floatType.getFloatSemantics());
+      index.convertFromAPInt(APInt(64, i), /*IsSigned=*/true,
+                             APFloat::rmNearestTiesToEven);
+      elements.push_back(first + step * index);
+    }
+    values = DenseElementsAttr::get(type, elements);
+  } else {
+    APInt first = start.getSplatValue<APInt>();
+    APInt step = delta.getSplatValue<APInt>();
+    SmallVector<APInt> elements;
+    for (int64_t i : llvm::seq<int64_t>(length))
+      elements.push_back(first + step * APInt(first.getBitWidth(), i));
+    values = DenseElementsAttr::get(type, elements);
+  }
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+// [0, 1, ..., length-1] in the range's element type.
+Value emitIotaConst(ConversionPatternRewriter &rewriter, Location loc,
+                    RankedTensorType type) {
+  int64_t length = type.getDimSize(0);
+  DenseElementsAttr values;
+  if (auto floatType = dyn_cast<FloatType>(type.getElementType())) {
+    SmallVector<APFloat> elements;
+    for (int64_t i : llvm::seq<int64_t>(length)) {
+      APFloat index(floatType.getFloatSemantics());
+      index.convertFromAPInt(APInt(64, i), /*IsSigned=*/true,
+                             APFloat::rmNearestTiesToEven);
+      elements.push_back(index);
+    }
+    values = DenseElementsAttr::get(type, elements);
+  } else {
+    unsigned width = type.getElementType().getIntOrFloatBitWidth();
+    SmallVector<APInt> elements;
+    for (int64_t i : llvm::seq<int64_t>(length))
+      elements.push_back(APInt(width, i));
+    values = DenseElementsAttr::get(type, elements);
+  }
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+// ONNX Range has no TOSA counterpart -- TOSA has no iota or arange. The
+// sequence is affine in the index (output[i] = start + i * delta), so a range
+// whose length is statically known is start + delta * iota, and constant
+// bounds collapse that to a single tosa.const. The limit operand is dropped:
+// the trip count it determines is already the result extent.
+//
+// A dynamic length has no TOSA spelling, so it is rejected rather than lowered
+// to invalid TOSA.
+struct RangeConverter final : public OpConversionPattern<RangeOp> {
+  using OpConversionPattern<RangeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RangeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || resultType.getRank() != 1 ||
+        !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static 1-D result");
+    // ONNX admits an empty Range, but a TOSA number tensor cannot be empty.
+    if (resultType.getDimSize(0) <= 0)
+      return rewriter.notifyMatchFailure(op, "empty range is not a TOSA value");
+
+    Type elemType = resultType.getElementType();
+    if (!isa<FloatType, IntegerType>(elemType) || elemType.isUnsignedInteger())
+      return rewriter.notifyMatchFailure(op, "unsupported range element type");
+
+    Location loc = op.getLoc();
+    DenseElementsAttr startAttr, deltaAttr;
+    if (matchPattern(adaptor.getStart(), m_Constant(&startAttr)) &&
+        matchPattern(adaptor.getDelta(), m_Constant(&deltaAttr)) &&
+        startAttr.isSplat() && deltaAttr.isSplat()) {
+      rewriter.replaceOp(
+          op, emitRangeConst(rewriter, loc, resultType, startAttr, deltaAttr));
+      return success();
+    }
+
+    // Runtime bounds: scale the iota instead of folding it. ONNX Range bounds
+    // are scalars, so reshaping them to rank 1 is all TOSA broadcasting needs.
+    for (Value bound : {adaptor.getStart(), adaptor.getDelta()}) {
+      auto boundType = dyn_cast<RankedTensorType>(bound.getType());
+      if (!boundType || boundType.getNumElements() != 1 ||
+          boundType.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "expected scalar range bounds");
+    }
+    Value start = reshapeTo(adaptor.getStart(), {1}, rewriter);
+    Value delta = reshapeTo(adaptor.getDelta(), {1}, rewriter);
+    Value scaled =
+        emitTosaMul(rewriter, loc, emitIotaConst(rewriter, loc, resultType),
+                    delta, resultType);
+    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, scaled, start);
+    return success();
+  }
+};
+
 // hip.cast is 1-1 with tosa.cast when both endpoints are signed or float.
 // Float->int and any unsigned endpoint go through rocMLIR tosa.custom, because
 // rock-tosa-to-elementwise rejects tosa.cast float->int.
+//
+// ONNX CastLike shares this path: simplify-onnx rewrites it to a plain
+// onnx.Cast (the target dtype is carried by the result type, and the type
+// donor is never read), which convert-onnx-to-hip lowers to hip.cast.
 struct CastConverter final : public OpConversionPattern<CastOp> {
   using OpConversionPattern<CastOp>::OpConversionPattern;
 
@@ -1836,6 +2133,423 @@ Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
       rewriter, loc, type,
       DenseElementsAttr::get(type, rewriter.getIntegerAttr(elemType, value)));
 }
+
+// hip.tile repeats each dimension, which is exactly tosa.tile. The one
+// difference is where the repeat counts live: hip carries them as an operand
+// (ONNX Tile takes `repeats` as an input), while TOSA wants a !tosa.shape, so
+// the operand has to be constant to convert at all.
+static bool isTosaExpressibleTile(hip::TileOp op) {
+  if (op->getNumResults() != 1)
+    return false;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  if (!resultType || !resultType.hasStaticShape() || !inputType ||
+      !inputType.hasStaticShape())
+    return false;
+  if (resultType.getElementType() != inputType.getElementType())
+    return false;
+
+  SmallVector<int64_t, 4> repeats;
+  if (!extractConstantInts(op.getRepeats(), repeats))
+    return false;
+  if (static_cast<int64_t>(repeats.size()) != inputType.getRank() ||
+      inputType.getRank() != resultType.getRank())
+    return false;
+  // A zero repeat empties the dimension. TOSA's multiples must be positive, so
+  // that case has no spelling here rather than a wrong one.
+  for (auto [repeat, in, out] :
+       llvm::zip_equal(repeats, inputType.getShape(), resultType.getShape())) {
+    if (repeat < 1 || in * repeat != out)
+      return false;
+  }
+  return true;
+}
+
+struct TileConverter final : public OpConversionPattern<hip::TileOp> {
+  using OpConversionPattern<hip::TileOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::TileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleTile(op))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible tile");
+
+    auto resultType = cast<RankedTensorType>(op.getResult(0).getType());
+    // Read the operand the legality predicate read, not the adaptor's: the
+    // repeats only become a multiples attribute, never an operand of the op
+    // being built, so there is nothing to gain from the remapped value and a
+    // materialization standing in its place would make the extraction fail
+    // here after the predicate had already claimed the op.
+    SmallVector<int64_t, 4> repeats;
+    if (!extractConstantInts(op.getRepeats(), repeats))
+      return rewriter.notifyMatchFailure(op, "repeats must be constant");
+    rewriter.replaceOp(op, tileMultiples(adaptor.getInput(), repeats,
+                                         resultType.getShape(), rewriter,
+                                         op.getLoc()));
+    return success();
+  }
+};
+
+// hip.pad carries ONNX Pad: `pads` as an operand, an optional scalar fill, an
+// optional `axes` subset, and a mode. tosa.pad is the constant-mode case of
+// that and nothing else -- there is no TOSA reflect, edge or wrap -- so only
+// mode="constant" converts.
+//
+// The two also disagree on layout. ONNX groups the pads as all the begins
+// followed by all the ends, [x0_begin, x1_begin, .., x0_end, x1_end, ..],
+// while TOSA interleaves them per dimension, [d0_lo, d0_hi, d1_lo, d1_hi, ..],
+// so the operand is transposed into place rather than copied.
+//
+// Negative pads are excluded: ONNX added them as a crop in opset 18 and TOSA
+// accepts them, but the result dimension then stops being inferable from the
+// operands alone, which is what the shape check below relies on.
+static bool matchTosaPad(hip::PadOp op, SmallVectorImpl<int64_t> &interleaved) {
+  interleaved.clear();
+  if (op->getNumResults() != 1)
+    return false;
+  if (op.getMode() != "constant")
+    return false;
+
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  auto dataType = dyn_cast<RankedTensorType>(op.getData().getType());
+  if (!resultType || !resultType.hasStaticShape() || !dataType ||
+      !dataType.hasStaticShape())
+    return false;
+  int64_t rank = dataType.getRank();
+  if (rank < 1 || resultType.getRank() != rank)
+    return false;
+
+  SmallVector<int64_t, 8> pads;
+  if (!extractConstantInts(op.getPads(), pads))
+    return false;
+
+  // Without `axes` the pads cover every dimension in order; with it they cover
+  // only the listed ones and the rest stay unpadded. An `axes` that is present
+  // but empty means every dimension as well, not none: wrap_pad selects the
+  // per-axis layout on axes_host.empty(), and it fills axes_host only when the
+  // operand is both present and non-empty, so an absent operand and a
+  // zero-length one arrive there alike.
+  SmallVector<int64_t, 4> axes;
+  if (op.getAxes() && !extractConstantInts(op.getAxes(), axes))
+    return false;
+  if (axes.empty())
+    for (int64_t i = 0; i < rank; ++i)
+      axes.push_back(i);
+  if (static_cast<int64_t>(pads.size()) !=
+      2 * static_cast<int64_t>(axes.size()))
+    return false;
+
+  int64_t numAxes = axes.size();
+  SmallVector<int64_t, 8> lo(rank, 0), hi(rank, 0);
+  SmallVector<bool, 8> padded(rank, false);
+  for (int64_t i = 0; i < numAxes; ++i) {
+    int64_t axis = axes[i];
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return false;
+    // A repeated axis would silently drop one of the two paddings. Reading
+    // lo/hi back would miss the repeat when the earlier pad was (0, 0), so the
+    // axes seen are tracked separately.
+    if (padded[axis])
+      return false;
+    padded[axis] = true;
+    if (pads[i] < 0 || pads[i + numAxes] < 0)
+      return false;
+    lo[axis] = pads[i];
+    hi[axis] = pads[i + numAxes];
+  }
+
+  for (int64_t d = 0; d < rank; ++d) {
+    if (dataType.getDimSize(d) + lo[d] + hi[d] != resultType.getDimSize(d))
+      return false;
+    interleaved.push_back(lo[d]);
+    interleaved.push_back(hi[d]);
+  }
+  return true;
+}
+
+// tosa.pad takes the fill as a one-element tensor operand. hip carries it as a
+// rank-0 tensor, so it is rematerialized as a TOSA constant instead of being
+// reshaped, which means it has to be readable here. Only the output matching
+// `elementType` is written; an absent operand is ONNX's default fill of zero.
+// Both the legality predicate and the converter go through this, so an op is
+// never claimed on terms the rewrite cannot then meet.
+static bool matchPadConstant(hip::PadOp op, Type elementType, double &fpFill,
+                             int64_t &intFill) {
+  fpFill = 0.0;
+  intFill = 0;
+  bool isFloat = isa<FloatType>(elementType);
+  if (!isFloat && !isa<IntegerType>(elementType))
+    return false;
+
+  Value cval = op.getConstantValue();
+  if (!cval)
+    return true;
+
+  if (isFloat) {
+    DenseFPElementsAttr dense;
+    if (matchPattern(cval, m_Constant(&dense)) && dense.isSplat()) {
+      fpFill = dense.getSplatValue<APFloat>().convertToDouble();
+      return true;
+    }
+    FloatAttr scalar;
+    if (matchPattern(cval, m_Constant(&scalar))) {
+      fpFill = scalar.getValueAsDouble();
+      return true;
+    }
+    return false;
+  }
+
+  // A splat collapses to its single value whatever its extent, which is what
+  // the float path above already accepts. Requiring exactly one element here
+  // instead would decline an integer fill spelled dense<5> : tensor<4xi32>
+  // while converting the f32 spelling of the same thing.
+  SmallVector<int64_t, 1> ints;
+  if (!extractConstantInts(cval, ints) || ints.empty())
+    return false;
+  if (!llvm::all_equal(ints))
+    return false;
+  intFill = ints.front();
+  return true;
+}
+
+static bool isTosaExpressiblePad(hip::PadOp op) {
+  SmallVector<int64_t, 8> interleaved;
+  if (!matchTosaPad(op, interleaved))
+    return false;
+  // matchTosaPad has already established the result is a ranked tensor.
+  Type elementType =
+      cast<RankedTensorType>(op.getResult(0).getType()).getElementType();
+  double fpFill;
+  int64_t intFill;
+  return matchPadConstant(op, elementType, fpFill, intFill);
+}
+
+struct PadConverter final : public OpConversionPattern<hip::PadOp> {
+  using OpConversionPattern<hip::PadOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::PadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<int64_t, 8> interleaved;
+    if (!matchTosaPad(op, interleaved))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible pad");
+
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult(0).getType());
+    Type elementType = resultType.getElementType();
+    auto padConstType = RankedTensorType::get({1}, elementType);
+
+    double fpFill;
+    int64_t intFill;
+    if (!matchPadConstant(op, elementType, fpFill, intFill))
+      return rewriter.notifyMatchFailure(
+          op, "pad constant_value must be a scalar constant");
+    Value padConst = isa<FloatType>(elementType)
+                         ? createSplatFloat(rewriter, loc, padConstType, fpFill)
+                         : createSplatInt(rewriter, loc, padConstType, intFill);
+
+    rewriter.replaceOpWithNewOp<tosa::PadOp>(
+        op, resultType, adaptor.getData(),
+        createConstShape(rewriter, loc, interleaved), padConst);
+    return success();
+  }
+};
+
+// hip.constant carries a statically-shaped constant from the importer to
+// hip-externalize-constants, which is the only pass allowed to choose between
+// inline and external storage. Only the inline form has data to hand to TOSA;
+// the file-backed and memory-address forms name a byte range that nothing has
+// read yet, so there is nothing to put in a tosa.const and they decline.
+//
+// This is a coverage op rather than a live one today. The ONNX-to-HIP pipeline
+// externalizes every carrier and then runs VerifyNoConstantCarriersPass, which
+// fails the compile if one survives, so a carrier does not normally reach this
+// pass at all. It matters the moment a constant does land inside a rock.kernel,
+// because rocMLIR is handed that function on its own and knows no hip op.
+static bool isTosaExpressibleConstant(hip::ConstantOp op) {
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return false;
+  // tosa.const takes the attribute as-is, so it has to be an elements
+  // attribute whose type already matches the result.
+  auto value = dyn_cast_or_null<DenseElementsAttr>(op.getValueAttr());
+  if (!value || value.getType() != resultType)
+    return false;
+  Type elementType = resultType.getElementType();
+  return isa<FloatType>(elementType) || isa<IntegerType>(elementType);
+}
+
+struct ConstantConverter final : public OpConversionPattern<hip::ConstantOp> {
+  using OpConversionPattern<hip::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleConstant(op))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible constant");
+
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    rewriter.replaceOpWithNewOp<tosa::ConstOp>(
+        op, resultType, cast<DenseElementsAttr>(op.getValueAttr()));
+    return success();
+  }
+};
+
+// TOSA resizes with an integer rational scale rather than a float one. The
+// input coordinate it samples for output index `o` on an axis is
+//
+//   in = (o * scale_d + offset) / scale_n
+//
+// and it derives the output extent back out of that, requiring
+//
+//   out - 1 == ((in_extent - 1) * scale_n - offset + border) / scale_d
+//
+// to divide exactly. Each ONNX coordinate_transformation_mode is an affine map
+// from `o` to the input coordinate, so each one is just a choice of the triple.
+// Writing OUT and IN for the extents of one axis:
+//
+//   asymmetric      in = o * IN/OUT
+//                   n = OUT, d = IN, offset = 0
+//   half_pixel      in = (o + 0.5) * IN/OUT - 0.5
+//                   n = 2*OUT, d = 2*IN, offset = IN - OUT
+//   align_corners   in = o * (IN-1)/(OUT-1)
+//                   n = OUT-1, d = IN-1, offset = 0
+//
+// half_pixel doubles the ratio because its offset is a half-integer otherwise;
+// TOSA takes integers only, so the whole triple is scaled by two instead of
+// rounding, which keeps the map exact. align_corners needs both extents above
+// one, or its ratio has a zero in it.
+//
+// The border is not a fourth choice -- it is whatever makes TOSA's derived
+// extent come back as OUT, so solving the relation above for it makes the
+// divisibility hold by construction rather than by luck.
+struct ResizeAxisParams {
+  int64_t scaleN, scaleD, offset, border;
+};
+
+static std::optional<ResizeAxisParams>
+planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
+  if (inExtent <= 0 || outExtent <= 0)
+    return std::nullopt;
+
+  ResizeAxisParams p;
+  switch (coordTransform) {
+  case 0: // half_pixel
+    p.scaleN = 2 * outExtent;
+    p.scaleD = 2 * inExtent;
+    p.offset = inExtent - outExtent;
+    break;
+  case 1: // asymmetric
+    p.scaleN = outExtent;
+    p.scaleD = inExtent;
+    p.offset = 0;
+    break;
+  case 2: // align_corners
+    if (inExtent < 2 || outExtent < 2)
+      return std::nullopt;
+    p.scaleN = outExtent - 1;
+    p.scaleD = inExtent - 1;
+    p.offset = 0;
+    break;
+  default:
+    return std::nullopt;
+  }
+  p.border = (outExtent - 1) * p.scaleD + p.offset - (inExtent - 1) * p.scaleN;
+  // tosa.resize requires every scale value to be positive.
+  if (p.scaleN <= 0 || p.scaleD <= 0)
+    return std::nullopt;
+  return p;
+}
+
+// hip.resize is (N, C, D_1..D_k) with the spatial axes trailing; tosa.resize is
+// 4-D NHWC with exactly two spatial axes, so only the k == 2 case maps and it
+// needs a transpose on each side.
+//
+// Nearest is declined rather than lowered. TOSA's NEAREST_NEIGHBOR breaks a tie
+// upward, hip.resize carries ONNX's round_prefer_floor, which breaks it
+// downward, and the tie is reachable: an asymmetric 2x upsample lands exactly
+// halfway on every odd output index, so the two disagree on half the output.
+//
+// Integers are declined for a different reason: TOSA's integer BILINEAR leaves
+// the result scaled by scale_y_n * scale_x_n for a following rescale to undo,
+// and this pass emits no such rescale. ONNX Resize on a real model is float.
+static bool isTosaExpressibleResize(hip::ResizeOp op) {
+  if (op->getNumResults() != 1)
+    return false;
+
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !inputType.hasStaticShape() || !resultType ||
+      !resultType.hasStaticShape())
+    return false;
+  if (inputType.getElementType() != resultType.getElementType())
+    return false;
+
+  Type elementType = resultType.getElementType();
+  if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+    return false;
+
+  // N, C, H, W: the two leading axes are carried through untouched.
+  if (inputType.getRank() != 4 || resultType.getRank() != 4)
+    return false;
+  if (inputType.getDimSize(0) != resultType.getDimSize(0) ||
+      inputType.getDimSize(1) != resultType.getDimSize(1))
+    return false;
+
+  if (op.getMode() != 1)
+    return false;
+  int64_t coordTransform = op.getCoordTransform();
+  return planResizeAxis(inputType.getDimSize(2), resultType.getDimSize(2),
+                        coordTransform)
+             .has_value() &&
+         planResizeAxis(inputType.getDimSize(3), resultType.getDimSize(3),
+                        coordTransform)
+             .has_value();
+}
+
+struct ResizeConverter final : public OpConversionPattern<hip::ResizeOp> {
+  using OpConversionPattern<hip::ResizeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ResizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleResize(op))
+      return rewriter.notifyMatchFailure(op, "not a tosa-expressible resize");
+
+    Location loc = op.getLoc();
+    auto inputType = cast<RankedTensorType>(op.getInput().getType());
+    auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+    Type elementType = resultType.getElementType();
+
+    int64_t coordTransform = op.getCoordTransform();
+    ResizeAxisParams y = *planResizeAxis(
+        inputType.getDimSize(2), resultType.getDimSize(2), coordTransform);
+    ResizeAxisParams x = *planResizeAxis(
+        inputType.getDimSize(3), resultType.getDimSize(3), coordTransform);
+
+    Value nhwc = transposePerm(adaptor.getInput(), {0, 2, 3, 1}, rewriter, loc);
+    auto resizedType = RankedTensorType::get(
+        {resultType.getDimSize(0), resultType.getDimSize(2),
+         resultType.getDimSize(3), resultType.getDimSize(1)},
+        elementType);
+    // Bound rather than passed inline: C++ leaves the evaluation order of call
+    // arguments unspecified, so building these in the argument list would let
+    // the order they are emitted in vary by host compiler.
+    Value scale = createConstShape(rewriter, loc,
+                                   {y.scaleN, y.scaleD, x.scaleN, x.scaleD});
+    Value offset = createConstShape(rewriter, loc, {y.offset, x.offset});
+    Value border = createConstShape(rewriter, loc, {y.border, x.border});
+    Value resized = tosa::ResizeOp::create(
+                        rewriter, loc, resizedType, nhwc, scale, offset, border,
+                        tosa::ResizeModeAttr::get(rewriter.getContext(),
+                                                  tosa::ResizeMode::BILINEAR))
+                        .getResult();
+    rewriter.replaceOp(op, transposePerm(resized, {0, 3, 1, 2}, rewriter, loc));
+    return success();
+  }
+};
 
 // ONNX Gather indexes one axis with an indices tensor of arbitrary rank. TOSA
 // gather has the canonical batched form [N,K,C] x [N,W] -> [N,W,C]. Flatten
@@ -3289,9 +4003,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, WhereOp,
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
-        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp, RopeOp,
-        GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp, RangeOp,
+        RopeOp, GqaOp, MultiHeadAttentionOp, RmsNormOp, LayerNormOp,
+        InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -3301,6 +4015,43 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
     conversion.addDynamicallyLegalOp<ExpandOp>(
         [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+    // The four reductions this pass added are claimed by element type and
+    // structure rather than outright, so an unsigned max/min, an f64 norm or a
+    // multi-axis reduction -- all of which ONNX permits and OnnxToHip
+    // preserves -- stays a hip op for the runtime lowering instead of failing
+    // this pass and taking the fusible ops in the same function with it. The
+    // predicates run matchHipReduceCore, which is the same structural match
+    // the patterns run, so nothing is claimed that a pattern then refuses.
+    //
+    // reduce_sum and reduce_mean stay outright illegal: that is pre-existing
+    // behaviour with its own coverage, and changing it is not in this change's
+    // scope, though the same argument applies to them.
+    conversion.addDynamicallyLegalOp<ReduceMaxOp>([](ReduceMaxOp op) {
+      return !isTosaExpressibleReduce(op, isTosaReduceType);
+    });
+    conversion.addDynamicallyLegalOp<ReduceMinOp>([](ReduceMinOp op) {
+      return !isTosaExpressibleReduce(op, isTosaReduceType);
+    });
+    conversion.addDynamicallyLegalOp<ReduceProdOp>([](ReduceProdOp op) {
+      return !isTosaExpressibleReduce(op, isTosaReduceType);
+    });
+    conversion.addDynamicallyLegalOp<ReduceL2Op>([](ReduceL2Op op) {
+      return !isTosaExpressibleReduce(op, isTosaExpressibleFloat);
+    });
+    // hip.tile and hip.pad both carry shape information as operands rather
+    // than attributes, so whether they convert depends on that operand being
+    // constant -- and hip.pad additionally on its mode. Neither can be claimed
+    // outright: a reflect-mode pad or a computed `repeats` has to stay a hip op
+    // for the runtime lowering instead of failing this pass and taking the
+    // fusible ops in the same function with it.
+    conversion.addDynamicallyLegalOp<hip::TileOp>(
+        [](hip::TileOp op) { return !isTosaExpressibleTile(op); });
+    conversion.addDynamicallyLegalOp<hip::PadOp>(
+        [](hip::PadOp op) { return !isTosaExpressiblePad(op); });
+    conversion.addDynamicallyLegalOp<hip::ResizeOp>(
+        [](hip::ResizeOp op) { return !isTosaExpressibleResize(op); });
+    conversion.addDynamicallyLegalOp<hip::ConstantOp>(
+        [](hip::ConstantOp op) { return !isTosaExpressibleConstant(op); });
     conversion.addDynamicallyLegalOp<tensor::CollapseShapeOp>(
         [](tensor::CollapseShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExpandShapeOp>(
@@ -3311,6 +4062,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     RewritePatternSet patterns(ctx);
     patterns.add<
         ConvConverter, MatMulConverter, GemmConverter, TransposeConverter,
+        TileConverter, PadConverter, ResizeConverter, ConstantConverter,
         ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
         DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
@@ -3331,10 +4083,14 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
         SqrtConverter, SoftplusConverter, WhereConverter, LeakyReluConverter,
-        SoftmaxConverter, ReduceSumConverter, ReduceMeanConverter,
-        CastConverter, DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, RopeConverter, GqaConverter,
-        MhaConverter, RmsNormConverter, LayerNormConverter,
+        SoftmaxConverter, ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
+        ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
+        ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
+        ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
+        ReduceMeanConverter, ReduceL2Converter, CastConverter,
+        DequantizeLinearConverter, QuantizeLinearConverter,
+        MatMulNBitsConverter, GatherConverter, RangeConverter, RopeConverter,
+        GqaConverter, MhaConverter, RmsNormConverter, LayerNormConverter,
         InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
