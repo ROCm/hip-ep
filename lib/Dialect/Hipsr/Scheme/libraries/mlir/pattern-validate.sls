@@ -21,8 +21,8 @@
     ;; Rule: Function name must be an identifier
     (validate-ast-match-function-name ast-rec)
 
-    ;; Rule: Root variable must be an identifier
-    (validate-ast-match-root-var ast-rec)
+    ;; Rule: Root variable must be an identifier (checked before normalization)
+    (validate-root-var-is-identifier ast-rec)
 
     ;; Normalization: match field from list to vector (enables indexed access in Phase 3)
     (normalize-ast-match-to-vector ast-rec)
@@ -35,8 +35,11 @@
 
     ;; Rule: All identifiers in match operations must start with %
     ;; Rule: Result variables must be unique across all operations (FATAL if violated)
-    ;; Rule: Root variable must appear as a result in at least one match operation
     (validate-match-operations ast-rec)
+
+    ;; Rule: Root variable must appear in results (after normalization)
+    ;; Cache: root-op-index, root-result-idx, root-op-name for codegen
+    (validate-and-cache-root-var ast-rec)
 
     ;; TODO: Document specific validation rules for rewrite operations
     (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
@@ -55,7 +58,7 @@
       (syntax-violation 'validate-ast "Function name must be an identifier"
                        (ast-pattern-expand-function-name ast-rec))))
 
-  (define (validate-ast-match-root-var ast-rec)
+  (define (validate-root-var-is-identifier ast-rec)
     (unless (identifier? (ast-pattern-expand-root-var ast-rec))
       (syntax-violation 'validate-ast "Root variable must be an identifier"
                        (ast-pattern-expand-root-var ast-rec))))
@@ -95,8 +98,7 @@
 
   (define (validate-match-operations ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
-    (validate-no-duplicate-result-variables ast-rec)
-    (validate-root-var-is-result ast-rec))
+    (validate-no-duplicate-result-variables ast-rec))
 
   (define (validate-match-identifiers-start-with-% ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
@@ -122,9 +124,10 @@
                                 "Duplicate result variable" var))
                             (hashtable-set! seen-results var #t))))))
 
-  (define (validate-root-var-is-result ast-rec)
+  (define (validate-and-cache-root-var ast-rec)
     ;; Rule: Root variable must appear as a result in at least one match operation
-    ;; Cache: Store root-op-index and root-result-idx for codegen phase
+    ;; Cache: Store root-op-index, root-result-idx, root-op-name for codegen phase
+    ;; Must be called AFTER normalization (needs match vector and normalized result-vars)
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
           [root-var (ast-pattern-expand-root-var ast-rec)])
       (let ([found (loop :initially := #f
@@ -147,7 +150,7 @@
               (let ([root-op (vector-ref match-vec (car found))])
                 (ast-pattern-expand-root-op-name-set! ast-rec
                   (ast-match-expand-op-name root-op))))
-            (syntax-violation 'validate-root-var-is-result
+            (syntax-violation 'validate-and-cache-root-var
               "Root variable not found in any match operation result" root-var)))))
 
   ;;-----------------------------------------------------------------------
