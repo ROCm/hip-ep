@@ -124,6 +124,8 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines CMAKE_C_COMPILER=${{ runner.workspace }}/llvm-install/bin/clang-cl.exe \
+            --cmake_extra_defines CMAKE_CXX_COMPILER=${{ runner.workspace }}/llvm-install/bin/clang-cl.exe \
             --cmake_extra_defines ENABLE_ROCMLIRTRITON=ON
 
       # -----------------------------------------------------------------------

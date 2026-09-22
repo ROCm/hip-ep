@@ -33,6 +33,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>")
   endif()
 
   option(USE_BINSKIM_COMPLIANT_COMPILE_FLAGS "Prepare HIP EP for BinSkim Binary Analyzer" ON)

@@ -31,8 +31,16 @@ endforeach()
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
 # not idempotent, so the second configure fails with "patch does not apply".
-# Instead we apply the patches ourselves via this helper right after populate,
-# reverse-checking first so a re-run on an already-patched tree is a no-op.
+# Instead we apply the patches ourselves via this helper right after populate.
+#
+# The patches are a cumulative series: each is generated on top of the previous
+# one and several edit the same file (cmake/triton.cmake) in the same region.
+# That means an intermediate patch can no longer be reverse-checked once a later
+# one is applied (the later patch changed the context its reverse expects), so
+# per-patch reverse-checking is not a reliable "already applied?" test. We
+# instead reverse-check ONLY the last patch: nothing is applied on top of it, so
+# its reverse-check is stable. If the last patch is present the whole series is
+# applied and we skip; otherwise we (re)apply the series from a pristine tree.
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch")
@@ -44,15 +52,32 @@ endforeach()
 
 function(_apply_rocmlirtriton_patch src_dir)
   find_package(Git QUIET REQUIRED)
+
+  # Already applied? Reverse-check only the last patch in the series (see the
+  # note above the patch list). --ignore-whitespace tolerates the CRLF vs LF
+  # mismatch a core.autocrlf checkout introduces on Windows.
+  list(GET _rocmlirtriton_patches_abs -1 _last_patch)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" apply --reverse --check --ignore-whitespace "${_last_patch}"
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  if(_rc EQUAL 0)
+    return()
+  endif()
+
+  # Not (fully) applied. Restore the tree to pristine first so the series
+  # applies cleanly even from a partially-patched state; this only runs on the
+  # cold path (first configure or after a manual reset), so it adds no
+  # steady-state reconfigure churn.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" checkout -- .
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "Failed to restore ${src_dir} before patching")
+  endif()
+
   foreach(_patch IN LISTS _rocmlirtriton_patches_abs)
-    # Already applied? A clean reverse-check means the patch is present.
-    execute_process(
-      COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${_patch}"
-      WORKING_DIRECTORY "${src_dir}"
-      RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
-    if(_rc EQUAL 0)
-      continue()
-    endif()
     execute_process(
       COMMAND "${GIT_EXECUTABLE}" apply "${_patch}"
       WORKING_DIRECTORY "${src_dir}"
@@ -156,6 +181,28 @@ if(NOT BUILD_MOCK_RUNTIME)
     message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
     list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
     list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
+
+    # hip-config-amd.cmake attaches the compiler-rt builtins lib to hip::host /
+    # hip::device by querying `${HIP_CXX_COMPILER} -print-libgcc-file-name
+    # --rtlib=compiler-rt`, defaulting HIP_CXX_COMPILER to CMAKE_CXX_COMPILER.
+    # On Windows CMAKE_CXX_COMPILER is often an external LLVM/clang-cl built
+    # without compiler-rt, so that query returns a clang_rt.builtins path that
+    # does not exist and every HIP link (custom kernels, hipgpu.dll) fails with
+    # "missing and no known rule to make it". TheRock's own clang ships a
+    # matching compiler-rt, so point HIP_CXX_COMPILER at it (unless the user
+    # already set one) to resolve a builtins lib that actually exists.
+    if(WIN32 AND NOT HIP_CXX_COMPILER)
+      find_program(_therock_hip_clang
+        NAMES clang++ clang++.exe
+        HINTS "${THEROCK_DIST}/bin"
+        NO_DEFAULT_PATH)
+      if(_therock_hip_clang)
+        set(HIP_CXX_COMPILER "${_therock_hip_clang}"
+            CACHE FILEPATH "Compiler hip-config queries for compiler-rt builtins")
+        message(STATUS "[onnx-hipdnn-ep] HIP_CXX_COMPILER (for compiler-rt "
+          "builtins resolution): ${HIP_CXX_COMPILER}")
+      endif()
+    endif()
   endif()
 endif()
 
