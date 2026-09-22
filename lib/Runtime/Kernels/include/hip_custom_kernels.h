@@ -3204,6 +3204,29 @@ HIP_KERNEL_API int hip_conv_transpose(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* =========================================================================
+ * ONNX Gemm (custom kernel, wrap_gemm ABI)
+ * =========================================================================
+ *
+ * Y = alpha * op(A) * op(B) + beta * C
+ *
+ * All matrices are row-major (ONNX). op(A) is [M,K] (transA=0 => A is [M,K]
+ * with lda=K; transA=1 => A is [K,M] with lda=M). op(B) is [K,N] (transB=0 =>
+ * B is [K,N] ldb=N; transB=1 => B is [N,K] ldb=K). C is [cDim0, cDim1] and
+ * unidirectional-broadcastable to [M,N]; pass C=NULL / beta=0 when absent.
+ *
+ * type_code matches HipToLLVM GemmOpLowering:
+ *   0 = float16, 1 = float32, 2 = float64, 3 = bfloat16
+ *
+ * Returns 0 on success. Returns -1 when this kernel cannot serve the problem
+ * (wave64 WMMA, unsupported dtype, etc.) so wrap_gemm can fall back to
+ * hipBLASLt. Other non-zero values are HIP launch failures.
+ */
+HIP_KERNEL_API int hip_gemm(void *stream, const void *A, const void *B,
+                            const void *C, void *Y, int M, int N, int K,
+                            float alpha, float beta, int transA, int transB,
+                            int type_code, int cDim0, int cDim1);
+
 #ifdef __cplusplus
 }
 #endif

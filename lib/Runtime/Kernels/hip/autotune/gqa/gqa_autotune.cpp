@@ -783,6 +783,10 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
   const fbs::GqaHeadDim hd = headDimClass(req->head_dim);
   if (t.loaded && hd != fbs::GqaHeadDim::Any) {
     const fbs::GqaPhase phase = prefillPhase(req->variant);
+    // Prefill always configures an fp16-reading kernel: an int8 cache is
+    // dequantized to fp16 once before it, so the cache dtype does not select a
+    // different config. pointConsistent() rejects any other prefill kv_dtype at
+    // load, so the query and the table agree.
     const fbs::GqaKvDtype dt = fbs::GqaKvDtype::Fp16;
     const float qnh = std::log2(float(std::max(req->num_heads, 1)));
     const float qkh = std::log2(float(std::max(req->kv_num_heads, 1)));

@@ -513,8 +513,11 @@ static int gqa_forward_fused(
       // scan and therefore the split count that wins.
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
-      if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
-          static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+      const bool use_online =
+          hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+              static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online) ||
+          !hip_gqa_autotune_table_loaded();
+      if (use_online) {
         drc = hip_gqa_flash_decode(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -739,8 +742,11 @@ static int gqa_forward_fused(
   const int fused_prefill_version =
       (d == 64 || d128_window_prefill) ? 5 : (d == 128 ? 7 : 8);
   int fp_rc;
-  if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
-      static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+  const bool use_online =
+      hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
+          static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online) ||
+      !hip_gqa_autotune_table_loaded();
+  if (use_online) {
     fp_rc = hip_gqa_flash_prefill(
         stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
         static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),

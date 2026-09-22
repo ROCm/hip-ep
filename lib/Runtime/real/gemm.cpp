@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -673,12 +674,38 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  hipblasLtHandle_t handle =
-      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (!stream) {
+    fprintf(stderr, "wrap_gemm: null stream\n");
+    return -1;
+  }
 
-  if (!handle || !stream) {
+  // Custom kernel (gemm_kernel.hip). Handles C broadcast in the epilogue, so
+  // we skip writeBroadcastC + hipBLASLt when it succeeds.
+  // HIPDNN_EP_GEMM_KERNEL=0 restores the previous hipBLASLt-only path.
+  if (hipdnn_ep_gemm_kernel_enabled() && M <= 2147483647LL &&
+      N <= 2147483647LL && K <= 2147483647LL) {
+    int rc = hip_gemm(stream, A, B, C, output, static_cast<int>(M),
+                      static_cast<int>(N), static_cast<int>(K), alpha, beta,
+                      static_cast<int>(transA), static_cast<int>(transB),
+                      static_cast<int>(typeCode), static_cast<int>(cDim0),
+                      static_cast<int>(cDim1));
+    if (rc == 0) {
+      RUNTIME_DEBUG_LOG(
+          "[REAL] wrap_gemm: custom kernel M=%lld N=%lld K=%lld\n",
+          (long long)M, (long long)N, (long long)K);
+      return 0;
+    }
+    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: custom kernel rc=%d, falling back to "
+                      "hipBLASLt\n",
+                      rc);
+  }
+
+  hipblasLtHandle_t handle =
+      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
+
+  if (!handle) {
     fprintf(stderr, "wrap_gemm: null handle or stream\n");
     return -1;
   }
