@@ -606,11 +606,29 @@ static_assert(kWLdsStride * sizeof(uint32_t) % 16 == 0,
 static_assert(kTileP == kTileCo,
               "one thread reduces one column of both staged tiles");
 
+// Adjacent positions one lane stages in a single request. Positions are the
+// contiguous axis of the activation, so this is the only axis a wider request
+// can cover; the quad a lane assembles runs along k, which is strided.
+constexpr int kXVec = 4;
+static_assert(kWQuads * (kTileP / kXVec) == kWmmaBlock,
+              "one quad and one position group per lane must tile the block");
+
+template <typename T> struct alignas(sizeof(T) * kXVec) qconv_act_vec {
+  T e[kXVec];
+};
+
 // OUT[n, co, p] as in the dot-product kernel, with the reduction issued as
 // 16x16x16 integer matrix ops over the same staged tiles.
 //
 // Grid: (ceil(P/kTileP), ceil(Cout/kTileCo), batch). Block: kWmmaBlock.
-template <typename TAct, int WBits, bool WSigned>
+//
+// Exact says every extent divides its tile, so no staged element and no output
+// element can land outside the operand. That buys two things the general body
+// cannot have: the range guards become constant true, and a lane can stage a
+// whole run of positions as one request instead of guarding each separately.
+// The second is the larger of the two -- the memory unit meters requests, and
+// the staging issues more of them than the matrix ops it feeds.
+template <typename TAct, int WBits, bool WSigned, bool Exact>
 __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
     const TAct *__restrict__ input, const uint8_t *__restrict__ weights,
     const float *__restrict__ weight_scales,
@@ -684,27 +702,57 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
   int32_t cw_part = 0;
 
   for (uint32_t k0 = 0; k0 < ic; k0 += kTileK) {
-#pragma unroll
-    for (int rep = 0; rep < kXQRepeats; ++rep) {
-      const int lin = rep * kWmmaBlock + tid;
-      const int sq = lin / kTileP;
-      const int sp = lin % kTileP;
-      const uint32_t p = p_base + sp;
-      const bool p_ok = p < ss;
-      uint32_t hi = 0;
-      uint32_t lo = 0;
+    if constexpr (Exact) {
+      // A lane owns one quad and kXVec adjacent positions, which covers the
+      // tile exactly once. Reading those positions as one vector is the point:
+      // taking them singly is kXVec requests where one does, and the staging
+      // requests, not the bytes they move, are what the memory unit meters.
+      const int sq = tid / (kTileP / kXVec);
+      const int sp0 = (tid % (kTileP / kXVec)) * kXVec;
+      uint32_t hi[kXVec] = {};
+      uint32_t lo[kXVec] = {};
 #pragma unroll
       for (int i = 0; i < kDotQuad; ++i) {
         const uint32_t k =
             k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(sq, i));
-        const uint32_t v = (k < ic && p_ok)
-                               ? static_cast<uint32_t>(x_n[k * ss + p])
-                               : 0u;
-        hi |= (v >> 8) << (8 * i);
-        lo |= (v & 0xFFu) << (8 * i);
+        const qconv_act_vec<TAct> v =
+            *reinterpret_cast<const qconv_act_vec<TAct> *>(x_n + k * ss +
+                                                           p_base + sp0);
+#pragma unroll
+        for (int j = 0; j < kXVec; ++j) {
+          const uint32_t e = static_cast<uint32_t>(v.e[j]);
+          hi[j] |= (e >> 8) << (8 * i);
+          lo[j] |= (e & 0xFFu) << (8 * i);
+        }
       }
-      xh_lds[sp][sq] = hi;
-      xl_lds[sp][sq] = lo;
+#pragma unroll
+      for (int j = 0; j < kXVec; ++j) {
+        xh_lds[sp0 + j][sq] = hi[j];
+        xl_lds[sp0 + j][sq] = lo[j];
+      }
+    } else {
+#pragma unroll
+      for (int rep = 0; rep < kXQRepeats; ++rep) {
+        const int lin = rep * kWmmaBlock + tid;
+        const int sq = lin / kTileP;
+        const int sp = lin % kTileP;
+        const uint32_t p = p_base + sp;
+        const bool p_ok = p < ss;
+        uint32_t hi = 0;
+        uint32_t lo = 0;
+#pragma unroll
+        for (int i = 0; i < kDotQuad; ++i) {
+          const uint32_t k =
+              k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(sq, i));
+          const uint32_t v = (k < ic && p_ok)
+                                 ? static_cast<uint32_t>(x_n[k * ss + p])
+                                 : 0u;
+          hi |= (v >> 8) << (8 * i);
+          lo |= (v & 0xFFu) << (8 * i);
+        }
+        xh_lds[sp][sq] = hi;
+        xl_lds[sp][sq] = lo;
+      }
     }
 
 #pragma unroll
@@ -715,7 +763,7 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
       const uint32_t co = co_base + sc;
       const uint32_t k = k0 + wq * kWElems;
       const uint32_t word =
-          (co < oc && k < ic)
+          (Exact || (co < oc && k < ic))
               ? reinterpret_cast<const uint32_t *>(weights)[(co * ic + k) /
                                                             kWElems] ^
                     kSignFlip
@@ -776,7 +824,7 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
   for (int j = 0; j < kWFragN; ++j) {
     const int p_local = p_frag0 + j * kWmmaDim + lane16;
     const uint32_t p = p_base + p_local;
-    if (p >= ss)
+    if (!Exact && p >= ss)
       continue;
     const int64_t sx =
         256LL * (sx_hi_lds[0][p_local] + sx_hi_lds[1][p_local]) +
@@ -787,7 +835,7 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
       for (int e = 0; e < 8; ++e) {
         const int co_local = co_frag0 + i * kWmmaDim + 2 * e + pair;
         const uint32_t co = co_base + co_local;
-        if (co >= oc)
+        if (!Exact && co >= oc)
           continue;
         const int32_t sw = cw_lds[0][co_local] + cw_lds[1][co_local];
         const int64_t zw =
@@ -1148,9 +1196,19 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
     const bool wmma_capable =
         dot_capable && offsets_fit && device_has_gfx11_wmma();
 
-#define QCONV_LAUNCH_WMMA(BITS, SIGNED)                                        \
+    // Every extent divides its tile, so the wave-matrix body can drop its
+    // range guards and stage the activation a vector of positions at a time.
+    // The extents put every such run at a multiple of its own width; the
+    // pointer check covers the buffer, which the allocator aligns far past
+    // this but which nothing here guarantees.
+    const bool tiles_exact =
+        (spatial_size % kTileP) == 0 && (out_channels % kTileCo) == 0 &&
+        (in_channels % kTileK) == 0 &&
+        (reinterpret_cast<uintptr_t>(x) % (sizeof(TAct) * kXVec)) == 0;
+
+#define QCONV_LAUNCH_WMMA(BITS, SIGNED, EXACT)                                 \
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qconv_tiled_wmma_kernel<TAct, BITS,       \
-                                                             SIGNED>),         \
+                                                             SIGNED, EXACT>),  \
                      grid, dim3(kWmmaBlock), 0, stream, x, w, ws, wzp, b, y,   \
                      in_channels, out_channels, spatial_size,                  \
                      act_out_scale_ratio, input_zp, inv_output_scale,          \
@@ -1158,10 +1216,14 @@ int launch_qconv(hipStream_t stream, const void *input, const void *weights,
 
 #define QCONV_LAUNCH_TILED_BITS(BITS)                                          \
   do {                                                                         \
-    if (wmma_capable && weight_signed)                                         \
-      QCONV_LAUNCH_WMMA(BITS, true);                                           \
+    if (wmma_capable && weight_signed && tiles_exact)                          \
+      QCONV_LAUNCH_WMMA(BITS, true, true);                                     \
+    else if (wmma_capable && weight_signed)                                    \
+      QCONV_LAUNCH_WMMA(BITS, true, false);                                    \
+    else if (wmma_capable && tiles_exact)                                      \
+      QCONV_LAUNCH_WMMA(BITS, false, true);                                    \
     else if (wmma_capable)                                                     \
-      QCONV_LAUNCH_WMMA(BITS, false);                                          \
+      QCONV_LAUNCH_WMMA(BITS, false, false);                                   \
     else if (dot_capable && weight_signed)                                     \
       QCONV_LAUNCH_TILED(qconv_tiled_dot_kernel, BITS, true);                  \
     else if (dot_capable)                                                      \
