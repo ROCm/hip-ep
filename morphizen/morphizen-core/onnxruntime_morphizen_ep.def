@@ -1,4 +1,4 @@
-LIBRARY onnxruntime_morphizen_ep
+LIBRARY hipgpu
 EXPORTS
     compile_onnx_model_morphizen_ep_v4
     create_ep_context_nodes
@@ -12,4 +12,3 @@ EXPORTS
     morphizen_get_execution_provider_deletor
     get_compiled_model_compatibility_info
     validate_compiled_model_compatibility_info
-    ??_7PassProto@morphizen@@6B@
