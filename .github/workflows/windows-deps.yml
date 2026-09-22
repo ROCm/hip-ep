@@ -19,15 +19,9 @@ on:
       amdgpu_cache_key:
         description: Cache key holding the amdgpu-ep build artifacts.
         value: ${{ jobs.amdgpu.outputs.cache_key }}
-      amdgpu_artifact_name:
-        description: Artifact name holding the amdgpu-ep fallback artifacts.
-        value: ${{ jobs.amdgpu.outputs.artifact_name }}
       oga_cache_key:
         description: Cache key holding the OGA artifact set.
         value: ${{ jobs.oga.outputs.cache_key }}
-      oga_artifact_name:
-        description: Artifact name holding the OGA fallback artifacts.
-        value: ${{ jobs.oga.outputs.artifact_name }}
 
 permissions:
   contents: read
@@ -59,14 +53,8 @@ jobs:
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
-      artifact_name: ${{ steps.artifact-name.outputs.value }}
 
     steps:
-      - name: Compute fallback artifact name
-        id: artifact-name
-        shell: bash
-        run: echo "value=prebuild-amdgpu-artifacts-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
-
       - name: Checkout deps manifest
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -334,12 +322,13 @@ jobs:
           AMDPR_KEY="${AMDPR_KEY// /-}"
           echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
-      - name: Restore amdgpu-artifacts
+      - name: Probe amdgpu-artifacts
         id: cache-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
+          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -495,14 +484,6 @@ jobs:
           path: ${{ runner.workspace }}/amdgpu-artifacts
           key: ${{ steps.key.outputs.value }}
 
-      - name: Upload amdgpu-artifacts fallback
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.artifact-name.outputs.value }}
-          path: ${{ runner.workspace }}/amdgpu-artifacts
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Save sccache directory
         if: always() && steps.cache-amdgpu.outputs.cache-hit != 'true' && github.ref_name == 'main'
         continue-on-error: true
@@ -520,25 +501,20 @@ jobs:
 
     outputs:
       cache_key: ${{ steps.key.outputs.value }}
-      artifact_name: ${{ steps.artifact-name.outputs.value }}
 
     steps:
-      - name: Compute fallback artifact name
-        id: artifact-name
-        shell: bash
-        run: echo "value=prebuild-oga-artifacts-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
-
       - name: Compute cache key
         id: key
         shell: bash
         run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
-      - name: Restore oga-artifacts
+      - name: Probe oga-artifacts
         id: cache-oga
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
+          lookup-only: true
 
       - name: Restore ort-install
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -701,14 +677,6 @@ jobs:
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           key: ${{ steps.key.outputs.value }}
-
-      - name: Upload oga-artifacts fallback
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.artifact-name.outputs.value }}
-          path: ${{ runner.workspace }}/oga-artifacts
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Save sccache directory
         if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'
