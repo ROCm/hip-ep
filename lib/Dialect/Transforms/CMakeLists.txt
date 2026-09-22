@@ -3,7 +3,25 @@
 # ** Licensed under the MIT License.
 ##
 
+# ============================================================================
+# PDLL Pattern Compilation
+# ============================================================================
+# hip-fusion-transform matches and rewrites HIP ops through PDLL patterns
+# compiled into this library as a byte array. See cmake/HipPdllPatterns.cmake
+# for the toolchain discovery and the no-mlir-pdll fallback, and
+# HipFusionTransform.cpp for the accessors it declares.
+include(${CMAKE_SOURCE_DIR}/cmake/HipPdllPatterns.cmake)
+
+hip_add_pdll_patterns(
+  NAME HipFusionTransformPdll
+  ENTRY HipFusionTransformPatterns.pdll
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fusion_pattern
+  SYMBOL hip_pdl_fusion_transform
+  OUT_VAR HIP_FUSION_TRANSFORM_PDL_CPP
+)
+
 add_library(HipDialectTransforms STATIC
+  ${HIP_FUSION_TRANSFORM_PDL_CPP}
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
@@ -12,6 +30,7 @@ add_library(HipDialectTransforms STATIC
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
+  HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
@@ -37,6 +56,12 @@ add_dependencies(HipDialectTransforms
   HipPassesIncGen
   HipSchemas
 )
+
+# Only defined when mlir-pdll was found; the fallback writes the byte array at
+# configure time and needs no build-time step.
+if(TARGET HipFusionTransformPdll)
+  add_dependencies(HipDialectTransforms HipFusionTransformPdll)
+endif()
 
 target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
@@ -67,5 +92,8 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRSCFToControlFlow
   MLIRInferTypeOpInterface
   MLIRTensorDialect
+  MLIRPDLDialect
+  MLIRPDLInterpDialect
+  MLIRParser
   flatbuffers::flatbuffers
 )

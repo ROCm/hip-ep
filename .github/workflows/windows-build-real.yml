@@ -279,6 +279,12 @@ jobs:
           cp "$ORT_WHEEL" staging/wheels/
           cp "$OGA_WHEEL" staging/wheels/
 
+          echo "=== Binary sizes ==="
+          ls -lh staging/bin/hipgpu.dll staging/bin/custom_kernels*.dll 2>/dev/null || true
+
+          mkdir -p dll-sizes
+          python -c 'import glob,json,os; b="staging/bin"; d={}; p=os.path.join(b,"hipgpu.dll"); d.update({"hipgpu.dll": os.path.getsize(p)} if os.path.isfile(p) else {}); d.update({os.path.basename(x): os.path.getsize(x) for x in sorted(glob.glob(os.path.join(b,"custom_kernels*.dll")))}); open("dll-sizes/dll-sizes.json","w",encoding="utf-8",newline="\n").write(json.dumps(d,indent=2)+"\n"); print(open("dll-sizes/dll-sizes.json",encoding="utf-8").read())'
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
@@ -287,6 +293,13 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+
+      - name: Upload DLL sizes
+        uses: actions/upload-artifact@v4
+        with:
+          name: dll-sizes
+          path: dll-sizes/dll-sizes.json
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 
       - name: Stage Python wheel package

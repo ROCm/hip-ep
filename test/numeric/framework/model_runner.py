@@ -11,6 +11,10 @@ reference outputs from one of two sources -- a live ORT CPU run or a
 per-test cache (default; backed by ORT CPU on miss). Sessions are
 created sequentially (never at the same time) so peak memory stays low
 when models carry large weight initializers.
+
+The reference normally runs the same graph as the backend. Tests for
+ops the CPU cannot execute at all pass a separate ``reference_model``
+built from ops it can; see :meth:`ModelRunner.run_sample`.
 """
 
 from __future__ import annotations
@@ -115,6 +119,7 @@ class ModelRunner:
         *,
         name: str | None = None,
         reference: ReferenceMode = "cache",
+        reference_model: ModelLike | None = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
         """Run *model* on the configured backend and return (actual, expected).
 
@@ -136,6 +141,15 @@ class ModelRunner:
             * ``"cpu"`` -- always run ORT CPU as the reference.
             * ``"cache"`` (default) -- read from the on-disk cache; on
               miss, run CPU and write it back.
+        reference_model:
+            Graph the reference runs instead of *model*. Defaults to
+            *model*, which is what every op ORT CPU implements wants.
+            Supply one when *model* holds an op the CPU cannot execute
+            at all -- a custom op with a GPU-only kernel -- as an
+            equivalent graph built from ops the CPU does have, over
+            the same inputs and outputs. The cache is keyed on this
+            graph rather than on *model*, since this is the graph that
+            produced the cached values.
         """
         if reference not in ("cpu", "cache"):
             raise ValueError(f"reference must be one of cpu|cache, got {reference!r}")
@@ -150,6 +164,15 @@ class ModelRunner:
         model_path.write_bytes(model_bytes)
         print(f"{_TAG} Model : {model_path}")
         print(f"{_TAG} Size  : {sizeof_fmt(len(model_bytes))}")
+
+        if reference_model is None:
+            ref_bytes, ref_path = model_bytes, model_path
+        else:
+            ref_bytes = _resolve_model_to_bytes(reference_model)
+            ref_path = sub / "reference_model.onnx"
+            ref_path.write_bytes(ref_bytes)
+            print(f"{_TAG} RefMdl: {ref_path}")
+            print(f"{_TAG} Size  : {sizeof_fmt(len(ref_bytes))}")
 
         np_inputs = _resolve_inputs(inputs)
         print(f"{_TAG} Inputs: {len(np_inputs)}")
@@ -167,18 +190,18 @@ class ModelRunner:
         ref_elapsed = 0.0
         ref_source = reference
         if reference == "cache":
-            cached = self.cache.load(sample_name, model_bytes, np_inputs)
+            cached = self.cache.load(sample_name, ref_bytes, np_inputs)
             if cached is not None:
                 expected = cached
                 ref_source = "cache(hit)"
             else:
                 expected, ref_elapsed = self._run_cpu_reference(
-                    str(model_path), np_inputs
+                    str(ref_path), np_inputs
                 )
-                self.cache.store(sample_name, model_bytes, np_inputs, expected)
+                self.cache.store(sample_name, ref_bytes, np_inputs, expected)
                 ref_source = "cache(miss->cpu)"
         else:
-            expected, ref_elapsed = self._run_cpu_reference(str(model_path), np_inputs)
+            expected, ref_elapsed = self._run_cpu_reference(str(ref_path), np_inputs)
 
         # 3. Snapshot per-test artefacts ---------------------------------
         # Always write inputs + both output tensors next to model.onnx in
