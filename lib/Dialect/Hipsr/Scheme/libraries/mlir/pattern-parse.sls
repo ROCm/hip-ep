@@ -110,9 +110,9 @@
 
       [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match match-ops... :rewrite root :with rewrite-ops...)" rest)]))
 
-  ;;-----------------------------------------------------------------------
-  ;; parse-match-operation - Parse one match operation
-  ;;-----------------------------------------------------------------------
+  ;;=======================================================================
+  ;; Match Operation Syntax Documentation
+  ;;=======================================================================
   ;;
   ;; Naming rules:
   ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
@@ -174,40 +174,7 @@
   ;;   %a = "op" (%x (&optional %y %z) (&variadic %w))
   ;;   %a = "op" (%x) :where (mlir-operation-get-attribute %a "kernel_shape")
   ;;
-  ;; Returns ast-match-expand record with syntax objects.
-  ;;
-  (define (parse-match-operation op-stx)
-    (syntax-case op-stx (= : ->)
-      ;; New keyword-based syntax: (result = op-name operands . rest)
-      [(result = op-name operands . rest)
-       (parse-match-keywords #'result #'op-name #'operands #'rest)]
-
-      [_ (syntax-violation 'parse-match-operation
-           "Invalid match operation syntax (expected: result = \"op.name\" (operands) [:attrs (...)] [: (...) -> (...)])"
-           op-stx)]))
-
-  ;; Helper: parse optional keyword sections in match operation
-  (define (parse-match-keywords result op-name operands rest)
-    (let ([where-expr #'#f])  ;; Default: no guard (always succeeds)
-      ;; Extract keywords from rest
-      (let loop ([remaining rest])
-        (syntax-case remaining (:where)
-          ;; :where keyword
-          [(:where guard-expr . more)
-           (begin
-             (set! where-expr #'guard-expr)
-             (loop #'more))]
-
-          ;; End of list
-          [() (void)]
-
-          ;; Unknown keyword
-          [_ (syntax-violation 'parse-match-keywords
-               "Invalid keyword in match operation (expected :where)"
-               remaining)]))
-
-      ;; Create AST record with extracted parts
-      (make-ast-match-expand result op-name operands where-expr)))
+  ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-operation - Parse one rewrite operation
@@ -420,13 +387,13 @@
       ;; Match operation WITH :where guard
       [(result = op-name (operand ...) :where guard-expr . rest)
        (identifier? #'result)
-       (let ([match-op (parse-match-operation #'(result = op-name (operand ...) :where guard-expr))])
+       (let ([match-op (make-ast-match-expand #'result #'op-name #'(operand ...) #'guard-expr)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       ;; Match operation WITHOUT :where guard
       [(result = op-name (operand ...) . rest)
        (identifier? #'result)
-       (let ([match-op (parse-match-operation #'(result = op-name (operand ...)))])
+       (let ([match-op (make-ast-match-expand #'result #'op-name #'(operand ...) #f)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       [_ (syntax-violation 'parse-match-ops-recursive
