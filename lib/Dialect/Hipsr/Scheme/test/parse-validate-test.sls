@@ -14,14 +14,14 @@
     :match
       %out = "test.op" (%in) () : (!in-type) -> !out-type
     :rewrite %out :with
-      %new = "new.op" (%in) -> !out-type)
+      (%new = "new.op" (%in) -> !out-type))
 
   ;; Test 2: Pattern without :debug-parse - returns lambda
   (define-conversion-pattern test-lambda-mode
     :match
       %out = "test.op" (%in) () : (!in-type) -> !out-type
     :rewrite %out :with
-      %new = "new.op" (%in) -> !out-type)
+      (%new = "new.op" (%in) -> !out-type))
 
   ;; Test 3: Pattern with :then-let clause
   (define-conversion-pattern :debug-parse test-with-then-let
@@ -30,33 +30,33 @@
     :then-let ((%ctx (get-context))
                (%val (compute-value)))
     :rewrite %out :with
-      %new = "new.op" (%in) -> !out-type)
+      (%new = "new.op" (%in) -> !out-type))
 
   ;; Test 4: Pattern with region containing blocks
   (define-conversion-pattern :debug-parse test-with-region
     :match
       %out = "scf.if" (%cond) () : (!cond-type) -> !result-type
     :rewrite %out :with
-      %r = "scf.if" (%cond)
-         :regions
-           ((^then ()
-              (%t = "arith.constant" () :attrs [value 1] -> i32))
-            (^else ()
-              (%f = "arith.constant" () :attrs [value 0] -> i32)))
-         -> i32)
+      (%r = "scf.if" (%cond)
+          :regions
+            ((^then ()
+               (%t = "arith.constant" () :attrs [value 1] -> i32))
+             (^else ()
+               (%f = "arith.constant" () :attrs [value 0] -> i32)))
+          -> i32))
 
   ;; Test 5: func.func with block arguments - function that adds two i32s
   (define-conversion-pattern :debug-parse test-func-func
     :match
       %func = "func.func" () () : () -> !func-type
     :rewrite %func :with
-      %new-func = "func.func" ()
-         :regions
-           ((^entry ((%a : i32) (%b : i32))
-              (%sum = "arith.addi" (%a %b) -> i32)
-              ("func.return" (%sum) -> ())))
-         :attrs [sym_name "add"] [function_type "(i32, i32) -> i32"]
-         -> ())
+      (%new-func = "func.func" ()
+          :regions
+            ((^entry ((%a : i32) (%b : i32))
+               (%sum = "arith.addi" (%a %b) -> i32)
+               ("func.return" (%sum) -> ())))
+          :attrs [sym_name "add"] [function_type "(i32, i32) -> i32"]
+          -> ()))
 
   ;; Test 6: Pattern with per-operation :where guard
   (define-conversion-pattern :debug-parse test-with-where-guard
@@ -65,28 +65,28 @@
          :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
                   (and $ks (is-1x1-kernel? $ks)))
     :rewrite %a :with
-      %out = "hipsr.matmul" (%x %w))
+      (%out = "hipsr.matmul" (%x %w)))
 
   ;; Test 7: Pattern with &optional operands
   (define-conversion-pattern :debug-parse test-with-optional
     :match
       %a = "test.op" (%x (&optional %y %z))
     :rewrite %a :with
-      %out = "new.op" (%x))
+      (%out = "new.op" (%x)))
 
   ;; Test 8: Pattern with &variadic operands
   (define-conversion-pattern :debug-parse test-with-variadic
     :match
       %a = "test.concat" (%x (&variadic %rest))
     :rewrite %a :with
-      %out = "new.concat" (%x))
+      (%out = "new.concat" (%x)))
 
   ;; Test 9: Pattern with mixed optional and variadic
   (define-conversion-pattern :debug-parse test-mixed-operands
     :match
       %a = "test.op" (%x (&optional %y) %z (&variadic %rest))
     :rewrite %a :with
-      %out = "new.op" (%x %z))
+      (%out = "new.op" (%x %z)))
 
   ;; Test 10: Pattern with :where guard and :then-let
   (define-conversion-pattern :debug-parse test-where-and-then-let
@@ -96,7 +96,7 @@
     :then-let ((%ctx (mlir-get-context %a))
                (%device (get-device-type %x)))
     :rewrite %a :with
-      %out = "hipsr.conv" (%ctx %x %w))
+      (%out = "hipsr.conv" (%ctx %x %w)))
 
   ;; Helper to get field from AST list
   (define (ast-get ast key)

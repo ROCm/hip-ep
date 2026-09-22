@@ -418,15 +418,15 @@
          (parse-after-match rest-stx ast))]
 
       ;; Match operation WITH :where guard
-      [(result = op-name operands :where guard-expr . rest)
+      [(result = op-name (operand ...) :where guard-expr . rest)
        (identifier? #'result)
-       (let ([match-op (parse-match-operation #'(result = op-name operands :where guard-expr))])
+       (let ([match-op (parse-match-operation #'(result = op-name (operand ...) :where guard-expr))])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       ;; Match operation WITHOUT :where guard
-      [(result = op-name operands . rest)
+      [(result = op-name (operand ...) . rest)
        (identifier? #'result)
-       (let ([match-op (parse-match-operation #'(result = op-name operands))])
+       (let ([match-op (parse-match-operation #'(result = op-name (operand ...)))])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       [_ (syntax-violation 'parse-match-ops-recursive
@@ -481,18 +481,26 @@
   ;;   3. Stop when reaching end
   ;;
   (define (parse-rewrite-ops-recursive rest-stx acc-ops ast)
+    ;; Rewrite operations are complex (can have :regions, :attrs, -> types)
+    ;; So we can't use simple pattern matching like match operations
+    ;; Instead, collect entire operation syntax and delegate to parse-rewrite-operation
+    ;;
+    ;; Strategy: Scan for start of next operation (pattern: identifier = ...)
+    ;; or end of list
     (syntax-case rest-stx (=)
       ;; End of operations
       [()
        (ast-pattern-expand-rewrite-set! ast (reverse acc-ops))
        ast]
 
-      ;; Match operation (simplified - rewrite ops don't have :where)
-      [(result = op-name operands . rest)
-       (identifier? #'result)
-       (let ([rewrite-op (parse-rewrite-operation #'(result = op-name operands))])
+      ;; TODO: This is complex - rewrite operations can span multiple lines
+      ;; with :regions, :attrs, etc. For now, require explicit parentheses
+      ;; around each rewrite operation (similar to old syntax)
+      ;; Future: implement proper operation boundary detection
+      [(op-syntax . rest)
+       (let ([rewrite-op (parse-rewrite-operation #'op-syntax)])
          (parse-rewrite-ops-recursive #'rest (cons rewrite-op acc-ops) ast))]
 
       [_ (syntax-violation 'parse-rewrite-ops-recursive
-           "Invalid rewrite operation (expected: result = \"op\" (...))" rest-stx)]))
+           "Invalid rewrite operation syntax" rest-stx)]))
 )
