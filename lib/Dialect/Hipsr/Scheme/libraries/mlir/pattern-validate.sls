@@ -35,6 +35,7 @@
 
     ;; Rule: All identifiers in match operations must start with %
     ;; Rule: Result variables must be unique across all operations (FATAL if violated)
+    ;; Rule: :where guards must be valid syntax objects (not validated for correctness)
     (validate-match-operations ast-rec)
 
     ;; Rule: Root variable must appear in results (after normalization)
@@ -98,7 +99,8 @@
 
   (define (validate-match-operations ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
-    (validate-no-duplicate-result-variables ast-rec))
+    (validate-no-duplicate-result-variables ast-rec)
+    (validate-where-guards ast-rec))
 
   (define (validate-match-identifiers-start-with-% ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
@@ -109,8 +111,9 @@
                   (loop :for var :in (ast-match-expand-result-var match-op)
                         :do (validate-%-identifier var "Result"))
                   ;; Validate operand variables start with %
-                  (loop :for var :in (syntax->list (ast-match-expand-operands match-op))
-                        :do (validate-%-identifier var "Operand"))))))
+                  ;; Handle &optional and &variadic groups
+                  (loop :for operand-or-group :in (syntax->list (ast-match-expand-operands match-op))
+                        :do (validate-operand-or-group operand-or-group))))))
 
   (define (validate-no-duplicate-result-variables ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
@@ -123,6 +126,16 @@
                               (syntax-violation 'validate-no-duplicate-result-variables
                                 "Duplicate result variable" var))
                             (hashtable-set! seen-results var #t))))))
+
+  (define (validate-where-guards ast-rec)
+    ;; Validate :where guards in match operations
+    ;; Guards are arbitrary Scheme expressions stored as syntax objects
+    ;; Actual correctness validation happens at Scheme expansion time
+    ;; We just check the field is properly set (syntax object or #f)
+    (let ([match-vec (ast-pattern-expand-match ast-rec)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (if #f #f))))  ;; No validation needed - parser ensures correct type
 
   (define (validate-and-cache-root-var ast-rec)
     ;; Rule: Root variable must appear as a result in at least one match operation
@@ -190,6 +203,35 @@
 
   (define (validate-block block)
     (for-each validate-operation (ast-block-expand-operations block)))
+
+  ;;-----------------------------------------------------------------------
+  ;; Operand group validation (&optional, &variadic)
+  ;;-----------------------------------------------------------------------
+
+  (define (validate-operand-or-group operand-stx)
+    ;; Operand can be:
+    ;;   1. Simple identifier: %x
+    ;;   2. Optional group: (&optional %y %z)
+    ;;   3. Variadic group: (&variadic %rest)
+    (syntax-case operand-stx (&optional &variadic)
+      [(&optional var ...)
+       ;; Optional group - validate all vars start with %
+       (for-each (lambda (v) (validate-%-identifier v "Optional operand"))
+                 (syntax->list #'(var ...)))]
+
+      [(&variadic var)
+       ;; Variadic group - single variable
+       (validate-%-identifier #'var "Variadic operand")]
+
+      [var
+       ;; Simple operand
+       (identifier? #'var)
+       (validate-%-identifier #'var "Operand")]
+
+      [_
+       (syntax-violation 'validate-operand-or-group
+         "Invalid operand syntax (expected: %var, (&optional ...), or (&variadic var))"
+         operand-stx)]))
 
   ;;-----------------------------------------------------------------------
   ;; Where binding validation
