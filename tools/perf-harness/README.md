@@ -345,6 +345,23 @@ you measured position and not the change. Discard rounds taken while the machine
 is shedding heat from a build — judge that from the absolute level against a
 known baseline, never by dropping rounds that disagree.
 
+### One run at a time, and the harness now enforces it
+
+Every timed script kills competing `model_benchmark` processes before it runs, so
+two concurrent invocations do not just contend for the GPU: each aborts the
+other's measurement mid-flight, and both append to the same summary CSV. The
+result is silent and looks like data.
+
+A triple-launch of one interleaved A/B produced arms with `n=1` and a `nan` in the
+paired difference, on a machine whose 16K TTFT read 2018-2586 ms against a known
+1110 ms baseline. Each number is plausible on its own.
+
+`Enter-HarnessLock` in `common.ps1` now refuses to start a second run rather than
+corrupting both, and clears a lock whose owning pid is gone. It is held by the
+outermost script, so `ab_interleaved.ps1` driving `bench_ttft.ps1` stays one
+logical run. If you are certain a lock is stale, delete `harness.lock` under
+`$HIPEP_OUT`.
+
 ### Give each arm its own autotune cache
 
 The on-disk WMMA tuner cache holds a single build timestamp and is discarded

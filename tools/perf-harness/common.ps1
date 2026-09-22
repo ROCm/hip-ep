@@ -98,6 +98,55 @@ function Clear-HarnessProfilingEnv {
     -EA SilentlyContinue
 }
 
+# Single-instance lock, because Stop-HarnessProcesses is not one.
+#
+# Every timed script kills competing model_benchmark processes before it runs, so
+# two concurrent invocations do not merely contend for the GPU: each aborts the
+# other's measurement mid-flight, and both append to the same summary CSV. The
+# failure is silent and looks like data. One triple-launch of an interleaved A/B
+# produced arms with n=1 and a NaN in the paired difference, on a machine whose
+# TTFT read 2018-2586 ms against a known 1110 ms baseline -- believable-looking
+# numbers in isolation, and worthless.
+#
+# So refuse to start rather than corrupt. A run that dies without releasing
+# leaves a lock naming a dead pid, which is cleared on sight.
+#
+# Returns the lock path if this process took it, or $null if an ancestor already
+# holds it: ab_interleaved.ps1 invoking bench_ttft.ps1 is one logical run, and the
+# child must not deadlock against its own parent.
+function Enter-HarnessLock {
+  if ($env:HIPEP_LOCK_OWNER) {
+    $owner = 0
+    if ([int]::TryParse($env:HIPEP_LOCK_OWNER, [ref]$owner) -and
+        (Get-Process -Id $owner -EA SilentlyContinue)) {
+      return $null
+    }
+  }
+  New-Item -ItemType Directory -Force -Path $HarnessEnv.OutRoot | Out-Null
+  $lock = Join-Path $HarnessEnv.OutRoot 'harness.lock'
+  if (Test-Path $lock) {
+    $holder = Get-Content $lock -EA SilentlyContinue | Select-Object -First 1
+    $pidNum = 0
+    if ([int]::TryParse($holder, [ref]$pidNum) -and
+        (Get-Process -Id $pidNum -EA SilentlyContinue)) {
+      throw ("another perf-harness run is in progress (pid $holder). Refusing " +
+             "to start: concurrent runs abort each other and share one CSV. " +
+             "Wait for it, or delete $lock if you are certain it is stale.")
+    }
+    Write-Host "    clearing stale lock from pid $holder"
+  }
+  Set-Content -Path $lock -Value $PID
+  $env:HIPEP_LOCK_OWNER = "$PID"
+  return $lock
+}
+
+function Exit-HarnessLock {
+  param([string]$Lock)
+  if (-not $Lock) { return }
+  Remove-Item $Lock -EA SilentlyContinue
+  Remove-Item Env:HIPEP_LOCK_OWNER -EA SilentlyContinue
+}
+
 function Stop-HarnessProcesses {
   # -IncludePython only when the vlm driver is in use: killing every python on
   # the box would be unacceptable collateral otherwise.
