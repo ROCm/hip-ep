@@ -103,15 +103,10 @@
          (parse-rest #'more ast))]
 
       ;; Main pattern structure - fname must be set by now
-      [(:match match-op ... . rest-after-match)
-       (and (ast-pattern-expand-function-name ast)  ; fname already parsed
-            (not (null? (syntax->list #'(match-op ...)))))
-       (begin
-         ;; Parse each match operation into ast-match-expand using map
-         (ast-pattern-expand-match-set! ast
-           (map parse-match-operation (syntax->list #'(match-op ...))))
-         ;; Continue parsing :then-let and :rewrite
-         (parse-after-match #'rest-after-match ast))]
+      [(:match . match-rest)
+       (ast-pattern-expand-function-name ast)  ; fname already parsed
+       ;; Parse match operations recursively
+       (parse-match-ops-recursive #'match-rest '() ast)]
 
       [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match match-ops... :rewrite root :with rewrite-ops...)" rest)]))
 
@@ -399,6 +394,45 @@
            rest-stx)]))
 
   ;;-----------------------------------------------------------------------
+  ;; parse-match-ops-recursive - Recursively parse match operations
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Collects match operations until hitting :then-let or :rewrite
+  ;;
+  ;; Pattern matching style (not list processing):
+  ;;   1. Match one operation: result = "op" (...) [:where expr]
+  ;;   2. Recurse on rest
+  ;;   3. Stop when hitting :then-let or :rewrite
+  ;;
+  (define (parse-match-ops-recursive rest-stx acc-ops ast)
+    (syntax-case rest-stx (:then-let :rewrite :where =)
+      ;; Stop: :then-let or :rewrite
+      [(:then-let . _)
+       (begin
+         (ast-pattern-expand-match-set! ast (reverse acc-ops))
+         (parse-after-match rest-stx ast))]
+
+      [(:rewrite . _)
+       (begin
+         (ast-pattern-expand-match-set! ast (reverse acc-ops))
+         (parse-after-match rest-stx ast))]
+
+      ;; Match operation WITH :where guard
+      [(result = op-name operands :where guard-expr . rest)
+       (identifier? #'result)
+       (let ([match-op (parse-match-operation #'(result = op-name operands :where guard-expr))])
+         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
+
+      ;; Match operation WITHOUT :where guard
+      [(result = op-name operands . rest)
+       (identifier? #'result)
+       (let ([match-op (parse-match-operation #'(result = op-name operands))])
+         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
+
+      [_ (syntax-violation 'parse-match-ops-recursive
+           "Invalid match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
+
+  ;;-----------------------------------------------------------------------
   ;; parse-after-match - Parse :then-let and :rewrite after :match
   ;;-----------------------------------------------------------------------
   ;;
@@ -406,15 +440,11 @@
   ;;   1. :match ... :then-let (...) :rewrite ... :with ...
   ;;   2. :match ... :rewrite ... :with ...
   ;;
-  ;; Note: No outer parentheses around rewrite operations (MLIR-like)
-  ;;
   (define (parse-after-match rest-stx ast)
     (syntax-case rest-stx (:then-let :rewrite :with)
       ;; Pattern 1: :then-let followed by :rewrite
-      [(:then-let ((var expr) ...)
-        :rewrite root :with rewrite-op ...)
-       (and (identifier? #'root)
-            (not (null? (syntax->list #'(rewrite-op ...)))))
+      [(:then-let ((var expr) ...) :rewrite root :with . rewrite-rest)
+       (identifier? #'root)
        (begin
          (ast-pattern-expand-root-var-set! ast #'root)
          (ast-pattern-expand-where-set! ast
@@ -425,20 +455,44 @@
                      (make-ast-where-binding-expand #'v #'e)]
                     [_ (syntax-violation 'parse-after-match "Invalid :then-let binding (expected: (var expr))" binding)]))
                 (syntax->list #'((var expr) ...))))
-         (ast-pattern-expand-rewrite-set! ast
-           (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
-         ast)]
+         ;; Parse rewrite operations recursively
+         (parse-rewrite-ops-recursive #'rewrite-rest '() ast))]
 
       ;; Pattern 2: :rewrite without :then-let
-      [(:rewrite root :with rewrite-op ...)
-       (and (identifier? #'root)
-            (not (null? (syntax->list #'(rewrite-op ...)))))
+      [(:rewrite root :with . rewrite-rest)
+       (identifier? #'root)
        (begin
          (ast-pattern-expand-root-var-set! ast #'root)
-         (ast-pattern-expand-rewrite-set! ast
-           (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
-         ast)]
+         ;; Parse rewrite operations recursively
+         (parse-rewrite-ops-recursive #'rewrite-rest '() ast))]
 
       [_ (syntax-violation 'define-conversion-pattern
            "Expected [:then-let (...)] :rewrite root :with rewrite-ops..." rest-stx)]))
+
+  ;;-----------------------------------------------------------------------
+  ;; parse-rewrite-ops-recursive - Recursively parse rewrite operations
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Collects rewrite operations until end of syntax
+  ;;
+  ;; Pattern matching style (not list processing):
+  ;;   1. Match one operation: result = "op" (...)
+  ;;   2. Recurse on rest
+  ;;   3. Stop when reaching end
+  ;;
+  (define (parse-rewrite-ops-recursive rest-stx acc-ops ast)
+    (syntax-case rest-stx (=)
+      ;; End of operations
+      [()
+       (ast-pattern-expand-rewrite-set! ast (reverse acc-ops))
+       ast]
+
+      ;; Match operation (simplified - rewrite ops don't have :where)
+      [(result = op-name operands . rest)
+       (identifier? #'result)
+       (let ([rewrite-op (parse-rewrite-operation #'(result = op-name operands))])
+         (parse-rewrite-ops-recursive #'rest (cons rewrite-op acc-ops) ast))]
+
+      [_ (syntax-violation 'parse-rewrite-ops-recursive
+           "Invalid rewrite operation (expected: result = \"op\" (...))" rest-stx)]))
 )
