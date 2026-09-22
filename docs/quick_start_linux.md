@@ -77,8 +77,8 @@ python3 build.py
 Whisper and VLM models require Microsoft's `onnxruntime-genai` Python example scripts
 (`examples/python/whisper.py`, `examples/python/model-mm.py`) to do audio/image
 feature extraction via `og.Audios.open()` / `create_multimodal_processor()`. These scripts
-need a Python-importable `onnxruntime_genai` package, which the prebuilt package below does 
-**not** provide. On Linux you have to build both ONNX Runtime and OGA from source yourself with 
+need a Python-importable `onnxruntime_genai` package, which the prebuilt package below does
+**not** provide. On Linux you have to build both ONNX Runtime and OGA from source yourself with
 `--build_wheel`.
 
 #### 1. Build ONNX Runtime from source
@@ -174,7 +174,7 @@ python3 onnxruntime-genai/examples/python/model-mm.py -m /path/to/vlm-model-dir 
 ```
 
 Make sure `genai_config.json` `provider_options` are set to
-`{"AMDGPU": {"profile": "hip"}}` 
+`{"AMDGPU": {"profile": "hip"}}`
 
 ### Docker (optional, same driver inside a container)
 
