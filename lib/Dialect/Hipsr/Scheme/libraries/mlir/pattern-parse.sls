@@ -134,6 +134,11 @@
        ;; Parse match operations recursively
        (parse-match-ops-recursive #'match-rest '() ast)]
 
+      ;; Error: missing function name or :match
+      [_ (syntax-violation 'parse-rest
+           "Expected function name and :match clause"
+           rest)]))
+
   ;;=======================================================================
   ;; SECTION 2: Recursive Collectors (High-Level Parsing)
   ;;=======================================================================
