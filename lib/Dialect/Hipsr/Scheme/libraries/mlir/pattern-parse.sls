@@ -89,7 +89,6 @@
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
-       ;; Create empty ast-pattern-expand record and parse incrementally
        (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
@@ -99,7 +98,7 @@
   ;;
   (define (parse-rest rest ast)
     (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
-      ;; Debug flags - continue parsing
+      ;; Debug flags
       [(:debug-parse . more)
        (begin
          (ast-pattern-expand-debug-parse?-set! ast #t)
@@ -120,7 +119,7 @@
          (ast-pattern-expand-debug-matching?-set! ast #t)
          (parse-rest #'more ast))]
 
-      ;; Function name (if not already set) - continue parsing
+      ;; Function name
       [(fname . more)
        (and (identifier? #'fname)
             (not (ast-pattern-expand-function-name ast)))
@@ -128,13 +127,10 @@
          (ast-pattern-expand-function-name-set! ast #'fname)
          (parse-rest #'more ast))]
 
-      ;; Main pattern structure - fname must be set by now
       [(:match . match-rest)
-       (ast-pattern-expand-function-name ast)  ; fname already parsed
-       ;; Parse match operations recursively
+       (ast-pattern-expand-function-name ast)
        (parse-match-ops-recursive #'match-rest '() ast)]
 
-      ;; Error: missing function name or :match
       [_ (syntax-violation 'parse-rest
            "Expected function name and :match clause"
            rest)]))
@@ -205,7 +201,6 @@
       (unless (identifier? var)
         (syntax-violation 'parse-operands "Operand must be identifier" var)))
 
-    ;; Main: parse each operand-or-group and flatten results
     (apply append (map parse-one (syntax->list operands-stx))))
 
   ;;-----------------------------------------------------------------------
@@ -263,7 +258,6 @@
                      (make-ast-where-binding-expand #'v #'e)]
                     [_ (syntax-violation 'parse-after-match "Invalid :then-let binding (expected: (var expr))" binding)]))
                 (syntax->list #'((var expr) ...))))
-         ;; Parse rewrite operations recursively
          (parse-rewrite-ops-recursive #'rewrite-rest '() ast))]
 
       ;; Pattern 2: :rewrite without :then-let
@@ -271,7 +265,6 @@
        (identifier? #'root)
        (begin
          (ast-pattern-expand-root-var-set! ast #'root)
-         ;; Parse rewrite operations recursively
          (parse-rewrite-ops-recursive #'rewrite-rest '() ast))]
 
       [_ (syntax-violation 'define-conversion-pattern
@@ -300,8 +293,6 @@
 
       [_ (syntax-violation 'parse-rewrite-ops-recursive
            "Invalid rewrite operation syntax" rest-stx)]))
-)
-      [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match match-ops... :rewrite root :with rewrite-ops...)" rest)]))
 
   ;;=======================================================================
   ;; SECTION 3: Detail Parsers (Low-Level Parsing)
@@ -365,19 +356,15 @@
   ;;
   (define (parse-rewrite-optional rec rest-stx)
     (syntax-case rest-stx (:regions :attrs ->)
-      ;; :regions starts region section - accumulate until :attrs, ->, or end
       [(:regions . more)
        (parse-regions-section rec #'more '())]
 
-      ;; :attrs starts attrs section - accumulate until -> or end
       [(:attrs . more)
        (parse-attrs-section rec #'more '())]
 
-      ;; -> result-types (REQUIRED - must be present)
       [(-> result-types)
        (ast-operation-expand-result-types-set! rec #'result-types)]
 
-      ;; Error - -> result-types is mandatory
       [_ (syntax-violation 'parse-rewrite-optional
            "Missing -> result-types (required for operations with results)"
            rest-stx)]))
@@ -394,24 +381,20 @@
   ;;
   (define (parse-regions-section rec rest-stx regions-acc)
     (syntax-case rest-stx (:attrs ->)
-      ;; Hit :attrs - done with regions, start attrs section
       [(:attrs . more)
        (begin
          (ast-operation-expand-regions-set! rec (reverse regions-acc))
          (parse-attrs-section rec #'more '()))]
 
-      ;; Hit -> - done with regions, parse result types
       [(-> result-types)
        (begin
          (ast-operation-expand-regions-set! rec (reverse regions-acc))
          (ast-operation-expand-result-types-set! rec #'result-types))]
 
-      ;; Another region - parse it and accumulate
       [(region . more)
        (let ([region-rec (parse-region #'region)])
          (parse-regions-section rec #'more (cons region-rec regions-acc)))]
 
-      ;; Error - must have -> result-types
       [_ (syntax-violation 'parse-regions-section
            "Expected region, :attrs, or -> result-types"
            rest-stx)]))
@@ -469,29 +452,16 @@
   ;;
   (define (parse-attrs-section rec rest-stx attrs-acc)
     (syntax-case rest-stx (->)
-      ;; Hit -> - done with attrs, parse result types
       [(-> result-types)
        (begin
          (ast-operation-expand-attributes-set! rec (reverse attrs-acc))
          (ast-operation-expand-result-types-set! rec #'result-types))]
 
-      ;; Another attr - accumulate it
       [(attr . more)
        (parse-attrs-section rec #'more (cons #'attr attrs-acc))]
 
-      ;; Error - must have -> result-types
       [_ (syntax-violation 'parse-attrs-section
            "Expected attr or -> result-types"
            rest-stx)]))
+)
 
-  ;;-----------------------------------------------------------------------
-  ;; parse-match-ops-recursive - Recursively parse match operations
-  ;;-----------------------------------------------------------------------
-  ;;
-  ;; Collects match operations until hitting :then-let or :rewrite
-  ;;
-  ;; Pattern matching style (not list processing):
-  ;;   1. Match one operation: result = "op" (...) [:where expr]
-  ;;   2. Recurse on rest
-  ;;   3. Stop when hitting :then-let or :rewrite
-  ;;
