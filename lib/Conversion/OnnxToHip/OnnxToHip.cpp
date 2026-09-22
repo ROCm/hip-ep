@@ -13,35 +13,19 @@
 
 #include "OnnxToHipUtils.h"
 
-// ConvertOnnxToHipPass lists the PDL dialects unconditionally in
-// `dependentDialects`, so the generated getDependentDialects() needs these
-// declarations even in builds where PDLL pattern compilation is disabled.
-#include "mlir/Dialect/PDL/IR/PDL.h"
-#include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
-
-#include "pdl/qdq_fusion_pass.hpp"
-
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cstddef>
 #include <limits>
 #include <map>
 #include <string>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
-
-// The compiled PDL fusion patterns, embedded as a byte array by CMake:
-// mlir-pdll -> mlir-opt --strip-debuginfo --emit-bytecode -> xxd.py ->
-// pdl_fused_pattern_data.cpp. Nothing is loaded from disk.
-extern "C" const unsigned char *hip_pdl_fused_pattern_data(void);
-extern "C" size_t hip_pdl_fused_pattern_size(void);
 
 namespace mlir {
 namespace hip {
@@ -56,10 +40,6 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
-
-// Buffer identifier for the embedded patterns. Parser diagnostics quote it, so
-// it names the build artifact the bytes came from.
-constexpr llvm::StringLiteral kPdlFusionPatternsName = "HipFusionPatterns.pdl";
 
 /// Classification of an 8-bit constant's backing byte size against its element
 /// count, returned by markPackedInt4Consumers so the caller can diagnose a
@@ -458,8 +438,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
   logSubpass("metadata");
 
   // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
-  // Normalize them before PDLL so the existing native-ONNX QDQ fusion patterns
-  // can match the graph.
+  // Normalize them to native onnx.QuantizeLinear / onnx.DequantizeLinear so
+  // that QdqConversion below can lower them; nothing downstream matches the
+  // onnx.Custom spelling.
   {
     mlir::RewritePatternSet customQdqPatterns(ctx);
     populateCustomQdqCanonicalizationPatterns(customQdqPatterns, ctx);
@@ -468,22 +449,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
       return signalPassFailure();
   }
   logSubpass("custom QDQ canonicalization");
-
-  // hip::pdl::run treats an empty blob as "nothing to do", which would
-  // silently skip fusion, so an unembedded pattern set is rejected here.
-  if (hip_pdl_fused_pattern_size() == 0) {
-    module.emitError() << "PDL fusion patterns were not embedded into the "
-                          "execution provider; QDQ fusion is disabled";
-    return signalPassFailure();
-  }
-  const llvm::MemoryBufferRef pdlBuffer(
-      llvm::StringRef(
-          reinterpret_cast<const char *>(hip_pdl_fused_pattern_data()),
-          hip_pdl_fused_pattern_size()),
-      kPdlFusionPatternsName);
-  if (!::hip::pdl::run(module, pdlBuffer)) {
-    module.emitWarning() << "Failed to apply the embedded fusion PDL patterns";
-  }
 
   int64_t constantOrder = 0;
   for (auto funcOp :
