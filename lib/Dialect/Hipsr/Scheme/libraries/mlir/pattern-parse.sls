@@ -64,13 +64,13 @@
   ;; Pattern syntax:
   ;;   function-name [:debug-flags]* OR [:debug-flags]* function-name
   ;;   :match (match-operations...)
+  ;;   [:then-let ((var expr)...)]?
   ;;   :rewrite root-var :with (rewrite-operations...)
-  ;;   [:where ((var expr)...)]?
   ;;
   ;; Strategy: Parse fname and debug flags until we hit :match, then parse main structure.
   ;;
   (define (parse-rest rest ast)
-    (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :rewrite :with :where)
+    (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
       ;; Debug flags - continue parsing
       [(:debug-parse . more)
        (begin
@@ -102,23 +102,15 @@
 
       ;; Main pattern structure - fname must be set by now
       [(:match (match-op ...)
-        :rewrite root :with (rewrite-op ...)
-        . where-rest)
+        . rest-after-match)
        (and (ast-pattern-expand-function-name ast)  ; fname already parsed
-            (identifier? #'root)
-            (not (null? (syntax->list #'(match-op ...))))
-            (not (null? (syntax->list #'(rewrite-op ...)))))
+            (not (null? (syntax->list #'(match-op ...)))))
        (begin
-         ;; Store syntax objects, not datums
-         (ast-pattern-expand-root-var-set! ast #'root)
          ;; Parse each match operation into ast-match-expand using map
          (ast-pattern-expand-match-set! ast
            (map parse-match-operation (syntax->list #'(match-op ...))))
-         ;; Parse each rewrite operation into ast-operation-expand using map
-         (ast-pattern-expand-rewrite-set! ast
-           (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
-         (parse-where #'where-rest ast)
-         ast)]
+         ;; Continue parsing :then-let and :rewrite
+         (parse-after-match #'rest-after-match ast))]
 
       [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match (...) :rewrite root :with (...))" rest)]))
 
@@ -406,27 +398,44 @@
            rest-stx)]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-where - Parse optional :where clause
+  ;; parse-after-match - Parse :then-let and :rewrite after :match
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Where clause syntax:
-  ;;   :where ((var1 expr1) (var2 expr2) ...)
+  ;; Handles two syntax patterns:
+  ;;   1. :match (...) :then-let (...) :rewrite ... :with (...)
+  ;;   2. :match (...) :rewrite ... :with (...)
   ;;
-  ;; Each binding is (var expr) where expr is arbitrary Scheme code.
-  ;; Used to compute additional values for the rewrite.
-  ;;
-  (define (parse-where rest-stx ast)
-    (syntax-case rest-stx (:where)
-      [(:where ((var expr) ...))
-       (ast-pattern-expand-where-set! ast
-         (map (lambda (binding)
-                (syntax-case binding ()
-                  [(v e)
-                   (identifier? #'v)
-                   (make-ast-where-binding-expand #'v #'e)]
-                  [_ (syntax-violation 'parse-where "Invalid where binding (expected: (var expr))" binding)]))
-              (syntax->list #'((var expr) ...))))]
-      [()
-       (if #f #f)]
-      [_ (syntax-violation 'define-conversion-pattern "Expected :where ((var expr) ...) or end" rest-stx)]))
+  (define (parse-after-match rest-stx ast)
+    (syntax-case rest-stx (:then-let :rewrite :with)
+      ;; Pattern 1: :then-let followed by :rewrite
+      [(:then-let ((var expr) ...)
+        :rewrite root :with (rewrite-op ...))
+       (and (identifier? #'root)
+            (not (null? (syntax->list #'(rewrite-op ...)))))
+       (begin
+         (ast-pattern-expand-root-var-set! ast #'root)
+         (ast-pattern-expand-where-set! ast
+           (map (lambda (binding)
+                  (syntax-case binding ()
+                    [(v e)
+                     (identifier? #'v)
+                     (make-ast-where-binding-expand #'v #'e)]
+                    [_ (syntax-violation 'parse-after-match "Invalid :then-let binding (expected: (var expr))" binding)]))
+                (syntax->list #'((var expr) ...))))
+         (ast-pattern-expand-rewrite-set! ast
+           (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
+         ast)]
+
+      ;; Pattern 2: :rewrite without :then-let
+      [(:rewrite root :with (rewrite-op ...))
+       (and (identifier? #'root)
+            (not (null? (syntax->list #'(rewrite-op ...)))))
+       (begin
+         (ast-pattern-expand-root-var-set! ast #'root)
+         (ast-pattern-expand-rewrite-set! ast
+           (map parse-rewrite-operation (syntax->list #'(rewrite-op ...))))
+         ast)]
+
+      [_ (syntax-violation 'define-conversion-pattern
+           "Expected [:then-let (...)] :rewrite root :with (...)" rest-stx)]))
 )
