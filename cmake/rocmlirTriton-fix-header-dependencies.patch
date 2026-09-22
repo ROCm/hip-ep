@@ -1,7 +1,7 @@
-From c100a684adbf0db891143d70c7eecfe31226e884 Mon Sep 17 00:00:00 2001
+From f3e201a9512b2117901e2657ad66b6c06fbe48e7 Mon Sep 17 00:00:00 2001
 From: Ilango Rajagopal <ilangokul@gmail.com>
-Date: Mon, 21 Sep 2026 01:28:28 -0600
-Subject: [PATCH] Fix header dependencies
+Date: Tue, 22 Sep 2026 01:58:58 -0600
+Subject: [PATCH 2/2] Fix header dependencies
 
 ---
  cmake/triton.cmake                            | 32 ++++++++++++++++---
@@ -9,10 +9,10 @@ Subject: [PATCH] Fix header dependencies
  2 files changed, 40 insertions(+), 4 deletions(-)
 
 diff --git a/cmake/triton.cmake b/cmake/triton.cmake
-index 177db851d..ad4f7b853 100644
+index 58e41071d..0fe9f5432 100644
 --- a/cmake/triton.cmake
 +++ b/cmake/triton.cmake
-@@ -343,16 +343,32 @@ endif()
+@@ -386,6 +386,20 @@ endif()
  # Helper Functions for rocMLIR Libraries
  #===----------------------------------------------------------------------===//
  
@@ -30,22 +30,26 @@ index 177db851d..ad4f7b853 100644
 +    "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/mlir/include>")
 +endfunction(_rocmlir_propagate_public_includes)
 +
- function(add_rocmlir_dialect_library name)
-   set_property(GLOBAL APPEND PROPERTY ROCMLIR_DIALECT_LIBS ${name})
+ # When rocMLIR is built against an externally provided LLVM/MLIR
+ # (ROCMLIR_EXTERNAL_LLVM), the upstream MLIR TableGen and header-aggregate
+ # targets its libraries list in DEPENDS -- e.g. MLIRConversionPassIncGen, and
+@@ -425,6 +439,7 @@ function(add_rocmlir_dialect_library name)
    set_property(GLOBAL APPEND PROPERTY MLIR_DIALECT_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
    add_mlir_library(${ARGV} DEPENDS mlir-headers)
 +  _rocmlir_propagate_public_includes(${name})
  endfunction(add_rocmlir_dialect_library)
  
  function(add_rocmlir_conversion_library name)
-   set_property(GLOBAL APPEND PROPERTY ROCMLIR_CONVERSION_LIBS ${name})
+@@ -432,6 +447,7 @@ function(add_rocmlir_conversion_library name)
    set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
    add_mlir_library(${ARGV} DEPENDS mlir-headers)
 +  _rocmlir_propagate_public_includes(${name})
  endfunction(add_rocmlir_conversion_library)
  
  function(add_rocmlir_test_library name)
-@@ -400,9 +416,17 @@ endfunction(add_rocmlir_triton_library)
+@@ -482,9 +498,17 @@ endfunction(add_rocmlir_triton_library)
  # add_mlir_library). Marked SYSTEM so our strict warnings (-Wshadow, -Wundef,
  # ...) don't fire inside Triton headers.
  function(rocmlir_add_triton_includes target)

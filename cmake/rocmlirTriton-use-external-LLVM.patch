@@ -1,14 +1,14 @@
-From 28c7bde6009cf1fb0093c0e0974ea0ec9839bde3 Mon Sep 17 00:00:00 2001
+From 7b2686dc55b7ce28bded2b0c7eb3ca49d4569022 Mon Sep 17 00:00:00 2001
 From: Ilango Rajagopal <ilangokul@gmail.com>
-Date: Fri, 18 Sep 2026 01:50:33 -0600
-Subject: [PATCH] Use external LLVM when provided
+Date: Tue, 22 Sep 2026 01:58:26 -0600
+Subject: [PATCH 1/2] Use external LLVM
 
 ---
- cmake/triton.cmake | 43 +++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 43 insertions(+)
+ cmake/triton.cmake | 82 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 82 insertions(+)
 
 diff --git a/cmake/triton.cmake b/cmake/triton.cmake
-index 177db851d..7f469d7e9 100644
+index 177db851d..58e41071d 100644
 --- a/cmake/triton.cmake
 +++ b/cmake/triton.cmake
 @@ -26,6 +26,47 @@ set(ROCMLIR_LLVM_PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/llvm-project"
@@ -68,6 +68,78 @@ index 177db851d..7f469d7e9 100644
  #===----------------------------------------------------------------------===//
  # ROCm Configuration
  #
+@@ -343,25 +386,63 @@ endif()
+ # Helper Functions for rocMLIR Libraries
+ #===----------------------------------------------------------------------===//
+ 
++# When rocMLIR is built against an externally provided LLVM/MLIR
++# (ROCMLIR_EXTERNAL_LLVM), the upstream MLIR TableGen and header-aggregate
++# targets its libraries list in DEPENDS -- e.g. MLIRConversionPassIncGen, and
++# the mlir-headers / mlir-generic-headers aggregates that this file and
++# add_mlir_library add automatically -- are not defined in this build: their
++# generated headers already exist in the installed include tree, so the
++# ordering dependency is a no-op. Without the target, add_dependencies() aborts
++# at generate time with "dependency target ... does not exist". Create an empty
++# stand-in for any such missing DEPENDS entry so the (unneeded) ordering edge
++# resolves. rocMLIR's own *IncGen are always already defined (include/ is
++# processed before lib/) and are left untouched; the in-tree build, where every
++# upstream target also exists, is unaffected because of the NOT TARGET guard.
++function(_rocmlir_stub_external_depends)
++  if(NOT ROCMLIR_EXTERNAL_LLVM)
++    return()
++  endif()
++  foreach(dep ${ARGN})
++    if(NOT TARGET ${dep})
++      add_custom_target(${dep})
++    endif()
++  endforeach()
++endfunction(_rocmlir_stub_external_depends)
++
++# Parse the DEPENDS out of an add_rocmlir_*_library call and stub any that are
++# missing, together with the mlir-headers / mlir-generic-headers aggregates the
++# helpers and add_mlir_library attach unconditionally. The keyword set matches
++# what add_mlir_library accepts so DEPENDS is bounded correctly.
++macro(_rocmlir_stub_library_depends)
++  cmake_parse_arguments(_rsld "SHARED;DISABLE_INSTALL;EXCLUDE_FROM_LIBMLIR" ""
++    "DEPENDS;LINK_LIBS;LINK_COMPONENTS;ADDITIONAL_HEADER_DIRS;ADDITIONAL_HEADERS"
++    ${ARGN})
++  _rocmlir_stub_external_depends(${_rsld_DEPENDS} mlir-headers mlir-generic-headers)
++endmacro(_rocmlir_stub_library_depends)
++
+ function(add_rocmlir_dialect_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_DIALECT_LIBS ${name})
+   set_property(GLOBAL APPEND PROPERTY MLIR_DIALECT_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_dialect_library)
+ 
+ function(add_rocmlir_conversion_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_CONVERSION_LIBS ${name})
+   set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_conversion_library)
+ 
+ function(add_rocmlir_test_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_TEST_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_test_library)
+ 
+ function(add_rocmlir_public_c_api_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_PUBLIC_C_API_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${name}
+     ${ARGN}
+     EXCLUDE_FROM_LIBMLIR
+@@ -392,6 +473,7 @@ endfunction()
+ # Helper function for Rock-to-Triton libraries
+ function(add_rocmlir_triton_library name)
+   set_property(GLOBAL APPEND PROPERTY ROCMLIR_TRITON_LIBS ${name})
++  _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
+ endfunction(add_rocmlir_triton_library)
+ 
 -- 
 2.43.0
 
