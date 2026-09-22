@@ -52,7 +52,7 @@
     (syntax-case whole-stx ()
       [(_ . rest)
        ;; Create empty AST record and parse incrementally
-       (parse-rest #'rest (make-ast-pattern-expand #f #f #f '() #f #f '() '() #f #f #f #f))]))
+       (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rest - Tail-recursive parser with accumulator AST
