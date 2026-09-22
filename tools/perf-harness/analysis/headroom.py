@@ -228,7 +228,7 @@ def main() -> None:
         print("=== MoE expert blocks: measured vs the floor its own work implies ===")
         print(
             f"{'M':>10} {'blk/chunk':>9} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
-            f"{'util':>6} {'headroom s':>11}"
+            f"{'util':>6} {'headroom s':>11} {'meas GB/s':>10} {'real?':>6}"
         )
     elif not spec.experts:
         print(f"dense model ({args.preset}, experts=0): MoE section skipped\n")
@@ -242,13 +242,23 @@ def main() -> None:
             f"{args.preset} is MoE but no expert block appears in this window "
             "-- wrong capture position, or a decode capture; MoE section skipped\n"
         )
+    # Buckets whose floor is a bandwidth floor but whose measured bandwidth is at
+    # or above the roofline. Their headroom is not recoverable time: the traffic
+    # the floor charges DRAM for is being served from cache. Collected so the
+    # ranking at the bottom can mark them rather than silently rank them first.
+    # Keyed by the bucket's (lo, hi) bounds, not by its printed label: the small/
+    # large split below is `hi <= 63`, the same test the totals use, and matching
+    # on label text instead silently inverted which row got marked.
+    bw_not_binding: dict[tuple[int, int], float] = {}
+
     for lo, hi in M_BUCKETS if moe else []:
-        meas = fl = nb = 0.0
+        meas = fl = nb = meas_bytes = 0.0
         bind: dict[str, int] = defaultdict(int)
         for cap in caps:
             k = cap.layer_scale / n
             sel = [b for b in cap.blocks if lo <= b.m <= hi]
             meas += sum(b.dur_us for b in sel) * k
+            meas_bytes += sum(b.mem_bytes for b in sel) * k
             nb += len(sel) * k
             for b in sel:
                 f, byts, flop = block_floor(spec, dev, b.m)
@@ -266,9 +276,22 @@ def main() -> None:
             small_m += meas
             small_f += fl
         b = max(bind, key=bind.get)
+        # The floor says which resource *should* bind; SPM says what the hardware
+        # did. Where the floor is bandwidth and the measured rate already exceeds
+        # the roofline, the two disagree and the floor is the one that is wrong.
+        meas_gbps = (meas_bytes / (meas * 1e-6) / 1e9) if meas else 0.0
+        roof_gbps = dev.bw_bytes_s / 1e9
+        if meas_gbps <= 0:
+            real = "n/a"
+        elif b == "bandwidth" and meas_gbps >= roof_gbps:
+            real = "NO"
+            bw_not_binding[(lo, hi)] = meas_gbps
+        else:
+            real = "yes"
         print(
             f"{bucket_label(lo, hi):>10} {nb:9.0f} {meas / 1000:8.1f} {fl / 1000:9.1f} "
-            f"{b:>10} {100 * fl / meas:5.0f}% {(meas - fl) * spec.chunks / 1e6:11.2f}"
+            f"{b:>10} {100 * fl / meas:5.0f}% {(meas - fl) * spec.chunks / 1e6:11.2f} "
+            f"{meas_gbps:10.0f} {real:>6}"
         )
     if m_all:
         print(
@@ -376,17 +399,24 @@ def main() -> None:
 
     print("\n=== recoverable seconds, ranked ===")
     dense_fl_s = max(dense_b / dev.bw_bytes_s, dense_f / dev.peak_flops) * 1e3
+    # A bucket whose bandwidth floor does not bind contributes volume, not time.
+    # Ranking it as recoverable is how this report once put a 59% candidate at the
+    # top that measured -4% when it was built, so say so in the row itself.
+    small_unbound = [b for b in bw_not_binding if b[1] <= 63]
+    large_unbound = [b for b in bw_not_binding if b[1] > 63]
     items = (
         [
             (
-                "MoE experts, large M (ordinary GEMM efficiency)",
+                "MoE experts, large M (ordinary GEMM efficiency)"
+                + (" [BW FLOOR DOES NOT BIND]" if large_unbound else ""),
                 ((m_all - small_m) - (f_all - small_f)) * spec.chunks / 1e6,
-                "hard",
+                "hard" if not large_unbound else "not recoverable: see above",
             ),
             (
-                "MoE experts, small M (structural: per-expert launch)",
+                "MoE experts, small M (structural: per-expert launch)"
+                + (" [BW FLOOR DOES NOT BIND]" if small_unbound else ""),
                 (small_m - small_f) * spec.chunks / 1e6,
-                "new kernel",
+                "new kernel" if not small_unbound else "not recoverable: see above",
             ),
         ]
         if moe
@@ -412,9 +442,27 @@ def main() -> None:
                 "delete it",
             )
         )
-    print(f"{'':52} {'s':>6} {'% of prefill':>13}  cost to take")
+    print(f"{'':74} {'s':>6} {'% of prefill':>13}  cost to take")
     for name, s, cost in sorted(items, key=lambda x: -x[1]):
-        print(f"{name:52} {s:6.2f} {100 * s / args.prefill_s:13.1f}  {cost}")
+        print(f"{name:74} {s:6.2f} {100 * s / args.prefill_s:13.1f}  {cost}")
+
+    if bw_not_binding:
+        print()
+        print("!! Rows marked [BW FLOOR DOES NOT BIND] are not candidates.")
+        for (lo, hi), gbps in sorted(bw_not_binding.items()):
+            print(
+                f"   M {bucket_label(lo, hi):>7}: measured {gbps:.0f} GB/s = "
+                f"{100 * gbps / (dev.bw_bytes_s / 1e9):.0f}% of the "
+                f"{dev.bw_bytes_s / 1e9:.0f} GB/s roofline"
+            )
+        print(
+            "   Above the roofline the traffic is cache-served, so the floor is\n"
+            "   charging DRAM time for bytes that never reach DRAM. Measured once:\n"
+            "   a 59% 'candidate' whose kernels ran at 113-219% of roofline, and\n"
+            "   which regressed TTFT by 4% once the traffic was actually removed.\n"
+            "   Use the FLOP floor, or a measured control at a shape with nothing\n"
+            "   to re-read, to size these instead."
+        )
 
 
 if __name__ == "__main__":

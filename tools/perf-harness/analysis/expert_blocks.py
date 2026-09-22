@@ -70,8 +70,10 @@ def main() -> None:
 
         print(
             f"{'M range':>10} {'blocks':>7} {'tokens':>7} {'ms/chunk':>9} {'%chunk':>7} "
-            f"{'us/blk':>8} {'mean M':>7} {'x floor':>8} {'eff GB/s':>9}  path"
+            f"{'us/blk':>8} {'mean M':>7} {'x floor':>8} {'eff GB/s':>9} "
+            f"{'meas GB/s':>10} {'binds?':>7}  path"
         )
+        unbound = []
         for lo, hi in M_BUCKETS:
             sel = [b for b in cap.blocks if lo <= b.m <= hi]
             if not sel:
@@ -87,10 +89,45 @@ def main() -> None:
             pretty = " ".join(
                 f"{n}x{c}" for n, c in sorted(paths.items(), key=lambda kv: -kv[1])
             )
+            # What the hardware actually moved, per the parser's SPM counters. A
+            # bandwidth floor only bounds anything while bandwidth is the binding
+            # resource; once the measured rate is at or above the roofline the
+            # traffic is being served from cache, the floor is charging DRAM
+            # prices for it, and `x floor` stops being a waste measure.
+            meas_bytes = sum(b.mem_bytes for b in sel)
+            meas_gbps = (meas_bytes / (us * 1e-6) / 1e9) if us else 0.0
+            roof_gbps = dev.bw_bytes_s / 1e9
+            if meas_gbps <= 0:
+                binds = "n/a"
+            elif meas_gbps >= roof_gbps:
+                binds = "NO"
+                unbound.append((bucket_label(lo, hi), meas_gbps, us * k / 1000))
+            else:
+                binds = "yes"
             print(
                 f"{bucket_label(lo, hi):>10} {len(sel):7d} {toks:7d} {us * k / 1000:9.2f} "
                 f"{100 * us * k / chunk_us:7.2f} {mean:8.1f} {toks / len(sel):7.1f} "
-                f"{mean / floor_us:8.2f} {spec.expert_weight_bytes / mean / 1e3:9.0f}  {pretty}"
+                f"{mean / floor_us:8.2f} {spec.expert_weight_bytes / mean / 1e3:9.0f} "
+                f"{meas_gbps:10.0f} {binds:>7}  {pretty}"
+            )
+
+        if unbound:
+            print()
+            print(
+                "  !! bandwidth does NOT bind in these buckets, so read their "
+                "'x floor' as\n     traffic volume and not as recoverable time:"
+            )
+            for label, gbps, ms in unbound:
+                print(
+                    f"       M {label:>7}: measured {gbps:.0f} GB/s = "
+                    f"{100 * gbps / (dev.bw_bytes_s / 1e9):.0f}% of the "
+                    f"{dev.bw_bytes_s / 1e9:.0f} GB/s roofline, {ms:.2f} ms"
+                )
+            print(
+                "     Above the roofline the re-reads are cache hits. Removing them\n"
+                "     saves cache bandwidth, not DRAM time. Measured once on a\n"
+                "     gpt-oss-120b proxy: a 5.38x 'gap' here whose kernels ran at\n"
+                "     113-219% of roofline yielded -4% when the traffic was removed."
             )
 
         small = [b for b in cap.blocks if b.m <= 63]

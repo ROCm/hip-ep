@@ -301,6 +301,28 @@ all-rows floor and the row reports 4564% utilisation and *negative* recoverable
 time. Read that as the optimisation already being present, not as a candidate.
 `trace_ops.py --sequence` shows the `m=` on the `n=vocab` matmul directly.
 
+### A floor only bounds anything while its resource is the binding one
+
+`headroom.py` and `expert_blocks.py` score against `max(bytes/BW, FLOP/peak)`. The
+bandwidth half of that is only a bound while bandwidth actually binds, and the
+parser already measures whether it does. When the achieved rate is *above* the
+roofline the traffic is being served from cache, and a floor computed at DRAM
+prices is charging for bytes that never reach DRAM.
+
+This is not a subtlety; it produced the worst wrong answer this harness has given.
+On a gpt-oss-120b proxy at a 128-token prefill, `headroom.py` ranked small-M MoE
+experts first at **54% of prefill**, from a 5.38x bandwidth-floor gap. The same
+capture's `bound_reason` column said those kernels were running at **113-219% of
+the roofline**. The implied fix was built, verified bitwise correct, and **regressed
+TTFT by 4%**: the re-reads it eliminated had been cache hits all along.
+
+Both scripts now read `mem_gbps` back from the dispatch rows and mark any bucket
+whose bandwidth floor does not bind, `[BW FLOOR DOES NOT BIND]` in the ranking and
+`binds? NO` in the per-bucket table. Treat those rows as traffic volume, not as
+recoverable time, and size them from the FLOP floor or from a measured control at
+a shape with nothing to re-read instead. The guard is silent where the floor is a
+compute floor, which is the usual case at long prompts.
+
 ### Use published ceilings, not the best rate you happened to see
 
 Taking "the best rate observed" as the ceiling is circular: if the whole stack
