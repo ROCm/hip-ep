@@ -155,6 +155,11 @@ jobs:
           # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
+          # Leaf-specific kernel UT executables are installed below bin/kernel-tests/
+          # and dynamically share the custom_kernels_<arch>.dll in staging/bin/.
+          if [ -d "${{ runner.workspace }}/install/bin/kernel-tests" ]; then
+            cp -a "${{ runner.workspace }}/install/bin/kernel-tests" staging/bin/
+          fi
 
           cp "${{ runner.workspace }}/amdgpu-artifacts/bin/"* staging/bin/
 
@@ -171,6 +176,36 @@ jobs:
               exit 1
             fi
             echo "OK: $(basename "$KERNEL_DLL") present"
+          done
+
+          # Package smoke: every installed leaf driver is present for every
+          # kernel ISA.  The drivers share the DLL checked above; no test exe
+          # contains a separately compiled kernel fatbin.
+          if [ ! -f "staging/bin/hipdnn-kernel-ut.exe" ]; then
+            echo "ERROR: packaged kernel UT controller is missing"
+            exit 1
+          fi
+          KERNEL_UT_EXES=(
+            hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe
+            hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16.exe
+            hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32.exe
+            hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe
+            hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
+            hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe
+            hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe
+            hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe
+            hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
+            hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
+            hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe
+          )
+          for arch in "${HIP_ARCHS[@]}"; do
+            for exe in "${KERNEL_UT_EXES[@]}"; do
+              path="staging/bin/kernel-tests/${arch}/${exe}"
+              if [ ! -f "$path" ]; then
+                echo "ERROR: packaged kernel UT missing: $path"
+                exit 1
+              fi
+            done
           done
 
           # Import libraries that get bundled into the MorphiZen JIT-linker
