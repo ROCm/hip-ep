@@ -22,6 +22,8 @@
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!
           ast-pattern-expand-root-var ast-pattern-expand-root-var-set!
           ast-pattern-expand-root-op-name ast-pattern-expand-root-op-name-set!
+          ast-pattern-expand-root-op-index ast-pattern-expand-root-op-index-set!
+          ast-pattern-expand-root-result-idx ast-pattern-expand-root-result-idx-set!
           ast-pattern-expand-match ast-pattern-expand-match-set!
           ast-pattern-expand-match-bindings ast-pattern-expand-match-bindings-set!
           ast-pattern-expand-match-actions ast-pattern-expand-match-actions-set!
@@ -77,7 +79,18 @@
 
       (mutable root-op-name)     ;; syntax string - operation name of root operation
                                  ;; Example: #'"onnx.Cast"
-                                 ;; Set by analyze phase after finding root operation
+                                 ;; Set by validate phase after finding root operation
+
+      (mutable root-op-index)    ;; integer - index of root operation in match vector
+                                 ;; Example: 2 (if root is 3rd operation in :match clause)
+                                 ;; Set by validate phase (cached for efficiency)
+                                 ;; Used by codegen to initialize root variable
+
+      (mutable root-result-idx)  ;; integer - index of root var in root operation's result list
+                                 ;; Example: 0 (if root var is first result)
+                                 ;;          1 (if root var is second result in (%a %b) = "op"(...))
+                                 ;; Set by validate phase (cached for efficiency)
+                                 ;; Used by codegen with mlir-operation-get-result
 
       (mutable match)            ;; Phase 1: list of ast-match-expand (parsed)
                                  ;; Phase 2: vector of ast-match-expand (normalized by validate)

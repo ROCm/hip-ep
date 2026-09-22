@@ -124,18 +124,31 @@
 
   (define (validate-root-var-is-result ast-rec)
     ;; Rule: Root variable must appear as a result in at least one match operation
+    ;; Cache: Store root-op-index and root-result-idx for codegen phase
     (let ([match-vec (ast-pattern-expand-match ast-rec)]
           [root-var (ast-pattern-expand-root-var ast-rec)])
-      (unless (loop :initially := #f
-                    :for op-idx :from 0 :below (vector-length match-vec)
-                    :rime-with match-op := (vector-ref match-vec op-idx)
-                    :rime-with result-vars := (ast-match-expand-result-var match-op)
-                    :break #t :if (loop :initially := #f
-                                        :for var :in result-vars
-                                        :when (bound-identifier=? var root-var)
-                                        :break #t))
-        (syntax-violation 'validate-root-var-is-result
-          "Root variable not found in any match operation result" root-var))))
+      (let ([found (loop :initially := #f
+                         :for op-idx :from 0 :below (vector-length match-vec)
+                         :rime-with match-op := (vector-ref match-vec op-idx)
+                         :rime-with result-vars := (ast-match-expand-result-var match-op)
+                         :rime-with result-idx := (loop :initially := #f
+                                                         :for var :in result-vars
+                                                         :for idx :from 0
+                                                         :when (bound-identifier=? var root-var)
+                                                         :break idx)
+                         :when result-idx
+                         :break (cons op-idx result-idx))])
+        (if found
+            (begin
+              ;; Cache indices for codegen
+              (ast-pattern-expand-root-op-index-set! ast-rec (car found))
+              (ast-pattern-expand-root-result-idx-set! ast-rec (cdr found))
+              ;; Also cache root-op-name for convenience
+              (let ([root-op (vector-ref match-vec (car found))])
+                (ast-pattern-expand-root-op-name-set! ast-rec
+                  (ast-match-expand-op-name root-op))))
+            (syntax-violation 'validate-root-var-is-result
+              "Root variable not found in any match operation result" root-var)))))
 
   ;;-----------------------------------------------------------------------
   ;; Rewrite operation validation
