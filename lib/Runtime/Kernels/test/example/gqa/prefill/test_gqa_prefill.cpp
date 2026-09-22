@@ -27,7 +27,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -35,7 +34,6 @@
 #include <random>
 #include <vector>
 #include <string>
-#include <thread>
 
 extern "C" int hip_gqa_flash_prefill_v5(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
@@ -61,6 +59,9 @@ extern "C" int hip_gqa_flash_prefill_v7(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
 extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
@@ -68,9 +69,6 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
     int m_tiles, int bkv, int nw, int mt, int nd);
-
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-#include "gqa_autotune.h"
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
@@ -244,15 +242,6 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
   auto launch = [&]() {
-    if (const char* forced = std::getenv("HIPDNN_GQA_TEST_PREFILL_CONFIG")) {
-      const int encoded = std::atoi(forced);
-      const int forced_m_tiles = encoded / 1000;
-      const int forced_bkv = encoded % 1000;
-      return hip_gqa_flash_prefill_v3_configured(
-          nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D, max_seq, past_len,
-          scale, window_arg, sink_arg, H, smooth_arg, forced_m_tiles,
-          forced_bkv, 0, 0, 0);
-    }
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     if (!c.expect_reject) {
       using namespace hipdnn_ep;
@@ -318,21 +307,9 @@ static bool run_case(const Case& c, int iters) {
   ms /= iters;
 
   const bool pass = err < 2e-3;
-  const char* v7_window_env =
-      std::getenv("HIPDNN_GQA_D128_WINDOW_V7_CONFIG");
-  const bool default_psu_v7 =
-      !v7_window_env && B == 1 && H == 24 && G == 8 && sq == 128 &&
-      c.window == 2048;
-  const bool uses_v7_window =
-      D == 128 && c.window > 0 &&
-      (default_psu_v7 || (v7_window_env && std::atoi(v7_window_env) > 0));
-  const int version =
-      uses_v7_window ? 7 : (D == 64 || (D == 128 && c.window > 0))
-                              ? 5
-                              : (D == 256 ? 8 : 7);
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL", version);
+         pass ? "PASS" : "FAIL", D == 64 ? 5 : (D == 256 ? 8 : 7));
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
@@ -341,19 +318,8 @@ static bool run_case(const Case& c, int iters) {
 
 int main(int argc, char** argv) {
   int iters = 100;
-  int past_filter = -1;
-  int dwell_ms = 0;
-  const char* filter = nullptr;
-  for (int i = 1; i < argc; ++i) {
-    if (!std::strcmp(argv[i], "--iters") && i + 1 < argc)
-      iters = std::atoi(argv[++i]);
-    else if (!std::strcmp(argv[i], "--filter") && i + 1 < argc)
-      filter = argv[++i];
-    else if (!std::strcmp(argv[i], "--past") && i + 1 < argc)
-      past_filter = std::atoi(argv[++i]);
-    else if (!std::strcmp(argv[i], "--dwell-ms") && i + 1 < argc)
-      dwell_ms = std::atoi(argv[++i]);
-  }
+  for (int i = 1; i < argc; ++i)
+    if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
 
   const Case cases[] = {
       // Qwen3.6-35B-A3B text decoder: d=256 routes to the v8 kernel, which no
@@ -410,24 +376,10 @@ int main(int argc, char** argv) {
       // sink tensor and smooth together, deep enough to skip whole KV tiles.
       {"gpt_oss-win+bo",1, 64, 8,  64, 512,  8192, kSinkBoth,    false, 128},
       // A window must not silently apply at d == 128 either.
-      {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
-      // PSU_MF_LORA_GEMM production geometry: fixed 128-token chunks, H=24,
-      // G=8, d=128 and a 2048-token sliding window.
-      {"psu-d128-win",  1, 24, 8, 128, 128,  0,    kSinkNone,    false, 2048},
-      {"psu-d128-win",  1, 24, 8, 128, 128,  2048, kSinkNone,    false, 2048},
-      {"psu-d128-win",  1, 24, 8, 128, 128,  7808, kSinkNone,    false, 2048},
+      {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    true,  128},
   };
   int fails = 0;
-  for (const auto& c : cases) {
-    if (filter && !std::strstr(c.name, filter))
-      continue;
-    if (past_filter >= 0 && c.past != past_filter)
-      continue;
-    if (!run_case(c, iters))
-      ++fails;
-  }
-  if (dwell_ms > 0)
-    std::this_thread::sleep_for(std::chrono::milliseconds(dwell_ms));
+  for (const auto& c : cases) if (!run_case(c, iters)) ++fails;
   printf("\n%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "SOME FAILED", fails);
   return fails == 0 ? 0 : 1;
 }

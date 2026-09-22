@@ -53,9 +53,6 @@ hipcc --offload-arch=gfx1151 -O3 -std=c++17 -Wno-deprecated-declarations \
 | Option | Default | Meaning |
 |---|---|---|
 | `--iters <n>` | see source | Timed iterations per case |
-| `--filter <text>` | none | Run cases whose name contains the text |
-| `--past <n>` | none | Run cases with the selected past length |
-| `--dwell-ms <n>` | 0 | Keep the process alive after a short RGP capture |
 
 ### `test_gqa_prefill_i8` (INT8 KV)
 
@@ -89,12 +86,3 @@ HIPDNN_PREFILL_TUNE_DEBUG=1 ./test_gqa_prefill.exe --iters 10
 
 On Windows PowerShell, set it with `$env:HIPDNN_PREFILL_TUNE_DEBUG = '1'` and
 clear it with `Remove-Item Env:\HIPDNN_PREFILL_TUNE_DEBUG`.
-
-The PSU D=128/window=2048 route defaults to the measured v7
-`MT=1,NW=4,BKV=64` configuration. These controls support A/B:
-
-- `HIPDNN_GQA_D128_WINDOW_V7_CONFIG=0` restores the v5 route.
-- `HIPDNN_GQA_D128_WINDOW_CONFIG=0|1032|1064|2032|2064` selects a v5
-  `M_TILES*1000+BKV` configuration.
-- `HIPDNN_GQA_D128_WINDOW_V7_CONFIG=<encoded>` selects a v7
-  `MT*1000000+NW*1000+BKV` configuration.
