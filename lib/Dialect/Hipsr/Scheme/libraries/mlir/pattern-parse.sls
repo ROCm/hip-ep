@@ -28,25 +28,58 @@
 ;;
 ;;=======================================================================
 
+;;=======================================================================
+;; Syntax Reference: Match Operations
+;;=======================================================================
+;;
+;; Variables: All identifiers must start with %
+;;   - Results: %a, %out, %result
+;;   - Operands: %x, %input
+;;
+;; Operation name: string or symbol
+;;   - "onnx.Add" or onnx.Add
+;;
+;; Operand groups:
+;;   (%x %y)                           - all required
+;;   (%x (&optional %y %z))            - x required, y,z optional
+;;   (%x (&optional %y) %z)            - x required, y optional, z required
+;;   (%x (&variadic %rest))            - x required, rest variadic
+;;   (%x (&optional %y) (&variadic %w)) - combined
+;;
+;; Note: &optional/&variadic require AttrSizedOperandSegments trait
+;;
+;; Guards (:where clause):
+;;   :where <scheme-expr>
+;;   - Returns truthy to match, falsy to fail
+;;   - Early return (executes immediately after matching operation)
+;;   - Can access result variables, call FFI functions
+;;   Example: :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
+;;                     (and $ks (is-1x1-kernel? $ks)))
+;;
+;; Complete syntax:
+;;   result = "op" (operands) [:where <expr>]
+;;
+;; Type matching: NOT SUPPORTED
+;;   - MLIR's DRR/PDLL also make types optional
+;;   - Type verification happens in operation verifiers
+;;
+;;=======================================================================
+
 (library (mlir pattern-parse)
   (export parse-to-ast)
   (import (except (rnrs) =)
           (for (only (chezscheme) syntax->list) expand)
-          (for (mlir pattern-keywords) expand)  ;; KEY: Import keywords at expansion time!
+          (for (mlir pattern-keywords) expand)
           (for (mlir pattern-ast) expand))
 
   ;;=======================================================================
-  ;; Main entry point
+  ;; SECTION 1: Entry Points
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
-  ;; parse-to-ast - Entry point for parsing
+  ;; parse-to-ast - Entry point
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; INPUT:  whole-stx - entire syntax from (define-conversion-pattern ...)
-  ;; OUTPUT: ast-pattern-expand record
-  ;;
-  ;; Strips the macro name and delegates to parse-rest for actual parsing.
+  ;; Strips macro name, delegates to parse-rest.
   ;;
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
@@ -55,21 +88,9 @@
        (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-rest - Tail-recursive parser with accumulator AST
+  ;; parse-rest - Parse function name, debug flags, then dispatch to :match
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Parses fname and debug flags (in any order), then the main pattern.
-  ;; Uses tail recursion to handle optional debug flags.
-  ;;
-  ;; Pattern syntax:
-  ;;   function-name [:debug-flags]* OR [:debug-flags]* function-name
-  ;;   :match match-operations...
-  ;;   [:then-let ((var expr)...)]?
-  ;;   :rewrite root-var :with rewrite-operations...
-  ;;
-  ;; Note: No outer parentheses around match/rewrite operations (MLIR-like syntax)
-  ;;
-  ;; Strategy: Parse fname and debug flags until we hit :match, then parse main structure.
+  ;; Tail-recursive: accumulates debug flags, then calls parse-match-ops-recursive.
   ;;
   (define (parse-rest rest ast)
     (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
@@ -123,11 +144,9 @@
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
-  ;; parse-match-ops-recursive - Collect match operations recursively
+  ;; parse-match-ops-recursive - Collect match operations
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Recursively parses match operations until hitting :then-let or :rewrite.
-  ;; Creates AST records directly (no intermediate parser).
+  ;; Stops at :then-let or :rewrite. Creates AST records directly.
   ;;
   (define (parse-match-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (:then-let :rewrite :where =)
@@ -158,13 +177,8 @@
            "Invalid match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-after-match - Parse :then-let and :rewrite after :match
+  ;; parse-after-match - Parse optional :then-let, then :rewrite
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Handles two syntax patterns:
-  ;;   1. :match ... :then-let (...) :rewrite ... :with ...
-  ;;   2. :match ... :rewrite ... :with ...
-  ;;
   (define (parse-after-match rest-stx ast)
     (syntax-case rest-stx (:then-let :rewrite :with)
       ;; Pattern 1: :then-let followed by :rewrite
@@ -195,23 +209,12 @@
            "Expected [:then-let (...)] :rewrite root :with rewrite-ops..." rest-stx)]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-rewrite-ops-recursive - Recursively parse rewrite operations
+  ;; parse-rewrite-ops-recursive - Collect rewrite operations
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Collects rewrite operations until end of syntax
-  ;;
-  ;; Pattern matching style (not list processing):
-  ;;   1. Match one operation: result = "op" (...)
-  ;;   2. Recurse on rest
-  ;;   3. Stop when reaching end
+  ;; Requires parentheses around each operation (complex syntax).
+  ;; Delegates to parse-rewrite-operation for details.
   ;;
   (define (parse-rewrite-ops-recursive rest-stx acc-ops ast)
-    ;; Rewrite operations are complex (can have :regions, :attrs, -> types)
-    ;; So we can't use simple pattern matching like match operations
-    ;; Instead, collect entire operation syntax and delegate to parse-rewrite-operation
-    ;;
-    ;; Strategy: Scan for start of next operation (pattern: identifier = ...)
-    ;; or end of list
     (syntax-case rest-stx (=)
       ;; End of operations
       [()
@@ -232,97 +235,21 @@
       [_ (syntax-violation 'define-conversion-pattern "Invalid pattern syntax (expected fname :match match-ops... :rewrite root :with rewrite-ops...)" rest)]))
 
   ;;=======================================================================
-  ;; Match Operation Syntax Documentation
-  ;;=======================================================================
-  ;;
-  ;; Naming rules:
-  ;;   - Result variables: identifiers starting with % (e.g., %a, %out, %result)
-  ;;   - Operand variables: identifiers starting with % (e.g., %x, %input)
-  ;;
-  ;; Result syntax (all supported):
-  ;;   - Single result:     %r = "op" (...)  or  %r = op (...)
-  ;;   - Multiple results:  (%a %b) = "op" (...)
-  ;;   - Variadic (future): (%a ...) = "op" (...)      [not validated yet]
-  ;;   - Dotted (future):   (%a %b . %rest) = "op" (...) [not validated yet]
-  ;;
-  ;; Operation name syntax:
-  ;;   - String literal: "onnx.Add" or "arith.addi"
-  ;;   - Symbol: onnx.Add or arith.addi
-  ;;
-  ;; Operand syntax:
-  ;;   - Required: %x %y - identifiers starting with %
-  ;;   - Optional group: (&optional %y %z) - all operands in group are optional
-  ;;   - Variadic group: (&variadic %rest) - captures variable number of operands
-  ;;
-  ;; Operand groups (explicit parentheses for clarity):
-  ;;   (%x %y)                      - all required
-  ;;   (%x (&optional %y %z))       - x required, y,z optional
-  ;;   (%x (&optional %y) %z)       - x required, y optional, z required
-  ;;   (%x (&variadic %rest))       - x required, rest variadic
-  ;;   (%x (&optional %y) (&variadic %rest)) - combined
-  ;;
-  ;; Implementation note: Optional and variadic operands require reading
-  ;; the operation's "operandSegmentSizes" attribute at runtime to calculate
-  ;; actual operand positions. See AttrSizedOperandSegments trait in MLIR.
-  ;;
-  ;; Guard syntax (pure Scheme expression):
-  ;;   :where <scheme-expr>
-  ;;   - Expression must return truthy value for pattern to match
-  ;;   - Can bind local variables, access matched result/operands
-  ;;   - Early return: executes immediately after matching this operation
-  ;;   Example: :where (let ([$ks (mlir-operation-get-attribute %a "kernel_shape")])
-  ;;                     (and $ks (is-1x1-kernel? $ks)))
-  ;;
-  ;; Rationale for removing special attribute syntax:
-  ;;   - `:where` is more flexible than `((attr = $var))` syntax
-  ;;   - Can do ANY computation, not just attribute extraction
-  ;;   - Attribute missing → mlir-operation-get-attribute returns null → guard fails
-  ;;   - One unified mechanism instead of two separate syntaxes
-  ;;
-  ;; Type matching: NOT SUPPORTED (intentionally omitted)
-  ;;   Rationale: Type syntax is dialect-specific and unpredictable. MLIR's
-  ;;   own pattern systems (DRR, PDLL) make type constraints optional.
-  ;;   Most patterns match structurally without type constraints - type
-  ;;   verification happens in MLIR's operation verifiers, not patterns.
-  ;;   Complex type matching can be added later via C++ callbacks if needed.
-  ;;
-  ;; Complete syntax:
-  ;;   result = "op" (operands) [:where <scheme-expr>]
-  ;;
-  ;; Examples:
-  ;;   %a = "op" (%x %y)
-  ;;   %a = "op" (%x (&optional %y))
-  ;;   %a = "op" (%x (&optional %y %z) (&variadic %w))
-  ;;   %a = "op" (%x) :where (mlir-operation-get-attribute %a "kernel_shape")
-  ;;
-  ;;=======================================================================
-
-  ;;=======================================================================
   ;; SECTION 3: Detail Parsers (Low-Level Parsing)
   ;;=======================================================================
   ;;
-  ;; These functions parse individual operations and their components.
-  ;; Called by the recursive collectors above.
-  ;;
+  ;; These functions parse individual rewrite operations and components.
+  ;; Match operations are parsed directly in Section 2 (simple syntax).
   ;; Rewrite operations are complex: operands + :regions + :attrs + -> types
-  ;; Match operations are simple: already parsed directly in Section 2
   ;;
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-operation - Parse one rewrite operation
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Two-step parsing strategy:
-  ;;   Step 1: Extract result(s), op-name (this function)
-  ;;   Step 2: Parse rest: operands, optional sections (parse-rewrite-rest)
-  ;;
-  ;; Handles operations with/without results:
-  ;;   With result:  (%out = "op" (operands) -> !type)
-  ;;   Without:      ("op" (operands) -> ())
+  ;; Extracts result, op-name; delegates rest to parse-rewrite-rest.
   ;;
   (define (parse-rewrite-operation op-stx)
-    ;; Step 1: Extract result(s), =, op-name, and rest
     (syntax-case op-stx (=)
       ;; Pattern: (result-part = op-name . rest) or ((results ...) = op-name . rest)
       [(result-part = op-name . rest)
@@ -338,14 +265,9 @@
            op-stx)]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-rewrite-rest - Parse operation body after result and op-name
+  ;; parse-rewrite-rest - Parse operands and optional sections
   ;;-----------------------------------------------------------------------
-  ;;
-  ;; Required: (operands)
-  ;; Optional: :regions (...) :attrs [...] -> result-types
-  ;;
-  ;; The -> result-types is REQUIRED for operations with results.
-  ;; Delegates to parse-rewrite-optional to handle optional sections.
+  ;; Syntax: (operands) [:regions ...] [:attrs ...] [-> types]
   ;;
   (define (parse-rewrite-rest result-stx op-name-stx rest-stx)
     (syntax-case rest-stx ()
