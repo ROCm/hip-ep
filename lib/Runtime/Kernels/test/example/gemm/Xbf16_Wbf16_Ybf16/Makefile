@@ -88,13 +88,13 @@ TB   ?= 1
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_GEMM_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gemm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wfp16_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_GEMM_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gemm" && set "HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_GEMM_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gemm && set HIPDNN_RESULTS_LEAF=Xfp16_Wfp16_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_GEMM_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gemm && set HIPDNN_RESULTS_LEAF=Xbf16_Wbf16_Ybf16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef

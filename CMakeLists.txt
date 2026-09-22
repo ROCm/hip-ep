@@ -96,6 +96,8 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+option(BUILD_HIP_KERNEL_UNIT_TESTS
+  "Build standalone GPU kernel unit-test executables for packaging" ${BUILD_HIP_UNIT_TESTS})
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
@@ -230,6 +232,15 @@ if(BUILD_HIP_UNIT_TESTS)
 
   # MLIR dialect/pass unit tests (plain main; GPU-free injected-I/O coverage).
   add_subdirectory(test/unit)
+endif()
+
+# These GPU kernel tests are standalone package artifacts: their small,
+# leaf-specific drivers link the already-built custom_kernels_<arch> DLL/SO
+# instead of recompiling any .hip implementation.  Keep this option separate
+# from BUILD_HIP_UNIT_TESTS so a packaging build can request the executables
+# without also enabling the broader CTest suite.
+if(BUILD_HIP_KERNEL_UNIT_TESTS AND NOT BUILD_MOCK_RUNTIME)
+  add_subdirectory(lib/Runtime/Kernels/test/example)
 endif()
 
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can

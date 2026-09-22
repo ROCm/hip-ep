@@ -1,8 +1,37 @@
 # Kernel unit tests (`lib/Runtime/Kernels/test/example`)
 
-This folder is the **only** entry for standalone HIP kernel unit tests.
-Makefile is the only driver. No `.bat` / `setup_*` / `run_*` wrappers.
-No full-EP cmake.
+This folder contains the source for standalone HIP kernel unit tests.
+
+For CI/package testing, the full hip-ep CMake build creates one small,
+leaf-specific executable per test and installs it under
+`bin/kernel-tests/<arch>/`.  Each executable dynamically links the installed
+`custom_kernels_<arch>.dll`, so the GPU kernels and autotune resolver are
+compiled and packaged exactly once.  Run an installed test from `bin/` (so the
+shared DLL is on the Windows DLL search path), for example:
+
+```
+.\kernel-tests\gfx1151\hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
+```
+
+Use the package entry point to run the complete suite and aggregate every
+leaf's result in `bin/out/results.csv`:
+
+```
+.\hipdnn-kernel-ut.exe --mode lookup --coverage 3
+```
+
+Its two modes match the production kernel behavior:
+
+- `lookup` (default) reads the FB already embedded in
+  `custom_kernels_<arch>.dll`; a test executable never carries a second FB.
+  If that DLL has no compatible table, it falls through to autotune.
+- `autotune` bypasses the table and selects production's `online` mode.  The
+  name translation is only at the test command line; `online` remains the
+  kernel ABI spelling.
+
+The leaf Makefiles remain available for standalone kernel development.  That
+direct-build path intentionally compiles the selected kernel source itself;
+it is not the CI/package path.
 
 Repo-relative paths only. `HIP_SDK` and `OFFLOAD` come from the command line.
 
@@ -37,7 +66,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 9-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 11-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -69,6 +98,8 @@ Examples:
 | Leaf | What it is |
 |---|---|
 | `gemm/Xfp16_Wfp16_Yfp16` | dense GEMM fp16 |
+| `gemm/Xbf16_Wbf16_Ybf16` | dense GEMM bf16 |
+| `gemm/Xfp32_Wfp32_Yfp32` | dense GEMM fp32 |
 | `matmul_nbits/Xfp16_Wu4_Yfp16` | A fp16, B uint4, C fp16 |
 | `matmul_nbits/Xfp16_Wu2_Yfp16` | bits=2 |
 | `matmul_nbits/Xfp16_Wu3_Yfp16` | bits=3 |
@@ -89,9 +120,12 @@ Do **not** use `fp16u4`, `decode/fp16`, `prefill/i8`.
 ```
 example/
   README.md
-  Makefile                  # CI aggregator
-  tests.manifest
+  CMakeLists.txt             # package targets and install rules
+  kernel_ut_main.cpp         # hipdnn-kernel-ut.exe controller
+  Makefile                   # direct standalone-development aggregator
   gemm/Xfp16_Wfp16_Yfp16/
+  gemm/Xbf16_Wbf16_Ybf16/
+  gemm/Xfp32_Wfp32_Yfp32/
   matmul_nbits/Xfp16_Wu{2,3,4}_Yfp16/
   matmul_nbits/Xfp16_Wi8_Yfp16/
   gqa/decode/Xfp16_Wfp16_Yfp16/
@@ -105,12 +139,39 @@ example/
 `hip/autotune/gqa/tools/`, `hip/autotune/matmul_nbits/tools/`,
 `hip/autotune/gemm/tools/`.
 
+## Adding an op or dtype leaf
+
+Update all of these together:
+
+1. Add the production launcher declaration to `include/hip_custom_kernels.h`,
+   implementation to `hip/<op>_kernel.hip`, and that HIP file to
+   `lib/Runtime/Kernels/CMakeLists.txt`'s `_kernel_sources`.
+2. Add a leaf directory named from all tensor dtypes, containing exactly its
+   `Makefile`, self-contained `test_<op>.cpp`, and `README.md`. The test must
+   generate inputs and a CPU reference in-process, return non-zero on failure,
+   and support `--coverage 1|2|3`.
+3. Add the leaf once to the `LEAVES` list in `example/Makefile` for direct
+   development runs, once to `example/CMakeLists.txt` for package install, and
+   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report.
+4. Add the new leaf to `kernel_ut_main.cpp` without declaring whether it has a
+   table. The controller always passes the requested `lookup` mode; production
+   code must match the actual dtype/bits, shape, and GPU architecture against
+   the DLL's embedded table, then fall through to autotune on a miss.
+5. If the op supports lookup, add its resolver/schema and checked-in
+   `lut/<arch>.fb` data to the production `custom_kernels_<arch>` build. Do
+   not embed the FB in a test exe: `lookup` must consume the DLL's embedded
+   table, exactly like model execution. A missing compatible table must fall
+   through to autotune.
+6. Ensure the leaf writes one row per case to `HIPDNN_RESULTS_CSV` when set.
+   The controller also writes one `suite/controller` row per leaf, including
+   leaves without detailed timing rows.
+
 ## Required files in every leaf — EXACTLY these three, nothing else
 
 | File | Role |
 |---|---|
 | `Makefile` | `test` / `test_custom` / `clean` |
-| `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data, no `example/common/`. Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lut`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
+| `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data, no `example/common/`. Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
 | `README.md` | Targets + `MODE` + `COVERAGE` |
 
 No `gen_data.py`, no python anywhere under `example/`, no `shapes.csv`, no
@@ -147,19 +208,23 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
 
 **Per op family:**
 
-- **gemm**: a hand-enumerated `cases[]` array in `test_gemm.cpp` — M in
-  `{1,16,64,128,512,1024}` round-robined (not a full cross) across 5
+- **gemm**: dtype is fixed by the leaf (`Xfp16_Wfp16_Yfp16`,
+  `Xbf16_Wbf16_Ybf16`, `Xfp32_Wfp32_Yfp32`), not a per-row axis, so the three
+  leaves together provide the dtype axis at every tier. Each leaf's
+  `test_gemm.cpp` hand-enumerates its own identical-shape `cases[]` array — M
+  in `{1,16,64,128,512,1024}` round-robined (not a full cross) across 5
   representative `(K,N)` families (square, MLP gate/up-proj, MLP down-proj,
-  2 attn-proj sizes), 30 rows total, each commented with its `(ta,tb,dtype)`
-  combo — **is** the tier-3 set. `kTier1`/`kTier2` are fixed index subsets of
-  that array chosen so every TA/TB/bias/dtype value still appears at tier1
-  (6 rows) / tier2 (20 rows). The CPU reference (`cpuGemmF32`) is
-  multithreaded over M-rows. Every row's `(ta,tb,dtype)` triple is unique
-  within its `(K,N)` family across the whole grid — needed to route around a
-  discovered `hip_gemm` autotune-cache issue where reusing the same
-  `(N,K,ta,tb,dtype)` signature at a very different `M` in the same process
-  can return wrong results (out of scope to fix here; see the
-  `kernel_ut_coverage_wide` handoff `RESULT.md`).
+  2 attn-proj sizes), 30 rows total, each labeled with its phase (`GemvNt`,
+  `GemvNn`, `Wmma`/`TiledFma-Nt`/`TiledFma-Nn` depending on the leaf's dtype,
+  plus `-bias` variants) — **is** the tier-3 set. `kTier1`/`kTier2` are fixed
+  index subsets of that array chosen so every TA/TB/bias value still appears
+  at tier1 (6 rows) / tier2 (20 rows). The CPU reference (`cpuReference`) is
+  multithreaded over M-rows. Every row's `(ta,tb)` pair is unique within its
+  `(K,N)` family across the whole grid — needed to route around a discovered
+  `hip_gemm` autotune-cache issue where reusing the same `(N,K,ta,tb,dtype)`
+  signature at a very different `M` in the same process can return wrong
+  results (out of scope to fix here; see the `kernel_ut_coverage_wide`
+  handoff `RESULT.md`).
 - **gqa decode/prefill (fp16)**: a fixed list of named real-model +
   geometry-sweep cases (13 for decode, 39 hand-authored rows for prefill,
   widened from 29 with short `sq=128` and long pure-prefill `sq=8192` rows)
@@ -190,32 +255,40 @@ categorical axes are truly independent, build the real cross product
 (matmul_nbits style). Either way, the array (or the function that builds it)
 is the single source of truth for what "typical" means for that op.
 
-## Uniform make API / CI
+## Uniform make API (standalone development)
 
 `test`, `test_custom`, `clean`.
-CI: `cd example && make test OFFLOAD=... HIP_SDK=... [COVERAGE=1|2|3]`
+Standalone: `cd example && make test OFFLOAD=... HIP_SDK=... [COVERAGE=1|2|3]`
 
-### `MODE=auto` (default) — real LUT when one exists
+### `MODE=lookup` (default) — real LUT when one exists
 
-`MODE ?= auto` in every leaf Makefile:
+`MODE ?= lookup` in every leaf Makefile. There are exactly two values, named
+after what the kernel itself calls them:
 
-- **`auto`** (default): `lut` if `hip/autotune/<op>/lut/<arch>.fb` exists for
-  the current `OFFLOAD` arch, else `autotune`. Never fails for lack of a
-  table — falls back silently.
-- **`lut`**: forces `lut`; if the `.fb` is missing for this arch, warns and
-  falls back to `autotune` (still does not fail).
-- **`autotune`**: always the runtime sweep, never touches a LUT.
+- **`lookup`** (default): resolve the config from
+  `hip/autotune/<op>/lut/<arch>.fb`. If this arch has no table, it warns and
+  falls back to `autotune` — a missing table is never a hard failure.
+- **`autotune`**: always the runtime sweep, never touches a table.
 
-`MODE=lut` needs `flatc` (a build tool, **not part of this repo** — see
+`MODE` also selects the kernel's own source, via
+`HIPDNN_{GEMM,MATMUL,GQA}_AUTOTUNE_MODE=lookup|online` in the leaf's run
+command. Both halves must agree: the Makefile value alone only decides whether
+the real resolver and table are *linked*, so without that wiring a run labelled
+`autotune` would still be resolving from a table.
+
+`MODE=lookup` needs `flatc` (a build tool, **not part of this repo** — see
 `knowledge/hosts.md`) plus its `include/`, passed on the command line:
 
 ```
-make test MODE=auto OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> \
+make test MODE=lookup OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> \
     FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<flatbuffers include dir>
 ```
 
 `FLATC`/`FLATBUFFERS_INC` are only required when `MODE` actually resolves to
-`lut` (checked at `make direct`/`$(TARGET)` time, not for `clean` etc.).
+`lookup` (checked at `make direct`/`$(TARGET)` time, not for `clean` etc.).
+`flatc` and the flatbuffers headers must be the same release: the generated
+header asserts on the version it was produced by, so a mismatched pair fails
+the build with "Non-compatible flatbuffers version included".
 Under the hood: `flatc --cpp --gen-object-api --scoped-enums` generates
 `<op>_autotune_generated.h` into `out/gen/` (unchanged), and the test links
 the real `hip/autotune/<op>/<op>_autotune.cpp` resolver instead of the leaf's
@@ -290,7 +363,7 @@ real resolver is enough. For GQA, `gqa_kernel.hip` does not call the resolver
 and dispatch the resolved config through the production
 `hip_gqa_flash_decode_configured` / `_prefill_v3_configured` entries. The GQA
 i8 leaves' kernel calls never resolve from the LUT directly (only the fp16
-decode/prefill leaves do) — `MODE=lut` there only needs to satisfy
+decode/prefill leaves do) — `MODE=lookup` there only needs to satisfy
 `gqa_autotune.cpp`'s LUT-data symbols so the link succeeds.
 
 ### `out/results.csv`
@@ -303,10 +376,46 @@ removes it with the rest of `out/`). Stable header:
 op,leaf,arch,mode,shape,config,time_ms,relL2,verdict
 ```
 
-One row per case: `config` is `final` in `MODE=autotune`, or the resolved
-LUT config string (and `lut:<source>` for leaves that only log
-exact/nearest/fallback) in `MODE=lut`. Each leaf that writes this file
-inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) — see the
-top of any `test_<op>.cpp` that includes one. Not every leaf writes CSV: gemm
-never did (its perf/correctness path is inlined in `main()`), and the GQA i8
-leaves don't either — both unchanged from before this cleanup.
+One row per case.
+
+`time_ms` is the **mean per-launch** time of that case's own timing loop (the
+leaf's `kIters` launches between two HIP events), not a total. It is the only
+timing in the row: the tuner's own figure is a *peak* (minimum) sample taken
+during the sweep, under a different clock state, so it is deliberately not
+carried in `config` where it would read as the same measurement.
+
+`config` names the configuration that actually ran, recovered from the op's own
+diagnostics (`HIPDNN_{MATMUL,GQA}_AUTOTUNE_MODE` logs, `HIPDNN_MATMUL_LUT_LOG`,
+`HIPDNN_EP_DEBUG` for gemm) rather than inferred from `mode`. The prefix says
+where the configuration came from, the rest is the configuration itself:
+
+| Prefix | Meaning |
+|---|---|
+| `lookup:…` | the offline table answered. MatMulNBits also reports `(exact\|nearest\|fallback d=…)`, where `d` is the weighted log2 distance to the measured point |
+| `autotune:…` | the table missed, was bypassed, or the op has no lookup wired, and the runtime sweep picked this one |
+| `heuristic:…` | gemm's `Wmma` phase only: a table miss in `lookup` mode, which deliberately uses the compiled-in occupancy heuristic instead of sweeping (see `tuneWmma`) |
+| `default:…` | gemm's `GemvNt`/`GemvNn`/`TiledFma` phases: a table miss in `lookup` mode, which keeps that phase's compiled-in default config index (each of those tuners' equivalent of `heuristic:` — same "don't sweep on a miss" policy as `Wmma`, just a fixed index instead of an M/N/K-dependent heuristic function) |
+| `naive` / `fixed-kernel` | the shape reached a path with no tunable config at all (gemm: `TA=1` or the `NN` layout, both dispatch a single fixed kernel with nothing to choose — see `launchSmallM`; this label does not yet distinguish which fixed path, since neither logs a selection) |
+| `declined` | the op rejected the combination by design (a leaf's `expect_reject` case); `time_ms`/`relL2` are 0 because nothing ran |
+| `unlogged` | the op emitted no config diagnostic for this case — treat it as a gap to fix, not a result |
+| `unclassified:…` | gemm only: the op's diagnostics logged a `-> cfg[…]` line, but its prefix matched none of `lookup`/`heuristic`/`default`/`autotune` — a new source string was added to the kernel without updating the leaf's capture helper (`capture_selected_config` in `test_gemm.cpp`); treat this as a doc/parsing gap to fix, not a result, same as `unlogged` |
+
+A run is either `lookup` or `autotune`, never both, so a leaf has exactly one
+`out/results.csv` with one row per case that ran — including declined cases. The
+`mode` column records which mode was asked for; an `autotune:` config under
+`mode=lookup` is the honest report of a table miss, not a second result set.
+
+Each leaf captures that output per case into a single scratch file under `out/`
+and deletes it again, so a completed run leaves only `out/results.csv`. Because
+an op logs a selection only on the first encounter with a tune key — which does
+not include the activation dtype — a later case sharing that key (e.g. the fp32
+twin of an fp16 shape) reuses the earlier selection silently; the leaf remembers
+it per key so every row still names a real config.
+
+`hipdnn-kernel-ut.exe` appends one extra row per leaf to the same file, with
+`shape=suite`, `config=suite-total` and the leaf process's **total wall time**
+in `time_ms` — the one row where that column is not a per-launch mean.
+
+Each leaf that writes this file inlines its own ~30-line `CsvWriter`/`CsvRow`
+(no shared header) — see the top of any `test_<op>.cpp`. The two GQA i8 leaves
+are the only ones that still emit no per-case rows.

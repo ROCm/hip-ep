@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Self-contained fp16 GEMM kernel-unit-test leaf. This source deliberately
+ * Self-contained bf16 GEMM kernel-unit-test leaf. This source deliberately
  * instantiates exactly one device/input/output dtype path.
  */
 #include "hip_custom_kernels.h"
@@ -22,7 +22,7 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
 #endif
 
 #include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -36,13 +36,13 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
   std::fprintf(stderr, "HIP %s:%d %s\\n", __FILE__, __LINE__, hipGetErrorString(e)); return 1; } \
 } while (0)
 
-static constexpr int kGemmDtype = 0;
-static constexpr const char* kDtypeName = "fp16";
-static constexpr double kTolerance = 6e-2;
-using Elem = __half;
+static constexpr int kGemmDtype = 3;
+static constexpr const char* kDtypeName = "bf16";
+static constexpr double kTolerance = 3e-1;
+using Elem = __hip_bfloat16;
 
-static float toFloat(Elem value) { return __half2float(value); }
-static Elem fromFloat(float value) { return __float2half(value); }
+static float toFloat(Elem value) { return __bfloat162float(value); }
+static Elem fromFloat(float value) { return __float2bfloat16(value); }
 
 static int coverageTier(int argc, char** argv) {
   int tier = 3;

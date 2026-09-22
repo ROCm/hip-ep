@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Self-contained fp16 GEMM kernel-unit-test leaf. This source deliberately
+ * Self-contained fp32 GEMM kernel-unit-test leaf. This source deliberately
  * instantiates exactly one device/input/output dtype path.
  */
 #include "hip_custom_kernels.h"
@@ -22,7 +22,7 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
 #endif
 
 #include <hip/hip_runtime.h>
-#include <hip/hip_fp16.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -36,13 +36,13 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
   std::fprintf(stderr, "HIP %s:%d %s\\n", __FILE__, __LINE__, hipGetErrorString(e)); return 1; } \
 } while (0)
 
-static constexpr int kGemmDtype = 0;
-static constexpr const char* kDtypeName = "fp16";
-static constexpr double kTolerance = 6e-2;
-using Elem = __half;
+static constexpr int kGemmDtype = 1;
+static constexpr const char* kDtypeName = "fp32";
+static constexpr double kTolerance = 2e-3;
+using Elem = float;
 
-static float toFloat(Elem value) { return __half2float(value); }
-static Elem fromFloat(float value) { return __float2half(value); }
+static float toFloat(Elem value) { return value; }
+static Elem fromFloat(float value) { return value; }
 
 static int coverageTier(int argc, char** argv) {
   int tier = 3;
@@ -146,34 +146,34 @@ int main(int argc, char** argv) {
   static const Case cases[] = {
       {1, 2048, 2048, 0, 1, 1, 2048, 1.0f, 0.0f, "GemvNt"},
       {1, 4096, 4096, 0, 0, 1, 4096, 1.0f, 0.25f, "GemvNn-bias"},
-      {16, 4096, 11008, 0, 1, 1, 4096, 1.0f, 0.0f, "Wmma"},
-      {64, 4096, 14336, 1, 1, 64, 1, 1.0f, 0.25f, "fixed-layout-bias"},
-      {128, 1024, 4096, 1, 0, 128, 1, 1.0f, 0.0f, "fixed-layout"},
-      {512, 2048, 2048, 0, 0, 1, 2048, 1.0f, 0.25f, "fixed-layout-bias"},
+      {16, 4096, 11008, 0, 1, 1, 4096, 1.0f, 0.0f, "TiledFma-Nt"},
+      {64, 4096, 14336, 1, 1, 64, 1, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {128, 1024, 4096, 1, 0, 128, 1, 1.0f, 0.0f, "TiledFma-Nn"},
+      {512, 2048, 2048, 0, 0, 1, 2048, 1.0f, 0.25f, "TiledFma-Nn-bias"},
       {1, 11008, 4096, 0, 1, 1, 11008, 1.0f, 0.25f, "GemvNt-bias"},
       {1, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.0f, "GemvNn"},
-      {16, 1024, 4096, 0, 1, 1, 1024, 0.75f, 0.0f, "Wmma"},
-      {16, 2048, 2048, 1, 0, 16, 1, 1.0f, 0.25f, "fixed-layout-bias"},
-      {64, 4096, 4096, 0, 1, 1, 4096, 1.0f, 0.25f, "Wmma-bias"},
-      {64, 11008, 4096, 1, 1, 64, 1, 1.0f, 0.0f, "fixed-layout"},
-      {128, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "fixed-layout-bias"},
-      {128, 1024, 4096, 0, 1, 1, 1024, 1.0f, 0.0f, "Wmma"},
-      {512, 4096, 4096, 1, 1, 512, 1, 1.0f, 0.25f, "fixed-layout-bias"},
-      {512, 11008, 4096, 0, 0, 1, 11008, 1.0f, 0.0f, "fixed-layout"},
-      {1024, 2048, 2048, 0, 1, 1, 2048, 1.0f, 0.25f, "Wmma-bias"},
-      {1024, 4096, 4096, 1, 0, 1024, 1, 1.0f, 0.0f, "fixed-layout"},
-      {16, 4096, 14336, 1, 1, 16, 1, 1.0f, 0.0f, "fixed-layout"},
-      {64, 1024, 4096, 0, 0, 1, 1024, 1.0f, 0.25f, "fixed-layout-bias"},
-      {128, 2048, 2048, 1, 0, 128, 1, 1.0f, 0.0f, "fixed-layout"},
-      {512, 4096, 14336, 0, 1, 1, 4096, 1.0f, 0.25f, "Wmma-bias"},
-      {1024, 1024, 4096, 0, 0, 1, 1024, 1.0f, 0.0f, "fixed-layout"},
-      {16, 11008, 4096, 0, 1, 1, 11008, 1.0f, 0.25f, "Wmma-bias"},
-      {64, 2048, 2048, 1, 1, 64, 1, 1.0f, 0.0f, "fixed-layout"},
-      {128, 4096, 4096, 0, 0, 1, 4096, 1.0f, 0.25f, "fixed-layout-bias"},
-      {512, 1024, 4096, 1, 0, 512, 1, 1.0f, 0.0f, "fixed-layout"},
-      {1024, 11008, 4096, 0, 1, 1, 11008, 1.0f, 0.25f, "Wmma-bias"},
-      {128, 11008, 4096, 1, 1, 128, 1, 1.0f, 0.0f, "fixed-layout"},
-      {64, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "fixed-layout-bias"},
+      {16, 1024, 4096, 0, 1, 1, 1024, 0.75f, 0.0f, "TiledFma-Nt"},
+      {16, 2048, 2048, 1, 0, 16, 1, 1.0f, 0.25f, "TiledFma-Nn-bias"},
+      {64, 4096, 4096, 0, 1, 1, 4096, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {64, 11008, 4096, 1, 1, 64, 1, 1.0f, 0.0f, "TiledFma-Nt"},
+      {128, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "TiledFma-Nn-bias"},
+      {128, 1024, 4096, 0, 1, 1, 1024, 1.0f, 0.0f, "TiledFma-Nt"},
+      {512, 4096, 4096, 1, 1, 512, 1, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {512, 11008, 4096, 0, 0, 1, 11008, 1.0f, 0.0f, "TiledFma-Nn"},
+      {1024, 2048, 2048, 0, 1, 1, 2048, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {1024, 4096, 4096, 1, 0, 1024, 1, 1.0f, 0.0f, "TiledFma-Nn"},
+      {16, 4096, 14336, 1, 1, 16, 1, 1.0f, 0.0f, "TiledFma-Nt"},
+      {64, 1024, 4096, 0, 0, 1, 1024, 1.0f, 0.25f, "TiledFma-Nn-bias"},
+      {128, 2048, 2048, 1, 0, 128, 1, 1.0f, 0.0f, "TiledFma-Nn"},
+      {512, 4096, 14336, 0, 1, 1, 4096, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {1024, 1024, 4096, 0, 0, 1, 1024, 1.0f, 0.0f, "TiledFma-Nn"},
+      {16, 11008, 4096, 0, 1, 1, 11008, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {64, 2048, 2048, 1, 1, 64, 1, 1.0f, 0.0f, "TiledFma-Nt"},
+      {128, 4096, 4096, 0, 0, 1, 4096, 1.0f, 0.25f, "TiledFma-Nn-bias"},
+      {512, 1024, 4096, 1, 0, 512, 1, 1.0f, 0.0f, "TiledFma-Nn"},
+      {1024, 11008, 4096, 0, 1, 1, 11008, 1.0f, 0.25f, "TiledFma-Nt-bias"},
+      {128, 11008, 4096, 1, 1, 128, 1, 1.0f, 0.0f, "TiledFma-Nt"},
+      {64, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "TiledFma-Nn-bias"},
   };
   std::vector<int> positional;
   for (int i = 1; i < argc; ++i) {

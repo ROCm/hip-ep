@@ -1,6 +1,6 @@
-# hip_gemm Xfp16_Wfp16_Yfp16
+# hip_gemm Xfp32_Wfp32_Yfp32
 
-This leaf compiles and runs only `Xfp16_Wfp16_Yfp16`. Its self-contained `test_gemm.cpp`
+This leaf compiles and runs only `Xfp32_Wfp32_Yfp32`. Its self-contained `test_gemm.cpp`
 uses a leaf-local fixed `hip_gemm` dtype code and host/device storage: fp16=0,
 bf16=3, fp32=1. It has no runtime dtype selector.
 
@@ -11,6 +11,6 @@ make clean
 ```
 
 `MODE=lookup` is the default. Tier 1 has four quick representative cases: the
-GemvNt, GemvNn, and Wmma phases, plus a
+GemvNt, GemvNn, and TiledFma phases, plus a
 bias route. It writes the leaf identity through `HIPDNN_RESULTS_LEAF` and uses
 the schema-v3 gfx1151 LUT when linked.

@@ -1,8 +1,7 @@
-# CI aggregator for kernel unit tests. Makefile is the only entry.
+# Standalone-development aggregator for kernel unit tests.
 #
-#   make test OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> MODE=autotune [COVERAGE=1|2|3]
+#   make test OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> MODE=lookup|autotune [COVERAGE=1|2|3]
 #
-# Loops tests.manifest. Each leaf must implement the uniform API in README.md.
 # Use GOAL not TARGET — leaves already use TARGET for the exe path.
 
 ifeq ($(OS),Windows_NT)
@@ -13,7 +12,7 @@ endif
 
 OFFLOAD  ?=
 HIP_SDK  ?=
-MODE     ?= autotune
+MODE     ?= lookup
 COVERAGE ?= 3
 GOAL     ?= test
 
@@ -24,8 +23,8 @@ ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
 
-# Keep in sync with tests.manifest
-LEAVES := gemm/Xfp16_Wfp16_Yfp16 \
+# Keep in sync with example/CMakeLists.txt and kernel_ut_main.cpp.
+LEAVES := gemm/Xfp16_Wfp16_Yfp16 gemm/Xbf16_Wbf16_Ybf16 gemm/Xfp32_Wfp32_Yfp32 \
 	gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
 	gqa/prefill/Xfp16_Wfp16_Yfp16 gqa/prefill/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp16_Wu2_Yfp16 matmul_nbits/Xfp16_Wu3_Yfp16 \

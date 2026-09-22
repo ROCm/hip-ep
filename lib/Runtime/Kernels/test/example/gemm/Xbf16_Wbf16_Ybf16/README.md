@@ -1,6 +1,6 @@
-# hip_gemm Xfp16_Wfp16_Yfp16
+# hip_gemm Xbf16_Wbf16_Ybf16
 
-This leaf compiles and runs only `Xfp16_Wfp16_Yfp16`. Its self-contained `test_gemm.cpp`
+This leaf compiles and runs only `Xbf16_Wbf16_Ybf16`. Its self-contained `test_gemm.cpp`
 uses a leaf-local fixed `hip_gemm` dtype code and host/device storage: fp16=0,
 bf16=3, fp32=1. It has no runtime dtype selector.
 
