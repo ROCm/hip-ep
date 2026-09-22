@@ -1,0 +1,99 @@
+From f3e201a9512b2117901e2657ad66b6c06fbe48e7 Mon Sep 17 00:00:00 2001
+From: Ilango Rajagopal <ilangokul@gmail.com>
+Date: Tue, 22 Sep 2026 01:58:58 -0600
+Subject: [PATCH 2/2] Fix header dependencies
+
+---
+ cmake/triton.cmake                            | 32 ++++++++++++++++---
+ .../lib/Dialect/Rock/Pipelines/CMakeLists.txt | 12 +++++++
+ 2 files changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/cmake/triton.cmake b/cmake/triton.cmake
+index 58e41071d..0fe9f5432 100644
+--- a/cmake/triton.cmake
++++ b/cmake/triton.cmake
+@@ -386,6 +386,20 @@ endif()
+ # Helper Functions for rocMLIR Libraries
+ #===----------------------------------------------------------------------===//
+ 
++# rocMLIR's own public + generated headers are made visible to its libraries
++# via directory-scoped include_directories() in mlir/CMakeLists.txt. That does
++# not attach them to any target's INTERFACE_INCLUDE_DIRECTORIES, so out-of-tree
++# consumers that link a rocMLIR library do not inherit the header search paths.
++# Attach them as INTERFACE here so linking a rocMLIR target carries its headers.
++# $<BUILD_INTERFACE:...> keeps these build-tree-only: they are dropped from any
++# install(EXPORT) (e.g. the BUILD_FAT_LIBROCKCOMPILER package export), where
++# absolute build paths would otherwise be rejected at generate time.
++function(_rocmlir_propagate_public_includes name)
++  target_include_directories(${name} SYSTEM INTERFACE
++    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/mlir/include>"
++    "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/mlir/include>")
++endfunction(_rocmlir_propagate_public_includes)
++
+ # When rocMLIR is built against an externally provided LLVM/MLIR
+ # (ROCMLIR_EXTERNAL_LLVM), the upstream MLIR TableGen and header-aggregate
+ # targets its libraries list in DEPENDS -- e.g. MLIRConversionPassIncGen, and
+@@ -425,6 +439,7 @@ function(add_rocmlir_dialect_library name)
+   set_property(GLOBAL APPEND PROPERTY MLIR_DIALECT_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
++  _rocmlir_propagate_public_includes(${name})
+ endfunction(add_rocmlir_dialect_library)
+ 
+ function(add_rocmlir_conversion_library name)
+@@ -432,6 +447,7 @@ function(add_rocmlir_conversion_library name)
+   set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
+   _rocmlir_stub_library_depends(${ARGN})
+   add_mlir_library(${ARGV} DEPENDS mlir-headers)
++  _rocmlir_propagate_public_includes(${name})
+ endfunction(add_rocmlir_conversion_library)
+ 
+ function(add_rocmlir_test_library name)
+@@ -482,9 +498,17 @@ endfunction(add_rocmlir_triton_library)
+ # add_mlir_library). Marked SYSTEM so our strict warnings (-Wshadow, -Wundef,
+ # ...) don't fire inside Triton headers.
+ function(rocmlir_add_triton_includes target)
+-  target_include_directories(${target} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
+-  if(TARGET obj.${target})
+-    target_include_directories(obj.${target} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
+-  endif()
++  # PRIVATE for the target's own sources; INTERFACE (build-tree only) so
++  # consumers that link this target inherit the Triton headers too. Split like
++  # this rather than PUBLIC because TRITON_INCLUDE_DIRS are absolute build/source
++  # paths: $<BUILD_INTERFACE:...> keeps them out of any install(EXPORT) (the
++  # BUILD_FAT_LIBROCKCOMPILER package export), which rejects absolute build paths.
++  foreach(_t ${target} obj.${target})
++    if(TARGET ${_t})
++      target_include_directories(${_t} SYSTEM PRIVATE ${TRITON_INCLUDE_DIRS})
++      target_include_directories(${_t} SYSTEM INTERFACE
++        "$<BUILD_INTERFACE:${TRITON_INCLUDE_DIRS}>")
++    endif()
++  endforeach()
+ endfunction(rocmlir_add_triton_includes)
+ 
+diff --git a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
+index 16ff81ded..3fe395ee7 100644
+--- a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
++++ b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
+@@ -1,6 +1,18 @@
+ add_rocmlir_dialect_library(MLIRRockPipeline
+   Pipelines.cpp
+ 
++  # Pipelines.cpp includes mlir/Conversion/RocMLIRPasses.h, which transitively
++  # pulls the MIGraphX dialect's TableGen-generated headers
++  # (MIGraphXDialect/Types/Enums/MIGraphX.h.inc via MIGraphXToTosa.h ->
++  # MIGraphX.h). This library does not LINK against a MIGraphX library, so
++  # without an explicit DEPENDS there is no build edge forcing those .inc files
++  # to be generated before Pipelines.cpp compiles. A full `ninja all` masks this
++  # (every *IncGen builds as part of `all`), but a targeted or EXCLUDE_FROM_ALL
++  # build fails with "MIGraphXEnums.h.inc: No such file or directory".
++  DEPENDS
++  MLIRMIGraphXIncGen
++  MLIRMIGraphXTypeIncGen
++
+   LINK_LIBS PUBLIC
+   MLIRAMDGPUTransforms
+   MLIRCpuTransforms
+-- 
+2.43.0
+
