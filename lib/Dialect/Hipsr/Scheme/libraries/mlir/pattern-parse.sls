@@ -16,16 +16,6 @@
 ;; - Parse debug flags (:debug-parse, :debug-analyze, etc.)
 ;; - Validate basic syntax structure (guards in syntax-case)
 ;;
-;; Does NOT:
-;; - Validate semantics (that's phase 2: pattern-validate.sls)
-;; - Build bindings or actions (that's phase 3: pattern-analyze.sls)
-;; - Generate code (that's phase 4: pattern-codegen.sls)
-;;
-;; Strategy:
-;; - Tail-recursive parsing with accumulator ast-pattern-expand record
-;; - Mutable fields allow incremental construction
-;; - Keywords imported at expansion time (for syntax-case matching)
-;;
 ;;=======================================================================
 
 ;;=======================================================================
@@ -81,11 +71,6 @@
   ;; SECTION 1: Entry Points
   ;;=======================================================================
 
-  ;;-----------------------------------------------------------------------
-  ;; parse-to-ast - Entry point
-  ;;-----------------------------------------------------------------------
-  ;; Strips macro name, delegates to parse-rest.
-  ;;
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
@@ -94,8 +79,6 @@
   ;;-----------------------------------------------------------------------
   ;; parse-rest - Parse function name, debug flags, then dispatch to :match
   ;;-----------------------------------------------------------------------
-  ;; Tail-recursive: accumulates debug flags, then calls parse-match-ops-recursive.
-  ;;
   (define (parse-rest rest ast)
     (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
       ;; Debug flags
@@ -150,6 +133,44 @@
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
+  ;; parse-match-ops-recursive - Collect match operations
+  ;;-----------------------------------------------------------------------
+  ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
+  ;; Note: Operands are parsed and flattened to ast-operand records in phase 1.
+  ;; Validation (% prefix check) happens in phase 2 (pattern-validate.sls).
+  ;;
+  (define (parse-match-ops-recursive rest-stx acc-ops ast)
+    (syntax-case rest-stx (:then-let :rewrite :where =)
+      ;; Stop: :then-let or :rewrite
+      [(:then-let . _)
+       (begin
+         (ast-pattern-expand-match-set! ast (reverse acc-ops))
+         (parse-after-match rest-stx ast))]
+
+      [(:rewrite . _)
+       (begin
+         (ast-pattern-expand-match-set! ast (reverse acc-ops))
+         (parse-after-match rest-stx ast))]
+
+      ;; Match operation WITH :where guard
+      [(result = op-name (operand ...) :where guard-expr . rest)
+       (identifier? #'result)
+       (let* ([operands (parse-operands #'(operand ...))]
+              [match-op (make-ast-match-expand #'result #'op-name operands #'guard-expr)])
+         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
+
+      ;; Match operation WITHOUT :where guard
+      [(result = op-name (operand ...) . rest)
+       (identifier? #'result)
+       (let* ([operands (parse-operands #'(operand ...))]
+              [match-op (make-ast-match-expand #'result #'op-name operands #f)])
+         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
+
+      [_ (syntax-violation 'parse-match-ops-recursive
+           "Invalid match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
+
+  
+  ;;-----------------------------------------------------------------------
   ;; parse-operands - Parse operand list, flattening groups
   ;;-----------------------------------------------------------------------
   ;;
@@ -203,46 +224,10 @@
 
     (apply append (map parse-one (syntax->list operands-stx))))
 
-  ;;-----------------------------------------------------------------------
-  ;; parse-match-ops-recursive - Collect match operations
-  ;;-----------------------------------------------------------------------
-  ;; Stops at :then-let or :rewrite. Creates ast-match-expand records directly.
-  ;; Note: Operands are parsed and flattened to ast-operand records in phase 1.
-  ;; Validation (% prefix check) happens in phase 2 (pattern-validate.sls).
-  ;;
-  (define (parse-match-ops-recursive rest-stx acc-ops ast)
-    (syntax-case rest-stx (:then-let :rewrite :where =)
-      ;; Stop: :then-let or :rewrite
-      [(:then-let . _)
-       (begin
-         (ast-pattern-expand-match-set! ast (reverse acc-ops))
-         (parse-after-match rest-stx ast))]
-
-      [(:rewrite . _)
-       (begin
-         (ast-pattern-expand-match-set! ast (reverse acc-ops))
-         (parse-after-match rest-stx ast))]
-
-      ;; Match operation WITH :where guard
-      [(result = op-name (operand ...) :where guard-expr . rest)
-       (identifier? #'result)
-       (let* ([operands (parse-operands #'(operand ...))]
-              [match-op (make-ast-match-expand #'result #'op-name operands #'guard-expr)])
-         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
-
-      ;; Match operation WITHOUT :where guard
-      [(result = op-name (operand ...) . rest)
-       (identifier? #'result)
-       (let* ([operands (parse-operands #'(operand ...))]
-              [match-op (make-ast-match-expand #'result #'op-name operands #f)])
-         (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
-
-      [_ (syntax-violation 'parse-match-ops-recursive
-           "Invalid match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
-
-  ;;-----------------------------------------------------------------------
-  ;; parse-after-match - Parse optional :then-let, then :rewrite
-  ;;-----------------------------------------------------------------------
+  
+;;-----------------------------------------------------------------------
+;; parse-after-match - Parse optional :then-let, then :rewrite
+;;-----------------------------------------------------------------------
   (define (parse-after-match rest-stx ast)
     (syntax-case rest-stx (:then-let :rewrite :with)
       ;; Pattern 1: :then-let followed by :rewrite
