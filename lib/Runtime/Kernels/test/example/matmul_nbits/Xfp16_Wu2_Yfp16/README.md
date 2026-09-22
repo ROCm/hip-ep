@@ -37,13 +37,15 @@ point 2 when absent) -- the packed-zero-points round-trip
 path this op also supports are lower-level kernel behaviors, not exercised
 by this small correctness UT.
 
-`MODE=auto` (default) -- `lut` if `hip/autotune/matmul_nbits/lut/<arch>.fb`
-exists for the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it
-(falls back to `autotune` with a warning if the `.fb` is missing). `MODE=lut`
-needs `flatc` + its `include/` (a build tool, not part of this repo --
-see `example/README.md`): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its
-include dir>`. The LUT bytes are embedded directly into
-`test_matmul_nbits_u2.cpp` via a one-line C23 `#embed` -- no `embed_lut.py`,
-no generated `.cpp`. Both modes append to `out/results.csv`.
+`MODE=lookup` (default) resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
+if it exists, else falls back to `autotune` with a warning. `MODE=lookup`
+needs `flatc` plus its `include/` (a build tool outside this
+repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`.
+
+The bits=2 WMMA/GEMV dispatch has no lookup wired yet, so `MODE=lookup` here only
+satisfies the resolver's data symbols and every shape is autotuned.
+`out/results.csv`'s `config` column records the config actually launched
+(`autotune:best config[...]`), read back from the op's own
+`HIPDNN_MATMUL_AUTOTUNE_LOG` output.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

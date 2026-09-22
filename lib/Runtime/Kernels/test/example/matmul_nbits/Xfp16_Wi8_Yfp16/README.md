@@ -42,13 +42,16 @@ bits=8 zero-points are passed to the kernel as a **raw uint8 buffer**
 which passes fp16-cast zero-points (`zp_elem_size=2`). See the comment above
 `genCase()` / `runOne()` in the cpp.
 
-`MODE=auto` (default) -- `lut` if `hip/autotune/matmul_nbits/lut/<arch>.fb`
-exists for the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it
-(falls back to `autotune` with a warning if the `.fb` is missing). `MODE=lut`
-needs `flatc` + its `include/` (a build tool, not part of this repo --
-see `example/README.md`): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its
-include dir>`. The LUT bytes are embedded directly into
-`test_matmul_nbits_i8.cpp` via a one-line C23 `#embed` -- no `embed_lut.py`,
-no generated `.cpp`. Both modes append to `out/results.csv`.
+`MODE=lookup` (default) resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
+if it exists, else falls back to `autotune` with a warning. `MODE=lookup`
+needs `flatc` plus its `include/` (a build tool outside this
+repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`.
+
+The bits=8 GEMV and WMMA paths issue a real lookup keyed on their own weight
+width, so the table decides: a table measured only at other widths reports a
+miss and the kernel sweeps. `out/results.csv`'s `config` column records what was
+actually used for each case -- `lookup:config[...]` on a hit, or
+`autotune:best config[...]` on the sweep that follows a miss -- read back from
+the op's own `HIPDNN_MATMUL_LUT_LOG` / `HIPDNN_MATMUL_AUTOTUNE_LOG` output.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

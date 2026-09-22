@@ -49,13 +49,13 @@ zero-points/dtype combo. At startup the exe prints `coverage=N -> running
 <n> matmul_nbits cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 
-`MODE=auto` (default) -- `lut` if `hip/autotune/matmul_nbits/lut/<arch>.fb`
-exists for the arch in `OFFLOAD`, else `autotune`. `MODE=lut` forces it
-(falls back to `autotune` with a warning if the `.fb` is missing). `MODE=lut`
+`MODE=lookup` (default) -- resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
+if it exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
+warning. `MODE=autotune` always sweeps, ignoring any `.fb`. `MODE=lookup`
 needs `flatc` + its `include/` (a build tool, not part of this repo --
 see `example/README.md`): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its
 include dir>`. The LUT bytes are embedded directly into `test_matmul_nbits.cpp`
-via a one-line C23 `#embed` (see `example/README.md` "`MODE=auto`") -- no
+via a one-line C23 `#embed` (see `example/README.md` "`MODE=lookup`") -- no
 `embed_lut.py`, no generated `.cpp`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

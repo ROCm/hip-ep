@@ -37,6 +37,8 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
+
+#ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 #include "matmul_nbits_autotune.h"
 
 #ifndef HIPDNN_LUT_LINKED_EXTERNALLY
@@ -55,6 +57,7 @@ extern "C" const unsigned char* const kMatmulNbitsLutBlobs[1]   = { kLutBlob0 };
 extern "C" const size_t               kMatmulNbitsLutBlobSizes[1] = { sizeof(kLutBlob0) };
 extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
 #endif  // HIPDNN_LUT_LINKED_EXTERNALLY
+#endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 
 #include <algorithm>
 #include <cmath>
@@ -62,6 +65,8 @@ extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <map>
 #include <random>
 #include <string>
 #include <thread>
@@ -121,6 +126,65 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 }  // namespace hipdnn_ep_test
+
+// Reports which config the op actually ran, read back from its own
+// HIPDNN_MATMUL_LUT_LOG / HIPDNN_MATMUL_AUTOTUNE_LOG output rather than guessed
+// from the mode. The op logs a selection only on the first encounter with a
+// tune key (which does not include the activation dtype), so a later case
+// sharing that key reuses the earlier selection silently -- hence the memo,
+// which keeps every row attributable to a real config.
+template <typename Fn>
+static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
+  static std::map<std::string, std::string> selected_by_key;
+  static const char* const kCapture = "out/_config_capture.tmp";
+  _putenv_s("HIPDNN_MATMUL_AUTOTUNE_LOG", "1");
+  _putenv_s("HIPDNN_MATMUL_LUT_LOG", "1");
+  std::fflush(stderr);
+  FILE* redirected = std::freopen(kCapture, "w", stderr);
+  launch();
+  std::fflush(stderr);
+  std::freopen("CON", "w", stderr);
+  if (!redirected) return "log-unavailable";
+
+  std::string lut, tuned;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream log(kCapture);
+    std::string line;
+    while (std::getline(log, line)) {
+      if (line.find("LUT hit") != std::string::npos) {
+        lut = "lookup:" + line.substr(line.find("config["));
+        const size_t src = line.find('(');
+        if (src != std::string::npos)
+          lut += " " + line.substr(src, line.find(')', src) + 1 - src);
+      } else if (line.find("best config[") != std::string::npos) {
+        tuned = "autotune:" + line.substr(line.find("best config["));
+        // Drop the tuner's own "(x ms/iter)": it is a peak sample taken under
+        // the clock state of the sweep, not this row's time_ms, and showing
+        // both invites reading them as the same measurement.
+        const size_t timing = tuned.rfind(" (");
+        if (timing != std::string::npos &&
+            tuned.find("ms/iter", timing) != std::string::npos)
+          tuned.erase(timing);
+      }
+    }
+  }
+  std::remove(kCapture);
+
+  std::string selected = !lut.empty() ? lut : tuned;
+  if (selected.empty()) {
+    auto it = selected_by_key.find(tune_key);
+    // No selection logged and none remembered: this shape reached a path with
+    // no tunable config at all.
+    if (it == selected_by_key.end()) return "naive";
+    selected = it->second;
+  } else {
+    selected_by_key[tune_key] = selected;
+  }
+  std::replace(selected.begin(), selected.end(), ',', ';');
+  return selected;
+}
 
 static float half_to_float(__half h) {
   uint16_t bits;
@@ -389,8 +453,13 @@ static bool runOne(const Case& c, int idx) {
   };
 
   int status = 0;
-  for (int w = 0; w < 3; ++w) status = launch();
-  HIP_CHECK(hipStreamSynchronize(stream));
+  char tune_key[64];
+  std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
+                c.gs, c.zero ? "z" : "noz");
+  const std::string selected_config = capture_selected_config(tune_key, [&] {
+    for (int w = 0; w < 3; ++w) status = launch();
+    HIP_CHECK(hipStreamSynchronize(stream));
+  });
 
   double avg_ms = 0.0;
   if (status == 0) {
@@ -442,7 +511,7 @@ static bool runOne(const Case& c, int idx) {
                  c.K, c.gs, c.fp32 ? "fp32" : "fp16", c.zero ? "" : "_noz");
     CsvRow row;
     row.shape = shape_buf;
-    row.config = "final";
+    row.config = selected_config;
     row.time_ms = avg_ms;
     row.rel_l2 = rel_l2;
     row.verdict = pass ? "PASS" : "FAIL";
