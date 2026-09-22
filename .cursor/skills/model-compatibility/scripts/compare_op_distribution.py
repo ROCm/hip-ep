@@ -3,11 +3,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""
-Compare step1 ONNX op distributions (original model vs EP-dumped onnx.onnx).
+"""Compare operator distributions: the model as authored vs what the EP compiles.
+
+Both inputs share a schema but come from different producers --
+step1_onnx_parser reads the .onnx, mlir_op_parser reads the dumped MLIR --
+so this only depends on the shape they agree on: an object per operator with
+a `count`.
 
 Usage:
-  python compare_op_distribution.py <original_step1.json> <ep_step1.json> <output_dir>
+  python compare_op_distribution.py <original_ops.json> <ep_input_ops.json> <output_dir>
 """
 
 from __future__ import annotations

@@ -2,135 +2,159 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Reference — compatibility rules, reason codes, recommendation routing
+# Reference — how each verdict is reached
 
-Canonical definitions consumed by SKILL.md, diagnose.md, and report_template.md. **Source of truth** for status semantics and reason text wording — do not paraphrase elsewhere.
+Definitions behind the report. Source of truth for status semantics; do not
+restate them elsewhere.
 
-## Status definitions (data layer)
+## The pipeline
 
-`report_input.json` stores one of three canonical statuses per `(onnx_op, domain)`:
+| Step | Script | Produces |
+|---|---|---|
+| Dump the graph the EP compiles | `dump_ep_input.ps1` | `ep_input.mlir` |
+| Count operators in it | `mlir_op_parser.py` | `ep_input_ops.json` |
+| Count operators in the original | `step1_onnx_parser.py` | `step1_onnx_ops.json` |
+| Compare the two | `compare_op_distribution.py` | `op_distribution_comparison.json` |
+| Ask the compiler | `probe.py` | `probe_result.json` |
+| Assemble | `build_report_input.py` | `report_input.json` |
+| Render | `generate_final_reports.py` | the two markdown files |
 
-- `full` — mapped to a HIP op (or a compile-time `tensor.*` op) and no per-instance schema mismatch found.
-- `partial` — mapped to a HIP op, but per-instance schema checks found mismatch.
-- `unsupported` — no ONNX -> HIP mapping found in the parsed conversion patterns.
+## The probe
 
-## Status display rule (report layer)
+### stage1 — whole graph, does a converter exist
 
-| Data status | Displayed in report as |
+Runs the first six passes of `--onnx-to-hip-pipeline`, ending at
+`convert-onnx-to-hip`, plus `--mlir-print-debuginfo`.
+
+An operator with no converter **does not fail the pass** --
+`applyPatternsGreedily` leaves unmatched operations alone -- so one run
+covers the whole model. Operations still named `onnx.*` afterwards are the
+ones with no converter, or whose matcher declined.
+
+The verdict comes from diffing the IR, not from parsing the
+`[convert-onnx-to-hip] N unconverted ...` line. That line is still read, as
+a cross-check.
+
+Results pair back to inputs through `loc("<file>":<line>:<col>)`, which is
+why the operator counts carry line numbers.
+
+### stage2 — one operator, does it lower
+
+Runs `--onnx-to-hip-pipeline --hip-to-llvm-pipeline` on a single-operator
+module, and collects the `wrap_*` symbols it reaches.
+
+Two constraints, both learned the hard way:
+
+- The **full** `--onnx-to-hip-pipeline` is required. stage1's six-pass
+  prefix omits bufferization, and lowering straight from tensor-level HIP
+  reports `failed to legalize operation` for every operator.
+- It must be **per-operator**. Whole-graph lowering fails in constant
+  externalization, which needs a FileSystem `hip-mlir-opt` cannot inject.
+
+No operator-specific symbol means the lowering is entirely compile-time,
+which is a result, not a failure -- `Reshape` via `tensor.expand_shape` is
+the usual case.
+
+### Slicing
+
+| Operand's definition | Treatment | Why |
+|---|---|---|
+| inline `onnx.Constant` | copied in | converters read the value; `Pow` only decomposes for a constant scalar exponent |
+| weight `onnx.Constant` | becomes an argument | the value cannot change the decision, and a memory-address source breaks externalization |
+| `onnx.NoValue` | rebuilt in place | `none` cannot be a function argument |
+| anything else | becomes an argument | |
+
+`none` results are dropped from the function signature: module metadata
+rejects a non-tensor in `@main_graph`.
+
+### Attributes
+
+Two steps. The diff finds attributes absent from the conversion output, for
+free, from the whole-graph result. Perturbation then says why they are
+absent, since a converter that read one and omitted it as a default looks
+identical to one that never read it.
+
+| Perturbed result | Verdict |
 |---|---|
-| `full` | `supported` |
-| `partial` | `partial` |
-| `unsupported` | `unsupported` |
+| output changed | `handled` |
+| converter rejected the value | `handled` |
+| conversion stopped terminating | `handled` |
+| output byte-for-byte identical | **`ignored`** |
+| no valid different value exists | `inconclusive` |
 
-## Compile-time operators
+Any behaviour difference means the converter read the attribute; an
+indifferent converter behaves identically. `Gather.axis` shows the third
+case: `0` converts instantly, `1` never finishes.
 
-When a mapping's `hip_op` starts with `tensor.` (e.g. `tensor.expand_shape`, `tensor.collapse_shape`):
+Perturbation preserves the MLIR type annotation. Rewriting `axis = 0 : si64`
+to `axis = 1` drops the signedness and sends the converter down paths it
+never takes on real input.
 
-- status = `full`
-- reason code = `COMPILE_TIME_TENSOR_OP`
-- reason text = `Handled at compile time.`
+### Attribution
 
-## Non-compile-time per-instance schema checks
+For an operator that did not convert, one operand's element type is changed
+at a time. If the conversion then succeeds, that operand is the reason --
+a single-variable result naming the fix.
 
-For each `(onnx_op, domain)` mapped to a non-`tensor.*` HIP op, the pipeline runs three checks:
+## Status
 
-1. **Input edge compatibility**
-   - HIP input bounds from TableGen:
-     - lower bound = required non-`ctx` operands
-     - upper bound = total non-`ctx` operands unless variadic
-   - reason codes: `ONNX_INPUT_BELOW_HIP_MIN`, `ONNX_INPUT_ABOVE_HIP_MAX`
-2. **Output edge compatibility**
-   - HIP output bounds same way.
-   - reason codes: `ONNX_OUTPUT_BELOW_HIP_MIN`, `ONNX_OUTPUT_ABOVE_HIP_MAX`
-3. **Attribute compatibility**
-   - Required attrs = TD non-optional attrs + strict overrides from `compatibility_attr_rules.json` (key `strict_required_attrs`).
-   - No strict attrs are hardcoded.
-   - reason codes: `MISSING_HIP_REQUIRED_ATTR`, `EXTRA_ONNX_ATTR_NOT_IN_HIP`
-
-Any reason code present => `partial`. No reason code => `full`.
-
-## Unsupported rule
-
-No ONNX -> HIP mapping found for `(onnx_op, domain)`:
-
-- status = `unsupported`
-- reason code = `NO_HIP_DIALECT_IMPL`
-- reason text:
-  - if op is compile-time classifiable elsewhere: keep that specific text
-  - otherwise: **exactly** `No Hip Dialect implementation available.`
-
-## Reason code catalog
-
-```
-NO_HIP_DIALECT_IMPL
-COMPILE_TIME_TENSOR_OP
-MISSING_HIP_REQUIRED_ATTR
-EXTRA_ONNX_ATTR_NOT_IN_HIP
-ONNX_INPUT_BELOW_HIP_MIN
-ONNX_INPUT_ABOVE_HIP_MAX
-ONNX_OUTPUT_BELOW_HIP_MIN
-ONNX_OUTPUT_ABOVE_HIP_MAX
-```
-
-## Recommended ROCm implementation (report-layer inference)
-
-`Recommended Rocm Implementation` is **agent-inferred at render time** from normalized data; it is NOT stored in `report_input.json`.
-
-### For `full` / `supported` / `partial`
-
-In order, first match wins:
-
-1. `hip_op` starts with `tensor.` -> `Compile Time Optimization`
-2. `backend` AND `runtime_func` exist -> `` `<backend>` (`<runtime_func>`) ``
-3. only `backend` exists -> `<backend>`
-4. only `runtime_func` exists -> `` `<runtime_func>` ``
-5. else -> `Unknown`
-
-### For `unsupported`
-
-1. If reason text indicates compile-time handling -> `Compile Time Optimization`
-2. Otherwise run capability-driven recommendation:
-   1. Infer op family from ONNX semantics (`op_type` + schema description)
-   2. Build capability inventory from `step2_3_backend_analysis.json`, runtime wrappers in `lib/Runtime/real/`, and [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)
-   3. Map family to nearest available ROCm path and name extension target wrapper
-3. If no feasible ROCm/library match -> `Custom Hip Kernel`
-
-For every unsupported op recommendation include: recommended path, closest existing wrapper / entry point (if any), short rationale.
-
-## ROCm family routing matrix
-
-Machine-readable form: [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json). Human-readable summary:
-
-| # | Family | Preferred path | Fallback |
+| stage1 | stage2 | In `docs/supported-operations.md` | Status |
 |---|---|---|---|
-| 1 | Matrix multiplication (`matmul`, `gemm`, batched dense linear) | `hipBLASLt` — extend `wrap_hipblasLtMatmul` | `Custom Hip Kernel` |
-| 2 | Convolution (`conv`, depthwise / pointwise variants) | extend `wrap_conv` / `wrap_conv_transpose` (in-tree `hip_conv` kernels) | new `Custom Hip Kernel` |
-| 3 | Activation (`relu`, `sigmoid`, `tanh`, `softplus`, similar unary) | extend the in-tree activation kernels (`wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` family) | new `Custom Hip Kernel` |
-| 4 | Elementwise arith / cmp / logical | `wrap_elementwise` when the op is representable as add / mul / min / max | new `Custom Hip Kernel` |
-| 5 | Reduction (`reduce_*`, cumulative reductions) | extend existing reduction runtime path (`wrap_reduce_sum` family) | `Custom Hip Kernel` |
-| 6 | Indexing / data movement (`gather / scatter / slice / split / tile / pad / concat / expand`) | reuse / extend existing custom data-movement kernels | `Custom Hip Kernel` |
-| 7 | Control flow / stateful (`loop / if / scan`) | graph-level lowering / runtime orchestration | `Custom Hip Kernel` (unless compile-time eliminable) |
-| 8 | Normalization / composite blocks | decompose into supported primitives if possible, else extend the `wrap_layer_normalization` / `wrap_rms_norm` family | new `Custom Hip Kernel` |
+| converted | ok | — | `supported` |
+| converted | ok, no runtime symbol | — | `supported` (compile-time) |
+| converted | ok, an ignored attribute the model sets | — | `partial` |
+| converted | failed | — | `lowering-broken` |
+| not converted | — | yes | `blocked` |
+| not converted | — | no | `unsupported` |
+| converted | ok | no | `supported`, listed under documentation drift |
 
-### Known runtime capabilities (capability inventory examples)
+The probe outranks the doc. The doc only separates `blocked` from
+`unsupported`.
 
-- `wrap_elementwise` — elementwise add / mul / min / max, with per-axis broadcast
-- `wrap_gelu` / `wrap_softplus` / `wrap_leaky_relu` — activation-family elementwise ops
-- `wrap_power` — `Reciprocal` and `Sqrt` only; any other exponent is rejected
-- `wrap_conv` — forward convolution family (in-tree `hip_conv` kernel)
-- `wrap_conv_transpose` — ConvTranspose
-- `wrap_hipblasLtMatmul` — matmul family
-- `wrap_rms_norm` — RMS / simplified layer norm (custom HIP kernel)
-- `wrap_layer_normalization` — standard ONNX-17 LayerNormalization (mean + var)
-- `wrap_skip_simplified_layer_norm` — Microsoft SkipSimplifiedLayerNormalization fusion
-- `wrap_reduce_sum` — current custom reduction path
+### Why "the model sets it" matters
 
-## Validation checklist (final pass before responding to user)
+ORT fills in ONNX schema defaults during `Graph::Resolve`, so an attribute
+present in the EP input does not mean the model author wrote it: `Reshape`
+ships with no attributes and arrives carrying `allowzero`. Only the file on
+disk distinguishes them.
 
-- Counts in summary equal computed counts from `operator_distribution`
-- No unsupported non-compile-time line uses text other than `No Hip Dialect implementation available.`
-- Every operator in compatibility summary appears in operator distribution
-- `mapping_chain` table rows exactly match input rows
-- No extra sections beyond template order
-- **Diagnose pass executed for every non-supported entry** (see [diagnose.md](diagnose.md))
-- If `-SkipDump` mode was used, report header carries `Source: original ONNX (no EP rewrites)` badge
+An ignored attribute the model does not set is still a real gap -- another
+model will set it -- so it appears under capability gaps regardless. The
+status says whether it bites here.
+
+Without the original model, every ignored attribute counts as a defect and
+the evidence note says so.
+
+## Evidence levels
+
+| Level | Condition | Effect |
+|---|---|---|
+| A | whole-graph probe succeeded | full results |
+| B | probe failed; per-operator slices | under-reports; context-dependent fusions cannot fire |
+| C | no whole-graph MLIR; single-operator models from the original ONNX | independent per-operator results |
+| D | no compilation | **cannot detect `blocked`** |
+
+D must be stated prominently. `MatMulNBits` is listed as supported in
+`docs/supported-operations.md`, so at level D its 224 blocked instances read
+as working.
+
+## Counting
+
+Support percentage counts `supported` only. `partial`, `lowering-broken`,
+`blocked` and `unsupported` are reported on their own lines.
+
+The denominator excludes weight constants: ONNX initializers become
+`onnx.Constant` operations in MLIR, and on a 1.8B model that is 805 of 809
+of them -- more than the compute operators put together.
+
+`onnx.Return`, `onnx.Yield` and `onnx.NoValue` are not operators and are
+excluded. `onnx.Custom` is normalized back to the operator in its
+`function_name`, without which the comparison against the original ONNX
+misaligns every `com.microsoft` row.
+
+## Recommending a path for `unsupported`
+
+[scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)
+maps operator families to ROCm paths. It applies to `unsupported` only:
+a `blocked` operator already has an implementation, and the work is to
+extend that one rather than to choose a path.
