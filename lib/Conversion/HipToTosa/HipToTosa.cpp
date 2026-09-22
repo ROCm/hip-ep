@@ -2332,9 +2332,6 @@ static bool isTosaExpressibleResize(hip::ResizeOp op) {
 
   if (op.getMode() != 1)
     return false;
-  if (op.getNearestMode() != 0)
-    return false;
-
   int64_t coordTransform = op.getCoordTransform();
   return planResizeAxis(inputType.getDimSize(2), resultType.getDimSize(2),
                         coordTransform)
