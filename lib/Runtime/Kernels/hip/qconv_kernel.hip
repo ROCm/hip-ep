@@ -701,30 +701,81 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
   int32_t sx_lo = 0;
   int32_t cw_part = 0;
 
-  for (uint32_t k0 = 0; k0 < ic; k0 += kTileK) {
+  // At Exact a lane owns one quad and kXVec adjacent positions, which covers
+  // the tile exactly once. Reading those positions as one vector is the point:
+  // taking them singly is kXVec requests where one does, and the staging
+  // requests, not the bytes they move, are what the memory unit meters.
+  const int sq = tid / (kTileP / kXVec);
+  const int sp0 = (tid % (kTileP / kXVec)) * kXVec;
+
+  // A tile's global loads issue a whole tile ahead of the iteration that
+  // consumes them, so their latency runs underneath the previous tile's matrix
+  // ops. Issued in the consuming iteration they would have nothing to hide
+  // behind: the staged tile feeds the ops that immediately follow it. The
+  // staging registers are spent once the tile reaches LDS, so one set serves
+  // both tiles and the LDS footprint is unchanged.
+  //
+  // x_stage is plain register storage and the two paths map it differently:
+  // Exact holds quad element a across the lane's kXVec positions, the general
+  // path holds repeat a's quad element b.
+  static_assert(kDotQuad == kXVec, "one staging array serves both maps");
+  static_assert(kXQRepeats == kDotQuad, "general staging must fit x_stage");
+  qconv_act_vec<TAct> x_stage[kDotQuad];
+  uint32_t w_stage[kWordRepeats];
+
+  auto load_tile = [&](uint32_t k0) {
     if constexpr (Exact) {
-      // A lane owns one quad and kXVec adjacent positions, which covers the
-      // tile exactly once. Reading those positions as one vector is the point:
-      // taking them singly is kXVec requests where one does, and the staging
-      // requests, not the bytes they move, are what the memory unit meters.
-      const int sq = tid / (kTileP / kXVec);
-      const int sp0 = (tid % (kTileP / kXVec)) * kXVec;
-      uint32_t hi[kXVec] = {};
-      uint32_t lo[kXVec] = {};
 #pragma unroll
       for (int i = 0; i < kDotQuad; ++i) {
         const uint32_t k =
             k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(sq, i));
-        const qconv_act_vec<TAct> v =
-            *reinterpret_cast<const qconv_act_vec<TAct> *>(x_n + k * ss +
-                                                           p_base + sp0);
+        x_stage[i] = *reinterpret_cast<const qconv_act_vec<TAct> *>(
+            x_n + k * ss + p_base + sp0);
+      }
+    } else {
+#pragma unroll
+      for (int rep = 0; rep < kXQRepeats; ++rep) {
+        const int lin = rep * kWmmaBlock + tid;
+        const int gq = lin / kTileP;
+        const uint32_t p = p_base + lin % kTileP;
+        const bool p_ok = p < ss;
+#pragma unroll
+        for (int i = 0; i < kDotQuad; ++i) {
+          const uint32_t k =
+              k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(gq, i));
+          x_stage[rep].e[i] =
+              (k < ic && p_ok) ? x_n[k * ss + p] : static_cast<TAct>(0);
+        }
+      }
+    }
+#pragma unroll
+    for (int rep = 0; rep < kWordRepeats; ++rep) {
+      const int widx = rep * kWmmaBlock + tid;
+      const uint32_t co = co_base + widx / kWordsPerRow;
+      const uint32_t k = k0 + (widx % kWordsPerRow) * kWElems;
+      w_stage[rep] =
+          (Exact || (co < oc && k < ic))
+              ? reinterpret_cast<const uint32_t *>(weights)[(co * ic + k) /
+                                                            kWElems] ^
+                    kSignFlip
+              : 0u;
+    }
+  };
+
+  load_tile(0);
+
+  for (uint32_t k0 = 0; k0 < ic; k0 += kTileK) {
+    if constexpr (Exact) {
+      uint32_t hi[kXVec] = {};
+      uint32_t lo[kXVec] = {};
+#pragma unroll
+      for (int i = 0; i < kDotQuad; ++i)
 #pragma unroll
         for (int j = 0; j < kXVec; ++j) {
-          const uint32_t e = static_cast<uint32_t>(v.e[j]);
+          const uint32_t e = static_cast<uint32_t>(x_stage[i].e[j]);
           hi[j] |= (e >> 8) << (8 * i);
           lo[j] |= (e & 0xFFu) << (8 * i);
         }
-      }
 #pragma unroll
       for (int j = 0; j < kXVec; ++j) {
         xh_lds[sp0 + j][sq] = hi[j];
@@ -734,24 +785,18 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
 #pragma unroll
       for (int rep = 0; rep < kXQRepeats; ++rep) {
         const int lin = rep * kWmmaBlock + tid;
-        const int sq = lin / kTileP;
+        const int gq = lin / kTileP;
         const int sp = lin % kTileP;
-        const uint32_t p = p_base + sp;
-        const bool p_ok = p < ss;
         uint32_t hi = 0;
         uint32_t lo = 0;
 #pragma unroll
         for (int i = 0; i < kDotQuad; ++i) {
-          const uint32_t k =
-              k0 + static_cast<uint32_t>(qconv_dot_k<WBits>(sq, i));
-          const uint32_t v = (k < ic && p_ok)
-                                 ? static_cast<uint32_t>(x_n[k * ss + p])
-                                 : 0u;
+          const uint32_t v = static_cast<uint32_t>(x_stage[rep].e[i]);
           hi |= (v >> 8) << (8 * i);
           lo |= (v & 0xFFu) << (8 * i);
         }
-        xh_lds[sp][sq] = hi;
-        xl_lds[sp][sq] = lo;
+        xh_lds[sp][gq] = hi;
+        xl_lds[sp][gq] = lo;
       }
     }
 
@@ -760,23 +805,17 @@ __global__ __launch_bounds__(kWmmaBlock) void qconv_tiled_wmma_kernel(
       const int widx = rep * kWmmaBlock + tid;
       const int sc = widx / kWordsPerRow;
       const int wq = widx % kWordsPerRow;
-      const uint32_t co = co_base + sc;
-      const uint32_t k = k0 + wq * kWElems;
-      const uint32_t word =
-          (Exact || (co < oc && k < ic))
-              ? reinterpret_cast<const uint32_t *>(weights)[(co * ic + k) /
-                                                            kWElems] ^
-                    kSignFlip
-              : 0u;
       if constexpr (WBits == 4) {
-        w_lds[sc][2 * wq] = word & 0x0F0F0F0Fu;
-        w_lds[sc][2 * wq + 1] = (word >> 4) & 0x0F0F0F0Fu;
+        w_lds[sc][2 * wq] = w_stage[rep] & 0x0F0F0F0Fu;
+        w_lds[sc][2 * wq + 1] = (w_stage[rep] >> 4) & 0x0F0F0F0Fu;
       } else {
-        w_lds[sc][wq] = word;
+        w_lds[sc][wq] = w_stage[rep];
       }
     }
 
     __syncthreads();
+    if (k0 + kTileK < ic)
+      load_tile(k0 + kTileK);
 
     // Column sums for the zero-point correction. The matrix ops cannot produce
     // them, so they stay on the dot product, which is cheap at one pass over
