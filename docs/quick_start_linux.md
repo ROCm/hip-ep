@@ -73,10 +73,10 @@ python3 build.py
 
 ### Building ONNX Runtime + OGA from source (for Whisper/VLM models, no prebuilt)
 
-`model_benchmark` has no mechanism for audio or image input, only text-prompt options. 
+`model_benchmark` has no mechanism for audio or image input, only text-prompt options.
 Whisper and VLM models require Microsoft's `onnxruntime-genai` Python example scripts
 (`examples/python/whisper.py`, `examples/python/model-mm.py`) to do audio/image
-feature extraction via `og.Audios.open()` / `create_multimodal_processor()`. These scripts 
+feature extraction via `og.Audios.open()` / `create_multimodal_processor()`. These scripts
 need a Python-importable `onnxruntime_genai` package, which the prebuilt package below does 
 **not** provide. On Linux you have to build both ONNX Runtime and OGA from source yourself with 
 `--build_wheel`.
@@ -212,7 +212,7 @@ A ready-to-run package is published for each green build. It contains every
 the host. Download it with `gh` (no compile needed).
 
 > **Limitation:** `model_benchmark` only supports text-prompt models. It has
-> no mechanism for audio or image input. This package also only ships C++ binaries, 
+> no mechanism for audio or image input. This package also only ships C++ binaries,
 > not a Python-importable `onnxruntime_genai` package. For Whisper or VLM models, see
 > [Building ONNX Runtime + OGA from source](#building-onnx-runtime--oga-from-source-for-whispervlm-models-no-prebuilt)
 > above.
