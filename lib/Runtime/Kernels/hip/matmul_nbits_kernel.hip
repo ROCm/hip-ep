@@ -3925,6 +3925,30 @@ static _Float16* ensureAPadBuffer(int M, int K_pad) {
     return g_a_pad_buf;
 }
 
+// HIPDNN_EP_MATMUL_NBITS_PAD_A=1 (default off): run the int4 WMMA prefill on a
+// copy of A whose row stride is padded by kAPadHalfs when K % 1024 == 0.
+// A 128-row tile then no longer reads 128 rows a multiple of 2 KB apart, which
+// on gfx1151 cost 20-60% of the GEMM (M=15856 N=2880 cfg 31: K=4096 16.4 ->
+// 12.1 ms, K=2048 16.4 -> 6.3 ms, K=8192 33.5 -> 24.6 ms; K=2880 unchanged).
+// The copy reads and writes A once, a few percent of the GEMM's A traffic.
+static constexpr int kAPadHalfs = 32;
+
+static bool matmulNbitsPadAEnabled() {
+    static const bool on = []() {
+#ifdef _WIN32
+        // Win32 rather than the CRT, as in matmulNbitsChooseMode.
+        char buf[8];
+        const unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_NBITS_PAD_A", buf, sizeof(buf));
+        return n > 0 && n < sizeof(buf) && buf[0] >= '1';
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_NBITS_PAD_A");
+        return v && v[0] >= '1';
+#endif
+    }();
+    return on;
+}
+
 static _Float16* g_out_col_buf = nullptr;
 static size_t    g_out_col_buf_elems = 0;
 
@@ -4218,6 +4242,17 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     // the dequant pass taught about the stride too.
     if (!kWmmaConfigs[id].fused) return -1;
 
+    if (lda == K && K % 1024 == 0 && matmulNbitsPadAEnabled()) {
+        const int lda_pad = K + kAPadHalfs;
+        if (_Float16* a_pad = ensureAPadBuffer(M, lda_pad)) {
+            hipMemcpy2DAsync(a_pad, static_cast<size_t>(lda_pad) * sizeof(_Float16),
+                             ap, static_cast<size_t>(K) * sizeof(_Float16),
+                             static_cast<size_t>(K) * sizeof(_Float16), M,
+                             hipMemcpyDeviceToDevice, s);
+            ap = a_pad;
+            lda = lda_pad;
+        }
+    }
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
                      ldc, has_zp, nullptr, b_row_bytes);
     return static_cast<int>(hipGetLastError());
@@ -7251,6 +7286,19 @@ extern "C" int hip_matmul_nbits(
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
+    // The config above is chosen for the arrival stride, so the padded copy
+    // leaves LUT/autotune selection untouched.
+    if (iK % 1024 == 0 && matmulNbitsPadAEnabled()) {
+        const int lda_pad = iK + kAPadHalfs;
+        if (_Float16* a_pad = ensureAPadBuffer(iM, lda_pad)) {
+            hipMemcpy2DAsync(a_pad, static_cast<size_t>(lda_pad) * sizeof(_Float16),
+                             a_ptr, static_cast<size_t>(iK) * sizeof(_Float16),
+                             static_cast<size_t>(iK) * sizeof(_Float16), iM,
+                             hipMemcpyDeviceToDevice, hip_stream);
+            a_ptr = a_pad;
+            lda = lda_pad;
+        }
+    }
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
                      s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
