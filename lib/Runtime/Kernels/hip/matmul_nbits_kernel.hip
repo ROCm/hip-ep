@@ -2716,10 +2716,15 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
  * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
  * reordering is legal.
  *
- * gfx12 retired s_barrier for the s_barrier_signal/s_barrier_wait pair, so the
- * asm does not assemble there and the arch falls back to __syncthreads(). */
+ * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
+ * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
+ * pair, and later architectures likewise lack it, so the inline asm fails to
+ * assemble there. Emit the asm only on the families that provide it and let
+ * every other target -- current or future -- fall back to __syncthreads(),
+ * which is always correct (a strictly stronger full-workgroup fence); it only
+ * reintroduces the redundant per-K-step L0 flush the raw asm skips. */
 #if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    !defined(__GFX12__)
+    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
 #define HIPDNN_LDS_BARRIER()                                                    \
     __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
 #else

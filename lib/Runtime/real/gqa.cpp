@@ -892,6 +892,43 @@ static size_t gqa_score_budget_bytes() {
 // pass.
 static constexpr int64_t kScoreChunkAlign = 128;
 
+// Chunk height for a windowed prefill, where chunking is worth doing for the
+// key narrowing rather than to fit a byte budget (see the window clause in
+// gqa_forward_hipblaslt).
+//
+// One alignment quantum, which is where a sweep puts the optimum. TTFT against
+// the unchunked path, averaged over two reversed arm orders, every arm sharing
+// one binary and differing only in this height:
+//
+//                  gemma-4-26B      gemma-4-12b       gemma3-4b
+//   height        2K      16K      2K      16K      2K      16K
+//    128       -8.8%    -5.9%   -10.2%   -6.1%   -4.9%   -4.5%   <-- here
+//    256       -8.2%    -4.7%    -9.2%   -4.6%   -4.7%   -4.3%
+//    384       -6.7%    -2.6%    -7.8%   -2.8%   -4.6%   -4.1%
+//    512       -5.6%     0.0%    -6.4%   -0.6%   -4.5%   -3.4%
+//    640       -5.1%    +0.7%    -5.8%   +0.9%   -4.0%   -2.5%
+//
+// Monotonic in all six columns, so a shorter chunk scoring fewer keys per row
+// outweighs the extra passes and the smaller n it hands the GEMMs, at least
+// down to the quantum. 128 is the floor worth testing: below it the chunk stops
+// being a multiple of kScoreChunkAlign, which is what that constant is for. The
+// two swept heights that are not multiples of it, 192 and 320, sit off the
+// trend in four of the six columns, which is the same effect from the other
+// side.
+//
+// The 640 row is a control rather than a candidate. At 16K the byte budget
+// already chunks to about that height on its own, and forcing it there measures
+// within 1% of not chunking at all -- which is what says the 16K gain here
+// comes from going below the budget's choice, not from chunking per se.
+//
+// An earlier single-point sweep on the 12B at 2283 tokens read 128 as 0.7%
+// worse than 256, and this constant was 2 x the quantum on that basis. The
+// wider sweep reverses it: 128 is the argmin in 11 of 12 model/length/order
+// cells and wins on the mean in all 12, by 0.7-1.6% on the Gemma-4 pair.
+// gemma3-4b gains 0.2%, so its curve is flat and the choice does not matter
+// there.
+static constexpr int64_t kWindowChunkRows = kScoreChunkAlign;
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1767,10 +1804,18 @@ static int gqa_forward_hipblaslt(
   //
   // The softmax here reduces along total_seq, so each query row is independent
   // of every other. A block of rows can therefore be scored, biased, masked,
-  // softmaxed and multiplied by V to completion before the next block starts,
-  // and the result is identical -- this is a tiling of the same arithmetic, not
-  // an approximation, and it needs no running maximum or rescaling because
-  // every row sees its full key range within one chunk.
+  // softmaxed and multiplied by V to completion before the next block starts --
+  // this is a tiling of the same arithmetic, not an approximation, and it needs
+  // no running maximum or rescaling because every row sees its full key range
+  // within one chunk.
+  //
+  // Mathematically equivalent is not bitwise identical, though, and it is worth
+  // being precise about which one this is. Chunking changes the score GEMM's n
+  // from sq to sq_chunk, so hipBLASLt's heuristic can select a different kernel
+  // and a different tile accumulates in a different order. Measured on
+  // gemma-4-12b at 2283 tokens: the same build run twice is byte-identical, and
+  // chunked against unchunked agrees for ~45 greedy tokens before a near-tie
+  // flips. Treat a change here as a kernel retune, not as a no-op.
   //
   // Only the two score buffers shrink. Q, K, V and O are linear in sq and stay
   // whole, so Q is read and O is written through a per-chunk offset while their
@@ -1807,6 +1852,23 @@ static int gqa_forward_hipblaslt(
       sq_chunk = rows;
     }
   }
+
+  // A windowed op benefits from chunking for a reason the byte budget cannot
+  // see. The per-chunk key bound below is keyed off q0, so it narrows nothing
+  // on a single chunk: an unchunked windowed prefill scores the whole key
+  // range and throws the window away. At 2283 tokens the score pair is ~500 MB,
+  // far under the 1 GiB budget, so that is exactly what happens today.
+  //
+  // Chunk on the window instead, independently of size. The gate is the same
+  // one the narrowing itself needs (chunk_narrow_ok), plus a check that there
+  // is more to drop than the chunk already covers -- below that the extra
+  // passes cost more than the keys they save.
+  if (sq > 1 && !use_no_expand && local_window_size > 0 && chunk_narrow_ok &&
+      total_seq > local_window_size + kWindowChunkRows &&
+      sq_chunk > kWindowChunkRows) {
+    sq_chunk = kWindowChunkRows;
+  }
+
   const bool chunked = (sq_chunk < sq);
 
   //===--------------------------------------------------------------------===//
