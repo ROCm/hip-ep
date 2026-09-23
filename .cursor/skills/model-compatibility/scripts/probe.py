@@ -428,9 +428,17 @@ def attr_present(ir_text: str, attr: str) -> bool:
     return re.search(rf"\b{re.escape(attr)}\s*=", ir_text) is not None
 
 
-def instances_of(info: dict) -> dict | None:
-    insts = info.get("instances") or []
-    return insts[0] if insts else None
+def merged_attributes(instances: list[dict]) -> dict:
+    """Every attribute any instance of the operator sets.
+
+    Instances need not agree: one Shape can carry `start` and the next not.
+    Looking at only the first would miss whatever the others set.
+    """
+    merged: dict = {}
+    for inst in instances:
+        for name, value in (inst.get("attributes") or {}).items():
+            merged.setdefault(name, value)
+    return merged
 
 
 def attribute_probe(
@@ -584,7 +592,9 @@ def stage1_per_operator(
             continue
 
         print(f"  stage1-slice {op_type} ...", flush=True)
-        converted, targets, _ = convert_candidates(opt, candidates, work, op_type)
+        converted, targets, produced = convert_candidates(
+            opt, candidates, work, op_type
+        )
         converts = converted is not None
         if not converts and inferred:
             # The slice only exists because we invented a shape for it, so
@@ -597,12 +607,21 @@ def stage1_per_operator(
                 "reason": "unranked types; a slice with an inferred shape did not convert",
             }
             continue
+        # The slice is one instance, so only its own attributes can be
+        # compared against what it produced -- unlike the whole-graph path,
+        # which sees every instance.
+        sliced = next((i for i in instances if i["line_no"] == line_no), instances[0])
+        attrs = sliced.get("attributes") or {}
         results[op_type] = {
             **base,
             "converted": info["count"] if converts else 0,
             "unconverted": 0 if converts else info["count"],
             "targets": targets,
             "unconverted_lines": [] if converts else [line_no],
+            "attributes_seen": attrs,
+            "dropped_attrs": [a for a in attrs if not attr_present(produced, a)]
+            if converts
+            else [],
         }
     return results
 
@@ -668,10 +687,14 @@ def stage2(
         results[op_type] = {
             **entry,
             "source_line": line_no,
+            # Whichever set stage1 compared against: the union over all
+            # instances on the whole-graph path, one instance's on the
+            # sliced one. Mixing them would offer an attribute for
+            # perturbation that is not in this slice.
             "attributes": attribute_probe(
                 opt,
                 candidates[0],
-                instances[0].get("attributes", {}),
+                s1.get("attributes_seen") or merged_attributes(instances),
                 s1.get("dropped_attrs", []),
                 op_type,
                 out_dir / "attrs",
@@ -738,17 +761,20 @@ def stage1(
         # Attributes that did not survive conversion. Free to collect -- the
         # whole-graph output is already in hand -- and only these operators
         # go on to the perturbation test.
-        dropped_attrs: list[str] = []
-        first = instances_of(info)
-        if first is not None:
-            entry = by_src.get(first["line_no"])
+        # Every instance, not just the first: they need not set the same
+        # attributes, and each is compared against the IR it produced.
+        dropped: set[str] = set()
+        for inst in info["instances"]:
+            entry = by_src.get(inst["line_no"])
             produced = " ".join(entry["result_text"]) if entry else ""
-            if produced:
-                dropped_attrs = [
-                    a
-                    for a in first.get("attributes", {})
-                    if not attr_present(produced, a)
-                ]
+            if not produced:
+                continue
+            dropped |= {
+                a
+                for a in (inst.get("attributes") or {})
+                if not attr_present(produced, a)
+            }
+        dropped_attrs = sorted(dropped)
         results[op_type] = {
             "domain": info["domain"][0] if info["domain"] else "onnx",
             "count": info["count"],
