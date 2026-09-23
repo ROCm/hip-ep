@@ -1,6 +1,8 @@
 #!r6rs
 (library (mlir pattern-codegen)
-  (export generate-code)
+  (export generate-debug-ast
+          generate-pattern-matchAndRewrite
+          generate-debug-codegen)
   (import (rnrs)
           (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier? hashtable-keys)
           (rename (rime loop) (:with :rime-with))
@@ -54,25 +56,11 @@
         [else obj])))
 
   ;;-----------------------------------------------------------------------
-  ;; Main entry point
+  ;; Main entry points (called from pattern-macro.sls waterfall)
   ;;-----------------------------------------------------------------------
-
-  (define (generate-code ast-rec)
-    (cond
-      [(ast-pattern-expand-debug-parse? ast-rec)
-       (generate-debug-ast ast-rec)]
-
-      [(ast-pattern-expand-debug-validate? ast-rec)
-       (generate-debug-ast ast-rec)]
-
-      [(ast-pattern-expand-debug-analyze? ast-rec)
-       (generate-debug-actions ast-rec)]
-
-      [(ast-pattern-expand-debug-codegen? ast-rec)
-       (generate-debug-codegen ast-rec)]
-
-      [else
-       (generate-pattern-matchAndRewrite ast-rec)]))
+  ;; generate-debug-ast: returns lambda that returns AST as alist
+  ;; generate-pattern-matchAndRewrite: returns actual pattern matching code
+  ;; generate-debug-codegen: returns lambda that returns generated code as datum
 
   ;;-----------------------------------------------------------------------
   ;; Debug mode: AST output (parse phase)
@@ -98,11 +86,10 @@
   ;; Debug mode: Codegen output (codegen phase)
   ;;-----------------------------------------------------------------------
 
-  (define (generate-debug-codegen ast-rec)
+  (define (generate-debug-codegen ast-rec generated-code)
     (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
-      (let ([code-datum (syntax->datum (generate-pattern-matchAndRewrite ast-rec))])
-        (datum->syntax #'fname
-                       `(define ,(syntax->datum #'fname) '(lambda () ',code-datum))))))
+      (let ([code-datum (syntax->datum generated-code)])
+        #`(define fname (lambda () '#,code-datum)))))
 
   ;;-----------------------------------------------------------------------
   ;; Pattern matcher generation
