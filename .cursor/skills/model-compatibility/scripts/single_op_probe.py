@@ -47,6 +47,7 @@ if str(_HERE) not in sys.path:
 import ep_dump  # noqa: E402
 import probe  # noqa: E402
 from mlir_op_parser import parse_attributes, real_attributes  # noqa: E402
+from mlir_slice import build_def_index, slices_for  # noqa: E402
 from onnx_graph_walk import NodeContext, iter_typed_nodes  # noqa: E402
 
 # A Constant small enough that its value is more useful than its size. Above
@@ -179,7 +180,7 @@ def probe_operator(
     assembler cannot tell which path produced them.
     """
     src = mlir.read_text(encoding="utf-8").splitlines()
-    def_index = probe.build_def_index(src)
+    def_index = build_def_index(src)
     line_no = _find_op_line(src, op_type)
     if line_no is None:
         reason = "operator absent from its own import"
@@ -191,7 +192,7 @@ def probe_operator(
     # Same slicer as the whole-graph path, candidate shapes included: an
     # import of a subgraph operator can come back unranked just as a slice
     # of one can.
-    candidates, line_no, why, inferred = probe._slices_for(
+    candidates, line_no, why, inferred = slices_for(
         src, def_index, [{"line_no": line_no}]
     )
     if not candidates:
@@ -216,7 +217,7 @@ def probe_operator(
     # Attributes the converter did not carry through, then why: the same
     # diff-and-perturb the whole-graph path runs, on the same slice.
     attrs = real_attributes(parse_attributes(src[line_no - 1]))
-    dropped = [a for a in attrs if not probe._attr_present(produced, a)]
+    dropped = [a for a in attrs if not probe.attr_present(produced, a)]
     findings = probe.attribute_probe(
         opt, module, attrs, dropped, op_type, work / "attrs"
     )

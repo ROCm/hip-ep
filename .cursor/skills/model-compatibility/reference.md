@@ -62,6 +62,9 @@ the usual case.
 
 ### Slicing
 
+Both probes build their modules through `mlir_slice.py`, from a whole-graph
+dump or a one-node import respectively.
+
 | Operand's definition | Treatment | Why |
 |---|---|---|
 | inline `onnx.Constant` | copied in | converters read the value; `Pow` only decomposes for a constant scalar exponent |
