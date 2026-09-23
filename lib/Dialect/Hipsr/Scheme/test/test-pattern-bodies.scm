@@ -1,7 +1,16 @@
 ;; Test Pattern Bodies - Single Source of Truth
-;; Empty for now - pattern DSL implementation incomplete
-;; Infrastructure is ready, waiting for DSL syntax to be finalized
 
 (
-  ;; No test patterns yet - add them once DSL works
+  ;; Simplest test: operation with no operands
+  (basic
+   :pattern (
+     :match %out = "test.op" ()
+     :rewrite %out :with ("new.op" () -> !t)
+   )
+   :expect-parse (
+     (has-function-name . #t)
+     (root-op-name . "test.op")
+     (match-count . 1)
+   )
+  )
 )

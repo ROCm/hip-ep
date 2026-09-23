@@ -12,7 +12,11 @@
 (library-directories '("." "libraries" "../../../../third_party/rime"))
 
 (import (except (chezscheme) =)
+        (except (mlir pattern-macro) :with)  ; Import pattern macro
         (test test-helpers))
+
+;; Import pattern-macro into interaction-environment so eval can use it
+(eval '(import (mlir pattern-macro)) (interaction-environment))
 
 (define (main)
   (let ([test-bodies (load-test-bodies)])
@@ -20,14 +24,36 @@
     (display "Pattern DSL Test Suite (Data-Driven)\n")
     (display "==================================================\n\n")
 
-    ;; Run all 4 phases
-    (run-phase-tests "Parse" ':debug-parse ':expect-parse test-bodies)
-    (run-phase-tests "Validate" ':debug-validate ':expect-validate test-bodies)
-    (run-phase-tests "Analyze" ':debug-analyze ':expect-analyze test-bodies)
-    (run-phase-tests "Codegen" #f ':expect-codegen test-bodies)
+    ;; For each test case, run all 4 phases
+    (let ([total-passed 0]
+          [total-failed 0])
+      (for-each
+        (lambda (test-case)
+          (let ([name (car test-case)])
+            (display (format "Testing: ~a\n" name))
 
-    (display "\n==================================================\n")
-    (display "All tests complete\n")
-    (display "==================================================\n")))
+            ;; Run all phases for this test case
+            (let ([parse-result (run-one-phase "  Parse" ':debug-parse ':expect-parse test-case)]
+                  [validate-result (run-one-phase "  Validate" ':debug-validate ':expect-validate test-case)]
+                  [analyze-result (run-one-phase "  Analyze" ':debug-analyze ':expect-analyze test-case)]
+                  [codegen-result (run-one-phase "  Codegen" #f ':expect-codegen test-case)])
+
+              ;; Count results
+              (let ([passed (+ (if (eq? parse-result #t) 1 0)
+                               (if (eq? validate-result #t) 1 0)
+                               (if (eq? analyze-result #t) 1 0)
+                               (if (eq? codegen-result #t) 1 0))]
+                    [failed (+ (if (eq? parse-result #f) 1 0)
+                               (if (eq? validate-result #f) 1 0)
+                               (if (eq? analyze-result #f) 1 0)
+                               (if (eq? codegen-result #f) 1 0))])
+                (set! total-passed (+ total-passed passed))
+                (set! total-failed (+ total-failed failed))
+                (display (format "  Result: ~a passed, ~a failed\n\n" passed failed))))))
+        test-bodies)
+
+      (display "==================================================\n")
+      (display (format "Total: ~a passed, ~a failed\n" total-passed total-failed))
+      (display "==================================================\n"))))
 
 (main)

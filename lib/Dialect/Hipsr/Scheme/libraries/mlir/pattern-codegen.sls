@@ -54,7 +54,7 @@
                                          'debug-analyze? #f
                                          'debug-codegen? #f
                                          'debug-matching? #f))])
-          #'(define fname ast-list)))))
+          #'(define fname (lambda () ast-list))))))
 
   ;;-----------------------------------------------------------------------
   ;; Debug mode: Actions output (analyze phase)
@@ -75,7 +75,7 @@
                                          'debug-analyze? #t
                                          'debug-codegen? #f
                                          'debug-matching? #f))])
-          #'(define fname ast-list)))))
+          #'(define fname (lambda () ast-list))))))
 
   ;;-----------------------------------------------------------------------
   ;; Debug mode: Codegen output (codegen phase)
@@ -85,7 +85,7 @@
     (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
       (let ([code-datum (syntax->datum (generate-pattern-matchAndRewrite ast-rec))])
         (datum->syntax #'fname
-                       `(define ,(syntax->datum #'fname) ',code-datum)))))
+                       `(define ,(syntax->datum #'fname) '(lambda () ',code-datum))))))
 
   ;;-----------------------------------------------------------------------
   ;; Pattern matcher generation
