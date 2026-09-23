@@ -17,7 +17,7 @@
               ":for " (syntax->datum #'var) " :in-vector " (syntax->datum #'expr))]
             [(recur)
              (list #'(expr-var expr))]
-            [(init)
+            [(iteration)
              (list #'[var-index 0 (+ 1 var-index)])]
             [(inner-if-true)
              (list #'[var (vector-ref expr-var var-index)])]
