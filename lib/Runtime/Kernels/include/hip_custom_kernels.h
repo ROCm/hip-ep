@@ -836,6 +836,17 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
     const void* seqlens_k, int element_size_bytes,
     int kv_dtype, const void* scale);
 
+/* KV cache append for key and value together, otherwise identical to
+ * hip_gqa_kv_cache_append: both halves share every extent, so they index the
+ * cache the same way and one launch can do both. HIP_KV_DTYPE_INT8 uses a
+ * merged kernel; the other formats sequence the single-half entry twice, to
+ * keep each half on the widest vectorized path its own pointers qualify for. */
+HIP_KERNEL_API int hip_gqa_kv_cache_append_kv(
+    void* stream, const void* src_k, void* cache_k, const void* scale_k,
+    const void* src_v, void* cache_v, const void* scale_v,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k, int element_size_bytes, int kv_dtype);
+
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
  * past [B,G,past_seq,d] at positions [0,past_len) AND transposing new tokens

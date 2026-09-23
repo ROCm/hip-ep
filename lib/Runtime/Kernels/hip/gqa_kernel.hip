@@ -536,6 +536,43 @@ __global__ void kv_cache_append_quant_i8_kernel(
   cache[dst_idx] = (int8_t)q;
 }
 
+// Key and value are appended with identical extents, so every index above is
+// the same for both. Computing them once and pairing the two loads with the two
+// stores is the whole point of this variant: the bytes moved are unchanged, but
+// a decode-shaped append moves so few of them that the index arithmetic and the
+// launch dominate, and this pays for them once instead of twice.
+__global__ void kv_cache_append_quant_i8_kv_kernel(
+    const _Float16* __restrict__ src_k,   // BSHD [B, sq, G, d]
+    int8_t* __restrict__ cache_k,         // BNSD [B, G, present_seq, d]
+    const float* __restrict__ scale_k,    // [G, d]
+    const _Float16* __restrict__ src_v, int8_t* __restrict__ cache_v,
+    const float* __restrict__ scale_v,
+    int sq, int G, int d, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_per_batch = sq * G * d;
+  if (idx >= total_per_batch) return;
+  int di = idx % d;
+  int remaining = idx / d;
+  int g = remaining % G;
+  int s = remaining / G;
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
+
+  float inv_k = 1.0f / scale_k[g * d + di];
+  float qk = rintf((float)src_k[src_idx] * inv_k);
+  qk = fminf(fmaxf(qk, -128.0f), 127.0f);
+  cache_k[dst_idx] = (int8_t)qk;
+
+  float inv_v = 1.0f / scale_v[g * d + di];
+  float qv = rintf((float)src_v[src_idx] * inv_v);
+  qv = fminf(fmaxf(qv, -128.0f), 127.0f);
+  cache_v[dst_idx] = (int8_t)qv;
+}
+
 // Quantize-concat (separate past/present buffers): copy past INT8 [0,past_len)
 // then quantize new fp16 tokens [past_len, past_len+sq) into present INT8.
 __global__ void kv_cache_concat_quant_i8_kernel(
@@ -961,6 +998,48 @@ extern "C" int hip_gqa_kv_cache_append(
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_append, stream,
                             src, cache, batch_size, sq, G, d, present_seq,
                             past_len, seqlens_k);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// Step 4-5: KV cache append for both halves in one launch. Same contract as
+// hip_gqa_kv_cache_append, which every parameter but the three per-half
+// pointers is shared with.
+//
+// Only the INT8 format is actually merged. The FP16 formats reach a vectorized
+// kernel whose eligibility is a per-pointer alignment test, and a merged launch
+// would have to require it of four pointers at once and fall back for all of
+// them when any one failed. Sequencing the existing entry twice keeps each half
+// on the widest path it qualifies for.
+extern "C" int hip_gqa_kv_cache_append_kv(
+    void* stream_ptr, const void* src_k, void* cache_k, const void* scale_k,
+    const void* src_v, void* cache_v, const void* scale_v,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k, int element_size_bytes, int kv_dtype) {
+  if (kv_dtype != HIP_KV_DTYPE_INT8) {
+    int rc = hip_gqa_kv_cache_append(stream_ptr, src_k, cache_k, batch_size, sq,
+                                     G, d, present_seq, past_len, seqlens_k,
+                                     element_size_bytes, kv_dtype, scale_k);
+    if (rc != 0)
+      return rc;
+    return hip_gqa_kv_cache_append(stream_ptr, src_v, cache_v, batch_size, sq,
+                                   G, d, present_seq, past_len, seqlens_k,
+                                   element_size_bytes, kv_dtype, scale_v);
+  }
+  if (scale_k == nullptr || scale_v == nullptr) {
+    fprintf(stderr, "hip_gqa_kv_cache_append_kv: INT8 requires both scales\n");
+    return -1;
+  }
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = sq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();
+  kv_cache_append_quant_i8_kv_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                       stream>>>(
+      static_cast<const _Float16*>(src_k), static_cast<int8_t*>(cache_k),
+      static_cast<const float*>(scale_k),
+      static_cast<const _Float16*>(src_v), static_cast<int8_t*>(cache_v),
+      static_cast<const float*>(scale_v), sq, G, d, present_seq, past_len,
+      static_cast<const int*>(seqlens_k));
   GQA_RETURN_LAUNCH_STATUS();
 }
 

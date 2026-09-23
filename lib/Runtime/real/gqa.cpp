@@ -321,13 +321,12 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
-    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr, elem_sz,
-                                kv_dtype, k_sc) != 0)
-      return -1;
-    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr, elem_sz,
-                                kv_dtype, v_sc) != 0)
+    // Both halves in one entry: they share every extent, so the quantized path
+    // indexes the cache once for the pair instead of twice.
+    if (hip_gqa_kv_cache_append_kv(stream, new_key, present_key, k_sc,
+                                   new_value, present_value, v_sc, B, sq, G, d,
+                                   present_seq, past_len, seqlens_k_ptr,
+                                   elem_sz, kv_dtype) != 0)
       return -1;
   }
   return 0;
