@@ -264,8 +264,20 @@
   ;;-----------------------------------------------------------------------
   ;; parse-rewrite-ops-recursive - Collect rewrite operations
   ;;-----------------------------------------------------------------------
-  ;; Requires parentheses around each operation (complex syntax).
-  ;; Delegates to parse-rewrite-operation for details.
+  ;; Syntax: Each rewrite operation is wrapped in parentheses.
+  ;;
+  ;; Multiple operations:
+  ;;   :rewrite %root :with
+  ;;     (%x = temp.op (%a) -> !t1)
+  ;;     (%y = new.op (%x %b) -> !t1)
+  ;;
+  ;; Single operation:
+  ;;   :rewrite %root :with (new.op (%a %b) -> !t)
+  ;;
+  ;; Each operation is parsed by parse-rewrite-operation, which handles:
+  ;;   - Result variable: [result =] or [(result-list) =]
+  ;;   - Operands: (operand ...)
+  ;;   - Optional sections: [:regions ...] [:attrs ...] [-> result-types]
   ;;
   (define (parse-rewrite-ops-recursive rest-stx acc-ops ast)
     (syntax-case rest-stx (=)
@@ -274,10 +286,7 @@
        (ast-pattern-expand-rewrite-set! ast (reverse acc-ops))
        ast]
 
-      ;; TODO: This is complex - rewrite operations can span multiple lines
-      ;; with :regions, :attrs, etc. For now, require explicit parentheses
-      ;; around each rewrite operation (similar to old syntax)
-      ;; Future: implement proper operation boundary detection
+      ;; Parse one operation, continue with rest
       [(op-syntax . rest)
        (let ([rewrite-op (parse-rewrite-operation #'op-syntax)])
          (parse-rewrite-ops-recursive #'rest (cons rewrite-op acc-ops) ast))]
