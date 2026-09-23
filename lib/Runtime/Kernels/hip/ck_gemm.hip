@@ -4,9 +4,9 @@
  */
 
 // Composable Kernel GEMM instances, behind a narrow C ABI so callers compiled
-// outside hipcc never see CK's device templates. Every instance takes fp16
-// operands through the WMMA op, which is all any caller asks for; bf16 and fp32
-// operands go to hip_ref_gemm_run instead.
+// outside hipcc never see CK's device templates. fp16 operands go through the
+// WMMA op; gfx11's WMMA has no fp32 type, so fp32 operands go through the
+// FMA-based DL pipeline instead. bf16 and fp64 operands go to hip_ref_gemm_run.
 //
 // Arguments arrive in hipBLASLt's column-major convention. A column-major
 // (rows x cols, ld=rows) buffer is bit-identical to a row-major
@@ -38,6 +38,7 @@
 #include "ck/ck.hpp"
 #include "ck/stream_config.hpp"
 #include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
+#include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_multiple_d_dl.hpp"
 #include "ck/tensor_operation/gpu/device/impl/device_batched_gemm_multiple_d_wmma_cshuffle_v3.hpp"
 #include "ck/tensor_operation/gpu/element/element_wise_operation.hpp"
 
@@ -61,6 +62,10 @@ using S = ck::Sequence<Is...>;
 
 static constexpr auto GemmMNKPadding =
     ck::tensor_operation::device::GemmSpecialization::MNKPadding;
+// The DL pipeline pads M and N only; GemmDefault would demand M % MPerBlock ==
+// 0 && N % NPerBlock == 0, which real shapes almost never satisfy.
+static constexpr auto GemmMNPadding =
+    ck::tensor_operation::device::GemmSpecialization::MNPadding;
 static constexpr auto Intrawave = ck::BlockGemmPipelineScheduler::Intrawave;
 static constexpr auto Interwave = ck::BlockGemmPipelineScheduler::Interwave;
 static constexpr auto V1        = ck::BlockGemmPipelineVersion::v1;
@@ -205,6 +210,144 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
         S<4, 64, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 0, 1, 1, S<1, 32, 1, 8>, S<1, 8, 8>,  \
         Intrawave, V1
 
+// ------------------------------------------------- fp32 tile sets (DL / FMA)
+//
+// Copied from CK's tuned f32 lists in library/src/tensor_operation_instance/
+// gpu/gemm/device_gemm_dl_f32_f32_f32_{mk_kn,mk_nk}_mn_instance.cpp, one entry
+// per distinct (BlockSize, MPerBlock, NPerBlock, K0PerBlock) geometry. The
+// dropped entries differ only in thread-cluster arrangement; on the 12 whisper
+// fp32 shapes keeping them buys at most 1.3%, inside the run-to-run spread.
+//
+// The DLKN / DLNK tiles have K1 = 2, and the DL pipeline does not pad K, so they
+// serve only K % (2 * K0PerBlock) == 0 -- multiples of 8. The DLK1 tiles trade
+// that vector width for K1 = 1 and serve any K divisible by their K0PerBlock
+// (20 or 4).
+//
+// The trailing CThreadTransferDstScalarPerVector is supplied by the entry macro
+// instead of the tile, because runDl needs it to reject an N the store cannot
+// land on exactly.
+
+// A Row / B Row.
+#define DLKN_1                                                                              \
+    256, 128, 128, 16, 2, 4, 4, 1, S<8, 2>, S<8, 2>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,        \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<2, 1, 4, 2>, S<8, 1, 32, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_2                                                                              \
+    128, 128, 64, 16, 2, 4, 4, 1, S<8, 2>, S<4, 2>, S<8, 1, 2, 2>, S<2, 1, 64, 1>,          \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<2, 1, 8, 2>, S<8, 1, 8, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,          \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_3                                                                              \
+    128, 64, 128, 16, 2, 4, 4, 1, S<4, 2>, S<8, 2>, S<8, 1, 2, 2>, S<2, 1, 32, 1>,          \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<2, 1, 8, 2>, S<8, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_4                                                                              \
+    64, 64, 64, 8, 2, 4, 4, 1, S<4, 2>, S<4, 2>, S<4, 1, 2, 2>, S<2, 1, 32, 1>,             \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<2, 1, 4, 2>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_5                                                                              \
+    64, 16, 64, 16, 2, 1, 4, 1, S<4, 2>, S<4, 2>, S<4, 1, 1, 2>, S<4, 1, 16, 1>,            \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>,          \
+        S<4, 1, 4, 2>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_6                                                                              \
+    64, 64, 16, 16, 2, 4, 1, 1, S<4, 2>, S<4, 2>, S<4, 1, 4, 2>, S<4, 1, 16, 1>,            \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>,          \
+        S<1, 1, 4, 2>, S<16, 1, 4, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_7                                                                              \
+    16, 16, 16, 16, 2, 2, 2, 1, S<2, 2>, S<2, 2>, S<4, 1, 4, 2>, S<4, 1, 4, 1>,             \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>,          \
+        S<4, 1, 4, 2>, S<4, 1, 4, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,          \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_8                                                                              \
+    64, 8, 64, 32, 2, 1, 2, 1, S<4, 1>, S<8, 2>, S<4, 1, 1, 2>, S<8, 1, 8, 1>,              \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>,          \
+        S<8, 1, 4, 2>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_9                                                                              \
+    64, 64, 8, 32, 2, 2, 1, 1, S<8, 2>, S<4, 1>, S<8, 1, 4, 2>, S<4, 1, 16, 1>,             \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>,          \
+        S<1, 1, 4, 2>, S<32, 1, 2, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLKN_10                                                                             \
+    8, 8, 8, 4, 2, 1, 2, 1, S<4, 1>, S<2, 1>, S<4, 1, 1, 2>, S<1, 1, 8, 1>, S<0, 3, 1, 2>,  \
+        S<0, 3, 1, 2>, S<4, 1, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 2>, S<1, 1, 4, 2>,          \
+        S<4, 1, 2, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>, S<0, 3, 1, 2>,          \
+        S<1, 1, 4, 2>, S<0, 1, 2, 3, 4, 5>, 5
+
+// A Row / B Col, same ten geometries.
+#define DLNK_1                                                                              \
+    256, 128, 128, 16, 2, 4, 4, 1, S<8, 2>, S<8, 2>, S<8, 1, 1, 2>, S<2, 1, 128, 1>,        \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<8, 1, 1, 2>, S<2, 1, 128, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,        \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_2                                                                              \
+    128, 128, 64, 16, 2, 4, 4, 1, S<8, 2>, S<4, 2>, S<8, 1, 2, 2>, S<2, 1, 64, 1>,          \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<8, 1, 2, 2>, S<2, 1, 32, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_3                                                                              \
+    128, 64, 128, 16, 2, 4, 4, 1, S<4, 2>, S<8, 2>, S<8, 1, 2, 2>, S<2, 1, 32, 1>,          \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<8, 1, 2, 2>, S<2, 1, 64, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_4                                                                              \
+    64, 64, 64, 8, 2, 4, 4, 1, S<4, 2>, S<4, 2>, S<4, 1, 2, 2>, S<2, 1, 32, 1>,             \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<4, 1, 2, 2>, S<2, 1, 32, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_5                                                                              \
+    64, 16, 64, 16, 2, 1, 4, 1, S<4, 2>, S<4, 2>, S<4, 1, 1, 2>, S<4, 1, 16, 1>,            \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<4, 1, 4, 2>, S<4, 1, 16, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_6                                                                              \
+    64, 64, 16, 16, 2, 4, 1, 1, S<4, 2>, S<4, 2>, S<4, 1, 4, 2>, S<4, 1, 16, 1>,            \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<4, 1, 1, 2>, S<4, 1, 16, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_7                                                                              \
+    16, 16, 16, 16, 2, 2, 2, 1, S<2, 2>, S<2, 2>, S<4, 1, 4, 2>, S<4, 1, 4, 1>,             \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<4, 1, 4, 2>, S<4, 1, 4, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,          \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_8                                                                              \
+    64, 8, 64, 32, 2, 1, 2, 1, S<4, 1>, S<8, 2>, S<4, 1, 1, 2>, S<8, 1, 8, 1>,              \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<8, 1, 4, 2>, S<4, 1, 16, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,         \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_9                                                                              \
+    64, 64, 8, 32, 2, 2, 1, 1, S<8, 2>, S<4, 1>, S<8, 1, 4, 2>, S<4, 1, 16, 1>,             \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>,          \
+        S<4, 1, 1, 2>, S<8, 1, 8, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>,          \
+        S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLNK_10                                                                             \
+    8, 8, 8, 4, 2, 1, 2, 1, S<4, 1>, S<2, 1>, S<4, 1, 1, 2>, S<1, 1, 8, 1>, S<1, 2, 0, 3>,  \
+        S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>, S<1, 1, 1, 2>, S<4, 1, 1, 2>,          \
+        S<1, 1, 8, 1>, S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<4, 1, 1, 2>, S<1, 2, 0, 3>,          \
+        S<1, 1, 1, 2>, S<0, 1, 2, 3, 4, 5>, 5
+
+// A Row / B Row, K1 = 1.
+#define DLK1_1                                                                              \
+    64, 64, 64, 20, 1, 4, 4, 1, S<4, 2>, S<4, 2>, S<10, 1, 2, 1>, S<2, 1, 32, 1>,           \
+        S<1, 2, 0, 3>, S<1, 2, 0, 3>, S<2, 1, 1, 1>, S<1, 2, 0, 3>, S<1, 1, 1, 1>,          \
+        S<5, 1, 4, 1>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 1>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLK1_2                                                                              \
+    64, 16, 64, 20, 1, 1, 4, 1, S<4, 2>, S<4, 2>, S<5, 1, 1, 1>, S<4, 1, 16, 1>,            \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 1>, S<0, 3, 1, 2>, S<1, 1, 1, 1>,          \
+        S<5, 1, 4, 1>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 1>, S<0, 1, 2, 3, 4, 5>, 5
+#define DLK1_3                                                                              \
+    64, 16, 64, 4, 1, 1, 4, 1, S<4, 2>, S<4, 2>, S<1, 1, 1, 1>, S<4, 1, 16, 1>,             \
+        S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 1, 1>, S<0, 3, 1, 2>, S<1, 1, 1, 1>,          \
+        S<1, 1, 4, 1>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
+        S<0, 3, 1, 2>, S<1, 1, 4, 1>, S<0, 1, 2, 3, 4, 5>, 5
+
 // ComputeTypeA/B are the trailing pair. They default to ADataType/BDataType,
 // but naming them keeps the f32-output combos from instantiating GetWmma<float>.
 #define MAKE_OP(ABDATA, ALAY, BLAY, DSLAY, DSDATA, EDATA, CDEOP, EV, TILE)                \
@@ -225,6 +368,27 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
                                                                          TILE(EV),       \
                                                                          ABDATA,         \
                                                                          ABDATA>
+
+// Variadic because the DL tiles above are comma lists, which a single-parameter
+// macro would see as too many arguments.
+#define MAKE_DL_OP(BLAY, ...)                                                             \
+    ck::tensor_operation::device::DeviceBatchedGemmMultipleD_Dl<Row,                      \
+                                                                BLAY,                     \
+                                                                Empty_Tuple,              \
+                                                                Row,                      \
+                                                                F32,                      \
+                                                                F32,                      \
+                                                                F32,                      \
+                                                                Empty_Tuple,              \
+                                                                F32,                      \
+                                                                PassThrough,              \
+                                                                PassThrough,              \
+                                                                Scale,                    \
+                                                                GemmMNPadding,            \
+                                                                __VA_ARGS__>
+
+#define DL_BLOCK_SIZE_(BLOCK, ...) BLOCK
+#define DL_BLOCK_SIZE(...) DL_BLOCK_SIZE_(__VA_ARGS__)
 
 // ------------------------------------------------------------------ runners
 
@@ -298,6 +462,79 @@ int runBias(const RunArgs &r) {
   return 0;
 }
 
+// DeviceBatchedGemmMultipleD_Dl::Invoker::Run minus its unconditional
+// std::cout of the grid descriptors. The op does not expose BlockSize, so the
+// entry macro supplies it.
+template <typename Op, int BlockSize>
+void launchDl(const typename Op::Argument &arg, hipStream_t stream) {
+  using GG = typename Op::GridwiseGemm;
+  using ck::integral_constant;
+  constexpr auto I0 = ck::Number<0>{};
+  constexpr auto I1 = ck::Number<1>{};
+  const ck::index_t gridSize =
+      GG::CalculateGridSize(arg.e_grid_desc_m_n_.GetLength(I0),
+                            arg.e_grid_desc_m_n_.GetLength(I1)) *
+      arg.Batch_;
+  auto launch = [&](auto mainLoop, auto doubleTail) {
+    const auto kernel = ck::tensor_operation::device::kernel_gemm_dl_multiple_d<
+        GG, F32, typename GG::DsGridPointer, F32, PassThrough, PassThrough,
+        Scale, typename Op::AGridDesc_K0_M0_M1_K1,
+        typename Op::BGridDesc_K0_N0_N1_K1,
+        typename Op::DsGridDesc_M0_M10_M11_N0_N10_N11,
+        typename Op::EGridDesc_M0_M10_M11_N0_N10_N11,
+        typename Op::ComputePtrOffsetOfStridedBatch,
+        typename Op::DefaultBlock2CTileMap, decltype(mainLoop)::value,
+        decltype(doubleTail)::value>;
+    launch_and_time_kernel(StreamConfig{stream, false}, kernel, dim3(gridSize),
+                           dim3(BlockSize), 0, arg.p_a_grid_, arg.p_b_grid_,
+                           arg.p_ds_grid_, arg.p_e_grid_, arg.Batch_,
+                           arg.a_element_op_, arg.b_element_op_,
+                           arg.cde_element_op_, arg.a_grid_desc_k0_m0_m1_k1_,
+                           arg.b_grid_desc_k0_n0_n1_k1_,
+                           arg.ds_grid_desc_m0_m10_m11_n0_n10_n11_,
+                           arg.e_grid_desc_m0_m10_m11_n0_n10_n11_,
+                           arg.compute_ptr_offset_of_batch_,
+                           arg.block_2_ctile_map_);
+  };
+  const auto K0 = arg.a_grid_desc_k0_m0_m1_k1_.GetLength(I0);
+  const bool mainLoop = GG::CalculateHasMainKBlockLoop(K0);
+  const bool doubleTail = GG::CalculateHasDoubleTailKBlockLoop(K0);
+  if (mainLoop && doubleTail) {
+    launch(integral_constant<bool, true>{}, integral_constant<bool, true>{});
+  } else if (mainLoop) {
+    launch(integral_constant<bool, true>{}, integral_constant<bool, false>{});
+  } else if (doubleTail) {
+    launch(integral_constant<bool, false>{}, integral_constant<bool, true>{});
+  } else {
+    launch(integral_constant<bool, false>{}, integral_constant<bool, false>{});
+  }
+}
+
+// MakeArgument takes no KBatch and the DL multi-D epilogue cannot broadcast a
+// stride-0 D along M', so there is no bias variant of this.
+template <typename Op, int EVec, int BlockSize>
+int runDl(const RunArgs &r) {
+  // CK's own DL instances run GemmDefault, which forces N % NPerBlock == 0 and
+  // so can never leave a partial vector at E's right edge. GemmMNPadding pads
+  // N for the GEMM but the CShuffle store still writes EVec elements at a time
+  // and IsSupportedArgument checks neither the extent nor the row stride, so a
+  // partial vector there silently spills into the next row.
+  if (r.n % EVec != 0 || r.strideE % EVec != 0) {
+    return 1;
+  }
+  auto arg = Op::MakeArgument(
+      r.a, r.b, {}, r.e, (ck::index_t)r.m, (ck::index_t)r.n, (ck::index_t)r.k,
+      (ck::index_t)r.batch, (ck::index_t)r.strideA, (ck::index_t)r.strideB, {},
+      (ck::index_t)r.strideE, (ck::index_t)r.batchStrideA,
+      (ck::index_t)r.batchStrideB, {}, (ck::index_t)r.batchStrideE,
+      PassThrough{}, PassThrough{}, Scale{r.alpha});
+  if (!Op::IsSupportedArgument(arg)) {
+    return 1;
+  }
+  launchDl<Op, BlockSize>(arg, r.stream);
+  return 0;
+}
+
 // ----------------------------------------------------------------- registry
 
 enum Combo {
@@ -306,6 +543,8 @@ enum Combo {
   kTN_F16_BIAS = 2, // transA=T, f16 out, bias     -> B' Col, Add epilogue
   kNN_F16_BIAS = 3, // transA=N, f16 out, bias     -> A'/B' both Row, Add
   kTN_F16 = 4,      // transA=T, f16 out, no bias  -> B' Col
+  kNN_F32 = 5,      // fp32 operands, transA=N     -> DL, A'/B' both Row
+  kTN_F32AB = 6,    // fp32 operands, transA=T     -> DL, B' Col
 };
 
 using RunFn = int (*)(const RunArgs &);
@@ -326,6 +565,11 @@ struct Entry {
 #define ENT_C(TILE) {kTN_F16_BIAS, &runBias<OP_C(TILE), Add>},
 #define ENT_D(TILE) {kNN_F16_BIAS, &runBias<OP_D(TILE), Add>},
 #define ENT_E(TILE) {kTN_F16, &runNoBias<OP_E(TILE), PassThrough>},
+
+#define ENT_F(TILE, EV)                                                                   \
+    {kNN_F32, &runDl<MAKE_DL_OP(Row, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
+#define ENT_G(TILE, EV)                                                                   \
+    {kTN_F32AB, &runDl<MAKE_DL_OP(Col, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
 
 const Entry kEntries[] = {
     // 0-13: NN, f16 out, no bias
@@ -354,6 +598,19 @@ const Entry kEntries[] = {
     // GEMM of every folded model falls to the reference kernel.
     ENT_E(TNK_1) ENT_E(TNK_2) ENT_E(TNK_3) ENT_E(TNK_4) ENT_E(TNK_6)
     ENT_E(TNK_7) ENT_E(TNK_8) ENT_E(TNK_K4) ENT_E(TNK_E2a) ENT_E(TNK_E1a)
+
+    // 59-68: NN, fp32 operands, no bias
+    ENT_F(DLKN_1, 4) ENT_F(DLKN_2, 4) ENT_F(DLKN_3, 4) ENT_F(DLKN_4, 4)
+    ENT_F(DLKN_5, 4) ENT_F(DLKN_6, 1) ENT_F(DLKN_7, 2) ENT_F(DLKN_8, 2)
+    ENT_F(DLKN_9, 1) ENT_F(DLKN_10, 2)
+
+    // 69-78: TN, fp32 operands, no bias
+    ENT_G(DLNK_1, 4) ENT_G(DLNK_2, 4) ENT_G(DLNK_3, 4) ENT_G(DLNK_4, 4)
+    ENT_G(DLNK_5, 4) ENT_G(DLNK_6, 1) ENT_G(DLNK_7, 2) ENT_G(DLNK_8, 2)
+    ENT_G(DLNK_9, 1) ENT_G(DLNK_10, 2)
+
+    // 79-81: NN, fp32 operands, no bias, K1 = 1
+    ENT_F(DLK1_1, 4) ENT_F(DLK1_2, 4) ENT_F(DLK1_3, 4)
 };
 
 constexpr int kNumEntries = (int)(sizeof(kEntries) / sizeof(kEntries[0]));
@@ -388,6 +645,11 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
     } else {
       combo = transA ? kTN_F16 : kNN_F16;
     }
+  } else if (abDtype == HIP_DTYPE_FLOAT32 && dDtype == HIP_DTYPE_FLOAT32) {
+    if (bias) {
+      return 1;
+    }
+    combo = transA ? kTN_F32AB : kNN_F32;
   } else {
     return 1;
   }
@@ -426,7 +688,11 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
   if (abBytes == 0 || dBytes == 0) {
     return 1;
   }
-  constexpr int64_t kMaxSpanBytes = 0x100000000LL; // 4 GiB
+  // The DL gridwise op validates each tensor against 2 GB rather than the SRD's
+  // 4 GiB, and it does so per batch, so a batch that individually fits can
+  // still overrun the window in one launch. Split against the tighter bound.
+  const bool isDl = (combo == kNN_F32 || combo == kTN_F32AB);
+  const int64_t kMaxSpanBytes = isDl ? 0x80000000LL : 0x100000000LL;
   int64_t maxBatch = r.batch;
   const int64_t perBatch[3] = {r.batchStrideA * abBytes,
                                r.batchStrideB * abBytes,

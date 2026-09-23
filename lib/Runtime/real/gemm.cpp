@@ -475,11 +475,12 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
 
   // A per-output-feature [N] / [1,N] bias with beta==1 is the fused-bias
   // problem CK serves through its Add epilogue; every other C shape routes
-  // through the post-add below the reference fallback.
+  // through the post-add below. fp32 runs on the DL instances, whose multi-D
+  // epilogue cannot broadcast a stride-0 D along M', so its C always takes the
+  // post-add.
   const bool use_bias_epilogue =
       C && beta == 1.0f && cDim0 == 1 && cDim1 == N &&
-      (typeCode == kTypeFloat16 || typeCode == kTypeFloat32 ||
-       typeCode == kTypeBFloat16);
+      (typeCode == kTypeFloat16 || typeCode == kTypeBFloat16);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
                     "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p, "
@@ -493,13 +494,14 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   const int64_t hblA_ld = transB ? K : N;
   const int64_t hblB_ld = transA ? M : K;
 
-  // CK eligibility mirrors the tuned f16 instances: no alpha and ONNX
-  // transA==0, which would become the kernels' TRANSB and has no instance.
-  // The A-side transpose (ONNX transB) is served with or without a bias.
-  // `!C || use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C,
-  // which ckSelectGemmInstance relies on when it times into `output`.
-  const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
-                           transA == 0 && (!C || use_bias_epilogue);
+  // CK eligibility: no alpha, and ONNX transA==0, which would become the
+  // kernels' TRANSB and has no instance. The A-side transpose (ONNX transB) is
+  // served with or without a bias. An f16 C has to be one the Add epilogue
+  // takes; fp32 has no epilogue, so its C goes to the post-add either way.
+  const bool ck_eligible =
+      alpha == 1.0f && transA == 0 &&
+      ((typeCode == kTypeFloat16 && (!C || use_bias_epilogue)) ||
+       typeCode == kTypeFloat32);
   const void *ck_bias = use_bias_epilogue ? C : nullptr;
 
   GemmCacheKey key{
@@ -523,8 +525,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     if (ck_eligible) {
       entry.ck_instance = ckSelectGemmInstance(
           stream, B, A, ck_bias, output, N, M, K, /*batch=*/1,
-          static_cast<int>(transB), static_cast<int>(transA), HIP_DTYPE_FLOAT16,
-          HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
+          static_cast<int>(transB), static_cast<int>(transA), abDtype, abDtype,
+          alpha, hblA_ld, hblB_ld, N,
           /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
     }
     {
@@ -551,11 +553,16 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
+  // Non-null only once a CK instance actually ran with it, which is what the
+  // post-add below keys off; a shape CK refused still has to add its bias.
+  const void *fused_bias = nullptr;
+
   if (cached.ck_instance >= 0) {
+    fused_bias = ck_bias;
     int result = hip_ck_gemm_run(
         stream, cached.ck_instance, B, A, ck_bias, output, N, M, K,
         /*batch=*/1, static_cast<int>(transB), static_cast<int>(transA),
-        HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16, alpha, hblA_ld, hblB_ld, N,
+        abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
         /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
     if (result != 0) {
       // The instance was chosen by running this same geometry, so a refusal
@@ -565,24 +572,24 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               "transA=%lld transB=%lld\n",
               cached.ck_instance, (long long)M, (long long)N, (long long)K,
               (long long)transA, (long long)transB);
+      return result;
     }
-    return result;
+  } else {
+    // Reference fallback: alpha * op(A) op(B) into output.
+    int rc = hip_ref_gemm_run(
+        stream, B, A, output, N, M, K, /*batch=*/1, static_cast<int>(transB),
+        static_cast<int>(transA), abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
+        /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_gemm: reference GEMM unsupported for typeCode=%lld M=%lld "
+              "N=%lld K=%lld\n",
+              (long long)typeCode, (long long)M, (long long)N, (long long)K);
+      return -1;
+    }
   }
 
-  // Reference fallback: alpha * op(A) op(B) into output, then + beta*C.
-  int rc = hip_ref_gemm_run(stream, B, A, output, N, M, K, /*batch=*/1,
-                            static_cast<int>(transB), static_cast<int>(transA),
-                            abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
-                            /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
-  if (rc != 0) {
-    fprintf(stderr,
-            "wrap_gemm: reference GEMM unsupported for typeCode=%lld M=%lld "
-            "N=%lld K=%lld\n",
-            (long long)typeCode, (long long)M, (long long)N, (long long)K);
-    return -1;
-  }
-
-  if (C) {
+  if (C && !fused_bias) {
     // output += beta * C_broadcast. hip_elementwise_add serves f16/f32; a C
     // term with fp64 or bf16 appears in no supported model and errors.
     if (abDtype != HIP_DTYPE_FLOAT16 && abDtype != HIP_DTYPE_FLOAT32) {
