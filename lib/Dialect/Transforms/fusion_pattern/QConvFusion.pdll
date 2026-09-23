@@ -10,6 +10,16 @@
 // channel, and they routinely arrive as external constants whose bytes are not
 // in the IR, so there is nothing to fold -- the kernel has to index them by
 // channel.
+//
+// Also unlike them, the rewrite statement names `conv` rather than the `q` it
+// replaces. The op named there is the pattern's root, which is what decides
+// the `rootKind` recorded for the match, and `PatternApplicator` only compares
+// benefits among patterns sharing a root. Rooting at `hip.conv` puts this
+// pattern and the conv-to-gemm rewrite (which cannot root anywhere else,
+// because an unquantized conv has no surrounding Q/DQ) on the same op, so
+// their `benefit` values decide which is offered a conv first. `q` is still
+// reachable: PDL walks to it through `pdl_interp.get_users`, and it is still
+// the op being replaced.
 //===----------------------------------------------------------------------===//
 
 // ===== UINT16 activation, per-output-channel packed 4-bit weights =====
@@ -55,7 +65,7 @@ Pattern HipQConv with benefit(10) {
   CanBuildInit(output_type, conv_init);
   HasSingleUseResult(conv);
 
-  rewrite q with {
+  rewrite conv with {
     let input_scale_attr = ExtractHipSplatScale(input_scale);
     let output_scale_attr = ExtractHipSplatScale(output_scale);
     let input_zp_attr = ExtractHipQdqZeropoint(dq_input, attr<"0 : i64">);
