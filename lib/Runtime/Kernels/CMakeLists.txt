@@ -42,6 +42,7 @@ set(_kernel_sources
     hip/gemm_wmma_kernel.hip
     hip/ck_gemm.hip
     hip/ref_gemm.hip
+    hip/gemv_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
