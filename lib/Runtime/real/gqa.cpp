@@ -1904,8 +1904,8 @@ static int gqa_forward_hipblaslt(
   // the GEMMs read and write past the regions allocated for them.
   //
   // strideA has to be stated explicitly the moment kv_ext differs from kv_span.
-  // Both keys otherwise leave it 0, which queryOrCreateGemmState resolves to
-  // the dense default m*k: kv_ext*d for the score GEMM and d*kv_ext for the
+  // Both keys otherwise leave it 0, which gqaGemmStrides resolves to the dense
+  // default m*k: kv_ext*d for the score GEMM and d*kv_ext for the
   // value one, while Kexp / Vexp are packed at kv_span*d per head. Those agree
   // only while the chunk reads the whole op-level range; once it reads a
   // sub-range
