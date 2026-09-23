@@ -9,8 +9,13 @@
 // an iota against the round's argmax rather than comparing values, so a tie
 // loses only one of its members per round.
 //
+// The masked-in value has to be one the input cannot hold, or a position
+// would stay tied with its own mask and be picked twice. Floats use NaN,
+// which the IGNORE reduction drops outright; integers run one width up and
+// mask below the range they arrived in.
+//
 // Forms the expansion cannot express -- a K too wide to unroll, smallest-first
-// on integers, f64 -- stay hip ops rather than failing the pass.
+// on integers, i64, f64 -- stay hip ops rather than failing the pass.
 //
 // FILE LAYOUT:
 // Converting cases first, then the cases left alone. Each rejection that must
@@ -99,10 +104,13 @@ func.func @top_k_smallest(
   return %values, %indices : tensor<3x2xf32>, tensor<3x2xi64>
 }
 
-// Integers take the largest-first form, where the sentinel is the signed
-// minimum rather than negative infinity.
+// Integers take the largest-first form. The rounds run in i64 so the mask can
+// sit one below the i32 range, and the selected values -- all of which the i32
+// input held -- narrow back at the end.
 // CHECK-LABEL: func.func @top_k_integer
+// CHECK: tosa.cast %{{.*}} : (tensor<3x4xi32>) -> tensor<3x4xi64>
 // CHECK: tosa.argmax
+// CHECK: tosa.cast %{{.*}} : (tensor<3x2xi64>) -> tensor<3x2xi32>
 // CHECK-NOT: hip.top_k
 func.func @top_k_integer(
     %ctx: !hip.context, %x: tensor<3x4xi32>, %k: tensor<i64>,
@@ -150,6 +158,24 @@ func.func @top_k_integer_smallest(
   return %values, %indices : tensor<3x2xi32>, tensor<3x2xi64>
 }
 
+// The mask has to be below everything the input can hold, so the rounds run
+// one integer width up. i64 has nowhere to go, so it is left alone rather
+// than masked with a value the input could have held.
+// CHECK-LABEL: func.func @top_k_integer_i64
+// CHECK: hip.top_k
+// CHECK-NOT: tosa.argmax
+func.func @top_k_integer_i64(
+    %ctx: !hip.context, %x: tensor<3x4xi64>, %k: tensor<i64>,
+    %vinit: tensor<3x2xi64>, %iinit: tensor<3x2xi64>)
+    -> (tensor<3x2xi64>, tensor<3x2xi64>) attributes {rock.kernel} {
+  %values, %indices = hip.top_k(%ctx)
+      ins(%x, %k : tensor<3x4xi64>, tensor<i64>)
+      outs(%vinit, %iinit : tensor<3x2xi64>, tensor<3x2xi64>)
+      {axis = 1 : i64, largest = true, sorted = true}
+      : tensor<3x2xi64>, tensor<3x2xi64>
+  return %values, %indices : tensor<3x2xi64>, tensor<3x2xi64>
+}
+
 // TOSA has no f64 tensor type.
 // CHECK-LABEL: func.func @top_k_f64
 // CHECK: hip.top_k
@@ -180,4 +206,22 @@ func.func @top_k_off_axis_mismatch(
       {axis = 1 : i64, largest = true, sorted = true}
       : tensor<5x2xf32>, tensor<5x2xi64>
   return %values, %indices : tensor<5x2xf32>, tensor<5x2xi64>
+}
+
+// -----
+
+// A result of the wrong rank is a shape disagreement, so it fails the pass
+// rather than staying a hip op. The legality gate has to reach that failure
+// without indexing the result by an axis the result does not have.
+func.func @top_k_result_rank_mismatch(
+    %ctx: !hip.context, %x: tensor<3x4x5xf32>, %k: tensor<i64>,
+    %vinit: tensor<3x2xf32>, %iinit: tensor<3x2xi64>)
+    -> (tensor<3x2xf32>, tensor<3x2xi64>) attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.top_k'}}
+  %values, %indices = hip.top_k(%ctx)
+      ins(%x, %k : tensor<3x4x5xf32>, tensor<i64>)
+      outs(%vinit, %iinit : tensor<3x2xf32>, tensor<3x2xi64>)
+      {axis = 2 : i64, largest = true, sorted = true}
+      : tensor<3x2xf32>, tensor<3x2xi64>
+  return %values, %indices : tensor<3x2xf32>, tensor<3x2xi64>
 }

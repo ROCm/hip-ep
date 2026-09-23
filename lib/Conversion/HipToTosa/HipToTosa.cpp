@@ -3022,22 +3022,43 @@ struct ScatterNDConverter final : public OpConversionPattern<ScatterNDOp> {
   }
 };
 
-// A value that loses every comparison, so a masked-out position is never
-// selected again.
+// Integers mask with a value below their own range, so the rounds run one
+// width up to have somewhere to put it. i64 has no wider type to move to.
+constexpr unsigned kMaxTopKIntWidth = 32;
+
+// The element type the rounds run in: integers widen, floats stay put.
+Type topKRoundElementType(Builder &builder, Type elemType) {
+  if (auto intTy = dyn_cast<IntegerType>(elemType))
+    return builder.getIntegerType(intTy.getWidth() * 2);
+  return elemType;
+}
+
+// A value the input cannot hold, so masking a position with it takes that
+// position out of every later round.
+//
+// The obvious choices do not work. Negative infinity and the signed minimum
+// are both ordinary input values, and masking with one of those leaves the
+// position tied with its own mask: an input of [-inf, -inf] would report
+// index 0 twice instead of 0 and 1.
+//
+// Floats get that separation from NaN, which the rounds already drop on both
+// sides because they reduce with NanPropagationMode::IGNORE -- no finite or
+// infinite input can imitate a lane that is not there. Integers have no such
+// lane, so they run in a wider type (topKRoundElementType) and mask one below
+// the range the input arrived in, which is unreachable by construction.
 Value createLosingSentinel(ConversionPatternRewriter &rewriter, Location loc,
-                           RankedTensorType type) {
-  Type elemType = type.getElementType();
+                           RankedTensorType roundType, Type inputElemType) {
+  Type elemType = roundType.getElementType();
   if (auto floatTy = dyn_cast<FloatType>(elemType)) {
-    APFloat lowest =
-        APFloat::getInf(floatTy.getFloatSemantics(), /*Negative=*/true);
+    APFloat nan = APFloat::getNaN(floatTy.getFloatSemantics());
     return tosa::ConstOp::create(
-        rewriter, loc, type,
-        DenseElementsAttr::get(type, rewriter.getFloatAttr(floatTy, lowest)));
+        rewriter, loc, roundType,
+        DenseElementsAttr::get(roundType, rewriter.getFloatAttr(floatTy, nan)));
   }
-  auto intTy = cast<IntegerType>(elemType);
-  return createSplatInt(
-      rewriter, loc, type,
-      APInt::getSignedMinValue(intTy.getWidth()).getSExtValue());
+  unsigned inputWidth = cast<IntegerType>(inputElemType).getWidth();
+  unsigned roundWidth = cast<IntegerType>(elemType).getWidth();
+  APInt below = APInt::getSignedMinValue(inputWidth).sext(roundWidth) - 1;
+  return createSplatInt(rewriter, loc, roundType, below.getSExtValue());
 }
 
 // [0, 1, ..., extent-1] along `axis`, size 1 elsewhere so it broadcasts over
@@ -3078,6 +3099,10 @@ bool isTosaExpressibleTopK(TopKOp op) {
     // Smallest-first negates the input, which an integer range cannot take.
     if (!intTy.isSignless() || !op.getLargest())
       return false;
+    // The mask needs a value below the input range, which only exists if
+    // there is a wider type to run the rounds in.
+    if (intTy.getWidth() > kMaxTopKIntWidth)
+      return false;
   } else {
     return false;
   }
@@ -3088,6 +3113,11 @@ bool isTosaExpressibleTopK(TopKOp op) {
     axis += rank;
   if (axis < 0 || axis >= rank)
     return false;
+  // A result of the wrong rank is a shape disagreement rather than a
+  // capability limit, so it belongs to the pattern's hard failures. Claim it
+  // here without reading K, which would index past the end of that shape.
+  if (valuesTy.getRank() != rank)
+    return true;
   int64_t k = valuesTy.getDimSize(axis);
   return k >= 1 && k <= kMaxTopKUnroll;
 }
@@ -3139,11 +3169,19 @@ struct TopKConverter final : public OpConversionPattern<TopKOp> {
     } else if (auto intTy = dyn_cast<IntegerType>(elemType)) {
       if (!intTy.isSignless())
         return rewriter.notifyMatchFailure(op, "expected a signless integer");
+      if (intTy.getWidth() > kMaxTopKIntWidth)
+        return rewriter.notifyMatchFailure(
+            op, "integer is too wide to leave room for the round mask");
     } else {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
 
     int64_t rank = xTy.getRank();
+    // Every shape check below indexes the results by an axis taken from the
+    // input, so the ranks have to agree before any of them runs.
+    if (valuesTy.getRank() != rank)
+      return rewriter.notifyMatchFailure(op,
+                                         "results must have the input's rank");
     int64_t axis = op.getAxis();
     if (axis < 0)
       axis += rank;
@@ -3175,20 +3213,25 @@ struct TopKConverter final : public OpConversionPattern<TopKOp> {
     Type i32 = rewriter.getI32Type();
     auto axisAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(axis));
 
+    // The rounds run in roundElem, which is elemType for floats and one width
+    // up for integers so the mask has somewhere below the input range to sit.
+    Type roundElem = topKRoundElementType(rewriter, elemType);
+    auto roundTy = RankedTensorType::get(xTy.getShape(), roundElem);
+
     // A round reduces the axis to one element; argmax drops it entirely.
     SmallVector<int64_t> sliceShape(xTy.getShape());
     sliceShape[axis] = 1;
     SmallVector<int64_t> argMaxShape(xTy.getShape());
     argMaxShape.erase(argMaxShape.begin() + axis);
-    auto valueSliceTy = RankedTensorType::get(sliceShape, elemType);
+    auto valueSliceTy = RankedTensorType::get(sliceShape, roundElem);
     auto argMaxTy = RankedTensorType::get(argMaxShape, i32);
     auto maskTy = RankedTensorType::get(xTy.getShape(), rewriter.getI1Type());
 
-    Value cur = adaptor.getX();
+    Value cur = emitTosaCast(rewriter, loc, adaptor.getX(), roundElem);
     if (!largest)
-      cur = tosa::NegateOp::create(rewriter, loc, xTy, cur);
+      cur = tosa::NegateOp::create(rewriter, loc, roundTy, cur);
     Value iota = createAxisIota(rewriter, loc, xTy.getShape(), axis, i32);
-    Value sentinel = createLosingSentinel(rewriter, loc, xTy);
+    Value sentinel = createLosingSentinel(rewriter, loc, roundTy, elemType);
 
     SmallVector<Value> valueSlices, indexSlices;
     for (int64_t round = 0; round < k; ++round) {
@@ -3209,22 +3252,27 @@ struct TopKConverter final : public OpConversionPattern<TopKOp> {
         break;
       Value taken =
           tosa::EqualOp::create(rewriter, loc, maskTy, iota, roundIndex);
-      cur = tosa::SelectOp::create(rewriter, loc, xTy, taken, sentinel, cur);
+      cur =
+          tosa::SelectOp::create(rewriter, loc, roundTy, taken, sentinel, cur);
     }
 
     // The rounds already run largest first, which is what sorted=true asks
     // for; sorted=false accepts any order, so neither needs extra work.
+    auto roundValuesTy = RankedTensorType::get(valuesTy.getShape(), roundElem);
     Value values = valueSlices.front();
     Value indices = indexSlices.front();
     if (k > 1) {
-      values = tosa::ConcatOp::create(rewriter, loc, valuesTy, valueSlices,
+      values = tosa::ConcatOp::create(rewriter, loc, roundValuesTy, valueSlices,
                                       axisAttr);
       indices = tosa::ConcatOp::create(
           rewriter, loc, RankedTensorType::get(valuesTy.getShape(), i32),
           indexSlices, axisAttr);
     }
     if (!largest)
-      values = tosa::NegateOp::create(rewriter, loc, valuesTy, values);
+      values = tosa::NegateOp::create(rewriter, loc, roundValuesTy, values);
+    // A selected value is one the input held, so narrowing back to the input
+    // width is exact; only the mask ever needed the extra room.
+    values = emitTosaCast(rewriter, loc, values, elemType);
     indices = emitTosaCast(rewriter, loc, indices, indicesTy.getElementType());
     rewriter.replaceOp(op, {values, indices});
     return success();
