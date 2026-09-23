@@ -319,35 +319,52 @@ def parse_op_line(line: str) -> dict | None:
     }
 
 
-def _slice_any_instance(
+def _slices_for(
     src_lines: list[str], def_index: dict[str, int], instances: list[dict]
-) -> tuple[str | None, int, str, bool]:
-    """Isolate whichever instance of an operator can be isolated.
+) -> tuple[list[str], int, str, bool]:
+    """Modules worth probing for one operator, strongest evidence first.
 
-    Returns (module, line_no, reason, inferred). Shapes are guessed only
-    after every instance has been tried as written, so a guess never
-    displaces evidence we actually have.
+    Returns (candidates, line_no, reason, inferred). Normally there is a
+    single candidate taken straight from the graph. Only when no instance
+    can be used as written does this fall back to guessing a shape, and then
+    it offers several, because one guess is not enough: a reduction needs a
+    narrower result than its operand, and the crash it causes otherwise is
+    both intermittent and unrelated to whether the operator is supported.
     """
     why = "no instances"
-    for infer in (False, True):
-        for inst in instances:
+    for inst in instances:
+        module, why = build_single_op_module(src_lines, def_index, inst["line_no"])
+        if module is not None:
+            return [module], inst["line_no"], why, False
+
+    for inst in instances:
+        candidates = []
+        for rank_delta in range(_MAX_RANK_GUESSES):
             module, why = build_single_op_module(
-                src_lines, def_index, inst["line_no"], infer_unranked=infer
+                src_lines, def_index, inst["line_no"], infer_unranked=rank_delta
             )
             if module is not None:
-                return module, inst["line_no"], why, infer
-    return None, instances[0]["line_no"] if instances else 0, why, False
+                candidates.append(module)
+        if candidates:
+            return candidates, inst["line_no"], "inferred-shape", True
+
+    return [], instances[0]["line_no"] if instances else 0, why, False
 
 
-def _widest_shape(types: list[str]) -> str | None:
+# How many ranks below the widest operand to try for an unranked type.
+# Shape-preserving operators need the first; reductions need a lower one.
+_MAX_RANK_GUESSES = 3
+
+
+def _widest_shape(types: list[str], rank_delta: int = 0) -> str | None:
     """Guess the shape an unranked type would have, from its neighbours.
 
-    Most operators that reach us unranked are shape-preserving, so the widest
-    ranked operand is a good guess -- but only a guess, and it is wrong for
-    anything that changes rank, such as a reduction. That asymmetry decides
-    how the result may be used: a slice built this way that converts proves
-    the operator is handled, while one that fails proves nothing, because the
-    shape we invented may be the reason.
+    The widest ranked operand fits shape-preserving operators, which are most
+    of them; rank_delta drops trailing dimensions for the ones that shrink.
+    Either way it is a guess, and that decides how the answer may be used: a
+    slice built this way that converts proves the operator is handled, while
+    one that fails proves nothing, since the shape we invented may be the
+    reason it failed.
     """
     best: str | None = None
     best_rank = -1
@@ -359,7 +376,13 @@ def _widest_shape(types: list[str]) -> str | None:
         rank = shape.count("x")
         if rank > best_rank:
             best, best_rank = shape, rank
-    return best
+    if best is None or rank_delta == 0:
+        return best
+    dims = best.split("x")[:-1]
+    if rank_delta > len(dims):
+        return None
+    kept = dims[: len(dims) - rank_delta]
+    return "".join(d + "x" for d in kept)
 
 
 def _apply_shape(ty: str, shape: str) -> str:
@@ -374,7 +397,7 @@ def build_single_op_module(
     def_index: dict[str, int],
     line_no: int,
     type_override: tuple[int, str] | None = None,
-    infer_unranked: bool = False,
+    infer_unranked: int | None = None,
 ) -> tuple[str | None, str]:
     """Wrap one operation in a self-contained module.
 
@@ -406,10 +429,10 @@ def build_single_op_module(
     # slice out; operands are checked below, since an inlined constant never
     # reaches the signature.
     inferred = False
-    if infer_unranked and any(
+    if infer_unranked is not None and any(
         "<*x" in t for t in parsed["in_types"] + parsed["out_types"]
     ):
-        shape = _widest_shape(parsed["in_types"])
+        shape = _widest_shape(parsed["in_types"], infer_unranked)
         if shape is None:
             return None, "unranked type with no ranked operand to borrow a shape from"
         parsed = dict(
@@ -813,7 +836,7 @@ def stage1_per_operator(
         instances = info.get("instances") or []
         if not instances:
             continue
-        module, line_no, why, inferred = _slice_any_instance(
+        candidates, line_no, why, inferred = _slices_for(
             src_lines, def_index, instances
         )
         base = {
@@ -825,7 +848,7 @@ def stage1_per_operator(
             "dropped_attrs": [],
             "unconverted_lines": [],
         }
-        if module is None:
+        if not candidates:
             results[op_type] = {
                 **base,
                 "converted": 0,
@@ -837,7 +860,11 @@ def stage1_per_operator(
 
         print(f"  stage1-slice {op_type} ...", flush=True)
         out = work / f"{op_type}.out.mlir"
-        converts = _converts_cleanly(opt, module, work / f"{op_type}.mlir", out)
+        converts = False
+        for module in candidates:
+            converts = _converts_cleanly(opt, module, work / f"{op_type}.mlir", out)
+            if converts:
+                break
         targets: dict[str, int] = {}
         if converts and out.exists():
             for line in out.read_text(encoding="utf-8").splitlines():
@@ -910,10 +937,10 @@ def stage2(
         # unusable instance says nothing about the operator. On a vision
         # model the first three of 51 SkipLayerNormalization uses are
         # unranked and the other 48 are fine.
-        module, line_no, why, inferred = _slice_any_instance(
+        candidates, line_no, why, inferred = _slices_for(
             src_lines, def_index, instances
         )
-        if module is None:
+        if not candidates:
             # Not a lowering failure: the operator cannot be expressed as a
             # standalone module. stage1 already showed it converts; the
             # lowering simply goes unverified. The reason is worth keeping --
@@ -927,10 +954,13 @@ def stage2(
             continue
 
         slice_path = slice_dir / f"{op_type}.mlir"
-        slice_path.write_text(module, encoding="utf-8")
         out_path = slice_dir / f"{op_type}.llvm.mlir"
         print(f"  stage2 {op_type} ...", flush=True)
-        code, log = run_opt(opt, slice_path, STAGE2_PASSES, out_path, debug=False)
+        for module in candidates:
+            slice_path.write_text(module, encoding="utf-8")
+            code, log = run_opt(opt, slice_path, STAGE2_PASSES, out_path, debug=False)
+            if code == 0 and out_path.exists():
+                break
 
         if code == TIMEOUT_EXIT:
             results[op_type] = {

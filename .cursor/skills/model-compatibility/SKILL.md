@@ -60,6 +60,13 @@ afternoon or a fortnight.
 `blocked` and `unsupported` differ by roughly an order of magnitude in
 effort. Reporting them as one number misleads planning.
 
+An operator can be `supported` and still be marked "lowering unverified".
+That means the front end converted it but the probe could not build a
+standalone module to check the rest of the chain, usually because the
+operator carries a region, as `Loop` and `If` do. The summary counts it as
+supported, because that is what was observed, and the worklist carries a
+row saying what went wrong so the reader can judge whether it matters.
+
 ## After the run
 
 Read `model_compatibility_report.md`. It builds up in four steps: the

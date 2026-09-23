@@ -67,6 +67,25 @@ the usual case.
 `none` results are dropped from the function signature: module metadata
 rejects a non-tensor in `@main_graph`.
 
+Which instance gets sliced matters. Shape inference leaves some uses of an
+operator unranked and others not, and an unranked type cannot go in
+`@main_graph`'s signature, so every instance is tried before the operator
+is given up on. On one vision model the first three of 51
+`SkipLayerNormalization` uses are unranked and the remaining 48 are usable.
+
+When no instance is usable, a shape is borrowed from the widest ranked
+operand, and also tried with one and two trailing dimensions dropped, since
+reductions need a narrower result than their operand. That is a guess, so
+it only counts in one direction: a slice that lowers proves the operator is
+handled, while one that fails proves nothing and is reported as unverified.
+A guessed shape can produce a semantically impossible operation -- a
+`ReduceMax` with `keepdims = 0` and a result as wide as its operand
+segfaults `hip-mlir-opt` about four times in five -- which is exactly the
+kind of failure that must not be read as a verdict.
+
+What is left after all that is operators carrying a region, `Loop` and
+`If`, whose bodies the line-based parser cannot lift out.
+
 ### Attributes
 
 Two steps. The diff finds attributes absent from the conversion output, for
@@ -107,9 +126,16 @@ a single-variable result naming the fix.
 | not converted | — | yes | `blocked` |
 | not converted | — | no | `unsupported` |
 | converted | ok | no | `supported`, listed under documentation drift |
+| converted | could not be sliced | — | `supported`, marked "lowering unverified" |
 
 The probe outranks the doc. The doc only separates `blocked` from
 `unsupported`.
+
+An unverified lowering is not a sixth status. stage1 converted the
+operator, and that is a real observation, so it counts as supported; what
+is missing is the second half of the check. It gets a worklist row anyway,
+carrying the reason and any error, because deciding whether that gap
+matters is a person's call and nothing else in the report would raise it.
 
 ### Why "the model sets it" matters
 

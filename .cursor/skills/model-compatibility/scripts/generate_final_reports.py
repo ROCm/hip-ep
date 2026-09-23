@@ -48,6 +48,13 @@ WORKLIST_SECTIONS = [
         "Conversion succeeds, but the converter never reads an attribute this "
         "model sets, so the generated code silently means something else.",
     ),
+    (
+        "unverified",
+        "Check the lowering by hand",
+        "Conversion succeeds and the operator is counted as supported, but the "
+        "probe could not build a standalone module to check the rest of the "
+        "chain. Read the finding and decide whether it needs looking into.",
+    ),
 ]
 
 # Headline for a degraded run. The assembler's note carries the specific
@@ -87,9 +94,7 @@ def render_stages(stages: list[dict]) -> list[str]:
     for s in stages:
         result = s.get("result", "")
         mark = "**failed**" if result == "failed" else result
-        out.append(
-            f"| {s.get('stage', '')} | {mark} | {fmt(s.get('detail'), '')} |\n"
-        )
+        out.append(f"| {s.get('stage', '')} | {mark} | {fmt(s.get('detail'), '')} |\n")
     out.append("\n")
     return out
 
@@ -105,11 +110,24 @@ def render_summary(summary: dict) -> list[str]:
     if excluded:
         out.append(f" (excluding {excluded} weight constants)")
     out.append("\n")
+    # The unverified count sits inside the supported figure rather than
+    # beside it, because those operators did convert. Stating it here stops
+    # the headline from claiming more was checked than was.
+    unverified = summary.get("lowering_unverified_instances", 0)
+    n_types = summary.get("lowering_unverified_types", 0)
+    caveat = (
+        f" — {unverified} of them, in {n_types} operator "
+        f"type{'s' if n_types != 1 else ''}, converted but had no lowering check"
+        if unverified
+        else ""
+    )
     out.append(
         f"- Supported: **{inst['supported']} ({summary['supported_pct']}%)** "
-        f"across {types['supported']} operator types\n"
+        f"across {types['supported']} operator types{caveat}\n"
     )
     for key, label, _ in WORKLIST_SECTIONS:
+        if key not in inst:
+            continue
         out.append(
             f"- {label.split()[0]} ({key}): {inst[key]} instances, "
             f"{types[key]} operator types\n"
@@ -234,10 +252,13 @@ def render_distribution(rows: list[dict]) -> list[str]:
         "|---|---|---:|---|---|---|---|---|---|\n",
     ]
     for r in rows:
+        status = r["status"]
+        if r.get("lowering_unverified"):
+            status += " (lowering unverified)"
         out.append(
             f"| {r['onnx_op']} | {r['domain']} | {r['count']} | "
             f"{fmt(r.get('data_types'))} | {fmt(r.get('shape_types'))} | "
-            f"{r['status']} | {fmt(r.get('target'))} | {fmt(r.get('backend'))} | "
+            f"{status} | {fmt(r.get('target'))} | {fmt(r.get('backend'))} | "
             f"{fmt(r.get('op_description'))} |\n"
         )
     out.append("\n")

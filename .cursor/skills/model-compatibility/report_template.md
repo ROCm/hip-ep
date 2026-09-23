@@ -32,7 +32,9 @@ operators bucketed by status, then only those needing work.
 
 Total instances, then the five statuses. The percentage counts `supported`
 only; the other four get their own lines. The denominator excludes weight
-constants, and says so.
+constants, and says so. When some supported operators had no lowering
+check, the supported line says how many, since they are inside that figure
+rather than beside it.
 
 ### Compatibility summary
 

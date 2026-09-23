@@ -44,7 +44,12 @@ from supported_ops_doc import default_doc_path, load_supported_ops  # noqa: E402
 
 STATUSES = ("supported", "partial", "lowering-broken", "blocked", "unsupported")
 
-# What to do about each status, carried into the report so the worklist does
+# Worklist buckets are the statuses plus "unverified", which is not a status
+# -- those operators are reported supported -- but still needs a decision
+# from a person.
+WORKLIST_BUCKETS = STATUSES + ("unverified",)
+
+# What to do about each bucket, carried into the report so the worklist does
 # not have to restate it.
 STATUS_ACTION = {
     "supported": "",
@@ -52,11 +57,30 @@ STATUS_ACTION = {
     "lowering-broken": "add the HipToLLVM lowering or runtime function",
     "blocked": "extend the existing operator",
     "unsupported": "implement the operator",
+    "unverified": "check the lowering by hand",
 }
 
 
 def _norm_domain(domain: str) -> str:
     return "onnx" if domain in ("", "ai.onnx") else domain
+
+
+def _unverified_reason(s2: dict) -> str:
+    """Why an operator's lowering went unchecked, including how it failed.
+
+    Two different things end up here. Either no slice could be built, and
+    there is nothing but a reason, or a slice ran and failed on a shape we
+    guessed, which is not enough to convict the lowering but is still an
+    observed failure. Reporting only the reason in the second case hides
+    that the compiler crashed.
+    """
+    if s2.get("status") != "not_sliceable":
+        return ""
+    reason = s2.get("reason", "")
+    error = s2.get("error", "")
+    if error and error not in reason:
+        return f"{reason} — {error}" if reason else error
+    return reason
 
 
 def type_signature(line: str) -> str:
@@ -243,11 +267,16 @@ def main() -> None:
         evidence, note = "A", ""
 
     rows: list[dict] = []
-    worklist: dict[str, list] = {k: [] for k in STATUSES if k != "supported"}
+    worklist: dict[str, list] = {k: [] for k in WORKLIST_BUCKETS if k != "supported"}
     capability_gaps: list[dict] = []
     doc_stale: list[dict] = []
     counts = {k: 0 for k in STATUSES}
     type_counts = {k: 0 for k in STATUSES}
+    # Counted apart from the statuses: these are inside the supported totals,
+    # and saying so keeps the headline figure from overstating what was
+    # checked.
+    unverified_instances = 0
+    unverified_types = 0
 
     for op, info in ops.items():
         if op.startswith("_"):
@@ -302,20 +331,26 @@ def main() -> None:
                     s2.get("status") == "ok" and s2.get("compile_time")
                 ),
                 "lowering_unverified": s2.get("status") == "not_sliceable",
-                "lowering_unverified_reason": (
-                    s2.get("reason", "") if s2.get("status") == "not_sliceable" else ""
-                ),
+                "lowering_unverified_reason": _unverified_reason(s2),
                 "op_description": op_description(op, domain),
                 "ignored_attributes": [f["attribute"] for f in ignored],
             }
         )
 
-        if status != "supported":
+        # An unverified lowering is not a defect, so it is not one of the
+        # statuses, but it is still something a person has to decide about.
+        # It earns a worklist row on its own.
+        bucket = status
+        if status == "supported" and s2.get("status") == "not_sliceable":
+            bucket = "unverified"
+            unverified_instances += count
+            unverified_types += 1
+        if bucket != "supported":
             item = {
                 "onnx_op": op,
                 "domain": domain,
                 "count": count,
-                "action": STATUS_ACTION[status],
+                "action": STATUS_ACTION[bucket],
                 "data_types": info.get("data_types", []),
                 "shape_types": info.get("shape_types", []),
             }
@@ -328,6 +363,9 @@ def main() -> None:
                     item["signature"] = type_signature(mlir_lines[idx])
             if status == "lowering-broken":
                 item["error"] = s2.get("error", "")
+            if bucket == "unverified":
+                item["error"] = _unverified_reason(s2)
+                item["implementation"] = doc_impl
             if status == "partial":
                 item["ignored_attributes"] = [
                     {"name": f["attribute"], "value": f.get("value")} for f in ignored
@@ -339,7 +377,7 @@ def main() -> None:
                     item["blocking_operand"] = attribution["summary"]
                 elif attribution.get("reason"):
                     item["blocking_operand"] = f"not isolated: {attribution['reason']}"
-            worklist[status].append(item)
+            worklist[bucket].append(item)
 
         # An ignored attribute is a real gap whether or not this model sets
         # it -- another model will. The status above says whether it bites
@@ -375,7 +413,7 @@ def main() -> None:
         unconv = s1_meta.get("diagnostic") or {}
         if s1_meta.get("failed"):
             s1_result = "failed"
-            s1_detail = (s1_meta.get("error") or "whole-graph conversion failed")
+            s1_detail = s1_meta.get("error") or "whole-graph conversion failed"
             if s1_meta.get("fallback"):
                 s1_detail += f" — fell back to {s1_meta['fallback']}"
         else:
@@ -403,7 +441,14 @@ def main() -> None:
         if broken:
             detail += f"; {len(broken)} broken ({', '.join(broken)})"
         if unsliceable:
-            detail += f"; {len(unsliceable)} not verifiable ({', '.join(unsliceable)})"
+            # Name how each one failed, not just that it was not verified.
+            # Some of these ran and crashed the compiler, which the bare
+            # count would bury.
+            named = ", ".join(
+                f"{k}: {s2_all[k]['error']}" if s2_all[k].get("error") else k
+                for k in unsliceable
+            )
+            detail += f"; {len(unsliceable)} not verified ({named})"
         stages.append(
             {
                 "stage": "hip-to-llvm (stage2)",
@@ -430,6 +475,8 @@ def main() -> None:
             "total_operator_types": sum(type_counts.values()),
             "instances": {k: counts[k] for k in STATUSES},
             "operator_types": {k: type_counts[k] for k in STATUSES},
+            "lowering_unverified_instances": unverified_instances,
+            "lowering_unverified_types": unverified_types,
             "supported_pct": round(counts["supported"] / total * 100, 1)
             if total
             else 0.0,
