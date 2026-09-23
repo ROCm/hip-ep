@@ -1336,6 +1336,11 @@ HIP_KERNEL_API int hip_compress(
     size_t workspace_bytes,
     int element_size_bytes);
 
+/* OneHot: no host D2H. Kernels load values[0]/values[1] on device.
+ * Depth is output_shape[axis] (the inserted axis extent). `depth` is
+ * unused and may be null from the kernel's point of view; wrap_one_hot
+ * still passes the graph tensor for ABI stability.
+ */
 HIP_KERNEL_API int hip_one_hot(
     void* stream,
     const void* indices,
@@ -1349,7 +1354,6 @@ HIP_KERNEL_API int hip_one_hot(
     const int64_t* output_shape,
     int64_t num_indices,
     int64_t num_output_elements,
-    int64_t depth_scalar,
     int element_size_bytes,
     int indices_element_size_bytes);
 
