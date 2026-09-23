@@ -132,6 +132,13 @@ python3 build.py --config Release --ort_home "$ORT_HOME" \
 
 The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.14.0-cp310-cp310-linux_x86_64.whl`.
 
+**Install `model_benchmark`:**
+
+```bash
+cp build/Linux/Release/benchmark/c/model_benchmark "$ROOT/bin/"
+chmod +x "$ROOT/bin/model_benchmark"
+```
+
 #### 3. Install both wheels
 
 ```bash
