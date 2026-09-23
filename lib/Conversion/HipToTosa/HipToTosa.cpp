@@ -2686,6 +2686,110 @@ struct ExtractSliceConverter final
   }
 };
 
+struct StaticConcatMatch {
+  RankedTensorType resultType;
+  int64_t axis;
+  SmallVector<Value> inputs;
+  SmallVector<tensor::InsertSliceOp> inserts;
+  tensor::EmptyOp init;
+};
+
+static std::optional<StaticConcatMatch>
+matchStaticConcat(tensor::InsertSliceOp root) {
+  // Only claim the last insertion. Earlier insertions remain legal until the
+  // root rewrite replaces the complete chain.
+  if (llvm::any_of(root->getUsers(), [&](Operation *user) {
+        auto next = dyn_cast<tensor::InsertSliceOp>(user);
+        return next && next.getDest() == root.getResult();
+      }))
+    return std::nullopt;
+
+  auto resultType = dyn_cast<RankedTensorType>(root.getResult().getType());
+  if (!resultType || !resultType.hasStaticShape() ||
+      llvm::any_of(resultType.getShape(), [](int64_t dim) { return dim <= 0; }))
+    return std::nullopt;
+
+  SmallVector<tensor::InsertSliceOp> inserts;
+  Value dest = root.getResult();
+  while (auto insert = dest.getDefiningOp<tensor::InsertSliceOp>()) {
+    if (insert.getResult().getType() != resultType)
+      return std::nullopt;
+    inserts.push_back(insert);
+    dest = insert.getDest();
+  }
+  auto init = dest.getDefiningOp<tensor::EmptyOp>();
+  if (!init || init.getType() != resultType || inserts.size() < 2)
+    return std::nullopt;
+  std::reverse(inserts.begin(), inserts.end());
+
+  int64_t rank = resultType.getRank();
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    int64_t expectedOffset = 0;
+    SmallVector<Value> inputs;
+    bool valid = true;
+    for (tensor::InsertSliceOp insert : inserts) {
+      auto sourceType =
+          dyn_cast<RankedTensorType>(insert.getSource().getType());
+      if (!sourceType || !sourceType.hasStaticShape() ||
+          sourceType.getRank() != rank ||
+          sourceType.getElementType() != resultType.getElementType()) {
+        valid = false;
+        break;
+      }
+
+      for (int64_t dim = 0; dim < rank; ++dim) {
+        auto offset = getConstantIntValue(insert.getMixedOffsets()[dim]);
+        auto size = getConstantIntValue(insert.getMixedSizes()[dim]);
+        auto stride = getConstantIntValue(insert.getMixedStrides()[dim]);
+        int64_t sourceDim = sourceType.getDimSize(dim);
+        int64_t wantedOffset = dim == axis ? expectedOffset : 0;
+        if (sourceDim <= 0 || offset != wantedOffset || size != sourceDim ||
+            stride != 1 ||
+            (dim != axis && sourceDim != resultType.getDimSize(dim))) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid)
+        break;
+      expectedOffset += sourceType.getDimSize(axis);
+      inputs.push_back(insert.getSource());
+    }
+
+    if (valid && expectedOffset == resultType.getDimSize(axis))
+      return StaticConcatMatch{resultType, axis, std::move(inputs),
+                               std::move(inserts), init};
+  }
+  return std::nullopt;
+}
+
+struct InsertSliceConcatConverter final
+    : public OpConversionPattern<tensor::InsertSliceOp> {
+  using OpConversionPattern<tensor::InsertSliceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::InsertSliceOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<StaticConcatMatch> match = matchStaticConcat(op);
+    if (!match)
+      return rewriter.notifyMatchFailure(
+          op, "expected a static contiguous concat insertion chain");
+
+    Value concat = tosa::ConcatOp::create(
+        rewriter, op.getLoc(), match->resultType, match->inputs,
+        rewriter.getI32IntegerAttr(match->axis));
+    rewriter.replaceOp(op, concat);
+
+    // Remove the now-dead decomposition from the root back to tensor.empty.
+    for (size_t i = match->inserts.size() - 1; i-- > 0;)
+      if (match->inserts[i]->use_empty())
+        rewriter.eraseOp(match->inserts[i]);
+    if (match->init->use_empty())
+      rewriter.eraseOp(match->init);
+    return success();
+  }
+};
+
 // onnx.Shape / Size / Identity / ConstantOfShape are not 1-1 TOSA ops
 // (except Identity → tosa.identity). After convert-onnx-to-hip they arrive
 // as:
@@ -6895,6 +6999,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    conversion.addDynamicallyLegalOp<tensor::InsertSliceOp>(
+        [](tensor::InsertSliceOp op) { return !matchStaticConcat(op); });
     conversion.addDynamicallyLegalOp<arith::ConstantOp>(
         [](arith::ConstantOp op) { return !isTosaExpressibleTensorConst(op); });
     conversion.addDynamicallyLegalOp<tensor::FromElementsOp>(
@@ -6933,7 +7039,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         TileConverter, PadConverter, ResizeConverter, ConstantConverter,
         ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
-        DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
+        InsertSliceConcatConverter, DivConverter,
+        BinaryConverter<AddOp, tosa::AddOp>,
         BinaryConverter<SubOp, tosa::SubOp>,
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,
