@@ -1804,11 +1804,15 @@ Value emitRangeConst(ConversionPatternRewriter &rewriter, Location loc,
     }
     values = DenseElementsAttr::get(type, elements);
   } else {
-    APInt first = start.getSplatValue<APInt>();
-    APInt step = delta.getSplatValue<APInt>();
+    auto intType = cast<IntegerType>(type.getElementType());
+    unsigned width = intType.getWidth();
+    unsigned mathWidth = std::max(64u, width + 1);
+    APInt first = start.getSplatValue<APInt>().sextOrTrunc(mathWidth);
+    APInt step = delta.getSplatValue<APInt>().sextOrTrunc(mathWidth);
     SmallVector<APInt> elements;
     for (int64_t i : llvm::seq<int64_t>(length))
-      elements.push_back(first + step * APInt(first.getBitWidth(), i));
+      elements.push_back(
+          (first + step * APInt(mathWidth, i, /*isSigned=*/true)).trunc(width));
     values = DenseElementsAttr::get(type, elements);
   }
   return tosa::ConstOp::create(rewriter, loc, type, values);
@@ -2440,6 +2444,223 @@ Value createSplatInt(ConversionPatternRewriter &rewriter, Location loc,
       DenseElementsAttr::get(type, rewriter.getIntegerAttr(elemType, value)));
 }
 
+// TOSA has no round, and the obvious floor(x + 0.5) is the wrong rounding:
+// hip.round is ONNX Round, which breaks ties to even, so it owes 2 on 2.5 and
+// -4 on -4.5 where floor(x + 0.5) gives 3 and -4.
+//
+// tosa.cast from float to integer does round half to even, so a cast out and
+// back would spell it in two ops, but it saturates at the integer range and
+// would need a guard for the magnitudes that no longer fit -- which are exactly
+// the values already integral, and so exactly the ones that need no rounding.
+// The guard's threshold is per float type, and the tie rule would be inherited
+// from whatever the backend's cast does rather than stated here. Building it
+// out of tosa.floor avoids both: one element type throughout, and the rule
+// written down.
+//
+//   f = floor(x)        the integer below x
+//   d = x - f           the fraction, always in [0, 1)
+// Step up when d > 0.5, stay when d < 0.5, and on the tie step up only when f
+// is odd, which is the half-to-even rule. f is odd exactly when halving and
+// doubling it fails to round-trip; halving is exact, so that test costs
+// nothing.
+//
+// The infinities and NaN need no case of their own. floor leaves them be and
+// d becomes inf - inf = NaN, so both comparisons are false and x falls through
+// unrounded, which is what it should do.
+//
+// Before:
+//   %y = hip.round(%ctx) ins(%x : tensor<4xf32>) outs(%i : tensor<4xf32>)
+// After:
+//   %f = tosa.floor %x
+//   %d = tosa.sub %x, %f
+//   %up = tosa.bitwise_or (tosa.greater %d, 0.5),
+//                         (tosa.bitwise_and (tosa.equal %d, 0.5), f is odd)
+//   %y = tosa.select %up, (tosa.ceil %x), %f
+//
+// The predicates are combined with the bitwise ops rather than the logical
+// ones, which coincide on i1. rocMLIR's RockTosaToElementwise has patterns for
+// tosa.bitwise_and/_or/_xor and none for any tosa.logical_*, and it marks every
+// surviving tosa op illegal, so the logical spelling converts cleanly here and
+// then kills the kernel it was meant to enable. hip.and/or/not are spelled the
+// same way for the same reason.
+struct RoundConverter final : public OpConversionPattern<RoundOp> {
+  using OpConversionPattern<RoundOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RoundOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    Value x = adaptor.getX();
+    if (x.getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    // ONNX Round is float-only, so an integer here is unreachable from a valid
+    // model. f64 is reachable -- ONNX has a double tensor type -- but TOSA has
+    // no f64 tensor type, so the expansion would build tosa.floor on an element
+    // type TOSA cannot represent. Both are named rather than left to fail
+    // later, for the reason GemmConverter names its own f64 rejection.
+    Type elementType = resultType.getElementType();
+    if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+      return op->emitError("hip.round has no TOSA spelling for element type ")
+             << elementType << ": the expansion needs f32, f16, or bf16";
+
+    Location loc = op.getLoc();
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    Value half = createSplatFloat(rewriter, loc, resultType, 0.5);
+    Value two = createSplatFloat(rewriter, loc, resultType, 2.0);
+    Value shift = createZeroMulShift(rewriter, loc);
+
+    Value floored = tosa::FloorOp::create(rewriter, loc, resultType, x);
+    Value fraction = tosa::SubOp::create(rewriter, loc, resultType, x, floored);
+    Value above =
+        tosa::GreaterOp::create(rewriter, loc, predType, fraction, half);
+    Value tie = tosa::EqualOp::create(rewriter, loc, predType, fraction, half);
+
+    Value halved =
+        tosa::MulOp::create(rewriter, loc, resultType, floored, half, shift);
+    Value rounded = tosa::MulOp::create(
+        rewriter, loc, resultType,
+        tosa::FloorOp::create(rewriter, loc, resultType, halved), two, shift);
+    // Halving and doubling drops exactly the low bit, so an odd floor comes
+    // back one smaller and an even one comes back unchanged. Asking which is
+    // the greater reads that off without a negation.
+    Value isOdd =
+        tosa::GreaterOp::create(rewriter, loc, predType, floored, rounded);
+
+    Value stepUp = tosa::BitwiseOrOp::create(
+        rewriter, loc, predType, above,
+        tosa::BitwiseAndOp::create(rewriter, loc, predType, tie, isOdd));
+    // The step-up value is tosa.ceil rather than floor + 1 so that a negative
+    // input rounding to zero keeps its sign. nearbyintf, which the round
+    // runtime uses, returns -0 on [-0.5, 0), and floor + 1 would return +0
+    // there. The two agree everywhere the branch is taken: it is taken only
+    // when the fraction is non-zero, and ceil is floor + 1 on every
+    // non-integral value.
+    Value next = tosa::CeilOp::create(rewriter, loc, resultType, x);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultType, stepUp, next,
+                                                floored);
+    return success();
+  }
+};
+
+// TOSA has no modulo either, but for integers the remainder identity spells one
+// out. tosa.intdiv truncates towards zero, so lhs - (lhs / rhs) * rhs is C's %,
+// whose sign follows the dividend -- which is ONNX Mod's fmod = 1 exactly.
+//
+// The default fmod = 0 wants the sign to follow the divisor instead. The two
+// agree except where the remainder and the divisor have opposite signs, and
+// there they differ by one divisor, so adding it back converts one to the
+// other. A zero remainder is already right under both rules and must be left
+// alone, or a divide that came out exact would gain a spurious divisor.
+//
+// Floats are rejected rather than expanded. fmod needs the truncated quotient
+// exactly, and reciprocal-then-multiply cannot supply it: an error of one ulp
+// in lhs/rhs moves the truncation across an integer boundary and the result is
+// then wrong by a whole divisor, not by an ulp. The quotient need not even be
+// representable -- fmod(1e30, 3) asks for a truncation no f32 can hold -- which
+// is why libm computes it by iterated reduction instead of a division, and why
+// no fixed sequence of TOSA ops stands in for it.
+static bool isTosaExpressibleModType(Type elementType) {
+  return elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
+}
+
+struct ModConverter final : public OpConversionPattern<hip::ModOp> {
+  using OpConversionPattern<hip::ModOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(hip::ModOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+
+    // Named here for the same reason hip.div names its own: the pass runs only
+    // inside a rock.kernel, so a hip.mod left behind fails in rocMLIR instead,
+    // later and as an op from a dialect it has never heard of.
+    Type elementType = resultType.getElementType();
+    if (isa<FloatType>(elementType))
+      return op->emitError("hip.mod has no TOSA spelling for element type ")
+             << elementType
+             << ": fmod needs the exact truncated quotient, which a "
+                "reciprocal and a multiply cannot give";
+    if (!isTosaExpressibleModType(elementType))
+      return op->emitError("hip.mod has no TOSA spelling for element type ")
+             << elementType << ": tosa.intdiv takes signless i32 and i64 only";
+    // Past here the element type is signless i32 or i64, where fmod = 1 is
+    // outside the contract rather than merely unimplemented. Hip_ModOp
+    // documents it as the floating-point rule and wrap_mod refuses it on an
+    // integer data type, which is ONNX Mod-13's constraint -- opset 13 ties
+    // fmod = 0 to the integer types and fmod = 1 to the float ones. Emitting
+    // the truncated remainder here is the Mod-28 reading instead, and it would
+    // answer inside a fused kernel what the runtime declines outside one, so
+    // the same graph would give two different results depending on whether it
+    // happened to be fused. Widening this belongs in the runtime first.
+    if (op.getFmod() != 0)
+      return op->emitError("hip.mod with fmod = 1 needs a floating-point "
+                           "element type, got ")
+             << elementType;
+
+    Location loc = op.getLoc();
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    if (failed(tosa::EqualizeRanks(rewriter, loc, lhs, rhs)))
+      return rewriter.notifyMatchFailure(op, "operand ranks not equalizable");
+    if (!isTosaCompatibleOperand(lhs, resultType) ||
+        !isTosaCompatibleOperand(rhs, resultType))
+      return rewriter.notifyMatchFailure(op, "operands not tosa-broadcastable");
+
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    // Dividing the most negative value by -1 overflows, and tosa.intdiv becomes
+    // arith.divsi and then an LLVM sdiv, where that pair is undefined behaviour
+    // rather than a merely wrong value -- a later select cannot take it back.
+    // Every remainder by -1 is zero under both fmod rules, and dividing by 1
+    // instead produces exactly that (lhs - (lhs / 1) * 1), so substituting the
+    // divisor keeps the result and leaves no overflowing division behind.
+    Value minusOne = createSplatInt(rewriter, loc, resultType, -1);
+    Value divisor = tosa::SelectOp::create(
+        rewriter, loc, resultType,
+        tosa::EqualOp::create(rewriter, loc, predType, rhs, minusOne),
+        createSplatInt(rewriter, loc, resultType, 1), rhs);
+
+    Value quotient =
+        tosa::IntDivOp::create(rewriter, loc, resultType, lhs, divisor);
+    Value product =
+        tosa::MulOp::create(rewriter, loc, resultType, quotient, divisor,
+                            createZeroMulShift(rewriter, loc));
+    Value remainder =
+        tosa::SubOp::create(rewriter, loc, resultType, lhs, product);
+
+    Value zero = createSplatInt(rewriter, loc, resultType, 0);
+    Value signsDiffer = tosa::BitwiseXorOp::create(
+        rewriter, loc, predType,
+        tosa::GreaterOp::create(rewriter, loc, predType, zero, remainder),
+        tosa::GreaterOp::create(rewriter, loc, predType, zero, rhs));
+    // x ^ true is !x, which is how the and/or/not lowerings spell negation for
+    // the same reason: tosa.logical_not has no downstream pattern either.
+    Value nonZero = tosa::BitwiseXorOp::create(
+        rewriter, loc, predType,
+        tosa::EqualOp::create(rewriter, loc, predType, remainder, zero),
+        createSplatInt(rewriter, loc, predType, 1));
+    Value adjust = tosa::BitwiseAndOp::create(rewriter, loc, predType,
+                                              signsDiffer, nonZero);
+    Value shifted =
+        tosa::AddOp::create(rewriter, loc, resultType, remainder, rhs);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultType, adjust, shifted,
+                                                remainder);
+    return success();
+  }
+};
+
 // hip.tile repeats each dimension, which is exactly tosa.tile. The one
 // difference is where the repeat counts live: hip carries them as an operand
 // (ONNX Tile takes `repeats` as an input), while TOSA wants a !tosa.shape, so
@@ -2492,6 +2713,159 @@ struct TileConverter final : public OpConversionPattern<hip::TileOp> {
     rewriter.replaceOp(op, tileMultiples(adaptor.getInput(), repeats,
                                          resultType.getShape(), rewriter,
                                          op.getLoc()));
+    return success();
+  }
+};
+
+// TOSA has no arctangent, and no identity reaches one from the transcendentals
+// it does carry: the usual rewrites land on asin or on complex arithmetic, and
+// tosa.table is an integer lookup that will not take a float tensor. So unlike
+// round and mod, this expansion approximates. It is the Cephes atanf
+// algorithm; the runtime calls the device atanf, so the two agree to within
+// their error bounds rather than bit-for-bit.
+//
+// atan is odd, so the work happens on |x| and the sign goes back on at the end.
+// No polynomial holds accuracy across [0, inf), so the domain is folded onto
+// [0, tan(pi/8)] by the angle-difference identity, splitting at tan(pi/8) and
+// tan(3pi/8):
+//
+//   ax > 2.4142   y0 = pi/2   r = -1/ax          atan(ax) = pi/2 - atan(1/ax)
+//   ax > 0.4142   y0 = pi/4   r = (ax-1)/(ax+1)  atan(ax) = pi/4 + atan(r)
+//   otherwise     y0 = 0      r = ax
+//
+// An odd minimax polynomial finishes the reduced argument: atan(r) is r plus
+// r*z times a degree-3 polynomial in z = r*r. The three-way split is what keeps
+// that degree down -- folding only at ax > 1 would need roughly twice the terms
+// for the same error. Cephes bounds this at a few ulp in f32.
+//
+// TOSA has no control flow, so both reduced arguments are computed on every
+// lane and tosa.select picks between them. An unselected lane can hold an
+// infinity -- 1/ax is inf at ax = 0 -- but select discards it without doing
+// arithmetic on it, so it cannot spread. The same dead lane is load-bearing at
+// the other end: at ax = inf the reciprocal is 0, r is -0, and the result comes
+// out exactly pi/2.
+//
+// f16 and bf16 are widened to f32 for the expansion and narrowed back. The
+// runtime does the same -- its f16 kernel is __half2float, atanf, __float2half
+// -- and evaluating a degree-9 polynomial in 11 mantissa bits would throw away
+// most of what the minimax fit buys. f64 is named rather than expanded, the way
+// RoundConverter names its own: ONNX has a double tensor type and TOSA has no
+// f64 tensor type.
+//
+// The signed zero is put back by hand. atan(-0) is -0, but abs erases the sign
+// and `0 > x` is false for -0, so the sign-restoring select would hand back +0.
+// Selecting x itself wherever x == 0 returns it: the comparison holds for both
+// zeros, and atan(+-0) is +-0.
+//
+// Before:
+//   %y = hip.atan(%ctx) ins(%x : tensor<4xf32>) outs(%i : tensor<4xf32>)
+// After:
+//   %ax = tosa.abs %x
+//   %r  = tosa.select (tosa.greater %ax, 2.4142), (-1/%ax),
+//           (tosa.select (tosa.greater %ax, 0.4142), (%ax-1)/(%ax+1), %ax)
+//   %y0 = tosa.select (tosa.greater %ax, 2.4142), pi/2,
+//           (tosa.select (tosa.greater %ax, 0.4142), pi/4, 0)
+//   %y  = %y0 + (poly(%r*%r) * %r*%r * %r + %r)
+//   %y  = tosa.select (tosa.greater 0, %x), -%y, %y
+//   %y  = tosa.select (tosa.equal %x, 0), %x, %y
+struct AtanConverter final : public OpConversionPattern<AtanOp> {
+  using OpConversionPattern<AtanOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(AtanOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    Value x = adaptor.getX();
+    if (x.getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    Type elementType = resultType.getElementType();
+    if (!elementType.isF32() && !elementType.isF16() && !elementType.isBF16())
+      return op->emitError("hip.atan has no TOSA spelling for element type ")
+             << elementType << ": the expansion needs f32, f16, or bf16";
+
+    Location loc = op.getLoc();
+    Type computeElem = rewriter.getF32Type();
+    auto computeType =
+        RankedTensorType::get(resultType.getShape(), computeElem);
+    auto predType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI1Type());
+    Value xc = emitTosaCast(rewriter, loc, x, computeElem);
+
+    auto splat = [&](double v) -> Value {
+      return createSplatFloat(rewriter, loc, computeType, v);
+    };
+    auto mul = [&](Value a, Value b) -> Value {
+      return emitTosaMul(rewriter, loc, a, b, computeType);
+    };
+    auto add = [&](Value a, Value b) -> Value {
+      return tosa::AddOp::create(rewriter, loc, computeType, a, b);
+    };
+    auto sub = [&](Value a, Value b) -> Value {
+      return tosa::SubOp::create(rewriter, loc, computeType, a, b);
+    };
+    auto recip = [&](Value a) -> Value {
+      return tosa::ReciprocalOp::create(rewriter, loc, computeType, a);
+    };
+    auto greater = [&](Value a, Value b) -> Value {
+      return tosa::GreaterOp::create(rewriter, loc, predType, a, b);
+    };
+    auto select = [&](Value p, Value a, Value b) -> Value {
+      return tosa::SelectOp::create(rewriter, loc, computeType, p, a, b);
+    };
+
+    // Each step is bound to a name rather than nested, so the order the ops
+    // come out in is the order written here. C++ leaves the evaluation order of
+    // call arguments unspecified, and nesting these would let it vary.
+    Value zero = splat(0.0);
+    Value one = splat(1.0);
+    // tosa.negate carries zero-point operands, so the two negations here are
+    // spelled as a multiply instead.
+    Value minusOne = splat(-1.0);
+    Value ax = tosa::AbsOp::create(rewriter, loc, computeType, xc);
+
+    // tan(3*pi/8) and tan(pi/8), the two fold points.
+    Value isHigh = greater(ax, splat(2.414213562373095));
+    Value isMid = greater(ax, splat(0.4142135623730950));
+
+    Value invAx = recip(ax);
+    Value highArg = mul(invAx, minusOne);
+    Value midNum = sub(ax, one);
+    Value midDen = add(ax, one);
+    Value invMidDen = recip(midDen);
+    Value midArg = mul(midNum, invMidDen);
+
+    Value midOrLow = select(isMid, midArg, ax);
+    Value reduced = select(isHigh, highArg, midOrLow);
+    Value midOffset = select(isMid, splat(0.7853981633974483), zero);
+    Value offset = select(isHigh, splat(1.5707963267948966), midOffset);
+
+    // Cephes minimax coefficients for atan on [0, tan(pi/8)], in Horner order.
+    Value z = mul(reduced, reduced);
+    Value poly = splat(8.05374449538e-2);
+    for (double coeff :
+         {-1.38776856032e-1, 1.99777106478e-1, -3.33329491539e-1}) {
+      Value scaled = mul(poly, z);
+      poly = add(scaled, splat(coeff));
+    }
+    Value polyZ = mul(poly, z);
+    Value tail = mul(polyZ, reduced);
+    Value series = add(tail, reduced);
+    Value y = add(offset, series);
+
+    Value isNegative = greater(zero, xc);
+    Value negated = mul(y, minusOne);
+    y = select(isNegative, negated, y);
+
+    Value isZero = tosa::EqualOp::create(rewriter, loc, predType, xc, zero);
+    y = select(isZero, xc, y);
+
+    rewriter.replaceOp(op, emitTosaCast(rewriter, loc, y, elementType));
     return success();
   }
 };
@@ -4310,8 +4684,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, RangeOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp,
+        InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -4415,8 +4789,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<SigmoidOp, tosa::SigmoidOp, /*FloatOnly=*/true>,
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
-        LogicalNotConverter, SqrtConverter, SignConverter, WhereConverter,
-        LeakyReluConverter, SoftmaxConverter,
+        LogicalNotConverter, RoundConverter, ModConverter, AtanConverter,
+        SqrtConverter, SignConverter, WhereConverter, LeakyReluConverter,
+        SoftmaxConverter,
         ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
         ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
         ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
