@@ -29,11 +29,17 @@
         [(not (eq? datum obj))
          datum]
         ;; Hashtable: convert to alist with sorted keys
+        ;; Keys can be symbols or syntax identifiers - handle both
         [(hashtable? obj)
          (let* ([keys (vector->list (hashtable-keys obj))]
                 [sorted-keys (list-sort (lambda (a b)
-                                          (string<? (symbol->string a)
-                                                   (symbol->string b)))
+                                          (let ([a-str (if (identifier? a)
+                                                          (symbol->string (syntax->datum a))
+                                                          (symbol->string a))]
+                                                [b-str (if (identifier? b)
+                                                          (symbol->string (syntax->datum b))
+                                                          (symbol->string b))])
+                                            (string<? a-str b-str)))
                                         keys)])
            (loop :for key :in sorted-keys
                  :collect (cons (record->alist key)
@@ -88,8 +94,11 @@
 
   (define (generate-debug-codegen ast-rec generated-code)
     (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
-      (let ([code-datum (syntax->datum generated-code)])
-        #`(define fname (lambda () '#,code-datum)))))
+      ;; Use syntax-object->datum which properly handles free identifiers
+      ;; (doesn't try to evaluate them at expansion time)
+      (let ([code-datum (syntax-object->datum generated-code)])
+        (with-syntax ([code-list (datum->syntax #'fname `',code-datum)])
+          #'(define fname (lambda () code-list))))))
 
   ;;-----------------------------------------------------------------------
   ;; Pattern matcher generation

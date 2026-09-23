@@ -4,4 +4,8 @@
 (:pattern
   (:match %a = op1 (%x)
           %b = op2 (%a)
-   :rewrite %b :with (op3 (%a) -> !t)))
+   :rewrite %b :with (op3 (%a) -> !t))
+
+ ;; Fake expectation to see generated code (will fail)
+ :expect-codegen
+   ((fake . expect)))
