@@ -64,9 +64,18 @@
 
 #include "CrashHandler.h"
 
+#if HIP_ROCMLIR_AUTOTUNE
+#include <hip/hip_runtime.h>
+#endif
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <memory>
+#include <numeric>
 #include <string>
+#include <vector>
 
 // Resolve the target GPU arch: ROCK_ARCH wins, else a default. The rock
 // backend pipeline validates and parses this (triple/chip/features).
@@ -118,6 +127,13 @@ struct CompiledKernel {
   int64_t gridSize = 0;
   int64_t blockSize = 0;
   std::string highLevelMlir;
+};
+
+struct AutotuneOptions {
+  bool enabled = false;
+  mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
+  unsigned warmupRuns = 5;
+  unsigned measuredRuns = 20;
 };
 
 // Map a parsed perfConfig string + arch onto rock's Triton/backend option
@@ -197,9 +213,271 @@ static bool extractCompiledKernel(mlir::ModuleOp mod, CompiledKernel &out) {
   return count == 1 && !out.binary.empty();
 }
 
+static bool compileBackend(mlir::ModuleOp module, llvm::StringRef arch,
+                           llvm::StringRef perfConfig, CompiledKernel &out) {
+  mlir::PassManager pm(module.getContext());
+  pm.setNesting(mlir::PassManager::Nesting::Implicit);
+  if (!buildBackendPipelineFor(pm, arch, perfConfig) ||
+      mlir::failed(pm.run(module)))
+    return false;
+  return extractCompiledKernel(module, out);
+}
+
+#if HIP_ROCMLIR_AUTOTUNE
+static bool reportHipError(hipError_t status, llvm::StringRef operation) {
+  if (status == hipSuccess)
+    return true;
+  llvm::errs() << "error: " << operation
+               << " failed: " << hipGetErrorString(status) << "\n";
+  return false;
+}
+
+static bool getBufferSize(mlir::Type type, size_t &bytes) {
+  auto shaped = mlir::dyn_cast<mlir::ShapedType>(type);
+  if (!shaped || !shaped.hasStaticShape())
+    return false;
+
+  mlir::Type elementType = shaped.getElementType();
+  uint64_t elementBits =
+      elementType.isIndex() ? 64 : elementType.getIntOrFloatBitWidth();
+  int64_t elements = shaped.getNumElements();
+  if (elements <= 0 || elementBits == 0)
+    return false;
+
+  uint64_t numElements = static_cast<uint64_t>(elements);
+  if (numElements > std::numeric_limits<uint64_t>::max() / elementBits)
+    return false;
+  uint64_t totalBits = numElements * elementBits;
+  uint64_t totalBytes = totalBits / 8 + (totalBits % 8 != 0);
+  if (totalBytes > std::numeric_limits<size_t>::max())
+    return false;
+  bytes = static_cast<size_t>(totalBytes);
+  return true;
+}
+
+class AutotuneBuffers {
+public:
+  AutotuneBuffers() = default;
+  AutotuneBuffers(const AutotuneBuffers &) = delete;
+  AutotuneBuffers &operator=(const AutotuneBuffers &) = delete;
+
+  ~AutotuneBuffers() {
+    for (void *buffer : deviceBuffers)
+      if (buffer)
+        (void)hipFree(buffer);
+    if (stream)
+      (void)hipStreamDestroy(stream);
+  }
+
+  bool initialize(mlir::ModuleOp module) {
+    auto func = *module.getOps<mlir::func::FuncOp>().begin();
+    llvm::SmallVector<mlir::Type> kernelArgTypes(func.getArgumentTypes());
+    llvm::append_range(kernelArgTypes, func.getResultTypes());
+
+    if (kernelArgTypes.empty()) {
+      llvm::errs() << "error: autotune kernel has no buffer arguments\n";
+      return false;
+    }
+    if (!reportHipError(hipStreamCreate(&stream), "hipStreamCreate"))
+      return false;
+
+    for (mlir::Type type : kernelArgTypes) {
+      size_t bytes = 0;
+      if (!getBufferSize(type, bytes)) {
+        llvm::errs()
+            << "error: autotune requires statically-shaped tensor/memref "
+               "kernel arguments; unsupported type: "
+            << type << "\n";
+        return false;
+      }
+      void *buffer = nullptr;
+      if (!reportHipError(hipMalloc(&buffer, bytes), "hipMalloc"))
+        return false;
+      deviceBuffers.push_back(buffer);
+      if (!reportHipError(hipMemsetAsync(buffer, 0, bytes, stream),
+                          "hipMemsetAsync"))
+        return false;
+    }
+    return reportHipError(hipStreamSynchronize(stream),
+                          "hipStreamSynchronize(buffer initialization)");
+  }
+
+  hipStream_t getStream() const { return stream; }
+  std::vector<void *> &getDeviceBuffers() { return deviceBuffers; }
+
+private:
+  hipStream_t stream = nullptr;
+  std::vector<void *> deviceBuffers;
+};
+
+static bool launchKernel(hipFunction_t function, const CompiledKernel &kernel,
+                         AutotuneBuffers &buffers) {
+  std::vector<void *> &deviceBuffers = buffers.getDeviceBuffers();
+  size_t kernargSize = deviceBuffers.size() * sizeof(void *);
+  void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, deviceBuffers.data(),
+                    HIP_LAUNCH_PARAM_BUFFER_SIZE, &kernargSize,
+                    HIP_LAUNCH_PARAM_END};
+  (void)hipGetLastError();
+  hipError_t status =
+      hipModuleLaunchKernel(function, static_cast<unsigned>(kernel.gridSize), 1,
+                            1, static_cast<unsigned>(kernel.blockSize), 1, 1, 0,
+                            buffers.getStream(), nullptr, config);
+  return reportHipError(status, "hipModuleLaunchKernel") &&
+         reportHipError(hipGetLastError(), "kernel launch");
+}
+
+static bool benchmarkKernel(const CompiledKernel &kernel,
+                            llvm::StringRef kernelName,
+                            const AutotuneOptions &options,
+                            AutotuneBuffers &buffers, double &milliseconds) {
+  hipModule_t hipModule = nullptr;
+  if (!reportHipError(hipModuleLoadData(&hipModule, kernel.binary.data()),
+                      "hipModuleLoadData"))
+    return false;
+
+  hipFunction_t function = nullptr;
+  std::string kernelNameStorage = kernelName.str();
+  hipError_t lookupStatus =
+      hipModuleGetFunction(&function, hipModule, kernelNameStorage.c_str());
+  if (!reportHipError(lookupStatus, "hipModuleGetFunction")) {
+    (void)hipModuleUnload(hipModule);
+    return false;
+  }
+
+  bool ok = true;
+  for (unsigned i = 0; ok && i < options.warmupRuns; ++i)
+    ok = launchKernel(function, kernel, buffers);
+  if (ok)
+    ok = reportHipError(hipStreamSynchronize(buffers.getStream()),
+                        "hipStreamSynchronize(warmup)");
+
+  std::vector<hipEvent_t> starts(options.measuredRuns, nullptr);
+  std::vector<hipEvent_t> stops(options.measuredRuns, nullptr);
+  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
+    ok = reportHipError(hipEventCreate(&starts[i]), "hipEventCreate(start)") &&
+         reportHipError(hipEventCreate(&stops[i]), "hipEventCreate(stop)");
+  }
+  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
+    ok = reportHipError(hipEventRecord(starts[i], buffers.getStream()),
+                        "hipEventRecord(start)") &&
+         launchKernel(function, kernel, buffers) &&
+         reportHipError(hipEventRecord(stops[i], buffers.getStream()),
+                        "hipEventRecord(stop)");
+  }
+  if (ok)
+    ok = reportHipError(hipStreamSynchronize(buffers.getStream()),
+                        "hipStreamSynchronize(benchmark)");
+
+  std::vector<float> samples;
+  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
+    float elapsed = 0.0f;
+    ok = reportHipError(hipEventElapsedTime(&elapsed, starts[i], stops[i]),
+                        "hipEventElapsedTime");
+    if (ok)
+      samples.push_back(elapsed);
+  }
+  for (hipEvent_t event : starts)
+    if (event)
+      (void)hipEventDestroy(event);
+  for (hipEvent_t event : stops)
+    if (event)
+      (void)hipEventDestroy(event);
+  (void)hipModuleUnload(hipModule);
+
+  if (!ok || samples.empty())
+    return false;
+  std::sort(samples.begin(), samples.end());
+  size_t trim = samples.size() / 4;
+  auto first = samples.begin() + trim;
+  auto last = samples.end() - trim;
+  milliseconds = std::accumulate(first, last, 0.0) / std::distance(first, last);
+  return true;
+}
+
+static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
+                           llvm::StringRef kernelName,
+                           const AutotuneOptions &options,
+                           CompiledKernel &winner) {
+  hipDeviceProp_t properties{};
+  int device = 0;
+  if (!reportHipError(hipGetDevice(&device), "hipGetDevice") ||
+      !reportHipError(hipGetDeviceProperties(&properties, device),
+                      "hipGetDeviceProperties"))
+    return false;
+  llvm::StringRef requestedArch = arch.split(':').first;
+  llvm::StringRef deviceArch(properties.gcnArchName);
+  deviceArch = deviceArch.split(':').first;
+  if (requestedArch != deviceArch)
+    llvm::errs() << "warning: autotuning for " << requestedArch << " on device "
+                 << deviceArch << "; compiled candidates may not load\n";
+
+  std::unique_ptr<mlir::rock::TuningParamSet> space(
+      mlir::rock::createTunableParamSpace(module, options.kind));
+  if (!space || space->tuningRange.empty()) {
+    llvm::errs() << "error: autotune perfConfig search space is empty\n";
+    return false;
+  }
+
+  AutotuneBuffers buffers;
+  if (!buffers.initialize(module))
+    return false;
+
+  double bestMilliseconds = std::numeric_limits<double>::infinity();
+  std::string bestConfig;
+  unsigned compiled = 0;
+  unsigned benchmarked = 0;
+  llvm::errs() << "[hip-rocmlir-compiler] autotuning kernel '" << kernelName
+               << "' across " << space->tuningRange.size() << " perfConfigs\n";
+
+  for (auto [index, tuningAttr] : llvm::enumerate(space->tuningRange)) {
+    llvm::SmallString<1024> perfConfig;
+    tuningAttr.getPerfConfigStr(perfConfig);
+    mlir::OwningOpRef<mlir::ModuleOp> candidate = module.clone();
+    mlir::ModuleOp candidateModule = *candidate;
+    if (!mlir::rock::tuningSetStr(candidateModule, perfConfig))
+      continue;
+
+    CompiledKernel compiledKernel;
+    if (!compileBackend(candidateModule, arch, perfConfig, compiledKernel)) {
+      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                   << space->tuningRange.size() << ": compile failed\n";
+      continue;
+    }
+    ++compiled;
+
+    double elapsed = 0.0;
+    if (!benchmarkKernel(compiledKernel, kernelName, options, buffers,
+                         elapsed)) {
+      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                   << space->tuningRange.size() << ": benchmark failed\n";
+      continue;
+    }
+    ++benchmarked;
+    llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                 << space->tuningRange.size() << ": " << elapsed << " ms  "
+                 << perfConfig << "\n";
+    if (elapsed < bestMilliseconds) {
+      bestMilliseconds = elapsed;
+      bestConfig = perfConfig.str().str();
+      winner = std::move(compiledKernel);
+    }
+  }
+
+  if (bestConfig.empty()) {
+    llvm::errs() << "error: autotune found no runnable perfConfig (compiled "
+                 << compiled << ", benchmarked " << benchmarked << ")\n";
+    return false;
+  }
+  llvm::errs() << "[hip-rocmlir-compiler] autotune winner for '" << kernelName
+               << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
+  return true;
+}
+#endif
+
 static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
                        const std::string &userPerfConfig,
-                       bool stopAfterHighLevel, CompiledKernel &out) {
+                       bool stopAfterHighLevel, const AutotuneOptions &autotune,
+                       CompiledKernel &out) {
   auto fail = [&](const char *msg) {
     llvm::errs() << "error: " << msg << "\n";
     return false;
@@ -220,6 +498,16 @@ static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
     module.print(os);
     return true;
   }
+
+#if HIP_ROCMLIR_AUTOTUNE
+  if (autotune.enabled && userPerfConfig.empty()) {
+    auto kernel = *module.getOps<mlir::func::FuncOp>().begin();
+    return autotuneKernel(module, arch, kernel.getSymName(), autotune, out);
+  }
+#else
+  if (autotune.enabled)
+    return fail("autotune requires a real HIP build");
+#endif
 
   // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
   //    A caller-supplied config is used verbatim; otherwise take the first
@@ -253,19 +541,9 @@ static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
       return fail("failed to affix perfConfig to the gemm op");
   }
 
-  // 3. Backend pipeline: rock (with the affixed perf_config) -> LLVM / binary.
-  {
-    mlir::PassManager pm(module.getContext());
-    pm.setNesting(mlir::PassManager::Nesting::Implicit);
-    if (!buildBackendPipelineFor(pm, arch, perfConfig))
-      return fail("failed to build the backend pipeline");
-    if (mlir::failed(pm.run(module)))
-      return fail("rocMLIR backend pipeline failed");
-  }
-
-  // 4. Extract the compiled artifact: the gpu.binary blob + launch geometry.
-  if (!extractCompiledKernel(module, out))
-    return fail("failed to extract the compiled binary / kernel attributes");
+  // 3-4. Run the backend and extract the binary + launch geometry.
+  if (!compileBackend(module, arch, perfConfig, out))
+    return fail("rocMLIR backend compilation failed");
   return true;
 }
 
@@ -310,6 +588,7 @@ int main(int argc, char **argv) {
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
+  AutotuneOptions autotune;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -327,6 +606,33 @@ int main(int argc, char **argv) {
       dumpTosaPath = argv[++i];
     } else if (arg == "--dump-high-level") {
       dumpHighLevel = true;
+    } else if (arg == "--autotune") {
+      autotune.enabled = true;
+    } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
+      autotune.enabled = true;
+      llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
+      if (kind == "quick")
+        autotune.kind = mlir::rock::TuningParamSetKind::Quick;
+      else if (kind == "full")
+        autotune.kind = mlir::rock::TuningParamSetKind::Full;
+      else if (kind == "exhaustive")
+        autotune.kind = mlir::rock::TuningParamSetKind::Exhaustive;
+      else {
+        llvm::errs() << "error: unknown autotune space '" << kind
+                     << "' (expected quick, full, or exhaustive)\n";
+        return 1;
+      }
+    } else if (arg == "--autotune-warmup" && i + 1 < argc) {
+      if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.warmupRuns)) {
+        llvm::errs() << "error: invalid --autotune-warmup value\n";
+        return 1;
+      }
+    } else if (arg == "--autotune-runs" && i + 1 < argc) {
+      if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
+          autotune.measuredRuns == 0) {
+        llvm::errs() << "error: --autotune-runs must be greater than zero\n";
+        return 1;
+      }
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
     }
@@ -352,6 +658,14 @@ int main(int argc, char **argv) {
         << "                       the flag to configure several. A bare "
            "config applies\n"
         << "                       to every kernel without one of its own.\n"
+        << "  --autotune[=quick|full|exhaustive]\n"
+        << "                       Benchmark the tuning space and embed the "
+           "fastest\n"
+        << "                       GPU candidate (default space: quick).\n"
+        << "  --autotune-warmup <n>\n"
+        << "                       Warmup launches per candidate (default: "
+           "5).\n"
+        << "  --autotune-runs <n> Timed launches per candidate (default: 20).\n"
         << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
            "passes\n"
         << "                       and fuse-rocmlir, then keep going.\n"
@@ -525,14 +839,14 @@ int main(int argc, char **argv) {
       llvm::errs() << "[hip-rocmlir-compiler] compiling kernel '" << name
                    << "' (" << (index + 1) << " of " << kernelNames.size()
                    << ")\n";
-    if (!runRocmlir(*single, arch, perfConfig, dumpHighLevel,
+    if (!runRocmlir(*single, arch, perfConfig, dumpHighLevel, autotune,
                     compiledByKernel[name]))
       return 1;
   }
 
   // --dump-high-level: write the rock MLIR (text) and stop. A single kernel
   // writes <output> verbatim so existing tuning scripts keep working; several
-  // get one file each, since rocmlir-tuning-driver takes one kernel at a time.
+  // get one file each because each dump contains one tunable kernel.
   if (dumpHighLevel) {
     for (const std::string &name : kernelNames) {
       std::string path = kernelNames.size() == 1
