@@ -18,7 +18,7 @@
 ;;=======================================================================
 
 (library (mlir pattern-ast)
-  (export ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?
+  (export ast-pattern-expand make-ast-pattern-expand make-default-ast-pattern-expand ast-pattern-expand?
           ast-pattern-expand-pattern-type ast-pattern-expand-pattern-type-set!
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!
           ast-pattern-expand-root-var ast-pattern-expand-root-var-set!
@@ -174,6 +174,32 @@
       (mutable debug-matching?)))  ;; Phase 1 (parse): boolean - :debug-matching flag
                                    ;; When true, generated code prints trace during matching
                                    ;; Currently unused (not implemented yet)
+
+  ;;=======================================================================
+  ;; Default Constructor for ast-pattern-expand
+  ;;=======================================================================
+  ;;
+  ;; Creates a new pattern AST with all fields initialized to default values.
+  ;; Only pattern-type needs to be specified ('conversion or 'rewrite).
+  ;;
+  (define (make-default-ast-pattern-expand pattern-type)
+    (make-ast-pattern-expand
+      pattern-type  ;; pattern-type: 'conversion or 'rewrite
+      #f            ;; function-name: set by parse-rest
+      #f            ;; root-var: set by parse-rest
+      #f            ;; root-op-name: set by validate phase
+      #f            ;; root-op-index: set by validate phase
+      #f            ;; root-result-idx: set by validate phase
+      '()           ;; match: accumulated during parse
+      #f            ;; match-bindings: set by analyze phase
+      #f            ;; match-actions: set by analyze phase
+      '()           ;; rewrite: accumulated during parse
+      '()           ;; where: accumulated during parse
+      #f            ;; debug-parse?: set by parse-rest if :debug-parse present
+      #f            ;; debug-validate?: set by parse-rest if :debug-validate present
+      #f            ;; debug-analyze?: set by parse-rest if :debug-analyze present
+      #f            ;; debug-codegen?: set by parse-rest if :debug-codegen present
+      #f))          ;; debug-matching?: set by parse-rest if :debug-matching present
 
   ;;-----------------------------------------------------------------------
   ;; MATCH-LEVEL RECORD: ast-match-expand (child of ast-pattern-expand)

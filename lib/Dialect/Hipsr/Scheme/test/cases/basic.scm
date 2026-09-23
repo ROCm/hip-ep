@@ -9,7 +9,8 @@
  ;; - root-op-name, root-op-index, root-result-idx: #f (filled by validation)
  ;; - match-bindings, match-actions: #f (filled by analysis)
  :expect-parse
- ((function-name . pattern-basic)
+ ((pattern-type . conversion)
+  (function-name . pattern-basic)
   (root-var . %out)
   (root-op-name . #f)
   (root-op-index . #f)
@@ -40,7 +41,8 @@
  ;; - match-bindings, match-actions: still #f (analysis not run yet)
  ;; - op-name converted to strings by validation phase
  :expect-validate
- ((function-name . pattern-basic)
+ ((pattern-type . conversion)
+  (function-name . pattern-basic)
   (root-var . %out)
   (root-op-name . "test.op")
   (root-op-index . 0)
@@ -71,7 +73,8 @@
  ;; - match-bindings: filled by analysis (hashtable with binding info)
  ;; - match-actions: filled by analysis (list of matching actions)
  :expect-analyze
- ((function-name . pattern-basic)
+ ((pattern-type . conversion)
+  (function-name . pattern-basic)
   (root-var . %out)
   (root-op-name . "test.op")
   (root-op-index . 0)
