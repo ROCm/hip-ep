@@ -1,0 +1,57 @@
+//===- QdqCastFold.pdll ---------------------------------------------------===//
+//
+// Absorb a float-widening hip.cast into the Q/DQ op next to it.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+// A dequantize followed by a cast, or a cast followed by a quantize, does not
+// need two kernels: both runtime entry points take the float width as a
+// runtime argument and implement f32 and f16 alike, so the Q/DQ op can name
+// the width the cast was producing and the cast disappears. The lowering reads
+// that width off the operand and result types, so retyping is the whole
+// change; no attribute and no kernel is involved.
+//
+// The conversion is exact either way. A dequantize computes in f32 and narrows
+// once on store, which is where the cast narrowed it before, and a quantize
+// widens its input to f32 before dividing, which is what the cast did for it.
+// So these are eliminations, like the Q/DQ round trip, rather than fusions
+// that change what is computed.
+//===----------------------------------------------------------------------===//
+
+// ===== dequantize -> cast =====
+Pattern HipDequantizeCastFold with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  let cast = op<hip.cast>(ctx, dq.0, cast_init: Value);
+
+  IsAbsorbableFloatCast(cast);
+  // A second consumer still wants the width the dequantize produces now, so
+  // retyping it would make the graph dequantize twice.
+  HasSingleUseResult(dq);
+
+  rewrite cast with {
+    let retyped = CreateDequantizeThroughCast(dq, cast);
+    replace cast with retyped;
+  };
+}
+
+// ===== cast -> quantize =====
+//
+// No single-use constraint: the quantize reads the cast's source instead of
+// its result, which is valid however many other consumers the cast has. It
+// keeps serving them and only goes away, through dead code elimination, when
+// the quantize was the last one.
+Pattern HipCastQuantizeFold with benefit(10) {
+  let cast = op<hip.cast>(ctx: Value, source: Value, cast_init: Value);
+  let q = op<hip.quantize_linear>(ctx, cast.0, output_scale: Value,
+                                  output_tail: ValueRange);
+
+  IsAbsorbableFloatCast(cast);
+
+  rewrite q with {
+    let retyped = CreateQuantizeThroughCast(cast, q);
+    replace q with retyped;
+  };
+}

@@ -62,6 +62,12 @@ Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
 Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
+// Cast absorption. Also eliminations rather than fusions: the Q/DQ op takes
+// over the float width the cast was producing, so no fused op is built.
+Constraint IsAbsorbableFloatCast(cast: Op);
+Rewrite CreateDequantizeThroughCast(dq: Op, cast: Op) -> Value;
+Rewrite CreateQuantizeThroughCast(cast: Op, q: Op) -> Value;
+
 #include "QAddFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
@@ -70,3 +76,4 @@ Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 #include "QSigmoidFusion.pdll"
 #include "QLpNormalizationFusion.pdll"
 #include "QdqRoundTrip.pdll"
+#include "QdqCastFold.pdll"
