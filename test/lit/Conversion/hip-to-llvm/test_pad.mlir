@@ -3,9 +3,10 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify hip.pad lowers to llvm.call @wrap_pad with the full 14-parameter
+// Verify hip.pad lowers to llvm.call @wrap_pad with the full 17-parameter
 // signature:
-//   (state, data, pads, cval_or_null, axes_or_null, out,
+//   (state, data, pads_device, pads_host, cval_device, cval_host,
+//    axes_device, axes_host, out,
 //    data_shape_ptr, data_rank,
 //    out_shape_ptr,  out_rank,
 //    pads_num_elements, axes_num_elements,
@@ -31,7 +32,7 @@ module {
     // Shape arrays for data + output (both rank 2).
     // CHECK: llvm.alloca {{.*}} x !llvm.array<2 x i64>
     // CHECK: llvm.alloca {{.*}} x !llvm.array<2 x i64>
-    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -48,7 +49,7 @@ module {
                   cval(%cval : memref<f32, 1>)
                   outs(%out : memref<5x6xf32, 1>)
 
-    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -63,7 +64,7 @@ module {
     hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, 1>, memref<4xi64, 1>)
                   outs(%out : memref<5x6xf32, 1>) {mode = "reflect"}
 
-    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -80,7 +81,27 @@ module {
                   axes(%axes : memref<1xi64, 1>)
                   outs(%out : memref<3x6xf32, 1>)
 
-    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    return
+  }
+
+  func.func @pad_host_constants(
+      %ctx: !hip.context,
+      %data: memref<3x4xf32, 1>,
+      %pads: memref<4xi64, 1>,
+      %out: memref<5x6xf32, 1>) {
+    // CHECK-LABEL: llvm.func @pad_host_constants
+
+    hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, 1>, memref<4xi64, 1>)
+                  outs(%out : memref<5x6xf32, 1>)
+                  {constant_value_attr = dense<2.5> : tensor<f32>,
+                   pads_attr = array<i64: 1, 1, 1, 1>}
+
+    // Host pads and scalar storage are stack allocated and passed separately
+    // from the unchanged device operands.
+    // CHECK: llvm.alloca {{.*}} x !llvm.array<4 x i64>
+    // CHECK: llvm.alloca {{.*}} x f32
+    // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

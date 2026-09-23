@@ -9,16 +9,15 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.cumsum(ctx, x, axis, y, exclusive, reverse)
-//   -> wrap_cumsum(state, x_ptr, axis_ptr, y_ptr,
+// hip.cumsum(ctx, x, [axis], y, axis_attr, exclusive, reverse)
+//   -> wrap_cumsum(state, x_ptr, axis_device_ptr, y_ptr,
 //                  x_shape_ptr, x_rank,
-//                  num_elements, data_type, axis_dtype,
+//                  num_elements, data_type, axis_dtype, axis_host,
 //                  exclusive, reverse)
 //
-// `axis` is a rank-0 (scalar) GPU tensor of i32/i64 selecting the reduction
-// axis. The runtime is responsible for reading it -- we only forward the
-// pointer plus the axis dtype enum so the runtime knows whether to treat
-// the byte buffer as int32 or int64.
+// A compile-time axis has a null device pointer and its value in `axis_host`.
+// A dynamic axis retains its GPU pointer and dtype for the runtime D2H
+// fallback.
 struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -34,18 +33,22 @@ struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
     Value statePtr = adaptor.getCtx();
     Value xPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
     Value axisPtr =
-        extractContiguousMemRefPtr(adaptor.getAxis(), rewriter, loc);
+        adaptor.getAxis()
+            ? extractContiguousMemRefPtr(adaptor.getAxis(), rewriter, loc)
+            : LLVM::ZeroOp::create(rewriter, loc, ptrType);
     Value yPtr = extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc);
 
     auto xType = cast<MemRefType>(op.getX().getType());
-    auto axisType = cast<MemRefType>(op.getAxis().getType());
-
     int64_t dataType = getHipdnnDataType(xType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
-    int64_t axisDtype = getHipdnnDataType(axisType.getElementType());
-    if (axisDtype < 0)
-      return rewriter.notifyMatchFailure(op, "unsupported axis element type");
+    int64_t axisDtype = HIPDNN_EP_DATATYPE_INT64;
+    if (op.getAxis()) {
+      auto axisType = cast<MemRefType>(op.getAxis().getType());
+      axisDtype = getHipdnnDataType(axisType.getElementType());
+      if (axisDtype < 0)
+        return rewriter.notifyMatchFailure(op, "unsupported axis element type");
+    }
 
     Value numElements =
         computeNumElements(xType, adaptor.getX(), rewriter, loc);
@@ -74,24 +77,26 @@ struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
     Value rankVal = createI64Const(rank);
     Value dataTypeVal = createI64Const(dataType);
     Value axisDtypeVal = createI64Const(axisDtype);
+    Value axisHostVal = createI64Const(op.getAxisAttr().value_or(0));
     Value exclusiveVal = createI64Const(op.getExclusive());
     Value reverseVal = createI64Const(op.getReverse());
 
-    SmallVector<Type, 11> paramTypes = {
+    SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, // state, x, axis, y
         ptrType, i64Type,                   // x_shape, x_rank
-        i64Type, i64Type, i64Type, // num_elements, data_type, axis_dtype
-        i64Type, i64Type};         // exclusive, reverse
+        i64Type, i64Type, i64Type, i64Type, // num_elements, data_type,
+                                            // axis_dtype, axis_host
+        i64Type, i64Type};                  // exclusive, reverse
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapCumSum, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {statePtr,     xPtr,        axisPtr,
-                                   yPtr,         shapeArr,    rankVal,
-                                   numElements,  dataTypeVal, axisDtypeVal,
-                                   exclusiveVal, reverseVal};
+    SmallVector<Value, 12> args = {statePtr,    xPtr,         axisPtr,
+                                   yPtr,        shapeArr,     rankVal,
+                                   numElements, dataTypeVal,  axisDtypeVal,
+                                   axisHostVal, exclusiveVal, reverseVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

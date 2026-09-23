@@ -33,8 +33,10 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 }
 
 // hip.top_k(ctx, x, k, values, indices, axis, largest, sorted)
-//   -> wrap_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
-//                 x_shape_ptr, num_elements, element_size_bytes)
+//   -> wrap_top_k(state, x, values, indices, axis, largest, sorted, rank,
+//                 x_shape_ptr, num_elements, element_size_bytes, k)
+// Host k is values.shape[axis] (same extent as indices). The GPU K tensor is
+// not passed; OnnxToHip already used it to size the result.
 struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -54,16 +56,18 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 
     Value statePtr = adaptor.getCtx();
     Value xPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
-    Value kPtr = extractContiguousMemRefPtr(adaptor.getK(), rewriter, loc);
     Value valuesPtr =
         extractContiguousMemRefPtr(adaptor.getValues(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
 
     auto xType = cast<MemRefType>(op.getX().getType());
+    auto valuesType = cast<MemRefType>(op.getValues().getType());
     int rank = xType.getRank();
     if (rank <= 0 || rank > 8)
       return rewriter.notifyMatchFailure(op, "rank must be in [1, 8]");
+    if (valuesType.getRank() != rank)
+      return rewriter.notifyMatchFailure(op, "values rank must match x");
 
     Value xShapeArr = buildShapeArray(xType, adaptor.getX(), loc, rewriter);
     Value numElements =
@@ -72,6 +76,11 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     int64_t axisAttr = op.getAxis();
     if (axisAttr < 0)
       axisAttr += rank;
+    if (axisAttr < 0 || axisAttr >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    Value kVal = getMemRefDimSize(valuesType, static_cast<unsigned>(axisAttr),
+                                  adaptor.getValues(), rewriter, loc);
 
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
@@ -83,18 +92,19 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     SmallVector<Type, 12> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
-        i64Type, i64Type, i64Type,                   // axis, largest, sorted
-        i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, elem
+        ptrType, ptrType, ptrType, ptrType, // state, x, values, idx
+        i64Type, i64Type, i64Type,          // axis, largest, sorted
+        i64Type, ptrType, i64Type, i64Type, // rank, shape, num, elem
+        i64Type};                           // host k = values.shape[axis]
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapTopK, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
-                               indicesPtr, axisVal,   largestVal,  sortedVal,
-                               rankVal,    xShapeArr, numElements, elemSizeVal};
+    SmallVector<Value> args = {statePtr,  xPtr,        valuesPtr,   indicesPtr,
+                               axisVal,   largestVal,  sortedVal,   rankVal,
+                               xShapeArr, numElements, elemSizeVal, kVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -28,18 +28,17 @@ The parametrization straddles the runtime's dispatch boundaries so the
 suite covers every path rather than whichever one a single shape
 happens to select:
 
-  seq_len      1 takes the fused single-token decode path; >1 takes the
-               grouped WMMA prefill on an arch that has WMMA, and the
-               per-expert host dispatch loop on one that does not.
+  seq_len      1 takes the fused single-token decode path; >1 takes grouped
+               WMMA prefill on wave32 and fixed-sequence routing-slot dispatch
+               on wave64.
   num_experts  at seq_len 1, a multiple of the routing kernel's
                expert-tile width takes the parallel routing fast path
                and anything else takes the generic one-block-per-token
                router. That fast path is decode-only, so longer
                sequences route generically whatever the expert count.
 
-Shapes stay small (hidden=64) but must keep latent and the MoE
-intermediate a multiple of block_size, or the runtime declines the
-fused/grouped paths and every case collapses onto the legacy loop.
+Shapes stay small (hidden=64) but keep latent and the MoE intermediate a
+multiple of block_size, as required by both grouped prefill paths.
 """
 
 from dataclasses import dataclass

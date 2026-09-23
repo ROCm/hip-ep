@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  *
  * QMoE sub-kernels — pure kernel launches, no memory or stream management.
- * The orchestration logic (hipMalloc, hipMemcpy, expert loop, hipFree) lives
- * in the runtime wrapper (lib/Runtime/real/qmoe.cpp).
+ * The runtime wrapper owns scratch and selects the fused decode or fixed-
+ * sequence prefill launcher.
  */
 
 #include "hip_custom_kernels.h"
@@ -589,6 +589,7 @@ __global__ void qmoe_decode_fc1_kernel(
     int fusion_inter,
     int n_blk_in,
     int block_size,
+    int slots_per_token,
     float swiglu_alpha,
     float swiglu_beta,
     float swiglu_limit) {
@@ -596,6 +597,9 @@ __global__ void qmoe_decode_fc1_kernel(
   const int slot   = blockIdx.y;
   const int tid    = threadIdx.x;
   const int E      = expert_indices[slot];
+
+  // Decode has one token; prefill maps every routing slot back to its token.
+  input += static_cast<size_t>(slot / slots_per_token) * hidden;
 
   // No LDS preload of the input vector: each input element is read exactly
   // once per block (threads stride through K-tiles uniquely), so an LDS
@@ -946,18 +950,22 @@ __global__ void qmoe_decode_fc2_kernel(
 
 // Reduce: output[n] = sum over slot of slot_buf[slot, n]. Pure sum.
 __global__ void qmoe_decode_reduce_kernel(
-    const __half* __restrict__ slot_buf,  // [k, hidden]
-    __half*       __restrict__ output,    // [hidden]
+    const __half* __restrict__ slot_buf,  // [num_tokens * k, hidden]
+    __half*       __restrict__ output,    // [num_tokens, hidden]
     int hidden,
     int k) {
   int n = blockIdx.x * blockDim.x + threadIdx.x;
+  const int token = static_cast<int>(blockIdx.y);
   if (n >= hidden) return;
   float acc = 0.0f;
+  const size_t token_base =
+      static_cast<size_t>(token) * static_cast<size_t>(k) * hidden;
   #pragma unroll 4
   for (int s = 0; s < k; s++) {
-    acc += static_cast<float>(slot_buf[s * hidden + n]);
+    acc += static_cast<float>(
+        slot_buf[token_base + static_cast<size_t>(s) * hidden + n]);
   }
-  output[n] = static_cast<__half>(acc);
+  output[static_cast<size_t>(token) * hidden + n] = static_cast<__half>(acc);
 }
 
 // ---------------------------------------------------------------------------
@@ -976,13 +984,13 @@ __global__ void qmoe_decode_reduce_kernel(
 
 template <int BS, int TN>
 static hipError_t launch_qmoe_fc1(
-    hipStream_t s, int k, int fusion_inter, const void* input,
-    const void* expert_indices, const void* fc1_weights, const void* fc1_scales,
-    const void* fc1_zero_points, const void* fc1_bias, void* act_out,
-    int hidden_size, int n_blk_in, int block_size, float swiglu_alpha,
-    float swiglu_beta, float swiglu_limit) {
+    hipStream_t s, int slots, int slots_per_token, int fusion_inter,
+    const void* input, const void* expert_indices, const void* fc1_weights,
+    const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
+    void* act_out, int hidden_size, int n_blk_in, int block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
   dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
-            static_cast<unsigned>(k));
+            static_cast<unsigned>(slots));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_kernel<BS, TN>), grid,
                      dim3(BS), 0, s, static_cast<const __half*>(input),
                      static_cast<const int32_t*>(expert_indices),
@@ -991,8 +999,8 @@ static hipError_t launch_qmoe_fc1(
                      static_cast<const uint8_t*>(fc1_zero_points),
                      static_cast<const __half*>(fc1_bias),
                      static_cast<__half*>(act_out), hidden_size, fusion_inter,
-                     n_blk_in, block_size, swiglu_alpha, swiglu_beta,
-                     swiglu_limit);
+                     n_blk_in, block_size, slots_per_token, swiglu_alpha,
+                     swiglu_beta, swiglu_limit);
   return hipGetLastError();
 }
 
@@ -1018,23 +1026,25 @@ static hipError_t launch_qmoe_fc2(
 }
 
 static hipError_t dispatch_qmoe_fc1(
-    int bs, int tn, hipStream_t s, int k, int fusion_inter, const void* input,
-    const void* expert_indices, const void* fc1_weights, const void* fc1_scales,
+    int bs, int tn, hipStream_t s, int slots, int slots_per_token,
+    int fusion_inter, const void* input, const void* expert_indices,
+    const void* fc1_weights, const void* fc1_scales,
     const void* fc1_zero_points, const void* fc1_bias, void* act_out,
     int hidden_size, int n_blk_in, int block_size, float swiglu_alpha,
     float swiglu_beta, float swiglu_limit) {
 #define X(B, T)                                                                \
   if (bs == (B) && tn == (T))                                                  \
     return launch_qmoe_fc1<B, T>(                                              \
-        s, k, fusion_inter, input, expert_indices, fc1_weights, fc1_scales,    \
-        fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, block_size, \
-        swiglu_alpha, swiglu_beta, swiglu_limit);
+        s, slots, slots_per_token, fusion_inter, input, expert_indices,        \
+        fc1_weights, fc1_scales, fc1_zero_points, fc1_bias, act_out,            \
+        hidden_size, n_blk_in, block_size, swiglu_alpha, swiglu_beta,          \
+        swiglu_limit);
   QMOE_CFG_LIST(X)
 #undef X
   return launch_qmoe_fc1<64, 8>(
-      s, k, fusion_inter, input, expert_indices, fc1_weights, fc1_scales,
-      fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, block_size,
-      swiglu_alpha, swiglu_beta, swiglu_limit);
+      s, slots, slots_per_token, fusion_inter, input, expert_indices,
+      fc1_weights, fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size,
+      n_blk_in, block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
 }
 
 static hipError_t dispatch_qmoe_fc2(
@@ -1230,9 +1240,9 @@ extern "C" int hip_qmoe_decode_fused(
       hipEventRecord(me0, s);
     }
     hipError_t e = dispatch_qmoe_fc1(
-        c1.bs, c1.tn, s, static_cast<int>(k), fusion_inter, input,
-        expert_indices, fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
-        act_out, static_cast<int>(hidden_size), n_blk_in,
+        c1.bs, c1.tn, s, static_cast<int>(k), static_cast<int>(k), fusion_inter,
+        input, expert_indices, fc1_weights, fc1_scales, fc1_zero_points,
+        fc1_bias, act_out, static_cast<int>(hidden_size), n_blk_in,
         static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit);
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc1 failed: %s\n",
@@ -1307,6 +1317,85 @@ extern "C" int hip_qmoe_decode_fused(
   }
 
   return 0;
+}
+
+extern "C" int hip_qmoe_prefill_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t num_tokens,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k,
+    int64_t expert_weight_bits, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 1 || k <= 0)
+    return 0;
+  if (element_size_bytes != 2 || expert_weight_bits != 4 || block_size < 32 ||
+      (block_size & (block_size - 1)) != 0 || (hidden_size % block_size) != 0 ||
+      (inter_size % block_size) != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_prefill_fused: unsupported geometry "
+            "(tokens=%lld hidden=%lld inter=%lld k=%lld bits=%lld block=%lld "
+            "elem=%lld)\n",
+            (long long)num_tokens, (long long)hidden_size,
+            (long long)inter_size, (long long)k, (long long)expert_weight_bits,
+            (long long)block_size, (long long)element_size_bytes);
+    return -1;
+  }
+
+  const int tokens = static_cast<int>(num_tokens);
+  const int top_k = static_cast<int>(k);
+  const int slots = tokens * top_k;
+  const int hidden = static_cast<int>(hidden_size);
+  const int inter = static_cast<int>(inter_size);
+  const int fusion_inter = 2 * inter;
+  const int block = static_cast<int>(block_size);
+  const int n_blk_in = hidden / block;
+  const int n_blk_mid = inter / block;
+  hipStream_t s = static_cast<hipStream_t>(stream);
+
+  (void)hipGetLastError();
+  hipError_t err = launch_qmoe_fc1<64, 8>(
+      s, slots, top_k, fusion_inter, input, expert_indices, fc1_weights,
+      fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden, n_blk_in, block,
+      swiglu_alpha, swiglu_beta, swiglu_limit);
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_prefill_fused fc1 failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+
+  err = launch_qmoe_fc2<64, 8>(
+      s, slots, act_out, expert_indices, expert_weights, fc2_weights,
+      fc2_scales, fc2_zero_points, fc2_bias, slot_buf, inter, hidden, n_blk_mid,
+      block);
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_prefill_fused fc2 failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+
+  const int grid = (hidden + kBlock - 1) / kBlock;
+  hipLaunchKernelGGL(
+      qmoe_decode_reduce_kernel,
+      dim3(static_cast<unsigned>(grid), static_cast<unsigned>(tokens)),
+      dim3(kBlock), 0, s, static_cast<const __half*>(slot_buf),
+      static_cast<__half*>(output), hidden, top_k);
+  err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_prefill_fused reduce failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
 }
 
 // ===========================================================================

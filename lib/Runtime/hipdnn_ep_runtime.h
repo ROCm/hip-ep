@@ -1142,10 +1142,13 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          int64_t element_size_bytes,
                          int64_t indices_element_size_bytes);
 
-int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
-               void *indices, int64_t axis, int64_t largest, int64_t sorted,
-               int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes);
+// Host `k` is the values (or indices) result extent at `axis`. OnnxToHip
+// already materializes K on the host to size the result; do not D2H the GPU
+// K tensor here.
+int wrap_top_k(RuntimeState *state, void *x, void *values, void *indices,
+               int64_t axis, int64_t largest, int64_t sorted, int64_t rank,
+               const int64_t *x_shape, int64_t num_elements,
+               int64_t element_size_bytes, int64_t k);
 
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
@@ -1162,13 +1165,14 @@ int wrap_compress(RuntimeState *state, void *input, void *condition,
                   int64_t condition_len, int64_t num_output_elements,
                   int64_t element_size_bytes);
 
+// Host depth is output_shape[axis]. OnnxToHip already materializes depth on
+// the host to size the output; do not D2H the GPU depth tensor here.
 int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  void *output, int64_t axis, int64_t indices_rank,
                  int64_t output_rank, const int64_t *indices_shape,
                  const int64_t *output_shape, int64_t num_indices,
                  int64_t num_output_elements, int64_t element_size_bytes,
-                 int64_t indices_element_size_bytes,
-                 int64_t depth_element_size_bytes);
+                 int64_t indices_element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -1796,25 +1800,29 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
              int64_t data_type);
 
 // CumSum operation wrapper (cumulative sum along an axis).
-// `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
-// reduction axis; the runtime is responsible for reading it (typically a
-// single hipMemcpyAsync D2H or kernel-side load).
+// `axis_device` is a nullable rank-0 GPU tensor. When null, `axis_host`
+// supplies the compile-time axis and no device readback occurs.
 // `axis_dtype` is HIPDNN_EP_DATATYPE_INT32 / _INT64.
 // `data_type` is HIPDNN_EP_DATATYPE_* of the data tensor.
-int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
+int wrap_cumsum(RuntimeState *state, void *x, void *axis_device, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
-                int64_t exclusive, int64_t reverse);
+                int64_t axis_host, int64_t exclusive, int64_t reverse);
 
 // Pad operation wrapper (constant / reflect / edge / wrap modes).
+// *_device pointers are GPU tensors; matching *_host pointers are compiler-
+// materialized constants and take precedence without D2H. Both forms are
+// nullable where the ONNX input is optional.
 // pads:           int64 1-D tensor [2 * num_axes]
 //                 -- formatted as [x1_begin, ..., x1_end, ...]
 // constant_value: nullable scalar tensor (only used when mode_id == 0)
 // axes:           nullable int64 1-D tensor selecting axes; nullptr/empty
 //                 means "all axes"
 // mode_id:        0=constant, 1=reflect, 2=edge, 3=wrap
-int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
-             void *axes, void *output, const int64_t *data_shape,
+int wrap_pad(RuntimeState *state, void *data, void *pads_device,
+             const int64_t *pads_host, void *constant_value_device,
+             const void *constant_value_host, void *axes_device,
+             const int64_t *axes_host, void *output, const int64_t *data_shape,
              int64_t data_rank, const int64_t *output_shape,
              int64_t output_rank, int64_t pads_num_elements,
              int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
@@ -1870,21 +1878,18 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
-// Today this is a stub: the OnnxToHip decompose pattern handles the common
-// case (compile-time constant starts/ends/axes/steps with positive unit
-// stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
-// entry is only called for non-constant-indices or negative-step Slices.
-// The stub only logs its parameters and returns success — models that
-// exercise it will produce incorrect Slice output but will still link and
-// run end-to-end for IR-shape debugging.
-//
-// axes / steps may be nullptr when the corresponding optional input is absent.
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type);
+// Each control has a device pointer and a host pointer. A non-null host pointer
+// is a compile-time constant and avoids D2H; otherwise the device tensor is
+// read back. axes / steps may have both pointers null when absent.
+int wrap_slice(RuntimeState *state, void *data, void *starts_device,
+               const int64_t *starts_host, void *ends_device,
+               const int64_t *ends_host, void *axes_device,
+               const int64_t *axes_host, void *steps_device,
+               const int64_t *steps_host, void *output,
+               const int64_t *data_shape, int64_t data_rank,
+               const int64_t *output_shape, int64_t output_rank,
+               int64_t starts_num_elements, int64_t axes_num_elements,
+               int64_t steps_num_elements, int64_t data_type);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

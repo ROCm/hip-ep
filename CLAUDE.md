@@ -107,6 +107,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Compiler/runtime metadata and ABI: [docs/design/compiler-runtime-contract.md](docs/design/compiler-runtime-contract.md)
 - Output allocator: [docs/design/output-allocator-design.md](docs/design/output-allocator-design.md)
 - Shape inference: [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+- HIP graph capture / host-extent readbacks: [docs/design/hip-graph-capture.md](docs/design/hip-graph-capture.md)
 - Memory planning: [docs/design/pool-allocs-memory-planning.md](docs/design/pool-allocs-memory-planning.md)
 - Constant handling: [docs/design/constant-handling-design.md](docs/design/constant-handling-design.md)
 - Compilation options and artifact format: [docs/design/compilation-options.md](docs/design/compilation-options.md)
@@ -133,6 +134,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - `hip-use-output-allocator` must run before PoolAllocs so graph outputs remain runtime-owned and are not pooled. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned.
 - Keep the allocator callback model-agnostic; dynamic output shapes are computed in the generated graph.
 - See [docs/design/output-allocator-design.md](docs/design/output-allocator-design.md).
+- Do not remove `hip.alloc_output`'s host `index` or `hip.readback_*` to make Capture work. Data-dependent graph-output extents (Compress, Range, dynamic Pad) are HIP-graph breaks until the allocator ABI changes. See [docs/design/hip-graph-capture.md](docs/design/hip-graph-capture.md).
 
 ### Host reads of GPU values
 

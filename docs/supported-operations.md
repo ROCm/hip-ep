@@ -70,13 +70,13 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GatherND | Custom HIP kernel |
 | ScatterND | Custom HIP kernel (reductions: none / add / mul / min / max) |
 | ScatterElements | Custom HIP kernel (reductions: none / add / mul / min / max) |
-| Range | Custom HIP kernel |
+| Range | Custom HIP kernel; a GPU-computed length is a host readback / HIP-graph break |
 | Size | Custom HIP kernel; folds to a constant for static shapes |
 | NonZero | Custom HIP kernel |
 | Gather | Custom HIP kernel |
 | GatherElements | Custom HIP kernel |
 | TopK | Custom HIP kernel |
-| Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
+| Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation (HIP-graph break; see [hip-graph-capture.md](design/hip-graph-capture.md)) |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |

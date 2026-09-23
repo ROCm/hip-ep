@@ -1699,42 +1699,49 @@ HIP_KERNEL_API int hip_gather_nd(
  * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
  * graph-constant (or have negative steps).
  *
- * The host wrapper D2Hs the (typically tiny) index tensors and resolves
- * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
- * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
+ * Compile-time controls are resolved on the host. Runtime-dynamic controls
+ * are resolved by `hip_slice_resolve` directly on the device. Both paths
+ * produce device tables with one `(start, step, logical_extent)` entry per
+ * data dimension. Axes not listed default to `(0, 1)`. The copy kernel runs
  * one thread per output element and computes:
  *
  *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
  *     output[out_idx] = input[in_offset]
  *
- * `step[d]` may be negative; correctness relies on the host wrapper
- * having already resolved start / end to absolute positions per ONNX's
- * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ * `step[d]` may be negative; the resolver applies ONNX negative-index and
+ * clamping rules (see lib/Runtime/real/slice.cpp).
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  *
  * Supported dtypes: f16, f32, i32, i64.
  */
+HIP_KERNEL_API int hip_slice_resolve(
+    void* stream,
+    const int64_t* starts_device,
+    const int64_t* starts_host,
+    const int64_t* ends_device,
+    const int64_t* ends_host,
+    const int64_t* axes_device,
+    const int64_t* axes_host,
+    const int64_t* steps_device,
+    const int64_t* steps_host,
+    const int64_t* input_shape_host,
+    const int64_t* output_shape_host,
+    int count,
+    int rank,
+    int64_t* starts_per_axis_device,
+    int64_t* steps_per_axis_device,
+    int64_t* logical_extent_device);
+
 HIP_KERNEL_API int hip_slice(
     void* stream,
     const void* input,
     void* output,
     const int64_t* input_shape_host,
     const int64_t* output_shape_host,     /* physical alloc shape       */
-    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
-                                             may be NULL, in which case the
-                                             kernel treats it as identical to
-                                             output_shape_host (i.e. no
-                                             over-alloc; entire physical
-                                             buffer is filled by the slice).
-                                             When set and logical[d] <
-                                             output_shape[d] for some d,
-                                             positions in the over-allocated
-                                             tail are filled with zero — the
-                                             host wrapper does not need to
-                                             pre-memset the buffer.        */
-    const int64_t* starts_per_axis_host,  /* length = rank */
-    const int64_t* steps_per_axis_host,   /* length = rank */
+    const int64_t* logical_extent_device, /* device, length = rank */
+    const int64_t* starts_per_axis_device,/* device, length = rank */
+    const int64_t* steps_per_axis_device, /* device, length = rank */
     int rank,
     int hip_dtype);
 
@@ -1846,23 +1853,34 @@ HIP_KERNEL_API int hip_cumsum(
  * either copy input or fill from the pad_value depending on mode.
  *
  * `pad_mode`:    0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
- * `lower_pads_host`: per-dim begin pad (length = rank), already filtered
- *                    by the `axes` attribute (defaults to 0 for unaffected
- *                    dims). Upper bound implied by output_shape.
- * `pad_value_host` : host pointer to a scalar of the data type (used only
- *                    when pad_mode == Constant). May be null -> default 0.
+ * `lower_pads` is host or device according to `lower_pads_on_device`.
+ * `pad_value` is host or device according to `pad_value_on_device`, and may
+ * be null for the default zero value. Device lower pads are produced by
+ * `hip_pad_resolve` from ONNX-18 [begins..., ends...] controls.
  */
+HIP_KERNEL_API int hip_pad_resolve(
+    void* stream,
+    const int64_t* pads_device,
+    const int64_t* pads_host,
+    const int64_t* axes_device,
+    const int64_t* axes_host,
+    int num_axes,
+    int rank,
+    int64_t* lower_pads_device);
+
 HIP_KERNEL_API int hip_pad(
     void* stream,
     const void* input,
     void* output,
     const int64_t* input_shape_host,
     const int64_t* output_shape_host,
-    const int64_t* lower_pads_host,
+    const int64_t* lower_pads,
+    int lower_pads_on_device,
     int rank,
     int hip_dtype,
     int pad_mode,
-    const void* pad_value_host);
+    const void* pad_value,
+    int pad_value_on_device);
 
 /* =========================================================================
  * LayerNormalization (ONNX-17)
@@ -2440,7 +2458,7 @@ HIP_KERNEL_API int hip_dequantize_linear(
  *
  * Individual kernel launchers for QMoE (Quantized Mixture-of-Experts).
  * These only launch GPU kernels — no memory allocation, no stream sync.
- * The runtime wrapper (wrap_qmoe) orchestrates the expert loop.
+ * The runtime wrapper selects fixed-sequence decode/prefill dispatch.
  *
  * All functions take element_size_bytes: 2 for fp16, 4 for fp32.
  */
@@ -2588,6 +2606,30 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* output,
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* Fixed-sequence prefill dispatch. Each (token, top-k slot) directly selects
+ * its expert weights on device, FC1 fuses SwiGLU, FC2 writes a weighted slot,
+ * and a final kernel reduces the k slots per token. There is no expert-count
+ * D2H, host branch, allocation, or stream synchronization.
+ */
+HIP_KERNEL_API int hip_qmoe_prefill_fused(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    int64_t num_tokens,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k,
+    int64_t expert_weight_bits, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
@@ -2740,6 +2782,31 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
     void* acc,
     int64_t num_tokens,
     int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* Fixed-sequence wave64 prefill path. It dispatches every (token, top-k slot)
+ * through device-selected expert FC1/relu2 and FC2 kernels, then reduces the
+ * weighted slots per token. Unlike the wave32 WMMA path it does not bucket
+ * rows by expert, and it requires no expert-count D2H or host dispatch.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wave64(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* act_scratch,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
     int64_t latent_size,
     int64_t moe_intermediate_size,
     int64_t k,
@@ -2984,6 +3051,25 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *src_outer_strides,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
+
+/* =========================================================================
+ * In-place strided scale
+ * =========================================================================
+ *
+ * data[i * stride] *= beta for i in [0, count). Element stride, not bytes.
+ * HIP-graph-captureable (kernel launch only; no host memcpy).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT64, HIP_DTYPE_BFLOAT16. Scale accumulates in float except
+ * FLOAT64 (double). Returns hipSuccess (0) or a hipError_t / -1.
+ */
+HIP_KERNEL_API int hip_scale_strided(
+    void* stream,
+    void* data,
+    int64_t count,
+    int64_t stride,
+    float beta,
+    int hip_dtype);
 
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path

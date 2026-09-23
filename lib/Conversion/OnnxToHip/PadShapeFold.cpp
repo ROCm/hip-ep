@@ -9,18 +9,17 @@
 // onto the op while its producer is still a generic ONNX constant. The later
 // `lowerOnnxConstants` sweep creates an inspectable `hip.constant`, and
 // PadConversion runs before the standalone externalizer. Stamping still gives
-// shape construction stable provenance independent of the rewritten producer.
+// shape construction and runtime lowering stable provenance independent of the
+// rewritten producer.
 //
 // Why this matters
 // ----------------
-// `onnx.Pad` with a dynamic output shape needs the per-axis pad amounts on the
-// HOST to size the output buffer (out_dim[i] = data_dim[i] + begin + end).
 // `pads` is almost always a compile-time ONNX constant. This ONNX-rooted
 // pre-rewrite runs before the producer changes dialect and stamps the values
-// onto the Pad op. PadConversion can then size dynamic outputs without relying
-// on a particular constant producer form or emitting synchronized D2H
-// readbacks. Genuinely runtime-dynamic `pads` carry no attribute and still use
-// the readback path (correctness preserved).
+// onto the Pad op. PadConversion can then size dynamic outputs and pass host
+// controls to the runtime without relying on a particular constant producer
+// form or emitting synchronized D2H readbacks. Genuinely runtime-dynamic
+// `pads` carry no attribute and still use the readback path.
 //
 //   Before (this pattern):
 //     %pads = onnx.Constant {value = dense<[0,1,0,1]> : tensor<4xi64>}
@@ -31,16 +30,13 @@
 //     %out  = onnx.Pad(%data, %pads)
 //               {mode = "constant", hipdnn.pad_amounts = array<i64: 0,1,0,1>}
 //
-//   (the `pads` operand is left untouched -- the hip.pad kernel still reads it
-//    on the GPU; only the host-side output-shape math now uses the attribute.)
+//   (the operand remains in the IR for DPS compatibility, but runtime lowering
+//    uses the attribute and does not read the device allocation.)
 //
 // Implementation notes
 // --------------------
 //   * Roots on `onnx.Pad`. Idempotent: bails if `hipdnn.pad_amounts` is already
 //     set, so the greedy `ExistingOps`-strictness pre-lowering loop quiesces.
-//   * Only fires when the result has at least one dynamic dim (the static-shape
-//     case never reads `pads` in PadConversion, so stamping would be useless
-//     churn).
 //   * Reads the inline value from `onnx.Constant`'s `value` attr (or
 //     `arith.constant`). If `pads` is not such an inline constant the op is
 //     left unchanged -- it is a genuine runtime `pads` and PadConversion's
@@ -120,12 +116,10 @@ struct PadStampConstShape : public mlir::RewritePattern {
     if (op->getNumOperands() < 2)
       return rewriter.notifyMatchFailure(op, "pad.arity");
 
-    // Only the dynamic-output case reads `pads` on the host in PadConversion;
-    // a fully static result never needs the values, so stamping is pointless.
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType || resultType.hasStaticShape())
-      return rewriter.notifyMatchFailure(op, "pad.static_result");
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "pad.unranked_result");
 
     auto padsVec = getInlineIntVector(op->getOperand(1));
     if (!padsVec)

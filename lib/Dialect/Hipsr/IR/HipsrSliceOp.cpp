@@ -320,18 +320,19 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
                    : cast<ShapedType>(op.getStarts().getType()).getDimSize(0));
 
     using SliceCall =
-        RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, hostPtr, hostPtr, hostPtr,
-                    devicePtr, hostPtr, i64, hostPtr, i64, i64, i64, i64, i64>;
+        RuntimeFunc<i32, hostPtr, devicePtr, devicePtr, hostPtr, devicePtr,
+                    hostPtr, devicePtr, hostPtr, devicePtr, hostPtr, devicePtr,
+                    hostPtr, i64, hostPtr, i64, i64, i64, i64, i64>;
     auto sliceFunc =
         SliceCall::lookupOrCreateFn(rewriter, loc, module, kWrapSlice);
     if (failed(sliceFunc)) {
       return failure();
     }
-    if (failed(sliceFunc->call(adaptor.getCtx(), adaptor.getData(), startsPtr,
-                               endsPtr, axesPtr, stepsPtr, adaptor.getInit(),
-                               dataShape, dataType.getRank(), outputShape,
-                               outputType.getRank(), entries, entries, entries,
-                               elementType))) {
+    if (failed(sliceFunc->call(
+            adaptor.getCtx(), adaptor.getData(), Value(), startsPtr, Value(),
+            endsPtr, Value(), axesPtr, Value(), stepsPtr, adaptor.getInit(),
+            dataShape, dataType.getRank(), outputShape, outputType.getRank(),
+            entries, entries, entries, elementType))) {
       return failure();
     }
     rewriter.eraseOp(op);
