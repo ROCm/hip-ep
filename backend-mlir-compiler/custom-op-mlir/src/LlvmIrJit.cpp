@@ -416,7 +416,7 @@ bool isSharedLibraryFile(llvm::StringRef path) {
 }
 
 // Install symbol search generators on the JIT's main JITDylib, in priority
-// order: per-OS ROCm libs, the per-arch kernel DLL/SO, plugin-contributed
+// order: hipdnn_backend, the per-arch kernel DLL/SO, plugin-contributed
 // libraries, then the process image.
 // The kernel DLL is added before the process generator so its hip_* launchers
 // win over any look-alike symbol in another loaded module. Returns false only

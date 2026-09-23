@@ -11,12 +11,11 @@
 
 #include <cstdint>
 
-// Return the CK instance to serve this problem, or -1 when none accepts it.
-// The offline table proposes up to three instances; a single accepted one wins
-// outright, several are timed against each other. Without an accepted proposal
-// every accepting instance is timed and the fastest wins. CK ships nothing like
-// AlgoGetHeuristic, so measuring is the only way to pick. Arguments mirror
-// hip_ck_gemm_run minus the instance, i.e. hipBLASLt's column-major convention.
+// Returns the CK instance to serve this problem, or -1 when none is found. Up
+// to three instances proposed by the offline table are checked first: a single
+// accepted one wins outright, several are timed against each other. Without an
+// accepted proposal every accepting instance is timed and the fastest wins.
+// Arguments mirror hip_ck_gemm_run minus the instance.
 //
 // Probe and timing launches overwrite `output`, so the caller must not have
 // seeded it with anything the real call still needs.

@@ -7,10 +7,9 @@
 // fallback for shapes and dtypes the tuned WMMA/DL instances in ck_gemm.hip do
 // not serve. It covers fp16/bf16/fp32/fp64.
 //
-// Arguments arrive in hipBLASLt's column-major convention and are remapped the
-// same way as ck_gemm.hip: a column-major D = op(A) op(B) becomes CK's
-// row-major E = A' B' with M'=n, N'=m, K'=k and the operands swapped
-// (A' = B buffer, B' = A buffer).
+// Column-major arguments are remapped as in ck_gemm.hip: a column-major
+// D = op(A) op(B) becomes CK's row-major E = A' B' with M'=n, N'=m, K'=k and
+// the operands swapped (A' = B buffer, B' = A buffer).
 //
 // ck::ReferenceGemm assumes packed operands (it ignores leading dimensions and
 // has no batch), so lda/ldb/ldd must be the packed values and anything else is
@@ -67,10 +66,8 @@ void runRefBatched(hipStream_t stream, const void *aprime, const void *bprime,
   }
 }
 
-// After the column-major -> row-major swap (A' = B buffer, B' = A buffer,
-// M'=n, N'=m), A' is transposed exactly when the ABI's op(B) is (transB) and
-// B' when op(A) is (transA); E is always Row. Dispatch lives here so the
-// Row/Col aliases stay inside the anonymous namespace.
+// After the column-major -> row-major swap, A' is transposed exactly when op(B)
+// is (transB) and B' when op(A) is (transA); E is always Row.
 template <typename ABData, typename CData, typename AccData>
 void runRefDispatch(hipStream_t stream, const void *aprime, const void *bprime,
                     void *e, int64_t mp, int64_t np, int64_t k, int64_t batch,

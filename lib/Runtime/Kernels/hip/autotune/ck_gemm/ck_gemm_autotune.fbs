@@ -1,5 +1,3 @@
-// CK GEMM offline autotune lookup table.
-//
 // Measured winners of ckSelectGemmInstance. A lookup matches the categorical
 // fields exactly, then ranks the measured points of that group by log-space
 // distance over (M, N, K, batch) and proposes the instances of the nearest
@@ -35,11 +33,13 @@ struct CkGemmTunePoint {
 
 table CkGemmAutotuneLut {
   schema_version: uint32 = 1;
-  gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
+  // empty matches any device; otherwise must equal the running device,
+  // e.g. "gfx1151"
+  gpu_arch: string;
   rocm_version: int32;      // advisory
-  // Bumped when a tile keeps its name but changes meaning.
-  kernel_abi: string;       // "ck_gemm-v1"
-  model_key: string;        // provenance label for logging
+  // Bumped when a tile keeps its name but changes meaning; must equal kKernelAbi.
+  kernel_abi: string;
+  model_key: string;        // provenance label; not read at runtime
 
   //   d = sqrt( sum_i (w_i * log2(x_i / p_i))^2 ),  i in {m, n, k, batch}
   weight_m: float = 1.0;

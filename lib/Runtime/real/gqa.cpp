@@ -872,7 +872,7 @@ static bool gqa_no_expand_prefill_enabled() {
 //
 // The default is deliberately far above any shape that already runs well: at
 // 1 GiB nothing tiles below roughly 3.5K tokens on a 16-head model, so short
-// and medium sequences keep their existing kernel launch counts and descriptor
+// and medium sequences keep their existing kernel launch counts and routing
 // cache entries exactly, and only the lengths whose score matrices are already
 // tens of gigabytes change behaviour.
 static size_t gqa_score_budget_bytes() {
@@ -951,9 +951,9 @@ static bool gqa_fused_decode_disabled() {
 // instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
 // uses a serial-over-time scheme with cross-wave reductions on the critical
 // path of every iteration, so it loses to the GEMM-based decomposed path on
-// long sequences (measured ~12x slower at total_seq~=2048 on Strix Halo). When
-// flash_decode is eligible we keep the fused branch active even at long
-// total_seq -- flash_decode is exactly what this threshold was working around.
+// long sequences. When flash_decode is eligible we keep the fused branch active
+// even at long total_seq -- flash_decode is exactly what this threshold was
+// working around.
 //
 // Default 256 is a starter value pending a full threshold sweep. Set
 // HIPDNN_EP_GQA_FUSED_DECODE_MAX_T=N to override (or a very large value like
@@ -978,13 +978,13 @@ static int gqa_fused_decode_max_t() {
 //===----------------------------------------------------------------------===//
 //
 // The CK instance resolved for each unique (m, n, k, batch, transA, ...) shape
-// is cached and reused for the process lifetime, so the instance sweep runs
-// only on a cold miss in the decomposed (prefill) path.
+// is cached in this op instance's state, so the instance sweep runs only on a
+// cold miss.
 struct GqaGemmKey {
   int64_t m, n, k, batch;
   // true = Score GEMM (K^T * Q); false = Value GEMM (V * S)
   bool transA;
-  // true = HIP_R_32F C/D layouts (Score GEMM always accumulates fp32)
+  // true = fp32 D (Score GEMM always accumulates fp32)
   bool outputFp32;
   // true = fp32 A/B inputs (Whisper no_causal); false = fp16
   bool inputFp32;
@@ -1020,7 +1020,6 @@ struct GqaGemmKeyHash {
   }
 };
 
-// Batch strides for a key, resolving 0 to the dense default.
 static void gqaGemmStrides(const GqaGemmKey &key, int64_t &strideA,
                            int64_t &strideB, int64_t &strideC) {
   strideA = key.strideA != 0 ? key.strideA : key.m * key.k;
@@ -1079,13 +1078,10 @@ static GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   return &ins->second;
 }
 
-// Runs one GQA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0.
-//
-// Composable Kernel serves the score and value shapes; a shape no CK instance
-// accepts uses the reference GEMM fallback. The CK probe needs live pointers,
-// so it runs here on the shape's first call rather than in
-// queryOrCreateGemmState; timing iterations may scribble on D because beta is 0
-// and the real launch below rewrites it.
+// Runs one GQA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0. The
+// CK probe needs live pointers, so it runs on the shape's first call rather
+// than in queryOrCreateGemmState; its timing launches may overwrite D because
+// beta is 0 and the real launch rewrites it.
 static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
                       const void *B, void *D, float alpha) {
   const GqaGemmKey &key = st->key;
@@ -1095,8 +1091,8 @@ static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
   const int abDtype = key.inputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
   const int dDtype = key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
 
-  // CK has no fp32-operand, fp16-output combo, and the fp16-in fp16-out one
-  // would silently drop alpha.
+  // hip_ck_gemm_run has no fp32 -> fp16 combo and refuses alpha != 1 with fp16
+  // output, so skip the probe for those.
   const bool ck_eligible =
       key.inputFp32 ? key.outputFp32 : (key.outputFp32 || alpha == 1.0f);
 
@@ -1119,8 +1115,8 @@ static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
                         /*transB=*/0, abDtype, dDtype, alpha, lda,
                         /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB,
                         strideC) != 0) {
-      // The instance was chosen by running this same geometry, so a refusal
-      // here means the ABI contract is broken rather than the shape changing.
+      // This geometry was accepted when the instance was chosen, so a non-zero
+      // return is an error, not a routing answer.
       fprintf(stderr,
               "GQA: CK instance %d refused m=%lld n=%lld k=%lld batch=%lld\n",
               st->ck_instance, (long long)key.m, (long long)key.n,
@@ -1208,10 +1204,10 @@ static int gqa_forward_hipblaslt(
   // Smart dispatch: the legacy fused decode kernel (hip_gqa_fused_decode)
   // serializes over the time dimension (cross-wave reduction tree on the
   // critical path of every iteration). For total_seq above
-  // gqa_fused_decode_max_t() the GEMM-based decomposed path wins (~12x at
-  // total_seq=2048 on Strix Halo), so route long sequences there. When we can't
-  // read total_seq (B>1, no seqlens_k, or D2H failure) default to permitting
-  // fused -- preserves behaviour on workloads that pass the predicate today.
+  // gqa_fused_decode_max_t() the GEMM-based decomposed path wins, so route long
+  // sequences there. When we can't read total_seq (B>1, no seqlens_k, or D2H
+  // failure) default to permitting fused -- preserves behaviour on workloads
+  // that pass the predicate today.
   bool size_ok_for_fused =
       (total_seq_pre < 0) ||
       (total_seq_pre <= static_cast<int64_t>(gqa_fused_decode_max_t()));
@@ -1891,9 +1887,9 @@ static int gqa_forward_hipblaslt(
               (long long)sq, (long long)total_seq);
   }
 
-  // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
+  // GEMM keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero,
-  // so queryOrCreateGemmState falls back to the dense packed-batch defaults,
+  // so gqaGemmStrides falls back to the dense packed-batch defaults,
   // except where a per-chunk key range makes a dense default wrong (strideA
   // below).
   //
@@ -1953,10 +1949,10 @@ static int gqa_forward_hipblaslt(
   // A chunk is now its own GEMM shape, but far fewer distinct ones than that
   // suggests. With a window the interior chunks all sit at the same extent
   // (window + chunk rows, capped by the sequence), so at a 16K prefill with
-  // sq_chunk 640 and a 1024 window the 26 chunks collapse to four descriptors:
-  // the two leading partial ones, the interior extent, and the ragged tail.
-  // queryOrCreateGemmState is keyed on shape, so the duplicates cost a hash
-  // lookup and nothing else.
+  // sq_chunk 640 and a 1024 window the 26 chunks collapse to four cache
+  // entries: the two leading partial ones, the interior extent, and the ragged
+  // tail. queryOrCreateGemmState is keyed on shape, so the duplicates cost a
+  // hash lookup and nothing else.
   //===--------------------------------------------------------------------===//
   struct GqaChunkPlan {
     int64_t q0;     // first query row of the chunk
@@ -2004,7 +2000,7 @@ static int gqa_forward_hipblaslt(
     }
     // A degenerate range would give the GEMMs a zero extent. It cannot arise
     // from the arithmetic above (the chunk's own diagonal is always in range),
-    // but the GEMM descriptors must not be built from one if it ever did.
+    // but the GEMM keys must not be built from one if it ever did.
     if (k_hi <= k_lo)
       k_hi = k_lo + 1;
     *lo = k_lo;
@@ -2469,7 +2465,7 @@ static int gqa_forward_hipblaslt(
     // The per-chunk key extents are summarised as their range and their sum
     // rather than listed: the sum against sq*kv_span is the whole point of the
     // narrowing (it is the score-matrix area actually computed), and chunks is
-    // what says how many descriptors the loop cycled through.
+    // what says how many cache entries the loop cycled through.
     int64_t kv_ext_min = chunks.empty() ? 0 : chunks.front().kv_ext;
     int64_t kv_ext_max = 0, score_elems = 0;
     for (const GqaChunkPlan &cp : chunks) {

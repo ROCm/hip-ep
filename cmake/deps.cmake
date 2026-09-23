@@ -129,9 +129,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(cpptrace)
 set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 
-# Composable Kernel headers for ck_gemm.hip / ref_gemm.hip. SOURCE_SUBDIR names
-# a nonexistent dir so MakeAvailable populates the source without running CK's
-# own CMake. No GIT_SHALLOW: a shallow fetch of a raw commit SHA is unreliable.
+# SOURCE_SUBDIR names a nonexistent dir so MakeAvailable populates the source
+# without running CK's own CMake. No GIT_SHALLOW: a shallow fetch of a raw
+# commit SHA is unreliable.
 if(NOT BUILD_MOCK_RUNTIME)
   FetchContent_Declare(composablekernel
     GIT_REPOSITORY ${DEP_URL_composablekernel}
@@ -140,8 +140,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(composablekernel)
 
-  # ck/config.h for gfx11. CK_USE_WMMA is load-bearing: without it CK's gfx11
-  # host_utility/flush_cache.hpp does not compile.
+  # CK_USE_WMMA is load-bearing: host_utility/flush_cache.hpp (included by the
+  # WMMA v3 device ops) reads XDL-only kernel-arg fields unless it is defined.
   set(CK_USE_WMMA ON)
   set(CK_USE_XDL OFF)
   set(CK_ENABLE_FP16 ON)
@@ -154,9 +154,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     ${composablekernel_SOURCE_DIR}/include/ck/config.h.in
     ${CMAKE_BINARY_DIR}/ck_generated/ck/config.h @ONLY)
 
-  # Prepended before the HIP dist include (Windows: _hip_compile_sources;
-  # Linux: hip_add_library BEFORE PRIVATE) so the pinned CK source shadows the
-  # dist's include/ck. The generated config.h dir comes first.
+  # Consumers must place these before the HIP dist include so the pinned CK
+  # source shadows the dist's include/ck. The generated config.h dir must stay
+  # first.
   set(HIP_CK_INCLUDE_DIRS
     "${CMAKE_BINARY_DIR}/ck_generated"
     "${composablekernel_SOURCE_DIR}/include"

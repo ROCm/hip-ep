@@ -168,9 +168,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 }
 
 // Shared initialization that brings up the HIP device and stream in a fresh
-// RuntimeState. On any failure the partially
-// initialized state is released and a non-zero error code (matching the
-// historical exit codes 1-9) is returned. On success *out_state holds the
+// RuntimeState. On any failure the partially initialized state is released and
+// a non-zero error code is returned. On success *out_state holds the
 // RuntimeState ready for constants_blob allocation; no constant memory has
 // been touched yet.
 static int initialize_state_handles(RuntimeState **out_state) {

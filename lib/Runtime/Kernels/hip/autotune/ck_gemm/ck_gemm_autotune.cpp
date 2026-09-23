@@ -71,15 +71,14 @@ uint32_t groupKey(fbs::CkGemmDtype ab, fbs::CkGemmDtype d, bool transA,
          (transA ? 1u << 8 : 0u) | (bias ? 1u << 9 : 0u);
 }
 
-// 0..3 for a dim divisible by at most 1, 2, 4, 8.
 uint32_t alignClass(int64_t x) {
   return (x % 8 == 0) ? 3u : (x % 4 == 0) ? 2u : (x % 2 == 0) ? 1u : 0u;
 }
 
 // CK tiles are gated on vector widths that must divide m, n or k, so the
 // winner follows their alignment rather than their magnitude: shapes one apart
-// in m can need different tiles. Distance is only meaningful within one of
-// these.
+// in m can need different tiles. Candidates come from the same alignment class
+// first, then from the rest of the group.
 uint32_t alignedKey(uint32_t group, int64_t m, int64_t n, int64_t k) {
   return group | (alignClass(m) << 12) | (alignClass(n) << 14) |
          (alignClass(k) << 16);
