@@ -232,20 +232,21 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-#if 1
-  // HACK to always create cached operator handle
-  DDConvState *conv_state = nullptr;
-#else
   // Get or create cached operator handle
-  DDConvState *conv_state = DDConvState::get_op_state(state, op_state_slot);
-#endif
+  // NOTE: hip.conv does NOT have OpStateOpInterface, so op_state_slot will be -1
+  //       In that case, we skip caching and create a new operator each time.
+  //       TODO: Add OpStateOpInterface to hip.conv to enable caching.
+  DDConvState *conv_state = nullptr;
+  if (op_state_slot >= 0) {
+    conv_state = DDConvState::get_op_state(state, op_state_slot);
+  }
 
   if (!conv_state) {
-    // First call: create operator instance via C API
+    // First call (or no caching): create operator instance via C API
     const char *weight_dtype = "uint8";
 
-    fprintf(stderr, "[DD] Creating iconv: a=%s, b=%s, c=%s\n",
-            dtype_str, weight_dtype, dtype_str);
+    fprintf(stderr, "[DD] Creating iconv: a=%s, b=%s, c=%s (op_state_slot=%d)\n",
+            dtype_str, weight_dtype, dtype_str, op_state_slot);
 
     dd_conv_handle_t handle = dd_iconv_create(
         dtype_str, weight_dtype, dtype_str, true);  // load_xrt=true
@@ -255,12 +256,17 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
       return -1;
     }
 
-    // Create state and store in slot
+    // Create state and store in slot (only if valid slot)
     auto state_ptr = DDConvState::create(handle);
     conv_state = state_ptr.get();
-    hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
-
-    fprintf(stderr, "[DD] iconv created successfully, handle=%p\n", handle);
+    if (op_state_slot >= 0) {
+      hipdnn_ep_op_state_set(state, op_state_slot, state_ptr.release());
+      fprintf(stderr, "[DD] iconv created and cached, handle=%p, slot=%d\n", handle, op_state_slot);
+    } else {
+      // No caching - state will be leaked, but this is temporary until we add OpStateOpInterface
+      state_ptr.release();
+      fprintf(stderr, "[DD] iconv created (no caching), handle=%p\n", handle);
+    }
   }
 
   // Initialize weights
