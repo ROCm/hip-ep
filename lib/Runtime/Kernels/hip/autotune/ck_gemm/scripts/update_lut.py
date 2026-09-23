@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent  # autotune/ck_gemm
+ROOT = HERE.parent
 FBS = ROOT / "ck_gemm_autotune.fbs"
 LUT_DIR = ROOT / "lut"
 
@@ -52,7 +52,7 @@ RE_GEMM = re.compile(
 RE_MATMUL = re.compile(
     r"wrap_hipblasLtMatmul: M=(\d+), N=(\d+), K=(\d+), batch=(\d+), "
     r"b_batch_stride=(-?\d+), transA=(\d+), transB=(\d+), elem_size=(\d+)")
-# inFp32 is absent from logs written before fp32 GQA operands reached CK.
+# inFp32 is optional; a line without it has fp16 operands.
 RE_GQA = re.compile(
     r"\[GQA\] CK instance -?\d+ for m=(\d+) n=(\d+) k=(\d+) batch=(\d+) "
     r"transA=(\d)(?: inFp32=(\d))? outFp32=(\d)")

@@ -166,20 +166,17 @@ MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
   return &ins->second;
 }
 
-// Runs one MHA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0.
-//
-// Composable Kernel serves these shapes -- the operands are always fp16 -- and
-// a shape no instance accepts uses the reference GEMM fallback. The CK probe
-// needs live pointers, so it runs here on the shape's first call rather than in
-// queryOrCreateMhaGemm; timing iterations may scribble on D because beta is 0
-// and the real launch below rewrites it.
+// Runs one MHA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0; A and
+// B are always fp16. The CK probe needs live pointers, so it runs on the
+// shape's first call rather than in queryOrCreateMhaGemm; its timing launches
+// may overwrite D because beta is 0 and the real launch rewrites it.
 static int mhaRunGemm(MhaGemmCacheEntry *st, hipStream_t stream, const void *A,
                       const void *B, void *D, float alpha) {
   const MhaGemmKey &key = st->key;
   const int64_t lda = key.transA ? key.k : key.m;
 
-  // CK applies alpha only on the fp32-output (score) combo; the fp16-output
-  // one would silently drop it.
+  // hip_ck_gemm_run refuses alpha != 1 with fp16 output, so skip the probe for
+  // that case.
   if ((key.outputFp32 || alpha == 1.0f) && !st->ck_probed) {
     st->ck_probed = true;
     st->ck_instance = ckSelectGemmInstance(
@@ -202,8 +199,8 @@ static int mhaRunGemm(MhaGemmCacheEntry *st, hipStream_t stream, const void *A,
                         alpha, lda,
                         /*ldb=*/key.k, /*ldd=*/key.m, key.strideA, key.strideB,
                         key.strideC) != 0) {
-      // The instance was chosen by running this same geometry, so a refusal
-      // here means the ABI contract is broken rather than the shape changing.
+      // This geometry was accepted when the instance was chosen, so a non-zero
+      // return is an error, not a routing answer.
       fprintf(stderr,
               "MHA: CK instance %d refused m=%lld n=%lld k=%lld batch=%lld\n",
               st->ck_instance, (long long)key.m, (long long)key.n,
