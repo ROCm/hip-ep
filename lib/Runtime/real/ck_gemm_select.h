@@ -12,9 +12,10 @@
 #include <cstdint>
 
 // Return the CK instance to serve this problem, or -1 when none accepts it.
-// The first instance the offline table proposes that CK accepts wins; without
-// one, every accepting instance is timed and the fastest wins. CK ships nothing
-// like AlgoGetHeuristic, so measuring is the only way to pick. Arguments mirror
+// The offline table proposes up to three instances; a single accepted one wins
+// outright, several are timed against each other. Without an accepted proposal
+// every accepting instance is timed and the fastest wins. CK ships nothing like
+// AlgoGetHeuristic, so measuring is the only way to pick. Arguments mirror
 // hip_ck_gemm_run minus the instance, i.e. hipBLASLt's column-major convention.
 //
 // Probe and timing launches overwrite `output`, so the caller must not have
@@ -31,19 +32,32 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
                            transA, transB, abDtype, dDtype, alpha, lda, ldb,
                            ldd, strideA, strideB, strideD);
   };
+  // A launch CK accepted can still leave an error; consume it so the next
+  // candidate is not blamed for it.
+  auto accepted = [&](int instance) {
+    if (launch(instance) != 0) {
+      return false;
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) {
+      (void)hipGetLastError();
+      return false;
+    }
+    return true;
+  };
 
   int proposed[3];
   const int num_proposed =
       hip_ck_gemm_lut_candidates(m, n, k, batch, transA, abDtype, dDtype,
                                  bias != nullptr ? 1 : 0, proposed, 3);
+  int candidates[3];
+  int num_candidates = 0;
   for (int c = 0; c < num_proposed; ++c) {
-    if (launch(proposed[c]) != 0) {
-      continue;
+    if (accepted(proposed[c])) {
+      candidates[num_candidates++] = proposed[c];
     }
-    if (hipStreamSynchronize(stream) == hipSuccess) {
-      return proposed[c];
-    }
-    (void)hipGetLastError();
+  }
+  if (num_candidates == 1) {
+    return candidates[0];
   }
 
   hipEvent_t start = nullptr;
@@ -56,52 +70,62 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
     if (stop) {
       (void)hipEventDestroy(stop);
     }
-    return -1;
+    (void)hipGetLastError();
+    return num_candidates > 0 ? candidates[0] : -1;
   }
 
-  int best = -1;
-  double best_ms = 1e30;
-  const int count = hip_ck_gemm_num_instances();
-  for (int i = 0; i < count; ++i) {
-    if (launch(i) != 0) {
-      continue;
-    }
-    // An instance CK accepted can still fault; clear the sticky error so the
-    // next one is not blamed for it.
-    if (hipStreamSynchronize(stream) != hipSuccess) {
-      (void)hipGetLastError();
-      continue;
-    }
-    // Fastest of two rounds: one 3-iteration sample is noisy enough to rank a
-    // slower instance first.
-    float inst_ms = 0.0f;
+  // Fastest of two rounds: one 3-iteration sample is noisy enough to rank a
+  // slower instance first. Returns false when no round could be timed.
+  auto timeInstance = [&](int instance, float &out_ms) {
     bool timed = false;
     for (int round = 0; round < 2; ++round) {
       if (hipEventRecord(start, stream) != hipSuccess) {
+        (void)hipGetLastError();
         continue;
       }
       for (int r = 0; r < 3; ++r) {
-        launch(i);
+        launch(instance);
       }
       if (hipEventRecord(stop, stream) != hipSuccess ||
           hipEventSynchronize(stop) != hipSuccess) {
+        (void)hipGetLastError();
         continue;
       }
       float ms = 0.0f;
       if (hipEventElapsedTime(&ms, start, stop) != hipSuccess) {
+        (void)hipGetLastError();
         continue;
       }
-      if (!timed || ms < inst_ms) {
-        inst_ms = ms;
+      if (!timed || ms < out_ms) {
+        out_ms = ms;
         timed = true;
       }
     }
-    if (!timed) {
-      continue;
+    return timed;
+  };
+
+  int best = -1;
+  float best_ms = 0.0f;
+  auto consider = [&](int instance) {
+    float ms = 0.0f;
+    if (timeInstance(instance, ms) && (best < 0 || ms < best_ms)) {
+      best = instance;
+      best_ms = ms;
     }
-    if (inst_ms < best_ms) {
-      best_ms = inst_ms;
-      best = i;
+  };
+  if (num_candidates > 1) {
+    for (int c = 0; c < num_candidates; ++c) {
+      consider(candidates[c]);
+    }
+    if (best < 0) {
+      best = candidates[0];
+    }
+  } else {
+    const int count = hip_ck_gemm_num_instances();
+    for (int i = 0; i < count; ++i) {
+      if (accepted(i)) {
+        consider(i);
+      }
     }
   }
   (void)hipEventDestroy(start);

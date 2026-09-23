@@ -5,18 +5,19 @@
 
 // Composable Kernel naive (reference) GEMM behind a narrow C ABI, the universal
 // fallback for shapes and dtypes the tuned WMMA/DL instances in ck_gemm.hip do
-// not serve. It is correct for any m/n/k and covers fp16/bf16/fp32/fp64, so the
-// callers that used to fall back to hipBLASLt reach this instead.
+// not serve. It covers fp16/bf16/fp32/fp64.
 //
 // Arguments arrive in hipBLASLt's column-major convention and are remapped the
 // same way as ck_gemm.hip: a column-major D = op(A) op(B) becomes CK's
 // row-major E = A' B' with M'=n, N'=m, K'=k and the operands swapped
-// (A' = B buffer, B' = A buffer). transB must be 0.
+// (A' = B buffer, B' = A buffer).
 //
 // ck::ReferenceGemm assumes packed operands (it ignores leading dimensions and
-// has no batch), so this ABI's lda/ldb/ldd are unused and the caller must pass
-// packed buffers; batch is handled here by looping and offsetting pointers by
-// the batch strides. alpha enters as a Scale C-element-op.
+// has no batch), so lda/ldb/ldd must be the packed values and anything else is
+// refused; batch is handled here by looping and offsetting pointers by the
+// batch strides. alpha enters as a Scale C-element-op. Its naive kernel indexes
+// with int and launches ceil(N'/16) blocks along grid y, which bounds the
+// per-batch element counts and N'.
 
 #include "hip_custom_kernels.h"
 
@@ -149,9 +150,16 @@ extern "C" int hip_ref_gemm_run(void *stream, const void *A, const void *B,
                                 int64_t lda, int64_t ldb, int64_t ldd,
                                 int64_t strideA, int64_t strideB,
                                 int64_t strideD) {
-  (void)lda;
-  (void)ldb;
-  (void)ldd;
+  if (m <= 0 || n <= 0 || k <= 0 || batch <= 0) {
+    return 1;
+  }
+  if (lda != (transA ? k : m) || ldb != (transB ? n : k) || ldd != m) {
+    return 1;
+  }
+  if (m * k > INT32_MAX || k * n > INT32_MAX || m * n > INT32_MAX ||
+      (m + 15) / 16 > 65535) {
+    return 1;
+  }
   return runRef(static_cast<hipStream_t>(stream), A, B, D, m, n, k, batch,
                 transA, transB, abDtype, dDtype, alpha, strideA, strideB,
                 strideD);

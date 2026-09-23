@@ -48,10 +48,9 @@ static int ckDtypeForTypeCode(int64_t typeCode) {
 struct GemmCacheKey {
   int64_t M, N, K, transA, transB, typeCode;
   bool bias_epilogue; // distinct algo for the fused-bias-epilogue problem
-  // CK eligibility also turns on alpha and on a C the epilogue cannot fuse,
-  // neither of which is a geometry field. Keying on the verdict stops an
-  // ineligible call from reusing an entry probed for an eligible one, which
-  // would silently drop that alpha or that C.
+  // CK eligibility also turns on alpha, which is not a geometry field. Keying
+  // on the verdict stops an ineligible call from reusing an entry probed for an
+  // eligible one, which would silently drop that alpha.
   bool ck_eligible;
   bool operator==(const GemmCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && transA == o.transA &&
@@ -458,6 +457,9 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     fprintf(stderr, "wrap_gemm: null stream\n");
     return -1;
   }
+  if (M == 0 || N == 0) {
+    return 0;
+  }
 
   GemmState *gs = GemmState::get_op_state(state, op_state_slot);
   if (!gs || !gs->table) {
@@ -474,13 +476,12 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   // A per-output-feature [N] / [1,N] bias with beta==1 is the fused-bias
-  // problem CK serves through its Add epilogue; every other C shape routes
+  // problem CK serves through its f16 Add epilogue; every other C routes
   // through the post-add below. fp32 runs on the DL instances, whose multi-D
   // epilogue cannot broadcast a stride-0 D along M', so its C always takes the
   // post-add.
   const bool use_bias_epilogue =
-      C && beta == 1.0f && cDim0 == 1 && cDim1 == N &&
-      (typeCode == kTypeFloat16 || typeCode == kTypeBFloat16);
+      C && beta == 1.0f && cDim0 == 1 && cDim1 == N && typeCode == kTypeFloat16;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
                     "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p, "
@@ -496,12 +497,11 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
 
   // CK eligibility: no alpha, and ONNX transA==0, which would become the
   // kernels' TRANSB and has no instance. The A-side transpose (ONNX transB) is
-  // served with or without a bias. An f16 C has to be one the Add epilogue
-  // takes; fp32 has no epilogue, so its C goes to the post-add either way.
+  // served with or without a bias; a C the epilogue does not take is added
+  // afterwards.
   const bool ck_eligible =
       alpha == 1.0f && transA == 0 &&
-      ((typeCode == kTypeFloat16 && (!C || use_bias_epilogue)) ||
-       typeCode == kTypeFloat32);
+      (typeCode == kTypeFloat16 || typeCode == kTypeFloat32);
   const void *ck_bias = use_bias_epilogue ? C : nullptr;
 
   GemmCacheKey key{
@@ -589,30 +589,34 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  if (C && !fused_bias) {
-    // output += beta * C_broadcast. hip_elementwise_add serves f16/f32; a C
-    // term with fp64 or bf16 appears in no supported model and errors.
-    if (abDtype != HIP_DTYPE_FLOAT16 && abDtype != HIP_DTYPE_FLOAT32) {
-      fprintf(stderr, "wrap_gemm: C/bias add unsupported for typeCode=%lld\n",
-              (long long)typeCode);
-      return -1;
+  if (C && !fused_bias && beta != 0.0f) {
+    // output += beta * C_broadcast.
+    int bc = -2;
+    if (beta == 1.0f &&
+        (abDtype == HIP_DTYPE_FLOAT16 || abDtype == HIP_DTYPE_FLOAT32)) {
+      const int64_t outShape[4] = {1, 1, M, N};
+      const int64_t cShape[4] = {1, 1, cDim0, cDim1};
+      bc =
+          hip_elementwise_binary_bcast(stream, output, C, output, outShape,
+                                       cShape, outShape, /*op=add*/ 0, abDtype);
     }
-    const size_t elemSize = gemmElemSize(typeCode);
-    const size_t outBytes =
-        static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
-    void *scratch = nullptr;
-    if (hipMalloc(&scratch, outBytes) != hipSuccess) {
-      fprintf(stderr, "wrap_gemm: C-add scratch alloc failed\n");
-      return -1;
+    // beta != 1, bf16 / fp64, or past the broadcast kernel's 32-bit index
+    // range (-2): materialise beta * C, then add it.
+    if (bc == -2) {
+      const size_t outBytes = static_cast<size_t>(M) * static_cast<size_t>(N) *
+                              gemmElemSize(typeCode);
+      if (hipdnn_ep_state_ensure_workspace(state, outBytes) != 0) {
+        fprintf(stderr, "wrap_gemm: C-add workspace alloc failed\n");
+        return -1;
+      }
+      void *scratch = hipdnn_ep_state_get_workspace(state);
+      bc = writeBroadcastC(state, C, scratch, M, N, cDim0, cDim1, beta,
+                           typeCode);
+      if (bc == 0) {
+        bc = hip_elementwise_add(stream, output, scratch, output,
+                                 static_cast<int64_t>(M) * N, abDtype);
+      }
     }
-    int bc =
-        writeBroadcastC(state, C, scratch, M, N, cDim0, cDim1, beta, typeCode);
-    if (bc == 0) {
-      bc = hip_elementwise_add(stream, output, scratch, output,
-                               static_cast<int64_t>(M) * N, abDtype);
-    }
-    hipStreamSynchronize(stream);
-    hipFree(scratch);
     if (bc != 0) {
       fprintf(stderr, "wrap_gemm: C/bias add failed (%d)\n", bc);
       return -1;

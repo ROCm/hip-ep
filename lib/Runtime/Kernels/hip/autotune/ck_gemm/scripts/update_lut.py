@@ -3,7 +3,7 @@
 
     python update_lut.py extract --logs <HIPDNN_EP_DEBUG logs...> --out shapes/<name>.csv
     ck_gemm_autotune_sweep.exe <shapes.csv> <winners.csv>
-    python update_lut.py build --winners <winners.csv>...    # -> lut/<arch>.json
+    python update_lut.py build --winners <winners.csv>... --rocm-version <n>  # -> lut/<arch>.json
     python update_lut.py compile --flatc <flatc>             # -> lut/<arch>.fb
 
 extract turns the per-op debug lines into hip_ck_gemm_run's column-major
@@ -277,7 +277,7 @@ def main() -> int:
     ap.add_argument("--winners", nargs="+", default=[])
     ap.add_argument("--arch", default="gfx1151")
     ap.add_argument("--flatc", default="flatc")
-    ap.add_argument("--rocm-version", type=int, default=0)
+    ap.add_argument("--rocm-version", type=int)
     ap.add_argument("--model-key", default="")
     ap.add_argument("--keep-all", action="store_true",
                     help="build: emit every measured point, no pruning")
@@ -287,8 +287,8 @@ def main() -> int:
             ap.error("extract needs --logs and --out")
         return cmd_extract(args)
     if args.command == "build":
-        if not args.winners:
-            ap.error("build needs --winners")
+        if not args.winners or args.rocm_version is None:
+            ap.error("build needs --winners and --rocm-version")
         return cmd_build(args)
     return cmd_compile(args)
 
