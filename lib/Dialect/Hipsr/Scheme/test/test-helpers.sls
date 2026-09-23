@@ -7,10 +7,11 @@
   (export load-test-bodies
           eval-pattern
           get-field
+          run-one-phase
           run-phase-tests)
   (import (except (chezscheme) =)
-          (except (mlir pattern-macro) :with)  ; Exclude :with to avoid conflict
-          (rime loop))  ; Use rime loop's :with
+          (except (mlir pattern-macro) :with)
+          (rime loop))
 
   ;;=======================================================================
   ;; Load test data
@@ -24,15 +25,63 @@
   ;;=======================================================================
 
   (define (get-field key test-case)
-    ;; Manual recursion is clearest for plist traversal (advance by 2)
-    (let loop ([rest (cdr test-case)])  ;; Skip name
+    ;; Simple plist traversal - advance by 2
+    (let loop ([rest (cdr test-case)])
       (cond
         [(null? rest) #f]
         [(eq? (car rest) key) (cadr rest)]
         [else (loop (cddr rest))])))
 
   ;;=======================================================================
-  ;; Eval pattern with debug flag
+  ;; Check expectations against actual plist result
+  ;;=======================================================================
+
+  (define (plist-ref plist key)
+    ;; Get value from plist by key
+    (let loop ([rest plist])
+      (cond
+        [(null? rest) #f]
+        [(null? (cdr rest)) #f]
+        [(eq? (car rest) key) (cadr rest)]
+        [else (loop (cddr rest))])))
+
+  (define (check-expectation result expectation)
+    ;; Check one expectation (key . expected-value) against result plist
+    (let ([key (car expectation)]
+          [expected (cdr expectation)])
+      (cond
+        ;; has-function-name - check key exists
+        [(eq? key 'has-function-name)
+         (if expected
+             (and (plist-ref result 'function-name) #t)
+             (not (plist-ref result 'function-name)))]
+
+        ;; match-count - count elements in match list
+        [(eq? key 'match-count)
+         (let ([match-list (plist-ref result 'match)])
+           (and match-list (fx= (length match-list) expected)))]
+
+        ;; rewrite-count - count elements in rewrite list
+        [(eq? key 'rewrite-count)
+         (let ([rewrite-list (plist-ref result 'rewrite)])
+           (and rewrite-list (fx= (length rewrite-list) expected)))]
+
+        ;; Default: check value equality
+        [else
+         (let ([actual (plist-ref result key)])
+           (equal? actual expected))])))
+
+  (define (check-all-expectations result expectations)
+    ;; Returns (passed? . failing-expectation-or-#f)
+    (let loop ([exps expectations])
+      (cond
+        [(null? exps) (cons #t #f)]
+        [(check-expectation result (car exps))
+         (loop (cdr exps))]
+        [else (cons #f (car exps))])))
+
+  ;;=======================================================================
+  ;; Eval pattern with debug flag and check expectations
   ;;=======================================================================
 
   (define (eval-pattern name debug-flag pattern-body expectations)
@@ -48,29 +97,59 @@
         ;; Eval the pattern definition
         (eval full-expr (interaction-environment))
 
-        ;; Get the result (AST for debug modes, function otherwise)
-        (let ([result (eval pattern-name (interaction-environment))])
+        ;; Get the defined pattern
+        (let ([pattern-fn (eval pattern-name (interaction-environment))])
           (cond
-            ;; Debug mode: result is an AST list - check expectations
-            [(and debug-flag (list? result))
-             ;; TODO: Check expectations against AST
-             ;; For now, just verify it's a list
-             #t]
+            [(not (procedure? pattern-fn))
+             (display (format "ERROR: Pattern ~a is not a procedure\n" name))
+             #f]
 
-            ;; Normal mode: result should be a function
-            [(procedure? result)
-             #t]
+            ;; Debug mode: call function, check expectations
+            [debug-flag
+             (let ([result (pattern-fn)])
+               (cond
+                 [(not (list? result))
+                  (display (format "ERROR: Debug pattern ~a did not return a list\n" name))
+                  #f]
+                 ;; Check expectations if provided
+                 [expectations
+                  (let ([check-result (check-all-expectations result expectations)])
+                    (if (car check-result)
+                        #t
+                        (begin
+                          (display (format "  Expectation failed: ~s\n" (cdr check-result)))
+                          (display (format "  Actual result:\n  "))
+                          (pretty-print result)
+                          #f)))]
+                 ;; No expectations
+                 [else #t]))]
 
-            [else
-             (display (format "ERROR: Pattern ~a returned unexpected type\n" name))
-             #f])))))
+            ;; Normal mode
+            [else #t])))))
 
   ;;=======================================================================
-  ;; Run tests for a phase
+  ;; Run one phase for one test case
+  ;;=======================================================================
+
+  (define (run-one-phase phase-name debug-flag expect-key test-case)
+    (let ([name (car test-case)]
+          [pattern (get-field ':pattern test-case)]
+          [expectations (get-field expect-key test-case)])
+      (if expectations
+          (begin
+            (display (format "~a... " phase-name))
+            (let ([result (eval-pattern name debug-flag pattern expectations)])
+              (display (if result "✓\n" "✗\n"))
+              result))
+          (begin
+            (display (format "~a... skipped (no expectations)\n" phase-name))
+            'skipped))))
+
+  ;;=======================================================================
+  ;; Run tests for a phase (OLD - kept for compatibility)
   ;;=======================================================================
 
   (define (run-phase-tests phase-name debug-flag expect-key test-bodies)
-    ;; Simplified with rime loop - collect results then count
     (display (format "\n=== Phase: ~a ===\n" phase-name))
     (let ([results
            (loop :for test-case :in test-bodies
@@ -92,4 +171,4 @@
         (display (format "\nResults: ~a passed, ~a failed\n" passed failed))
         (list passed failed))))
 
-) ;; end library (test test-helpers)
+) ;; end library
