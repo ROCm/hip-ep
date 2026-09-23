@@ -243,9 +243,12 @@ extern "C" int hip_gemv_fp16(void *stream, const void *a, const void *b,
     return 1;
   }
 
-  // A vector load needs b's row stride (n halves) and the column offset to keep
-  // the 8-byte alignment, which holds exactly when 4 divides n.
-  const int vec = (n % 4 == 0) ? 4 : 1;
+  // A vector access needs b's row stride (n halves) and the column offset to
+  // keep the 8-byte alignment, which holds exactly when 4 divides n and b and y
+  // start 8-byte aligned.
+  const bool aligned8 = (reinterpret_cast<uintptr_t>(b) % 8 == 0) &&
+                        (reinterpret_cast<uintptr_t>(y) % 8 == 0);
+  const int vec = (n % 4 == 0 && aligned8) ? 4 : 1;
   const int64_t tile = static_cast<int64_t>(kBlock) * vec;
   const int64_t blocks = (n + tile - 1) / tile;
 
@@ -253,6 +256,10 @@ extern "C" int hip_gemv_fp16(void *stream, const void *a, const void *b,
   if (cu <= 0 || blocks > INT32_MAX) {
     return 1;
   }
+
+  // The return value below is hipGetLastError(), which reports whatever error
+  // is pending on the thread; consume one left by an unrelated caller.
+  (void)hipGetLastError();
 
   const auto s = static_cast<hipStream_t>(stream);
   const auto *ah = static_cast<const _Float16 *>(a);
