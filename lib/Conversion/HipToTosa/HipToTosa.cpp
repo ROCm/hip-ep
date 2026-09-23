@@ -1000,6 +1000,157 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// TOSA has no gelu. Expand to the formula hip.gelu's own description
+// spells out, matching wrap_gelu / hip_elementwise_gelu:
+//
+//   erf (approximate = "none"):
+//     y = 0.5 * x * (1 + erf(x * 1/sqrt(2)))
+//   tanh (approximate = "tanh", also hip.fast_gelu):
+//     y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//
+// Cubing uses tosa.mul rather than tosa.pow so it holds for every float
+// type TOSA accepts. Dividing by sqrt(2) is a multiply by the reciprocal
+// constant, because TOSA has no float divide.
+//
+// hip.bias_gelu is Gelu(data + last-dim-broadcast(bias)) with the erf
+// form. hip.fast_gelu is the tanh form, with optional bias added first.
+enum class GeluKind { Erf, Tanh };
+
+static LogicalResult matchGeluTensor(Operation *op, Value input,
+                                     ConversionPatternRewriter &rewriter,
+                                     RankedTensorType &resultType) {
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected tensor mode");
+  resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+  if (input.getType() != resultType)
+    return rewriter.notifyMatchFailure(
+        op, "operand and result types must match exactly");
+  if (!isa<FloatType>(resultType.getElementType()))
+    return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+  return success();
+}
+
+static FailureOr<Value> addBroadcastBias(ConversionPatternRewriter &rewriter,
+                                         Location loc,
+                                         RankedTensorType resultType,
+                                         Value data, Value bias) {
+  if (failed(tosa::EqualizeRanks(rewriter, loc, data, bias)))
+    return failure();
+  if (!isTosaCompatibleOperand(data, resultType) ||
+      !isTosaCompatibleOperand(bias, resultType))
+    return failure();
+  return tosa::AddOp::create(rewriter, loc, resultType, data, bias).getResult();
+}
+
+static Value emitGelu(ConversionPatternRewriter &rewriter, Location loc,
+                      RankedTensorType type, Value x, GeluKind kind) {
+  Value shift = createZeroMulShift(rewriter, loc);
+  auto mul = [&](Value lhs, Value rhs) {
+    return tosa::MulOp::create(rewriter, loc, type, lhs, rhs, shift);
+  };
+  auto add = [&](Value lhs, Value rhs) {
+    return tosa::AddOp::create(rewriter, loc, type, lhs, rhs);
+  };
+
+  Value half = createSplatFloat(rewriter, loc, type, 0.5);
+  Value one = createSplatFloat(rewriter, loc, type, 1.0);
+  Value inner;
+  if (kind == GeluKind::Tanh) {
+    Value x2 = mul(x, x);
+    Value x3 = mul(x2, x);
+    Value coeff = createSplatFloat(rewriter, loc, type, 0.044715);
+    Value k = createSplatFloat(rewriter, loc, type, 0.7978845608028654);
+    Value tanhArg = mul(k, add(x, mul(coeff, x3)));
+    inner = add(one, tosa::TanhOp::create(rewriter, loc, type, tanhArg));
+  } else {
+    Value invSqrt2 = createSplatFloat(rewriter, loc, type, 0.7071067811865476);
+    inner =
+        add(one, tosa::ErfOp::create(rewriter, loc, type, mul(x, invSqrt2)));
+  }
+  return mul(mul(x, half), inner);
+}
+
+// Before:
+//   %r = hip.gelu(%ctx) ins(%x : tensor<2x8xf16>)
+//                       outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+// After (exact):
+//   %c = tosa.const dense<0.7071...>
+//   %s = tosa.mul %x, %c
+//   %e = tosa.erf %s
+//   %t = tosa.add %one, %e
+//   %r = tosa.mul (tosa.mul %x, %half), %t
+struct GeluConverter final : public OpConversionPattern<GeluOp> {
+  using OpConversionPattern<GeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getInput(), rewriter, resultType)))
+      return failure();
+
+    StringRef approximate = op.getApproximate();
+    if (approximate != "none" && approximate != "tanh")
+      return rewriter.notifyMatchFailure(
+          op, "approximate must be \"none\" or \"tanh\"");
+
+    GeluKind kind = approximate == "tanh" ? GeluKind::Tanh : GeluKind::Erf;
+    rewriter.replaceOp(op, emitGelu(rewriter, op.getLoc(), resultType,
+                                    adaptor.getInput(), kind));
+    return success();
+  }
+};
+
+struct BiasGeluConverter final : public OpConversionPattern<BiasGeluOp> {
+  using OpConversionPattern<BiasGeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(BiasGeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getData(), rewriter, resultType)))
+      return failure();
+
+    FailureOr<Value> biased =
+        addBroadcastBias(rewriter, op.getLoc(), resultType, adaptor.getData(),
+                         adaptor.getBias());
+    if (failed(biased))
+      return rewriter.notifyMatchFailure(op, "bias is not tosa-broadcastable");
+
+    rewriter.replaceOp(op, emitGelu(rewriter, op.getLoc(), resultType, *biased,
+                                    GeluKind::Erf));
+    return success();
+  }
+};
+
+struct FastGeluConverter final : public OpConversionPattern<FastGeluOp> {
+  using OpConversionPattern<FastGeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(FastGeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getInput(), rewriter, resultType)))
+      return failure();
+
+    Value x = adaptor.getInput();
+    if (Value bias = adaptor.getBias()) {
+      FailureOr<Value> biased =
+          addBroadcastBias(rewriter, op.getLoc(), resultType, x, bias);
+      if (failed(biased))
+        return rewriter.notifyMatchFailure(op,
+                                           "bias is not tosa-broadcastable");
+      x = *biased;
+    }
+
+    rewriter.replaceOp(
+        op, emitGelu(rewriter, op.getLoc(), resultType, x, GeluKind::Tanh));
+    return success();
+  }
+};
+
 // TOSA has no softplus. Expand to the numerically stable form the
 // hip_softplus kernel uses:
 //   softplus(x) = max(x, 0) + log(1 + exp(-abs(x)))
@@ -6079,12 +6230,12 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, WhereOp,
-        LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
-        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
-        GatherElementsOp, GatherNDOp, RangeOp, RopeOp, GqaOp,
-        MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp,
-        InstanceNormOp, SkipRmsNormOp>();
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, GeluOp,
+        BiasGeluOp, FastGeluOp, WhereOp, LeakyReluOp, MiopenSoftmaxOp,
+        ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp, DequantizeLinearOp,
+        MatMulNBitsOp, GatherOp, GatherElementsOp, GatherNDOp, RangeOp, RopeOp,
+        GqaOp, MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp,
+        LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -6212,9 +6363,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
         LogicalNotConverter, RoundConverter, ModConverter, AtanConverter,
-        SqrtConverter, SoftplusConverter, SignConverter, WhereConverter,
-        LeakyReluConverter, SoftmaxConverter,
-        ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
+        SqrtConverter, SoftplusConverter, GeluConverter, BiasGeluConverter,
+        FastGeluConverter, SignConverter, WhereConverter, LeakyReluConverter,
+        SoftmaxConverter, ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
         ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
         ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
