@@ -30,6 +30,16 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// com.microsoft QMoE prefill bucketing via the expert-parallel
+// hip_qmoe_amd_bucket_tokens (one block per expert) instead of the
+// single-block hip_qmoe_bucket_tokens. Output layout is byte-identical.
+// DEFAULT-OFF; set HIPDNN_EP_QMOE_PAR_BUCKET=1 to enable.
+inline bool hipdnn_ep_qmoe_par_bucket_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled("HIPDNN_EP_QMOE_PAR_BUCKET");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
