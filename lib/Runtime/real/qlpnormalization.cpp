@@ -70,67 +70,16 @@ int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
   const int64_t num_rows = num_elements / norm_num_elements;
   void *stream = hipdnn_ep_state_get_stream(state);
 
-  const size_t f32_bytes = static_cast<size_t>(num_elements) * sizeof(float);
-  const size_t scale_bytes =
-      static_cast<size_t>(norm_num_elements) * sizeof(float);
-  const size_t scratch_bytes =
-      2 * f32_bytes + scale_bytes + 2 * sizeof(float) + 2 * sizeof(uint16_t);
-  if (hipdnn_ep_state_ensure_qlpnormalization_scratch(state, scratch_bytes) !=
-      0) {
-    fprintf(stderr,
-            "[REAL] wrap_qlpnormalization: scratch allocation failed\n");
-    return -1;
-  }
-
-  auto *scratch = static_cast<uint8_t *>(
-      hipdnn_ep_state_get_qlpnormalization_scratch(state));
-  void *dq = scratch;
-  void *rms = scratch + f32_bytes;
-  void *scale_vec = scratch + 2 * f32_bytes;
-  void *in_scale = scratch + 2 * f32_bytes + scale_bytes;
-  void *out_scale = static_cast<uint8_t *>(in_scale) + sizeof(float);
-  void *in_zp = static_cast<uint8_t *>(out_scale) + sizeof(float);
-  void *out_zp = static_cast<uint8_t *>(in_zp) + sizeof(uint16_t);
-
-  int rc = hip_qlpnormalization_prepare_params(
-      stream, scale_vec, norm_num_elements,
-      1.0f / std::sqrt(static_cast<float>(norm_num_elements)), in_scale,
-      input_scale, out_scale, output_scale, in_zp,
-      static_cast<uint16_t>(input_zp), out_zp,
-      static_cast<uint16_t>(output_zp));
+  int rc = hip_qlpnormalization(
+      stream, input, output, num_rows, norm_num_elements,
+      1.0f / std::sqrt(static_cast<float>(norm_num_elements)), input_scale,
+      static_cast<int32_t>(input_zp), output_scale,
+      static_cast<int32_t>(output_zp), HIP_DTYPE_UINT16);
   if (rc != 0) {
     fprintf(stderr,
-            "[REAL] wrap_qlpnormalization: parameter preparation failed "
+            "[REAL] wrap_qlpnormalization: qlpnormalization failed "
             "(%d)\n",
             rc);
-    return rc;
-  }
-
-  const int64_t flat_shape[1] = {num_elements};
-  const int64_t scalar_shape[1] = {1};
-
-  rc = hip_dequantize_linear(
-      stream, input, in_scale, in_zp, dq, flat_shape, 1, scalar_shape, 0,
-      /*axis=*/0, /*block_size=*/0, HIP_DTYPE_UINT16, HIP_DTYPE_FLOAT32,
-      HIP_DTYPE_FLOAT32, /*in_bits=*/16);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qlpnormalization: dequant failed (%d)\n", rc);
-    return rc;
-  }
-
-  rc = hip_rms_norm(stream, dq, scale_vec, rms, num_rows, norm_num_elements,
-                    /*scale_rows=*/1, /*epsilon=*/0.0f, HIP_DTYPE_FLOAT32);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qlpnormalization: rms_norm failed (%d)\n", rc);
-    return rc;
-  }
-
-  rc = hip_quantize_linear(
-      stream, rms, out_scale, out_zp, output, flat_shape, 1, scalar_shape, 0,
-      /*axis=*/0, /*block_size=*/0, /*precision=*/0, HIP_DTYPE_FLOAT32,
-      HIP_DTYPE_FLOAT32, HIP_DTYPE_UINT16, /*out_bits=*/16);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qlpnormalization: quant failed (%d)\n", rc);
     return rc;
   }
   return 0;

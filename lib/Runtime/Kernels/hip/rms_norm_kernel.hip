@@ -128,6 +128,65 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// Q(L2-normalize(DQ(x))) over a per-tensor UINT16 tensor, in one pass.
+//
+// Lives beside hip_rms_norm_kernel and shares its reduction rather than
+// restating it: the normalized value has to come out bit-for-bit the same as
+// the separate dequantize, RMS and quantize it replaces, and a sum of floats
+// only reproduces when the traversal and the combining order do. Everything
+// outside the reduction is what changed -- the row is read as quantized
+// storage and written back as quantized storage instead of passing through two
+// f32 staging copies and three extra launches.
+//
+// The row scale is a scalar rather than the vector hip_rms_norm takes: an L2
+// normalization applies the same 1/sqrt(N) to the whole row. Epsilon is absent
+// for the same reason it was zero before -- an L2 norm has no epsilon, and
+// adding 0.0f to a non-negative sum changes nothing.
+__global__ void hip_qlpnormalization_kernel(
+    const uint16_t *__restrict__ input, uint16_t *__restrict__ output,
+    int64_t outer, int64_t norm_size, float norm_scale, float input_scale,
+    int32_t input_zp, float output_scale, int32_t output_zp) {
+  int64_t row = blockIdx.x;
+  if (row >= outer)
+    return;
+
+  const uint16_t *x_row = input + row * norm_size;
+  uint16_t *y_row = output + row * norm_size;
+
+  __shared__ float s_reduce[kRmsNormBlockSize];
+  __shared__ float s_inv_rms;
+
+  // The zero point is subtracted in int32 before the widen, as the dequantize
+  // kernel does; doing it in float would round twice for 16-bit storage.
+  auto dequantize = [&](int64_t i) {
+    return static_cast<float>(static_cast<int32_t>(x_row[i]) - input_zp) *
+           input_scale;
+  };
+
+  float local_sumsq = 0.0f;
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float v = dequantize(i);
+    local_sumsq += v * v;
+  }
+
+  float sumsq = rms_block_sum(local_sumsq, s_reduce);
+  if (threadIdx.x == 0)
+    s_inv_rms = rsqrtf(sumsq / static_cast<float>(norm_size));
+  __syncthreads();
+
+  const float inv_rms = s_inv_rms;
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float y = dequantize(i) * inv_rms * norm_scale;
+    // As the quantize kernel spells it: rintf rounds ties to even, and the
+    // output scale stays a division because multiplying by a reciprocal rounds
+    // a second time and can move the result by one LSB at a tie.
+    float q = rintf(y / output_scale) + static_cast<float>(output_zp);
+    q = fmaxf(q, 0.0f);
+    q = fminf(q, 65535.0f);
+    y_row[i] = static_cast<uint16_t>(q);
+  }
+}
+
 // Packed __half2 requires an even row and 4-byte aligned bases. Row starts stay
 // aligned across rows when norm_size is even, so checking the bases is enough.
 inline bool rms_can_vectorize(const void *input, const void *scale,
@@ -207,4 +266,46 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
+}
+
+extern "C" int hip_qlpnormalization(void *stream, const void *input,
+                                    void *output, int64_t outer,
+                                    int64_t norm_size, float norm_scale,
+                                    float input_scale, int32_t input_zp,
+                                    float output_scale, int32_t output_zp,
+                                    int hip_dtype) {
+  if (outer <= 0 || norm_size <= 0)
+    return 0;
+  if (!input || !output) {
+    fprintf(stderr, "[custom_kernels] hip_qlpnormalization: null buffer\n");
+    return -1;
+  }
+  if (hip_dtype != HIP_DTYPE_UINT16) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qlpnormalization: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+  if (output_scale == 0.0f) {
+    fprintf(stderr, "[custom_kernels] hip_qlpnormalization: output_scale is "
+                    "0\n");
+    return -1;
+  }
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(hip_qlpnormalization_kernel,
+                     dim3(static_cast<unsigned int>(outer)),
+                     dim3(kRmsNormBlockSize), 0,
+                     static_cast<hipStream_t>(stream),
+                     static_cast<const uint16_t *>(input),
+                     static_cast<uint16_t *>(output), outer, norm_size,
+                     norm_scale, input_scale, input_zp, output_scale,
+                     output_zp);
+  hipError_t qerr = hipGetLastError();
+  if (qerr != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qlpnormalization launch failed: %s\n",
+            hipGetErrorString(qerr));
+  }
+  return static_cast<int>(qerr);
 }
