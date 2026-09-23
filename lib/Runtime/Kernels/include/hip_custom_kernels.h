@@ -1699,44 +1699,36 @@ HIP_KERNEL_API int hip_gather_nd(
  * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
  * graph-constant (or have negative steps).
  *
- * The host wrapper D2Hs the (typically tiny) index tensors and resolves
- * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
- * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
- * one thread per output element and computes:
+ * Index tensors stay on the device. Thread 0 of each block applies the
+ * ONNX-13+ negative-index / clamp / default-axes / default-steps rules
+ * into shared memory; copy threads then compute:
  *
  *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
  *     output[out_idx] = input[in_offset]
  *
- * `step[d]` may be negative; correctness relies on the host wrapper
- * having already resolved start / end to absolute positions per ONNX's
- * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ * `step[d]` may be negative. When the resolved logical extent on an axis
+ * is smaller than `output_shape_host[d]` (SliceToHip over-allocation),
+ * positions in the tail are filled with zero. Invalid runtime indices
+ * set `device_error_flag` (nullable) without a host stream sync.
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  *
- * Supported dtypes: f16, f32, i32, i64.
+ * Supported dtypes: f16, f32, i32, i64. INT64 index tensors only.
  */
 HIP_KERNEL_API int hip_slice(
     void* stream,
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,     /* physical alloc shape       */
-    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
-                                             may be NULL, in which case the
-                                             kernel treats it as identical to
-                                             output_shape_host (i.e. no
-                                             over-alloc; entire physical
-                                             buffer is filled by the slice).
-                                             When set and logical[d] <
-                                             output_shape[d] for some d,
-                                             positions in the over-allocated
-                                             tail are filled with zero — the
-                                             host wrapper does not need to
-                                             pre-memset the buffer.        */
-    const int64_t* starts_per_axis_host,  /* length = rank */
-    const int64_t* steps_per_axis_host,   /* length = rank */
+    const int64_t* output_shape_host, /* physical alloc shape */
+    const int64_t* starts_dev,        /* INT64, length K */
+    const int64_t* ends_dev,          /* INT64, length K */
+    const int64_t* axes_dev,          /* INT64, length K, nullable */
+    const int64_t* steps_dev,         /* INT64, length K, nullable */
+    int64_t starts_num_elements,      /* K */
     int rank,
-    int hip_dtype);
+    int hip_dtype,
+    void* device_error_flag);         /* GPU int*, nullable */
 
 /* =========================================================================
  * ScatterND (ONNX-13+ with optional `reduction`)
