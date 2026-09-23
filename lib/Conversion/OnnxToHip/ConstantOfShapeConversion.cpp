@@ -29,7 +29,8 @@ namespace {
 //
 //   1. ConstantOfShapeAsScalar (benefit=3): when the result is only consumed
 //      by ops that already broadcast a scalar input across the result shape
-//      (today: `onnx.Where`), replace the op with a rank-0 fill-value buffer.
+//      (today: `onnx.Where`, `onnx.Min`), replace the op with a rank-0
+//      fill-value buffer.
 //      The consumer broadcasts the scalar at no extra memory cost (stride==0
 //      along every output axis in the runtime kernel), avoiding the
 //      `tensor.splat` -> `linalg.map` -> `scf.for` bufferization chain that
@@ -222,16 +223,18 @@ struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected 1 result");
     mlir::Value result = op->getResult(0);
 
-    // Only fold when every consumer is `onnx.Where`.  Future broadcasts
-    // (Mul / Add / ...) can be added incrementally as their lowerings are
-    // verified to handle a rank-0 operand.
+    // Only fold when every consumer broadcasts a scalar operand across the
+    // result shape.  Future broadcasts (Mul / Add / ...) can be added
+    // incrementally as their lowerings are verified to handle a rank-0
+    // operand.
     if (result.use_empty())
       return rewriter.notifyMatchFailure(op, "dead op, leave to DCE");
     for (auto &use : result.getUses()) {
-      if (use.getOwner()->getName().getStringRef() != "onnx.Where")
+      llvm::StringRef consumerName = use.getOwner()->getName().getStringRef();
+      if (consumerName != "onnx.Where" && consumerName != "onnx.Min")
         return rewriter.notifyMatchFailure(
-            op, "consumer is not onnx.Where; scalar broadcast not yet "
-                "supported for this consumer");
+            op, "consumer is not onnx.Where or onnx.Min; scalar broadcast "
+                "not yet supported for this consumer");
     }
 
     auto resultType = mlir::dyn_cast<mlir::RankedTensorType>(result.getType());

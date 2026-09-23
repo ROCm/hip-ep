@@ -4,7 +4,7 @@
 // Verify the three ONNX ConstantOfShape lowering paths:
 //
 //   1. ConstantOfShapeAsScalar (highest benefit): result is consumed only by
-//      ops that broadcast a scalar (today onnx.Where) -> a rank-0 fill-value
+//      ops that broadcast a scalar (today onnx.Where, onnx.Min) -> a rank-0 fill-value
 //      buffer (tensor.empty + linalg.fill), elide the full-size buffer.
 //   2. ConstantOfShapeFold: shape input is a compile-time constant AND result
 //      type is fully static -> single splat arith.constant; no runtime work.
@@ -126,6 +126,25 @@ module {
     // CHECK-NOT: onnx.ConstantOfShape
     // CHECK-NOT: tensor.splat
     // CHECK-DAG: %[[V:.*]] = arith.constant -100 : i64
+    // CHECK-DAG: %[[E:.*]] = tensor.empty() : tensor<i64>
+    // CHECK: linalg.fill ins(%[[V]] : i64) outs(%[[E]] : tensor<i64>) -> tensor<i64>
+
+    return %o : tensor<?x?xi64>
+  }
+
+  // Test 7: ConstantOfShapeAsScalar with onnx.Min -- same rank-0 fill path as
+  // Where; Min broadcasts the scalar across the other operand's shape.
+  func.func @test_constant_of_shape_as_scalar_min(
+      %a: tensor<?x?xi64>, %shape: tensor<2xi64>) -> tensor<?x?xi64> {
+    // CHECK-LABEL: func.func @test_constant_of_shape_as_scalar_min
+    %c = "onnx.ConstantOfShape"(%shape) {
+      value = dense<15> : tensor<1xi64>
+    } : (tensor<2xi64>) -> tensor<?x?xi64>
+    %o = "onnx.Min"(%a, %c) : (tensor<?x?xi64>, tensor<?x?xi64>) -> tensor<?x?xi64>
+
+    // CHECK-NOT: onnx.ConstantOfShape
+    // CHECK-NOT: tensor.splat
+    // CHECK-DAG: %[[V:.*]] = arith.constant 15 : i64
     // CHECK-DAG: %[[E:.*]] = tensor.empty() : tensor<i64>
     // CHECK: linalg.fill ins(%[[V]] : i64) outs(%[[E]] : tensor<i64>) -> tensor<i64>
 
