@@ -19,6 +19,7 @@
 
 (library (mlir pattern-ast)
   (export ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?
+          ast-pattern-expand-pattern-type ast-pattern-expand-pattern-type-set!
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!
           ast-pattern-expand-root-var ast-pattern-expand-root-var-set!
           ast-pattern-expand-root-op-name ast-pattern-expand-root-op-name-set!
@@ -100,6 +101,11 @@
   ;;
   (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
     (fields
+      (mutable pattern-type)     ;; Phase 1 (parse): symbol - 'conversion or 'rewrite
+                                 ;; Determines operand binding behavior in codegen:
+                                 ;; - 'conversion: root operation uses operands-ref parameter
+                                 ;; - 'rewrite: all operations use mlir-operation-get-operand-value
+
       (mutable function-name)    ;; Phase 1 (parse): syntax identifier - name of generated pattern function
                                  ;; Example: #'my-pattern
 

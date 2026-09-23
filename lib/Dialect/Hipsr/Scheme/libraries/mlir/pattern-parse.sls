@@ -74,7 +74,8 @@
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
-       (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f #f))]))
+       ;; define-conversion-pattern always creates 'conversion patterns
+       (parse-rest #'rest (make-ast-pattern-expand 'conversion #f #f #f #f #f '() #f #f '() '() #f #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rest - Parse function name, debug flags, then dispatch to :match
