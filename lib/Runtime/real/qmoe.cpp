@@ -316,8 +316,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       int32_t *d_ids_e = d_sorted_token_ids + off_e;
       char *d_wts_e = d_sorted_weights + off_e * elem_size;
 
+      // The fused epilogues only pay once an expert's GEMM has enough blocks
+      // to hide them. TTFT A/B on gfx1151 by mean tokens per expert:
+      // gpt-oss-20b 16k (~2000) -2.8%, proxy 16k (~500) neutral, 20b 2k
+      // (~250) +3.2%, proxy 2k (~60) +1.0%.
+      constexpr int64_t kFusedExpertMinTokens = 1024;
       const bool fuse = hipdnn_ep_qmoe_fused_expert_enabled() &&
-                        expert_weight_bits == 4 && elem_size == 2;
+                        expert_weight_bits == 4 && elem_size == 2 &&
+                        count >= kFusedExpertMinTokens;
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
