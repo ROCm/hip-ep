@@ -17,8 +17,6 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ## Crash-backtrace helper (always FetchContent; no find_package path).
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
-## Composable Kernel headers: a public develop commit, since no
-## ROCm/composable_kernel release tag has DeviceBatchedGemmMultiD_Wmma_CShuffleV3.
 composablekernel;https://github.com/ROCm/composable_kernel.git;22b89e961437ee349a7222c1c8c6ef52d5a8bc78
 ##
 therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
