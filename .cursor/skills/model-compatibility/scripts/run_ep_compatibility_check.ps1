@@ -36,7 +36,11 @@ param(
 
     [switch]$SkipDump,
     [switch]$ContinueOnDumpFailure,
-    [string]$EpMlirPath = ""
+    [string]$EpMlirPath = "",
+
+    # Without a package, the newest green Windows build from main is fetched.
+    # This says to fail instead, for a machine that must stay offline.
+    [switch]$NoFetchPackage
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,8 +58,19 @@ $ModelPath = (Resolve-Path -LiteralPath $ModelPath).ProviderPath
 if ([string]::IsNullOrWhiteSpace($GpuTestPackageRoot) -and $env:GPU_TEST_PACKAGE_ROOT) {
     $GpuTestPackageRoot = $env:GPU_TEST_PACKAGE_ROOT
 }
+if ([string]::IsNullOrWhiteSpace($GpuTestPackageRoot) -and -not $NoFetchPackage) {
+    # Nothing supplied, so take the newest green Windows build from main
+    # rather than making the caller find one. Cached per artifact, so this
+    # costs a download once.
+    Write-Host "(0/5) No package supplied; fetching the latest from CI..." -ForegroundColor Yellow
+    $fetched = & python (Join-Path $ToolsDir "fetch_package.py") 2>&1 |
+               ForEach-Object { $_.ToString() }
+    $fetched | ForEach-Object { Write-Host "  $_" }
+    $line = @($fetched | Where-Object { $_ -match '^PACKAGE_ROOT=' } | Select-Object -Last 1)
+    if ($line.Count) { $GpuTestPackageRoot = ([string]$line[0]) -replace '^PACKAGE_ROOT=', '' }
+}
 if ([string]::IsNullOrWhiteSpace($GpuTestPackageRoot)) {
-    Write-Output '[GPU_TEST_PACKAGE_NOT_CONFIGURED] No GpuTestPackageRoot supplied. Pass -GpuTestPackageRoot <path>, set env var GPU_TEST_PACKAGE_ROOT, or rerun with -SkipDump and -EpMlirPath to reuse an existing dump.'
+    Write-Output '[GPU_TEST_PACKAGE_NOT_CONFIGURED] No GpuTestPackageRoot supplied and none could be fetched. Pass -GpuTestPackageRoot <path>, set env var GPU_TEST_PACKAGE_ROOT, or rerun with -SkipDump and -EpMlirPath to reuse an existing dump.'
     exit 10
 }
 $GpuTestPackageRoot = (Resolve-Path -LiteralPath $GpuTestPackageRoot).ProviderPath

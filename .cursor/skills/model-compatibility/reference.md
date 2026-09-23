@@ -16,6 +16,7 @@ restate them elsewhere.
 | Count operators in the original | `step1_onnx_parser.py` | `step1_onnx_ops.json` |
 | Compare the two | `compare_op_distribution.py` | `op_distribution_comparison.json` |
 | Ask the compiler | `probe.py` | `probe_result.json` |
+| Get the tools, if none were supplied | `fetch_package.py` | a cached gpu-test-package |
 | Assemble | `build_report_input.py` | `report_input.json` |
 | Render | `generate_final_reports.py` | the two markdown files |
 

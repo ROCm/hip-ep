@@ -19,23 +19,29 @@ variant is reported as such rather than as working.
 | Input | Required | Default |
 |---|---|---|
 | `<model.onnx>` | yes | — |
-| `<GpuTestPackageRoot>` | yes | `$env:GPU_TEST_PACKAGE_ROOT` |
+| `<GpuTestPackageRoot>` | no | `$env:GPU_TEST_PACKAGE_ROOT`, else fetched from CI |
 | `<OutputDir>` | no | `$env:TEMP\<derived-from-path>_ep_compat` |
 
 Ask for the model path if it is missing. **Never invent one**, and do not
 reuse a path from an earlier conversation without confirming it.
 
 The package supplies `hip-onnx-runner.exe` and `hip-mlir-opt.exe`; no build
-tree or GPU is needed. Exit code **10** with
-`[GPU_TEST_PACKAGE_NOT_CONFIGURED]` means the package was not found -- ask
-the user for the path, and suggest `setx GPU_TEST_PACKAGE_ROOT <path>` so it
-persists.
+tree or GPU is needed. With none supplied, the newest green **Windows
+Build** of `main` is downloaded and cached under
+`%LOCALAPPDATA%\hip-ep\gpu-test-package\<artifact-id>\`, so the cost is one
+download rather than one per run. This needs the GitHub CLI, logged in.
+Pass `-NoFetchPackage` to require a local one instead.
+
+Exit code **10** with `[GPU_TEST_PACKAGE_NOT_CONFIGURED]` means none was
+supplied and none could be fetched -- ask the user for the path, and suggest
+`setx GPU_TEST_PACKAGE_ROOT <path>` so it persists.
 
 ## Run
 
 ```powershell
 .\scripts\run_ep_compatibility_check.ps1 -ModelPath <model.onnx>
-# -GpuTestPackageRoot <path>   when not in the environment
+# -GpuTestPackageRoot <path>   to use a local package instead of CI's
+# -NoFetchPackage              to fail rather than download one
 # -OutputDir <dir>             to pin the location
 # -SkipDump -EpMlirPath <mlir> to reuse an existing dump
 ```
