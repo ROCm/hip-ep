@@ -6,9 +6,9 @@
 // Composable Kernel GEMM instances, behind a narrow C ABI so callers compiled
 // outside hipcc never see CK's device templates. fp16 operands go through the
 // WMMA op; gfx11's WMMA has no fp32 type, so fp32 operands go through the
-// FMA-based DL pipeline instead. bf16 and fp64 operands go to hip_ref_gemm_run.
+// FMA-based DL pipeline instead. bf16 and fp64 operands are refused.
 //
-// Arguments arrive in hipBLASLt's column-major convention. A column-major
+// Arguments use hip_ck_gemm_run's column-major convention. A column-major
 // (rows x cols, ld=rows) buffer is bit-identical to a row-major
 // (cols x rows, ld=rows) one, so a column-major D = op(A) op(B) becomes CK's
 // row-major E = A' B' with M'=n, N'=m, K'=k and the operands swapped:
@@ -71,8 +71,6 @@ static constexpr auto Interwave = ck::BlockGemmPipelineScheduler::Interwave;
 static constexpr auto V1        = ck::BlockGemmPipelineVersion::v1;
 static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
 
-// ---------------------------------------------------------------- tile sets
-
 // A Row / B Row. EV = E scalar-per-vector (8 for f16 out, 4 for f32 out).
 #define TKN_1(EV)                                                                           \
     256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0, \
@@ -102,8 +100,8 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
     256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 1, \
         S<4, 64, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 1, 1, 1, S<1, 32, 1, 8>, S<EV, 8, 8>, \
         Intrawave, V3
-// AK1=2 / SrcScalarPerVector=2: CK's own low-alignment entry, the only one that
-// accepts a K not divisible by 8.
+// AK1=2 / SrcScalarPerVector=2: the only entry in CK's list that accepts
+// k % 8 != 0.
 #define TKN_8(EV)                                                                          \
     128, 128, 64, 64, 2, 8, 16, 16, 4, 2, S<4, 32, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 2, 2, 1, \
         S<4, 32, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 2, 8, 1, 1, 1, S<1, 32, 1, 4>,             \
@@ -218,10 +216,10 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
 // dropped entries differ only in thread-cluster arrangement; on the 12 whisper
 // fp32 shapes keeping them buys at most 1.3%, inside the run-to-run spread.
 //
-// The DLKN / DLNK tiles have K1 = 2, and the DL pipeline does not pad K, so they
-// serve only K % (2 * K0PerBlock) == 0 -- multiples of 8. The DLK1 tiles trade
-// that vector width for K1 = 1 and serve any K divisible by their K0PerBlock
-// (20 or 4).
+// The DLKN / DLNK tiles have K1 = 2 and the DL pipeline does not pad K, so each
+// serves only K % (2 * K0PerBlock) == 0 (at least a multiple of 8). The DLK1
+// tiles trade that vector width for K1 = 1 and serve any K divisible by their
+// K0PerBlock (20 or 4).
 //
 // The trailing CThreadTransferDstScalarPerVector is supplied by the entry macro
 // instead of the tile, because runDl needs it to reject an N the store cannot
@@ -386,8 +384,6 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
 #define DL_BLOCK_SIZE_(BLOCK, ...) BLOCK
 #define DL_BLOCK_SIZE(...) DL_BLOCK_SIZE_(__VA_ARGS__)
 
-// ------------------------------------------------------------------ runners
-
 struct RunArgs {
   hipStream_t stream;
   const void *a;
@@ -402,7 +398,6 @@ struct RunArgs {
 
 int64_t elemBytes(int dtype) { return dtype == HIP_DTYPE_FLOAT16 ? 2 : 4; }
 
-// Element span of one matrix: the last row starts at (rows - 1) * ld.
 int64_t matrixSpan(int64_t rows, int64_t cols, int64_t ld) {
   return (rows - 1) * ld + cols;
 }
@@ -439,7 +434,6 @@ int runNoBias(const RunArgs &r) {
 
 template <typename Op, typename CDEOp>
 int runBias(const RunArgs &r) {
-  // StrideDs = 0 broadcasts the length-N' bias vector along M'.
   auto arg = Op::MakeArgument(
       r.a, r.b, {r.bias}, r.e, (ck::index_t)r.m, (ck::index_t)r.n,
       (ck::index_t)r.k, (ck::index_t)r.batch, (ck::index_t)r.strideA,
@@ -503,15 +497,15 @@ void launchDl(const typename Op::Argument &arg, hipStream_t stream) {
   }
 }
 
-// MakeArgument takes no KBatch and the DL multi-D epilogue cannot broadcast a
-// stride-0 D along M', so there is no bias variant of this.
+// The DL multi-D epilogue cannot broadcast a stride-0 D along M', so there is no
+// bias variant.
 template <typename Op, int EVec, int BlockSize>
 int runDl(const RunArgs &r) {
   // CK's own DL instances run GemmDefault, which forces N % NPerBlock == 0 and
-  // so can never leave a partial vector at E's right edge. GemmMNPadding pads
-  // N for the GEMM but the CShuffle store still writes EVec elements at a time
-  // and IsSupportedArgument checks neither the extent nor the row stride, so a
-  // partial vector there silently spills into the next row.
+  // so never leaves a partial vector at E's right edge. Under GemmMNPadding the
+  // C thread transfer still writes CThreadTransferDstScalarPerVector (EVec)
+  // elements at a time, and IsSupportedArgument checks neither the extent nor
+  // the row stride, so a partial vector silently spills into the next row.
   if (r.n % EVec != 0 || r.strideE % EVec != 0) {
     return 1;
   }
@@ -528,16 +522,14 @@ int runDl(const RunArgs &r) {
   return 0;
 }
 
-// ----------------------------------------------------------------- registry
-
 enum Combo {
-  kNN_F16 = 0,      // transA=N, f16 out, no bias  -> A'/B' both Row
-  kTN_F32 = 1,      // transA=T, f32 out           -> B' Col, Scale epilogue
-  kTN_F16_BIAS = 2, // transA=T, f16 out, bias     -> B' Col, Add epilogue
-  kNN_F16_BIAS = 3, // transA=N, f16 out, bias     -> A'/B' both Row, Add
-  kTN_F16 = 4,      // transA=T, f16 out, no bias  -> B' Col
-  kNN_F32 = 5,      // fp32 operands, transA=N     -> DL, A'/B' both Row
-  kTN_F32AB = 6,    // fp32 operands, transA=T     -> DL, B' Col
+  kNN_F16 = 0,
+  kTN_F32 = 1,
+  kTN_F16_BIAS = 2,
+  kNN_F16_BIAS = 3,
+  kTN_F16 = 4,
+  kNN_F32 = 5,
+  kTN_F32AB = 6,
 };
 
 using RunFn = int (*)(const RunArgs &);
@@ -570,41 +562,41 @@ struct Entry {
      &runDl<MAKE_DL_OP(Col, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
 
 const Entry kEntries[] = {
-    // 0-13: NN, f16 out, no bias
+    // NN, f16 out, no bias
     ENT_A(TKN_1) ENT_A(TKN_2) ENT_A(TKN_3) ENT_A(TKN_4) ENT_A(TKN_5)
     ENT_A(TKN_6) ENT_A(TKN_7) ENT_A(TKN_8) ENT_A(TKN_A1a) ENT_A(TKN_A1b)
     ENT_A(TKN_E4a) ENT_A(TKN_E2a) ENT_A(TKN_E1a) ENT_A(TKN_M64)
 
-    // 14-26: TN, f32 out, Scale
+    // TN, f32 out, Scale
     ENT_B(TNK_1) ENT_B(TNK_2) ENT_B(TNK_3) ENT_B(TNK_4) ENT_B(TNK_5)
     ENT_B(TNK_6) ENT_B(TNK_7) ENT_B(TNK_8) ENT_B(TNK_E2a) ENT_B(TNK_E2b)
     ENT_B(TNK_E1a) ENT_B(TNK_E1b) ENT_B(TNK_K4)
 
-    // 27-37: TN, f16 out, bias
+    // TN, f16 out, bias
     ENT_C(TNK_1) ENT_C(TNK_2) ENT_C(TNK_3) ENT_C(TNK_4) ENT_C(TNK_5)
     ENT_C(TNK_6) ENT_C(TNK_7) ENT_C(TNK_8) ENT_C(TNK_K4)
     ENT_C(TNK_E2a) ENT_C(TNK_E1a)
 
-    // 38-48: NN, f16 out, bias
+    // NN, f16 out, bias
     ENT_D(TKN_1) ENT_D(TKN_2) ENT_D(TKN_3) ENT_D(TKN_4) ENT_D(TKN_5)
     ENT_D(TKN_6) ENT_D(TKN_7) ENT_D(TKN_8)
     ENT_D(TKN_E4a) ENT_D(TKN_E2a) ENT_D(TKN_E1a)
 
-    // 49-58: TN, f16 out, no bias
+    // TN, f16 out, no bias
     ENT_E(TNK_1) ENT_E(TNK_2) ENT_E(TNK_3) ENT_E(TNK_4) ENT_E(TNK_6)
     ENT_E(TNK_7) ENT_E(TNK_8) ENT_E(TNK_K4) ENT_E(TNK_E2a) ENT_E(TNK_E1a)
 
-    // 59-68: NN, fp32 operands, no bias
+    // NN, fp32 operands, no bias
     ENT_F(DLKN_1, 4) ENT_F(DLKN_2, 4) ENT_F(DLKN_3, 4) ENT_F(DLKN_4, 4)
     ENT_F(DLKN_5, 4) ENT_F(DLKN_6, 1) ENT_F(DLKN_7, 2) ENT_F(DLKN_8, 2)
     ENT_F(DLKN_9, 1) ENT_F(DLKN_10, 2)
 
-    // 69-78: TN, fp32 operands, no bias
+    // TN, fp32 operands, no bias
     ENT_G(DLNK_1, 4) ENT_G(DLNK_2, 4) ENT_G(DLNK_3, 4) ENT_G(DLNK_4, 4)
     ENT_G(DLNK_5, 4) ENT_G(DLNK_6, 1) ENT_G(DLNK_7, 2) ENT_G(DLNK_8, 2)
     ENT_G(DLNK_9, 1) ENT_G(DLNK_10, 2)
 
-    // 79-81: NN, fp32 operands, no bias, K1 = 1
+    // NN, fp32 operands, no bias, K1 = 1
     ENT_F(DLK1_1, 4) ENT_F(DLK1_2, 4) ENT_F(DLK1_3, 4)
 };
 
