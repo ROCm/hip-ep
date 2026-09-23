@@ -1,7 +1,7 @@
 # GQA Prefill Test Suite
 
 Tests for the fused FA-2 WMMA prefill kernels (`sq > 1`), which the runtime
-selects by head_dim: v5 at 64, v7 at 128, v8 at 256.
+selects by head_dim: v6 at 64, v7 at 128, v8 at 256.
 
 Both programs are standalone: they compile `gqa_kernel.hip` directly and call
 the kernel entry, so nothing needs the EP or a model to be built first.
