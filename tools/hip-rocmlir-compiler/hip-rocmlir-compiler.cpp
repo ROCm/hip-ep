@@ -4,24 +4,21 @@
  */
 
 // hip-rocmlir-compiler: drive an ONNX-dialect module through the ONNX->HIP
-// head passes and the rocmlir hip->tosa conversion, then hand the tosa IR to
-// rocMLIR's high-level pipeline living inside librockCompiler.so.
+// head passes and the rocmlir hip->tosa conversion, then run rocMLIR's
+// high-level + backend pipelines on the fused GEMM to produce a GPU binary.
 //
-// Why the split / dlopen: librockCompiler.so statically embeds its OWN complete
-// copy of LLVM/MLIR. This executable also links its own copy. The two copies
-// have incompatible type systems (each dialect/type/op TypeID is the address of
-// a per-copy static, so they differ). Passing a live MLIRContext / pass manager
-// across the boundary aborts with "Trying to register different dialects for
-// the same namespace: tosa". The only safe hand-off is *serialized IR*: we run
-// our passes in our context, print the module to text, then dlopen the .so and
-// use ITS exported MLIR C-API (mlirContextCreate, mlirModuleCreateParse,
-// hipEpAddHighLevelPipeline, ...) to parse + run + print entirely inside the
-// .so's own MLIR. No MLIR object ever crosses the boundary -- only bytes.
+// rocMLIR (rocmlirTriton) is now built in-tree against the SAME LLVM/MLIR as
+// this executable (ENABLE_ROCMLIRTRITON), so its dialects/types share one
+// TypeID system with ours. That removes the reason the old design serialized
+// IR across a dlopen'd librockCompiler.so boundary (two incompatible LLVM
+// copies): we register the rocMLIR dialects into our own MLIRContext and call
+// the `mlir::rock::*` pipeline builders and tuning API directly on our own
+// ModuleOp -- no serialization, no dlopen, no C-API.
 //
-// The .so's high-level pipeline only rewrites functions marked `rock.kernel`
-// (set by fuse-rocmlir), so `main_graph` and its unregistered `hip.*` ops ride
-// through untouched; we allow unregistered dialects on the .so side and print
-// in generic form so those ops survive the round-trip.
+// The high-level pipeline only rewrites functions marked `rock.kernel` (set by
+// fuse-rocmlir) and asserts on non-kernel funcs, so we still hand it a module
+// containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops are
+// dropped from the clone we compile).
 
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -32,6 +29,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -43,7 +41,17 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
 
+// rocMLIR (rocmlirTriton) C++ API -- linked in-tree, same LLVM/MLIR as us.
+#include "mlir/Dialect/Rock/IR/Rock.h"
+#include "mlir/Dialect/Rock/IR/RockTuningParamAttrInterface.h"
+#include "mlir/Dialect/Rock/Pipelines/Pipelines.h"
+#include "mlir/Dialect/Rock/Tuning/RockTuning.h"
+#include "mlir/Dialect/Rock/utility/KnobUtils.h"
+#include "mlir/Dialect/Rock/utility/RocmDeviceName.h"
+#include "mlir/InitRocMLIRDialects.h"
+
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/LLVMContext.h"
@@ -56,254 +64,8 @@
 
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 
-#ifdef _WIN32
-// Included after the LLVM/MLIR headers above, and with the two macro guards,
-// so windows.h's min/max and its wider macro surface cannot rewrite them.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
-// ---------------------------------------------------------------------------
-// Minimal mlir-c type/function declarations for the symbols we resolve out of
-// librockCompiler.so. We deliberately do NOT include <mlir-c/*.h> here: those
-// declare the functions with default (import) linkage and could bind to this
-// executable's own MLIR at link time. Everything below is called ONLY through
-// dlsym'd pointers so it always hits the .so's copy. The struct layouts match
-// mlir-c/Support.h and mlir-c/IR.h (single-pointer opaque handles).
-// ---------------------------------------------------------------------------
-namespace rockcapi {
-
-struct MlirContext {
-  void *ptr;
-};
-struct MlirDialectRegistry {
-  void *ptr;
-};
-struct MlirModule {
-  void *ptr;
-};
-struct MlirOperation {
-  void *ptr;
-};
-struct MlirPassManager {
-  void *ptr;
-};
-struct MlirOpPassManager {
-  void *ptr;
-};
-struct MlirStringRef {
-  const char *data;
-  size_t length;
-};
-using MlirStringCallback = void (*)(MlirStringRef, void *);
-
-// Opaque rock tuning handles (mlir-c/Dialect/Rock.h).
-struct MlirRockTuningSpace {
-  void *ptr;
-};
-struct MlirRockTuningParam {
-  void *ptr;
-};
-
-// RocmlirTuningParamSetKind (mlir-c/Dialect/RockEnums.h).
-enum RocmlirTuningParamSetKind {
-  RocmlirTuningParamSetKindQuick = 0,
-  RocmlirTuningParamSetKindFull = 1,
-  RocmlirTuningParamSetKindExhaustive = 2,
-};
-
-// HipEpBackendOptions (mlir-c/Dialect/HipEp.h). Layout must match exactly --
-// hipEpAddBackendPipeline reads it by value through this struct.
-struct HipEpBackendOptions {
-  const char *arch;
-  int optLevel;
-  int numWarps;
-  int numCTAs;
-  int numStages;
-  int matrixInstrNonkdim;
-  int kpack;
-  int64_t useAsyncCopy;
-  int64_t useBlockPingpong;
-  int64_t useInThreadTranspose;
-  int64_t useBufferOps;
-  int64_t useBufferAtomics;
-  int64_t useReductionLayout;
-  int64_t useOptimizeEpilogue;
-  int wavesPerEU;
-};
-
-struct Api {
-  void *handle = nullptr;
-
-  MlirDialectRegistry (*dialectRegistryCreate)();
-  void (*dialectRegistryDestroy)(MlirDialectRegistry);
-  void (*registerRocMLIRDialects)(MlirDialectRegistry);
-  MlirContext (*contextCreateWithRegistry)(MlirDialectRegistry, bool);
-  void (*contextSetAllowUnregisteredDialects)(MlirContext, bool);
-  void (*contextLoadAllAvailableDialects)(MlirContext);
-  void (*contextDestroy)(MlirContext);
-  MlirModule (*moduleCreateParse)(MlirContext, MlirStringRef);
-  MlirOperation (*moduleGetOperation)(MlirModule);
-  void (*moduleDestroy)(MlirModule);
-  MlirPassManager (*passManagerCreate)(MlirContext);
-  MlirOpPassManager (*passManagerGetAsOpPassManager)(MlirPassManager);
-  int (*passManagerRunOnOp)(MlirPassManager,
-                            MlirOperation); // MlirLogicalResult
-  void (*passManagerDestroy)(MlirPassManager);
-  void (*operationPrint)(MlirOperation, MlirStringCallback, void *);
-
-  void (*hipEpAddHighLevelPipeline)(MlirOpPassManager);
-  bool (*hipEpAddBackendPipeline)(MlirOpPassManager,
-                                  const HipEpBackendOptions *);
-
-  // Rock perfConfig search-space enumeration (mlir-c/Dialect/Rock.h).
-  MlirRockTuningSpace (*rockTuningSpaceCreate)(MlirModule,
-                                               RocmlirTuningParamSetKind);
-  unsigned (*rockTuningGetNumParams)(MlirRockTuningSpace);
-  MlirRockTuningParam (*rockTuningParamCreate)();
-  bool (*rockTuningParamGet)(MlirRockTuningSpace, unsigned,
-                             MlirRockTuningParam);
-  size_t (*rockTuningParamToString)(MlirRockTuningParam, char *, size_t);
-  bool (*rockTuningSetFromStr)(MlirModule, MlirStringRef);
-  void (*rockTuningParamDestroy)(MlirRockTuningParam);
-  void (*rockTuningSpaceDestroy)(MlirRockTuningSpace);
-
-  // Compiled-artifact extraction (mlir-c/Dialect/MIGraphX.h).
-  void (*getKernelAttrs)(MlirModule, uint32_t *); // [block, grid, cluster]
-  bool (*getBinary)(MlirModule, size_t *, char *);
-};
-
-#ifdef _WIN32
-// Win32 stand-ins for the three POSIX loader calls used below, so the loading
-// logic itself stays platform-independent.
-//
-// RTLD_LOCAL has no Win32 counterpart because it needs none: a DLL never
-// contributes its exports to a process-global namespace, so the symbol
-// isolation that RTLD_LOCAL buys on ELF -- keeping the library's MLIR from
-// interposing this executable's own copy -- is simply how the loader already
-// behaves. The mode argument is therefore ignored.
-static void *dlopen(const char *path, int /*mode*/) {
-  return reinterpret_cast<void *>(LoadLibraryA(path));
-}
-
-static void *dlsym(void *handle, const char *name) {
-  return reinterpret_cast<void *>(
-      GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
-}
-
-static std::string dlerror() {
-  DWORD err = GetLastError();
-  char *text = nullptr;
-  DWORD n = FormatMessageA(
-      FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-          FORMAT_MESSAGE_IGNORE_INSERTS,
-      nullptr, err, 0, reinterpret_cast<char *>(&text), 0, nullptr);
-  std::string msg = n && text ? std::string(text, n) : std::string();
-  if (text)
-    LocalFree(text);
-  while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
-    msg.pop_back();
-  return msg.empty() ? "error " + std::to_string(err) : msg;
-}
-
-#define RTLD_NOW 0
-#define RTLD_LOCAL 0
-#endif
-
-template <typename T> static bool bind(void *handle, T &fn, const char *name) {
-  fn = reinterpret_cast<T>(dlsym(handle, name));
-  if (!fn) {
-    llvm::errs() << "error: symbol '" << name
-                 << "' not found in the rock compiler library\n";
-    return false;
-  }
-  return true;
-}
-
-static bool load(Api &api, const std::string &soPath) {
-  // RTLD_LOCAL keeps the .so's ~769 exported mlir* symbols out of the global
-  // namespace so they cannot interpose on this executable's own MLIR.
-  api.handle = dlopen(soPath.c_str(), RTLD_NOW | RTLD_LOCAL);
-  if (!api.handle) {
-    llvm::errs() << "error: dlopen('" << soPath << "') failed: " << dlerror()
-                 << "\n";
-    return false;
-  }
-  bool ok = true;
-  ok &=
-      bind(api.handle, api.dialectRegistryCreate, "mlirDialectRegistryCreate");
-  ok &= bind(api.handle, api.dialectRegistryDestroy,
-             "mlirDialectRegistryDestroy");
-  ok &= bind(api.handle, api.registerRocMLIRDialects,
-             "mlirRegisterRocMLIRDialects");
-  ok &= bind(api.handle, api.contextCreateWithRegistry,
-             "mlirContextCreateWithRegistry");
-  ok &= bind(api.handle, api.contextSetAllowUnregisteredDialects,
-             "mlirContextSetAllowUnregisteredDialects");
-  ok &= bind(api.handle, api.contextLoadAllAvailableDialects,
-             "mlirContextLoadAllAvailableDialects");
-  ok &= bind(api.handle, api.contextDestroy, "mlirContextDestroy");
-  ok &= bind(api.handle, api.moduleCreateParse, "mlirModuleCreateParse");
-  ok &= bind(api.handle, api.moduleGetOperation, "mlirModuleGetOperation");
-  ok &= bind(api.handle, api.moduleDestroy, "mlirModuleDestroy");
-  ok &= bind(api.handle, api.passManagerCreate, "mlirPassManagerCreate");
-  ok &= bind(api.handle, api.passManagerGetAsOpPassManager,
-             "mlirPassManagerGetAsOpPassManager");
-  ok &= bind(api.handle, api.passManagerRunOnOp, "mlirPassManagerRunOnOp");
-  ok &= bind(api.handle, api.passManagerDestroy, "mlirPassManagerDestroy");
-  ok &= bind(api.handle, api.operationPrint, "mlirOperationPrint");
-  ok &= bind(api.handle, api.hipEpAddHighLevelPipeline,
-             "hipEpAddHighLevelPipeline");
-  ok &=
-      bind(api.handle, api.hipEpAddBackendPipeline, "hipEpAddBackendPipeline");
-  ok &=
-      bind(api.handle, api.rockTuningSpaceCreate, "mlirRockTuningSpaceCreate");
-  ok &= bind(api.handle, api.rockTuningGetNumParams,
-             "mlirRockTuningGetNumParams");
-  ok &=
-      bind(api.handle, api.rockTuningParamCreate, "mlirRockTuningParamCreate");
-  ok &= bind(api.handle, api.rockTuningParamGet, "mlirRockTuningParamGet");
-  ok &= bind(api.handle, api.rockTuningParamToString,
-             "mlirRockTuningParamToString");
-  ok &= bind(api.handle, api.rockTuningSetFromStr, "mlirRockTuningSetFromStr");
-  ok &= bind(api.handle, api.rockTuningParamDestroy,
-             "mlirRockTuningParamDestroy");
-  ok &= bind(api.handle, api.rockTuningSpaceDestroy,
-             "mlirRockTuningSpaceDestroy");
-  ok &= bind(api.handle, api.getKernelAttrs, "mlirGetKernelAttrs");
-  ok &= bind(api.handle, api.getBinary, "mlirGetBinary");
-  return ok;
-}
-
-} // namespace rockcapi
-
-// Platform-specific because an MSVC shared-library build emits
-// rockCompiler.dll, not librockCompiler.so.
-static const char *defaultSoPath() {
-#ifdef _WIN32
-  return "build/rockCompiler.dll";
-#else
-  return "build/librockCompiler.so";
-#endif
-}
-
-// Resolve the rock compiler library path: ROCK_COMPILER_SO wins, else the
-// in-tree build location.
-static std::string resolveSoPath() {
-  if (const char *env = std::getenv("ROCK_COMPILER_SO"))
-    if (env[0] != '\0')
-      return env;
-  return defaultSoPath();
-}
-
-// Run the rocMLIR high-level pipeline inside the .so on the serialized module,
-// printing the result to stdout. `moduleText` is generic-form MLIR text.
 // Resolve the target GPU arch: ROCK_ARCH wins, else a default. The rock
 // backend pipeline validates and parses this (triple/chip/features).
 static std::string resolveArch() {
@@ -338,7 +100,8 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
   return fallback;
 }
 
-// Drive the rocMLIR flow inside the .so on the serialized tosa module:
+// Drive the rocMLIR flow directly on the tosa `rock.kernel` module (in our own
+// context -- rocMLIR dialects are registered alongside ours):
 //   1. high-level pipeline (tosa -> rock.gemm)
 //   2. affix a perfConfig to the gemm op (the `perf_config` string attribute):
 //      either the caller-supplied `userPerfConfig`, or -- when empty -- the
@@ -347,7 +110,7 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
 // When `stopAfterHighLevel` is set, stops after step 1 and returns the printed
 // rock MLIR in `out.highLevelMlir` (steps 2-3 are skipped). Otherwise returns
 // the compiled GPU binary in `binary` and the kernel launch geometry in
-// `gridSize`/`blockSize`. `moduleText` is generic-form MLIR text.
+// `gridSize`/`blockSize`.
 struct CompiledKernel {
   std::string binary;
   int64_t gridSize = 0;
@@ -355,174 +118,152 @@ struct CompiledKernel {
   std::string highLevelMlir;
 };
 
-static bool runRocmlirInSo(const std::string &moduleText,
-                           const std::string &soPath, const std::string &arch,
-                           const std::string &userPerfConfig,
-                           bool stopAfterHighLevel, CompiledKernel &out) {
-  using namespace rockcapi;
-  Api api;
-  if (!load(api, soPath))
-    return false;
-
-  MlirDialectRegistry registry = api.dialectRegistryCreate();
-  api.registerRocMLIRDialects(registry);
-  // Disable threading: keeps diagnostics ordered and avoids the .so spinning up
-  // its own thread pool for a single one-shot pipeline run.
-  MlirContext ctx =
-      api.contextCreateWithRegistry(registry, /*threading=*/false);
-  // main_graph still carries unregistered hip.* ops; let them parse
-  // generically.
-  api.contextSetAllowUnregisteredDialects(ctx, true);
-  api.contextLoadAllAvailableDialects(ctx);
-
-  MlirStringRef text{moduleText.data(), moduleText.size()};
-  MlirModule module = api.moduleCreateParse(ctx, text);
-  if (!module.ptr) {
-    llvm::errs() << "error: librockCompiler.so failed to parse the "
-                    "tosa module\n";
-    api.contextDestroy(ctx);
-    api.dialectRegistryDestroy(registry);
+// Map a parsed perfConfig string + arch onto rock's Triton/backend option
+// structs. Mirrors the option wiring the fork's C-API entrypoint
+// (hipEpAddBackendPipeline) did: the Triton/backend knobs are the tuning
+// fields of the chosen perfConfig, read straight out of the string rather than
+// re-defaulted (perfConfig field `numWaves` is the backend's `numWarps`); a
+// missing field falls back to the rock default and kKnobDefault (-1) leaves a
+// bool knob at its arch default.
+static bool buildBackendPipelineFor(mlir::OpPassManager &pm,
+                                    llvm::StringRef arch,
+                                    llvm::StringRef perfConfig) {
+  mlir::RocmDeviceName devName;
+  if (arch.empty() || mlir::failed(devName.parse(arch))) {
+    llvm::errs() << "error: invalid architecture: " << arch << "\n";
     return false;
   }
-  MlirOperation moduleOp = api.moduleGetOperation(module);
 
+  mlir::rock::KernelOptions kOpts;
+  mlir::rock::buildKernelPipeline(pm, kOpts);
+
+  mlir::rock::TritonOptions tOpts;
+  tOpts.arch = devName.getChip().str();
+  tOpts.numWarps = static_cast<int>(perfConfigField(perfConfig, "numWaves", 4));
+  tOpts.numCTAs = static_cast<int>(perfConfigField(perfConfig, "numCTAs", 1));
+  tOpts.numStages =
+      static_cast<int>(perfConfigField(perfConfig, "numStages", 1));
+  tOpts.matrixInstrNonkdim =
+      static_cast<int>(perfConfigField(perfConfig, "matrixInstrNonkdim", 0));
+  tOpts.kpack = static_cast<int>(perfConfigField(perfConfig, "kpack", 1));
+  tOpts.useAsyncCopy = perfConfigField(perfConfig, "useAsyncCopy", -1);
+  tOpts.useBlockPingpong = perfConfigField(perfConfig, "useBlockPingpong", -1);
+  tOpts.useInThreadTranspose =
+      perfConfigField(perfConfig, "useInThreadTranspose", -1);
+  tOpts.useBufferOps = perfConfigField(perfConfig, "useBufferOps", -1);
+  tOpts.useBufferAtomics = perfConfigField(perfConfig, "useBufferAtomics", -1);
+  tOpts.useReductionLayout =
+      perfConfigField(perfConfig, "useReductionLayout", -1);
+  tOpts.useOptimizeEpilogue =
+      perfConfigField(perfConfig, "useOptimizeEpilogue", -1);
+  mlir::rock::buildTritonPipeline(pm, tOpts);
+
+  mlir::rock::BackendOptions bOpts;
+  bOpts.triple = devName.getTriple().str();
+  bOpts.chip = devName.getChip().str();
+  bOpts.features = devName.getFeaturesForBackend();
+  bOpts.optLevel = 3;
+  bOpts.numWarps = tOpts.numWarps;
+  bOpts.numCTAs = tOpts.numCTAs;
+  bOpts.wavesPerEU =
+      static_cast<int>(perfConfigField(perfConfig, "wavesPerEU", 0));
+  mlir::rock::buildBackendPipeline(pm, bOpts);
+  return true;
+}
+
+// Walk the compiled module for the single gpu.binary object and pull out its
+// ELF blob plus the {block, grid} launch geometry (mirrors the fork's
+// mlirGetBinary / mlirGetKernelAttrs C-API, in C++).
+static bool extractCompiledKernel(mlir::ModuleOp mod, CompiledKernel &out) {
+  unsigned count = 0;
+  mod.walk([&](mlir::gpu::BinaryOp binary) {
+    auto object = llvm::cast<mlir::gpu::ObjectAttr>(binary.getObjects()[0]);
+    llvm::StringRef blob = object.getObject().getValue();
+    out.binary.assign(blob.begin(), blob.end());
+    for (auto kernel : object.getKernels()) {
+      auto block = kernel.getAttr<mlir::IntegerAttr>(
+          mlir::rock::BlockSizeAttr::getMnemonic());
+      auto grid = kernel.getAttr<mlir::IntegerAttr>(
+          mlir::rock::GridSizeAttr::getMnemonic());
+      if (!block || !grid)
+        continue;
+      out.blockSize = block.getInt();
+      out.gridSize = grid.getInt();
+      ++count;
+    }
+  });
+  return count == 1 && !out.binary.empty();
+}
+
+static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
+                       const std::string &userPerfConfig,
+                       bool stopAfterHighLevel, CompiledKernel &out) {
   auto fail = [&](const char *msg) {
     llvm::errs() << "error: " << msg << "\n";
-    api.moduleDestroy(module);
-    api.contextDestroy(ctx);
-    api.dialectRegistryDestroy(registry);
     return false;
   };
 
   // 1. High-level pipeline: tosa -> rock.gemm.
   {
-    MlirPassManager pm = api.passManagerCreate(ctx);
-    api.hipEpAddHighLevelPipeline(api.passManagerGetAsOpPassManager(pm));
-    int r = api.passManagerRunOnOp(pm, moduleOp);
-    api.passManagerDestroy(pm);
-    if (r == 0)
+    mlir::PassManager pm(module.getContext());
+    pm.setNesting(mlir::PassManager::Nesting::Implicit);
+    mlir::rock::buildHighlevelPipeline(pm);
+    if (mlir::failed(pm.run(module)))
       return fail("rocMLIR high-level pipeline failed");
   }
 
   // Stop after the high-level pipeline: capture the rock MLIR text and return.
   if (stopAfterHighLevel) {
-    auto appendCb = [](MlirStringRef s, void *userData) {
-      static_cast<std::string *>(userData)->append(s.data, s.length);
-    };
-    api.operationPrint(moduleOp, appendCb, &out.highLevelMlir);
-    api.moduleDestroy(module);
-    api.contextDestroy(ctx);
-    api.dialectRegistryDestroy(registry);
+    llvm::raw_string_ostream os(out.highLevelMlir);
+    module.print(os);
     return true;
   }
 
   // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
   //    A caller-supplied config is used verbatim; otherwise take the first
-  //    entry enumerated from the tuning search space. mlirRockTuningSetFromStr
-  //    stamps `perf_config` onto the gemm op.
-  char perfConfig[1024]; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
+  //    entry enumerated from the tuning search space. rock::tuningSetStr stamps
+  //    `perf_config` onto the gemm op.
+  llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
   if (!userPerfConfig.empty()) {
-    if (userPerfConfig.size() >= sizeof(perfConfig))
-      return fail("supplied perfConfig string too long");
-    std::memcpy(perfConfig, userPerfConfig.data(), userPerfConfig.size());
-    perfConfig[userPerfConfig.size()] = '\0';
+    perfConfig.assign(userPerfConfig.begin(), userPerfConfig.end());
     llvm::errs() << "[hip-rocmlir-compiler] affixing supplied perfConfig: "
                  << perfConfig << "\n";
-    MlirStringRef perf{perfConfig, userPerfConfig.size()};
-    if (!api.rockTuningSetFromStr(module, perf))
+    if (!mlir::rock::tuningSetStr(module, perfConfig))
       return fail("failed to affix supplied perfConfig to the gemm op");
   } else {
-    MlirRockTuningSpace space =
-        api.rockTuningSpaceCreate(module, RocmlirTuningParamSetKindFull);
-    unsigned num = api.rockTuningGetNumParams(space);
+    mlir::rock::TuningParamSet *space = mlir::rock::createTunableParamSpace(
+        module, mlir::rock::TuningParamSetKind::Full);
+    unsigned num = space ? space->tuningRange.size() : 0;
     if (num == 0) {
-      api.rockTuningSpaceDestroy(space);
+      delete space;
       return fail("perfConfig search space is empty");
     }
-
-    MlirRockTuningParam param = api.rockTuningParamCreate();
-    if (!api.rockTuningParamGet(space, /*pos=*/0, param)) {
-      api.rockTuningParamDestroy(param);
-      api.rockTuningSpaceDestroy(space);
+    mlir::rock::ParamEntry entry;
+    if (!mlir::rock::tuningGetParam(space, /*pos=*/0, &entry)) {
+      delete space;
       return fail("failed to read the first perfConfig entry");
     }
-
-    size_t n =
-        api.rockTuningParamToString(param, perfConfig, sizeof(perfConfig));
-    if (n >= sizeof(perfConfig)) {
-      api.rockTuningParamDestroy(param);
-      api.rockTuningSpaceDestroy(space);
-      return fail("perfConfig string too long");
-    }
-    perfConfig[n] = '\0';
+    entry.param.getPerfConfigStr(perfConfig);
+    delete space;
     llvm::errs() << "[hip-rocmlir-compiler] perfConfig search space size: "
                  << num << "; affixing first entry: " << perfConfig << "\n";
-
-    MlirStringRef perf{perfConfig, n};
-    bool stamped = api.rockTuningSetFromStr(module, perf);
-    api.rockTuningParamDestroy(param);
-    api.rockTuningSpaceDestroy(space);
-    if (!stamped)
+    if (!mlir::rock::tuningSetStr(module, perfConfig))
       return fail("failed to affix perfConfig to the gemm op");
   }
 
   // 3. Backend pipeline: rock (with the affixed perf_config) -> LLVM / binary.
-  //    The Triton/backend knobs are the tuning fields of the chosen perfConfig,
-  //    so read them straight out of the string rather than re-defaulting them
-  //    (the perfConfig field `numWaves` is the backend's `numWarps`). A missing
-  //    field falls back to the rock default; kKnobDefault (-1) leaves a bool
-  //    knob at its arch default.
   {
-    llvm::StringRef perf(perfConfig);
-    HipEpBackendOptions opts{};
-    opts.arch = arch.c_str();
-    opts.optLevel = 3;
-    opts.numWarps = static_cast<int>(perfConfigField(perf, "numWaves", 4));
-    opts.numCTAs = static_cast<int>(perfConfigField(perf, "numCTAs", 1));
-    opts.numStages = static_cast<int>(perfConfigField(perf, "numStages", 1));
-    opts.matrixInstrNonkdim =
-        static_cast<int>(perfConfigField(perf, "matrixInstrNonkdim", 0));
-    opts.kpack = static_cast<int>(perfConfigField(perf, "kpack", 1));
-    opts.wavesPerEU = static_cast<int>(perfConfigField(perf, "wavesPerEU", 0));
-    opts.useAsyncCopy = perfConfigField(perf, "useAsyncCopy", -1);
-    opts.useBlockPingpong = perfConfigField(perf, "useBlockPingpong", -1);
-    opts.useInThreadTranspose =
-        perfConfigField(perf, "useInThreadTranspose", -1);
-    opts.useBufferOps = perfConfigField(perf, "useBufferOps", -1);
-    opts.useBufferAtomics = perfConfigField(perf, "useBufferAtomics", -1);
-    opts.useReductionLayout = perfConfigField(perf, "useReductionLayout", -1);
-    opts.useOptimizeEpilogue = perfConfigField(perf, "useOptimizeEpilogue", -1);
-
-    MlirPassManager pm = api.passManagerCreate(ctx);
-    if (!api.hipEpAddBackendPipeline(api.passManagerGetAsOpPassManager(pm),
-                                     &opts)) {
-      api.passManagerDestroy(pm);
+    mlir::PassManager pm(module.getContext());
+    pm.setNesting(mlir::PassManager::Nesting::Implicit);
+    if (!buildBackendPipelineFor(pm, arch, perfConfig))
       return fail("failed to build the backend pipeline");
-    }
-    int r = api.passManagerRunOnOp(pm, moduleOp);
-    api.passManagerDestroy(pm);
-    if (r == 0)
+    if (mlir::failed(pm.run(module)))
       return fail("rocMLIR backend pipeline failed");
   }
 
-  // 4. Extract the compiled artifact: the gpu.binary blob plus launch geometry.
-  //    mlirGetKernelAttrs returns uint32_t[3] = {block_size, grid_size,
-  //    cluster_size}.
-  uint32_t attrs[3] = {0, 0, 0};
-  api.getKernelAttrs(module, attrs);
-  out.blockSize = attrs[0];
-  out.gridSize = attrs[1];
-
-  size_t binSize = 0;
-  if (!api.getBinary(module, &binSize, nullptr) || binSize == 0)
-    return fail("failed to query compiled binary size");
-  out.binary.resize(binSize);
-  if (!api.getBinary(module, nullptr, out.binary.data()))
-    return fail("failed to extract compiled binary");
-
-  api.moduleDestroy(module);
-  api.contextDestroy(ctx);
-  api.dialectRegistryDestroy(registry);
+  // 4. Extract the compiled artifact: the gpu.binary blob + launch geometry.
+  if (!extractCompiledKernel(module, out))
+    return fail("failed to extract the compiled binary / kernel attributes");
   return true;
 }
 
@@ -592,7 +333,7 @@ int main(int argc, char **argv) {
     llvm::errs()
         << "Usage: " << argv[0] << " <input.onnx.mlir> -o <output> [options]\n"
         << "  Runs ONNX->HIP head passes, compiles the fused GEMM via\n"
-        << "  the rocMLIR pipeline (librockCompiler.so), embeds the GPU\n"
+        << "  the rocMLIR pipeline (linked in-tree), embeds the GPU\n"
         << "  binary into hip.rocmlir, runs the ONNX->HIP tail +\n"
         << "  HIP->LLVM lowering, and emits LLVM bitcode to <output>.\n"
         << "\n"
@@ -617,9 +358,8 @@ int main(int argc, char **argv) {
         << "                       write the rock MLIR (text) to <output> "
            "instead of\n"
         << "                       the compiled bitcode.\n"
-        << "  Set ROCK_COMPILER_SO to override the rock compiler library path "
-           "(default: "
-        << defaultSoPath() << ").\n";
+        << "  Set ROCK_ARCH to override the target GPU arch (default: "
+        << resolveArch() << ").\n";
     return 1;
   }
 
@@ -631,9 +371,18 @@ int main(int argc, char **argv) {
   }
 
   // Our own context, loaded with the same dialects the EP uses (adds tosa
-  // lazily as a dependent dialect of convert-hip-to-tosa).
+  // lazily as a dependent dialect of convert-hip-to-tosa). rocMLIR is built
+  // against the same LLVM/MLIR (ENABLE_ROCMLIRTRITON), so we additionally
+  // register its dialects (rock, migraphx, triton, ...) into this one context
+  // and run the rock pipelines directly -- no serialization boundary.
   mlir::MLIRContext context;
   hip::compiler::loadAllDialects(context);
+  {
+    mlir::DialectRegistry rockRegistry;
+    mlir::registerRocMLIRDialects(rockRegistry);
+    context.appendDialectRegistry(rockRegistry);
+    context.loadAllAvailableDialects();
+  }
   hip::compiler::registerAllPasses();
 
   llvm::SourceMgr sourceMgr;
@@ -678,7 +427,7 @@ int main(int argc, char **argv) {
   // Stage 2: on a CLONE, run the hip->tosa conversion (front of
   // buildRocMlirPipeline, minus its terminal hipEpAddHighLevelPipeline -- that
   // runs in the .so), then serialize only the `rock.kernel` funcs and compile
-  // them through the rocMLIR pipeline in librockCompiler.so. The clone is
+  // them through the in-tree rocMLIR pipeline. The clone is
   // discarded; we only want the compiled binary + launch geometry back.
   mlir::OwningOpRef<mlir::ModuleOp> tosaModule = module->clone();
   {
@@ -702,9 +451,9 @@ int main(int argc, char **argv) {
 
   // The rocMLIR high-level pipeline errors on any non-kernel func (its
   // tosa->rock passes assert a `rock.kernel` attribute and walk ops assuming
-  // registered dialects). So hand it ONLY the `rock.kernel` functions: drop
-  // everything else (e.g. `main_graph` and its hip.* ops). Generic-form text is
-  // the portable interchange between this executable's MLIR and the .so's.
+  // registered dialects). So collect the `rock.kernel` functions; each is
+  // compiled from a clone that drops every other func (e.g. `main_graph` and
+  // its hip.* ops).
   llvm::SmallVector<std::string> kernelNames;
   for (auto func : tosaModule->getOps<mlir::func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
@@ -729,13 +478,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // The .so's tuning and backend entry points are module-scoped and assume a
-  // single anchor op per module, so a graph with several outlined kernels (a
+  // The tuning and backend entry points are module-scoped and assume a single
+  // anchor op per module, so a graph with several outlined kernels (a
   // decomposed conv_transpose, say) has to be compiled one kernel at a time.
-  // Each module keeps the original module-level attributes; only the sibling
-  // kernel funcs are dropped.
+  // Each single-kernel module keeps the original module-level attributes; only
+  // the sibling kernel funcs are dropped, then the linked-in rocMLIR pipelines
+  // run on it directly (same context, no serialization).
   llvm::StringMap<CompiledKernel> compiledByKernel;
-  const std::string soPath = resolveSoPath();
   const std::string arch = resolveArch();
   for (auto [index, name] : llvm::enumerate(kernelNames)) {
     mlir::OwningOpRef<mlir::ModuleOp> single = tosaModule->clone();
@@ -744,14 +493,6 @@ int main(int argc, char **argv) {
       if (func.getSymName() != name)
         func.erase();
 
-    std::string moduleText;
-    {
-      llvm::raw_string_ostream os(moduleText);
-      mlir::OpPrintingFlags flags;
-      flags.printGenericOpForm();
-      single->print(os, flags);
-    }
-
     auto it = perfConfigByKernel.find(name);
     const std::string &perfConfig =
         it != perfConfigByKernel.end() ? it->second : defaultPerfConfig;
@@ -759,8 +500,8 @@ int main(int argc, char **argv) {
       llvm::errs() << "[hip-rocmlir-compiler] compiling kernel '" << name
                    << "' (" << (index + 1) << " of " << kernelNames.size()
                    << ")\n";
-    if (!runRocmlirInSo(moduleText, soPath, arch, perfConfig, dumpHighLevel,
-                        compiledByKernel[name]))
+    if (!runRocmlir(*single, arch, perfConfig, dumpHighLevel,
+                    compiledByKernel[name]))
       return 1;
   }
 

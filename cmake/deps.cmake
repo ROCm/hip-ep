@@ -18,6 +18,76 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# Local patches applied to the fetched rocmlirTriton checkout, each temporary
+# until upstreamed and the rocmlirtriton pin is bumped:
+#   - rocmlirTriton-use-external-LLVM.patch: skip its in-tree LLVM build when
+#     this project already provides LLVM/MLIR (ROCMLIR_EXTERNAL_LLVM path in
+#     rocmlirTriton's cmake/triton.cmake).
+#   - rocmlirTriton-fix-header-dependencies.patch: add the missing MIGraphX
+#     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
+#     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
+#     tablegen collector or include-dir export.
+#
+# We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
+# patch step on every reconfigure (not just on first clone), and `git apply` is
+# not idempotent, so the second configure fails with "patch does not apply".
+# Instead we apply the patches ourselves via this helper right after populate.
+#
+# The patches are a cumulative series: each is generated on top of the previous
+# one and several edit the same file (cmake/triton.cmake) in the same region.
+# That means an intermediate patch can no longer be reverse-checked once a later
+# one is applied (the later patch changed the context its reverse expects), so
+# per-patch reverse-checking is not a reliable "already applied?" test. We
+# instead reverse-check ONLY the last patch: nothing is applied on top of it, so
+# its reverse-check is stable. If the last patch is present the whole series is
+# applied and we skip; otherwise we (re)apply the series from a pristine tree.
+set(_rocmlirtriton_patches
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch")
+set(_rocmlirtriton_patches_abs "")
+foreach(_p IN LISTS _rocmlirtriton_patches)
+  get_filename_component(_p "${_p}" ABSOLUTE)
+  list(APPEND _rocmlirtriton_patches_abs "${_p}")
+endforeach()
+
+function(_apply_rocmlirtriton_patch src_dir)
+  find_package(Git QUIET REQUIRED)
+
+  # Already applied? Reverse-check only the last patch in the series (see the
+  # note above the patch list). --ignore-whitespace tolerates the CRLF vs LF
+  # mismatch a core.autocrlf checkout introduces on Windows.
+  list(GET _rocmlirtriton_patches_abs -1 _last_patch)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" apply --reverse --check --ignore-whitespace "${_last_patch}"
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc OUTPUT_QUIET ERROR_QUIET)
+  if(_rc EQUAL 0)
+    return()
+  endif()
+
+  # Not (fully) applied. Restore the tree to pristine first so the series
+  # applies cleanly even from a partially-patched state; this only runs on the
+  # cold path (first configure or after a manual reset), so it adds no
+  # steady-state reconfigure churn.
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" checkout -- .
+    WORKING_DIRECTORY "${src_dir}"
+    RESULT_VARIABLE _rc)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "Failed to restore ${src_dir} before patching")
+  endif()
+
+  foreach(_patch IN LISTS _rocmlirtriton_patches_abs)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" apply "${_patch}"
+      WORKING_DIRECTORY "${src_dir}"
+      RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+      message(FATAL_ERROR "Failed to apply ${_patch} in ${src_dir}")
+    endif()
+  endforeach()
+endfunction()
+
 # ===========================================================================
 # Toolchain deps, resolved first so the EP section below and the top-level
 # CMakeLists.txt reuse the same targets. find_package wins when a prefix is
@@ -167,7 +237,24 @@ else()
   # external dependency. Kept identical to the CI LLVM build so the prefix that
   # CI caches (find_package path) and this fallback produce equivalent toolsets.
   set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
-  set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  # rocMLIR/Triton needs the AMDGPU backend. When ENABLE_ROCMLIRTRITON is on,
+  # the single in-tree LLVM must be a superset that satisfies both hip-ep and
+  # rocmlirTriton (which is added as a subdirectory later and reuses these
+  # targets instead of building its own LLVM). Assertions are left at the
+  # build-type default (OFF for Release) to match the CI prebuilt LLVM prefix,
+  # so the from-source and find_package paths produce equivalent toolsets.
+  if(ENABLE_ROCMLIRTRITON)
+    set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
+    # rocMLIR's Rock libraries link Triton targets and get registered into
+    # MLIR's MLIRTargets install-export set; Triton targets are not in any
+    # export set, so install(EXPORT MLIRTargets) errors at generate time.
+    # Toolchain-only install disables MLIR's export machinery (this embedded
+    # LLVM is consumed from the build tree, never installed), matching what
+    # rocmlirTriton's own in-tree build sets.
+    set(LLVM_INSTALL_TOOLCHAIN_ONLY ON CACHE BOOL "" FORCE)
+  else()
+    set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
+  endif()
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
@@ -195,10 +282,14 @@ else()
   FetchContent_Declare(rocmlirtriton
     GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
     GIT_TAG ${DEP_HASH_rocmlirtriton}
-    GIT_SHALLOW TRUE
+    # GIT_SHALLOW cannot check out a non-tip pinned commit; the rocmlirtriton
+    # pin is an ancestor of develop, not its current tip, so a full fetch is
+    # required or git reports "reference is not a tree".
+    GIT_SHALLOW FALSE
     SOURCE_SUBDIR external
     EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(rocmlirtriton)
+  _apply_rocmlirtriton_patch("${rocmlirtriton_SOURCE_DIR}")
   FetchContent_Declare(llvm-project
     SOURCE_DIR "${rocmlirtriton_SOURCE_DIR}/external/llvm-project"
     SOURCE_SUBDIR llvm
@@ -271,6 +362,108 @@ else()
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     "${llvm-project_SOURCE_DIR}/lld/include"
     "${llvm-project_BINARY_DIR}/tools/lld/include")
+endif()
+
+# ===========================================================================
+# rocmlirTriton (rocMLIR/Triton) in-tree targets. Only when ENABLE_ROCMLIRTRITON
+# is on. rocmlirTriton reuses the LLVM/MLIR resolved above (its cmake/triton.cmake
+# detects the already-defined MLIRSupport target and skips building its own
+# LLVM), so it must be configured after LLVM is resolved. Its own triton.cmake
+# sets up the MLIR CMake module path and includes (TableGen/AddMLIR/AddLLVM),
+# so it does not need the top-level module setup that runs later.
+#
+# The from-source LLVM path above already populated the checkout; the
+# find_package path did not, so populate it here with the SAME populate-only
+# declaration (SOURCE_SUBDIR external, so MakeAvailable clones/patches but does
+# not configure rocMLIR/Triton). Either way, add_subdirectory then configures
+# the rocMLIR/Triton targets as a separate step -- decoupling population from
+# configuration keeps the FetchContent declaration identical across configures
+# so the patch step never re-runs.
+# ===========================================================================
+if(ENABLE_ROCMLIRTRITON)
+  # We link rocMLIR/Triton libraries directly and provide LLVM/MLIR ourselves,
+  # so the fat archive (which also bundles a second copy of LLVM/MLIR) is both
+  # unnecessary and harmful (duplicate symbols, ~4x binary size). Build the
+  # ordinary per-target static libs instead and link the curated closure.
+  set(BUILD_FAT_LIBROCKCOMPILER OFF CACHE BOOL "" FORCE)
+  if(NOT DEFINED rocmlirtriton_SOURCE_DIR)
+    FetchContent_Declare(rocmlirtriton
+      GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
+      GIT_TAG ${DEP_HASH_rocmlirtriton}
+      # Full fetch: the pin is a non-tip commit (a shallow clone cannot check
+      # it out). SOURCE_SUBDIR external keeps this populate-only, identical to
+      # the from-source LLVM declaration above.
+      GIT_SHALLOW FALSE
+      SOURCE_SUBDIR external
+      EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(rocmlirtriton)
+    _apply_rocmlirtriton_patch("${rocmlirtriton_SOURCE_DIR}")
+  endif()
+  # Triton's CMake runs `find_package(MLIR REQUIRED CONFIG)` (and LLVM/LLD)
+  # WITHOUT NO_DEFAULT_PATH, so it searches CMAKE_PREFIX_PATH. In the embedded
+  # LLVM path this project builds LLVM/MLIR via add_subdirectory and hand-sets
+  # the consumer variables (HIPDNN_LLVM_EMBEDDED) instead of installing a
+  # package, and it also puts THEROCK_DIST on CMAKE_PREFIX_PATH for
+  # find_package(hip). Without an in-tree MLIR package ahead of it, Triton would
+  # resolve ROCm's bundled MLIR/LLVM and compile the NVIDIA backend against the
+  # wrong (ABI-incompatible) LLVM headers. The embedded sub-build DOES emit
+  # usable build-tree package configs -- point Triton at them and PREPEND so
+  # they win over the ROCm SDK on the search path.
+  if(HIPDNN_LLVM_EMBEDDED)
+    if(EXISTS "${CMAKE_BINARY_DIR}/lib/cmake/mlir/MLIRConfig.cmake")
+      list(PREPEND CMAKE_PREFIX_PATH
+        "${CMAKE_BINARY_DIR}/lib/cmake/mlir"
+        "${CMAKE_BINARY_DIR}/lib/cmake/lld"
+        "${llvm-project_BINARY_DIR}/lib/cmake/llvm")
+    endif()
+    # Triton's build_helpers derives LLVM_INCLUDE_DIRS/LLVM_LIBRARY_DIR from
+    # LLVM_SYSPATH; point it at the real LLVM build prefix (its /include and
+    # /lib), otherwise triton.cmake defaults it to an empty in-tree path and the
+    # NVIDIA backend compiles against ROCm's LLVM headers. (No longer used for a
+    # fat-library archive -- that is disabled -- but still consumed here.)
+    set(LLVM_SYSPATH "${llvm-project_BINARY_DIR}"
+        CACHE PATH "LLVM build prefix consumed by rocmlirTriton/Triton" FORCE)
+  endif()
+
+  set(ROCM_PATH "${THEROCK_DIST}")
+  add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
+                   "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
+
+  # Curated rock/triton link closure. rocMLIR maintains this list for its fat
+  # archive in mlir/tools/rocmlir-lib/librockcompiler_deps.cmake (set(__rocmlir_libs
+  # ...)); read it and link those as TARGETS so CMake resolves the transitive
+  # closure and the linker pulls only what is referenced -- no bundled second
+  # copy of LLVM/MLIR. Drop the MLIRCAPI* members: the C-API is unused now that
+  # hip-rocmlir-compiler calls the rock C++ API directly. That generated file
+  # only runs set(...) (no side effects), so it is safe to include here.
+  set(_rocmlir_deps_file
+      "${rocmlirtriton_SOURCE_DIR}/mlir/tools/rocmlir-lib/librockcompiler_deps.cmake")
+  if(EXISTS "${_rocmlir_deps_file}")
+    include("${_rocmlir_deps_file}")
+    set(_rocmlir_link_closure "")
+    foreach(_lib IN LISTS __rocmlir_libs)
+      if(NOT _lib MATCHES "^MLIRCAPI" AND TARGET ${_lib})
+        list(APPEND _rocmlir_link_closure "${_lib}")
+      endif()
+    endforeach()
+    # The rock closure references Triton conversion/dialect libraries
+    # (TritonGPUToLLVM, TritonNVIDIAGPUToLLVM, GluonTransforms, ...) that the
+    # fat-library path bundles via the TRITON_LIBS global property rather than
+    # __rocmlir_libs. Append them (and plugins) so the direct-link closure is
+    # complete.
+    get_property(_triton_libs GLOBAL PROPERTY TRITON_LIBS)
+    get_property(_triton_plugins GLOBAL PROPERTY TRITON_PLUGINS)
+    foreach(_lib IN LISTS _triton_libs _triton_plugins)
+      if(TARGET ${_lib})
+        list(APPEND _rocmlir_link_closure "${_lib}")
+      endif()
+    endforeach()
+    set(HIPDNN_ROCMLIR_LINK_LIBS "${_rocmlir_link_closure}"
+        CACHE INTERNAL "rocMLIR/Triton C++ link closure for in-tree consumers")
+  else()
+    message(FATAL_ERROR
+      "rocMLIR link-closure list not found: ${_rocmlir_deps_file}")
+  endif()
 endif()
 
 # ===========================================================================
