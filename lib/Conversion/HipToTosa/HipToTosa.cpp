@@ -6213,8 +6213,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
                        /*FloatOnly=*/true>,
         LogicalNotConverter, RoundConverter, ModConverter, AtanConverter,
         SqrtConverter, SoftplusConverter, SignConverter, WhereConverter,
-        LeakyReluConverter,
-        SoftmaxConverter, ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
+        LeakyReluConverter, SoftmaxConverter,
+        ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
         ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
         ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
@@ -6224,8 +6224,8 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
         RangeConverter, RopeConverter, GqaConverter, MhaConverter,
-        RmsNormConverter, LayerNormConverter,
-        InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        RmsNormConverter, LayerNormConverter, InstanceNormConverter,
+        SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
