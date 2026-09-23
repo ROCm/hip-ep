@@ -1,234 +1,127 @@
-# Scheme Pattern DSL Test Suite
+# Pattern DSL Tests - Data-Driven Approach
 
-Clean, organized test architecture with **zero duplication** - all test patterns defined once in a single source of truth.
+Simple, scalable test infrastructure using eval-based pattern generation.
 
 ## Quick Start
 
 ```bash
 cd /workspace/hip-ep/hip-ep-1/lib/Dialect/Hipsr/Scheme
-scheme --libdirs .:libraries --program test/run-all-tests.scm
+scheme --script test/run-tests.scm
 ```
 
-## Architecture: Single Source of Truth
+## Architecture
 
 ```
 test/
-├── test-patterns.sls          # ⭐ SINGLE SOURCE: All test patterns defined here
-├── phase-1-parse-test.sls     # Tests parsing (imports test-patterns)
-├── phase-2-validate-test.sls  # Tests validation (imports test-patterns)
-├── phase-3-analyze-test.sls   # Tests analysis (imports test-patterns)
-├── phase-4-codegen-test.sls   # Tests codegen (imports test-patterns)
-├── integration-test.sls       # Tests all phases (imports test-patterns)
-├── test-framework.sls         # Test harness (assertions, lifecycle)
-├── mock-ffi.sls               # Mock FFI functions
-└── run-all-tests.scm          # Test runner
+├── run-tests.scm              # Test runner - runs all 4 phases
+├── test-helpers.sls           # Infrastructure - eval patterns from data
+├── test-pattern-bodies.scm    # Test data - single source of truth
+└── README.md                  # This file
 ```
 
-### Key Design: No Duplication
+## How It Works
 
-**Problem (Old):** Test patterns duplicated across parse-test.sls, validate-test.sls, analyze-test.sls, codegen-test.sls → maintenance nightmare
+1. **Load test data**: Read S-expressions from `test-pattern-bodies.scm`
+2. **Generate pattern**: Build `define-conversion-pattern` expression with debug flag
+3. **Eval pattern**: Use `eval` + `interaction-environment` to define it
+4. **Check result**: Verify pattern compiled successfully
 
-**Solution (New):** Define each test pattern ONCE in `test-patterns.sls` with 5 versions:
-- `pattern-*-parse`: Uses `:debug-parse` flag (returns AST after parse)
-- `pattern-*-validate`: No debug flags (validates successfully)
-- `pattern-*-analyze`: Uses `:debug-analyze` flag (returns AST with actions)
-- `pattern-*-codegen`: Uses `:debug-codegen` flag (returns quoted code)
-- `pattern-*-lambda`: No debug flags (normal lambda generation)
+## Test Data Format
 
-**Example:**
-```scheme
-;; test-patterns.sls - define once
-(define-conversion-pattern :debug-parse pattern-basic-parse
-  :match %out = "test.op" (%in)
-  :rewrite %out :with (%new = "new.op" (%in)))
-
-(define-conversion-pattern pattern-basic-validate
-  :match %out = "test.op" (%in)
-  :rewrite %out :with (%new = "new.op" (%in)))
-
-(define-conversion-pattern :debug-analyze pattern-basic-analyze
-  :match %out = "test.op" (%in)
-  :rewrite %out :with (%new = "new.op" (%in)))
-;; ... and so on
-```
-
-Phase test files just **import and assert**:
-```scheme
-;; phase-1-parse-test.sls
-(import (test test-patterns))
-(test-equal "basic: has root-op-name" "test.op"
-  (ast-get pattern-basic-parse 'root-op-name))
-```
-
-## Test Patterns (12 Canonical Patterns)
-
-All defined in `test-patterns.sls`:
-
-1. **pattern-basic**: Single operation, simple match/rewrite
-2. **pattern-required**: Multiple required operands
-3. **pattern-optional**: `(&optional ...)` operand group
-4. **pattern-variadic**: `(&variadic ...)` operand group
-5. **pattern-mixed**: Required + optional + variadic
-6. **pattern-where**: `:where` guard (per-operation)
-7. **pattern-then-let**: `:then-let` bindings (global)
-8. **pattern-two-ops**: Two operations, DAG traversal
-9. **pattern-reuse**: Same operand twice (check-eq)
-10. **pattern-combined**: :where + :then-let + multiple ops
-11. **pattern-region**: Regions with blocks
-12. **pattern-multi-rewrite**: Multiple rewrite operations
-
-Each pattern has 5 versions: `-parse`, `-validate`, `-analyze`, `-codegen`, `-lambda`
-
-## Phase-Specific Tests
-
-### Phase 1: Parse (`phase-1-parse-test.sls`)
-
-Tests ONLY parsing:
-- Operand parsing and flattening
-- :where guard parsing
-- :then-let binding parsing
-- Region/block structure parsing
-- Debug flags
-
-Uses `:debug-parse` patterns to inspect AST structure.
-
-### Phase 2: Validate (`phase-2-validate-test.sls`)
-
-Tests ONLY validation:
-- % prefix validation
-- Duplicate result variable detection
-- Root var existence validation
-- Normalization (list → vector, symbol → string)
-
-Uses non-debug patterns to verify successful validation.
-
-### Phase 3: Analyze (`phase-3-analyze-test.sls`)
-
-Tests ONLY analysis:
-- Action generation from match operations
-- Binding manager creation
-- Operand segment handling (optional/variadic)
-- DAG traversal order
-
-Uses `:debug-analyze` patterns to inspect actions list.
-
-### Phase 4: Codegen (`phase-4-codegen-test.sls`)
-
-Tests ONLY code generation:
-- Lambda signature generation
-- Variable initialization code
-- :where guard code generation
-- :then-let binding code generation
-- Optional/variadic operand access code
-
-Uses `:debug-codegen` patterns to inspect quoted code.
-
-### Integration (`integration-test.sls`)
-
-Tests all phases together:
-- Complete pipeline (parse → validate → analyze → codegen)
-- Generated lambdas are callable
-- Pattern matching behavior (with mock FFI)
-
-Uses normal patterns (no debug flags) to verify lambda generation.
-
-## Test Framework API
+Each test case in `test-pattern-bodies.scm`:
 
 ```scheme
-(test-begin "suite-name")     ; Start test suite
-(test-end)                    ; End suite, exit(1) if failures
-(test-equal desc actual expected)  ; Assert equality
-(test-assert desc condition)  ; Assert truth
-(test-error desc thunk)       ; Assert error raised
+(pattern-name
+  :pattern (
+    :match %out = "test.op" (%in) : (f32) -> f32
+    :rewrite %out :with
+      (%new = "new.op" (%in) : (f32) -> f32))
+  :expect-parse ((match-count . 1) (rewrite-count . 1))
+  :expect-validate ((validation-passes . #t))
+  :expect-analyze ((where-actions . 0))
+  :expect-codegen ((compiles . #t)))
 ```
 
-## Running Specific Tests
+**Key features:**
+- `:pattern` contains S-expression (not string!)
+- `:expect-*` fields are optional per phase
+- Missing expectation = skip that phase for this test
 
-```bash
-cd /workspace/hip-ep/hip-ep-1/lib/Dialect/Hipsr/Scheme
+## Adding a New Test
 
-# Run only parse tests
-scheme --libdirs .:libraries --program test/phase-1-parse-test.sls
+Just add one S-expression to `test-pattern-bodies.scm`:
 
-# Run only codegen tests
-scheme --libdirs .:libraries --program test/phase-4-codegen-test.sls
-
-# Run all tests
-scheme --libdirs .:libraries --program test/run-all-tests.scm
-```
-
-## Adding New Tests
-
-To add a new test pattern:
-
-1. **Define pattern in test-patterns.sls** (5 versions):
 ```scheme
-(define-conversion-pattern :debug-parse pattern-new-feature-parse
-  :match ...)
-
-(define-conversion-pattern pattern-new-feature-validate
-  :match ...)
-
-(define-conversion-pattern :debug-analyze pattern-new-feature-analyze
-  :match ...)
-
-(define-conversion-pattern :debug-codegen pattern-new-feature-codegen
-  :match ...)
-
-(define-conversion-pattern pattern-new-feature-lambda
-  :match ...)
+(my-new-test
+  :pattern (
+    :match %a = "my.op" (%x) : (i32) -> i32
+    :rewrite %a :with
+      (%b = "new.op" (%x) : (i32) -> i32))
+  :expect-parse ((has-function-name . #t))
+  :expect-codegen ((compiles . #t)))
 ```
 
-2. **Export pattern names** in test-patterns.sls export list
+No code, no macros - just data!
 
-3. **Add assertions** in relevant phase test files:
+## Implementation
+
+**test-helpers.sls** provides:
+- `load-test-bodies` - read data file
+- `eval-pattern` - generate and eval pattern with debug flag
+- `get-field` - extract `:expect-*` from test case
+- `run-phase-tests` - run all tests for one phase
+
+**How eval works:**
 ```scheme
-;; phase-1-parse-test.sls
-(test-equal "new-feature: parses as AST" #t 
-  (list? pattern-new-feature-parse))
+(define (eval-pattern name debug-flag pattern-body)
+  (let ([full-expr `(define-conversion-pattern 
+                      ,debug-flag 
+                      ,pattern-name 
+                      ,@pattern-body)])
+    (eval full-expr (interaction-environment))))
 ```
+
+This works because:
+1. `test-helpers.sls` imports `(mlir pattern-macro)` → loads the library
+2. `interaction-environment` includes all imported libraries
+3. `eval` expands macros in that environment
+
+## Why This Approach?
+
+**Old approach (deleted):**
+- 4 phase-specific test files
+- Complex macro system to generate patterns from data
+- Lots of duplication and indirection
+
+**New approach:**
+- Single data file with all tests
+- Simple eval-based infrastructure
+- Easy to add/modify tests
 
 **Benefits:**
-- ✅ Pattern defined ONCE, not 4+ times
-- ✅ Easy to see what each pattern tests
-- ✅ Changes to pattern automatically propagate to all tests
-- ✅ Adding new test: define pattern once, add assertions
+- No temp files, no string conversion
+- No macro complexity
+- Clear separation: data vs infrastructure
+- Scalable: 100 tests = 100 S-expressions in data file
+- Each test declares which phases matter
 
-## Debug Flags
+## Example Output
 
-- `:debug-parse` - Returns AST list instead of lambda (parse phase only)
-- `:debug-analyze` - Returns AST with actions list (parse + validate + analyze)
-- `:debug-codegen` - Returns quoted generated code (all phases, code as data)
-- `:debug-matching` - Runtime debugging (prints match progress when pattern runs)
+```
+==================================================
+Pattern DSL Test Suite (Data-Driven)
+==================================================
 
-## File Organization Principles
+=== Phase: Parse ===
+  Testing basic... ✓
+  Testing optional... ✓
+  Testing where-guard... ✓
+  Skipping reuse (no expectations)
 
-**Keep:**
-- `test-patterns.sls` - Single source of truth for patterns
-- `phase-*-test.sls` - Phase-specific test assertions
-- `integration-test.sls` - End-to-end tests
-- `test-framework.sls` - Test harness
-- `mock-ffi.sls` - Mock FFI functions
-- `run-all-tests.scm` - Test runner
-- `README.md` - This file
+Results: 3 passed, 0 failed
 
-**Clean:**
-- ❌ No duplicate pattern definitions
-- ❌ No obsolete/experimental files (case4-*.scm, show-*.scm)
-- ❌ No disabled tests (*.disabled)
-- ❌ No redundant test runners (run-simple-test.scm, etc.)
-
-## Design Goals Achieved
-
-1. ✅ **DRY (Don't Repeat Yourself)**: Patterns defined once, used everywhere
-2. ✅ **Single Source of Truth**: test-patterns.sls is the canonical source
-3. ✅ **Clean Directory**: No clutter, no obsolete files
-4. ✅ **Easy to Extend**: Add pattern once, works across all phases
-5. ✅ **Clear Separation**: Each phase tests only its concern
-6. ✅ **Maintainable**: Change pattern once, all tests updated
-
-## Notes
-
-- TODOs in test files mark places for deeper inspection (requires analyzing AST/action records)
-- Invalid patterns (missing %, duplicates) cause syntax-violation at macro expansion time
-- Mock FFI functions defined in integration-test.sls for testing without real MLIR operations
+=== Phase: Validate ===
+  Testing basic... ✓
+  Testing optional... ✓
+  ...
+```
