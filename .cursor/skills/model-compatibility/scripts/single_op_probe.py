@@ -46,6 +46,7 @@ if str(_HERE) not in sys.path:
 
 import ep_dump  # noqa: E402
 import probe  # noqa: E402
+from mlir_op_parser import parse_attributes, real_attributes  # noqa: E402
 from onnx_graph_walk import NodeContext, iter_typed_nodes  # noqa: E402
 
 # A Constant small enough that its value is more useful than its size. Above
@@ -199,8 +200,8 @@ def probe_operator(
             {"status": "not_sliceable", "reason": why},
         )
 
-    converted, targets = probe.convert_candidates(opt, candidates, work, op_type)
-    if not converted:
+    module, targets, produced = probe.convert_candidates(opt, candidates, work, op_type)
+    if module is None:
         if inferred:
             why = "unranked types; a slice with an inferred shape did not convert"
             return {"inconclusive": 1, "reason": why}, {
@@ -212,8 +213,18 @@ def probe_operator(
             {"status": "skipped", "reason": "unconverted in stage1"},
         )
 
-    s1 = {"targets": targets, "unconverted_lines": []}
+    # Attributes the converter did not carry through, then why: the same
+    # diff-and-perturb the whole-graph path runs, on the same slice.
+    attrs = real_attributes(parse_attributes(src[line_no - 1]))
+    dropped = [a for a in attrs if not probe._attr_present(produced, a)]
+    findings = probe.attribute_probe(
+        opt, module, attrs, dropped, op_type, work / "attrs"
+    )
+
+    s1 = {"targets": targets, "unconverted_lines": [], "dropped_attrs": dropped}
     entry = probe.lower_candidates(opt, candidates, work, op_type, inferred)
+    if entry["status"] == "ok":
+        entry["attributes"] = findings
     return s1, {**entry, "source_line": line_no}
 
 

@@ -316,24 +316,25 @@ def parse_op_line(line: str) -> dict | None:
 
 def convert_candidates(
     opt: Path, candidates: list[str], work: Path, op_type: str
-) -> tuple[bool, dict[str, int]]:
+) -> tuple[str | None, dict[str, int], str]:
     """Convert the first candidate that converts, and name what it became.
 
-    Returns (converted, target op counts). Trying each in turn is what makes
-    a guessed shape usable: only a candidate that succeeds is evidence.
+    Returns (the module that converted, target op counts, the IR it
+    produced). Trying each in turn is what makes a guessed shape usable:
+    only a candidate that succeeds is evidence.
     """
     out = work / f"{op_type}.hip.mlir"
     work.mkdir(parents=True, exist_ok=True)
     for module in candidates:
         if _converts_cleanly(opt, module, work / f"{op_type}.mlir", out):
             targets: dict[str, int] = {}
-            if out.exists():
-                for line in out.read_text(encoding="utf-8").splitlines():
-                    for name in ops_on_line(line):
-                        if not name.startswith("onnx.") and name not in DPS_HELPER_OPS:
-                            targets[name] = targets.get(name, 0) + 1
-            return True, targets
-    return False, {}
+            produced = out.read_text(encoding="utf-8") if out.exists() else ""
+            for line in produced.splitlines():
+                for name in ops_on_line(line):
+                    if not name.startswith("onnx.") and name not in DPS_HELPER_OPS:
+                        targets[name] = targets.get(name, 0) + 1
+            return module, targets, produced
+    return None, {}, ""
 
 
 def lower_candidates(
@@ -914,7 +915,8 @@ def stage1_per_operator(
             continue
 
         print(f"  stage1-slice {op_type} ...", flush=True)
-        converts, targets = convert_candidates(opt, candidates, work, op_type)
+        converted, targets, _ = convert_candidates(opt, candidates, work, op_type)
+        converts = converted is not None
         if not converts and inferred:
             # The slice only exists because we invented a shape for it, so
             # its failure may be ours rather than the converter's.
