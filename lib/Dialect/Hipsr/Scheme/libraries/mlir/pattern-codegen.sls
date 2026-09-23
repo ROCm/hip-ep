@@ -2,7 +2,9 @@
 (library (mlir pattern-codegen)
   (export generate-code)
   (import (rnrs)
-          (for (only (chezscheme) syntax->list syntax->datum) expand)
+          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier? hashtable-keys)
+          (rename (rime loop) (:with :rime-with))
+          (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
           (for (mlir pattern-analyze) expand))  ; for binding-manager-bindings
@@ -12,12 +14,55 @@
   ;;=======================================================================
 
   ;;-----------------------------------------------------------------------
+  ;; Generic record to alist conversion
+  ;;-----------------------------------------------------------------------
+
+  (define (record->alist obj)
+    "Convert a record or any value to an alist. Recursively handles nested records.
+     Uses syntax-object->datum to handle all syntax objects (identifiers and forms).
+     Converts hashtables to alists."
+    (let ([datum (syntax-object->datum obj)])
+      (cond
+        ;; If syntax-object->datum converted something, use the datum
+        [(not (eq? datum obj))
+         datum]
+        ;; Hashtable: convert to alist with sorted keys
+        [(hashtable? obj)
+         (let* ([keys (vector->list (hashtable-keys obj))]
+                [sorted-keys (list-sort (lambda (a b)
+                                          (string<? (symbol->string a)
+                                                   (symbol->string b)))
+                                        keys)])
+           (loop :for key :in sorted-keys
+                 :collect (cons (record->alist key)
+                               (record->alist (hashtable-ref obj key #f)))))]
+        ;; Otherwise check if it's a record
+        [(record? obj)
+         (let* ([rtd (record-rtd obj)]
+                [field-names (vector->list (record-type-field-names rtd))])
+           (loop :for name :in field-names
+                 :for i :from 0
+                 :collect (let* ([accessor (record-accessor rtd i)]
+                                 [value (accessor obj)])
+                            (cons name (record->alist value)))))]
+        ;; Lists and vectors
+        [(list? obj)
+         (map record->alist obj)]
+        [(vector? obj)
+         (vector->list (vector-map record->alist obj))]
+        ;; Anything else
+        [else obj])))
+
+  ;;-----------------------------------------------------------------------
   ;; Main entry point
   ;;-----------------------------------------------------------------------
 
   (define (generate-code ast-rec)
     (cond
       [(ast-pattern-expand-debug-parse? ast-rec)
+       (generate-debug-ast ast-rec)]
+
+      [(ast-pattern-expand-debug-validate? ast-rec)
        (generate-debug-ast ast-rec)]
 
       [(ast-pattern-expand-debug-analyze? ast-rec)
@@ -34,26 +79,9 @@
   ;;-----------------------------------------------------------------------
 
   (define (generate-debug-ast ast-rec)
-    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
-                  [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
-      (let* ([fname-sym (syntax->datum #'fname)]
-             [root-op-str (syntax->datum #'root-op-name)]
-             [match-data (map match-expand->datum
-                              (vector->list (ast-pattern-expand-match ast-rec)))]
-             [rewrite-data (map operation-expand->datum
-                                (ast-pattern-expand-rewrite ast-rec))]
-             [where-data (map where-binding-expand->datum
-                              (ast-pattern-expand-where ast-rec))])
-        (with-syntax ([ast-list (datum->syntax #'fname
-                                  `(list 'function-name ',fname-sym
-                                         'root-op-name ,root-op-str
-                                         'match ',match-data
-                                         'rewrite ',rewrite-data
-                                         'where ',where-data
-                                         'debug-parse? #t
-                                         'debug-analyze? #f
-                                         'debug-codegen? #f
-                                         'debug-matching? #f))])
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
+      (let ([alist-data (record->alist ast-rec)])
+        (with-syntax ([ast-list (datum->syntax #'fname `',alist-data)])
           #'(define fname (lambda () ast-list))))))
 
   ;;-----------------------------------------------------------------------
@@ -61,20 +89,9 @@
   ;;-----------------------------------------------------------------------
 
   (define (generate-debug-actions ast-rec)
-    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
-                  [root-op-name (ast-pattern-expand-root-op-name ast-rec)])
-      (let* ([fname-sym (syntax->datum #'fname)]
-             [root-op-str (syntax->datum #'root-op-name)]
-             [actions-data (map action->datum
-                                (ast-pattern-expand-match-actions ast-rec))])
-        (with-syntax ([ast-list (datum->syntax #'fname
-                                  `(list 'function-name ',fname-sym
-                                         'root-op-name ,root-op-str
-                                         'match-actions ',actions-data
-                                         'debug-parse? #f
-                                         'debug-analyze? #t
-                                         'debug-codegen? #f
-                                         'debug-matching? #f))])
+    (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)])
+      (let ([alist-data (record->alist ast-rec)])
+        (with-syntax ([ast-list (datum->syntax #'fname `',alist-data)])
           #'(define fname (lambda () ast-list))))))
 
   ;;-----------------------------------------------------------------------

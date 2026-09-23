@@ -4,80 +4,61 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (test test-helpers)
-  (export load-test-bodies
+  (export load-test-cases
           eval-pattern
           get-field
           run-one-phase
-          run-phase-tests)
+          run-phase-tests
+          show-pattern-output)
   (import (chezscheme)
           (except (mlir pattern-macro) =)  ; Exclude = to avoid conflict
           (rename (rime loop) (:with :rime-with)))
 
   ;;=======================================================================
-  ;; Load test data
+  ;; Load test data from cases/ directory
   ;;=======================================================================
 
-  (define (load-test-bodies)
-    (call-with-input-file "test/test-pattern-bodies.scm" read))
+  (define (load-test-cases)
+    "Load all test cases from test/cases/*.scm directory.
+     Returns list of (name . test-body) pairs."
+    (let* ([files (directory-list "test/cases")]
+           [scm-files (filter (lambda (f) (string-suffix? ".scm" f)) files)])
+      (map (lambda (filename)
+             (let* ([name (substring filename 0 (- (string-length filename) 4))]
+                    [path (string-append "test/cases/" filename)]
+                    [body (call-with-input-file path read)])
+               (cons (string->symbol name) body)))
+           scm-files)))
+
+  (define (string-suffix? suffix str)
+    (let ([slen (string-length suffix)]
+          [len (string-length str)])
+      (and (>= len slen)
+           (string=? (substring str (- len slen) len) suffix))))
 
   ;;=======================================================================
   ;; Extract field from test case
   ;;=======================================================================
 
-  (define (get-field key test-case)
+  (define (get-field key test-body)
     ;; Simple plist traversal - advance by 2
-    (let loop ([rest (cdr test-case)])
+    ;; test-body is already the plist: (:pattern ... :expect-parse ...)
+    (let loop ([rest test-body])
       (cond
         [(null? rest) #f]
         [(eq? (car rest) key) (cadr rest)]
         [else (loop (cddr rest))])))
 
   ;;=======================================================================
-  ;; Check expectations against actual plist result
+  ;; Check expectations against actual result - EXACT MATCH
   ;;=======================================================================
-
-  (define (plist-ref plist key)
-    ;; Get value from plist by key
-    (let loop ([rest plist])
-      (cond
-        [(null? rest) #f]
-        [(null? (cdr rest)) #f]
-        [(eq? (car rest) key) (cadr rest)]
-        [else (loop (cddr rest))])))
-
-  (define (check-expectation result expectation)
-    ;; Check one expectation (key . expected-value) against result plist
-    (let ([key (car expectation)]
-          [expected (cdr expectation)])
-      (cond
-        ;; has-function-name - check key exists
-        [(eq? key 'has-function-name)
-         (if expected
-             (and (plist-ref result 'function-name) #t)
-             (not (plist-ref result 'function-name)))]
-
-        ;; match-count - count elements in match list
-        [(eq? key 'match-count)
-         (let ([match-list (plist-ref result 'match)])
-           (and match-list (fx= (length match-list) expected)))]
-
-        ;; rewrite-count - count elements in rewrite list
-        [(eq? key 'rewrite-count)
-         (let ([rewrite-list (plist-ref result 'rewrite)])
-           (and rewrite-list (fx= (length rewrite-list) expected)))]
-
-        ;; Default: check value equality
-        [else
-         (let ([actual (plist-ref result key)])
-           (equal? actual expected))])))
 
   (define (check-all-expectations result expectations)
-    ;; Returns (passed? . failing-expectation-or-#f)
-    (loop :for exp :in expectations
-          :rime-with passed := (check-expectation result exp)
-          :unless passed
-          :break (cons #f exp)
-          :finally (cons #t #f)))
+    ;; Returns (passed? . failing-reason-or-#f)
+    ;; Expects exact match: result must equal expectations
+    (if (equal? result expectations)
+        (cons #t #f)
+        (cons #f "Output does not match expectations exactly")))
 
   ;;=======================================================================
   ;; Eval pattern with debug flag and check expectations
@@ -127,17 +108,42 @@
             [else #t])))))
 
   ;;=======================================================================
+  ;; Show pattern output for troubleshooting (doesn't check expectations)
+  ;;=======================================================================
+
+  (define (show-pattern-output name debug-flag pattern-body)
+    (guard (e [else
+               (display (format "ERROR: Pattern ~a failed:\n" name))
+               (display-condition e)
+               (newline)])
+      (let* ([pattern-name (string->symbol (string-append "pattern-" (symbol->string name)))]
+             [full-expr (if debug-flag
+                           `(define-conversion-pattern ,debug-flag ,pattern-name ,@pattern-body)
+                           `(define-conversion-pattern ,pattern-name ,@pattern-body))])
+        ;; Eval the pattern definition
+        (eval full-expr (interaction-environment))
+
+        ;; Get and show the result
+        (let ([pattern-fn (eval pattern-name (interaction-environment))])
+          (if (procedure? pattern-fn)
+              (if debug-flag
+                  (let ([result (pattern-fn)])
+                    (display (format "Pattern ~a output:\n" name))
+                    (pretty-print result))
+                  (display "Normal mode - no output to show\n"))
+              (display (format "ERROR: ~a is not a procedure\n" pattern-name)))))))
+
+  ;;=======================================================================
   ;; Run one phase for one test case
   ;;=======================================================================
 
-  (define (run-one-phase phase-name debug-flag expect-key test-case)
-    (let ([name (car test-case)]
-          [pattern (get-field ':pattern test-case)]
-          [expectations (get-field expect-key test-case)])
+  (define (run-one-phase phase-name debug-flag expect-key test-name test-body)
+    (let ([pattern (get-field ':pattern test-body)]
+          [expectations (get-field expect-key test-body)])
       (if expectations
           (begin
             (display (format "~a... " phase-name))
-            (let ([result (eval-pattern name debug-flag pattern expectations)])
+            (let ([result (eval-pattern test-name debug-flag pattern expectations)])
               (display (if result "✓\n" "✗\n"))
               result))
           (begin
