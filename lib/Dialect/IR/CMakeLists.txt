@@ -47,3 +47,29 @@ target_link_libraries(HipDialectIR PUBLIC
 if(MSVC)
   target_compile_options(HipDialectIR PRIVATE /bigobj)
 endif()
+
+# --- hip-ir packaging -------------------------------------------------------
+# Usage requirements. Previously these came from the enclosing project's global
+# include_directories(), which works in-tree but cannot be exported.
+get_filename_component(HIP_IR_SOURCE_INCLUDE_ROOT
+  "${CMAKE_CURRENT_LIST_DIR}/../../../include" ABSOLUTE)
+
+target_include_directories(HipDialectIR PUBLIC
+  $<BUILD_INTERFACE:${HIP_IR_SOURCE_INCLUDE_ROOT}>
+  $<BUILD_INTERFACE:${HIP_IR_GENERATED_INCLUDE_ROOT}>
+  $<INSTALL_INTERFACE:include>)
+
+target_compile_features(HipDialectIR PUBLIC cxx_std_17)
+
+# Consumers link the namespaced name whether hip-ir comes from this source tree
+# or from the installed package, so they never branch on how it was obtained.
+if(NOT TARGET hip::HipDialectIR)
+  add_library(hip::HipDialectIR ALIAS HipDialectIR)
+endif()
+
+if(HIP_IR_INSTALL)
+  get_filename_component(_hip_ir_cmake_dir
+    "${CMAKE_CURRENT_LIST_DIR}/../../../cmake" ABSOLUTE)
+  include("${_hip_ir_cmake_dir}/hip-ir-install.cmake")
+  unset(_hip_ir_cmake_dir)
+endif()
