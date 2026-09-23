@@ -2877,11 +2877,14 @@ struct ScatterElementsConverter final
                                              "tensors");
     if (!isa<IntegerType>(indicesTy.getElementType()))
       return rewriter.notifyMatchFailure(op, "indices must be integers");
-    if (updatesTy.getShape() != indicesTy.getShape())
-      return rewriter.notifyMatchFailure(op,
-                                         "updates must have the indices shape");
-    if (resultTy.getShape() != dataTy.getShape())
-      return rewriter.notifyMatchFailure(op, "result must have the data shape");
+if (updatesTy.getShape() != indicesTy.getShape() ||
+        updatesTy.getElementType() != dataTy.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "updates must have the indices shape and data element type");
+    if (resultTy.getShape() != dataTy.getShape() ||
+        resultTy.getElementType() != dataTy.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "result must have the data shape and element type");
 
     int64_t rank = dataTy.getRank();
     if (indicesTy.getRank() != rank)
