@@ -120,7 +120,7 @@
                         [(parse) ':debug-parse]
                         [(validate) ':debug-validate]
                         [(analyze) ':debug-analyze]
-                        [(codegen) #f]
+                        [(codegen) ':debug-codegen]
                         [else (error 'main "Unknown phase" phase)])))]
 
       ;; Invalid usage
