@@ -111,6 +111,9 @@
            [root-var (ast-pattern-expand-root-var ast-rec)]
            [root-op-name (ast-pattern-expand-root-op-name ast-rec)]
            [num-ops (vector-length match-vec)]
+           [pattern-type (ast-pattern-expand-pattern-type ast-rec)]
+           [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
+           [where-bindings (ast-pattern-expand-where ast-rec)]
 
            ;; Find root operation to get all its result variables
            [root-op (find-root-op match-vec root-op-name)]
@@ -119,17 +122,28 @@
            ;; Generate root initialization code (bind all result variables)
            [root-inits (generate-root-inits root-result-vars)]
 
-           ;; Collect all variables from binding manager
-           [all-vars (collect-all-variables binding-mgr)]
+           ;; Generate where bindings (from :then-let)
+           [where-inits (generate-where-bindings where-bindings)]
+
+           ;; Collect all variables that need initialization
+           [match-vars (collect-all-variables binding-mgr)]
+           [where-vars (collect-where-variables where-bindings)]
+           [rewrite-vars (collect-rewrite-variables rewrite-ops)]
+           [all-vars (append match-vars where-vars rewrite-vars)]
 
            ;; Generate check code from actions
-           [check-code (generate-check-code actions match-vec)])
+           [check-code (generate-check-code actions match-vec)]
+
+           ;; Generate rewrite code
+           [rewrite-code (generate-rewrite-code rewrite-ops pattern-type)])
 
       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
                     [(var ...) all-vars]
                     [num-operations num-ops]
                     [(root-init ...) root-inits]
-                    [checks check-code])
+                    [(where-init ...) where-inits]
+                    [checks check-code]
+                    [rewrite rewrite-code])
         #'(define fname
             (lambda (op operands-ref rewriter type-converter)
               (let ([var (make-unbound-value)] ...
@@ -137,10 +151,74 @@
                 ;; Bind all result variables of root operation
                 root-init ...
 
+                ;; Bind where variables (:then-let bindings)
+                where-init ...
+
                 ;; Match pattern and rewrite if successful
                 (if checks
-                    (error 'todo "rewrite not implemented yet")
+                    rewrite
                     #f)))))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate rewrite code
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; For conversion patterns: generate let* bindings, then replaceOp
+  ;; For rewrite patterns: generate let* bindings, then return last result
+  ;;
+  (define (generate-rewrite-code rewrite-ops pattern-type)
+    (if (null? rewrite-ops)
+        #'#t  ; No rewrite ops, just return #t for success
+        (let ([bindings (generate-rewrite-bindings rewrite-ops)])
+          (if (eq? pattern-type 'conversion)
+              ;; Conversion pattern: replaceOp with last result
+              (let ([last-result (ast-operation-expand-result-var (car (reverse rewrite-ops)))])
+                (with-syntax ([(binding ...) bindings]
+                              [result last-result])
+                  #'(let* (binding ...)
+                      (mlir-replace-op op result)
+                      #t)))
+              ;; Rewrite pattern: return last result
+              (let ([last-result (ast-operation-expand-result-var (car (reverse rewrite-ops)))])
+                (with-syntax ([(binding ...) bindings]
+                              [result last-result])
+                  #'(let* (binding ...)
+                      result)))))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate let* bindings for rewrite operations
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Each operation becomes: (result-var (mlir-create-generic-op "op.name" operands-list types-list))
+  ;;
+  (define (generate-rewrite-bindings rewrite-ops)
+    (loop :for op-rec :in rewrite-ops
+          :collect (generate-one-rewrite-binding op-rec)))
+
+  (define (generate-one-rewrite-binding op-rec)
+    (let* ([result-var (ast-operation-expand-result-var op-rec)]
+           [op-name (syntax->datum (ast-operation-expand-op-name op-rec))]
+           [operands (ast-operation-expand-operands op-rec)]
+           [result-types (ast-operation-expand-result-types op-rec)])
+      (with-syntax ([var result-var]
+                    [name op-name]
+                    [(operand ...) operands]
+                    [types result-types])
+        ;; Create operation and extract first result as a Value
+        #'(var (let ([new-op (mlir-create-generic-op name (list operand ...) (list types))])
+                 (mlir-operation-get-result new-op 0))))))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate where bindings (:then-let)
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Each where binding becomes: (set! var expr)
+  ;;
+  (define (generate-where-bindings where-list)
+    (loop :for binding-rec :in where-list
+          :rime-with var := (ast-where-binding-expand-var binding-rec)
+          :rime-with expr := (ast-where-binding-expand-expr binding-rec)
+          :collect #`(set! #,var #,expr)))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Generate root initialization statements
@@ -172,6 +250,16 @@
 
   (define (collect-all-variables binding-mgr)
     (vector->list (hashtable-keys (binding-manager-bindings binding-mgr))))
+
+  (define (collect-where-variables where-list)
+    (loop :for binding-rec :in where-list
+          :collect (ast-where-binding-expand-var binding-rec)))
+
+  (define (collect-rewrite-variables rewrite-ops)
+    (loop :for op-rec :in rewrite-ops
+          :rime-with result-var := (ast-operation-expand-result-var op-rec)
+          :when (not (null? result-var))  ; Skip void operations
+          :collect result-var))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Generate check code from actions
