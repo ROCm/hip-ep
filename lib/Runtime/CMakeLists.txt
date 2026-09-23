@@ -4,13 +4,19 @@
 ##
 
 # HipDnnEpRuntime - Runtime library for ONNX HIP DNN Execution Provider
-# Provides HIP/hipBLASLt wrappers called by generated LLVM IR
+# Provides HIP wrappers called by generated LLVM IR
 #
 # This implements a two-stage compilation:
 # Stage 1 (Build Time): runtime.cpp → bitcode → embedded in library
 # Stage 2 (Model Compilation): Generated MLIR + runtime.bc → optimized DLL
 
-cmake_minimum_required(VERSION 3.18)
+# Higher than the top-level 3.20 because the bitcode custom commands below use
+# add_custom_command(DEPFILE): CMP0116 (depfile paths relative to the current
+# binary dir) arrived in 3.20, and DEPFILE support for the Visual Studio
+# generators -- which is what build.py defaults to on Windows -- only arrived in
+# 3.22. Demanding it here turns an obscure generator-specific failure into a
+# version message.
+cmake_minimum_required(VERSION 3.22)
 
 # ============================================================================
 # STEP 1: Find Required Tools
@@ -124,34 +130,19 @@ if(NOT BUILD_MOCK_RUNTIME)
     endif()
 
     find_package(hip QUIET)
-    if(NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        find_package(hipblaslt QUIET)
-    endif()
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
     endif()
 
-    # Vendor BLAS/DNN disabled: build the real runtime with only hip (the stubbed
-    # wrappers, added in the follow-up change, keep the ABI intact).
-    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        if(NOT hip_FOUND)
-            message(WARNING "HIP not found. Building mock runtime library for testing.")
-            message(WARNING "  hip_FOUND=${hip_FOUND}; set THEROCK_DIST to the ROCm SDK path")
-            set(BUILD_MOCK_RUNTIME TRUE)
-        else()
-            message(STATUS "Building REAL runtime with HIP (vendor hipBLASLt DISABLED)")
-            message(STATUS "  HIP: ${hip_DIR}")
-        endif()
-    elseif(NOT hip_FOUND OR NOT hipblaslt_FOUND)
+    if(NOT hip_FOUND)
         message(WARNING "ROCm components not found. Building mock runtime library for testing.")
-        message(WARNING "  hip_FOUND=${hip_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
+        message(WARNING "  hip_FOUND=${hip_FOUND}")
         message(WARNING "  Set THEROCK_DIST environment variable to ROCm SDK path")
         set(BUILD_MOCK_RUNTIME TRUE)
     else()
-        message(STATUS "Building REAL runtime with HIP/hipBLASLt")
+        message(STATUS "Building REAL runtime with HIP")
         message(STATUS "  HIP: ${hip_DIR}")
-        message(STATUS "  hipBLASLt: ${hipblaslt_DIR}")
     endif()
 else()
     message(STATUS "Building mock runtime (BUILD_MOCK_RUNTIME explicitly set)")
@@ -178,13 +169,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-fPIC")
     endif()
 
-    # Propagate the vendor-BLAS opt-out into the bitcode compile so the
-    # hipBLASLt-backed wrappers (real/{hipblas,gemm}.cpp) compile their stub
-    # branch instead of the vendor-backed one.
-    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
-    endif()
-
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -205,12 +189,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         endforeach()
     endif()
 
-    # Add implementation directory and collect impl-specific deps. Both
-    # `real/` and `mock/` ship their own `runtime_types.h` (resolved via the
-    # -I flag below), so the DEPENDS list must reference whichever copy the
-    # active build will actually compile against. `cache_utils.h` and the
-    # custom-kernels header only exist for the real GPU runtime.
-    set(IMPL_DEPS "")
+    # Add implementation directory. Both `real/` and `mock/` ship their own
+    # `runtime_types.h`; which copy a TU compiles against is decided by the -I
+    # flag below, and the depfile records whichever one clang actually opened.
     if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_REAL_RUNTIME=1")
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
@@ -230,17 +211,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
         endif()
-
-        list(APPEND IMPL_DEPS
-            ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
-            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
-            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
-        list(APPEND IMPL_DEPS
-            ${CMAKE_CURRENT_SOURCE_DIR}/mock/runtime_types.h)
     endif()
 
     add_custom_command(
@@ -260,20 +232,24 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 $<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>
                 $<$<NOT:$<CONFIG:Debug>>:-D_ITERATOR_DEBUG_LEVEL=0>
                 $<$<NOT:$<CONFIG:Debug>>:-O2>
+                # Header dependencies come from clang, not from a hand-written
+                # list. The manual DEPENDS this replaces was missing 7 directly
+                # included headers -- among them hipdnn_ep_errors.h (80+ TUs),
+                # ck_gemm_select.h and error_check_macros.h -- plus everything
+                # they pull in transitively, such as hip/env.h. Editing one of
+                # those left the stale .bc in place, so the build kept silently
+                # running the old code.
+                -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}.d
                 ${COMPILE_FLAGS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
+        # Only two entries remain: the source itself (the depfile is absent on
+        # the very first build, so nothing else would trigger it) and the
+        # flatbuffers header, which must be *generated* before clang can open
+        # it -- a depfile can only name files a previous compile already read.
         DEPENDS ${SOURCE_FILE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
-                ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
-                ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
-                ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
-                ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
+        DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}.d
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
         VERBATIM
         COMMAND_EXPAND_LISTS
@@ -296,12 +272,6 @@ compile_to_bitcode(op_state.cpp runtime_op_state.bc)
 if(NOT BUILD_MOCK_RUNTIME)
     # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
-    compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
-    # Vendor-symbol stubs so a model links without libhipblaslt (see
-    # real/vendor_blas_stub.cpp).
-    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)
-    endif()
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
@@ -396,7 +366,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
@@ -479,12 +448,6 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qsigmoid.bc
     )
-    # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
-    # when the vendor BLAS/DNN backends are disabled.
-    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        list(APPEND RUNTIME_BC_MODULES
-            ${CMAKE_CURRENT_BINARY_DIR}/runtime_vendor_blas_stub.bc)
-    endif()
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)

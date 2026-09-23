@@ -183,7 +183,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   state->stream = nullptr;
-  state->hipblas_handle = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
@@ -264,29 +263,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
-  // Skip vendor-handle creation when hipBLASLt is disabled: the stubbed
-  // hipblasLtCreate would fail and abort session creation even for a model
-  // that never dispatches a vendor GEMM. Handle stays null; cleanup is
-  // already null-guarded.
-#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
-  if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "Failed to create hipBLASLt handle\n");
-    if (state->stream)
-      HIP_CLEANUP(hipStreamDestroy(state->stream));
-    free(state);
-    return 9;
-  }
-#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
-
-  TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
-
   // Allocate device-side error flag used by kernels for runtime error
   // propagation (e.g., Range delta==0).
   if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
       hipSuccess) {
     fprintf(stderr, "Failed to allocate device error flag\n");
-    if (state->hipblas_handle)
-      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -297,8 +278,6 @@ static int initialize_state_handles(RuntimeState **out_state) {
     fprintf(stderr, "Failed to initialize device error flag\n");
     HIP_CLEANUP(hipFree(state->device_error_flag));
     state->device_error_flag = nullptr;
-    if (state->hipblas_handle)
-      hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -886,12 +865,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   delete static_cast<ProviderOptions *>(state->provider_options);
   state->provider_options = nullptr;
-
-  // Destroy hipBLASLt handle
-  if (state->hipblas_handle) {
-    hipblasLtDestroy(state->hipblas_handle);
-  }
-
   // Destroy HIP stream
   if (state->stream) {
     // Stop ABI-fixed helpers (memrefCopy) from reading this stream after it is
@@ -921,10 +894,6 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
 
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {
   return state ? static_cast<void *>(state->stream) : nullptr;
-}
-
-void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
-  return state ? static_cast<void *>(state->hipblas_handle) : nullptr;
 }
 
 void *hipdnn_ep_state_get_op_profile(RuntimeState *state) {

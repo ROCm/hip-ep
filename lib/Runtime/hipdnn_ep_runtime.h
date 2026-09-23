@@ -288,11 +288,6 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
-// Get hipBLASLt handle from state (for GEMM operations)
-// Returns: hipblasLtHandle_t cast to void* (NULL on error)
-// Ownership: Caller does NOT own handle (destroyed in cleanup)
-void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
-
 // Get buffer from memory pool by index
 // Returns: GPU pointer at pool_base + buffer_offsets[index] (NULL on error)
 // Ownership: Caller does NOT own pointer (freed in cleanup)
@@ -789,21 +784,6 @@ int wrap_conv_transpose(
     int64_t output_padding_w, // Output padding width
     int64_t group,            // Number of groups
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
-
-//===----------------------------------------------------------------------===//
-// Library Operations (hipBLAS)
-//===----------------------------------------------------------------------===//
-
-// hipBLASLt GEMM operation wrapper
-// Called by generated IR for matrix multiplication operations
-int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
-                       void *stream, // HIP stream
-                       int64_t m, int64_t n, int64_t k,
-                       const void *alpha, // Scalar alpha
-                       const void *A,     // Matrix A GPU pointer
-                       const void *B,     // Matrix B GPU pointer
-                       const void *beta,  // Scalar beta
-                       void *C);          // Matrix C GPU pointer (in/out)
 
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
