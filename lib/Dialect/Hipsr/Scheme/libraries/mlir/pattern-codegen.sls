@@ -224,6 +224,14 @@
                             #,operand-idx))
                #t))]
 
+        [(:bind-argument-operand)
+         (let* ([fields (cdr action)]
+                [var (cdr (assq 'var fields))]
+                [operand-idx (cdr (assq 'operand-idx fields))])
+           #`(begin
+               (set! #,var (vector-ref operands-ref #,operand-idx))
+               #t))]
+
         [(:check-eq)
          (let* ([fields (cdr action)]
                 [op-idx (cdr (assq 'op-idx fields))]
