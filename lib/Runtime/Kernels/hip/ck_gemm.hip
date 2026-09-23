@@ -551,6 +551,9 @@ using RunFn = int (*)(const RunArgs &);
 
 struct Entry {
   int combo;
+  // Persisted by the offline LUT: must stay unique and must not change when
+  // entries are reordered.
+  const char *name;
   RunFn fn;
 };
 
@@ -560,16 +563,18 @@ struct Entry {
 #define OP_D(TILE) MAKE_OP(F16, Row, Row, Row_Tuple, F16_Tuple, F16, Add, 8, TILE)
 #define OP_E(TILE) MAKE_OP(F16, Row, Col, Empty_Tuple, Empty_Tuple, F16, PassThrough, 8, TILE)
 
-#define ENT_A(TILE) {kNN_F16, &runNoBias<OP_A(TILE), PassThrough>},
-#define ENT_B(TILE) {kTN_F32, &runNoBias<OP_B(TILE), Scale>},
-#define ENT_C(TILE) {kTN_F16_BIAS, &runBias<OP_C(TILE), Add>},
-#define ENT_D(TILE) {kNN_F16_BIAS, &runBias<OP_D(TILE), Add>},
-#define ENT_E(TILE) {kTN_F16, &runNoBias<OP_E(TILE), PassThrough>},
+#define ENT_A(TILE) {kNN_F16, "NN_F16:" #TILE, &runNoBias<OP_A(TILE), PassThrough>},
+#define ENT_B(TILE) {kTN_F32, "TN_F32:" #TILE, &runNoBias<OP_B(TILE), Scale>},
+#define ENT_C(TILE) {kTN_F16_BIAS, "TN_F16_BIAS:" #TILE, &runBias<OP_C(TILE), Add>},
+#define ENT_D(TILE) {kNN_F16_BIAS, "NN_F16_BIAS:" #TILE, &runBias<OP_D(TILE), Add>},
+#define ENT_E(TILE) {kTN_F16, "TN_F16:" #TILE, &runNoBias<OP_E(TILE), PassThrough>},
 
 #define ENT_F(TILE, EV)                                                                   \
-    {kNN_F32, &runDl<MAKE_DL_OP(Row, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
+    {kNN_F32, "NN_F32:" #TILE,                                                            \
+     &runDl<MAKE_DL_OP(Row, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
 #define ENT_G(TILE, EV)                                                                   \
-    {kTN_F32AB, &runDl<MAKE_DL_OP(Col, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
+    {kTN_F32AB, "TN_F32AB:" #TILE,                                                        \
+     &runDl<MAKE_DL_OP(Col, TILE, EV), EV, DL_BLOCK_SIZE(TILE)>},
 
 const Entry kEntries[] = {
     // 0-13: NN, f16 out, no bias
@@ -618,6 +623,13 @@ constexpr int kNumEntries = (int)(sizeof(kEntries) / sizeof(kEntries[0]));
 } // namespace
 
 extern "C" int hip_ck_gemm_num_instances(void) { return kNumEntries; }
+
+extern "C" const char *hip_ck_gemm_instance_name(int instance) {
+  if (instance < 0 || instance >= kNumEntries) {
+    return nullptr;
+  }
+  return kEntries[instance].name;
+}
 
 extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
                                const void *B, const void *bias, void *D,
