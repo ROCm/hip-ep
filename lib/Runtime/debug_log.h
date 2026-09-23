@@ -30,6 +30,17 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// com.microsoft QMoE prefill: fold the per-expert gather, fc1 bias + SwiGLU
+// and fc2 bias + weighted scatter-add into the two expert GEMMs
+// (hip_matmul_nbits_u4_wmma_epilogue). Experts the fused GEMM cannot take
+// (M < 8) keep the unfused sequence. DEFAULT-OFF; set
+// HIPDNN_EP_QMOE_FUSED_EXPERT=1 to enable.
+inline bool hipdnn_ep_qmoe_fused_expert_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled("HIPDNN_EP_QMOE_FUSED_EXPERT");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
