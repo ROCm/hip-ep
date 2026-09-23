@@ -15,8 +15,8 @@ Performance notes:
   can be orders of magnitude slower).
 - Default keeps at most max_instances_per_op entries per op type to avoid
   blowing up memory and JSON size on graphs with hundreds of thousands of
-  nodes. Downstream build_report_input only consumes per-op data_types,
-  not the instance list.
+  nodes. One is enough downstream: without an EP input, the report reads
+  the worklist's signatures and attributes from that instance.
 - Default scope includes subgraphs (Loop.body, etc.). Use --top-level-only
   to restrict to the main graph (legacy behavior).
 """
@@ -32,32 +32,6 @@ from onnx_graph_walk import iter_model_nodes
 
 
 class ONNXModelAnalyzer:
-    # Fallback descriptions, used ONLY when `onnx.defs.get_schema(...)` does
-    # not return a schema. In practice this covers Microsoft custom ops
-    # (com.microsoft domain) and any opset/domain combination the installed
-    # `onnx` library does not know about. For standard ai.onnx ops the
-    # description comes from the ONNX schema directly (single source of
-    # truth: the ONNX specification, not this dict).
-    OP_DESCRIPTIONS = {
-        "MatMulNBits": "Quantized N-bit matrix multiplication (com.microsoft)",
-        "RotaryEmbedding": "Rotary position embedding (RoPE)",
-        "SkipSimplifiedLayerNormalization": "Skip connection + RMS normalization",
-        "GroupQueryAttention": "Group Query Attention mechanism",
-        "SimplifiedLayerNormalization": "RMS layer normalization",
-        "MultiHeadAttention": "Multi-head attention (often inside Loop subgraph)",
-        "CausalConvWithState": "Causal convolution with persistent state (com.microsoft)",
-        "LinearAttention": "Linear attention (com.microsoft)",
-        "QMoE": "Quantized Mixture-of-Experts (com.microsoft)",
-    }
-
-    # Domain -> canonical name accepted by onnx.defs.get_schema.
-    _SCHEMA_DOMAIN_ALIASES = {
-        "": "",
-        "ai.onnx": "",
-        "onnx": "",
-        "com.microsoft": "com.microsoft",
-    }
-
     def __init__(
         self,
         model_path: str,
@@ -70,105 +44,56 @@ class ONNXModelAnalyzer:
         # graph and initializer dtypes/dims are still readable.
         self.model = onnx.load(model_path, load_external_data=load_external_data)
         self.graph = self.model.graph
-        self.op_descriptions = self._build_op_descriptions()
 
         # Pre-build a tensor info cache to avoid repeated lookups.
         self._tensor_cache = {}
         self._build_tensor_cache()
 
     def _build_tensor_cache(self):
-        """Pre-build the tensor info cache for all initializers / inputs / outputs."""
-        # Cache initializers.
-        for initializer in self.graph.initializer:
-            dtype = self._get_dtype_name(initializer.data_type)
-            self._tensor_cache[initializer.name] = {
-                "dtype": dtype,
-                "shape": list(initializer.dims),
-                "shape_type": "static",
+        """Cache the type of every tensor the model states one for.
+
+        value_info and subgraph scopes are included, not just the graph's own
+        inputs, outputs and weights. Those three cover only the edges of the
+        graph, so without the rest every intermediate tensor reads as
+        unknown -- which is most of the model.
+        """
+
+        def record(value_info):
+            tensor = value_info.type.tensor_type
+            if not tensor.elem_type or value_info.name in self._tensor_cache:
+                return
+            self._tensor_cache[value_info.name] = {
+                "dtype": self._get_dtype_name(tensor.elem_type),
+                "shape": [
+                    dim.dim_value if dim.dim_value > 0 else -1
+                    for dim in tensor.shape.dim
+                ],
+                "shape_type": self._get_shape_type(
+                    tensor.shape if tensor.HasField("shape") else None
+                ),
             }
 
-        # Cache graph inputs.
-        for input_tensor in self.graph.input:
-            dtype = self._get_dtype_name(input_tensor.type.tensor_type.elem_type)
-            shape_type = self._get_shape_type(input_tensor.type.tensor_type.shape)
-            shape = [
-                dim.dim_value if dim.dim_value > 0 else -1
-                for dim in input_tensor.type.tensor_type.shape.dim
-            ]
-            self._tensor_cache[input_tensor.name] = {
-                "dtype": dtype,
-                "shape": shape,
-                "shape_type": shape_type,
-            }
+        def walk(graph):
+            for initializer in graph.initializer:
+                self._tensor_cache.setdefault(
+                    initializer.name,
+                    {
+                        "dtype": self._get_dtype_name(initializer.data_type),
+                        "shape": list(initializer.dims),
+                        "shape_type": "static",
+                    },
+                )
+            for collection in (graph.input, graph.output, graph.value_info):
+                for value_info in collection:
+                    record(value_info)
+            for node in graph.node:
+                for attr in node.attribute:
+                    if attr.g.ByteSize():
+                        walk(attr.g)
+                    for sub_graph in attr.graphs:
+                        walk(sub_graph)
 
-        # Cache graph outputs.
-        for output_tensor in self.graph.output:
-            dtype = self._get_dtype_name(output_tensor.type.tensor_type.elem_type)
-            shape_type = self._get_shape_type(output_tensor.type.tensor_type.shape)
-            shape = [
-                dim.dim_value if dim.dim_value > 0 else -1
-                for dim in output_tensor.type.tensor_type.shape.dim
-            ]
-            self._tensor_cache[output_tensor.name] = {
-                "dtype": dtype,
-                "shape": shape,
-                "shape_type": shape_type,
-            }
-
-    def _build_op_descriptions(self) -> Dict[str, str]:
-        """
-        Build the operator description dictionary, sourced (in order) from:
-          1. ONNX official op schema doc (`onnx.defs.get_schema(...).doc`)
-             -- single source of truth for standard `ai.onnx` ops.
-          2. The OP_DESCRIPTIONS fallback (mostly `com.microsoft` ops the
-             installed `onnx` library may not carry, plus a few hand-curated
-             one-liners).
-          3. A synthesized `<OpType> (<domain>)` placeholder.
-        """
-        descriptions = {}
-
-        for node, _scope in self._iter_nodes():
-            op_type = node.op_type
-            if op_type in descriptions:
-                continue
-            domain = node.domain if node.domain else "ai.onnx"
-            doc = self._lookup_onnx_schema_doc(op_type, domain)
-            if doc:
-                descriptions[op_type] = doc
-            elif op_type in self.OP_DESCRIPTIONS:
-                descriptions[op_type] = self.OP_DESCRIPTIONS[op_type]
-            else:
-                descriptions[op_type] = f"{op_type} ({domain})"
-
-        return descriptions
-
-    def _lookup_onnx_schema_doc(self, op_type: str, domain: str) -> Optional[str]:
-        """Return a short single-line description from the ONNX op schema.
-
-        Trims the schema's `.doc` string to the first non-empty paragraph
-        (or first sentence) to match the inline-friendly format used by
-        the report's "Op Description" column.
-        """
-        schema_domain = self._SCHEMA_DOMAIN_ALIASES.get(domain.lower(), domain)
-        try:
-            schema = onnx.defs.get_schema(op_type, domain=schema_domain)
-        except Exception:
-            return None
-        if schema is None or not getattr(schema, "doc", None):
-            return None
-        doc = schema.doc.strip()
-        if not doc:
-            return None
-        # First non-empty paragraph (paragraphs separated by blank lines).
-        para = doc.split("\n\n", 1)[0].strip()
-        # Collapse internal whitespace / newlines for table-cell display.
-        para = " ".join(para.split())
-        # Prefer first sentence to keep the cell short; fall back to first
-        # 200 chars if no sentence boundary is found.
-        sentence_end = para.find(". ")
-        if 0 < sentence_end <= 240:
-            return para[: sentence_end + 1]
-        return para[:240]
+        walk(self.graph)
 
     def _iter_nodes(self):
         if self.include_subgraphs:
@@ -176,10 +101,6 @@ class ONNXModelAnalyzer:
         else:
             for node in self.graph.node:
                 yield node, "main"
-
-    def get_op_description(self, op_type: str) -> str:
-        """Return the operator description, or a default if not found."""
-        return self.op_descriptions.get(op_type, f"{op_type} (unknown domain)")
 
     def analyze(self, max_instances_per_op: Optional[int] = 5) -> Dict:
         """Analyze every operator in the model.
@@ -303,6 +224,8 @@ class ONNXModelAnalyzer:
             5: "int16",
             6: "int32",
             7: "int64",
+            8: "string",
+            9: "bool",
             10: "float16",
             11: "float64",
             12: "complex64",
@@ -342,107 +265,6 @@ class ONNXModelAnalyzer:
             return str([s.decode("utf-8") for s in attr.strings])
         else:
             return "complex_value"
-
-
-def generate_markdown_report(
-    ops_info: Dict, model_name: str, analyzer: "ONNXModelAnalyzer"
-) -> str:
-    """Render the analysis as a Markdown report."""
-    report = []
-    meta = ops_info.get("_analysis_meta", {})
-    op_items = {k: v for k, v in ops_info.items() if not k.startswith("_")}
-
-    report.append(f"# ONNX Model Analysis Report: {model_name}\n")
-    report.append("## Overview\n")
-
-    total_ops = sum(info["count"] for info in op_items.values())
-    unique_ops = len(op_items)
-
-    report.append(f"- **Total Operators**: {total_ops}\n")
-    if meta.get("include_subgraphs"):
-        report.append(
-            f"- **Top-level graph nodes only**: {meta.get('top_level_nodes', 'n/a')}\n"
-        )
-        report.append(
-            f"- **Nodes inside subgraphs** (Loop/If/... bodies): {meta.get('subgraph_nodes', 0)}\n"
-        )
-    report.append(f"- **Unique Operator Types**: {unique_ops}\n")
-    report.append(
-        f"- **Scope**: {'main graph + nested subgraphs' if meta.get('include_subgraphs', True) else 'main graph only'}\n"
-    )
-    report.append(
-        f"- **Analysis Date**: {__import__('datetime').datetime.now().isoformat()}\n\n"
-    )
-
-    report.append("## Shape Type Explanation\n\n")
-    report.append(
-        "- **static**: All dimensions have fixed values (e.g., [1, 128, 4096])\n"
-    )
-    report.append(
-        "- **dynamic**: At least one dimension is variable (e.g., [batch_size, 128, 4096] where batch_size is -1)\n"
-    )
-    report.append(
-        "- **unknown**: Shape information is not available in the graph (intermediate tensors without explicit shape definition)\n\n"
-    )
-
-    report.append("## Operator Distribution\n\n")
-    report.append(
-        "| Op Type | Count | Domain | Data Types | Shape Type | Description |\n"
-    )
-    report.append(
-        "|---------|-------|--------|------------|------------|-------------|\n"
-    )
-
-    # Sort by count (descending).
-    sorted_ops = sorted(op_items.items(), key=lambda x: x[1]["count"], reverse=True)
-
-    for op_type, info in sorted_ops:
-        count = info["count"]
-        domain = ", ".join(info["domain"])
-        data_types = ", ".join(info["data_types"]) if info["data_types"] else "-"
-        shape_types = ", ".join(info["shape_types"]) if info["shape_types"] else "-"
-        description = analyzer.get_op_description(op_type)
-
-        report.append(
-            f"| {op_type} | {count} | {domain} | {data_types} | {shape_types} | {description} |\n"
-        )
-
-    report.append("\n## Detailed Operator Information\n\n")
-
-    for op_type, info in sorted_ops:
-        report.append(f"### {op_type} (Count: {info['count']})\n\n")
-        report.append(f"**Domain**: {', '.join(info['domain'])}\n\n")
-        report.append(
-            f"**Data Types**: {', '.join(info['data_types']) if info['data_types'] else 'Unknown'}\n\n"
-        )
-        report.append(
-            f"**Shape Types**: {', '.join(info['shape_types']) if info['shape_types'] else 'Unknown'}\n\n"
-        )
-
-        total_n = info["count"]
-        stored = info["instances"]
-        if stored:
-            sample_shown = min(3, len(stored))
-            report.append(
-                f"**Instances**: sample {sample_shown} of {len(stored)} recorded "
-                f"(total nodes of this op type: {total_n})\n\n"
-            )
-            for i, instance in enumerate(stored[:3]):
-                report.append(f"#### Instance {i + 1}: {instance['node_name']}\n\n")
-                if instance["attributes"]:
-                    report.append("**Attributes**:\n")
-                    for attr_name, attr_value in instance["attributes"].items():
-                        report.append(f"- {attr_name}: {attr_value}\n")
-                    report.append("\n")
-
-            remaining_in_graph = total_n - sample_shown
-            if remaining_in_graph > 0:
-                report.append(
-                    f"... {remaining_in_graph} additional node(s) of this type in the graph "
-                    f"(not all stored in JSON when capped)\n\n"
-                )
-
-    return "".join(report)
 
 
 def main():
@@ -494,18 +316,6 @@ def main():
         include_subgraphs=not args.top_level_only,
     )
     ops_info = analyzer.analyze(max_instances_per_op=max_inst)
-
-    # Derive a human-readable model name from the parent directory.
-    model_name = Path(model_path).parent.name
-
-    # Render the Markdown report.
-    markdown_report = generate_markdown_report(ops_info, model_name, analyzer)
-
-    # Save the Markdown report.
-    md_path = Path(output_dir) / "step1_onnx_analysis.md"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(markdown_report)
-    print(f"[OK] Markdown report saved: {md_path}")
 
     # Save the JSON data.
     json_path = Path(output_dir) / "step1_onnx_ops.json"

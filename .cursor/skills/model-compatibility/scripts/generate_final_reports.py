@@ -434,7 +434,11 @@ def main() -> None:
 
     # Details: the full per-operator record, including what the report omits.
     det = ["# Model compatibility details\n\n"]
-    det.append(f"- EP input: `{meta.get('ep_input_path', '')}`\n")
+    det.append(
+        f"- EP input: `{ep_input}`\n"
+        if ep_input.endswith(".mlir")
+        else "- EP input: not available; analyzed the original ONNX\n"
+    )
     det.append(f"- Generated: `{meta['generated_at_utc']}`\n\n")
 
     worklist = data.get("worklist", {})

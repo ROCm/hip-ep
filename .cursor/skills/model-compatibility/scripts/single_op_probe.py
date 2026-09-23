@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -46,14 +45,13 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import ep_dump  # noqa: E402
 import probe  # noqa: E402
 from onnx_graph_walk import NodeContext, iter_typed_nodes  # noqa: E402
 
 # A Constant small enough that its value is more useful than its size. Above
 # this it is a weight, and weights become inputs.
 INLINE_CONSTANT_LIMIT = 1024
-
-DUMP_TIMEOUT_SEC = 300
 
 
 def _is_typed(v: ValueInfoProto) -> bool:
@@ -164,44 +162,6 @@ def build_single_op_model(
     return model, ""
 
 
-def dump_model(
-    runner: Path, config: Path, model_path: Path, out_dir: Path
-) -> tuple[Path | None, str]:
-    """Import one model through the EP and return the MLIR it produced."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        proc = subprocess.run(
-            [
-                str(runner),
-                "-m",
-                str(model_path),
-                "--no-run",
-                "--allow-cpu-fallback",
-                "--provider-options",
-                f"config_file={config}",
-                "--provider-options",
-                f"pass.init.directory={out_dir.as_posix()}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=DUMP_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired:
-        return None, f"import timed out after {DUMP_TIMEOUT_SEC}s"
-
-    mlir = out_dir / "ep_input.mlir"
-    if mlir.exists():
-        return mlir, ""
-
-    log = (proc.stderr or "") + (proc.stdout or "")
-    for line in log.splitlines():
-        if "Error in ORT API" in line or "error:" in line:
-            # Trim glog's timestamp and source-location preamble.
-            _, _, tail = line.partition("] ")
-            return None, (tail or line).strip()[:200]
-    return None, f"importer exited with code {proc.returncode}"
-
-
 def _find_op_line(mlir_lines: list[str], op_type: str) -> int | None:
     """Where the operator of interest sits in its own dump."""
     for i, line in enumerate(mlir_lines):
@@ -240,21 +200,7 @@ def probe_operator(
             {"status": "not_sliceable", "reason": why},
         )
 
-    work.mkdir(parents=True, exist_ok=True)
-    out = work / f"{op_type}.hip.mlir"
-    converted = False
-    for module in candidates:
-        converted = probe._converts_cleanly(opt, module, work / f"{op_type}.mlir", out)
-        if converted:
-            break
-    targets: dict[str, int] = {}
-    if converted and out.exists():
-        for line in out.read_text(encoding="utf-8").splitlines():
-            for name in probe.ops_on_line(line):
-                if not name.startswith("onnx.") and name not in probe.DPS_HELPER_OPS:
-                    targets[name] = targets.get(name, 0) + 1
-
-    s1 = {"targets": targets, "unconverted_lines": [] if converted else [line_no]}
+    converted, targets = probe.convert_candidates(opt, candidates, work, op_type)
     if not converted:
         if inferred:
             why = "unranked types; a slice with an inferred shape did not convert"
@@ -262,68 +208,35 @@ def probe_operator(
                 "status": "not_sliceable",
                 "reason": why,
             }
-        return s1, {"status": "skipped", "reason": "unconverted in stage1"}
+        return (
+            {"targets": {}, "unconverted_lines": [line_no]},
+            {"status": "skipped", "reason": "unconverted in stage1"},
+        )
 
-    s2_path = work / f"{op_type}.s2.mlir"
-    llvm = work / f"{op_type}.llvm.mlir"
-    for module in candidates:
-        s2_path.write_text(module, encoding="utf-8")
-        code, log = probe.run_opt(opt, s2_path, probe.STAGE2_PASSES, llvm, debug=False)
-        if code == 0 and llvm.exists():
-            break
-    if code != 0 or not llvm.exists():
-        return s1, {
-            # A guessed shape is as likely a suspect as the lowering.
-            "status": "not_sliceable" if inferred else "lowering_broken",
-            "source_line": line_no,
-            "error": probe._failure_reason(code, log)[:300],
-            **(
-                {
-                    "reason": "unranked types; a slice with an inferred shape did not lower"
-                }
-                if inferred
-                else {}
-            ),
-        }
-
-    symbols = sorted(
-        {
-            s
-            for s in probe._WRAP_SYM.findall(llvm.read_text(encoding="utf-8"))
-            if not probe.INFRA_SYMBOLS.match(s)
-        }
-    )
-    return s1, {
-        "status": "ok",
-        "source_line": line_no,
-        "runtime_funcs": symbols,
-        "compile_time": not symbols,
-        "attributes": [],
-    }
+    s1 = {"targets": targets, "unconverted_lines": []}
+    entry = probe.lower_candidates(opt, candidates, work, op_type, inferred)
+    return s1, {**entry, "source_line": line_no}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("model", type=Path)
     ap.add_argument("out_dir", type=Path)
-    ap.add_argument("--package", type=Path, required=True)
+    ap.add_argument("--package", default="")
     ap.add_argument(
         "--config",
         type=Path,
-        default=_HERE / "morphizen_init_config.json",
+        default=None,
         help="MorphiZen plugin config used for the per-operator imports.",
     )
     args = ap.parse_args()
 
-    runner = args.package / "bin" / "hip-onnx-runner.exe"
-    if not runner.exists():
-        runner = args.package / "bin" / "hip-onnx-runner"
-    opt = args.package / "bin" / "hip-mlir-opt.exe"
-    if not opt.exists():
-        opt = args.package / "bin" / "hip-mlir-opt"
-    for tool in (runner, opt):
-        if not tool.exists():
-            sys.exit(f"not found in the package: {tool}")
+    package = ep_dump.resolve_package(args.package)
+    runner = ep_dump.find_tool(package, "hip-onnx-runner")
+    opt = ep_dump.find_tool(package, "hip-mlir-opt")
+    # Once, not once per operator: this costs a process launch.
+    ep_dump.check_options(runner)
+    args.config = (args.config or ep_dump.default_config()).resolve()
 
     model = onnx.load(args.model)
     try:
@@ -379,7 +292,8 @@ def main() -> None:
         model_path = models_dir / f"{op}.onnx"
         onnx.save(built, model_path)
 
-        mlir, err = dump_model(runner, args.config, model_path, dumps_dir / op)
+        dumped = ep_dump.run_dump(runner, args.config, model_path, dumps_dir / op)
+        mlir, err = dumped.path, dumped.reason
         if mlir is not None:
             complaint = ""
         if mlir is None:

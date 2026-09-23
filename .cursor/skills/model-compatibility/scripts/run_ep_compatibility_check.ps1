@@ -160,16 +160,31 @@ if (-not $SkipDump -and (Test-Path -LiteralPath $EpMlir)) {
     $SkipDump = $true
 } elseif (-not $SkipDump) {
     Write-Host '(1/5) Dumping EP input MLIR...' -ForegroundColor Yellow
-    $dumpArgs = @{
-        ModelPath          = $ModelPath
-        GpuTestPackageRoot = $GpuTestPackageRoot
-        DumpDirectory      = $EpInputDir
-        DumpFileName       = $DumpFileName
-    }
-    if ($MorphizenConfigPath) { $dumpArgs['MorphizenConfigPath'] = $MorphizenConfigPath }
+    $dumpArgv = @(
+        (Join-Path $ToolsDir "ep_dump.py"), $ModelPath, $EpInputDir,
+        "--package", $GpuTestPackageRoot, "--filename", $DumpFileName
+    )
+    if ($MorphizenConfigPath) { $dumpArgv += @("--config", $MorphizenConfigPath) }
     try {
-        & (Join-Path $ToolsDir "dump_ep_input.ps1") @dumpArgs
-        if (-not (Test-Path -LiteralPath $EpMlir)) { throw "dump produced no file: $EpMlir" }
+        # Relaxed around the call only: under "Stop", one line on the child's
+        # stderr becomes a terminating NativeCommandError before its reason
+        # can be read back out of the output.
+        $savedErrPref = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $dumpOutput = & python @dumpArgv 2>&1 | ForEach-Object { $_.ToString() }
+        } finally {
+            $ErrorActionPreference = $savedErrPref
+        }
+        $dumpOutput | ForEach-Object { Write-Host $_ }
+        if (-not (Test-Path -LiteralPath $EpMlir)) {
+            # ep_dump.py already printed why; carry its last line so the
+            # report's stage table says more than "no file".
+            $why = @($dumpOutput | Where-Object { $_ -match '^ERROR: ' } |
+                     Select-Object -Last 1)
+            throw $(if ($why.Count) { ([string]$why[0]) -replace '^ERROR: ', '' }
+                    else { "dump produced no file: $EpMlir" })
+        }
         Add-Stage "Dump EP input" "ok" `
             ("{0:N0} bytes" -f (Get-Item -LiteralPath $EpMlir).Length)
     } catch {
@@ -192,8 +207,10 @@ if (Test-UpToDate -Source $ModelPath -Derived $origOps) {
     Write-Host '(2/5) Original model distribution: up to date' -ForegroundColor DarkGray
 } else {
     Invoke-PythonStep -Label '(2/5) Counting operators in the original model...' -PyArgv @(
+        # One instance per operator, not none: without an EP input this file
+        # is what the report's worklist reads signatures and attributes from.
         (Join-Path $ToolsDir "step1_onnx_parser.py"), $ModelPath, $OrigOpsDir,
-        "--max-instances-per-op", "0"
+        "--max-instances-per-op", "1"
     )
 }
 

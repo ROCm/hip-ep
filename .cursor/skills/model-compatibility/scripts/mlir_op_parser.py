@@ -90,7 +90,6 @@ _ELEM_TYPES = {
 _OP_NAME = re.compile(r'"(onnx\.[A-Za-z0-9_]+)"\s*\(')
 _FUNC_DEF = re.compile(r"^(\s*)func\.func\b")
 _TENSOR = re.compile(r"tensor<([^<>]*)>")
-_STR_ATTR = re.compile(r'{}\s*=\s*"([^"]*)"')
 
 
 def _split_top_level(text: str) -> list[str]:

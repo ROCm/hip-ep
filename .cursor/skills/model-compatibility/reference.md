@@ -11,7 +11,7 @@ restate them elsewhere.
 
 | Step | Script | Produces |
 |---|---|---|
-| Dump the graph the EP compiles | `dump_ep_input.ps1` | `ep_input.mlir` |
+| Dump the graph the EP compiles | `ep_dump.py` | `ep_input.mlir` |
 | Count operators in it | `mlir_op_parser.py` | `ep_input_ops.json` |
 | Count operators in the original | `step1_onnx_parser.py` | `step1_onnx_ops.json` |
 | Compare the two | `compare_op_distribution.py` | `op_distribution_comparison.json` |

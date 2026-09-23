@@ -64,6 +64,32 @@ STATUS_ACTION = {
 }
 
 
+def onnx_signature(inst: dict) -> str:
+    """An ONNX node's operand and result types, read like an MLIR signature.
+
+    Without an EP input there are no MLIR lines to quote, but the original
+    model carries the same information, and a worklist entry is much harder
+    to act on without it.
+    """
+
+    def one(tensor: dict) -> str:
+        dtype = tensor.get("dtype") or "?"
+        dims = tensor.get("shape") or []
+        if not dims:
+            return dtype
+        shape = "x".join("?" if d in (None, "", 0) else str(d) for d in dims)
+        return f"{dtype}[{shape}]"
+
+    parts = [one(t) for t in inst.get("inputs", [])]
+    results = [one(t) for t in inst.get("outputs", [])]
+    if not any(p != "?" for p in parts + results):
+        # Every type unknown, which is what a sequence operand looks like
+        # here. "(?) -> ?" is worse than saying nothing.
+        return ""
+    ins = ", ".join(parts)
+    return f"({ins}) -> {', '.join(results)}" if results else f"({ins})"
+
+
 def _norm_domain(domain: str) -> str:
     return "onnx" if domain in ("", "ai.onnx") else domain
 
@@ -392,6 +418,10 @@ def main() -> None:
                 idx = first["line_no"] - 1
                 if 0 <= idx < len(mlir_lines):
                     item["signature"] = type_signature(mlir_lines[idx])
+            elif first.get("inputs") or first.get("outputs"):
+                signature = onnx_signature(first)
+                if signature:
+                    item["signature"] = signature
             if status == "lowering-broken":
                 item["error"] = s2.get("error", "")
             if bucket == "unverified":

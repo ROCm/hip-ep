@@ -319,6 +319,70 @@ def parse_op_line(line: str) -> dict | None:
     }
 
 
+def convert_candidates(
+    opt: Path, candidates: list[str], work: Path, op_type: str
+) -> tuple[bool, dict[str, int]]:
+    """Convert the first candidate that converts, and name what it became.
+
+    Returns (converted, target op counts). Trying each in turn is what makes
+    a guessed shape usable: only a candidate that succeeds is evidence.
+    """
+    out = work / f"{op_type}.hip.mlir"
+    work.mkdir(parents=True, exist_ok=True)
+    for module in candidates:
+        if _converts_cleanly(opt, module, work / f"{op_type}.mlir", out):
+            targets: dict[str, int] = {}
+            if out.exists():
+                for line in out.read_text(encoding="utf-8").splitlines():
+                    for name in ops_on_line(line):
+                        if not name.startswith("onnx.") and name not in DPS_HELPER_OPS:
+                            targets[name] = targets.get(name, 0) + 1
+            return True, targets
+    return False, {}
+
+
+def lower_candidates(
+    opt: Path, candidates: list[str], work: Path, op_type: str, inferred: bool
+) -> dict:
+    """Lower the first candidate that lowers, and name the symbols it reached.
+
+    Returns a stage2 entry. A slice built on a guessed shape cannot convict
+    the lowering -- the shape is as likely a suspect -- so its failure is
+    recorded as unverified rather than broken.
+    """
+    work.mkdir(parents=True, exist_ok=True)
+    src = work / f"{op_type}.s2.mlir"
+    out = work / f"{op_type}.llvm.mlir"
+    code, log = 1, "no candidates"
+    for module in candidates:
+        src.write_text(module, encoding="utf-8")
+        code, log = run_opt(opt, src, STAGE2_PASSES, out, debug=False)
+        if code == 0 and out.exists():
+            break
+
+    if code == TIMEOUT_EXIT:
+        return {"status": "timeout", "error": log}
+    if code != 0 or not out.exists():
+        entry = {
+            "status": "not_sliceable" if inferred else "lowering_broken",
+            "error": _failure_reason(code, log)[:300],
+        }
+        if inferred:
+            entry["reason"] = (
+                "unranked types; a slice with an inferred shape did not lower"
+            )
+        return entry
+
+    symbols = sorted(
+        {
+            s
+            for s in _WRAP_SYM.findall(out.read_text(encoding="utf-8"))
+            if not INFRA_SYMBOLS.match(s)
+        }
+    )
+    return {"status": "ok", "runtime_funcs": symbols, "compile_time": not symbols}
+
+
 def _slices_for(
     src_lines: list[str], def_index: dict[str, int], instances: list[dict]
 ) -> tuple[list[str], int, str, bool]:
@@ -864,18 +928,7 @@ def stage1_per_operator(
             continue
 
         print(f"  stage1-slice {op_type} ...", flush=True)
-        out = work / f"{op_type}.out.mlir"
-        converts = False
-        for module in candidates:
-            converts = _converts_cleanly(opt, module, work / f"{op_type}.mlir", out)
-            if converts:
-                break
-        targets: dict[str, int] = {}
-        if converts and out.exists():
-            for line in out.read_text(encoding="utf-8").splitlines():
-                for name in ops_on_line(line):
-                    if not name.startswith("onnx.") and name not in DPS_HELPER_OPS:
-                        targets[name] = targets.get(name, 0) + 1
+        converts, targets = convert_candidates(opt, candidates, work, op_type)
         if not converts and inferred:
             # The slice only exists because we invented a shape for it, so
             # its failure may be ours rather than the converter's.
@@ -958,65 +1011,25 @@ def stage2(
             }
             continue
 
-        slice_path = slice_dir / f"{op_type}.mlir"
-        out_path = slice_dir / f"{op_type}.llvm.mlir"
         print(f"  stage2 {op_type} ...", flush=True)
-        for module in candidates:
-            slice_path.write_text(module, encoding="utf-8")
-            code, log = run_opt(opt, slice_path, STAGE2_PASSES, out_path, debug=False)
-            if code == 0 and out_path.exists():
-                break
-
-        if code == TIMEOUT_EXIT:
-            results[op_type] = {
-                "status": "timeout",
-                "source_line": line_no,
-                "error": log,
-            }
-            continue
-        if code != 0 or not out_path.exists():
-            results[op_type] = {
-                # A slice built on a shape we invented cannot convict the
-                # lowering: the shape is as likely a suspect as the operator.
-                "status": "not_sliceable" if inferred else "lowering_broken",
-                "source_line": line_no,
-                "error": _failure_reason(code, log)[:300],
-                **(
-                    {
-                        "reason": "unranked types; a slice with an inferred shape "
-                        "did not lower"
-                    }
-                    if inferred
-                    else {}
-                ),
-            }
+        entry = lower_candidates(opt, candidates, slice_dir, op_type, inferred)
+        if entry["status"] != "ok":
+            results[op_type] = {**entry, "source_line": line_no}
             continue
 
-        symbols = sorted(
-            {
-                s
-                for s in _WRAP_SYM.findall(out_path.read_text(encoding="utf-8"))
-                if not INFRA_SYMBOLS.match(s)
-            }
-        )
         # Only operators stage1 saw lose an attribute need this; the same
         # slice serves, so nothing extra is built.
-        attr_findings = attribute_probe(
-            opt,
-            module,
-            instances[0].get("attributes", {}),
-            s1.get("dropped_attrs", []),
-            op_type,
-            out_dir / "attrs",
-        )
         results[op_type] = {
-            "status": "ok",
+            **entry,
             "source_line": line_no,
-            "runtime_funcs": symbols,
-            # No operator-specific symbol means the lowering is entirely
-            # compile-time, as for Reshape via tensor.expand_shape.
-            "compile_time": not symbols,
-            "attributes": attr_findings,
+            "attributes": attribute_probe(
+                opt,
+                candidates[0],
+                instances[0].get("attributes", {}),
+                s1.get("dropped_attrs", []),
+                op_type,
+                out_dir / "attrs",
+            ),
         }
     return results
 

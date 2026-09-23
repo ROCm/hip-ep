@@ -96,20 +96,3 @@ def iter_typed_nodes(
                 for idx, sub_graph in enumerate(attr.graphs):
                     child = f"{scope}/{node.op_type}.{attr.name}[{idx}]"
                     yield from iter_typed_nodes(sub_graph, child, types, constants)
-
-
-def count_nodes_by_op(
-    model: onnx.ModelProto,
-    *,
-    top_level_only: bool = False,
-) -> Tuple[int, int]:
-    """Return (total_node_count, unique_op_type_count)."""
-    if top_level_only:
-        nodes = model.graph.node
-        return len(nodes), len({n.op_type for n in nodes})
-    counts = set()
-    total = 0
-    for node, _ in iter_model_nodes(model):
-        total += 1
-        counts.add(node.op_type)
-    return total, len(counts)
