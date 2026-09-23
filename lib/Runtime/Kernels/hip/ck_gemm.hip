@@ -104,6 +104,14 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
         S<4, 32, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 2, 8, 1, 1, 1, S<1, 32, 1, 4>,             \
         S<EV, 8, 8>, Intrawave, V1
 
+// Not from CK's list: MPerBlock 64 with NPerBlock left at 128, so a shape whose
+// whole N' fits inside one tile still reads A once but spreads over twice the
+// workgroups. Serves attention's A @ V, where N' is the head dim.
+#define TKN_M64(EV)                                                                         \
+    256, 64, 128, 64, 8, 8, 16, 16, 2, 2, S<8, 32, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0,  \
+        S<8, 32, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 0, 1, 1, S<1, 32, 1, 8>, S<EV, 8, 8>, \
+        Intrawave, V1
+
 // A Row / B Col.
 #define TNK_1(EV)                                                                           \
     256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 1, \
@@ -178,6 +186,25 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
         S<4, 32, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0, 1, 1, S<1, 32, 1, 4>,             \
         S<1, 8, 8>, Intrawave, V1
 
+// The same E-store relaxation for the B-Row tiles. On those, B' already loads
+// scalar (BBlockTransferSrcScalarPerVector is 1) and A' vectorises along K',
+// so the CShuffle store is the only thing an m (= CK's N') indivisible by 8
+// blocks. Without these, every B-Row shape whose m is not a multiple of 8 is
+// refused by all instances and falls to the reference GEMM. EV is ignored; the
+// width is the point of the variant.
+#define TKN_E4a(EV)                                                                         \
+    256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0, \
+        S<4, 64, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 0, 1, 1, S<1, 32, 1, 8>, S<4, 8, 8>,  \
+        Intrawave, V1
+#define TKN_E2a(EV)                                                                         \
+    256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0, \
+        S<4, 64, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 0, 1, 1, S<1, 32, 1, 8>, S<2, 8, 8>,  \
+        Intrawave, V1
+#define TKN_E1a(EV)                                                                         \
+    256, 128, 128, 32, 8, 8, 16, 16, 4, 2, S<4, 64, 1>, S<1, 0, 2>, S<1, 0, 2>, 2, 8, 8, 0, \
+        S<4, 64, 1>, S<0, 2, 1>, S<0, 2, 1>, 1, 1, 8, 0, 1, 1, S<1, 32, 1, 8>, S<1, 8, 8>,  \
+        Intrawave, V1
+
 // ComputeTypeA/B are the trailing pair. They default to ADataType/BDataType,
 // but naming them keeps the f32-output combos from instantiating GetWmma<float>.
 #define MAKE_OP(ABDATA, ALAY, BLAY, DSLAY, DSDATA, EDATA, CDEOP, EV, TILE)                \
@@ -212,6 +239,21 @@ struct RunArgs {
   int64_t batchStrideA, batchStrideB, batchStrideE;
   float alpha;
 };
+
+// 0 for anything the registry does not serve.
+int64_t elemBytes(int dtype) {
+  switch (dtype) {
+  case HIP_DTYPE_FLOAT16:
+  case HIP_DTYPE_BFLOAT16:
+    return 2;
+  case HIP_DTYPE_FLOAT32:
+    return 4;
+  case HIP_DTYPE_FLOAT64:
+    return 8;
+  default:
+    return 0;
+  }
+}
 
 template <typename CDEOp>
 CDEOp makeCde(float) {
@@ -263,6 +305,7 @@ enum Combo {
   kTN_F32 = 1,      // transA=T, f32 out, alpha!=1 -> B' Col, Scale epilogue
   kTN_F16_BIAS = 2, // transA=T, f16 out, bias     -> B' Col, Add epilogue
   kNN_F16_BIAS = 3, // transA=N, f16 out, bias     -> A'/B' both Row, Add
+  kTN_F16 = 4,      // transA=T, f16 out, no bias  -> B' Col
 };
 
 using RunFn = int (*)(const RunArgs &);
@@ -276,29 +319,41 @@ struct Entry {
 #define OP_B(TILE) MAKE_OP(F16, Row, Col, Empty_Tuple, Empty_Tuple, F32, Scale, 4, TILE)
 #define OP_C(TILE) MAKE_OP(F16, Row, Col, Row_Tuple, F16_Tuple, F16, Add, 8, TILE)
 #define OP_D(TILE) MAKE_OP(F16, Row, Row, Row_Tuple, F16_Tuple, F16, Add, 8, TILE)
+#define OP_E(TILE) MAKE_OP(F16, Row, Col, Empty_Tuple, Empty_Tuple, F16, PassThrough, 8, TILE)
 
 #define ENT_A(TILE) {kNN_F16, &runNoBias<OP_A(TILE), PassThrough>},
 #define ENT_B(TILE) {kTN_F32, &runNoBias<OP_B(TILE), Scale>},
 #define ENT_C(TILE) {kTN_F16_BIAS, &runBias<OP_C(TILE), Add>},
 #define ENT_D(TILE) {kNN_F16_BIAS, &runBias<OP_D(TILE), Add>},
+#define ENT_E(TILE) {kTN_F16, &runNoBias<OP_E(TILE), PassThrough>},
 
 const Entry kEntries[] = {
-    // 0-9: NN, f16 out, no bias
+    // 0-13: NN, f16 out, no bias
     ENT_A(TKN_1) ENT_A(TKN_2) ENT_A(TKN_3) ENT_A(TKN_4) ENT_A(TKN_5)
     ENT_A(TKN_6) ENT_A(TKN_7) ENT_A(TKN_8) ENT_A(TKN_A1a) ENT_A(TKN_A1b)
+    ENT_A(TKN_E4a) ENT_A(TKN_E2a) ENT_A(TKN_E1a) ENT_A(TKN_M64)
 
-    // 10-22: TN, f32 out, Scale
+    // 14-26: TN, f32 out, Scale
     ENT_B(TNK_1) ENT_B(TNK_2) ENT_B(TNK_3) ENT_B(TNK_4) ENT_B(TNK_5)
     ENT_B(TNK_6) ENT_B(TNK_7) ENT_B(TNK_8) ENT_B(TNK_E2a) ENT_B(TNK_E2b)
     ENT_B(TNK_E1a) ENT_B(TNK_E1b) ENT_B(TNK_K4)
 
-    // 23-31: TN, f16 out, bias
+    // 27-37: TN, f16 out, bias
     ENT_C(TNK_1) ENT_C(TNK_2) ENT_C(TNK_3) ENT_C(TNK_4) ENT_C(TNK_5)
     ENT_C(TNK_6) ENT_C(TNK_7) ENT_C(TNK_8) ENT_C(TNK_K4)
+    ENT_C(TNK_E2a) ENT_C(TNK_E1a)
 
-    // 32-39: NN, f16 out, bias
+    // 38-48: NN, f16 out, bias
     ENT_D(TKN_1) ENT_D(TKN_2) ENT_D(TKN_3) ENT_D(TKN_4) ENT_D(TKN_5)
     ENT_D(TKN_6) ENT_D(TKN_7) ENT_D(TKN_8)
+    ENT_D(TKN_E4a) ENT_D(TKN_E2a) ENT_D(TKN_E1a)
+
+    // 49-58: TN, f16 out, no bias. This is the Q @ K^T that
+    // TransposeMatMulFold stamps as hipdnn.transB on a plain MatMul; hipBLASLt
+    // served it directly, so without these entries the whole attention score
+    // GEMM of every folded model falls to the reference kernel.
+    ENT_E(TNK_1) ENT_E(TNK_2) ENT_E(TNK_3) ENT_E(TNK_4) ENT_E(TNK_6)
+    ENT_E(TNK_7) ENT_E(TNK_8) ENT_E(TNK_K4) ENT_E(TNK_E2a) ENT_E(TNK_E1a)
 };
 
 constexpr int kNumEntries = (int)(sizeof(kEntries) / sizeof(kEntries[0]));
@@ -330,10 +385,8 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
   } else if (abDtype == HIP_DTYPE_FLOAT16 && dDtype == HIP_DTYPE_FLOAT16) {
     if (bias) {
       combo = transA ? kTN_F16_BIAS : kNN_F16_BIAS;
-    } else if (transA) {
-      return 1;
     } else {
-      combo = kNN_F16;
+      combo = transA ? kTN_F16 : kNN_F16;
     }
   } else {
     return 1;
@@ -360,7 +413,55 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
   r.batchStrideE = strideD;
   r.alpha = alpha;
 
+  // A buffer load or store reaches memory through an SRD whose range field is
+  // 32 bits, so one launch can address at most 4 GiB per operand. Past that the
+  // range wraps and the kernel runs outside the buffer: on swinv2's window
+  // attention (m=n=256, k=32, batch=49152, E = 6.44 GiB) an E span of exactly
+  // 2^32 completes while 2^32 + 131072 faults, and the damage surfaces on the
+  // following launch rather than the one that caused it. CK accepts these
+  // arguments, so the bound has to be applied here: split the batch until every
+  // launch fits. Shapes already inside the window keep the single launch.
+  const int64_t abBytes = elemBytes(abDtype);
+  const int64_t dBytes = elemBytes(dDtype);
+  if (abBytes == 0 || dBytes == 0) {
+    return 1;
+  }
+  constexpr int64_t kMaxSpanBytes = 0x100000000LL; // 4 GiB
+  int64_t maxBatch = r.batch;
+  const int64_t perBatch[3] = {r.batchStrideA * abBytes,
+                               r.batchStrideB * abBytes,
+                               r.batchStrideE * dBytes};
+  for (int64_t per : perBatch) {
+    if (per <= 0) {
+      continue;
+    }
+    const int64_t lim = kMaxSpanBytes / per;
+    maxBatch = (lim < 1) ? 1 : (lim < maxBatch ? lim : maxBatch);
+  }
+
+  // CK checks hipGetLastError() after each launch, which reports whatever
+  // error is pending on the thread rather than only this launch's. Consume a
+  // pending one so an unrelated caller's handled failure cannot be read as
+  // this shape being unsupported.
+  (void)hipGetLastError();
+
   try {
+    if (maxBatch < r.batch) {
+      RunArgs seg = r;
+      for (int64_t off = 0; off < r.batch; off += maxBatch) {
+        const int64_t rest = r.batch - off;
+        seg.batch = rest < maxBatch ? rest : maxBatch;
+        seg.a = static_cast<const char *>(r.a) + off * r.batchStrideA * abBytes;
+        seg.b = static_cast<const char *>(r.b) + off * r.batchStrideB * abBytes;
+        seg.e = static_cast<char *>(r.e) + off * r.batchStrideE * dBytes;
+        // The bias is broadcast along the batch, so it keeps its base pointer.
+        const int rc = kEntries[instance].fn(seg);
+        if (rc != 0) {
+          return rc;
+        }
+      }
+      return 0;
+    }
     return kEntries[instance].fn(r);
   } catch (...) {
     return 1;
