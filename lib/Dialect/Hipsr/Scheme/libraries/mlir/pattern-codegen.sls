@@ -229,8 +229,12 @@
                 [var (cdr (assq 'var fields))]
                 [operand-idx (cdr (assq 'operand-idx fields))])
            #`(begin
-               (set! #,var (vector-ref operands-ref #,operand-idx))
-               #t))]
+               ;; Check bounds: operand-idx < operands-ref size
+               (if (< #,operand-idx (value-array-ref-size operands-ref))
+                   (begin
+                     (set! #,var (value-array-ref-at operands-ref #,operand-idx))
+                     #t)
+                   #f)))]
 
         [(:check-eq)
          (let* ([fields (cdr action)]
