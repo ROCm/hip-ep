@@ -142,6 +142,30 @@ def run_opt(
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
+def _failure_reason(code: int, log: str) -> str:
+    """Say why a run failed, in whatever form the failure took.
+
+    A diagnostic is only one of the ways hip-mlir-opt can fail: it also
+    crashes, and then there is no `error:` line to find. Reporting "unknown"
+    for a segfault hides the most actionable failure of the three.
+    """
+    if code == TIMEOUT_EXIT:
+        return log.strip()
+    for line in log.splitlines():
+        if "error:" in line:
+            return line.strip()
+    crash = re.search(r"exception 0x[0-9a-fA-F]+", log)
+    if crash:
+        top = re.search(r"^#0\s+0x\S+ in\s+(.+)$", log, re.MULTILINE)
+        where = (
+            f" at {top.group(1).strip()}" if top and "??" not in top.group(1) else ""
+        )
+        return f"hip-mlir-opt crashed ({crash.group(0)}){where}"
+    if code and code & 0xC0000000 == 0xC0000000:
+        return f"hip-mlir-opt terminated abnormally (0x{code & 0xFFFFFFFF:08X})"
+    return f"hip-mlir-opt exited with code {code}"
+
+
 def parse_loc_table(lines: list[str]) -> dict[str, int]:
     """Map loc identifier -> source line number."""
     table: dict[str, int] = {}
@@ -295,12 +319,63 @@ def parse_op_line(line: str) -> dict | None:
     }
 
 
+def _slice_any_instance(
+    src_lines: list[str], def_index: dict[str, int], instances: list[dict]
+) -> tuple[str | None, int, str, bool]:
+    """Isolate whichever instance of an operator can be isolated.
+
+    Returns (module, line_no, reason, inferred). Shapes are guessed only
+    after every instance has been tried as written, so a guess never
+    displaces evidence we actually have.
+    """
+    why = "no instances"
+    for infer in (False, True):
+        for inst in instances:
+            module, why = build_single_op_module(
+                src_lines, def_index, inst["line_no"], infer_unranked=infer
+            )
+            if module is not None:
+                return module, inst["line_no"], why, infer
+    return None, instances[0]["line_no"] if instances else 0, why, False
+
+
+def _widest_shape(types: list[str]) -> str | None:
+    """Guess the shape an unranked type would have, from its neighbours.
+
+    Most operators that reach us unranked are shape-preserving, so the widest
+    ranked operand is a good guess -- but only a guess, and it is wrong for
+    anything that changes rank, such as a reduction. That asymmetry decides
+    how the result may be used: a slice built this way that converts proves
+    the operator is handled, while one that fails proves nothing, because the
+    shape we invented may be the reason.
+    """
+    best: str | None = None
+    best_rank = -1
+    for ty in types:
+        m = _ELEM_OF_TENSOR.match(ty.strip())
+        if not m or "*" in m.group(1):
+            continue
+        shape = m.group(1)
+        rank = shape.count("x")
+        if rank > best_rank:
+            best, best_rank = shape, rank
+    return best
+
+
+def _apply_shape(ty: str, shape: str) -> str:
+    m = _ELEM_OF_TENSOR.match(ty.strip())
+    if not m or m.group(1) != "*x":
+        return ty
+    return f"tensor<{shape}{m.group(2)}>"
+
+
 def build_single_op_module(
     src_lines: list[str],
     def_index: dict[str, int],
     line_no: int,
     type_override: tuple[int, str] | None = None,
-) -> str | None:
+    infer_unranked: bool = False,
+) -> tuple[str | None, str]:
     """Wrap one operation in a self-contained module.
 
     Operands become function arguments, with two exceptions that change what
@@ -314,15 +389,44 @@ def build_single_op_module(
       those become arguments.
     - onnx.NoValue is rebuilt in place, since `none` cannot be a function
       argument.
+
+    Returns (module, reason). The module is None when the operator cannot be
+    isolated, and the reason says why -- that is a finding in itself, not
+    just a failure to report. With infer_unranked the reason on success is
+    "inferred-shape", and the caller must then read a conversion failure as
+    inconclusive: see _widest_shape for why.
     """
     parsed = parse_op_line(src_lines[line_no - 1])
     if not parsed:
-        return None
+        return None, "could not parse the operation"
+
+    # An unranked tensor is fine mid-graph, where its shape comes from
+    # context, but module metadata requires ranked types in @main_graph's
+    # signature. A result is always in the signature, so one there rules the
+    # slice out; operands are checked below, since an inlined constant never
+    # reaches the signature.
+    inferred = False
+    if infer_unranked and any(
+        "<*x" in t for t in parsed["in_types"] + parsed["out_types"]
+    ):
+        shape = _widest_shape(parsed["in_types"])
+        if shape is None:
+            return None, "unranked type with no ranked operand to borrow a shape from"
+        parsed = dict(
+            parsed,
+            in_types=[_apply_shape(t, shape) for t in parsed["in_types"]],
+            out_types=[_apply_shape(t, shape) for t in parsed["out_types"]],
+        )
+        inferred = True
+
+    unranked_out = [t for t in parsed["out_types"] if "<*x" in t]
+    if unranked_out:
+        return None, f"unranked result type {unranked_out[0]}"
 
     if type_override is not None:
         idx, new_type = type_override
         if not 0 <= idx < len(parsed["in_types"]):
-            return None
+            return None, "operand index out of range"
         parsed = dict(parsed, in_types=list(parsed["in_types"]))
         parsed["in_types"][idx] = new_type
         # An inlined constant carries its own type, which would now disagree
@@ -333,6 +437,7 @@ def build_single_op_module(
     preamble: list[str] = []
     args: list[str] = []
     remap: dict[str, str] = {}
+    inlined: set[str] = set()
     none_ssa: str | None = None
 
     forced_arg = parsed.get("_force_arg")
@@ -361,10 +466,19 @@ def build_single_op_module(
             and not _MEM_ADDR_CONST.search(def_line)
         )
         if inline_const:
-            preamble.append("  " + def_line.strip())
+            # One constant can feed several operands -- Slice routinely passes
+            # the same zero vector as starts, ends and axes. Copying it once
+            # per use would redefine its SSA name and make the module invalid.
+            if base not in inlined:
+                preamble.append("  " + def_line.strip())
+                inlined.add(base)
             remap[operand] = base
             continue
 
+        if "<*x" in ty:
+            # Reaches the signature as an argument, where unranked is not
+            # allowed.
+            return None, f"unranked operand type {ty} at position {pos}"
         arg = f"%arg{len(args)}"
         args.append(f"{arg}: {ty}")
         remap[operand] = arg
@@ -388,7 +502,7 @@ def build_single_op_module(
     # the real results are returned.
     returned = [(ref, ty) for ref, ty in zip(result_refs, outs) if ty.strip() != "none"]
     if not returned:
-        return None
+        return None, "every result is a `none` placeholder"
     ret_types = [ty for _ref, ty in returned]
     ret_sig = f"({', '.join(ret_types)})" if len(ret_types) > 1 else ret_types[0]
     ret_vals = ", ".join(ref for ref, _ty in returned)
@@ -404,7 +518,7 @@ def build_single_op_module(
         "}",
         "",
     ]
-    return "\n".join(body)
+    return "\n".join(body), "inferred-shape" if inferred else ""
 
 
 # Element types worth trying when looking for the operand that blocks a
@@ -471,7 +585,7 @@ def attribution_probe(
             new_type = _retype(ty, alt)
             if not new_type:
                 continue
-            module = build_single_op_module(
+            module, _why = build_single_op_module(
                 src_lines, def_index, line_no, type_override=(idx, new_type)
             )
             if module is None:
@@ -676,6 +790,81 @@ def attribute_probe(
     return findings
 
 
+def stage1_per_operator(
+    opt: Path, mlir_path: Path, ops: dict, out_dir: Path
+) -> dict[str, dict]:
+    """Fallback for when the whole-graph probe fails.
+
+    One operator failing the pass takes the whole run down with it -- an
+    onnx.If whose output shapes are not static, say -- and the other
+    operators' verdicts go with it. Slicing each one out isolates them, at
+    the cost of losing context: fusions that need neighbouring operators
+    cannot fire, so support here is a lower bound.
+    """
+    src_lines = mlir_path.read_text(encoding="utf-8").splitlines()
+    def_index = build_def_index(src_lines)
+    work = out_dir / "stage1_slices"
+    work.mkdir(parents=True, exist_ok=True)
+
+    results: dict[str, dict] = {}
+    for op_type, info in ops.items():
+        if op_type.startswith("_"):
+            continue
+        instances = info.get("instances") or []
+        if not instances:
+            continue
+        module, line_no, why, inferred = _slice_any_instance(
+            src_lines, def_index, instances
+        )
+        base = {
+            "domain": (info.get("domain") or ["onnx"])[0],
+            "count": info["count"],
+            "targets": {},
+            "helpers": {},
+            "folded": 0,
+            "dropped_attrs": [],
+            "unconverted_lines": [],
+        }
+        if module is None:
+            results[op_type] = {
+                **base,
+                "converted": 0,
+                "unconverted": 0,
+                "inconclusive": info["count"],
+                "reason": why,
+            }
+            continue
+
+        print(f"  stage1-slice {op_type} ...", flush=True)
+        out = work / f"{op_type}.out.mlir"
+        converts = _converts_cleanly(opt, module, work / f"{op_type}.mlir", out)
+        targets: dict[str, int] = {}
+        if converts and out.exists():
+            for line in out.read_text(encoding="utf-8").splitlines():
+                for name in ops_on_line(line):
+                    if not name.startswith("onnx.") and name not in DPS_HELPER_OPS:
+                        targets[name] = targets.get(name, 0) + 1
+        if not converts and inferred:
+            # The slice only exists because we invented a shape for it, so
+            # its failure may be ours rather than the converter's.
+            results[op_type] = {
+                **base,
+                "converted": 0,
+                "unconverted": 0,
+                "inconclusive": info["count"],
+                "reason": "unranked types; a slice with an inferred shape did not convert",
+            }
+            continue
+        results[op_type] = {
+            **base,
+            "converted": info["count"] if converts else 0,
+            "unconverted": 0 if converts else info["count"],
+            "targets": targets,
+            "unconverted_lines": [] if converts else [line_no],
+        }
+    return results
+
+
 def stage2(
     opt: Path, mlir_path: Path, ops: dict, stage1_results: dict, out_dir: Path
 ) -> dict[str, dict]:
@@ -715,12 +904,25 @@ def stage2(
             }
             continue
 
-        line_no = instances[0]["line_no"]
-        module = build_single_op_module(src_lines, def_index, line_no)
+        # Try every instance, not just the first. Whether an operator can be
+        # isolated depends on the types at that particular use -- shape
+        # inference leaves some uses unranked and others not -- so one
+        # unusable instance says nothing about the operator. On a vision
+        # model the first three of 51 SkipLayerNormalization uses are
+        # unranked and the other 48 are fine.
+        module, line_no, why, inferred = _slice_any_instance(
+            src_lines, def_index, instances
+        )
         if module is None:
+            # Not a lowering failure: the operator cannot be expressed as a
+            # standalone module. stage1 already showed it converts; the
+            # lowering simply goes unverified. The reason is worth keeping --
+            # an unranked type here means shape inference did not pin down
+            # the operator's rank.
             results[op_type] = {
-                "status": "slice_failed",
-                "reason": f"could not parse line {line_no}",
+                "status": "not_sliceable",
+                "source_line": line_no,
+                "reason": f"{why} (no usable instance among {len(instances)})",
             }
             continue
 
@@ -739,11 +941,19 @@ def stage2(
             continue
         if code != 0 or not out_path.exists():
             results[op_type] = {
-                "status": "lowering_broken",
+                # A slice built on a shape we invented cannot convict the
+                # lowering: the shape is as likely a suspect as the operator.
+                "status": "not_sliceable" if inferred else "lowering_broken",
                 "source_line": line_no,
-                "error": next(
-                    (ln.strip() for ln in log.splitlines() if "error:" in ln), ""
-                )[:300],
+                "error": _failure_reason(code, log)[:300],
+                **(
+                    {
+                        "reason": "unranked types; a slice with an inferred shape "
+                        "did not lower"
+                    }
+                    if inferred
+                    else {}
+                ),
             }
             continue
 
@@ -792,9 +1002,7 @@ def stage1(
     }
     if code != 0 or not after.exists():
         meta["failed"] = True
-        meta["error"] = next(
-            (ln.strip() for ln in log.splitlines() if "error:" in ln), ""
-        )
+        meta["error"] = _failure_reason(code, log)
         return {}, meta
 
     by_src = read_conversion_result(after)
@@ -888,11 +1096,14 @@ def main() -> None:
     print(f"stage1 exit={meta['exit_code']}")
     if meta.get("failed"):
         print(f"  FAILED: {meta.get('error', '')}")
-        (args.out_dir / "probe_result.json").write_text(
-            json.dumps({"stage1": {"meta": meta, "operators": {}}}, indent=2),
-            encoding="utf-8",
+        print("  falling back to per-operator slices")
+        results = stage1_per_operator(opt, args.mlir_path, ops, args.out_dir)
+        meta["fallback"] = "per-operator slices"
+        meta["fallback_note"] = (
+            "whole-graph conversion failed; each operator was converted in "
+            "isolation, so fusions needing surrounding context could not fire "
+            "and support is a lower bound"
         )
-        return
 
     print(f"{'operator':36s} {'conv':>5s} {'unconv':>7s} {'folded':>7s}  targets")
     print("-" * 104)

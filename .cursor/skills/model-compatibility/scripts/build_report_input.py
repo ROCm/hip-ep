@@ -55,6 +55,10 @@ STATUS_ACTION = {
 }
 
 
+def _norm_domain(domain: str) -> str:
+    return "onnx" if domain in ("", "ai.onnx") else domain
+
+
 def type_signature(line: str) -> str:
     """The `(operand types) -> result types` tail of an operation line.
 
@@ -131,7 +135,10 @@ def classify(
     it; otherwise it is a gap that a different model would hit.
     """
     if not s1:
-        return "unsupported", [], []
+        # Nothing was compiled, so the documentation is all there is. It
+        # cannot distinguish an implementation that exists from one that
+        # accepts this model, which is why this path is evidence level D.
+        return ("supported" if in_doc else "unsupported"), [], []
 
     if s1.get("unconverted"):
         # No converter ran. Whether an implementation exists decides between
@@ -140,6 +147,12 @@ def classify(
 
     if (s2 or {}).get("status") in ("lowering_broken", "timeout"):
         return "lowering-broken", [], []
+
+    if (s2 or {}).get("status") == "not_sliceable":
+        # stage1 converted it; stage2 could not build a standalone module to
+        # check the rest of the chain. Trust what was observed and record
+        # that the lowering is unverified rather than claiming either way.
+        return "supported", [], []
 
     ignored = [
         f for f in (s2 or {}).get("attributes", []) if f.get("verdict") == "ignored"
@@ -178,6 +191,13 @@ def main() -> None:
         help="Original .onnx, used to tell author-set attributes from ORT-filled "
         "defaults. Without it every ignored attribute counts as a defect.",
     )
+    ap.add_argument(
+        "--stages",
+        type=Path,
+        default=None,
+        help="pipeline_stages.json from the orchestrator; the probe stages are "
+        "appended from probe_result.json.",
+    )
     args = ap.parse_args()
 
     ops = json.loads(args.ops_json.read_text(encoding="utf-8"))
@@ -200,16 +220,24 @@ def main() -> None:
         if ep_mlir.suffix == ".mlir" and ep_mlir.exists():
             mlir_lines = ep_mlir.read_text(encoding="utf-8").splitlines()
 
-    if s1_all.get("meta", {}).get("failed"):
-        evidence, note = (
-            "B",
-            "whole-graph probe failed; per-operator results are unavailable",
+    # The note says what the report cannot say generically -- the specific
+    # cause. What a degraded level means is the renderer's fixed wording, so
+    # do not repeat it here.
+    probed = bool(s1_all.get("operators"))
+    if not probed:
+        evidence = "D"
+        note = "Cause: " + (
+            s1_all.get("meta", {}).get("error") or "the probe did not run"
         )
+    elif s1_all.get("meta", {}).get("failed"):
+        evidence = "B"
+        note = "Cause: " + (s1_all["meta"].get("error") or "unknown")
     elif explicit is None:
-        evidence, note = (
-            "A",
-            "original model unavailable; every ignored attribute is counted as a "
-            "defect, since ORT-filled defaults cannot be told from author-set values",
+        evidence = "A"
+        note = (
+            "The original model was unavailable, so every ignored attribute is "
+            "counted as a defect: ORT-filled defaults cannot be told from "
+            "author-set values."
         )
     else:
         evidence, note = "A", ""
@@ -224,7 +252,12 @@ def main() -> None:
     for op, info in ops.items():
         if op.startswith("_"):
             continue
-        domain = (info.get("domain") or ["onnx"])[0]
+        # Normalize here rather than trusting the producer: mlir_op_parser
+        # already folds ai.onnx into onnx, step1_onnx_parser reports the
+        # domain verbatim, and step1 only becomes the primary input on the
+        # fallback path -- where the mismatch would silently miss every
+        # standard-domain operator in the lookup.
+        domain = _norm_domain((info.get("domain") or ["onnx"])[0])
         s1 = s1_all.get("operators", {}).get(op, {})
         s2 = s2_all.get(op, {})
         in_doc = (op, domain) in doc
@@ -267,6 +300,10 @@ def main() -> None:
                 "backend": backend,
                 "compile_time": bool(
                     s2.get("status") == "ok" and s2.get("compile_time")
+                ),
+                "lowering_unverified": s2.get("status") == "not_sliceable",
+                "lowering_unverified_reason": (
+                    s2.get("reason", "") if s2.get("status") == "not_sliceable" else ""
                 ),
                 "op_description": op_description(op, domain),
                 "ignored_attributes": [f["attribute"] for f in ignored],
@@ -326,6 +363,55 @@ def main() -> None:
         worklist[key].sort(key=lambda x: -x["count"])
     rows.sort(key=lambda r: (-r["count"], r["onnx_op"]))
 
+    stages: list[dict] = []
+    if args.stages and args.stages.exists():
+        try:
+            loaded = json.loads(args.stages.read_text(encoding="utf-8"))
+            stages = loaded if isinstance(loaded, list) else [loaded]
+        except Exception:
+            stages = []
+    if probed:
+        s1_meta = s1_all.get("meta", {})
+        unconv = s1_meta.get("diagnostic") or {}
+        if s1_meta.get("failed"):
+            s1_result = "failed"
+            s1_detail = (s1_meta.get("error") or "whole-graph conversion failed")
+            if s1_meta.get("fallback"):
+                s1_detail += f" — fell back to {s1_meta['fallback']}"
+        else:
+            # A pass that leaves operators unconverted still succeeded; that
+            # is how it reports missing converters.
+            s1_result = "ok"
+            s1_detail = (
+                f"{len(unconv)} operator type(s) have no converter"
+                if unconv
+                else "every operator converted"
+            )
+        stages.append(
+            {
+                "stage": "convert-onnx-to-hip (stage1)",
+                "result": s1_result,
+                "detail": s1_detail,
+            }
+        )
+        ok = sum(1 for r in s2_all.values() if r.get("status") == "ok")
+        broken = [k for k, r in s2_all.items() if r.get("status") == "lowering_broken"]
+        unsliceable = [
+            k for k, r in s2_all.items() if r.get("status") == "not_sliceable"
+        ]
+        detail = f"{ok} operator(s) lowered"
+        if broken:
+            detail += f"; {len(broken)} broken ({', '.join(broken)})"
+        if unsliceable:
+            detail += f"; {len(unsliceable)} not verifiable ({', '.join(unsliceable)})"
+        stages.append(
+            {
+                "stage": "hip-to-llvm (stage2)",
+                "result": "failed" if broken else "ok",
+                "detail": detail,
+            }
+        )
+
     total = sum(counts.values())
     out = {
         "meta": {
@@ -348,6 +434,7 @@ def main() -> None:
             if total
             else 0.0,
         },
+        "pipeline_stages": stages,
         "operator_distribution": rows,
         "worklist": worklist,
         "capability_gaps": capability_gaps,

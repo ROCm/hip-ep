@@ -50,15 +50,17 @@ WORKLIST_SECTIONS = [
     ),
 ]
 
+# Headline for a degraded run. The assembler's note carries the specific
+# cause and is appended, so the two do not repeat each other.
 EVIDENCE_BADGE = {
     "A": None,
-    "B": "Whole-graph probe failed; results come from per-operator slices and "
-    "under-report support, since fusions that need surrounding context cannot fire.",
-    "C": "Whole-graph MLIR was unavailable; results come from single-operator "
-    "models built from the original ONNX.",
-    "D": "**Support was read from documentation only.** No compilation happened, "
-    "so operators whose implementation rejects this model's variant are reported "
-    "as supported. Treat the numbers as an upper bound.",
+    "B": "**Whole-graph conversion failed**, so each operator was probed in "
+    "isolation. Support is a lower bound.",
+    "C": "**Whole-graph MLIR was unavailable**, so results come from "
+    "single-operator models built from the original ONNX.",
+    "D": "**Nothing was compiled**, so support was read from documentation "
+    "alone. Operators whose implementation rejects this model read as "
+    "supported: treat the numbers as an upper bound.",
 }
 
 
@@ -68,6 +70,28 @@ def fmt(value, dash: str = "—") -> str:
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
     return str(value)
+
+
+def render_stages(stages: list[dict]) -> list[str]:
+    """Which steps ran, and what any failure said.
+
+    The evidence level says results are degraded; this says which step
+    degraded them and why, which is the part that suggests a fix.
+    """
+    if not stages:
+        return []
+    out = [
+        "## Pipeline\n\n",
+        "| Stage | Result | Detail |\n|---|---|---|\n",
+    ]
+    for s in stages:
+        result = s.get("result", "")
+        mark = "**failed**" if result == "failed" else result
+        out.append(
+            f"| {s.get('stage', '')} | {mark} | {fmt(s.get('detail'), '')} |\n"
+        )
+    out.append("\n")
+    return out
 
 
 def render_summary(summary: dict) -> list[str]:
@@ -112,6 +136,9 @@ def _one_liner(row: dict) -> str:
     """What to say about an operator in a grouped list."""
     if row["status"] == "supported":
         target = row.get("target") or "—"
+        if row.get("lowering_unverified"):
+            why = row.get("lowering_unverified_reason") or "could not be isolated"
+            return f"{target} — converts; lowering unverified ({why})"
         if row.get("runtime_func"):
             return f"{target} → `{row['runtime_func']}`"
         # A folded operator's target already says so; do not say it twice.
@@ -323,16 +350,22 @@ def main() -> None:
     lines = ["# Model compatibility report\n\n"]
     if meta.get("model_path"):
         lines.append(f"- Model: `{meta['model_path']}`\n")
-    lines.append(f"- EP input: `{meta.get('ep_input_path', '')}`\n")
+    ep_input = meta.get("ep_input_path", "")
+    if ep_input.endswith(".mlir"):
+        lines.append(f"- EP input: `{ep_input}`\n")
+    else:
+        # No dump, so the original ONNX is what was analyzed. Calling that
+        # the EP input would misdescribe it.
+        lines.append("- EP input: not available; analyzed the original ONNX\n")
     lines.append(f"- Generated: `{meta['generated_at_utc']}`\n")
     lines.append(f"- Evidence level: **{meta.get('evidence_level', 'A')}**\n\n")
 
     badge = EVIDENCE_BADGE.get(meta.get("evidence_level", "A"))
-    if badge:
-        lines.append(f"> {badge}\n\n")
-    if meta.get("evidence_note"):
-        lines.append(f"> {meta['evidence_note']}\n\n")
+    note = meta.get("evidence_note") or ""
+    if badge or note:
+        lines.append("> " + " ".join(x for x in (badge, note) if x) + "\n\n")
 
+    lines += render_stages(data.get("pipeline_stages", []))
     lines += render_summary(summary)
     if comp:
         lines += render_comparison(comp)

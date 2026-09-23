@@ -98,13 +98,17 @@ try {
     $savedErrPref = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $RunnerExe `
+        # Captured, not streamed: when the runner fails it usually says why
+        # on stderr, and that line is what the report needs to show.
+        $runnerOutput = & $RunnerExe `
             -m $ModelPath `
             --no-run `
             --allow-cpu-fallback `
             --provider-options "config_file=$MorphizenConfigPath" `
-            --provider-options "pass.init.directory=$DumpDirForOption"
+            --provider-options "pass.init.directory=$DumpDirForOption" 2>&1 |
+            ForEach-Object { $_.ToString() }
         $exitCode = $LASTEXITCODE
+        $runnerOutput | ForEach-Object { Write-Host $_ }
     } finally {
         $ErrorActionPreference = $savedErrPref
     }
@@ -118,8 +122,17 @@ try {
 }
 
 if (-not (Test-Path -LiteralPath $DumpPath)) {
+    # Surface the runner's own diagnosis rather than just the exit code:
+    # "Sequence type conversion is not implemented yet" tells the reader
+    # what to do, 0xC0000409 does not.
+    $why = @($runnerOutput | Where-Object {
+        $_ -match 'Error in ORT API|error:|Exception|not implemented|failed'
+    } | Select-Object -Last 1)
+    $reason = if ($why.Count) { ([string]$why[0]).Trim() } else { "" }
     if ($exitCode -ne 0) {
-        throw "hip-onnx-runner.exe failed with exit code $exitCode and no dump was created: $DumpPath"
+        $msg = "hip-onnx-runner.exe failed with exit code $exitCode and no dump was created"
+        if ($reason) { $msg += ": $reason" }
+        throw $msg
     }
     throw "Dump file was not created: $DumpPath"
 }

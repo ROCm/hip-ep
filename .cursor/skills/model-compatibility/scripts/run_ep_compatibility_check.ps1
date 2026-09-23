@@ -131,6 +131,18 @@ function Test-UpToDate {
            (Get-Item -LiteralPath $Source).LastWriteTimeUtc
 }
 
+# Every stage records how it went, so the report can say which step failed
+# and why instead of only reporting a degraded evidence level.
+$script:Stages = [System.Collections.ArrayList]::new()
+function Add-Stage {
+    param([string]$Name, [string]$Result, [string]$Detail = "")
+    [void]$script:Stages.Add([ordered]@{
+        stage  = $Name
+        result = $Result
+        detail = $Detail
+    })
+}
+
 Write-Host "=== Operator compatibility check ===" -ForegroundColor Cyan
 Write-Host "Model:        $ModelPath"
 Write-Host "Package:      $GpuTestPackageRoot"
@@ -144,9 +156,9 @@ $EpMlir = if ($EpMlirPath) { (Resolve-Path -LiteralPath $EpMlirPath).Path }
 $dumpError = ""
 if (-not $SkipDump -and (Test-Path -LiteralPath $EpMlir)) {
     Write-Host "(1/5) EP input already present, reusing: $EpMlir" -ForegroundColor DarkGray
+    Add-Stage "Dump EP input" "reused" "existing $DumpFileName"
     $SkipDump = $true
-}
-if (-not $SkipDump) {
+} elseif (-not $SkipDump) {
     Write-Host '(1/5) Dumping EP input MLIR...' -ForegroundColor Yellow
     $dumpArgs = @{
         ModelPath          = $ModelPath
@@ -158,13 +170,19 @@ if (-not $SkipDump) {
     try {
         & (Join-Path $ToolsDir "dump_ep_input.ps1") @dumpArgs
         if (-not (Test-Path -LiteralPath $EpMlir)) { throw "dump produced no file: $EpMlir" }
+        Add-Stage "Dump EP input" "ok" `
+            ("{0:N0} bytes" -f (Get-Item -LiteralPath $EpMlir).Length)
     } catch {
         $dumpError = $_.Exception.Message
         Write-Host "WARN: EP dump failed: $dumpError" -ForegroundColor Red
+        Add-Stage "Dump EP input" "failed" $dumpError
         if (-not $ContinueOnDumpFailure) { throw }
     }
 } elseif (-not (Test-Path -LiteralPath $EpMlir)) {
     Write-Host "(1/5) No EP input available; analysis will cover the original ONNX only" -ForegroundColor Yellow
+    Add-Stage "Dump EP input" "skipped" "-SkipDump with no existing dump"
+} else {
+    Add-Stage "Dump EP input" "reused" "-SkipDump; using $EpMlir"
 }
 $haveEpMlir = Test-Path -LiteralPath $EpMlir
 
@@ -179,6 +197,8 @@ if (Test-UpToDate -Source $ModelPath -Derived $origOps) {
     )
 }
 
+Add-Stage "Count operators (original ONNX)" "ok" ""
+
 $epOps = Join-Path $EpOpsDir "ep_input_ops.json"
 if ($haveEpMlir) {
     if (Test-UpToDate -Source $EpMlir -Derived $epOps) {
@@ -188,14 +208,18 @@ if ($haveEpMlir) {
             (Join-Path $ToolsDir "mlir_op_parser.py"), $EpMlir, $EpOpsDir
         )
     }
+    Add-Stage "Count operators (EP input)" "ok" ""
 
     # --- 3/5  Comparison --------------------------------------------------
     Invoke-PythonStep -Label '(3/5) Comparing the two distributions...' -PyArgv @(
         (Join-Path $ToolsDir "compare_op_distribution.py"), $origOps, $epOps, $OutputDir,
         "--original-model", $ModelPath, "--ep-model", $EpMlir
     )
+    Add-Stage "Compare distributions" "ok" ""
 } else {
     Write-Host '(3/5) Skipping comparison: no EP input' -ForegroundColor Yellow
+    Add-Stage "Count operators (EP input)" "skipped" "no EP input"
+    Add-Stage "Compare distributions" "skipped" "no EP input"
 }
 
 # --- 4/5  Compiler probe --------------------------------------------------
@@ -205,13 +229,27 @@ if ($haveEpMlir) {
         (Join-Path $ToolsDir "probe.py"), $EpMlir, $epOps, $ProbeDir,
         "--package", $GpuTestPackageRoot
     )
+    # Outcomes come from probe_result.json, which records them per stage.
 } else {
     Write-Host '(4/5) Skipping probe: no EP input' -ForegroundColor Yellow
     # Support cannot be established without compiling. Hand the assembler an
     # empty probe so it reports evidence level D rather than inventing one.
-    '{"stage1": {"meta": {"failed": true, "error": "no EP input MLIR"}, "operators": {}}, "stage2": {"operators": {}}}' |
-        Set-Content -LiteralPath $probeResult -Encoding UTF8
+    # WriteAllText, not Set-Content -Encoding UTF8: the latter prepends a BOM
+    # on PowerShell 5.1 and Python's json module rejects it.
+    $emptyProbe = '{"stage1": {"meta": {"failed": true, "error": "no EP input MLIR"}, "operators": {}}, "stage2": {"operators": {}}}'
+    [System.IO.File]::WriteAllText($probeResult, $emptyProbe, [System.Text.UTF8Encoding]::new($false))
+    Add-Stage "convert-onnx-to-hip (stage1)" "skipped" "no EP input"
+    Add-Stage "hip-to-llvm (stage2)" "skipped" "no EP input"
 }
+
+# The stage table is finished by build_report_input, which can read the
+# probe's own record of how stage1 and stage2 went.
+$stagesPath = Join-Path $CompatDir "pipeline_stages.json"
+[System.IO.File]::WriteAllText(
+    $stagesPath,
+    (ConvertTo-Json @($script:Stages) -Depth 4),
+    [System.Text.UTF8Encoding]::new($false)
+)
 
 # --- 5/5  Report ----------------------------------------------------------
 $opsForReport = if ($haveEpMlir) { $epOps } else { $origOps }
@@ -223,6 +261,7 @@ $reportArgs = @(
     "--supported-ops-doc", $SupportedOpsDoc
 )
 if ($haveEpMlir) { $reportArgs += @("--ep-input-path", $EpMlir) }
+if (Test-Path -LiteralPath $stagesPath) { $reportArgs += @("--stages", $stagesPath) }
 Invoke-PythonStep -Label '(5/5) Assembling the report...' -PyArgv $reportArgs
 
 $comparison = Join-Path $OutputDir "op_distribution_comparison.json"
