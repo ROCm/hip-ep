@@ -275,15 +275,25 @@ if ($haveEpMlir) {
     try {
         Invoke-PythonStep -Label '(4/5) Probing operator by operator (no whole-graph import)...' -PyArgv $soArgs
     } catch {
-        Write-Host "WARN: per-operator probe failed: $($_.Exception.Message)" -ForegroundColor Red
-        # Support cannot be established without compiling. Hand the assembler
-        # an empty probe so it reports evidence level D rather than inventing
-        # one. WriteAllText, not Set-Content -Encoding UTF8: the latter
-        # prepends a BOM on PowerShell 5.1 and Python's json module rejects it.
-        $emptyProbe = '{"stage1": {"meta": {"failed": true, "error": "no EP input MLIR"}, "operators": {}}, "stage2": {"operators": {}}}'
+        # Still produce a report: the operator distribution is worth having
+        # even when nothing could be compiled, and evidence level D says how
+        # far to trust the rest. Carry the real reason, not a fixed string --
+        # "no EP input MLIR" would describe the dump, not this failure.
+        $probeError = $_.Exception.Message
+        Write-Host "WARN: per-operator probe failed: $probeError" -ForegroundColor Red
+        # Built through ConvertTo-Json so the message is escaped, and written
+        # with WriteAllText because Set-Content -Encoding UTF8 prepends a BOM
+        # on PowerShell 5.1, which Python's json module rejects.
+        $emptyProbe = [ordered]@{
+            stage1 = [ordered]@{
+                meta      = [ordered]@{ failed = $true; error = $probeError }
+                operators = @{}
+            }
+            stage2 = [ordered]@{ operators = @{} }
+        } | ConvertTo-Json -Depth 6 -Compress
         [System.IO.File]::WriteAllText($probeResult, $emptyProbe, [System.Text.UTF8Encoding]::new($false))
-        Add-Stage "convert-onnx-to-hip (stage1)" "skipped" "no EP input"
-        Add-Stage "hip-to-llvm (stage2)" "skipped" "no EP input"
+        Add-Stage "convert-onnx-to-hip (stage1)" "failed" $probeError
+        Add-Stage "hip-to-llvm (stage2)" "skipped" "the probe did not run"
     }
 }
 
@@ -333,20 +343,9 @@ if (Test-Path -LiteralPath $reportInput) {
                  ConvertFrom-Json).meta.evidence_level
 }
 
-$statusLines = @(
-    "# Compatibility check status",
-    "",
-    "- **Model:** ``$ModelPath``",
-    "- **EP input:** ``$EpMlir``",
-    "- **EP input available:** $haveEpMlir",
-    "- **Evidence level:** $evidence",
-    "- **Analyzed:** $(if ($haveEpMlir) { 'EP input MLIR' } else { 'original ONNX only' })",
-    ""
-)
-if ($dumpError) {
-    $statusLines += @("## Dump error", "", '```', $dumpError, '```', "")
-}
-$statusLines | Set-Content -LiteralPath (Join-Path $OutputDir "pipeline_status.md") -Encoding UTF8
+# No separate status file: the report's header carries the model, the EP
+# input and the evidence level, and its pipeline table carries every step
+# with the error that stopped it.
 
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
