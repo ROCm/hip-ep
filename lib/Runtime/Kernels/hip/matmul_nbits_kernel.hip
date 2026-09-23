@@ -3909,20 +3909,52 @@ static _Float16* ensureAColBuffer(int M, int K) {
     return g_a_col_buf;
 }
 
-// Zero-padded activation copy for the K%32!=0 int4 WMMA path (see the dispatch
-// site). Sized [M, K_pad]; the caller writes the real [M, K] columns and zeroes
-// the tail every call, so the buffer may be reused across shapes with different
-// K_pad without stale tail data leaking into the padded reduction steps.
+// Row-padded activation copy for the int4 WMMA prefill, sized [M, lda_pad]:
+//   * K % 32 != 0: lda_pad is K rounded up to 32; the caller zeroes the tail
+//     columns every call, so no stale data leaks into the padded reduction
+//     steps when the buffer is reused across shapes.
+//   * K % 1024 == 0: lda_pad = K + kAPadHalfs (see below); the extra columns
+//     are never read.
+// Like the other scratch buffers here it grows to the largest layer seen and
+// is reused. Returns nullptr on allocation failure.
 static _Float16* g_a_pad_buf = nullptr;
 static size_t    g_a_pad_buf_elems = 0;
 
-static _Float16* ensureAPadBuffer(int M, int K_pad) {
-    size_t need = static_cast<size_t>(M) * K_pad;
+static _Float16* ensureAPadBuffer(int M, int lda_pad) {
+    size_t need = static_cast<size_t>(M) * lda_pad;
     if (g_a_pad_buf && g_a_pad_buf_elems >= need) return g_a_pad_buf;
     if (g_a_pad_buf) hipFree(g_a_pad_buf);
-    hipMalloc(&g_a_pad_buf, need * sizeof(_Float16));
+    if (hipMalloc(&g_a_pad_buf, need * sizeof(_Float16)) != hipSuccess) {
+        g_a_pad_buf = nullptr;
+        g_a_pad_buf_elems = 0;
+        return nullptr;
+    }
     g_a_pad_buf_elems = need;
     return g_a_pad_buf;
+}
+
+// With K % 1024 == 0 the A row stride is a multiple of 2 KB, so every row of a
+// 128-row A tile maps to the same few cache/channel sets. Running the GEMM on a
+// copy with the stride padded by kAPadHalfs avoids that; on gfx1151 it saves
+// 20-60% of the GEMM (M=15856 N=2880: K=4096 16.4 -> 12.1 ms, K=2048 16.4 ->
+// 6.3 ms, K=8192 33.5 -> 24.6 ms; K=2880 is unaffected and not padded). The
+// copy reads and writes A once, a small fraction of the GEMM's repeated A reads.
+static constexpr int kAPadHalfs = 32;
+
+// Points A/lda at a stride-padded copy when the arrival stride aliases. On
+// allocation failure A is left as is: slower, still correct.
+static void padAliasedAStride(hipStream_t stream, int M, int K,
+                              const _Float16*& A, int& lda) {
+    if (lda != K || K % 1024 != 0) return;
+    const int lda_pad = K + kAPadHalfs;
+    _Float16* a_pad = ensureAPadBuffer(M, lda_pad);
+    if (!a_pad) return;
+    hipMemcpy2DAsync(a_pad, static_cast<size_t>(lda_pad) * sizeof(_Float16), A,
+                     static_cast<size_t>(K) * sizeof(_Float16),
+                     static_cast<size_t>(K) * sizeof(_Float16), M,
+                     hipMemcpyDeviceToDevice, stream);
+    A = a_pad;
+    lda = lda_pad;
 }
 
 static _Float16* g_out_col_buf = nullptr;
@@ -4218,6 +4250,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     // the dequant pass taught about the stride too.
     if (!kWmmaConfigs[id].fused) return -1;
 
+    padAliasedAStride(s, M, K, ap, lda);
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
                      ldc, has_zp, nullptr, b_row_bytes);
     return static_cast<int>(hipGetLastError());
@@ -7181,6 +7214,7 @@ extern "C" int hip_matmul_nbits(
     // The tail is re-zeroed every call so the buffer can be reused across
     // shapes with a different K_pad.
     _Float16* a_pad = ensureAPadBuffer(iM, K_pad);
+    if (!a_pad) return static_cast<int>(hipErrorOutOfMemory);
     hipMemcpy2DAsync(a_pad, static_cast<size_t>(K_pad) * sizeof(_Float16), A,
                      static_cast<size_t>(iK) * sizeof(_Float16),
                      static_cast<size_t>(iK) * sizeof(_Float16), iM,
@@ -7251,6 +7285,9 @@ extern "C" int hip_matmul_nbits(
 
     _Float16* dq_buf = kWmmaConfigs[wmma_cfg].fused
                            ? nullptr : ensureDqBuffer(iN, iK);
+    // The config above is chosen for the arrival stride, so the padded copy
+    // leaves LUT/autotune selection untouched.
+    padAliasedAStride(hip_stream, iM, iK, a_ptr, lda);
     launchWmmaConfig(wmma_cfg, hip_stream,
                      iM, iN, iK, a_ptr, lda, b_ptr,
                      s_ptr, z_ptr, gs, ngk, out_ptr, ldc, has_zp, dq_buf);
