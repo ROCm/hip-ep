@@ -42,15 +42,15 @@ static int ckDtypeForTypeCode(int64_t typeCode) {
 }
 
 // =============================================================================
-// Algorithm cache: query heuristic once per unique problem shape, reuse after.
+// Instance cache: resolve once per unique problem shape, reuse after.
 // =============================================================================
 
 struct GemmCacheKey {
   int64_t M, N, K, transA, transB, typeCode;
   bool bias_epilogue; // distinct algo for the fused-bias-epilogue problem
-  // CK eligibility also turns on alpha, which is not a geometry field. Keying
-  // on the verdict stops an ineligible call from reusing an entry probed for an
-  // eligible one, which would silently drop that alpha.
+  // Alpha is not a key field, so key on the eligibility verdict: an alpha != 1
+  // call must not reuse a CK entry, which hip_ck_gemm_run refuses for fp16
+  // output.
   bool ck_eligible;
   bool operator==(const GemmCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && transA == o.transA &&
@@ -110,11 +110,11 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
 }
 
 // =============================================================================
-// Broadcast helper: write beta * broadcast(C) into dst[M, N]
+// Broadcast helper: write beta * broadcast(C) into output[M, N]
 // =============================================================================
 // C is [cDim0, cDim1] and must be unidirectional-broadcastable to [M, N]:
-// each cDim is 1 or equals the corresponding output extent. The reference
-// fallback then adds this into the GEMM output elementwise.
+// each cDim is 1 or equals the corresponding output extent. The caller adds
+// the result into the GEMM output.
 //
 // Device copies double a filled prefix (rows or columns) so a scalar, a
 // row, or a column becomes a full [M, N] buffer without a library op.
@@ -475,11 +475,9 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  // A per-output-feature [N] / [1,N] bias with beta==1 is the fused-bias
-  // problem CK serves through its f16 Add epilogue; every other C routes
-  // through the post-add below. fp32 runs on the DL instances, whose multi-D
-  // epilogue cannot broadcast a stride-0 D along M', so its C always takes the
-  // post-add.
+  // Only hip_ck_gemm_run's fp16 -> fp16 combos take a bias, so only an fp16
+  // [N] / [1,N] bias with beta == 1 is fused; every other C is added after the
+  // GEMM.
   const bool use_bias_epilogue =
       C && beta == 1.0f && cDim0 == 1 && cDim1 == N && typeCode == kTypeFloat16;
 
@@ -490,15 +488,12 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
                     (long long)transB, alpha, beta, (long long)typeCode, C,
                     (long long)cDim0, (long long)cDim1);
 
-  // Column-major leading dimensions of the swapped call (see banner): the CK
-  // and reference kernels take these as lda/ldb ("A" = B buffer, "B" = A).
   const int64_t hblA_ld = transB ? K : N;
   const int64_t hblB_ld = transA ? M : K;
 
-  // CK eligibility: no alpha, and ONNX transA==0, which would become the
-  // kernels' TRANSB and has no instance. The A-side transpose (ONNX transB) is
-  // served with or without a bias; a C the epilogue does not take is added
-  // afterwards.
+  // hip_ck_gemm_run requires transB == 0, which is ONNX transA == 0 after the
+  // operand swap; alpha is restricted to 1 because its fp16-output combos
+  // refuse other values.
   const bool ck_eligible =
       alpha == 1.0f && transA == 0 &&
       (typeCode == kTypeFloat16 || typeCode == kTypeFloat32);
@@ -517,9 +512,6 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  // Resolve once per shape: try the CK instances when eligible, else mark the
-  // entry for the reference fallback (ck_instance == -1). Cached either way so
-  // the instance sweep runs only on a cold miss.
   if (!have_cached) {
     GemmCacheEntry entry;
     if (ck_eligible) {
@@ -536,7 +528,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     have_cached = true;
     // ck_instance=-1 is reserved for a shape CK was offered and refused, so
     // that grepping it reports coverage gaps rather than the dtypes, alphas
-    // and residual C shapes the registry never serves.
+    // and transA the registry never serves.
     if (ck_eligible) {
       RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: resolved M=%lld N=%lld K=%lld "
                         "transA=%lld transB=%lld -> ck_instance=%d\n",
@@ -565,8 +557,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
         abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
         /*strideA=*/0, /*strideB=*/0, /*strideD=*/0);
     if (result != 0) {
-      // The instance was chosen by running this same geometry, so a refusal
-      // here means the ABI contract is broken rather than the shape changing.
+      // This geometry was accepted when the instance was chosen, so a non-zero
+      // return is an error, not a routing answer.
       fprintf(stderr,
               "wrap_gemm: CK instance %d refused M=%lld N=%lld K=%lld "
               "transA=%lld transB=%lld\n",
@@ -575,7 +567,6 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       return result;
     }
   } else {
-    // Reference fallback: alpha * op(A) op(B) into output.
     int rc = hip_ref_gemm_run(
         stream, B, A, output, N, M, K, /*batch=*/1, static_cast<int>(transB),
         static_cast<int>(transA), abDtype, abDtype, alpha, hblA_ld, hblB_ld, N,
@@ -590,7 +581,6 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   if (C && !fused_bias && beta != 0.0f) {
-    // output += beta * C_broadcast.
     int bc = -2;
     if (beta == 1.0f &&
         (abDtype == HIP_DTYPE_FLOAT16 || abDtype == HIP_DTYPE_FLOAT32)) {

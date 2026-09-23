@@ -9,8 +9,6 @@
 
 #include <cstdint>
 
-// fp16 GEMV: y[1, N] = a[1, K] @ b[K, N], row-major, no bias, alpha = 1.
-//
 // The tuned instances in ck_gemm.hip are GEMM tiles, so at M == 1 the tile's M
 // extent sits idle and the shape runs far below bandwidth: on a 201088x2880
 // weight matrix the fastest tuned instance reaches ~28 GB/s where this kernel
@@ -24,8 +22,7 @@
 // most of the device idle. Below the width that fills it, a second kernel adds
 // K as a block-local axis: blockDim.y threads walk K cyclically and are reduced
 // through LDS, which keeps the reduction inside the block and needs no
-// workspace. The MoE router m=1,n=128,k=2880 runs 5x faster that way than as a
-// CK GEMM tile.
+// workspace. The MoE router shape m=1,n=128,k=2880 is the target.
 
 namespace {
 

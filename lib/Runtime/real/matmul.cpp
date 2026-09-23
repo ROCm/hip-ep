@@ -19,10 +19,8 @@
 #include <unordered_map>
 
 //===----------------------------------------------------------------------===//
-// Per-shape routing cache. On the first call for each unique
-// (M, N, K, batch, elem_size, trans) shape we time the CK instances that
-// accept it and cache the winner (or -1 for the reference fallback);
-// subsequent calls reuse the decision with zero overhead.
+// Per-shape routing cache. The first call for each unique key picks GEMV, a CK
+// instance, or the reference fallback; later calls reuse the decision.
 //===----------------------------------------------------------------------===//
 
 struct MatmulCacheKey {
@@ -174,26 +172,23 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     entry = it->second.get();
   }
 
-  // CK's instances apply neither alpha nor a bias, matching this call's fixed
-  // alpha=1 / beta=0 / no-C form. ONNX transB becomes the kernels' TRANSA (the
-  // operands swap), which the TN entries serve; ONNX transA would become their
-  // TRANSB, which no instance takes, so it still goes to the reference kernel.
+  // hip_ck_gemm_run requires transB == 0, which is ONNX transA == 0 after the
+  // operand swap; ONNX transB becomes its transA, which the TN instances serve.
   const bool ck_eligible = transA == 0;
-  const int64_t hblA_ld = transB ? K : N; // "A" = B buffer
-  const int64_t hblB_ld = transA ? M : K; // "B" = A buffer
+  const int64_t hblA_ld = transB ? K : N;
+  const int64_t hblB_ld = transA ? M : K;
 
-  // Resolve once per shape across all sessions sharing this entry; the CK
-  // decision is device-specific and identical for every session. Double-checked
-  // locking on the per-entry mutex keeps the steady state a lock-free read.
+  // Resolve once per shape across all sessions sharing this entry; the decision
+  // is device-specific and identical for every session. Double-checked locking
+  // on the per-entry mutex keeps the steady state a lock-free read
+  // (std::call_once is avoided: its MSVC __std_init_once_* support symbols do
+  // not resolve in the JIT-linked runtime bitcode).
   bool gemvRan = false;
   if (!entry->resolved.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> probeGuard(entry->mu);
     if (!entry->resolved.load(std::memory_order_relaxed)) {
       // M == 1 leaves a GEMM tile's M extent idle, so offer the shape to the
       // GEMV kernel first and only probe CK for what it declines.
-      // hip_gemv_fp16 reads B as a plain [K, N] block of f16, so it takes only
-      // the untransposed form at elem_size 2; a folded transB or an fp32
-      // operand has to go to CK.
       entry->use_gemv = ck_eligible && elem_size == 2 && transB == 0 &&
                         M == 1 && batch_count == 1 &&
                         hip_gemv_fp16(stream, A, B, output, N, K) == 0;
@@ -235,8 +230,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   }
   if (entry->use_gemv) {
     if (hip_gemv_fp16(stream, A, B, output, N, K) != 0) {
-      // The shape was accepted during resolve, so a refusal here means the
-      // routing contract is broken rather than the shape changing.
+      // The GEMV accepted this shape on this device during resolve, so a
+      // non-zero return is an error, not a routing answer.
       fprintf(stderr, "wrap_hipblasLtMatmul: GEMV refused N=%lld K=%lld\n",
               (long long)N, (long long)K);
       return -1;
@@ -251,8 +246,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                         /*alpha=*/1.0f, hblA_ld, hblB_ld, /*ldd=*/N,
                         /*strideA=*/b_batch_stride, /*strideB=*/M * K,
                         /*strideD=*/M * N) != 0) {
-      // The instance was chosen by running this same geometry, so a refusal
-      // here means the ABI contract is broken rather than the shape changing.
+      // This geometry was accepted when the instance was chosen, so a non-zero
+      // return is an error, not a routing answer.
       fprintf(stderr,
               "wrap_hipblasLtMatmul: CK instance %d refused M=%lld N=%lld "
               "K=%lld batch=%lld\n",
@@ -263,7 +258,6 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return 0;
   }
 
-  // Reference fallback: A @ B with alpha=1, no bias, over all transpose combos.
   int rc = hip_ref_gemm_run(stream, B, A, output, N, M, K, batch_count,
                             static_cast<int>(transB), static_cast<int>(transA),
                             abDtype, abDtype, /*alpha=*/1.0f, hblA_ld, hblB_ld,

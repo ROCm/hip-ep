@@ -362,9 +362,7 @@ uint64_t prefill_shape_key(int64_t M, int64_t N, int64_t K) {
 //
 // In the column-major GEMM convention this is D[m=N, n=M] = op(A')op(B') with
 // A' = Bfp16 transposed (transA=1), B' = A (transB=0), k=K, and a
-// per-output-channel bias[N] (length m). CK's fp16 TN-with-bias instances serve
-// it; a shape they refuse falls to the reference GEMM plus a broadcast bias
-// add.
+// per-output-channel bias[N] (length m).
 int matmul_nbits_prefill_gemm(MatmulNbitsState *mst, RuntimeState *state,
                               const void *A, const void *Bfp16,
                               const void *bias, void *Y, int64_t M, int64_t N,
@@ -408,8 +406,6 @@ int matmul_nbits_prefill_gemm(MatmulNbitsState *mst, RuntimeState *state,
     return 0;
   }
 
-  // Reference fallback: Y = A Bfp16^T (no bias), then add bias[N] broadcast
-  // across the M rows.
   if (hip_ref_gemm_run(stream, Bfp16, A, Y, m, n, K, /*batch=*/1, /*transA=*/1,
                        /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
                        /*alpha=*/1.0f, /*lda=*/K, /*ldb=*/K, /*ldd=*/N, 0, 0,
