@@ -319,10 +319,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       int32_t *d_ids_e = d_sorted_token_ids + off_e;
       char *d_wts_e = d_sorted_weights + off_e * elem_size;
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
-                        (long long)e, (long long)count);
-      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
-                                       hidden_size, count, elem_size));
+      // Fold the gather, fc1 bias + SwiGLU and fc2 bias + scatter-add into the
+      // two expert GEMMs (hip_matmul_nbits_u4_wmma_epilogue). The epilogues
+      // only pay once the GEMM has enough blocks to hide them: on gfx1151,
+      // fusing every expert raised gpt-oss TTFT by 1-3% at ~60-250 tokens per
+      // expert, was neutral at ~500 and lowered it by ~3% at ~2000.
+      constexpr int64_t kFusedExpertMinTokens = 1024;
+      const bool fuse = expert_weight_bits == 4 && elem_size == 2 &&
+                        count >= kFusedExpertMinTokens;
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -378,23 +382,44 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         }
       }
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc1 matmul_nbits "
-                        "[%lld x %lld] -> [%lld x %lld]\n",
-                        (long long)e, (long long)count, (long long)hidden_size,
-                        (long long)count, (long long)fusion_inter);
-      HIP_CHECK(
-          hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
-                           fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
-                           1, expert_weight_bits, block_size, elem_size,
-                           /*zp_elem_size=*/1, fc1_pre_zp_u8, fc1_pre_zp_fp16));
+      // Fused fc1: gather rows of `input` by d_ids_e, GEMM, bias and SwiGLU
+      // straight into d_act_buf. -1 means the shape was not eligible.
+      int fc1_rc = -1;
+      if (fuse && (!fc1_zp_e || fc1_pre_zp_fp16)) {
+        fc1_rc = hip_matmul_nbits_u4_wmma_epilogue(
+            stream, input, fc1_w_e, fc1_s_e, fc1_pre_zp_fp16, d_fc1_buf, count,
+            fusion_inter, hidden_size, block_size, /*mode=*/1, fc1_b_e, d_ids_e,
+            nullptr, nullptr, d_act_buf, inter_size, activation_alpha,
+            activation_beta, swiglu_limit);
+        if (fc1_rc > 0)
+          HIP_CHECK(fc1_rc);
+      }
+      if (fc1_rc != 0) {
+        RUNTIME_DEBUG_LOG(
+            "[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
+            (long long)e, (long long)count);
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
+                                         hidden_size, count, elem_size));
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
-                        "beta=%.3f, limit=%.1f)\n",
-                        (long long)e, (double)activation_alpha,
-                        (double)activation_beta, (double)swiglu_limit);
-      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count, inter_size,
-                                activation_alpha, activation_beta, swiglu_limit,
-                                elem_size));
+        RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc1 matmul_nbits "
+                          "[%lld x %lld] -> [%lld x %lld]\n",
+                          (long long)e, (long long)count,
+                          (long long)hidden_size, (long long)count,
+                          (long long)fusion_inter);
+        HIP_CHECK(hip_matmul_nbits(
+            stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e, fc1_b_e,
+            d_fc1_buf, count, fusion_inter, hidden_size, 1, expert_weight_bits,
+            block_size, elem_size,
+            /*zp_elem_size=*/1, fc1_pre_zp_u8, fc1_pre_zp_fp16));
+
+        RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
+                          "beta=%.3f, limit=%.1f)\n",
+                          (long long)e, (double)activation_alpha,
+                          (double)activation_beta, (double)swiglu_limit);
+        HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count,
+                                  inter_size, activation_alpha, activation_beta,
+                                  swiglu_limit, elem_size));
+      }
 
       const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
@@ -433,19 +458,34 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         }
       }
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits "
-                        "[%lld x %lld] -> [%lld x %lld]\n",
-                        (long long)e, (long long)count, (long long)inter_size,
-                        (long long)count, (long long)hidden_size);
-      HIP_CHECK(hip_matmul_nbits(
-          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
-          count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
-          elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8, fc2_pre_zp_fp16));
+      // Fused fc2: GEMM, bias and weighted scatter-add into `output`. A token
+      // routes to an expert at most once, so the destination rows of one
+      // launch are unique.
+      int fc2_rc = -1;
+      if (fuse && (!fc2_zp_e || fc2_pre_zp_fp16)) {
+        fc2_rc = hip_matmul_nbits_u4_wmma_epilogue(
+            stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_pre_zp_fp16, d_fc2_buf,
+            count, hidden_size, inter_size, block_size, /*mode=*/2, fc2_b_e,
+            nullptr, d_ids_e, d_wts_e, output, hidden_size, 0.0f, 0.0f, 0.0f);
+        if (fc2_rc > 0)
+          HIP_CHECK(fc2_rc);
+      }
+      if (fc2_rc != 0) {
+        RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits "
+                          "[%lld x %lld] -> [%lld x %lld]\n",
+                          (long long)e, (long long)count,
+                          (long long)inter_size, (long long)count,
+                          (long long)hidden_size);
+        HIP_CHECK(hip_matmul_nbits(
+            stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
+            count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
+            elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8, fc2_pre_zp_fp16));
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
-                        (long long)e);
-      HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
-                                     d_wts_e, hidden_size, count, elem_size));
+        RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
+                          (long long)e);
+        HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
+                                       d_wts_e, hidden_size, count, elem_size));
+      }
     }
   }
 

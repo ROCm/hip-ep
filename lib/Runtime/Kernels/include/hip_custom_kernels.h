@@ -2267,6 +2267,27 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
 
+/* hip_matmul_nbits_u4_wmma_epilogue: the int4 WMMA prefill of hip_matmul_nbits
+ *   with an optional A-row gather and a fused epilogue, for the per-expert
+ *   MoE loop. C_scratch [M, N] is only written in mode 0.
+ *     a_rows      nullable; A row r is read from A[a_rows[r]] (row stride K).
+ *     bias        nullable [N]; added in fp16 after the fp16 store rounding.
+ *     mode 0      C_scratch = A*B^T (+ bias).
+ *     mode 1      SwiGLU on interleaved (gate, linear) column pairs:
+ *                 out[r, j] (row stride ldo, N/2 columns), with alpha, beta,
+ *                 limit as in hip_qmoe_swiglu.
+ *     mode 2      out[out_rows[r], n] += out_weights[r] * C[r, n] (row stride
+ *                 ldo), as hip_qmoe_scatter_add; out_rows unique per launch.
+ *   zeros_fp16 is the FP16 [N, k_blocks] zero-point buffer or null. Returns 0
+ *   on launch, -1 when the shape is not eligible (M < 8, K % 32 != 0, wave64)
+ *   and nothing was launched, or a positive HIP error code. */
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_epilogue(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* zeros_fp16, void* C_scratch, int64_t M, int64_t N, int64_t K,
+    int64_t block_size, int mode, const void* bias, const int32_t* a_rows,
+    const int32_t* out_rows, const void* out_weights, void* out, int64_t ldo,
+    float alpha, float beta, float limit);
+
 /* hip_matmul_nbits_u4_wmma_padrow: fused int4 WMMA prefill against a row-padded
  *   B, repacking B into a single shared scratch on each call. Bounds padded-B
  *   memory to the largest single layer instead of a persistent per-weight copy.

@@ -2731,6 +2731,38 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 #define HIPDNN_LDS_BARRIER() __syncthreads()
 #endif
 
+/* Optional A-row gather and C epilogue for the int4 WMMA prefill GEMM.
+ *
+ * A value-initialized MnbEpilogue is the plain C store every existing caller
+ * gets. The other modes let a per-expert MoE GEMM absorb the kernels that used
+ * to run around it:
+ *   a_rows      A row r is read from A[a_rows[r]] (the token gather).
+ *   bias        added in fp16 after the fp32->fp16 conversion, the same two
+ *               roundings as the store followed by matmul_nbits_add_bias_rowmajor.
+ *   Swiglu      C columns (2j, 2j+1) are (gate, linear); out[r, j] gets the
+ *               interleaved SwiGLU of swiglu_kernel, from the same fp16 inputs.
+ *   ScatterAdd  out[out_rows[r], n] += out_weights[r] * C[r, n], as
+ *               scatter_add_kernel. out_rows must be unique within one launch.
+ */
+enum MnbEpiMode : int {
+    kMnbEpiStore      = 0,
+    kMnbEpiSwiglu     = 1,
+    kMnbEpiScatterAdd = 2,
+};
+
+struct MnbEpilogue {
+    int             mode;
+    const _Float16* bias;
+    const int32_t*  a_rows;
+    const int32_t*  out_rows;
+    const _Float16* out_weights;
+    _Float16*       out;
+    int             ldo;
+    float           alpha;
+    float           beta;
+    float           limit;
+};
+
 /* BK_IN decouples the K-step from the warp-tile shape.
  *
  * BK_T used to be forced to BM_T/(WT_M*WT_N), which is the value that makes each
@@ -2761,7 +2793,8 @@ void GemmFp16U4Impl(
      * serves both layouts and the autotuner stays free to pick any tile for a
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
-    int b_row_bytes = 0)
+    int b_row_bytes = 0,
+    const MnbEpilogue& epi = MnbEpilogue{})
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -2905,7 +2938,10 @@ void GemmFp16U4Impl(
         const int idx = tid + c * THR_L;
         a_row[c]      = idx / A_ROW_SPLIT;
         a_koff[c]     = (idx % A_ROW_SPLIT) * A_CH;
-        a_src[c] = A + static_cast<size_t>(row0 + a_row[c]) * lda + a_koff[c];
+        int src_row   = row0 + a_row[c];
+        // Rows past M are never loaded (BOUNDS_CHECK), but the index read is.
+        if (epi.a_rows) src_row = epi.a_rows[src_row < M ? src_row : M - 1];
+        a_src[c] = A + static_cast<size_t>(src_row) * lda + a_koff[c];
     }
 
     float8 acc[WT_M][WT_N];
@@ -3158,6 +3194,7 @@ void GemmFp16U4Impl(
     }
     computeWMMA(buf, 0, K_STEPS);
 
+    if (epi.mode == kMnbEpiStore && !epi.bias) {
 #pragma unroll
     for(int wm = 0; wm < WT_M; wm++)
     {
@@ -3177,6 +3214,90 @@ void GemmFp16U4Impl(
                 } else {
                     C[(mbase + r) * ldc + nbase + lane] =
                         (_Float16)acc[wm][wn][e];
+                }
+            }
+        }
+    }
+    return;
+    }
+
+    if (epi.mode == kMnbEpiScatterAdd) {
+        // Loads before stores: out may alias itself across rows as far as the
+        // compiler knows, so an interleaved read-modify-write serializes every
+        // element on a global round trip. That dominated small-M experts.
+#pragma unroll
+        for(int wm = 0; wm < WT_M; wm++)
+        {
+            const int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
+            size_t dst[8];
+            float  w[8];
+            bool   m_ok[8];
+#pragma unroll
+            for(int e = 0; e < 8; e++)
+            {
+                const int m = mbase + hipdnn_wmma_acc_row(sub, e);
+                m_ok[e] = !BOUNDS_CHECK || m < M;
+                dst[e] = m_ok[e]
+                    ? static_cast<size_t>(epi.out_rows[m]) * epi.ldo : 0;
+                w[e] = m_ok[e] ? static_cast<float>(epi.out_weights[m]) : 0.0f;
+            }
+#pragma unroll
+            for(int wn = 0; wn < WT_N; wn++)
+            {
+                const int n = col0 + (wcol * WT_N + wn) * WMMA_TILE + lane;
+                const bool n_ok = !BOUNDS_CHECK || n < N;
+                const _Float16 b = (epi.bias && n_ok) ? epi.bias[n] : (_Float16)0;
+                float old[8];
+#pragma unroll
+                for(int e = 0; e < 8; e++)
+                    old[e] = (n_ok && m_ok[e])
+                        ? static_cast<float>(epi.out[dst[e] + n]) : 0.0f;
+#pragma unroll
+                for(int e = 0; e < 8; e++)
+                {
+                    if (!(n_ok && m_ok[e])) continue;
+                    _Float16 v = (_Float16)acc[wm][wn][e];
+                    if (epi.bias) v = v + b;
+                    epi.out[dst[e] + n] = static_cast<_Float16>(
+                        old[e] + w[e] * static_cast<float>(v));
+                }
+            }
+        }
+        return;
+    }
+
+#pragma unroll
+    for(int wm = 0; wm < WT_M; wm++)
+    {
+        int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
+#pragma unroll
+        for(int wn = 0; wn < WT_N; wn++)
+        {
+            const int n = col0 + (wcol * WT_N + wn) * WMMA_TILE + lane;
+            const bool n_ok = !BOUNDS_CHECK || n < N;
+            const _Float16 b = (epi.bias && n_ok) ? epi.bias[n] : (_Float16)0;
+#pragma unroll
+            for(int e = 0; e < 8; e++)
+            {
+                const int m = mbase + hipdnn_wmma_acc_row(sub, e);
+                const bool ok = n_ok && (!BOUNDS_CHECK || m < M);
+                _Float16 v = (_Float16)acc[wm][wn][e];
+                if (epi.bias) v = v + b;
+                if (epi.mode == kMnbEpiSwiglu) {
+                    // Every lane shuffles; the (gate, linear) pair is the lane
+                    // pair (2j, 2j+1) of one 16-column WMMA tile.
+                    const float mine = static_cast<float>(v);
+                    const float other = __shfl_xor(mine, 1);
+                    if (ok && (n & 1) == 0) {
+                        const float G = fminf(mine, epi.limit);
+                        const float L = fmaxf(fminf(other, epi.limit), -epi.limit);
+                        const float sigmoid_val =
+                            1.0f / (1.0f + expf(-epi.alpha * G));
+                        epi.out[static_cast<size_t>(m) * epi.ldo + (n >> 1)] =
+                            static_cast<_Float16>(G * sigmoid_val * (L + epi.beta));
+                    }
+                } else if (ok) {
+                    C[m * ldc + n] = v;
                 }
             }
         }
@@ -3204,11 +3325,12 @@ void MatMulNBitsWMMA_NoZP(
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4, int b_row_bytes = 0)
+    int swizzle_n = 4, int b_row_bytes = 0,
+    MnbEpilogue epi = MnbEpilogue{})
 {
     GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, true, BK_T>(
         M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
+        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes, epi);
 }
 
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
@@ -3227,11 +3349,12 @@ void MatMulNBitsWMMA_ZP(
     const _Float16* __restrict__ zeros,
     int group_size, int num_groups_k,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4, int b_row_bytes = 0)
+    int swizzle_n = 4, int b_row_bytes = 0,
+    MnbEpilogue epi = MnbEpilogue{})
 {
     GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, true, BC, true, BK_T>(
         M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
+        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes, epi);
 }
 
 // Specialized ragged-batch WMMA entry for QMoE prefill. Each z slice is one
@@ -3391,11 +3514,12 @@ void MatMulNBitsFp16GEMM(
     const _Float16* __restrict__ A, int lda,
     const _Float16* __restrict__ B_fp16,
     _Float16* __restrict__ C, int ldc,
-    int swizzle_n = 4)
+    int swizzle_n = 4,
+    MnbEpilogue epi = MnbEpilogue{})
 {
     GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, BC, false, BK_T>(
         M, N, K, A, lda, B_fp16, nullptr, nullptr,
-        0, 0, C, ldc, swizzle_n);
+        0, 0, C, ldc, swizzle_n, 0, epi);
 }
 
 /* -----------------------------------------------------------------------
@@ -3563,7 +3687,8 @@ static void launchWmmaConfig(
     const _Float16* scales, const _Float16* zeros,
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp,
-    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
+    _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0,
+    const MnbEpilogue& epi = MnbEpilogue{})
 {
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
@@ -3581,7 +3706,7 @@ static void launchWmmaConfig(
     hipLaunchKernelGGL( \
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>), \
         grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n, epi); \
 } while(0)
 
 #define FP16_TILE_CASE(BM_V, BN_V) \
@@ -3598,7 +3723,7 @@ static void launchWmmaConfig(
     hipLaunchKernelGGL( \
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>), \
         grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n, epi); \
 } while(0)
 
 #define FP16_TILE_CASE_WT4(BM_V, BN_V) \
@@ -3615,7 +3740,7 @@ static void launchWmmaConfig(
     hipLaunchKernelGGL( \
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 1, 8, BC_V>), \
         grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n, epi); \
 } while(0)
 
 #define FP16_TILE_CASE_WT21(BM_V, BN_V) \
@@ -3632,7 +3757,7 @@ static void launchWmmaConfig(
     hipLaunchKernelGGL( \
         HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
         grid_, block_, 0, stream, \
-        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n, epi); \
 } while(0)
 
 #define FP16_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
@@ -3679,13 +3804,13 @@ static void launchWmmaConfig(
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } \
 } while(0)
 
@@ -3705,13 +3830,13 @@ static void launchWmmaConfig(
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } \
 } while(0)
 
@@ -3731,13 +3856,13 @@ static void launchWmmaConfig(
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } \
 } while(0)
 
@@ -3757,13 +3882,13 @@ static void launchWmmaConfig(
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } \
 } while(0)
 
@@ -3783,13 +3908,13 @@ static void launchWmmaConfig(
             HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } else { \
         hipLaunchKernelGGL( \
             HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 4, 4, 8, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
-            b_row_bytes); \
+            b_row_bytes, epi); \
     } \
 } while(0)
 
@@ -4253,6 +4378,52 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     padAliasedAStride(s, M, K, ap, lda);
     launchWmmaConfig(id, s, M, N, K, ap, lda, bp, sp, zp, group_size, ngk, cp,
                      ldc, has_zp, nullptr, b_row_bytes);
+    return static_cast<int>(hipGetLastError());
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_epilogue(
+    void* stream, const void* A, const void* B, const void* scales,
+    const void* zeros_fp16, void* C_scratch, int64_t M, int64_t N, int64_t K,
+    int64_t block_size, int mode, const void* bias, const int32_t* a_rows,
+    const int32_t* out_rows, const void* out_weights, void* out, int64_t ldo,
+    float alpha, float beta, float limit)
+{
+    // Same eligibility as the WMMA fast path in hip_matmul_nbits; anything
+    // else is left to the caller's unfused sequence.
+    if (M < 8 || (K % 32) != 0 || block_size < 16 || hipdnn_device_is_wave64())
+        return -1;
+    if (mode == kMnbEpiSwiglu && (N % 2) != 0) return -1;
+
+    const int iM = static_cast<int>(M), iN = static_cast<int>(N);
+    const int iK = static_cast<int>(K), gs = static_cast<int>(block_size);
+    const int ngk = (iK + gs - 1) / gs;
+    auto s  = static_cast<hipStream_t>(stream);
+    auto ap = static_cast<const _Float16*>(A);
+    auto bp = static_cast<const unsigned char*>(B);
+    auto sp = static_cast<const _Float16*>(scales);
+    auto zp = static_cast<const _Float16*>(zeros_fp16);
+    auto cp = static_cast<_Float16*>(C_scratch);
+    const bool has_zp = (zp != nullptr);
+
+    // Config choice sees the plain problem (C_scratch, contiguous A rows), so
+    // the fused launch runs the tile the unfused path would have run.
+    const int id = getOrTuneWmmaConfig(s, iM, iN, iK, ap, iK, bp, sp, zp, gs,
+                                       ngk, cp, iN, has_zp);
+    _Float16* dq_buf = kWmmaConfigs[id].fused ? nullptr : ensureDqBuffer(iN, iK);
+
+    MnbEpilogue epi{};
+    epi.mode        = mode;
+    epi.bias        = static_cast<const _Float16*>(bias);
+    epi.a_rows      = a_rows;
+    epi.out_rows    = out_rows;
+    epi.out_weights = static_cast<const _Float16*>(out_weights);
+    epi.out         = static_cast<_Float16*>(out);
+    epi.ldo         = static_cast<int>(ldo);
+    epi.alpha       = alpha;
+    epi.beta        = beta;
+    epi.limit       = limit;
+    launchWmmaConfig(id, s, iM, iN, iK, ap, iK, bp, sp, zp, gs, ngk, cp, iN,
+                     has_zp, dq_buf, 0, epi);
     return static_cast<int>(hipGetLastError());
 }
 
