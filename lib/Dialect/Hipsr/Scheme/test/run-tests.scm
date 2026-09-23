@@ -12,7 +12,8 @@
 (library-directories '("." "libraries" "../../../../third_party/rime"))
 
 (import (except (chezscheme) =)
-        (except (mlir pattern-macro) :with)  ; Import pattern macro
+        (mlir pattern-macro)
+        (rename (rime loop) (:with :rime-with))  ; Rename :with to avoid conflict
         (test test-helpers))
 
 ;; Import pattern-macro into interaction-environment so eval can use it
@@ -24,22 +25,30 @@
     (display "Pattern DSL Test Suite (Data-Driven)\n")
     (display "==================================================\n\n")
 
-    ;; For each test case, run all 4 phases
-    (let ([total-passed 0]
-          [total-failed 0])
-      (for-each
-        (lambda (test-case)
-          (let ([name (car test-case)])
-            (display (format "Testing: ~a\n" name))
+    ;; For each test case, run all 4 phases and count results
+    (loop :for test-case :in test-bodies
+          :do (display (format "Testing: ~a\n" (car test-case)))
 
-            ;; Run all phases for this test case
-            (let ([parse-result (run-one-phase "  Parse" ':debug-parse ':expect-parse test-case)]
-                  [validate-result (run-one-phase "  Validate" ':debug-validate ':expect-validate test-case)]
-                  [analyze-result (run-one-phase "  Analyze" ':debug-analyze ':expect-analyze test-case)]
-                  [codegen-result (run-one-phase "  Codegen" #f ':expect-codegen test-case)])
+          ;; Run all phases and bind results using :rime-with
+          :rime-with parse-result := (run-one-phase "  Parse" ':debug-parse ':expect-parse test-case)
+          :rime-with validate-result := (run-one-phase "  Validate" ':debug-validate ':expect-validate test-case)
+          :rime-with analyze-result := (run-one-phase "  Analyze" ':debug-analyze ':expect-analyze test-case)
+          :rime-with codegen-result := (run-one-phase "  Codegen" #f ':expect-codegen test-case)
 
-              ;; Count results
-              (let ([passed (+ (if (eq? parse-result #t) 1 0)
+          ;; Count passed tests into total-passed
+          :count :into total-passed :if (eq? parse-result #t)
+          :count :into total-passed :if (eq? validate-result #t)
+          :count :into total-passed :if (eq? analyze-result #t)
+          :count :into total-passed :if (eq? codegen-result #t)
+
+          ;; Count failed tests into total-failed
+          :count :into total-failed :if (eq? parse-result #f)
+          :count :into total-failed :if (eq? validate-result #f)
+          :count :into total-failed :if (eq? analyze-result #f)
+          :count :into total-failed :if (eq? codegen-result #f)
+
+          ;; Display per-test result
+          :do (let ([passed (+ (if (eq? parse-result #t) 1 0)
                                (if (eq? validate-result #t) 1 0)
                                (if (eq? analyze-result #t) 1 0)
                                (if (eq? codegen-result #t) 1 0))]
@@ -47,13 +56,12 @@
                                (if (eq? validate-result #f) 1 0)
                                (if (eq? analyze-result #f) 1 0)
                                (if (eq? codegen-result #f) 1 0))])
-                (set! total-passed (+ total-passed passed))
-                (set! total-failed (+ total-failed failed))
-                (display (format "  Result: ~a passed, ~a failed\n\n" passed failed))))))
-        test-bodies)
+                (display (format "  Result: ~a passed, ~a failed\n\n" passed failed)))
 
-      (display "==================================================\n")
-      (display (format "Total: ~a passed, ~a failed\n" total-passed total-failed))
-      (display "==================================================\n"))))
+          :finally
+            (begin
+              (display "==================================================\n")
+              (display (format "Total: ~a passed, ~a failed\n" total-passed total-failed))
+              (display "==================================================\n")))))
 
 (main)

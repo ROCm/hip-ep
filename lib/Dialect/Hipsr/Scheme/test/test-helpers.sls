@@ -9,9 +9,9 @@
           get-field
           run-one-phase
           run-phase-tests)
-  (import (except (chezscheme) =)
-          (except (mlir pattern-macro) :with)
-          (rime loop))
+  (import (chezscheme)
+          (except (mlir pattern-macro) =)  ; Exclude = to avoid conflict
+          (rename (rime loop) (:with :rime-with)))
 
   ;;=======================================================================
   ;; Load test data
@@ -73,12 +73,11 @@
 
   (define (check-all-expectations result expectations)
     ;; Returns (passed? . failing-expectation-or-#f)
-    (let loop ([exps expectations])
-      (cond
-        [(null? exps) (cons #t #f)]
-        [(check-expectation result (car exps))
-         (loop (cdr exps))]
-        [else (cons #f (car exps))])))
+    (loop :for exp :in expectations
+          :rime-with passed := (check-expectation result exp)
+          :unless passed
+          :break (cons #f exp)
+          :finally (cons #t #f)))
 
   ;;=======================================================================
   ;; Eval pattern with debug flag and check expectations
@@ -151,24 +150,27 @@
 
   (define (run-phase-tests phase-name debug-flag expect-key test-bodies)
     (display (format "\n=== Phase: ~a ===\n" phase-name))
-    (let ([results
-           (loop :for test-case :in test-bodies
-                 :collect
-                 (let ([name (car test-case)]
-                       [pattern (get-field ':pattern test-case)]
-                       [expectations (get-field expect-key test-case)])
-                   (if expectations
-                       (begin
-                         (display (format "  Testing ~a... " name))
-                         (let ([result (eval-pattern name debug-flag pattern expectations)])
-                           (display (if result "✓\n" "✗\n"))
-                           result))
-                       (begin
-                         (display (format "  Skipping ~a (no expectations)\n" name))
-                         'skipped))))])
-      (let ([passed (length (filter (lambda (x) (eq? x #t)) results))]
-            [failed (length (filter (lambda (x) (eq? x #f)) results))])
-        (display (format "\nResults: ~a passed, ~a failed\n" passed failed))
-        (list passed failed))))
+    (loop :for test-case :in test-bodies
+          :rime-with name := (car test-case)
+          :rime-with pattern := (get-field ':pattern test-case)
+          :rime-with expectations := (get-field expect-key test-case)
+
+          :rime-with result := (if expectations
+                                   (begin
+                                     (display (format "  Testing ~a... " name))
+                                     (let ([r (eval-pattern name debug-flag pattern expectations)])
+                                       (display (if r "✓\n" "✗\n"))
+                                       r))
+                                   (begin
+                                     (display (format "  Skipping ~a (no expectations)\n" name))
+                                     'skipped))
+
+          :count :into passed :if (eq? result #t)
+          :count :into failed :if (eq? result #f)
+
+          :finally
+            (begin
+              (display (format "\nResults: ~a passed, ~a failed\n" passed failed))
+              (list passed failed))))
 
 ) ;; end library
