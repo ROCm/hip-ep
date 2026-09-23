@@ -94,49 +94,108 @@ def render_summary(summary: dict) -> list[str]:
     return out
 
 
+STATUS_ORDER = ["supported", "partial", "lowering-broken", "blocked", "unsupported"]
+
+STATUS_HEADING = {
+    "supported": ("Supported", ""),
+    "partial": ("Partial", "Converts, but ignores an attribute this model sets."),
+    "lowering-broken": (
+        "Lowering broken",
+        "Converts, but the chain does not reach a runtime symbol.",
+    ),
+    "blocked": ("Blocked", "Implemented, but this variant is rejected."),
+    "unsupported": ("Unsupported", "No implementation in the tree."),
+}
+
+
+def _one_liner(row: dict) -> str:
+    """What to say about an operator in a grouped list."""
+    if row["status"] == "supported":
+        target = row.get("target") or "—"
+        if row.get("runtime_func"):
+            return f"{target} → `{row['runtime_func']}`"
+        # A folded operator's target already says so; do not say it twice.
+        if row.get("compile_time") and "compile time" not in target:
+            return f"{target} (compile-time)"
+        return target
+    if row.get("ignored_attributes"):
+        return "converter ignores " + ", ".join(
+            f"`{a}`" for a in row["ignored_attributes"]
+        )
+    return row.get("backend") or "—"
+
+
+def render_compatibility_summary(rows: list[dict]) -> list[str]:
+    """Operators grouped by status, one line each.
+
+    The distribution table holds more per operator but is hard to scan; this
+    answers "what is in each bucket" directly.
+    """
+    by_status: dict[str, list[dict]] = {}
+    for r in rows:
+        by_status.setdefault(r["status"], []).append(r)
+
+    out = ["### Compatibility summary\n\n"]
+    for status in STATUS_ORDER:
+        group = by_status.get(status)
+        if not group:
+            continue
+        instances = sum(r["count"] for r in group)
+        heading, note = STATUS_HEADING[status]
+        types = f"{len(group)} operator type" + ("s" if len(group) != 1 else "")
+        out.append(f"#### {heading} ({types}, {instances} instances)\n\n")
+        if note:
+            out.append(f"{note}\n\n")
+        for r in sorted(group, key=lambda x: -x["count"]):
+            dom = f" ({r['domain']})" if r["domain"] != "onnx" else ""
+            out.append(f"- `{r['onnx_op']}`{dom} ×{r['count']} — {_one_liner(r)}\n")
+        out.append("\n")
+    return out
+
+
+def _finding(item: dict) -> str:
+    """One sentence saying why this operator is not simply supported."""
+    if item.get("blocking_operand"):
+        return item["blocking_operand"]
+    if item.get("ignored_attributes"):
+        return "converter ignores " + ", ".join(
+            f"`{a['name']}={a['value']}`" for a in item["ignored_attributes"]
+        )
+    if item.get("error"):
+        return f"`{item['error']}`"
+    return "no implementation in the tree"
+
+
 def render_worklist(worklist: dict) -> list[str]:
+    """One row per operator needing work, grouped by the kind of work.
+
+    A table rather than a section each: lowering failures vary too much in
+    shape to give every one its own heading, and the supporting evidence
+    reads better collected in the details file than scattered here.
+    """
     total = sum(len(v) for v in worklist.values())
     out = ["## What needs doing\n\n"]
     if not total:
         out.append("Nothing: every operator in this model is fully supported.\n\n")
         return out
 
-    for key, label, why in WORKLIST_SECTIONS:
-        items = worklist.get(key) or []
-        if not items:
-            continue
-        out.append(
-            f"### {label} — {len(items)} operator(s), "
-            f"{sum(i['count'] for i in items)} instances\n\n"
-        )
-        out.append(f"{why}\n\n")
-        for item in items:
+    out.append("| Operator | Instances | Work | Finding |\n|---|---:|---|---|\n")
+    for key, label, _why in WORKLIST_SECTIONS:
+        for item in worklist.get(key) or []:
             dom = f" ({item['domain']})" if item["domain"] != "onnx" else ""
-            out.append(f"**{item['onnx_op']}**{dom} — {item['count']} instances\n\n")
-            if item.get("signature"):
-                out.append(f"- Signature: `{item['signature']}`\n")
-            if item.get("data_types"):
-                out.append(f"- Data types: {fmt(item['data_types'])}\n")
-            if item.get("shape_types"):
-                out.append(f"- Shapes: {fmt(item['shape_types'])}\n")
-            if item.get("attributes"):
-                attrs = ", ".join(f"{k}={v}" for k, v in item["attributes"].items())
-                out.append(f"- Attributes: `{attrs}`\n")
-            if item.get("implementation"):
-                out.append(f"- Existing implementation: {item['implementation']}\n")
-            if item.get("blocking_operand"):
-                out.append(f"- **Why it fails**: {item['blocking_operand']}\n")
-            if item.get("ignored_attributes"):
-                names = ", ".join(
-                    f"`{a['name']}={a['value']}`" for a in item["ignored_attributes"]
-                )
-                out.append(f"- Ignored by the converter: {names}\n")
-            if item.get("error"):
-                out.append(f"- Error: `{item['error']}`\n")
-            if item.get("source_line"):
-                out.append(f"- EP input MLIR line: {item['source_line']}\n")
-            out.append("- Converter source: _to be filled in_\n")
-            out.append("- Root cause: _to be filled in_\n\n")
+            out.append(
+                f"| {item['onnx_op']}{dom} | {item['count']} | {label} | "
+                f"{_finding(item)} |\n"
+            )
+    out.append("\n")
+
+    for key, label, why in WORKLIST_SECTIONS:
+        if worklist.get(key):
+            out.append(f"- **{label}** — {why}\n")
+    out.append(
+        "\nSignatures, attributes and errors per operator are in "
+        "`model_compatibility_details.md`.\n\n"
+    )
     return out
 
 
@@ -275,10 +334,11 @@ def main() -> None:
         lines.append(f"> {meta['evidence_note']}\n\n")
 
     lines += render_summary(summary)
-    lines += render_worklist(data.get("worklist", {}))
     if comp:
         lines += render_comparison(comp)
     lines += render_distribution(data.get("operator_distribution", []))
+    lines += render_compatibility_summary(data.get("operator_distribution", []))
+    lines += render_worklist(data.get("worklist", {}))
     lines += render_capability_gaps(data.get("capability_gaps", []))
     lines += render_doc_stale(data.get("doc_stale", []))
     lines.append("Per-operator detail is in `model_compatibility_details.md`.\n")
@@ -290,6 +350,44 @@ def main() -> None:
     det = ["# Model compatibility details\n\n"]
     det.append(f"- EP input: `{meta.get('ep_input_path', '')}`\n")
     det.append(f"- Generated: `{meta['generated_at_utc']}`\n\n")
+
+    worklist = data.get("worklist", {})
+    if any(worklist.values()):
+        det.append("## Evidence per operator needing work\n\n")
+        for key, label, _why in WORKLIST_SECTIONS:
+            for item in worklist.get(key) or []:
+                dom = f" ({item['domain']})" if item["domain"] != "onnx" else ""
+                det.append(
+                    f"### {item['onnx_op']}{dom} — {item['count']} instances, "
+                    f"{label.lower()}\n\n"
+                )
+                if item.get("signature"):
+                    det.append(f"- Signature: `{item['signature']}`\n")
+                if item.get("data_types"):
+                    det.append(f"- Data types: {fmt(item['data_types'])}\n")
+                if item.get("shape_types"):
+                    det.append(f"- Shapes: {fmt(item['shape_types'])}\n")
+                if item.get("attributes"):
+                    attrs = ", ".join(f"{k}={v}" for k, v in item["attributes"].items())
+                    det.append(f"- Attributes: `{attrs}`\n")
+                if item.get("implementation"):
+                    det.append(
+                        f"- Documented implementation: {item['implementation']}\n"
+                    )
+                if item.get("blocking_operand"):
+                    det.append(f"- Blocking operand: {item['blocking_operand']}\n")
+                if item.get("ignored_attributes"):
+                    names = ", ".join(
+                        f"`{a['name']}={a['value']}`"
+                        for a in item["ignored_attributes"]
+                    )
+                    det.append(f"- Ignored by the converter: {names}\n")
+                if item.get("error"):
+                    det.append(f"- Error: `{item['error']}`\n")
+                if item.get("source_line"):
+                    det.append(f"- EP input MLIR line: {item['source_line']}\n")
+                det.append("\n")
+
     det.append("## Every operator\n\n")
     det.append(
         "| Op Type | Domain | Count | Status | Target | Runtime | Data Types | "

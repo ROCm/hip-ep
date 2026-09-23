@@ -101,13 +101,13 @@ def _tool(package_root: Path, name: str) -> Path:
     return exe
 
 
-# A whole-graph pass takes about 1.3s and a single-operator lowering 1-2s, so
-# anything near this is not slow but stuck. Perturbing an attribute can feed
-# the converter an input its greedy rewrite never converges on; without a
-# bound, one such case hangs the run indefinitely (observed at 877s of CPU).
-# 30s would do, but the margin costs nothing on the handful of runs that
-# reach it.
-OPT_TIMEOUT_SEC = 120
+# Measured on a 1.8B model: 0.05s for the whole graph, 0.03s for the slowest
+# single-operator lowering. Anything approaching this bound is not slow, it
+# is stuck -- a perturbed attribute can leave the greedy rewrite with no
+# fixed point, and one such case burned 877s of CPU before being killed.
+# Five seconds is a hundredfold margin and keeps a run that hits it from
+# dominating the wall clock.
+OPT_TIMEOUT_SEC = 5
 
 TIMEOUT_EXIT = -9
 

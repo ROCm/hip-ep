@@ -62,21 +62,26 @@ effort. Reporting them as one number misleads planning.
 
 ## After the run
 
-Read `model_compatibility_report.md`. Its worklist gives, per operator, the
-signature, dtypes, shapes, attributes and -- for a blocked operator -- which
-operand the converter objects to, established by changing one operand's type
-at a time.
+Read `model_compatibility_report.md`. It builds up in four steps: the
+counts, the full distribution, the operators grouped by status, then a
+worklist of what is not simply supported and why.
+`model_compatibility_details.md` carries the evidence behind each worklist
+row -- signature, dtypes, shapes, attributes, and for a blocked operator
+which operand the converter objects to, established by changing one
+operand's type at a time.
 
-Two fields per entry are left blank on purpose, because filling them means
-reading the converter:
+Two things the report cannot produce, because they mean reading the
+converter. Add them for every `blocked`, `lowering-broken` and `partial`
+entry:
 
-- **Converter source** — search `lib/Conversion/OnnxToHip/` for the operator
-  name, usually `<Op>Conversion.cpp`.
-- **Root cause** — read the matcher and say which check rejects this model,
-  quoting it.
+- **Where the converter is** — search `lib/Conversion/OnnxToHip/` for the
+  operator name, usually `<Op>Conversion.cpp`.
+- **Which check rejects it** — read the matcher and quote the line, so the
+  fix is obvious.
 
-Do this for every `blocked`, `lowering-broken` and `partial` entry. It is
-the one part of the report a script cannot produce.
+For an `unsupported` operator, also name the closest existing
+implementation in `lib/Runtime/real/`. There is no rule table for this; a
+keyword-matched one existed and was removed after it went stale.
 
 There is no verification pass to run. Earlier versions inferred support with
 regexes over C++ and required every finding to be re-checked by hand; the

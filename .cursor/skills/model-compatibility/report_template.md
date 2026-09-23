@@ -18,11 +18,15 @@ Do not re-render or reformat the output. Read it and quote it.
 | 2 | metadata, including evidence level | always |
 | 3 | evidence badge | level is not A |
 | 4 | `## Summary` | always |
-| 5 | `## What needs doing` | always |
-| 6 | `## Original ONNX vs EP input` | the comparison ran |
-| 7 | `## Operator distribution` | always |
-| 8 | `## Capability gaps` | an attribute is ignored |
-| 9 | `## Documentation drift` | an operator compiles but is undocumented |
+| 5 | `## Original ONNX vs EP input` | the comparison ran |
+| 6 | `## Operator distribution` | always |
+| 7 | `### Compatibility summary` | always |
+| 8 | `## What needs doing` | always |
+| 9 | `## Capability gaps` | an attribute is ignored |
+| 10 | `## Documentation drift` | an operator compiles but is undocumented |
+
+Ordered widest to narrowest: the counts, then every operator, then the same
+operators bucketed by status, then only those needing work.
 
 ### Summary
 
@@ -30,26 +34,32 @@ Total instances, then the five statuses. The percentage counts `supported`
 only; the other four get their own lines. The denominator excludes weight
 constants, and says so.
 
+### Compatibility summary
+
+The same operators as the table above, bucketed by status, one line each:
+where a supported operator lowers to and which runtime symbol it reaches,
+or for the rest, what stands in the way. Easier to scan than the nine-column
+table when the question is "what is in each bucket".
+
 ### What needs doing
 
-The report's point, placed before the tables. Four groups, one per kind of
-work, each sorted by instance count:
+One row per operator that is not simply supported, with the kind of work and
+a one-line finding: which operand blocks conversion, which attribute the
+converter ignores, or the lowering error. Four kinds of work:
 
-```
-### Implement the operator          (unsupported)
-### Extend an existing operator     (blocked)
-### Complete the lowering chain     (lowering-broken)
-### Handle an ignored attribute     (partial)
-```
+| Work | Status |
+|---|---|
+| Implement the operator | `unsupported` |
+| Extend an existing operator | `blocked` |
+| Complete the lowering chain | `lowering-broken` |
+| Handle an ignored attribute | `partial` |
 
-Per entry: signature, data types, shapes, attributes, and where it applies
-the existing implementation, the ignored attributes, the lowering error, or
-which operand blocks conversion.
+A table, not a section each, because lowering failures vary too much in
+shape to fit a fixed layout. The supporting evidence is in the details file.
 
-Two fields read `_to be filled in_`: **converter source** and **root
-cause**. They are yours to complete -- finding them means reading the
-converter, which no script does. An entry left with both blanks is an
-unfinished report.
+Neither this section nor the report names the converter source or the exact
+check that rejects the model. Both require reading the converter, so they
+are yours to add -- see SKILL.md.
 
 ### Operator distribution
 
@@ -83,8 +93,11 @@ Operators that compile but are missing from
 
 ## `model_compatibility_details.md`
 
-Every operator in one table, including the ones the report summarizes:
-status, target, runtime symbol, data types, ignored attributes.
+Two parts. First the evidence behind each worklist row -- signature, data
+types, shapes, attributes, documented implementation, blocking operand,
+ignored attributes, lowering error, and the line in the EP input MLIR.
+Then every operator in one table: status, target, runtime symbol, data
+types, ignored attributes.
 
 ## Rules
 
