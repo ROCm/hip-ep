@@ -112,9 +112,9 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
                     (long long)data_rank, hipdnn_ep_datatype_name(data_type),
                     (long long)mode_id, (long long)n_axes);
 
-  return hip_pad(
-      hipdnn_ep_state_get_stream(state), data, output, data_shape, output_shape,
-      static_cast<const int64_t *>(pads), axes_dev, pads_num_elements, n_axes,
-      static_cast<int>(data_rank), hip_dtype, static_cast<int>(mode_id),
-      cval_dev, hipdnn_ep_state_get_error_flag_device_ptr(state));
+  return hip_pad(hipdnn_ep_state_get_stream(state), data, output, data_shape,
+                 output_shape, static_cast<const int64_t *>(pads), axes_dev,
+                 pads_num_elements, n_axes, static_cast<int>(data_rank),
+                 hip_dtype, static_cast<int>(mode_id), cval_dev,
+                 hipdnn_ep_state_get_error_flag_device_ptr(state));
 }

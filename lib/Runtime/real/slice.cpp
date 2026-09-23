@@ -139,8 +139,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
             (long long)data_rank, kSliceRuntimeMaxRank);
     return -1;
   }
-  if (starts_num_elements <= 0 ||
-      starts_num_elements > kSliceRuntimeMaxRank) {
+  if (starts_num_elements <= 0 || starts_num_elements > kSliceRuntimeMaxRank) {
     fprintf(stderr,
             "[REAL] wrap_slice: starts_num_elements=%lld out of range "
             "[1, %d]\n",
@@ -158,9 +157,10 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   }
 
   if (starts_num_elements > data_rank) {
-    fprintf(stderr,
-            "[REAL] wrap_slice: starts_num_elements=%lld exceeds data_rank=%lld\n",
-            (long long)starts_num_elements, (long long)data_rank);
+    fprintf(
+        stderr,
+        "[REAL] wrap_slice: starts_num_elements=%lld exceeds data_rank=%lld\n",
+        (long long)starts_num_elements, (long long)data_rank);
     return -1;
   }
 
@@ -213,9 +213,9 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                     (long long)data_rank, (long long)starts_num_elements,
                     hipdnn_ep_datatype_name(data_type));
 
-  return hip_slice(
-      hipdnn_ep_state_get_stream(state), data, output, data_shape, output_shape,
-      static_cast<const int64_t *>(starts), static_cast<const int64_t *>(ends),
-      axes_dev, steps_dev, starts_num_elements, static_cast<int>(data_rank),
-      hip_dtype, hipdnn_ep_state_get_error_flag_device_ptr(state));
+  return hip_slice(hipdnn_ep_state_get_stream(state), data, output, data_shape,
+                   output_shape, static_cast<const int64_t *>(starts),
+                   static_cast<const int64_t *>(ends), axes_dev, steps_dev,
+                   starts_num_elements, static_cast<int>(data_rank), hip_dtype,
+                   hipdnn_ep_state_get_error_flag_device_ptr(state));
 }

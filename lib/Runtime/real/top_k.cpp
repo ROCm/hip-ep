@@ -30,11 +30,10 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_top_k: axis=%lld, rank=%lld, largest=%lld, "
-      "sorted=%lld -> hip_top_k\n",
-      (long long)axis, (long long)rank, (long long)largest,
-      (long long)sorted);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_top_k: axis=%lld, rank=%lld, largest=%lld, "
+                    "sorted=%lld -> hip_top_k\n",
+                    (long long)axis, (long long)rank, (long long)largest,
+                    (long long)sorted);
 
   return hip_top_k(hipdnn_ep_state_get_stream(state), x, k, values, indices,
                    axis, largest, sorted, rank, x_shape,

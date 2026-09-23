@@ -80,15 +80,14 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_cumsum: rank=%lld, num=%lld, data_type=%s, "
-      "excl=%lld, rev=%lld -> hip_cumsum\n",
-      (long long)data_rank, (long long)num_elements,
-      hipdnn_ep_datatype_name(data_type), (long long)exclusive,
-      (long long)reverse);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_cumsum: rank=%lld, num=%lld, data_type=%s, "
+                    "excl=%lld, rev=%lld -> hip_cumsum\n",
+                    (long long)data_rank, (long long)num_elements,
+                    hipdnn_ep_datatype_name(data_type), (long long)exclusive,
+                    (long long)reverse);
 
-  return hip_cumsum(
-      hipdnn_ep_state_get_stream(state), x, y, data_shape, data_rank,
-      num_elements, axis, axis_elem_bytes, hip_dtype, exclusive ? 1 : 0,
-      reverse ? 1 : 0, hipdnn_ep_state_get_error_flag_device_ptr(state));
+  return hip_cumsum(hipdnn_ep_state_get_stream(state), x, y, data_shape,
+                    data_rank, num_elements, axis, axis_elem_bytes, hip_dtype,
+                    exclusive ? 1 : 0, reverse ? 1 : 0,
+                    hipdnn_ep_state_get_error_flag_device_ptr(state));
 }
