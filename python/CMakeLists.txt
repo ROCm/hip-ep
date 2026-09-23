@@ -17,11 +17,6 @@ set(_stage "${CMAKE_CURRENT_BINARY_DIR}/pkg")
 set(_libs_dir "${_stage}/onnxruntime_ep_amdgpu")
 set(_dist_dir "${CMAKE_CURRENT_BINARY_DIR}/dist")
 
-set(_rocm_arch_args)
-foreach(_arch IN LISTS HIP_ARCHITECTURES)
-  list(APPEND _rocm_arch_args "--rocm-arch" "${_arch}")
-endforeach()
-
 configure_file(
   "${_pkg_src}/pyproject.toml.in"
   "${_stage}/pyproject.toml"
@@ -81,8 +76,6 @@ add_custom_target(wheel ALL
   COMMAND ${Python3_EXECUTABLE} "${_pkg_src}/_pack_libs.py"
           ${_dll_args}
           --dest "${_libs_dir}"
-          --rocm-dist "${THEROCK_DIST}"
-          ${_rocm_arch_args}
           --with-crt
   # 3. Build the wheel (PEP 517). Drop setuptools' build cache + egg-info first:
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.

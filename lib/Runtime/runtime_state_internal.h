@@ -48,7 +48,6 @@ int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
-  hipblasLtHandle_t hipblas_handle;
 
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
