@@ -50,7 +50,7 @@
           (let* ([parse-result (run-one-phase "  Parse" ':debug-parse ':expect-parse test-name test-body)]
                  [validate-result (run-one-phase "  Validate" ':debug-validate ':expect-validate test-name test-body)]
                  [analyze-result (run-one-phase "  Analyze" ':debug-analyze ':expect-analyze test-name test-body)]
-                 [codegen-result (run-one-phase "  Codegen" #f ':expect-codegen test-name test-body)]
+                 [codegen-result (run-one-phase "  Codegen" ':debug-codegen ':expect-codegen test-name test-body)]
                  [passed (+ (if (eq? parse-result #t) 1 0)
                            (if (eq? validate-result #t) 1 0)
                            (if (eq? analyze-result #t) 1 0)
@@ -84,7 +84,7 @@
           (let* ([parse-result (run-one-phase "  Parse" ':debug-parse ':expect-parse test-name test-body)]
                  [validate-result (run-one-phase "  Validate" ':debug-validate ':expect-validate test-name test-body)]
                  [analyze-result (run-one-phase "  Analyze" ':debug-analyze ':expect-analyze test-name test-body)]
-                 [codegen-result (run-one-phase "  Codegen" #f ':expect-codegen test-name test-body)]
+                 [codegen-result (run-one-phase "  Codegen" ':debug-codegen ':expect-codegen test-name test-body)]
                  [passed (+ (if (eq? parse-result #t) 1 0)
                            (if (eq? validate-result #t) 1 0)
                            (if (eq? analyze-result #t) 1 0)

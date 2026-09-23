@@ -62,9 +62,10 @@
           (vector-set! visited op-idx #t)
 
           (let* ([match-op (vector-ref match-vec op-idx)]
-                 [operands (syntax->list (ast-match-expand-operands match-op))]
+                 [operands (ast-match-expand-operands match-op)]  ; list of ast-operand records
                  ;; Cache binding entries - avoid repeated hashtable lookups
-                 [entries (map (lambda (op) (find-binding-entry binding-mgr op)) operands)])
+                 ;; Extract var field from ast-operand for lookup
+                 [entries (map (lambda (op) (find-binding-entry binding-mgr (ast-operand-var op))) operands)])
 
             ;; Emit header actions (building backwards, will reverse at end)
             (set! acc (cons (action:set-current-op op-idx result-var) acc))
@@ -81,27 +82,28 @@
             (loop :for operand :in operands
                   :for entry :in entries
                   :for operand-idx :from 0
+                  :rime-with operand-var := (ast-operand-var operand)
                   :rime-with is-result := (binding-entry-is-result? entry)
                   :rime-with is-bound := (binding-entry-bound? entry)
                   :do (cond
                         ;; Case 1: is-bound AND is-result → check equality
                         [(and is-bound is-result)
-                         (set! acc (cons (action:check-eq op-idx operand-idx operand) acc))]
+                         (set! acc (cons (action:check-eq op-idx operand-idx operand-var) acc))]
 
                         ;; Case 2: is-bound AND NOT is-result → check equality
                         [(and is-bound (not is-result))
-                         (set! acc (cons (action:check-eq op-idx operand-idx operand) acc))]
+                         (set! acc (cons (action:check-eq op-idx operand-idx operand-var) acc))]
 
                         ;; Case 3: NOT is-bound AND is-result → bind first, then recurse to producer
                         [(and (not is-bound) is-result)
-                         (set! acc (cons (action:bind-operand op-idx operand-idx operand) acc))
+                         (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc))
                          (binding-entry-bound?-set! entry #t)
-                         (let ([producer-op-idx (find-operation-by-result match-vec operand)])
-                           (traverse producer-op-idx operand))]
+                         (let ([producer-op-idx (find-operation-by-result match-vec operand-var)])
+                           (traverse producer-op-idx operand-var))]
 
                         ;; Case 4: NOT is-bound AND NOT is-result → bind free variable
                         [(and (not is-bound) (not is-result))
-                         (set! acc (cons (action:bind-operand op-idx operand-idx operand) acc))
+                         (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc))
                          (binding-entry-bound?-set! entry #t)])))))
 
       ;; Warn about unvisited operations
@@ -122,10 +124,12 @@
     (let ([ht (make-hashtable identifier-hash bound-identifier=?)])
 
       ;; Pass 1: Collect operand occurrences (last write wins)
+      ;; operands is a list of ast-operand records after validation phase
       (loop :for op-idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec op-idx)
-            :do (loop :for operand-var :in (syntax->list (ast-match-expand-operands match-op))
+            :do (loop :for operand :in (ast-match-expand-operands match-op)
                       :for operand-idx :from 0
+                      :rime-with operand-var := (ast-operand-var operand)
                       :do (hashtable-set! ht operand-var
                             (make-binding-entry operand-var #f #f #f op-idx operand-idx #f))))
 
