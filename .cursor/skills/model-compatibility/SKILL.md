@@ -53,12 +53,19 @@ afternoon or a fortnight.
 |---|---|---|
 | `supported` | converts and lowers | none |
 | `partial` | converts, but a converter ignores an attribute this model sets | teach the converter that attribute |
-| `lowering-broken` | front end converts, back end does not follow | add the HipToLLVM lowering or runtime function |
+| `lowering-broken` | converts, but the rest of the pipeline does not finish | read the error: it can be any pass, not only a missing lowering |
 | `blocked` | no conversion, but an implementation exists | relax a dtype, shape or attribute restriction |
 | `unsupported` | no implementation anywhere | write the operator |
 
 `blocked` and `unsupported` differ by roughly an order of magnitude in
 effort. Reporting them as one number misleads planning.
+
+`supported` is not one piece of evidence but two, of unequal strength. The
+conversion half is checked on the real graph; the lowering half is checked
+on the operator alone, because a whole graph cannot be lowered outside the
+EP. So a supported operator is one that converts in context and lowers in
+isolation -- a failure that needs the size or the neighbours of a real
+model, such as memory planning, is outside what this can see.
 
 An operator can be `supported` and still be marked "lowering unverified".
 That means the front end converted it but the probe could not build a

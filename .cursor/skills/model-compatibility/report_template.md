@@ -57,7 +57,7 @@ ignores, or the error.
 |---|---|
 | Implement the operator | `unsupported` |
 | Extend an existing operator | `blocked` |
-| Complete the lowering chain | `lowering-broken` |
+| Finish the lowering pipeline | `lowering-broken` |
 | Handle an ignored attribute | `partial` |
 | Extend the MorphiZen ONNX importer | the importer refused the operator |
 | Check the lowering by hand | supported, but no slice could be built |

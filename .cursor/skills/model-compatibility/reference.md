@@ -60,6 +60,17 @@ No operator-specific symbol means the lowering is entirely compile-time,
 which is a result, not a failure -- `Reshape` via `tensor.expand_shape` is
 the usual case.
 
+Being per-operator sets the limit of what stage2 can see. A two-line module
+does not exercise memory planning, buffer reuse, or anything else that only
+appears at the size of a real graph, so it can only find failures an
+operator has on its own. Conversion is checked on the whole graph and
+lowering is not: the two halves of `supported` are not equally strong.
+
+A failure anywhere in those 57 passes counts as `lowering-broken`, not just
+a missing `HipToLLVM` pattern -- bufferization, shape reification, DPS init
+construction and memory planning are all inside stage2. The error text says
+which; the status does not.
+
 ### Slicing
 
 Both probes build their modules through `mlir_slice.py`, from a whole-graph

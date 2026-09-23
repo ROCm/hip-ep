@@ -34,9 +34,10 @@ WORKLIST_SECTIONS = [
     ),
     (
         "lowering-broken",
-        "Complete the lowering chain",
-        "The front end converts the operator but the back end does not follow. "
-        "Missing HipToLLVM lowering or runtime function.",
+        "Finish the lowering pipeline",
+        "The operator converts, but a later pass does not finish. Any of the "
+        "pipeline can be at fault -- bufferization, shape reification, memory "
+        "planning, a missing HipToLLVM pattern -- so read the error.",
     ),
     (
         "partial",

@@ -16,8 +16,8 @@ separating them:
   supported        nothing to do
   partial          converts, but the converter ignores an attribute the
                    model sets -- teach it that attribute
-  lowering-broken  front end converts, back end does not follow -- add the
-                   HipToLLVM lowering or the runtime function
+  lowering-broken  converts, but some pass after that does not finish --
+                   the error names which one
   blocked          no conversion, but an implementation exists -- relax a
                    dtype, shape or attribute restriction in it
   unsupported      no implementation -- write the operator
@@ -54,7 +54,7 @@ WORKLIST_BUCKETS = STATUSES + ("unverified", "import-blocked")
 STATUS_ACTION = {
     "supported": "",
     "partial": "handle the ignored attribute",
-    "lowering-broken": "add the HipToLLVM lowering or runtime function",
+    "lowering-broken": "fix the pass the error names",
     "blocked": "extend the existing operator",
     "unsupported": "implement the operator",
     "unverified": "check the lowering by hand",
