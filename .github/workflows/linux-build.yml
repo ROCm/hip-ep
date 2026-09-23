@@ -30,8 +30,11 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.15.2"
-  OGA_PR_PATCHES: "2165"
+  OGA_VERSION: "0.16.0"
+  OGA_PR_PATCHES: "2286"
+  # microsoft/onnxruntime-extensions PR numbers applied on top of the commit
+  # OGA's cmake/deps.txt pins.
+  EXTENSIONS_PR_PATCHES: "1091"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -296,7 +299,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ext${{ env.EXTENSIONS_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -324,20 +327,49 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
-          # git am needs a committer identity on a bare runner.
-          git config user.email "ci@onnx-hipdnn-ep.local"
-          git config user.name "onnx-hipdnn-ep CI"
+          # pull/<n>.diff is the PR's net diff against its merge base. Replaying
+          # pull/<n>.patch with `git am` drops the conflict resolution of any
+          # "merge main" commit in the PR.
           for pr in $prs; do
-            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
+            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff"
             echo "Fetching $url"
-            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # github.com throttles raw .diff fetches with HTTP 429; retry with
             # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
             curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
-              "$url" -o "/tmp/oga-pr-${pr}.patch"
+              "$url" -o "/tmp/oga-pr-${pr}.diff"
             echo "Applying PR #${pr}"
-            git am --3way --whitespace=nowarn "/tmp/oga-pr-${pr}.patch" \
-              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
+            git apply --whitespace=nowarn "/tmp/oga-pr-${pr}.diff" \
+              || { echo "PR #${pr} failed to apply"; exit 1; }
           done
+
+      - name: Apply onnxruntime-extensions PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        env:
+          EXT_PRS: ${{ env.EXTENSIONS_PR_PATCHES }}
+        run: |
+          set -euo pipefail
+          prs="$(echo "$EXT_PRS" | xargs || true)"
+          if [ -z "$prs" ]; then
+            echo "EXTENSIONS_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          fi
+          IFS=';' read -r _ repo sha < <(grep '^onnxruntime_extensions;' onnxruntime-genai/cmake/deps.txt)
+          src="${{ runner.workspace }}/source-extensions"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 "$repo" "$sha"
+          git -C "$src" checkout -q FETCH_HEAD
+          for pr in $prs; do
+            url="https://github.com/microsoft/onnxruntime-extensions/pull/${pr}.diff"
+            echo "Fetching $url"
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "/tmp/ext-pr-${pr}.diff"
+            echo "Applying PR #${pr} on onnxruntime-extensions ${sha}"
+            # OGA does not build the extensions tests, and the PR's test files
+            # conflict with the commits the pinned SHA has on top of its base.
+            git -C "$src" apply --whitespace=nowarn --exclude='test/*' "/tmp/ext-pr-${pr}.diff" \
+              || { echo "onnxruntime-extensions PR #${pr} failed to apply"; exit 1; }
+          done
+          echo "OGA_EXTRA_DEFINES=FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS=$src" >> "$GITHUB_ENV"
 
       - name: Build OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -366,7 +398,8 @@ jobs:
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ${OGA_EXTRA_DEFINES:-}
           mkdir -p "$ART"
           cp "${{ runner.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
           cp -a "${{ runner.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
