@@ -172,10 +172,11 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   // CK's f16 instances apply neither alpha nor a bias, matching this call's
-  // fixed alpha=1 / beta=0 / no-C form, and are instantiated only for
-  // untransposed operands. With transA and transB both N the column-major
-  // leading dimensions collapse to (lda, ldb, ldd) = (N, K, N).
-  const bool ck_eligible = elem_size == 2 && transA == 0 && transB == 0;
+  // fixed alpha=1 / beta=0 / no-C form. ONNX transB becomes the kernels'
+  // TRANSA (the operands swap), which the kTN_F16 entries serve; ONNX transA
+  // would become their TRANSB, which no instance takes, so it still goes to
+  // the reference kernel.
+  const bool ck_eligible = elem_size == 2 && transA == 0;
   const int64_t hblA_ld = transB ? K : N; // "A" = B buffer
   const int64_t hblB_ld = transA ? M : K; // "B" = A buffer
 
@@ -187,27 +188,39 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     if (!entry->resolved.load(std::memory_order_relaxed)) {
       // M == 1 leaves a GEMM tile's M extent idle, so offer the shape to the
       // GEMV kernel first and only probe CK for what it declines.
-      entry->use_gemv = ck_eligible && M == 1 && batch_count == 1 &&
+      // hip_gemv_fp16 reads B as a plain [K, N] block, so it takes only the
+      // untransposed form; a folded transB has to go to CK.
+      entry->use_gemv = ck_eligible && transB == 0 && M == 1 &&
+                        batch_count == 1 &&
                         hip_gemv_fp16(stream, A, B, output, N, K) == 0;
       if (ck_eligible && !entry->use_gemv) {
         entry->ck_instance = ckSelectGemmInstance(
             stream, B, A, /*bias=*/nullptr, output, N, M, K, batch_count,
-            /*transA=*/0, /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
-            /*alpha=*/1.0f, /*lda=*/N, /*ldb=*/K, /*ldd=*/N,
+            static_cast<int>(transB), /*transB=*/0, HIP_DTYPE_FLOAT16,
+            HIP_DTYPE_FLOAT16, /*alpha=*/1.0f, hblA_ld, hblB_ld, /*ldd=*/N,
             /*strideA=*/b_batch_stride, /*strideB=*/M * K, /*strideD=*/M * N);
       }
       entry->resolved.store(true, std::memory_order_release);
+      // ck_instance=-1 is reserved for a shape CK was offered and refused, so
+      // that grepping it reports coverage gaps rather than the dtypes and
+      // transposes the registry never serves.
       if (entry->use_gemv) {
         RUNTIME_DEBUG_LOG(
             "[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
             "gemv\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count);
-      } else {
+      } else if (ck_eligible) {
         RUNTIME_DEBUG_LOG(
             "[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
             "ck_instance=%d\n",
             (long long)M, (long long)N, (long long)K, (long long)batch_count,
             entry->ck_instance);
+      } else {
+        RUNTIME_DEBUG_LOG(
+            "[MATMUL] resolved M=%lld N=%lld K=%lld batch=%lld -> "
+            "ref (elem_size=%lld transA=%lld)\n",
+            (long long)M, (long long)N, (long long)K, (long long)batch_count,
+            (long long)elem_size, (long long)transA);
       }
     }
   }
@@ -225,9 +238,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   if (entry->ck_instance >= 0) {
     if (hip_ck_gemm_run(stream, entry->ck_instance, B, A, /*bias=*/nullptr,
-                        output, N, M, K, batch_count, /*transA=*/0,
+                        output, N, M, K, batch_count, static_cast<int>(transB),
                         /*transB=*/0, HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT16,
-                        /*alpha=*/1.0f, /*lda=*/N, /*ldb=*/K, /*ldd=*/N,
+                        /*alpha=*/1.0f, hblA_ld, hblB_ld, /*ldd=*/N,
                         /*strideA=*/b_batch_stride, /*strideB=*/M * K,
                         /*strideD=*/M * N) != 0) {
       // The instance was chosen by running this same geometry, so a refusal

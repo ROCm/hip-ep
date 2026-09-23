@@ -493,13 +493,13 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   const int64_t hblA_ld = transB ? K : N;
   const int64_t hblB_ld = transA ? M : K;
 
-  // CK eligibility mirrors the tuned f16 instances: no alpha, ONNX transA==0,
-  // and the A-side transpose (ONNX transB) only together with a bias. `!C ||
-  // use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C, which
-  // ckSelectGemmInstance relies on when it times into `output`.
+  // CK eligibility mirrors the tuned f16 instances: no alpha and ONNX
+  // transA==0, which would become the kernels' TRANSB and has no instance.
+  // The A-side transpose (ONNX transB) is served with or without a bias.
+  // `!C || use_bias_epilogue` also keeps `output` free of a pre-seeded beta*C,
+  // which ckSelectGemmInstance relies on when it times into `output`.
   const bool ck_eligible = typeCode == kTypeFloat16 && alpha == 1.0f &&
-                           transA == 0 && (!C || use_bias_epilogue) &&
-                           (transB == 0 || use_bias_epilogue);
+                           transA == 0 && (!C || use_bias_epilogue);
   const void *ck_bias = use_bias_epilogue ? C : nullptr;
 
   GemmCacheKey key{
@@ -532,10 +532,23 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       cached = table.map.try_emplace(key, entry).first->second;
     }
     have_cached = true;
-    RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: resolved M=%lld N=%lld K=%lld "
-                      "transA=%lld transB=%lld -> ck_instance=%d\n",
-                      (long long)M, (long long)N, (long long)K,
-                      (long long)transA, (long long)transB, cached.ck_instance);
+    // ck_instance=-1 is reserved for a shape CK was offered and refused, so
+    // that grepping it reports coverage gaps rather than the dtypes, alphas
+    // and residual C shapes the registry never serves.
+    if (ck_eligible) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: resolved M=%lld N=%lld K=%lld "
+                        "transA=%lld transB=%lld -> ck_instance=%d\n",
+                        (long long)M, (long long)N, (long long)K,
+                        (long long)transA, (long long)transB,
+                        cached.ck_instance);
+    } else {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: resolved M=%lld N=%lld K=%lld "
+                        "transA=%lld transB=%lld -> ref (typeCode=%lld "
+                        "alpha=%f bias_epilogue=%d)\n",
+                        (long long)M, (long long)N, (long long)K,
+                        (long long)transA, (long long)transB,
+                        (long long)typeCode, alpha, (int)use_bias_epilogue);
+    }
   }
 
   if (cached.ck_instance >= 0) {

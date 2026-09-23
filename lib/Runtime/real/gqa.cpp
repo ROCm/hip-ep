@@ -150,12 +150,20 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
       state->seqlens_k_cached_ptr == seqlens_k_ptr)
     return state->seqlens_k_cached_val;
 
+  // Falling back to kSeqlensKNotRead handles the failure here, so the HIP
+  // error it latched must be consumed too: it stays pending on the thread
+  // otherwise and the next hipGetLastError() anywhere reports it as its own.
+  // A cross-attention seqlens_k is host memory, so this D2H fails every call.
   int32_t seqlens_k_val = 0;
   if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                     hipMemcpyDeviceToHost, stream) != hipSuccess)
+                     hipMemcpyDeviceToHost, stream) != hipSuccess) {
+    (void)hipGetLastError();
     return kSeqlensKNotRead;
-  if (hipStreamSynchronize(stream) != hipSuccess)
+  }
+  if (hipStreamSynchronize(stream) != hipSuccess) {
+    (void)hipGetLastError();
     return kSeqlensKNotRead;
+  }
 
   if (gqa_cache_seqlens_enabled() && state) {
     state->seqlens_k_cached_val = seqlens_k_val;
