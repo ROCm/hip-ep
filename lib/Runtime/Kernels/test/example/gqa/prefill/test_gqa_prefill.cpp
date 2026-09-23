@@ -8,7 +8,8 @@
 //
 // Verifies the ported FA-2 WMMA prefill kernels that gqa.cpp routes to on the
 // fused-prefill fast path:
-//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry)
+//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry; runs
+//                              the transposed-score v6 kernel)
 //   hip_gqa_flash_prefill_v7  (d == 128, llama-3.1 geometry)
 //   hip_gqa_flash_prefill_v8  (d == 256, Qwen3.6 geometry)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
@@ -40,7 +41,7 @@ extern "C" int hip_gqa_flash_prefill_v5(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
-// Unified entry the runtime (gqa.cpp) actually calls -- picks v5/v7 by head dim.
+// Unified entry the runtime (gqa.cpp) actually calls -- picks v6/v7 by head dim.
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -229,7 +230,7 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
 
   // Route through the unified entry (same path the runtime takes); it dispatches
-  // v5 (D==64) / v7 (D==128) internally.
+  // v6 (D==64) / v7 (D==128) internally.
   const void* sink_arg =
       (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth)
           ? (const void*)dSink
@@ -309,7 +310,7 @@ static bool run_case(const Case& c, int iters) {
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL", D == 64 ? 5 : (D == 256 ? 8 : 7));
+         pass ? "PASS" : "FAIL", D == 64 ? 6 : (D == 256 ? 8 : 7));
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
