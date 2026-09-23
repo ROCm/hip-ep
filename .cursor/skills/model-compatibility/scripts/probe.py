@@ -376,7 +376,12 @@ def _widest_shape(types: list[str], rank_delta: int = 0) -> str | None:
         rank = shape.count("x")
         if rank > best_rank:
             best, best_rank = shape, rank
-    if best is None or rank_delta == 0:
+    if best is None:
+        # Nothing ranked to copy from, which happens when an operator sits
+        # downstream of something shape inference gave up on. Start from a
+        # plain 2-D dynamic shape and let rank_delta walk it down.
+        best = "?x?x"
+    if rank_delta == 0:
         return best
     dims = best.split("x")[:-1]
     if rank_delta > len(dims):

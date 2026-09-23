@@ -19,6 +19,11 @@ restate them elsewhere.
 | Assemble | `build_report_input.py` | `report_input.json` |
 | Render | `generate_final_reports.py` | the two markdown files |
 
+When the dump fails there is no `ep_input.mlir` to probe, and
+`single_op_probe.py` stands in for the first five rows: it builds a one-node
+ONNX model per operator, imports each one, and writes the same
+`probe_result.json`. See [Evidence levels](#evidence-levels).
+
 ## The probe
 
 ### stage1 — whole graph, does a converter exist
@@ -127,6 +132,7 @@ a single-variable result naming the fix.
 | not converted | — | no | `unsupported` |
 | converted | ok | no | `supported`, listed under documentation drift |
 | converted | could not be sliced | — | `supported`, marked "lowering unverified" |
+| the importer refused it | — | yes / no | `blocked` / `unsupported`, in the `import-blocked` worklist |
 
 The probe outranks the doc. The doc only separates `blocked` from
 `unsupported`.
@@ -163,6 +169,31 @@ the evidence note says so.
 D must be stated prominently. `MatMulNBits` is listed as supported in
 `docs/supported-operations.md`, so at level D its 224 blocked instances read
 as working.
+
+### Level C — one-node models
+
+Reached when the EP cannot import the model at all. `single_op_probe.py`
+rebuilds each operator as a model of its own and imports that, so the
+verdicts still come from compiling. Construction mirrors the MLIR slicer:
+weights and values captured from an enclosing scope become graph inputs,
+small inline Constants are carried in. A node with a subgraph travels with
+it, and whatever that subgraph reads from outside becomes an input too.
+
+`onnx.checker` advises here rather than decides. It rejects a signature of
+unknown rank, which the importer accepts and turns into an unranked tensor
+the slicer already handles; its complaint is kept only to explain an import
+failure if one follows.
+
+Two things level C says that no other level can. An operator the importer
+turns away is recorded as `import-blocked`, which is work on the MorphiZen
+importer and not on any HIP operator -- calling it `unsupported` would send
+someone to the wrong repository. And because a model can fail to import
+while its operators are individually fine, the report states the two
+conclusions separately: the support percentage is per operator type, not a
+verdict on the model.
+
+Level C shares B's blind spot. A one-node model has no surrounding graph,
+so fusions never fire and support is a lower bound.
 
 ## Counting
 

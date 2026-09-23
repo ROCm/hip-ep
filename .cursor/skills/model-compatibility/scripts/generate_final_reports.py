@@ -49,6 +49,12 @@ WORKLIST_SECTIONS = [
         "model sets, so the generated code silently means something else.",
     ),
     (
+        "import-blocked",
+        "Extend the MorphiZen ONNX importer",
+        "The EP turned the operator away before any conversion ran, so no HIP "
+        "operator would help. The work is in the importer, not in this tree.",
+    ),
+    (
         "unverified",
         "Check the lowering by hand",
         "Conversion succeeds and the operator is counted as supported, but the "
@@ -99,7 +105,19 @@ def render_stages(stages: list[dict]) -> list[str]:
     return out
 
 
-def render_summary(summary: dict) -> list[str]:
+# Whether the model compiles as a whole is a separate question from how many
+# of its operators are supported, and the evidence level already answers it.
+# Saying only the percentage invites reading a high one as "this model runs".
+WHOLE_MODEL_VERDICT = {
+    "A": "compiles as a whole",
+    "B": "**does not compile as a whole**; the figures below are per operator",
+    "C": "**cannot be imported as a whole**; the figures below are per operator "
+    "type, not a verdict on the model",
+    "D": "**was never compiled**; nothing below was verified",
+}
+
+
+def render_summary(summary: dict, evidence: str = "A") -> list[str]:
     inst = summary["instances"]
     types = summary["operator_types"]
     out = [
@@ -117,10 +135,13 @@ def render_summary(summary: dict) -> list[str]:
     n_types = summary.get("lowering_unverified_types", 0)
     caveat = (
         f" — {unverified} of them, in {n_types} operator "
-        f"type{'s' if n_types != 1 else ''}, converted but had no lowering check"
+        f"type{'s' if n_types != 1 else ''}, were not checked end to end"
         if unverified
         else ""
     )
+    verdict = WHOLE_MODEL_VERDICT.get(evidence)
+    if verdict:
+        out.append(f"- The model {verdict}\n")
     out.append(
         f"- Supported: **{inst['supported']} ({summary['supported_pct']}%)** "
         f"across {types['supported']} operator types{caveat}\n"
@@ -131,6 +152,17 @@ def render_summary(summary: dict) -> list[str]:
         out.append(
             f"- {label.split()[0]} ({key}): {inst[key]} instances, "
             f"{types[key]} operator types\n"
+        )
+    # Import-blocked operators are already counted above, as blocked or
+    # unsupported depending on the documentation. Saying so here keeps the
+    # reader from planning HIP work for them.
+    blocked_at_import = summary.get("import_blocked_instances", 0)
+    if blocked_at_import:
+        n = summary.get("import_blocked_types", 0)
+        out.append(
+            f"- Of those, {blocked_at_import} instances in {n} operator "
+            f"type{'s' if n != 1 else ''} never reached the compiler: the "
+            "importer rejected them, so the work is on the importer\n"
         )
     out.append("\n")
     return out
@@ -387,7 +419,7 @@ def main() -> None:
         lines.append("> " + " ".join(x for x in (badge, note) if x) + "\n\n")
 
     lines += render_stages(data.get("pipeline_stages", []))
-    lines += render_summary(summary)
+    lines += render_summary(summary, meta.get("evidence_level", "A"))
     if comp:
         lines += render_comparison(comp)
     lines += render_distribution(data.get("operator_distribution", []))

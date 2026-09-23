@@ -44,10 +44,12 @@ from supported_ops_doc import default_doc_path, load_supported_ops  # noqa: E402
 
 STATUSES = ("supported", "partial", "lowering-broken", "blocked", "unsupported")
 
-# Worklist buckets are the statuses plus "unverified", which is not a status
-# -- those operators are reported supported -- but still needs a decision
-# from a person.
-WORKLIST_BUCKETS = STATUSES + ("unverified",)
+# Worklist buckets are the statuses plus two kinds of entry that are not
+# statuses: "unverified", where the operator counts as supported but half
+# the check is missing, and "import-blocked", where the EP rejected the
+# operator before any conversion ran. The latter is work on the importer,
+# not on a HIP operator, so it cannot share the unsupported wording.
+WORKLIST_BUCKETS = STATUSES + ("unverified", "import-blocked")
 
 # What to do about each bucket, carried into the report so the worklist does
 # not have to restate it.
@@ -58,6 +60,7 @@ STATUS_ACTION = {
     "blocked": "extend the existing operator",
     "unsupported": "implement the operator",
     "unverified": "check the lowering by hand",
+    "import-blocked": "extend the MorphiZen ONNX importer",
 }
 
 
@@ -169,6 +172,12 @@ def classify(
         # extending one and writing one.
         return ("blocked" if in_doc else "unsupported"), [], []
 
+    if s1.get("inconclusive") and not s1.get("converted"):
+        # The operator was reached but nothing could be proved either way --
+        # no usable slice could be built from it. The documentation is all
+        # that is left; the worklist records that the check did not happen.
+        return ("supported" if in_doc else "unsupported"), [], []
+
     if (s2 or {}).get("status") in ("lowering_broken", "timeout"):
         return "lowering-broken", [], []
 
@@ -253,6 +262,16 @@ def main() -> None:
         note = "Cause: " + (
             s1_all.get("meta", {}).get("error") or "the probe did not run"
         )
+    elif s1_all.get("meta", {}).get("mode") == "single-op":
+        evidence = "C"
+        blocked_at_import = sorted(
+            k for k, v in s2_all.items() if v.get("status") == "import_failed"
+        )
+        note = "Cause: the model could not be imported as a whole" + (
+            f" ({', '.join(blocked_at_import)} were rejected by the importer)"
+            if blocked_at_import
+            else ""
+        )
     elif s1_all.get("meta", {}).get("failed"):
         evidence = "B"
         note = "Cause: " + (s1_all["meta"].get("error") or "unknown")
@@ -277,6 +296,11 @@ def main() -> None:
     # checked.
     unverified_instances = 0
     unverified_types = 0
+    # Likewise counted apart: these are spread across blocked and unsupported
+    # depending on the documentation, but the work is the same and it is not
+    # in this tree.
+    import_blocked_instances = 0
+    import_blocked_types = 0
 
     for op, info in ops.items():
         if op.startswith("_"):
@@ -341,7 +365,14 @@ def main() -> None:
         # statuses, but it is still something a person has to decide about.
         # It earns a worklist row on its own.
         bucket = status
-        if status == "supported" and s2.get("status") == "not_sliceable":
+        if s2.get("status") == "import_failed":
+            # The EP never saw the operator: its own front end turned the
+            # model away. Naming this "implement the operator" would send
+            # someone to the wrong repository.
+            bucket = "import-blocked"
+            import_blocked_instances += count
+            import_blocked_types += 1
+        elif status == "supported" and s2.get("status") == "not_sliceable":
             bucket = "unverified"
             unverified_instances += count
             unverified_types += 1
@@ -366,6 +397,8 @@ def main() -> None:
             if bucket == "unverified":
                 item["error"] = _unverified_reason(s2)
                 item["implementation"] = doc_impl
+            if bucket == "import-blocked":
+                item["error"] = s2.get("error", "")
             if status == "partial":
                 item["ignored_attributes"] = [
                     {"name": f["attribute"], "value": f.get("value")} for f in ignored
@@ -411,7 +444,21 @@ def main() -> None:
     if probed:
         s1_meta = s1_all.get("meta", {})
         unconv = s1_meta.get("diagnostic") or {}
-        if s1_meta.get("failed"):
+        if s1_meta.get("mode") == "single-op":
+            # There was no whole-graph pass to report on. What matters here
+            # is how many operators got as far as the converter at all.
+            rejected = [
+                k for k, r in s2_all.items() if r.get("status") == "import_failed"
+            ]
+            total = s1_meta.get("operators_probed", len(s2_all))
+            s1_result = "ok"
+            s1_detail = (
+                f"one-node models, {total - len(rejected)}/{total} operator type(s) "
+                "imported"
+            )
+            if rejected:
+                s1_detail += f"; the importer rejected {', '.join(sorted(rejected))}"
+        elif s1_meta.get("failed"):
             s1_result = "failed"
             s1_detail = s1_meta.get("error") or "whole-graph conversion failed"
             if s1_meta.get("fallback"):
@@ -477,6 +524,8 @@ def main() -> None:
             "operator_types": {k: type_counts[k] for k in STATUSES},
             "lowering_unverified_instances": unverified_instances,
             "lowering_unverified_types": unverified_types,
+            "import_blocked_instances": import_blocked_instances,
+            "import_blocked_types": import_blocked_types,
             "supported_pct": round(counts["supported"] / total * 100, 1)
             if total
             else 0.0,

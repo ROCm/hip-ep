@@ -231,15 +231,28 @@ if ($haveEpMlir) {
     )
     # Outcomes come from probe_result.json, which records them per stage.
 } else {
-    Write-Host '(4/5) Skipping probe: no EP input' -ForegroundColor Yellow
-    # Support cannot be established without compiling. Hand the assembler an
-    # empty probe so it reports evidence level D rather than inventing one.
-    # WriteAllText, not Set-Content -Encoding UTF8: the latter prepends a BOM
-    # on PowerShell 5.1 and Python's json module rejects it.
-    $emptyProbe = '{"stage1": {"meta": {"failed": true, "error": "no EP input MLIR"}, "operators": {}}, "stage2": {"operators": {}}}'
-    [System.IO.File]::WriteAllText($probeResult, $emptyProbe, [System.Text.UTF8Encoding]::new($false))
-    Add-Stage "convert-onnx-to-hip (stage1)" "skipped" "no EP input"
-    Add-Stage "hip-to-llvm (stage2)" "skipped" "no EP input"
+    # No whole-graph import, but the operators can still be compiled one at a
+    # time: build a one-node model for each and probe that. Reading the
+    # documentation instead cannot tell an implementation that exists from
+    # one that accepts this model.
+    $soArgs = @(
+        (Join-Path $ToolsDir "single_op_probe.py"), $ModelPath, $ProbeDir,
+        "--package", $GpuTestPackageRoot
+    )
+    if ($MorphizenConfigPath) { $soArgs += @("--config", $MorphizenConfigPath) }
+    try {
+        Invoke-PythonStep -Label '(4/5) Probing operator by operator (no whole-graph import)...' -PyArgv $soArgs
+    } catch {
+        Write-Host "WARN: per-operator probe failed: $($_.Exception.Message)" -ForegroundColor Red
+        # Support cannot be established without compiling. Hand the assembler
+        # an empty probe so it reports evidence level D rather than inventing
+        # one. WriteAllText, not Set-Content -Encoding UTF8: the latter
+        # prepends a BOM on PowerShell 5.1 and Python's json module rejects it.
+        $emptyProbe = '{"stage1": {"meta": {"failed": true, "error": "no EP input MLIR"}, "operators": {}}, "stage2": {"operators": {}}}'
+        [System.IO.File]::WriteAllText($probeResult, $emptyProbe, [System.Text.UTF8Encoding]::new($false))
+        Add-Stage "convert-onnx-to-hip (stage1)" "skipped" "no EP input"
+        Add-Stage "hip-to-llvm (stage2)" "skipped" "no EP input"
+    }
 }
 
 # The stage table is finished by build_report_input, which can read the

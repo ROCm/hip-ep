@@ -36,6 +36,10 @@ constants, and says so. When some supported operators had no lowering
 check, the supported line says how many, since they are inside that figure
 rather than beside it.
 
+A line above the percentage says whether the model compiles as a whole.
+That is a different question from how many operators are supported, and at
+level C the answer is no while the percentage can still be high.
+
 ### Compatibility summary
 
 The same operators as the table above, bucketed by status, one line each:
