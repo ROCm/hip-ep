@@ -47,9 +47,8 @@ def _norm_domain(domain: str) -> str:
 
 
 def _impl_text(cell: str) -> str:
-    # Keep backticks verbatim: they are markdown inline-code markers that the
-    # report renders as-is. Stripping the outer pair leaves the inner ones
-    # unbalanced for entries like "`tensor.expand_shape` / `tensor.collapse_shape`".
+    # Backticks stay: they are markdown the report renders as-is, and a cell
+    # can hold several inline-code spans.
     return cell.strip()
 
 

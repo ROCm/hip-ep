@@ -192,9 +192,12 @@ class ONNXModelAnalyzer:
             result[op_type] = {
                 "count": info["count"],
                 "count_top_level": info["count_top_level"],
-                "domain": list(info["domain"]),
-                "data_types": list(info["data_types"]),
-                "shape_types": list(info["shape_types"]),
+                # Sorted, like mlir_op_parser's: a set's iteration order
+                # varies between runs, which would make two reports on the
+                # same model differ in these columns for no reason.
+                "domain": sorted(info["domain"]),
+                "data_types": sorted(info["data_types"]),
+                "shape_types": sorted(info["shape_types"]),
                 "scopes": sorted(info["scopes"])[:20],
                 "instances": info["instances"],
             }

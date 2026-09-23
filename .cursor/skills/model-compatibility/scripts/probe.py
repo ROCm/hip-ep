@@ -38,11 +38,10 @@ import re
 import subprocess
 from pathlib import Path
 
-# Everything up to and including convert-onnx-to-hip. Taken from
-# --onnx-to-hip-pipeline, whose first six passes these are; the rest of that
-# pipeline bufferizes and would fail on operators this probe is meant to
-# report. --mlir-print-debuginfo makes each produced operation carry the
-# source line it came from, which is how results pair back to inputs.
+# --onnx-to-hip-pipeline's first six passes. The rest of that pipeline
+# bufferizes, and would fail on the very operators this probe reports on.
+# --mlir-print-debuginfo makes each produced operation carry its source line,
+# which is how results pair back to inputs.
 STAGE1_PASSES = [
     "--simplify-onnx",
     "--hip-add-context-arg",
@@ -53,11 +52,10 @@ STAGE1_PASSES = [
     "--mlir-print-debuginfo",
 ]
 
-# Usually produced by DPS init construction and shape math rather than being
-# the operator's own lowering target, so they are reported separately. Not
-# always, though: Shape lowers to tensor.dim + tensor.from_elements and
-# ConstantOfShape to arith.constant. An operator whose results are all in
-# this set falls back to reporting them, since they are then all it has.
+# Usually DPS init construction and shape math rather than an operator's own
+# lowering target, so they are reported separately -- but not always: Shape
+# lowers to tensor.dim + tensor.from_elements. An operator with nothing else
+# falls back to reporting these.
 DPS_HELPER_OPS = frozenset(
     {
         "tensor.dim",
@@ -101,12 +99,9 @@ def _tool(package_root: Path, name: str) -> Path:
     return exe
 
 
-# Measured on a 1.8B model: 0.05s for the whole graph, 0.03s for the slowest
-# single-operator lowering. Anything approaching this bound is not slow, it
-# is stuck -- a perturbed attribute can leave the greedy rewrite with no
-# fixed point, and one such case burned 877s of CPU before being killed.
-# Five seconds is a hundredfold margin and keeps a run that hits it from
-# dominating the wall clock.
+# A run near this bound is not slow, it is stuck: a perturbed attribute can
+# leave the greedy rewrite without a fixed point. Real runs are two orders of
+# magnitude below it.
 OPT_TIMEOUT_SEC = 5
 
 TIMEOUT_EXIT = -9
@@ -388,12 +383,11 @@ def _slices_for(
 ) -> tuple[list[str], int, str, bool]:
     """Modules worth probing for one operator, strongest evidence first.
 
-    Returns (candidates, line_no, reason, inferred). Normally there is a
-    single candidate taken straight from the graph. Only when no instance
-    can be used as written does this fall back to guessing a shape, and then
-    it offers several, because one guess is not enough: a reduction needs a
-    narrower result than its operand, and the crash it causes otherwise is
-    both intermittent and unrelated to whether the operator is supported.
+    Returns (candidates, line_no, reason, inferred). Whether an operator can
+    be isolated depends on the types at that particular use -- shape
+    inference leaves some uses unranked and others not -- so every instance
+    is tried before falling back to guessing a shape. Several guesses are
+    offered, since a reduction needs a narrower result than its operand.
     """
     why = "no instances"
     for inst in instances:
@@ -423,12 +417,10 @@ _MAX_RANK_GUESSES = 3
 def _widest_shape(types: list[str], rank_delta: int = 0) -> str | None:
     """Guess the shape an unranked type would have, from its neighbours.
 
-    The widest ranked operand fits shape-preserving operators, which are most
-    of them; rank_delta drops trailing dimensions for the ones that shrink.
-    Either way it is a guess, and that decides how the answer may be used: a
-    slice built this way that converts proves the operator is handled, while
-    one that fails proves nothing, since the shape we invented may be the
-    reason it failed.
+    The widest ranked operand fits shape-preserving operators; rank_delta
+    drops trailing dimensions for the ones that shrink. Being a guess decides
+    how the answer may be used: a slice built this way that converts proves
+    the operator is handled, while one that fails proves nothing.
     """
     best: str | None = None
     best_rank = -1
@@ -492,11 +484,9 @@ def build_single_op_module(
     if not parsed:
         return None, "could not parse the operation"
 
-    # An unranked tensor is fine mid-graph, where its shape comes from
-    # context, but module metadata requires ranked types in @main_graph's
-    # signature. A result is always in the signature, so one there rules the
-    # slice out; operands are checked below, since an inlined constant never
-    # reaches the signature.
+    # Unranked is fine mid-graph but not in @main_graph's signature. A result
+    # always lands there; operands are checked below, since an inlined
+    # constant never does.
     inferred = False
     if infer_unranked is not None and any(
         "<*x" in t for t in parsed["in_types"] + parsed["out_types"]
@@ -588,10 +578,9 @@ def build_single_op_module(
         lhs = "%r"
         result_refs = ["%r"]
 
-    # The operation keeps every result, including the `none` placeholders that
-    # stand in for absent optional outputs. The function cannot: generating
-    # module metadata rejects a non-tensor in @main_graph's signature, so only
-    # the real results are returned.
+    # The operation keeps its `none` placeholders for absent optional
+    # outputs; the function cannot, since a non-tensor in @main_graph's
+    # signature is rejected.
     returned = [(ref, ty) for ref, ty in zip(result_refs, outs) if ty.strip() != "none"]
     if not returned:
         return None, "every result is a `none` placeholder"
@@ -627,9 +616,8 @@ _DTYPE_ALTERNATIVES = {
     "i32": ["i64"],
 }
 # The element type is the final `x`-separated field. Anchoring on the
-# separator matters: a looser pattern lets backtracking pull the separator
-# into the element name, turning tensor<512x16xf32> into elem "xf32" and
-# rebuilding it as the malformed tensor<512x16f16>.
+# separator matters: a looser pattern lets backtracking pull it into the
+# element name, reading tensor<512x16xf32> as elem "xf32".
 _ELEM_OF_TENSOR = re.compile(r"^tensor<(|.*x)([A-Za-z]+\d*)>$")
 
 
@@ -851,12 +839,10 @@ def attribute_probe(
         p_path.write_text(perturbed, encoding="utf-8")
         p_code, _ = run_opt(opt, p_path, STAGE1_PASSES[:-1], p_out, debug=False)
 
-        # Only one distinction matters: did the converter look at this
-        # attribute? Different output, a rejected value, and a conversion
-        # that stops terminating are all evidence that it did -- a converter
-        # ignoring the attribute would behave identically either way.
-        # Gather.axis demonstrates the last case: 0 converts instantly, 1
-        # never finishes.
+        # Only one question: did the converter look at this attribute? A
+        # different output, a rejected value and a conversion that stops
+        # terminating all answer yes -- one ignoring it behaves identically
+        # whatever the value.
         if p_code == TIMEOUT_EXIT:
             verdict = "handled"
             detail = "conversion stops terminating on the changed value"
@@ -989,21 +975,12 @@ def stage2(
             }
             continue
 
-        # Try every instance, not just the first. Whether an operator can be
-        # isolated depends on the types at that particular use -- shape
-        # inference leaves some uses unranked and others not -- so one
-        # unusable instance says nothing about the operator. On a vision
-        # model the first three of 51 SkipLayerNormalization uses are
-        # unranked and the other 48 are fine.
         candidates, line_no, why, inferred = _slices_for(
             src_lines, def_index, instances
         )
         if not candidates:
-            # Not a lowering failure: the operator cannot be expressed as a
-            # standalone module. stage1 already showed it converts; the
-            # lowering simply goes unverified. The reason is worth keeping --
-            # an unranked type here means shape inference did not pin down
-            # the operator's rank.
+            # Not a lowering failure: stage1 showed it converts, and only the
+            # rest of the chain goes unchecked.
             results[op_type] = {
                 "status": "not_sliceable",
                 "source_line": line_no,
@@ -1068,13 +1045,9 @@ def stage1(
         for inst in info["instances"]:
             entry = by_src.get(inst["line_no"])
             if entry is None:
-                # Nothing in the output carries this source line. The
-                # operation was folded at compile time or fused into a
-                # neighbour, which credits the result to the neighbour's line
-                # -- Gather(Shape(x), i) collapses to tensor.dim and the
-                # results point at the Gather, leaving Shape with no line of
-                # its own. Either way it converted; it just left no operation
-                # behind.
+                # No output carries this source line: the operation was
+                # folded, or fused into a neighbour that now owns the result.
+                # Either way it converted, leaving nothing behind.
                 converted += 1
                 folded += 1
                 continue
@@ -1093,10 +1066,9 @@ def stage1(
             targets = helpers
             helpers = {}
 
-        # Which of the operator's attributes did not survive conversion. The
-        # whole-graph output already holds every result, so this costs no
-        # extra compiler runs -- only operators that actually lost an
-        # attribute go on to the perturbation test.
+        # Attributes that did not survive conversion. Free to collect -- the
+        # whole-graph output is already in hand -- and only these operators
+        # go on to the perturbation test.
         dropped_attrs: list[str] = []
         first = instances_of(info)
         if first is not None:

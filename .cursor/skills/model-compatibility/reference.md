@@ -75,21 +75,18 @@ rejects a non-tensor in `@main_graph`.
 Which instance gets sliced matters. Shape inference leaves some uses of an
 operator unranked and others not, and an unranked type cannot go in
 `@main_graph`'s signature, so every instance is tried before the operator
-is given up on. On one vision model the first three of 51
-`SkipLayerNormalization` uses are unranked and the remaining 48 are usable.
+is given up on.
 
-When no instance is usable, a shape is borrowed from the widest ranked
-operand, and also tried with one and two trailing dimensions dropped, since
-reductions need a narrower result than their operand. That is a guess, so
-it only counts in one direction: a slice that lowers proves the operator is
-handled, while one that fails proves nothing and is reported as unverified.
-A guessed shape can produce a semantically impossible operation -- a
-`ReduceMax` with `keepdims = 0` and a result as wide as its operand
-segfaults `hip-mlir-opt` about four times in five -- which is exactly the
-kind of failure that must not be read as a verdict.
+When none is usable, a shape is borrowed from the widest ranked operand and
+also tried with one and two trailing dimensions dropped, since reductions
+need a narrower result than their operand. Being a guess, it counts in one
+direction only: a slice that lowers proves the operator is handled, one
+that fails proves nothing and is reported as unverified. A guessed shape
+can even be semantically impossible, and the compiler does not always
+diagnose that gracefully -- another reason its failure is not a verdict.
 
-What is left after all that is operators carrying a region, `Loop` and
-`If`, whose bodies the line-based parser cannot lift out.
+What remains is operators carrying a region, `Loop` and `If`, whose bodies
+the line-based parser cannot lift out.
 
 ### Attributes
 
@@ -137,11 +134,10 @@ a single-variable result naming the fix.
 The probe outranks the doc. The doc only separates `blocked` from
 `unsupported`.
 
-An unverified lowering is not a sixth status. stage1 converted the
-operator, and that is a real observation, so it counts as supported; what
-is missing is the second half of the check. It gets a worklist row anyway,
-carrying the reason and any error, because deciding whether that gap
-matters is a person's call and nothing else in the report would raise it.
+An unverified lowering is not a sixth status: stage1 converted the operator,
+which is a real observation, and only the second half of the check is
+missing. It still earns a worklist row carrying the reason, since nothing
+else in the report would raise it.
 
 ### Why "the model sets it" matters
 
@@ -201,8 +197,8 @@ Support percentage counts `supported` only. `partial`, `lowering-broken`,
 `blocked` and `unsupported` are reported on their own lines.
 
 The denominator excludes weight constants: ONNX initializers become
-`onnx.Constant` operations in MLIR, and on a 1.8B model that is 805 of 809
-of them -- more than the compute operators put together.
+`onnx.Constant` operations in MLIR, and can outnumber the compute operators
+several times over.
 
 `onnx.Return`, `onnx.Yield` and `onnx.NoValue` are not operators and are
 excluded. `onnx.Custom` is normalized back to the operator in its
@@ -211,15 +207,9 @@ misaligns every `com.microsoft` row.
 
 ## Recommending a path for `unsupported`
 
-There is no rule table for this; the recommendation is yours to make while
-filling in the root cause.
+There is no rule table for this, and one keyed on operator names is not
+worth building: it goes stale as the runtime changes, and `conv` catches
+`ConvTranspose` and `CausalConvWithState` alike.
 
-A keyword-matched one used to exist and was removed. It aged badly -- four
-of its ten families still pointed at MIOpen after the dependency was taken
-out of the tree, so it recommended paths that no longer existed. Matching on
-the operator name is also weak: `conv` catches `ConvTranspose` and
-`CausalConvWithState` alike.
-
-You are already reading the converter to explain a failure. Naming the
-closest existing implementation from what is actually in
-`lib/Runtime/real/` is both more accurate and cannot go stale.
+You are already reading the converter to explain a failure. Name the
+closest existing implementation from what is in `lib/Runtime/real/`.

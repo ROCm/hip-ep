@@ -5,14 +5,10 @@
 #
 """Render the compatibility report from report_input.json.
 
-The report leads with a worklist rather than a distribution table. Knowing
-that an operator is unsupported is only useful alongside what to do about
-it, and the four non-supported statuses call for four different things --
-writing an operator, relaxing a restriction in one, adding a lowering, or
-teaching a converter an attribute.
-
-Reads only report_input.json (plus the optional distribution comparison);
-every verdict was decided upstream.
+Sections run widest to narrowest: how far the pipeline got, the counts, the
+full distribution, the same operators grouped by status, then only those
+needing work. Reads report_input.json and the optional distribution
+comparison; every verdict was decided upstream.
 
 Usage:
   python generate_final_reports.py <analysis_dir>
@@ -246,9 +242,8 @@ def _finding(item: dict) -> str:
 def render_worklist(worklist: dict) -> list[str]:
     """One row per operator needing work, grouped by the kind of work.
 
-    A table rather than a section each: lowering failures vary too much in
-    shape to give every one its own heading, and the supporting evidence
-    reads better collected in the details file than scattered here.
+    A table rather than a section each: failures vary too much in shape for
+    a fixed layout, and the evidence belongs in the details file.
     """
     total = sum(len(v) for v in worklist.values())
     out = ["## What needs doing\n\n"]
@@ -404,12 +399,12 @@ def main() -> None:
     if meta.get("model_path"):
         lines.append(f"- Model: `{meta['model_path']}`\n")
     ep_input = meta.get("ep_input_path", "")
-    if ep_input.endswith(".mlir"):
-        lines.append(f"- EP input: `{ep_input}`\n")
-    else:
-        # No dump, so the original ONNX is what was analyzed. Calling that
-        # the EP input would misdescribe it.
-        lines.append("- EP input: not available; analyzed the original ONNX\n")
+    lines.append(
+        f"- EP input: `{ep_input}`\n"
+        if ep_input
+        # No dump, so the original ONNX is what was analyzed.
+        else "- EP input: not available; analyzed the original ONNX\n"
+    )
     lines.append(f"- Generated: `{meta['generated_at_utc']}`\n")
     lines.append(f"- Evidence level: **{meta.get('evidence_level', 'A')}**\n\n")
 
@@ -436,7 +431,7 @@ def main() -> None:
     det = ["# Model compatibility details\n\n"]
     det.append(
         f"- EP input: `{ep_input}`\n"
-        if ep_input.endswith(".mlir")
+        if ep_input
         else "- EP input: not available; analyzed the original ONNX\n"
     )
     det.append(f"- Generated: `{meta['generated_at_utc']}`\n\n")

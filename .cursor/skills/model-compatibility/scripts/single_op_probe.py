@@ -12,11 +12,10 @@ through the same MorphiZen import path, and hands the result to the same
 probe the whole-graph path uses.
 
 The construction rules mirror the MLIR slicer's, for the same reasons:
-
-- Weights and values captured from an enclosing scope become graph inputs.
-  Their contents cannot change a converter's decision, and copying them is
-  not an option when a single embedding table runs to a gigabyte.
-- Small inline Constants are carried in, because converters read them.
+weights and values captured from an enclosing scope become graph inputs,
+since their contents cannot change a converter's decision and an embedding
+table can run to gigabytes; small inline Constants are carried in, because
+converters read them.
 
 Results are emitted in the same shape as `probe.py`'s, so everything
 downstream is unchanged.
@@ -256,9 +255,9 @@ def main() -> None:
     counts: dict[str, int] = {}
     domains: dict[str, str] = {}
 
-    # One representative per operator type: the probe answers per type, and
-    # a second instance of the same operator costs an import to say the same
-    # thing. Instances are counted separately, from the whole model.
+    # One representative per operator type; a second instance would cost an
+    # import to say the same thing. Instances are counted from the whole
+    # model regardless.
     chosen: dict[str, NodeContext] = {}
     for ctx in iter_typed_nodes(inferred.graph):
         op = ctx.node.op_type
@@ -299,9 +298,8 @@ def main() -> None:
         if mlir is None:
             if complaint:
                 err = f"{err} (the model we built is also irregular: {complaint})"
-            # The EP rejected the operator before any conversion ran. That is
-            # a front-end limit, not a missing HIP operator, and the two call
-            # for work in different places.
+            # Refused before any conversion ran: a front-end limit, not a
+            # missing HIP operator.
             stage1[op] = {
                 **base,
                 "unconverted": counts[op],

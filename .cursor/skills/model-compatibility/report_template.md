@@ -49,19 +49,21 @@ table when the question is "what is in each bucket".
 
 ### What needs doing
 
-One row per operator that is not simply supported, with the kind of work and
-a one-line finding: which operand blocks conversion, which attribute the
-converter ignores, or the lowering error. Four kinds of work:
+One row per operator needing attention, with the kind of work and a one-line
+finding: which operand blocks conversion, which attribute the converter
+ignores, or the error.
 
-| Work | Status |
+| Work | Comes from |
 |---|---|
 | Implement the operator | `unsupported` |
 | Extend an existing operator | `blocked` |
 | Complete the lowering chain | `lowering-broken` |
 | Handle an ignored attribute | `partial` |
+| Extend the MorphiZen ONNX importer | the importer refused the operator |
+| Check the lowering by hand | supported, but no slice could be built |
 
-A table, not a section each, because lowering failures vary too much in
-shape to fit a fixed layout. The supporting evidence is in the details file.
+The last two are not statuses; see SKILL.md. Supporting evidence is in the
+details file.
 
 Neither this section nor the report names the converter source or the exact
 check that rejects the model. Both require reading the converter, so they

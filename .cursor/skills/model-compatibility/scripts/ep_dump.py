@@ -128,9 +128,8 @@ def run_dump(
         "--allow-cpu-fallback",
         "--provider-options",
         f"config_file={config}",
-        # Per-run, so it is passed here rather than baked into the shared
-        # config; the runner merges it over the config's own options.
-        # Forward slashes keep the value clear of escaping issues.
+        # Per-run, so passed here rather than baked into the shared config;
+        # the runner merges it over the config's own options.
         "--provider-options",
         f"pass.init.directory={out_dir.as_posix()}",
     ]

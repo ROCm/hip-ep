@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 ---
 name: model-compatibility
-description: Find out which operators in an ONNX model hip-ep can run, and what work the rest needs. Dumps the graph the EP actually compiles, then asks the compiler itself -- one whole-graph pass for whether a converter exists, one per-operator lowering for whether the chain reaches a runtime symbol, and attribute perturbation for whether converters read what the model sets. Falls back to one-node models built from the original ONNX when the EP cannot import the model at all, so the verdicts still come from compiling. Sorts every operator into supported, partial, lowering-broken, blocked or unsupported, each naming a different piece of work, and renders a report that leads with that worklist. Use when asked to analyze an ONNX model, check operator compatibility, decide whether a model can run on hip-ep, work out why the EP falls back to CPU, or plan which operators to add or extend.
+description: Find out which operators in an ONNX model hip-ep can run, and what work the rest needs. Dumps the graph the EP actually compiles, then asks the compiler itself -- one whole-graph pass for whether a converter exists, one per-operator lowering for whether the chain reaches a runtime symbol, and attribute perturbation for whether converters read what the model sets. Falls back to one-node models built from the original ONNX when the EP cannot import the model at all, so the verdicts still come from compiling. Sorts every operator into supported, partial, lowering-broken, blocked or unsupported, each naming a different piece of work, and renders a report ending in a worklist of what to do. Use when asked to analyze an ONNX model, check operator compatibility, decide whether a model can run on hip-ep, work out why the EP falls back to CPU, or plan which operators to add or extend.
 ---
 
 # model-compatibility
@@ -40,8 +40,8 @@ persists.
 # -SkipDump -EpMlirPath <mlir> to reuse an existing dump
 ```
 
-One command, about two minutes on a 1.8B model. Artifacts land under
-`<OutputDir>`; `model_compatibility_report.md` is the one to read.
+One command, seconds to a minute depending on the model. Artifacts land
+under `<OutputDir>`; `model_compatibility_report.md` is the one to read.
 
 ## The five statuses
 
@@ -83,9 +83,9 @@ operator type and says nothing about whether the model runs. A model can be
 
 ## After the run
 
-Read `model_compatibility_report.md`. It builds up in four steps: the
-counts, the full distribution, the operators grouped by status, then a
-worklist of what is not simply supported and why.
+Read `model_compatibility_report.md`. It narrows as it goes: how far the
+pipeline got, the counts, the full distribution, the same operators grouped
+by status, then only those needing work.
 `model_compatibility_details.md` carries the evidence behind each worklist
 row -- signature, dtypes, shapes, attributes, and for a blocked operator
 which operand the converter objects to, established by changing one
@@ -101,12 +101,10 @@ entry:
   fix is obvious.
 
 For an `unsupported` operator, also name the closest existing
-implementation in `lib/Runtime/real/`. There is no rule table for this; a
-keyword-matched one existed and was removed after it went stale.
+implementation in `lib/Runtime/real/`. There is no rule table for this.
 
-There is no verification pass to run. Earlier versions inferred support with
-regexes over C++ and required every finding to be re-checked by hand; the
-compiler now answers directly.
+There is no verification pass to run: the verdicts come from the compiler,
+so there is nothing to second-guess.
 
 ## Evidence levels
 
@@ -120,10 +118,10 @@ taken.
 | C | no whole-graph import; one-node models used | per operator type; says nothing about the model as a whole |
 | D | no compilation at all | **cannot detect `blocked`; treat numbers as an upper bound** |
 
-At level D, say so first when reporting. An operator whose implementation
-rejects this model reads as supported, which is the failure mode the
-compiler-based approach exists to prevent. Level D is now reached only when
-the one-node probe cannot run either.
+At level D, say so first when reporting: an operator whose implementation
+rejects this model reads as supported, which is the failure this skill
+exists to prevent. It is reached only when the one-node probe cannot run
+either.
 
 At level C, report the two conclusions separately: the operators that are
 supported, and the fact that the model does not load. Quoting only the

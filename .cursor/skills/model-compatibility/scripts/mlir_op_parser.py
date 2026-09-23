@@ -5,34 +5,28 @@
 #
 """Count operators in the EP input MLIR.
 
-Writes ep_input_ops.json. The shape matches step1_onnx_parser.py's
-step1_onnx_ops.json so the distribution comparison and the report builder
-work unchanged, but the name differs on purpose: both files are in play at
-once -- this one describes the graph the EP compiles, step1's describes the
-original ONNX -- and the two are easy to mix up when they share a name.
+Writes ep_input_ops.json, whose shape matches step1_onnx_parser.py's
+step1_onnx_ops.json. The names differ on purpose: both files are in play at
+once, this one describing the graph the EP compiles and step1's the original
+ONNX.
 
-step1 still runs against the original .onnx to provide the comparison
-baseline and the fallback path when the dump is unavailable.
-
-Four things this has to get right, all of them because MLIR and ONNX do not
-describe the same graph in the same way:
+Four things this has to get right, because MLIR and ONNX do not describe the
+same graph the same way:
 
 - `onnx.Custom` carries the real operator in its `function_name` attribute.
-  Without normalizing it back to (MatMulNBits, com.microsoft) the comparison
-  against the original ONNX misaligns every com.microsoft row.
+  Without normalizing it back to (MatMulNBits, com.microsoft) every
+  com.microsoft row misaligns against the original ONNX.
 - MorphiZen and onnx-mlir attach bookkeeping attributes that are not ONNX
   operator attributes. They are listed in
   morphizen/mlir-imp/src/mlir-constants.hpp and must not reach the schema
   checks downstream.
-- ONNX initializers become `onnx.Constant` operations carrying
-  location/offset/size. Counting them would inflate the denominator of the
-  support rate by more than the compute operators themselves (805 of 809 in
-  a 1.8B model), so weight constants are tallied separately.
-- Loop/If bodies are nested regions at this stage -- they only become
-  separate func.func ops after onnx-loop-outline. Line-based scanning
-  therefore includes subgraph operators by default, matching step1's
-  include_subgraphs behaviour; indentation depth separates the two for
-  count_top_level.
+- ONNX initializers become `onnx.Constant` operations. They can outnumber
+  the compute operators several times over, so counting them would swamp the
+  support rate's denominator; weight constants are tallied separately.
+- Loop/If bodies are still nested regions here, becoming separate func.func
+  ops only after onnx-loop-outline. Line-based scanning therefore includes
+  subgraph operators, matching step1; indentation depth separates the two
+  for count_top_level.
 
 Usage:
   python mlir_op_parser.py <ep_input.mlir> <output_dir>   # -> ep_input_ops.json

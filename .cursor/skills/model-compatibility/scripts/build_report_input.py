@@ -44,11 +44,9 @@ from supported_ops_doc import default_doc_path, load_supported_ops  # noqa: E402
 
 STATUSES = ("supported", "partial", "lowering-broken", "blocked", "unsupported")
 
-# Worklist buckets are the statuses plus two kinds of entry that are not
-# statuses: "unverified", where the operator counts as supported but half
-# the check is missing, and "import-blocked", where the EP rejected the
-# operator before any conversion ran. The latter is work on the importer,
-# not on a HIP operator, so it cannot share the unsupported wording.
+# Two buckets are not statuses: "unverified" operators count as supported
+# with half the check missing, and "import-blocked" ones the EP refused
+# before any conversion ran -- work on the importer, not on a HIP operator.
 WORKLIST_BUCKETS = STATUSES + ("unverified", "import-blocked")
 
 # What to do about each bucket, carried into the report so the worklist does
@@ -67,9 +65,7 @@ STATUS_ACTION = {
 def onnx_signature(inst: dict) -> str:
     """An ONNX node's operand and result types, read like an MLIR signature.
 
-    Without an EP input there are no MLIR lines to quote, but the original
-    model carries the same information, and a worklist entry is much harder
-    to act on without it.
+    Used when there is no EP input to quote a line from.
     """
 
     def one(tensor: dict) -> str:
@@ -97,11 +93,9 @@ def _norm_domain(domain: str) -> str:
 def _unverified_reason(s2: dict) -> str:
     """Why an operator's lowering went unchecked, including how it failed.
 
-    Two different things end up here. Either no slice could be built, and
-    there is nothing but a reason, or a slice ran and failed on a shape we
-    guessed, which is not enough to convict the lowering but is still an
-    observed failure. Reporting only the reason in the second case hides
-    that the compiler crashed.
+    Either no slice could be built, leaving only a reason, or one ran and
+    failed on a guessed shape -- not enough to convict the lowering, but an
+    observed failure the reader should still see.
     """
     if s2.get("status") != "not_sliceable":
         return ""
@@ -279,28 +273,26 @@ def main() -> None:
         if ep_mlir.suffix == ".mlir" and ep_mlir.exists():
             mlir_lines = ep_mlir.read_text(encoding="utf-8").splitlines()
 
-    # The note says what the report cannot say generically -- the specific
-    # cause. What a degraded level means is the renderer's fixed wording, so
-    # do not repeat it here.
+    # The note carries the specific cause only; what a degraded level means
+    # in general is the renderer's fixed wording.
     probed = bool(s1_all.get("operators"))
+    s1_meta = s1_all.get("meta", {})
     if not probed:
         evidence = "D"
-        note = "Cause: " + (
-            s1_all.get("meta", {}).get("error") or "the probe did not run"
-        )
-    elif s1_all.get("meta", {}).get("mode") == "single-op":
+        note = "Cause: " + (s1_meta.get("error") or "the probe did not run")
+    elif s1_meta.get("mode") == "single-op":
         evidence = "C"
-        blocked_at_import = sorted(
+        rejected = sorted(
             k for k, v in s2_all.items() if v.get("status") == "import_failed"
         )
         note = "Cause: the model could not be imported as a whole" + (
-            f" ({', '.join(blocked_at_import)} were rejected by the importer)"
-            if blocked_at_import
+            f" ({', '.join(rejected)} were rejected by the importer)"
+            if rejected
             else ""
         )
-    elif s1_all.get("meta", {}).get("failed"):
+    elif s1_meta.get("failed"):
         evidence = "B"
-        note = "Cause: " + (s1_all["meta"].get("error") or "unknown")
+        note = "Cause: " + (s1_meta.get("error") or "unknown")
     elif explicit is None:
         evidence = "A"
         note = (
@@ -315,27 +307,13 @@ def main() -> None:
     worklist: dict[str, list] = {k: [] for k in WORKLIST_BUCKETS if k != "supported"}
     capability_gaps: list[dict] = []
     doc_stale: list[dict] = []
-    counts = {k: 0 for k in STATUSES}
-    type_counts = {k: 0 for k in STATUSES}
-    # Counted apart from the statuses: these are inside the supported totals,
-    # and saying so keeps the headline figure from overstating what was
-    # checked.
-    unverified_instances = 0
-    unverified_types = 0
-    # Likewise counted apart: these are spread across blocked and unsupported
-    # depending on the documentation, but the work is the same and it is not
-    # in this tree.
-    import_blocked_instances = 0
-    import_blocked_types = 0
 
     for op, info in ops.items():
         if op.startswith("_"):
             continue
-        # Normalize here rather than trusting the producer: mlir_op_parser
-        # already folds ai.onnx into onnx, step1_onnx_parser reports the
-        # domain verbatim, and step1 only becomes the primary input on the
-        # fallback path -- where the mismatch would silently miss every
-        # standard-domain operator in the lookup.
+        # The two producers disagree: mlir_op_parser folds ai.onnx into onnx,
+        # step1_onnx_parser reports it verbatim. Normalizing on the way in
+        # keeps the fallback path from missing every standard-domain lookup.
         domain = _norm_domain((info.get("domain") or ["onnx"])[0])
         s1 = s1_all.get("operators", {}).get(op, {})
         s2 = s2_all.get(op, {})
@@ -350,9 +328,7 @@ def main() -> None:
         runtime = (s2.get("runtime_funcs") or [None])[0]
         doc_impl = doc.get((op, domain), {}).get("impl", "")
         # "Compile-time" is the probe's finding, not a guess from the target
-        # name: stage2 lowered the operator all the way and no runtime symbol
-        # appeared. Operators stage1 never converted have no stage2 result,
-        # so they keep the documented implementation instead.
+        # name: stage2 lowered it fully and no runtime symbol appeared.
         if s2.get("status") == "ok" and s2.get("compile_time"):
             backend = "Compile-time"
         elif runtime:
@@ -361,9 +337,6 @@ def main() -> None:
             backend = doc_impl
 
         count = info["count"]
-        counts[status] += count
-        type_counts[status] += 1
-
         rows.append(
             {
                 "onnx_op": op,
@@ -387,21 +360,11 @@ def main() -> None:
             }
         )
 
-        # An unverified lowering is not a defect, so it is not one of the
-        # statuses, but it is still something a person has to decide about.
-        # It earns a worklist row on its own.
         bucket = status
         if s2.get("status") == "import_failed":
-            # The EP never saw the operator: its own front end turned the
-            # model away. Naming this "implement the operator" would send
-            # someone to the wrong repository.
             bucket = "import-blocked"
-            import_blocked_instances += count
-            import_blocked_types += 1
         elif status == "supported" and s2.get("status") == "not_sliceable":
             bucket = "unverified"
-            unverified_instances += count
-            unverified_types += 1
         if bucket != "supported":
             item = {
                 "onnx_op": op,
@@ -464,6 +427,20 @@ def main() -> None:
         worklist[key].sort(key=lambda x: -x["count"])
     rows.sort(key=lambda r: (-r["count"], r["onnx_op"]))
 
+    # Derived, not accumulated: a running total kept alongside the data it
+    # summarises is one more thing to forget to update. The last two sit
+    # inside the status totals, so the report states them separately rather
+    # than counting them twice.
+    counts = {k: sum(r["count"] for r in rows if r["status"] == k) for k in STATUSES}
+    type_counts = {k: sum(1 for r in rows if r["status"] == k) for k in STATUSES}
+
+    def bucket_size(name: str) -> tuple[int, int]:
+        items = worklist.get(name) or []
+        return sum(i["count"] for i in items), len(items)
+
+    unverified_instances, unverified_types = bucket_size("unverified")
+    import_blocked_instances, import_blocked_types = bucket_size("import-blocked")
+
     stages: list[dict] = []
     if args.stages and args.stages.exists():
         try:
@@ -472,22 +449,20 @@ def main() -> None:
         except Exception:
             stages = []
     if probed:
-        s1_meta = s1_all.get("meta", {})
-        unconv = s1_meta.get("diagnostic") or {}
         if s1_meta.get("mode") == "single-op":
-            # There was no whole-graph pass to report on. What matters here
-            # is how many operators got as far as the converter at all.
-            rejected = [
+            # No whole-graph pass to report on; what matters is how many
+            # operators reached the converter at all.
+            rejected = sorted(
                 k for k, r in s2_all.items() if r.get("status") == "import_failed"
-            ]
-            total = s1_meta.get("operators_probed", len(s2_all))
+            )
+            probed_types = s1_meta.get("operators_probed", len(s2_all))
             s1_result = "ok"
             s1_detail = (
-                f"one-node models, {total - len(rejected)}/{total} operator type(s) "
-                "imported"
+                f"one-node models, {probed_types - len(rejected)}/{probed_types} "
+                "operator type(s) imported"
             )
             if rejected:
-                s1_detail += f"; the importer rejected {', '.join(sorted(rejected))}"
+                s1_detail += f"; the importer rejected {', '.join(rejected)}"
         elif s1_meta.get("failed"):
             s1_result = "failed"
             s1_detail = s1_meta.get("error") or "whole-graph conversion failed"
@@ -496,6 +471,7 @@ def main() -> None:
         else:
             # A pass that leaves operators unconverted still succeeded; that
             # is how it reports missing converters.
+            unconv = s1_meta.get("diagnostic") or {}
             s1_result = "ok"
             s1_detail = (
                 f"{len(unconv)} operator type(s) have no converter"
@@ -509,6 +485,7 @@ def main() -> None:
                 "detail": s1_detail,
             }
         )
+
         ok = sum(1 for r in s2_all.values() if r.get("status") == "ok")
         broken = [k for k, r in s2_all.items() if r.get("status") == "lowering_broken"]
         unsliceable = [
@@ -519,8 +496,7 @@ def main() -> None:
             detail += f"; {len(broken)} broken ({', '.join(broken)})"
         if unsliceable:
             # Name how each one failed, not just that it was not verified.
-            # Some of these ran and crashed the compiler, which the bare
-            # count would bury.
+            # Some of these crashed the compiler, which a bare count buries.
             named = ", ".join(
                 f"{k}: {s2_all[k]['error']}" if s2_all[k].get("error") else k
                 for k in unsliceable
@@ -538,7 +514,9 @@ def main() -> None:
     out = {
         "meta": {
             "model_path": args.model_path,
-            "ep_input_path": args.ep_input_path or str(args.ops_json),
+            # Empty when there was no dump. Naming the operator-count JSON
+            # here instead would say the EP was given something it never saw.
+            "ep_input_path": args.ep_input_path,
             "generated_at_utc": datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
