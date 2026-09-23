@@ -2700,9 +2700,10 @@ struct GatherElementsConverter final
       if (i != axis && dataTy.getDimSize(i) != indicesTy.getDimSize(i))
         return rewriter.notifyMatchFailure(
             op, "data and indices disagree off the gathered axis");
-    if (resultTy.getShape() != indicesTy.getShape())
+if (resultTy.getShape() != indicesTy.getShape() ||
+        resultTy.getElementType() != dataTy.getElementType())
       return rewriter.notifyMatchFailure(
-          op, "result shape is not ONNX GatherElements");
+          op, "result type is not ONNX GatherElements");
 
     int64_t k = dataTy.getDimSize(axis);
     int64_t w = indicesTy.getDimSize(axis);
