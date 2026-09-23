@@ -3412,8 +3412,8 @@ gqa_flash_prefill_v5_kernel(
 // there is no P round-trip through LDS. V is staged transposed so each V^T
 // fragment is one contiguous LDS read.
 // ---------------------------------------------------------------------
-template <int M_TILES, int BKV, int D, bool HAS_WINDOW>
-__global__ void __launch_bounds__(32)
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int NW>
+__global__ void __launch_bounds__(32 * NW)
 gqa_flash_prefill_v6_kernel(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
     const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
@@ -3442,31 +3442,41 @@ gqa_flash_prefill_v6_kernel(
     // (all heads together measured 9% slower at 16k). Q tiles run last-first:
     // under the causal mask they walk the most keys and should not form the
     // tail.
+    //
+    // With NW > 1 a block is NW query heads of one KV group over the same Q
+    // rows, and each K/V tile is staged in LDS once for all of them. Where
+    // K/V bandwidth is limited (as in the EP, unlike a standalone loop), the
+    // per-head re-read of the whole prefix is what bounds the kernel.
+    constexpr int K_STR = D + 8;                 // K_lds row stride (NW > 1)
     const int num_q_tiles = (sq + ROWS - 1) / ROWS;
     const int nqb = num_q_tiles * B_count;
+    const int hpg = Hq / G;
+    const int cpg = hpg / NW;                    // head chunks per KV group
     const int bid = static_cast<int>(blockIdx.x);
-    int qb, hq;
+    int qb, chunk;
     if constexpr (HAS_WINDOW) {
-        qb = bid / Hq;
-        hq = bid % Hq;
+        qb = bid / (G * cpg);
+        chunk = bid % (G * cpg);
     } else {
-        const int hpg = Hq / G;
-        qb = (bid / hpg) % nqb;
-        hq = (bid / (hpg * nqb)) * hpg + bid % hpg;
+        qb = (bid / cpg) % nqb;
+        chunk = (bid / (cpg * nqb)) * cpg + bid % cpg;
     }
+    const int wave_id     = __builtin_amdgcn_readfirstlane(threadIdx.x / 32);
     const int q_tile_idx  = __builtin_amdgcn_readfirstlane(
         num_q_tiles - 1 - qb % num_q_tiles);
     const int batch       = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
-    const int head_q      = __builtin_amdgcn_readfirstlane(hq);
-    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (Hq / G));
+    const int head_q      = __builtin_amdgcn_readfirstlane(chunk * NW + wave_id);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(chunk / cpg);
     const int q_start     = q_tile_idx * ROWS;
 
-    const int lane_id   = threadIdx.x;
+    const int tid       = threadIdx.x;
+    const int lane_id   = tid % 32;
     const int wmma_lane = lane_id % kWmmaTile;
     const int pair      = lane_id / kWmmaTile;
 
     extern __shared__ char smem_v6[];
     _Float16* V_lds = reinterpret_cast<_Float16*>(smem_v6);
+    _Float16* K_lds = V_lds + D * VT_STR;        // used only when NW > 1
 
     const size_t kv_base =
         (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
@@ -3505,23 +3515,69 @@ gqa_flash_prefill_v6_kernel(
         t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
     }
 
+    // Group staging (NW > 1): the K tile (row-major) and V tile are copied
+    // in kKvChunks 16-element chunks spread over the block, prefetched into
+    // registers one tile ahead so the global latency overlaps the compute.
+    constexpr int kKChunks  = BKV * D_TILES;
+    constexpr int kKvChunks = 2 * kKChunks;
+    constexpr int kPerThr   = (kKvChunks + 32 * NW - 1) / (32 * NW);
+    half16_raw_t pf[kPerThr];
+    auto prefetch = [&](int kv0) {
+        #pragma unroll
+        for (int r = 0; r < kPerThr; ++r) {
+            const int i = tid + r * 32 * NW;
+            const bool is_k = i < kKChunks;
+            const int j = is_k ? i : i - kKChunks;
+            const int kv_local = is_k ? j / D_TILES : j % BKV;
+            const int dt       = is_k ? j % D_TILES : j / BKV;
+            const int kv_pos   = kv0 + kv_local;
+            const _Float16* src = is_k ? Kcache : Vcache;
+            pf[r] = (i < kKvChunks && kv_pos < skv)
+                ? HALF16_RAW_LOAD(&src[kv_base + (size_t)kv_pos * D + dt * 16])
+                : half16_raw_t{};
+        }
+    };
+    auto commit = [&]() {
+        #pragma unroll
+        for (int r = 0; r < kPerThr; ++r) {
+            const int i = tid + r * 32 * NW;
+            if (i >= kKvChunks) continue;
+            if (i < kKChunks) {
+                *reinterpret_cast<half16_raw_t*>(
+                    &K_lds[(i / D_TILES) * K_STR + (i % D_TILES) * 16]) = pf[r];
+            } else {
+                const int j = i - kKChunks;
+                #pragma unroll
+                for (int c = 0; c < 16; ++c)
+                    V_lds[((j / BKV) * 16 + c) * VT_STR + j % BKV] = pf[r][c];
+            }
+        }
+    };
+    if constexpr (NW > 1) prefetch(t_start * BKV);
+
     for (int t = t_start; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
-        // Stage V transposed (Vt[d][kv]) so each V^T A-fragment is one
-        // contiguous run of keys. Lanes take consecutive keys of one D-chunk,
-        // which keeps the scalar LDS writes on distinct banks.
-        #pragma unroll
-        for (int i = lane_id; i < BKV * D_TILES; i += 32) {
-            const int kv_local = i % BKV;
-            const int dt       = i / BKV;
-            const int kv_pos   = kv0 + kv_local;
-            half16_raw_t vv = (kv_pos < skv)
-                ? HALF16_RAW_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
-                : half16_raw_t{};
+        if constexpr (NW > 1) {
+            commit();
+            __syncthreads();
+            if (t + 1 < num_tiles) prefetch(kv0 + BKV);
+        } else {
+            // Stage V transposed (Vt[d][kv]) so each V^T A-fragment is one
+            // contiguous run of keys. Lanes take consecutive keys of one
+            // D-chunk, which keeps the scalar LDS writes on distinct banks.
             #pragma unroll
-            for (int c = 0; c < 16; ++c)
-                V_lds[(dt * 16 + c) * VT_STR + kv_local] = vv[c];
+            for (int i = lane_id; i < BKV * D_TILES; i += 32) {
+                const int kv_local = i % BKV;
+                const int dt       = i / BKV;
+                const int kv_pos   = kv0 + kv_local;
+                half16_raw_t vv = (kv_pos < skv)
+                    ? HALF16_RAW_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
+                    : half16_raw_t{};
+                #pragma unroll
+                for (int c = 0; c < 16; ++c)
+                    V_lds[(dt * 16 + c) * VT_STR + kv_local] = vv[c];
+            }
         }
 
         // S^T[mi][sj]: rows are keys kv0+sj*16+acc_row(pair,e), column query.
@@ -3537,8 +3593,12 @@ gqa_flash_prefill_v6_kernel(
             const size_t k_row = kv_base + static_cast<size_t>(kvalid ? key : 0) * D;
             #pragma unroll
             for (int tk = 0; tk < D_TILES; ++tk) {
-                half16_t k_frag = kvalid ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair)
-                                         : half16_t{};
+                half16_t k_frag;
+                if constexpr (NW > 1)
+                    k_frag = HALF16_LOAD(&K_lds[(sj * 16 + wmma_lane) * K_STR + tk * 16], pair);
+                else
+                    k_frag = kvalid ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair)
+                                    : half16_t{};
                 #pragma unroll
                 for (int mi = 0; mi < M_TILES; ++mi)
                     S_reg[mi][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
@@ -3637,7 +3697,7 @@ gqa_flash_prefill_v6_kernel(
                 for (int e = 0; e < kAcc; ++e)
                     O_frag[mi][tj][e] *= corr[mi];
 
-        __syncthreads();   // single wave: V_lds visible
+        if constexpr (NW == 1) __syncthreads();   // single wave: V_lds visible
         #pragma unroll
         for (int tj = 0; tj < D_TILES; ++tj) {
             #pragma unroll
@@ -3651,7 +3711,7 @@ gqa_flash_prefill_v6_kernel(
                         v_frag, Pb[mi][tk], O_frag[mi][tj]);
             }
         }
-        __syncthreads();   // WAR: V_lds reused by the next tile
+        __syncthreads();   // WAR: K/V LDS reused by the next tile
     }
 
     const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
@@ -3680,10 +3740,19 @@ gqa_flash_prefill_v6_kernel(
 
 // HIPDNN_EP_GQA_PREFILL_V6=1 routes d == 64 prefill from v5 to v6 (default
 // off). Launch configs (M_TILES, BKV) are shared with v5.
+// Read through the Win32 API on Windows for the same reason as
+// gqa_autotune_log_enabled(): a static-CRT getenv cannot see host-set vars.
 static bool prefillV6Enabled() {
     static const bool on = [] {
+#ifdef _WIN32
+        char buf[8];
+        const unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_GQA_PREFILL_V6", buf, sizeof(buf));
+        return n > 0 && n < sizeof(buf) && buf[0] >= '1';
+#else
         const char* e = getenv("HIPDNN_EP_GQA_PREFILL_V6");
         return e && e[0] >= '1';
+#endif
     }();
     return on;
 }
@@ -3718,14 +3787,26 @@ static inline void dispatchPrefillV5(
     const int num_q_tiles = (sq + rows - 1) / rows;
 
     if (d == 64 && G > 0 && Hq % G == 0 && prefillV6Enabled()) {
-        dim3 grid6(Hq * num_q_tiles * B);
-        const size_t smem6 = (size_t)d * (bkv + 8) * sizeof(_Float16);
-        #define LAUNCH_V6(MT_, BKV_, HW_)                                       \
-            gqa_flash_prefill_v6_kernel<MT_, BKV_, 64, HW_>                     \
-                <<<grid6, 32, smem6, stream>>>(                                 \
+        // 4 query heads per block: at gpt-oss geometry this beat 2 and 8 with
+        // the KV cache in both device and host memory (full 16k: 68 ms vs
+        // 72/71 ms device, 68/72/68 ms host; 1 head is 143 ms host).
+        const int hpg = Hq / G;
+        const int nw = (hpg % 4 == 0) ? 4 : (hpg % 2 == 0) ? 2 : 1;
+        dim3 grid6((Hq / nw) * num_q_tiles * B);
+        const size_t smem6 = (size_t)d * (bkv + 8) * sizeof(_Float16) +
+                             (nw > 1 ? (size_t)bkv * (d + 8) * sizeof(_Float16) : 0);
+        #define LAUNCH_V6_NW(MT_, BKV_, HW_, NW_)                               \
+            gqa_flash_prefill_v6_kernel<MT_, BKV_, 64, HW_, NW_>                \
+                <<<grid6, 32 * NW_, smem6, stream>>>(                           \
                     Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len, \
                     scale, head_sink, num_heads, smooth_softmax,                \
                     local_window_size)
+        #define LAUNCH_V6(MT_, BKV_, HW_)                                       \
+            do {                                                                \
+                if (nw == 4)      LAUNCH_V6_NW(MT_, BKV_, HW_, 4);              \
+                else if (nw == 2) LAUNCH_V6_NW(MT_, BKV_, HW_, 2);              \
+                else              LAUNCH_V6_NW(MT_, BKV_, HW_, 1);              \
+            } while (0)
         #define LAUNCH_V6_CFG(HW_)                                              \
             do {                                                                \
                 if (m_tiles == 2 && bkv == 64) LAUNCH_V6(2, 64, HW_);           \
@@ -3737,6 +3818,7 @@ static inline void dispatchPrefillV5(
         else                       LAUNCH_V6_CFG(false);
         #undef LAUNCH_V6_CFG
         #undef LAUNCH_V6
+        #undef LAUNCH_V6_NW
         return;
     }
 
