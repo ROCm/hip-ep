@@ -3817,6 +3817,129 @@ struct GatherConverter final : public OpConversionPattern<GatherOp> {
   }
 };
 
+// TOSA has no one_hot. Expand static OneHot to broadcasted elementwise ops:
+//
+//   canonical = indices < 0 ? indices + depth : indices
+//   output = select(canonical == [0, ..., depth - 1], on, off)
+//
+// The index and class tensors are reshaped and tiled to the output shape.
+// Values outside [-depth, depth - 1] compare unequal to every class and
+// therefore produce the off value, matching hip_one_hot.
+//
+// Before:
+//   %y = hip.one_hot(%ctx)
+//          ins(%indices, %depth, %values : tensor<2xi64>, tensor<i64>,
+//                                             tensor<2xf32>)
+//          outs(%init : tensor<2x4xf32>) : tensor<2x4xf32>
+// After:
+//   %canonical = tosa.select (tosa.greater 0, %indices),
+//                            (tosa.add %indices, 4), %indices
+//   %classes = tosa.const [0, 1, 2, 3]
+//   %pred = tosa.equal (tiled %canonical), (tiled %classes)
+//   %y = tosa.select %pred, %on, %off
+struct OneHotConverter final : public OpConversionPattern<OneHotOp> {
+  using OpConversionPattern<OneHotOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(OneHotOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto indicesTy = dyn_cast<RankedTensorType>(adaptor.getIndices().getType());
+    auto depthTy = dyn_cast<RankedTensorType>(adaptor.getDepth().getType());
+    auto valuesTy = dyn_cast<RankedTensorType>(adaptor.getValues().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!indicesTy || !depthTy || !valuesTy || !resultTy ||
+        !indicesTy.hasStaticShape() || !depthTy.hasStaticShape() ||
+        !valuesTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (!isa<IntegerType>(indicesTy.getElementType()) ||
+        !isa<IntegerType>(depthTy.getElementType()))
+      return rewriter.notifyMatchFailure(op,
+                                         "indices and depth must be integer");
+    if (valuesTy.getRank() != 1 || valuesTy.getDimSize(0) != 2)
+      return rewriter.notifyMatchFailure(op, "values must have shape [2]");
+    if (valuesTy.getElementType() != resultTy.getElementType())
+      return rewriter.notifyMatchFailure(op, "values and result types differ");
+    if (resultTy.getRank() != indicesTy.getRank() + 1)
+      return rewriter.notifyMatchFailure(
+          op, "result rank must be indices rank plus one");
+
+    int64_t axis = op.getAxis();
+    if (axis < 0)
+      axis += resultTy.getRank();
+    if (axis < 0 || axis >= resultTy.getRank())
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    SmallVector<int64_t> expectedShape;
+    expectedShape.reserve(resultTy.getRank());
+    expectedShape.append(indicesTy.getShape().begin(),
+                         indicesTy.getShape().begin() + axis);
+    int64_t depth = resultTy.getDimSize(axis);
+    expectedShape.push_back(depth);
+    expectedShape.append(indicesTy.getShape().begin() + axis,
+                         indicesTy.getShape().end());
+    if (depth <= 0 || expectedShape != resultTy.getShape())
+      return rewriter.notifyMatchFailure(op, "invalid static OneHot shape");
+    if (llvm::any_of(resultTy.getShape(), [](int64_t dim) { return dim <= 0; }))
+      return rewriter.notifyMatchFailure(op, "expected positive extents");
+
+    Location loc = op.getLoc();
+    auto indexElemTy = cast<IntegerType>(indicesTy.getElementType());
+    SmallVector<int64_t> indexShape(resultTy.getShape().begin(),
+                                    resultTy.getShape().end());
+    indexShape[axis] = 1;
+    Value indices = reshapeTo(adaptor.getIndices(), indexShape, rewriter);
+
+    auto expandedIndicesTy = RankedTensorType::get(indexShape, indexElemTy);
+    Value zero = createSplatInt(rewriter, loc, expandedIndicesTy, 0);
+    Value depthSplat = createSplatInt(rewriter, loc, expandedIndicesTy, depth);
+    auto indexPredTy = RankedTensorType::get(indexShape, rewriter.getI1Type());
+    Value isNegative =
+        tosa::GreaterOp::create(rewriter, loc, indexPredTy, zero, indices);
+    Value wrapped = tosa::AddOp::create(rewriter, loc, expandedIndicesTy,
+                                        indices, depthSplat);
+    indices = tosa::SelectOp::create(rewriter, loc, expandedIndicesTy,
+                                     isNegative, wrapped, indices);
+
+    SmallVector<int64_t> indexMultiples(resultTy.getRank(), 1);
+    indexMultiples[axis] = depth;
+    indices = tileMultiples(indices, indexMultiples, resultTy.getShape(),
+                            rewriter, loc);
+
+    SmallVector<int64_t> classShape(resultTy.getRank(), 1);
+    classShape[axis] = depth;
+    auto classTy = RankedTensorType::get(classShape, indexElemTy);
+    SmallVector<APInt> classValues;
+    classValues.reserve(depth);
+    for (int64_t i = 0; i < depth; ++i)
+      classValues.emplace_back(indexElemTy.getWidth(), i);
+    Value classes = tosa::ConstOp::create(
+        rewriter, loc, classTy, DenseElementsAttr::get(classTy, classValues));
+
+    SmallVector<int64_t> classMultiples(resultTy.getShape().begin(),
+                                        resultTy.getShape().end());
+    classMultiples[axis] = 1;
+    classes = tileMultiples(classes, classMultiples, resultTy.getShape(),
+                            rewriter, loc);
+
+    auto predTy =
+        RankedTensorType::get(resultTy.getShape(), rewriter.getI1Type());
+    Value pred = tosa::EqualOp::create(rewriter, loc, predTy, indices, classes);
+
+    SmallVector<int64_t> scalarShape(resultTy.getRank(), 1);
+    Value off =
+        reshapeTo(sliceOffsetSize(adaptor.getValues(), {0}, {1}, rewriter, loc),
+                  scalarShape, rewriter);
+    Value on =
+        reshapeTo(sliceOffsetSize(adaptor.getValues(), {1}, {1}, rewriter, loc),
+                  scalarShape, rewriter);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultTy, pred, on, off);
+    return success();
+  }
+};
+
 // TOSA has no grid_sample. tosa.resize only scales a regular lattice, so
 // hip.grid_sample expands to the unnormalize / gather / interpolate sequence
 // hip_grid_sample uses:
@@ -6688,6 +6811,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // fails.
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
+    // NonZero intentionally remains legal (unconverted): supported TOSA has
+    // no ordered prefix scan or data-dependent result extent, while
+    // hip.nonzero returns both compacted [rank, N] indices and the runtime N.
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
@@ -6695,7 +6821,7 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, GatherElementsOp,
-        GatherNDOp, GridSampleOp, SizeOp, RangeOp, RopeOp, GqaOp,
+        GatherNDOp, GridSampleOp, SizeOp, OneHotOp, RangeOp, RopeOp, GqaOp,
         MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp,
         InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
@@ -6846,9 +6972,9 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
         GridSampleConverter, SizeConverter, TensorConstConverter,
-        FromElementsConverter, SplatConverter, RangeConverter, RopeConverter,
-        GqaConverter, MhaConverter, RmsNormConverter, LayerNormConverter,
-        InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
+        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
+        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
