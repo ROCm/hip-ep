@@ -136,6 +136,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     fprintf(stderr, "wrap_hipblasLtMatmul: null stream\n");
     return -1;
   }
+  if (M == 0 || N == 0 || batch_count == 0) {
+    return 0;
+  }
 
   if (elem_size != 2 && elem_size != 4) {
     fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
@@ -182,6 +185,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // Resolve once per shape across all sessions sharing this entry; the CK
   // decision is device-specific and identical for every session. Double-checked
   // locking on the per-entry mutex keeps the steady state a lock-free read.
+  bool gemvRan = false;
   if (!entry->resolved.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> probeGuard(entry->mu);
     if (!entry->resolved.load(std::memory_order_relaxed)) {
@@ -193,6 +197,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       entry->use_gemv = ck_eligible && elem_size == 2 && transB == 0 &&
                         M == 1 && batch_count == 1 &&
                         hip_gemv_fp16(stream, A, B, output, N, K) == 0;
+      gemvRan = entry->use_gemv;
       if (ck_eligible && !entry->use_gemv) {
         entry->ck_instance = ckSelectGemmInstance(
             stream, B, A, /*bias=*/nullptr, output, N, M, K, batch_count,
@@ -225,6 +230,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
+  if (gemvRan) {
+    return 0;
+  }
   if (entry->use_gemv) {
     if (hip_gemv_fp16(stream, A, B, output, N, K) != 0) {
       // The shape was accepted during resolve, so a refusal here means the

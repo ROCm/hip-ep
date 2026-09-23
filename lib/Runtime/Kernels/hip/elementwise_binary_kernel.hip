@@ -24,6 +24,7 @@
 #include "debug_log.h"
 
 #include <cmath>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -580,6 +581,20 @@ __global__ void elementwise_add_kernel<__half>(const __half *__restrict__ lhs,
   }
 }
 
+template <>
+__global__ void elementwise_add_kernel<__hip_bfloat16>(
+    const __hip_bfloat16 *__restrict__ lhs,
+    const __hip_bfloat16 *__restrict__ rhs, __hip_bfloat16 *__restrict__ output,
+    int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __bfloat162float(lhs[idx]);
+    float b = __bfloat162float(rhs[idx]);
+    output[idx] = __float2bfloat16(a + b);
+  }
+}
+
 extern "C" int hip_elementwise_mul(void *stream, const void *lhs,
                                    const void *rhs, void *output,
                                    int64_t num_elements, int hip_dtype) {
@@ -677,6 +692,20 @@ extern "C" int hip_elementwise_add(void *stream, const void *lhs,
                        static_cast<const float *>(lhs),
                        static_cast<const float *>(rhs),
                        static_cast<float *>(output), num_elements);
+    break;
+  case HIP_DTYPE_BFLOAT16:
+    hipLaunchKernelGGL(elementwise_add_kernel<__hip_bfloat16>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __hip_bfloat16 *>(lhs),
+                       static_cast<const __hip_bfloat16 *>(rhs),
+                       static_cast<__hip_bfloat16 *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT64:
+    hipLaunchKernelGGL(elementwise_add_kernel<double>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const double *>(lhs),
+                       static_cast<const double *>(rhs),
+                       static_cast<double *>(output), num_elements);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_elementwise_add: unsupported dtype=%d\n",

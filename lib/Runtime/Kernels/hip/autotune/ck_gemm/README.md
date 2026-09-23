@@ -1,12 +1,13 @@
 # CK GEMM offline autotune LUT
 
-Ships the measured winner of `ckSelectGemmInstance` for known shapes, so the first call on a shape costs one launch instead of a sweep over every instance in its registry partition.
+Ships the measured winner of `ckSelectGemmInstance` for known shapes, so the first call on a shape costs at most three candidates instead of a sweep over every instance in its registry partition.
 
 ## Where it sits
 
 ```
 table proposes up to 3 instances (nearest measured shapes first)
-  -> first one hip_ck_gemm_run accepts wins
+  -> hip_ck_gemm_run accepts exactly one -> it wins
+  -> accepts several -> the fastest of those, timed like the sweep
   -> none accepted / no table / online mode -> runtime sweep, as before
 ```
 
@@ -58,7 +59,7 @@ clang++ --driver-mode=g++ -std=c++17 -O2 -D__HIP_PLATFORM_AMD__ `
 ck_gemm_sweep.exe shapes/survey.csv winners.csv
 
 # 3. table
-python scripts/update_lut.py build --winners winners.csv --arch gfx1151
+python scripts/update_lut.py build --winners winners.csv --arch gfx1151 --rocm-version 71600
 python scripts/update_lut.py compile --arch gfx1151 --flatc <build>/bin/flatc.exe
 ```
 

@@ -36,11 +36,6 @@ endif()
 set(_dll_args "--dll" "$<TARGET_FILE:${_ep_target}>")
 set(_wheel_deps ${_ep_target})
 
-if(NOT THEROCK_DIST)
-  message(FATAL_ERROR
-    "THEROCK_DIST is empty; the wheel cannot bundle the ROCm runtime.")
-endif()
-
 if(NOT TARGET HipFusionTransformPdll)
   message(FATAL_ERROR
     "PDL fusion patterns are unavailable (mlir-pdll was not found); the wheel "

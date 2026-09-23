@@ -404,20 +404,17 @@ struct RunArgs {
   float alpha;
 };
 
-// 0 for anything the registry does not serve.
-int64_t elemBytes(int dtype) {
-  switch (dtype) {
-  case HIP_DTYPE_FLOAT16:
-  case HIP_DTYPE_BFLOAT16:
-    return 2;
-  case HIP_DTYPE_FLOAT32:
-    return 4;
-  case HIP_DTYPE_FLOAT64:
-    return 8;
-  default:
-    return 0;
-  }
+int64_t elemBytes(int dtype) { return dtype == HIP_DTYPE_FLOAT16 ? 2 : 4; }
+
+// Element span of one matrix: the last row starts at (rows - 1) * ld.
+int64_t matrixSpan(int64_t rows, int64_t cols, int64_t ld) {
+  return (rows - 1) * ld + cols;
 }
+
+// CK checks the contiguous extent against the vector width but not the leading
+// dimension, so a non-packed ld must keep every row start at the widest vector
+// any tile loads or stores (8 elements).
+bool ldAligned(int64_t ld, int64_t packed) { return ld == packed || ld % 8 == 0; }
 
 template <typename CDEOp>
 CDEOp makeCde(float) {
@@ -539,7 +536,7 @@ int runDl(const RunArgs &r) {
 
 enum Combo {
   kNN_F16 = 0,      // transA=N, f16 out, no bias  -> A'/B' both Row
-  kTN_F32 = 1,      // transA=T, f32 out, alpha!=1 -> B' Col, Scale epilogue
+  kTN_F32 = 1,      // transA=T, f32 out           -> B' Col, Scale epilogue
   kTN_F16_BIAS = 2, // transA=T, f16 out, bias     -> B' Col, Add epilogue
   kNN_F16_BIAS = 3, // transA=N, f16 out, bias     -> A'/B' both Row, Add
   kTN_F16 = 4,      // transA=T, f16 out, no bias  -> B' Col
@@ -597,10 +594,7 @@ const Entry kEntries[] = {
     ENT_D(TKN_6) ENT_D(TKN_7) ENT_D(TKN_8)
     ENT_D(TKN_E4a) ENT_D(TKN_E2a) ENT_D(TKN_E1a)
 
-    // 49-58: TN, f16 out, no bias. This is the Q @ K^T that
-    // TransposeMatMulFold stamps as hipdnn.transB on a plain MatMul; hipBLASLt
-    // served it directly, so without these entries the whole attention score
-    // GEMM of every folded model falls to the reference kernel.
+    // 49-58: TN, f16 out, no bias
     ENT_E(TNK_1) ENT_E(TNK_2) ENT_E(TNK_3) ENT_E(TNK_4) ENT_E(TNK_6)
     ENT_E(TNK_7) ENT_E(TNK_8) ENT_E(TNK_K4) ENT_E(TNK_E2a) ENT_E(TNK_E1a)
 
@@ -668,6 +662,21 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
   if (kEntries[instance].combo != combo) {
     return 1;
   }
+  const bool isDl = (combo == kNN_F32 || combo == kTN_F32AB);
+  // Only the f32-output WMMA combo and the DL combos apply alpha (Scale); the
+  // f16-output epilogues are PassThrough / Add.
+  if (!isDl && combo != kTN_F32 && alpha != 1.0f) {
+    return 1;
+  }
+  if (batch <= 0 || m <= 0 || n <= 0 || k <= 0) {
+    return 1;
+  }
+  const int64_t idx[] = {m, n, k, batch, lda, ldb, ldd, strideA, strideB, strideD};
+  for (int64_t v : idx) {
+    if (v < 0 || v > INT32_MAX) {
+      return 1;
+    }
+  }
 
   RunArgs r;
   r.stream = static_cast<hipStream_t>(stream);
@@ -687,34 +696,39 @@ extern "C" int hip_ck_gemm_run(void *stream, int instance, const void *A,
   r.batchStrideE = strideD;
   r.alpha = alpha;
 
-  // A buffer load or store reaches memory through an SRD whose range field is
-  // 32 bits, so one launch can address at most 4 GiB per operand. Past that the
-  // range wraps and the kernel runs outside the buffer: on swinv2's window
-  // attention (m=n=256, k=32, batch=49152, E = 6.44 GiB) an E span of exactly
-  // 2^32 completes while 2^32 + 131072 faults, and the damage surfaces on the
-  // following launch rather than the one that caused it. CK accepts these
-  // arguments, so the bound has to be applied here: split the batch until every
-  // launch fits. Shapes already inside the window keep the single launch.
+  if (!isDl) {
+    const bool bpCol = (transA != 0);
+    if (!ldAligned(r.strideA, r.k) || !ldAligned(r.strideB, bpCol ? r.k : r.n) ||
+        !ldAligned(r.strideE, r.n)) {
+      return 1;
+    }
+  }
+
   const int64_t abBytes = elemBytes(abDtype);
   const int64_t dBytes = elemBytes(dDtype);
-  if (abBytes == 0 || dBytes == 0) {
-    return 1;
-  }
   // The DL gridwise op validates each tensor against 2 GB rather than the SRD's
   // 4 GiB, and it does so per batch, so a batch that individually fits can
   // still overrun the window in one launch. Split against the tighter bound.
-  const bool isDl = (combo == kNN_F32 || combo == kTN_F32AB);
   const int64_t kMaxSpanBytes = isDl ? 0x80000000LL : 0x100000000LL;
-  int64_t maxBatch = r.batch;
+  const int64_t spanA = matrixSpan(r.m, r.k, r.strideA) * abBytes;
+  const int64_t spanB = (transA ? matrixSpan(r.n, r.k, r.strideB)
+                                : matrixSpan(r.k, r.n, r.strideB)) *
+                        abBytes;
+  const int64_t spanE = matrixSpan(r.m, r.n, r.strideE) * dBytes;
+  const int64_t spans[3] = {spanA, spanB, spanE};
   const int64_t perBatch[3] = {r.batchStrideA * abBytes,
                                r.batchStrideB * abBytes,
                                r.batchStrideE * dBytes};
-  for (int64_t per : perBatch) {
-    if (per <= 0) {
+  int64_t maxBatch = r.batch;
+  for (int i = 0; i < 3; ++i) {
+    if (spans[i] > kMaxSpanBytes) {
+      return 1;
+    }
+    if (perBatch[i] <= 0) {
       continue;
     }
-    const int64_t lim = kMaxSpanBytes / per;
-    maxBatch = (lim < 1) ? 1 : (lim < maxBatch ? lim : maxBatch);
+    const int64_t lim = 1 + (kMaxSpanBytes - spans[i]) / perBatch[i];
+    maxBatch = lim < maxBatch ? lim : maxBatch;
   }
 
   // CK checks hipGetLastError() after each launch, which reports whatever
