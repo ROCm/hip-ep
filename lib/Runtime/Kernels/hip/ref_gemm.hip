@@ -110,6 +110,12 @@ int runRef(hipStream_t stream, const void *A, const void *B, void *D, int64_t m,
   runRefDispatch<ABD, CD, ACC>(stream, ap, bp, D, mp, np, k, batch, transA,    \
                                transB, bstA, bstB, bstE, alpha)
 
+  // CK checks hipGetLastError() after each launch, which reports whatever
+  // error is pending on the thread rather than only this launch's. Consume a
+  // pending one so an unrelated caller's handled failure cannot be read as
+  // this shape being unsupported.
+  (void)hipGetLastError();
+
   try {
     if (abDtype == HIP_DTYPE_FLOAT16 && dDtype == HIP_DTYPE_FLOAT16) {
       REF_DISPATCH(F16, F16, float);

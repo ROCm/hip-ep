@@ -57,22 +57,35 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
       (void)hipGetLastError();
       continue;
     }
-    if (hipEventRecord(start, stream) != hipSuccess) {
+    // Fastest of two rounds: one 3-iteration sample is noisy enough to rank a
+    // slower instance first.
+    float inst_ms = 0.0f;
+    bool timed = false;
+    for (int round = 0; round < 2; ++round) {
+      if (hipEventRecord(start, stream) != hipSuccess) {
+        continue;
+      }
+      for (int r = 0; r < 3; ++r) {
+        launch(i);
+      }
+      if (hipEventRecord(stop, stream) != hipSuccess ||
+          hipEventSynchronize(stop) != hipSuccess) {
+        continue;
+      }
+      float ms = 0.0f;
+      if (hipEventElapsedTime(&ms, start, stop) != hipSuccess) {
+        continue;
+      }
+      if (!timed || ms < inst_ms) {
+        inst_ms = ms;
+        timed = true;
+      }
+    }
+    if (!timed) {
       continue;
     }
-    for (int r = 0; r < 3; ++r) {
-      launch(i);
-    }
-    if (hipEventRecord(stop, stream) != hipSuccess ||
-        hipEventSynchronize(stop) != hipSuccess) {
-      continue;
-    }
-    float ms = 0.0f;
-    if (hipEventElapsedTime(&ms, start, stop) != hipSuccess) {
-      continue;
-    }
-    if (ms < best_ms) {
-      best_ms = ms;
+    if (inst_ms < best_ms) {
+      best_ms = inst_ms;
       best = i;
     }
   }
