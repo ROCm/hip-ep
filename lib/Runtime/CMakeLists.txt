@@ -10,13 +10,10 @@
 # Stage 1 (Build Time): runtime.cpp → bitcode → embedded in library
 # Stage 2 (Model Compilation): Generated MLIR + runtime.bc → optimized DLL
 
-# Higher than the top-level 3.20 because the bitcode custom commands below use
-# add_custom_command(DEPFILE): CMP0116 (depfile paths relative to the current
-# binary dir) arrived in 3.20, and DEPFILE support for the Visual Studio
-# generators -- which is what build.py defaults to on Windows -- only arrived in
-# 3.22. Demanding it here turns an obscure generator-specific failure into a
-# version message.
-cmake_minimum_required(VERSION 3.22)
+# 3.21: the bitcode custom commands below use add_custom_command(DEPFILE), which
+# the Visual Studio generators (build.py's Windows default) support only from
+# 3.21.
+cmake_minimum_required(VERSION 3.21)
 
 # ============================================================================
 # STEP 1: Find Required Tools
@@ -232,8 +229,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 $<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>
                 $<$<NOT:$<CONFIG:Debug>>:-D_ITERATOR_DEBUG_LEVEL=0>
                 $<$<NOT:$<CONFIG:Debug>>:-O2>
-                # Header dependencies come from clang, not from a hand-written
-                # list.
                 -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}.d
                 ${COMPILE_FLAGS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
