@@ -11,13 +11,14 @@
 
 #include <cstdint>
 
-// Time every CK instance that accepts this problem and return the fastest, or
-// -1 when none does. CK ships nothing like AlgoGetHeuristic, so measuring is
-// the only way to pick. Arguments mirror hip_ck_gemm_run minus the instance,
-// i.e. hipBLASLt's column-major convention.
+// Return the CK instance to serve this problem, or -1 when none accepts it.
+// The first instance the offline table proposes that CK accepts wins; without
+// one, every accepting instance is timed and the fastest wins. CK ships nothing
+// like AlgoGetHeuristic, so measuring is the only way to pick. Arguments mirror
+// hip_ck_gemm_run minus the instance, i.e. hipBLASLt's column-major convention.
 //
-// Timing iterations overwrite `output`, so the caller must not have seeded it
-// with anything the real call still needs.
+// Probe and timing launches overwrite `output`, so the caller must not have
+// seeded it with anything the real call still needs.
 inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
                                 const void *B, const void *bias, void *output,
                                 int64_t m, int64_t n, int64_t k, int64_t batch,
@@ -30,6 +31,20 @@ inline int ckSelectGemmInstance(hipStream_t stream, const void *A,
                            transA, transB, abDtype, dDtype, alpha, lda, ldb,
                            ldd, strideA, strideB, strideD);
   };
+
+  int proposed[3];
+  const int num_proposed =
+      hip_ck_gemm_lut_candidates(m, n, k, batch, transA, abDtype, dDtype,
+                                 bias != nullptr ? 1 : 0, proposed, 3);
+  for (int c = 0; c < num_proposed; ++c) {
+    if (launch(proposed[c]) != 0) {
+      continue;
+    }
+    if (hipStreamSynchronize(stream) == hipSuccess) {
+      return proposed[c];
+    }
+    (void)hipGetLastError();
+  }
 
   hipEvent_t start = nullptr;
   hipEvent_t stop = nullptr;

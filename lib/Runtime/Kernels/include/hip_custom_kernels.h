@@ -3243,6 +3243,20 @@ HIP_KERNEL_API int hip_ck_gemm_run(void* stream, int instance, const void* A,
                        float alpha, int64_t lda, int64_t ldb, int64_t ldd,
                        int64_t strideA, int64_t strideB, int64_t strideD);
 
+/* Stable name of an instance, e.g. "NN_F16:TKN_5"; nullptr out of range.
+ * Unlike the index, the name may be persisted. */
+HIP_KERNEL_API const char* hip_ck_gemm_instance_name(int instance);
+
+/* Instances the embedded offline table proposes for this problem, nearest
+ * measured shape first, de-duplicated, at most `cap`. Same column-major
+ * arguments as hip_ck_gemm_run. A proposal is not a guarantee: the caller must
+ * still check that hip_ck_gemm_run accepts it. Returns 0 when there is no
+ * usable table for this device, the problem class was never measured, or
+ * HIPDNN_CK_GEMM_AUTOTUNE_MODE=online. */
+HIP_KERNEL_API int hip_ck_gemm_lut_candidates(int64_t m, int64_t n, int64_t k,
+                       int64_t batch, int transA, int abDtype, int dDtype,
+                       int hasBias, int* out, int cap);
+
 /* =========================================================================
  * Composable Kernel reference (naive) GEMM
  * =========================================================================

@@ -1,0 +1,57 @@
+// CK GEMM offline autotune lookup table.
+//
+// Measured winners of ckSelectGemmInstance. A lookup matches the categorical
+// fields exactly, then ranks the measured points of that group by log-space
+// distance over (M, N, K, batch) and proposes the instances of the nearest
+// ones. Distance 0 is an exact hit.
+//
+// The categorical fields decide which registry partition can serve the call at
+// all, so they are never interpolated across.
+
+namespace hipdnn_ep.ck_gemm_autotune.fbs;
+
+// Any = 0 so a zeroed field is rejected at load rather than matching.
+enum CkGemmDtype : ubyte {
+  Any = 0,
+  F16 = 1,
+  F32 = 2
+}
+
+// Arguments are hip_ck_gemm_run's column-major ones, as the caller passes them.
+struct CkGemmTunePoint {
+  ab_dtype: CkGemmDtype;
+  d_dtype: CkGemmDtype;
+  trans_a: ubyte;
+  bias: ubyte;
+
+  // Index into CkGemmAutotuneLut.instances.
+  instance: uint16;
+
+  m: uint32;
+  n: uint32;
+  k: uint32;
+  batch: uint32;
+}
+
+table CkGemmAutotuneLut {
+  schema_version: uint32 = 1;
+  gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
+  rocm_version: int32;      // advisory
+  // Bumped when a tile keeps its name but changes meaning.
+  kernel_abi: string;       // "ck_gemm-v1"
+  model_key: string;        // provenance label for logging
+
+  //   d = sqrt( sum_i (w_i * log2(x_i / p_i))^2 ),  i in {m, n, k, batch}
+  weight_m: float = 1.0;
+  weight_n: float = 1.0;
+  weight_k: float = 1.0;
+  weight_batch: float = 1.0;
+
+  // hip_ck_gemm_instance_name() values. A name the running build does not
+  // have drops every point that uses it.
+  instances: [string];
+  points: [CkGemmTunePoint];
+}
+
+root_type CkGemmAutotuneLut;
+file_identifier "CKGL";
