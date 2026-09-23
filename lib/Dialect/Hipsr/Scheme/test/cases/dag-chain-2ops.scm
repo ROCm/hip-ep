@@ -6,6 +6,50 @@
           %b = op2 (%a)
    :rewrite %b :with (op3 (%a) -> !t))
 
+ :expect-analyze
+   ((pattern-type . conversion)
+    (function-name . pattern-dag-chain-2ops)
+    (root-var . %b)
+    (root-op-name . "op2")
+    (root-op-index . 1)
+    (root-result-idx . 0)
+    (match
+      ((result-var %a)
+       (op-name . "op1")
+       (operands ((kind . required) (var . %x)))
+       (where-expr . #f))
+      [(result-var %b)
+       (op-name . "op2")
+       (operands ((kind . required) (var . %a)))
+       (where-expr . #f)])
+    (match-bindings
+      (bindings-table
+        (%a (id . %a) (is-result? . #t) (result-op-idx . 0)
+            (result-idx . 0) (operand-op-idx . #f) (operand-idx . #f)
+            (bound? . #t))
+        (%b (id . %b) (is-result? . #t) (result-op-idx . 1)
+            (result-idx . 0) (operand-op-idx . #f) (operand-idx . #f)
+            (bound? . #t))
+        (%x (id . %x) (is-result? . #f) (result-op-idx . #f)
+            (result-idx . #f) (operand-op-idx . 0) (operand-idx . 0)
+            (bound? . #t))))
+    (match-actions
+      (:set-current-op (op-idx . 1) (var . %b))
+      (:check-op (op-idx . 1))
+      (:bind-argument-operand (operand-idx . 0) (var . %a))
+      (:set-current-op (op-idx . 0) (var . %a))
+      (:check-op (op-idx . 0))
+      (:bind-operand (op-idx . 0) (operand-idx . 0) (var . %x)))
+    (rewrite
+      ((result-var) (op-name . "op3") (operands %a) (regions)
+        (attributes) (result-types . !t)))
+    (where)
+    (debug-parse? . #f)
+    (debug-validate? . #f)
+    (debug-analyze? . #t)
+    (debug-codegen? . #f)
+    (debug-matching? . #f))
+
  :expect-codegen
    (define pattern-dag-chain-2ops
      (lambda (op operands-ref rewriter type-converter)
@@ -27,10 +71,9 @@
                (and (string=? (mlir-operation-name (vector-ref all-operations 1)) "op2")
                     (= (mlir-operation-num-results (vector-ref all-operations 1)) 1))
 
-               ;; Bind: %a = operand 0 of op2
+               ;; Bind: %a = argument operand 0 (from operands-ref for conversion pattern)
                (begin
-                 (set! %a (mlir-operation-get-operand-value
-                           (vector-ref all-operations 1) 0))
+                 (set! %a (vector-ref operands-ref 0))
                  #t)
 
                ;; Navigate: %a -> defining op (op1) and store in all-operations[0]

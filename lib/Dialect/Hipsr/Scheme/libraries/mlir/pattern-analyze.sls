@@ -36,7 +36,7 @@
         (ast-match-expand-op-name root-op))
 
       ;; Build match actions starting from root operation
-      (let* ([bindings-and-actions (build-bindings-and-actions match-vec root-op-idx root-var)]
+      (let* ([bindings-and-actions (build-bindings-and-actions ast-rec match-vec root-op-idx root-var)]
              [binding-mgr (car bindings-and-actions)]
              [actions (cdr bindings-and-actions)])
 
@@ -47,11 +47,13 @@
   ;; DAG traversal and action generation
   ;;-----------------------------------------------------------------------
 
-  (define (build-bindings-and-actions match-vec root-op-idx root-var)
+  (define (build-bindings-and-actions ast-rec match-vec root-op-idx root-var)
     ;; Create binding manager and visited vector locally
     (let* ([binding-mgr (collect-all-identifiers match-vec)]
            [visited (make-vector (vector-length match-vec) #f)]
-           [acc '()])
+           [acc '()]
+           [pattern-type (ast-pattern-expand-pattern-type ast-rec)]
+           [is-conversion? (eq? pattern-type 'conversion)])
 
       ;; Named let for DAG traversal
       ;; Precondition: result-var must be bound (used to navigate to operation)
@@ -96,14 +98,20 @@
 
                         ;; Case 3: NOT is-bound AND is-result → bind first, then recurse to producer
                         [(and (not is-bound) is-result)
-                         (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc))
+                         ;; Check if binding root operation operand in conversion pattern
+                         (if (and is-conversion? (= op-idx root-op-idx))
+                             (set! acc (cons (action:bind-argument-operand operand-idx operand-var) acc))
+                             (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc)))
                          (binding-entry-bound?-set! entry #t)
                          (let ([producer-op-idx (find-operation-by-result match-vec operand-var)])
                            (traverse producer-op-idx operand-var))]
 
                         ;; Case 4: NOT is-bound AND NOT is-result → bind free variable
                         [(and (not is-bound) (not is-result))
-                         (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc))
+                         ;; Check if binding root operation operand in conversion pattern
+                         (if (and is-conversion? (= op-idx root-op-idx))
+                             (set! acc (cons (action:bind-argument-operand operand-idx operand-var) acc))
+                             (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc)))
                          (binding-entry-bound?-set! entry #t)])))))
 
       ;; Warn about unvisited operations
