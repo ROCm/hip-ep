@@ -6220,12 +6220,11 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, GatherBlockQuantizedConverter,
         MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
-        RangeConverter, RopeConverter, GqaConverter,
-        MhaConverter, RmsNormConverter, LayerNormConverter,
+        RangeConverter, RopeConverter, GqaConverter, MhaConverter,
+        RmsNormConverter, LayerNormConverter,
         InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
