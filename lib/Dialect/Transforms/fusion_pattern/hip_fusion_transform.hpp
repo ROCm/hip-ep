@@ -20,9 +20,17 @@
 // Adding a pattern that needs a new native helper means adding it below,
 // registering it in `registerNativeHelpers`, and declaring it in
 // HipFusionTransformPatterns.pdll. Prefer extending the op-agnostic group.
+//
+// A native C++ pattern, on the other hand, is its own `<name>.hpp` + `.cpp`
+// pair holding a populate function that `run()` calls. The split is what
+// keeps this header from growing a pattern's implementation every time one is
+// added: only the declaration crosses into the translation units that
+// instantiate `run()`.
 #pragma once
 
 #include "hip/Dialect/IR/HipDialect.h"
+
+#include "patch_embed_conv_to_gemm.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -812,38 +820,48 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                       createRequantizedLayoutOp);
 }
 
-/// apply the patterns in pdlBuffer to every function body in module, an empty
-/// buffer is a successful no-op, failure means the patterns will not parse or
-/// the driver failed
+/// Benefit of the native patterns added alongside the PDLL ones.
+///
+/// `PatternApplicator` merges native patterns and PDL matches into one
+/// benefit-ordered sequence per root op, so these numbers are directly
+/// comparable to the `with benefit(N)` in the .pdll files. Keeping the
+/// conv-to-gemm rewrite below the Q/DQ fusions means a quantized conv is
+/// offered to `hip.qconv` first and only decomposed into a GEMM if that
+/// declines -- which is the whole reason QConvFusion roots at `hip.conv`
+/// rather than at the `hip.quantize_linear` it replaces.
+constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
+
+/// apply this directory's patterns to every function body in module, failure
+/// means the embedded PDLL patterns will not parse or the driver failed
+///
+/// The PDLL half is optional: a build without mlir-pdll embeds an empty
+/// buffer, and the native patterns added below still run.
 inline mlir::LogicalResult run(mlir::ModuleOp module,
                                llvm::MemoryBufferRef pdlBuffer) {
-  if (pdlBuffer.getBufferSize() == 0)
-    return mlir::success();
-
   mlir::MLIRContext *ctx = module.getContext();
-  mlir::ParserConfig parseConfig(ctx);
-  // parseSourceString, not parseSourceFile: the latter's StringRef overload
-  // takes a path, so it would try to open the pattern text itself as a file.
-  // Both dispatch on the magic bytes, so textual IR and bytecode work either
-  // way.
-  mlir::OwningOpRef<mlir::ModuleOp> pdlModule =
-      mlir::parseSourceString<mlir::ModuleOp>(
-          pdlBuffer.getBuffer(), parseConfig, pdlBuffer.getBufferIdentifier());
-  if (!pdlModule)
-    return mlir::failure();
-
-  // FrozenRewritePatternSet skips the PDL-to-PDLInterp lowering for a module
-  // holding no pdl.pattern, then still asks the bytecode generator for the
-  // @matcher function that lowering would have produced. Bail out first so a
-  // pattern set that is empty (every pattern disabled) stays a no-op.
-  if (pdlModule->getOps<mlir::pdl::PatternOp>().empty())
-    return mlir::success();
-
-  mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
-  registerNativeHelpers(pdlPatterns);
 
   mlir::RewritePatternSet patterns(ctx);
-  patterns.add(std::move(pdlPatterns));
+  // add c++ patterns here
+  populatePatchEmbedConvToGemmPattern(
+      patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
+
+  // pdl patterns here
+  if (pdlBuffer.getBufferSize() != 0) {
+    mlir::ParserConfig parseConfig(ctx);
+    mlir::OwningOpRef<mlir::ModuleOp> pdlModule =
+        mlir::parseSourceString<mlir::ModuleOp>(
+            pdlBuffer.getBuffer(), parseConfig,
+            pdlBuffer.getBufferIdentifier());
+    if (!pdlModule)
+      return mlir::failure();
+
+    if (!pdlModule->getOps<mlir::pdl::PatternOp>().empty()) {
+      mlir::PDLPatternModule pdlPatterns(std::move(pdlModule));
+      registerNativeHelpers(pdlPatterns);
+      patterns.add(std::move(pdlPatterns));
+    }
+  }
+
   // Freeze once for the whole module: this is what lowers PDL to PDLInterp
   // and generates the matcher bytecode, which is far too expensive to redo
   // per function.
