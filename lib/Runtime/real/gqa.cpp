@@ -1082,44 +1082,44 @@ static GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
 
 // Runs one GQA GEMM: D[m, n] = alpha * op(A) * B, column-major, beta = 0.
 //
-// Composable Kernel serves the fp16 score and value shapes. A shape no CK
-// instance accepts, and every fp32-operand shape (Whisper no_causal), uses the
-// reference GEMM fallback. The CK probe needs live pointers, so it runs here on
-// the shape's first call rather than in queryOrCreateGemmState; timing
-// iterations may scribble on D because beta is 0 and the real launch below
-// rewrites it.
+// Composable Kernel serves the score and value shapes; a shape no CK instance
+// accepts uses the reference GEMM fallback. The CK probe needs live pointers,
+// so it runs here on the shape's first call rather than in
+// queryOrCreateGemmState; timing iterations may scribble on D because beta is 0
+// and the real launch below rewrites it.
 static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
                       const void *B, void *D, float alpha) {
   const GqaGemmKey &key = st->key;
   int64_t strideA, strideB, strideC;
   gqaGemmStrides(key, strideA, strideB, strideC);
   const int64_t lda = key.transA ? key.k : key.m;
+  const int abDtype = key.inputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
+  const int dDtype = key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
 
-  // CK applies alpha only on the fp32-output (score) combo; the fp16-output
-  // one would silently drop it.
-  const bool ck_eligible = !key.inputFp32 && (key.outputFp32 || alpha == 1.0f);
+  // CK has no fp32-operand, fp16-output combo, and the fp16-in fp16-out one
+  // would silently drop alpha.
+  const bool ck_eligible =
+      key.inputFp32 ? key.outputFp32 : (key.outputFp32 || alpha == 1.0f);
 
   if (ck_eligible && !st->ck_probed) {
     st->ck_probed = true;
     st->ck_instance = ckSelectGemmInstance(
         stream, A, B, /*bias=*/nullptr, D, key.m, key.n, key.k, key.batch,
-        key.transA ? 1 : 0, /*transB=*/0, HIP_DTYPE_FLOAT16,
-        key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
+        key.transA ? 1 : 0, /*transB=*/0, abDtype, dDtype, alpha, lda,
         /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC);
     RUNTIME_DEBUG_LOG("[GQA] CK instance %d for m=%lld n=%lld k=%lld "
-                      "batch=%lld transA=%d outFp32=%d\n",
+                      "batch=%lld transA=%d inFp32=%d outFp32=%d\n",
                       st->ck_instance, (long long)key.m, (long long)key.n,
                       (long long)key.k, (long long)key.batch, (int)key.transA,
-                      (int)key.outputFp32);
+                      (int)key.inputFp32, (int)key.outputFp32);
   }
 
   if (st->ck_instance >= 0) {
-    if (hip_ck_gemm_run(
-            stream, st->ck_instance, A, B, /*bias=*/nullptr, D, key.m, key.n,
-            key.k, key.batch, key.transA ? 1 : 0,
-            /*transB=*/0, HIP_DTYPE_FLOAT16,
-            key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16, alpha, lda,
-            /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB, strideC) != 0) {
+    if (hip_ck_gemm_run(stream, st->ck_instance, A, B, /*bias=*/nullptr, D,
+                        key.m, key.n, key.k, key.batch, key.transA ? 1 : 0,
+                        /*transB=*/0, abDtype, dDtype, alpha, lda,
+                        /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB,
+                        strideC) != 0) {
       // The instance was chosen by running this same geometry, so a refusal
       // here means the ABI contract is broken rather than the shape changing.
       fprintf(stderr,
@@ -1131,8 +1131,6 @@ static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
     return 0;
   }
 
-  const int abDtype = key.inputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
-  const int dDtype = key.outputFp32 ? HIP_DTYPE_FLOAT32 : HIP_DTYPE_FLOAT16;
   if (hip_ref_gemm_run(stream, A, B, D, key.m, key.n, key.k, key.batch,
                        key.transA ? 1 : 0, /*transB=*/0, abDtype, dDtype, alpha,
                        lda, /*ldb=*/key.k, /*ldd=*/key.m, strideA, strideB,
