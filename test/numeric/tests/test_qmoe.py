@@ -205,6 +205,31 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    def test_qmoe_large_expert_batches(self, model_runner):
+        """QMoE prefill where experts receive around 1024 tokens each.
+
+        The HIP EP folds the gather, bias, SwiGLU and scatter-add into the
+        expert GEMMs only for experts with at least 1024 tokens. 2048 tokens
+        routed top-4 over 8 experts puts experts on both sides of that
+        threshold, so the fused and unfused sequences both run.
+        """
+        seq_len, hidden, intermediate, num_experts, top_k = 2048, 256, 512, 8, 4
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k,
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_qmoe_gpt_oss_shape(self, model_runner, seq_len):
         """QMoE with GPT-OSS-20B shapes: 32 experts, top-4, hidden=2880.
