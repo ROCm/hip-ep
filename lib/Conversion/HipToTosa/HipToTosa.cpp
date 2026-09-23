@@ -1908,25 +1908,6 @@ LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
   return success();
 }
 
-// The element types this pass can actually put through TOSA.
-//
-// Both are allow-lists rather than "everything except the type we know is
-// broken". Tosa_FloatTensor is AnyFloat and Tosa_Int is any signless or
-// unsigned integer, so f64, f80, f128, the float8 variants, i4 and i128 all
-// satisfy the op verifiers while nothing downstream can lower them -- and
-// onnx.ReduceL2 explicitly permits f64 input. The float set is the one
-// GemmConverter above already uses; the integer set names the widths ONNX
-// produces.
-static bool isTosaExpressibleFloat(Type elementType) {
-  return elementType.isF16() || elementType.isBF16() || elementType.isF32();
-}
-
-static bool isTosaExpressibleInt(Type elementType) {
-  return elementType.isSignlessInteger(1) || elementType.isSignlessInteger(8) ||
-         elementType.isSignlessInteger(16) ||
-         elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
-}
-
 // ONNX reductions accept unsigned element types and OnnxToHip preserves them,
 // but no TOSA lowering takes an unsigned tensor: `tosa.reduce_product` on
 // tensor<2x8xui32> dies in tosa-to-linalg with "'arith.constant' op integer
@@ -7406,6 +7387,10 @@ struct LoopConverter final : public OpConversionPattern<LoopOp> {
 
     rewriter.replaceOp(
         op, whileOp.getResults().slice(/*start=*/3, /*length=*/numCarried));
+    return success();
+  }
+};
+
 // ---------------------------------------------------------------------------
 // hip.qmoe
 // ---------------------------------------------------------------------------
