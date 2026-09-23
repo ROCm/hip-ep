@@ -1819,10 +1819,9 @@ HIP_KERNEL_API int hip_nonzero(
  * =========================================================================
  *
  * One thread per (outer, inner) slice; each thread sequentially scans
- * `axis_size` elements with stride `inner`. The host wrapper decomposes
- *   outer = product(shape[:axis]); axis_size = shape[axis];
- *   inner = product(shape[axis+1:])
- * and synchronously D2H-reads the axis scalar.
+ * `axis_size` elements with stride `inner`. Axis stays on the device:
+ * the launch grid is num_elements (upper bound on slices) and thread 0
+ * splits data_shape. Out-of-range axis sets device_error_flag.
  *
  * FP16 accumulates in float to avoid precision loss for long axes.
  */
@@ -1830,12 +1829,15 @@ HIP_KERNEL_API int hip_cumsum(
     void* stream,
     const void* x,
     void* y,
-    int64_t outer,
-    int64_t axis_size,
-    int64_t inner,
+    const int64_t* data_shape,
+    int64_t data_rank,
+    int64_t num_elements,
+    const void* axis,
+    int axis_elem_bytes,
     int hip_dtype,
     int exclusive,
-    int reverse);
+    int reverse,
+    void* device_error_flag);
 
 /* =========================================================================
  * Pad (constant / reflect / edge / wrap)
