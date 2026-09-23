@@ -474,18 +474,8 @@ def main() -> None:
                     det.append(f"- EP input MLIR line: {item['source_line']}\n")
                 det.append("\n")
 
-    det.append("## Every operator\n\n")
-    det.append(
-        "| Op Type | Domain | Count | Status | Target | Runtime | Data Types | "
-        "Ignored Attributes |\n|---|---|---:|---|---|---|---|---|\n"
-    )
-    for r in data.get("operator_distribution", []):
-        det.append(
-            f"| {r['onnx_op']} | {r['domain']} | {r['count']} | {r['status']} | "
-            f"{fmt(r.get('target'))} | {fmt(r.get('runtime_func'))} | "
-            f"{fmt(r.get('data_types'))} | {fmt(r.get('ignored_attributes'))} |\n"
-        )
-    det.append("\n")
+    # No second operator table here: the report's distribution already lists
+    # every operator, and the ignored attributes are under capability gaps.
     details = args.analysis_dir / "model_compatibility_details.md"
     details.write_text("".join(det), encoding="utf-8")
 

@@ -101,11 +101,10 @@ Operators that compile but are missing from
 
 ## `model_compatibility_details.md`
 
-Two parts. First the evidence behind each worklist row -- signature, data
-types, shapes, attributes, documented implementation, blocking operand,
-ignored attributes, lowering error, and the line in the EP input MLIR.
-Then every operator in one table: status, target, runtime symbol, data
-types, ignored attributes.
+The evidence behind each worklist row -- signature, data types, shapes,
+attributes, documented implementation, blocking operand, ignored
+attributes, lowering error, and the line in the EP input MLIR. Nothing
+else: every operator is already listed in the report.
 
 ## Rules
 

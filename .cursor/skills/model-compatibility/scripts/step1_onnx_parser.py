@@ -218,26 +218,18 @@ class ONNXModelAnalyzer:
         }
 
     def _get_dtype_name(self, dtype_int: int) -> str:
-        """Map an ONNX TensorProto.DataType enum to a string name."""
-        dtype_map = {
-            1: "float32",
-            2: "uint8",
-            3: "int8",
-            4: "uint16",
-            5: "int16",
-            6: "int32",
-            7: "int64",
-            8: "string",
-            9: "bool",
-            10: "float16",
-            11: "float64",
-            12: "complex64",
-            13: "complex128",
-            14: "uint32",
-            15: "uint64",
-            16: "complex256",
-        }
-        return dtype_map.get(dtype_int, f"unknown({dtype_int})")
+        """Name an ONNX TensorProto.DataType, the way numpy would.
+
+        Asking the library rather than keeping a table: a hand-written one
+        had uint32 through bfloat16 shifted by two positions, and reported
+        every dtype added since as unknown.
+        """
+        if dtype_int == onnx.TensorProto.STRING:
+            return "string"  # no numpy equivalent; "object" would not read as one
+        try:
+            return str(onnx.helper.tensor_dtype_to_np_dtype(dtype_int))
+        except Exception:
+            return onnx.TensorProto.DataType.Name(dtype_int).lower()
 
     def _get_shape_type(self, shape) -> str:
         """Classify a tensor shape as static / dynamic / unknown."""
