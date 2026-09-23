@@ -257,8 +257,7 @@ itself is a few int64s; the cost was draining the inference stream
 (~50–200 µs). The same clamp state machine now runs once per block in
 `slice_kernel.hip`. Invalid runtime indices set the session
 device-error flag instead of returning from the host after a sync.
-`pad.cpp` and `cumsum.cpp` still stall on their host-side index
-readbacks.
+`cumsum.cpp` still stalls on its host-side axis readback.
 
 ScatterND keeps indices on the device because each thread does its own
 out-of-range clamp inline (`idx >= dim ? dim-1 : idx`, etc.) and looks
