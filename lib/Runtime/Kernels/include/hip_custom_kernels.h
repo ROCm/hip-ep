@@ -1298,11 +1298,14 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
-HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
-                             void* indices, int64_t axis, int64_t largest,
-                             int64_t sorted, int64_t rank,
-                             const int64_t* x_shape, int64_t k,
-                             int element_size_bytes);
+/* TopK: K stays on device. Thread 0 loads the INT64 scalar and builds
+ * output strides; K > 256 sets device_error_flag (nullable).
+ */
+HIP_KERNEL_API int hip_top_k(void* stream, const void* data, const void* k,
+                             void* values, void* indices, int64_t axis,
+                             int64_t largest, int64_t sorted, int64_t rank,
+                             const int64_t* x_shape, int element_size_bytes,
+                             void* device_error_flag);
 
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
