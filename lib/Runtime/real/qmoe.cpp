@@ -261,13 +261,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
     int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
 
-    // Bucket tokens on the device: count per expert (atomicAdd), exclusive
-    // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
-    // into d_sorted_token_ids / d_sorted_weights ordered by expert.
-    HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
-                                     d_expert_counts, d_expert_offsets,
-                                     d_sorted_token_ids, d_sorted_weights,
-                                     num_tokens, num_experts, k, elem_size));
+    // Bucket tokens on the device: count per expert, exclusive prefix sum
+    // into d_expert_offsets, scatter (token_id, weight) pairs into
+    // d_sorted_token_ids / d_sorted_weights ordered by expert. One block per
+    // expert; the single-block hip_qmoe_bucket_tokens produces the same
+    // layout but scans serially on one CU (5.4 ms vs 0.1 ms per gpt-oss-20b
+    // layer at a 16k prompt on gfx1151).
+    HIP_CHECK(hip_qmoe_amd_bucket_tokens(
+        stream, d_expert_indices, d_expert_weights, d_expert_counts,
+        d_expert_offsets, d_sorted_token_ids, /*sorted_pair_ids=*/nullptr,
+        d_sorted_weights, num_tokens, num_experts, k, elem_size));
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed
