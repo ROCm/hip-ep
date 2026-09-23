@@ -35,11 +35,10 @@ enum GraphExecError {
 // Layout-compatible mirror of RuntimeState (defined in
 // runtime_state_internal.h). We cannot include the real header because
 // runtime_types.h pulls in hip_runtime.h which contains MSVC-incompatible
-// vector types. Handle fields (hipStream_t, hipblasLtHandle_t) are pointer
-// types, so void* is binary-compatible on the same ABI.
+// vector types. hipStream_t is a pointer type, so void* is binary-compatible
+// on the same ABI.
 struct RuntimeStateLayout {
   void *stream;
-  void *hipblas_handle;
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
