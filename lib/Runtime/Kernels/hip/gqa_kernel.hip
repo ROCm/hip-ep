@@ -3401,6 +3401,294 @@ gqa_flash_prefill_v5_kernel(
 }
 
 // ---------------------------------------------------------------------
+// Transposed-score prefill kernel (v6). 1-D grid of Hq*num_q_tiles*B blocks
+// of one wave, each owning M_TILES 16-row Q subtiles of one head (as v5).
+// Computes S^T = K Q^T by swapping the WMMA operands, so in the accumulator
+// layout a lane owns one query and holds keys along its registers. The row
+// max/sum then reduce in registers plus one cross-half exchange instead of a
+// 4-step shuffle per row, the running m/l/corr are one value per lane, and P^T
+// becomes the B operand of O^T = V^T P^T directly from registers (gfx11 needs
+// a half-wave swap to fill the K range; gfx12's layout already matches), so
+// there is no P round-trip through LDS. V is staged transposed so each V^T
+// fragment is one contiguous LDS read.
+// ---------------------------------------------------------------------
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW>
+__global__ void __launch_bounds__(32)
+gqa_flash_prefill_v6_kernel(
+    const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
+    const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
+    const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
+    _Float16* __restrict__ O,             // [B, sq, Hq, D]
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale,
+    const _Float16* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads, int smooth_softmax,
+    int local_window_size)                   // <= 0 for full attention
+{
+    constexpr int kWmmaTile = 16;
+    constexpr int ROWS      = M_TILES * kWmmaTile;
+    constexpr int S_TILES_J = BKV / kWmmaTile;
+    constexpr int D_TILES   = D / kWmmaTile;
+    constexpr int VT_STR    = BKV + 8;           // keeps 16-byte row alignment
+    constexpr int kAcc      = 8;                 // accumulator floats per lane
+    constexpr float kLog2e  = 1.4426950408889634f;
+
+    // Dispatch order. The query heads of one KV group are always adjacent, so
+    // they stream the same K/V through L2 together; v5's Q-tile-major order
+    // re-fetches it per head long after eviction. With a window every block
+    // touches only a few KV tiles, so all heads of a Q tile go together. Full
+    // attention walks the whole prefix per block, so it runs one KV group at a
+    // time over all Q tiles instead, which bounds the live K/V working set
+    // (all heads together measured 9% slower at 16k). Q tiles run last-first:
+    // under the causal mask they walk the most keys and should not form the
+    // tail.
+    const int num_q_tiles = (sq + ROWS - 1) / ROWS;
+    const int nqb = num_q_tiles * B_count;
+    const int bid = static_cast<int>(blockIdx.x);
+    int qb, hq;
+    if constexpr (HAS_WINDOW) {
+        qb = bid / Hq;
+        hq = bid % Hq;
+    } else {
+        const int hpg = Hq / G;
+        qb = (bid / hpg) % nqb;
+        hq = (bid / (hpg * nqb)) * hpg + bid % hpg;
+    }
+    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(
+        num_q_tiles - 1 - qb % num_q_tiles);
+    const int batch       = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
+    const int head_q      = __builtin_amdgcn_readfirstlane(hq);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (Hq / G));
+    const int q_start     = q_tile_idx * ROWS;
+
+    const int lane_id   = threadIdx.x;
+    const int wmma_lane = lane_id % kWmmaTile;
+    const int pair      = lane_id / kWmmaTile;
+
+    extern __shared__ char smem_v6[];
+    _Float16* V_lds = reinterpret_cast<_Float16*>(smem_v6);
+
+    const size_t kv_base =
+        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+
+    half16_t Q_reg[M_TILES][D_TILES];
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        const int q_pos = q_start + mi * 16 + wmma_lane;
+        const bool valid = q_pos < sq;
+        const size_t q_row_base =
+            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+        #pragma unroll
+        for (int tk = 0; tk < D_TILES; ++tk)
+            Q_reg[mi][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16], pair) : half16_t{};
+    }
+
+    // O^T accumulators: lane's column is query mi*16+wmma_lane, element e is
+    // head-dim row tj*16 + acc_row(pair, e).
+    float8_t O_frag[M_TILES][D_TILES] = {};
+    float m_reg[M_TILES], l_reg[M_TILES];
+    int   abs_q[M_TILES];
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        m_reg[mi] = -INFINITY;
+        l_reg[mi] = 0.0f;
+        abs_q[mi] = past_len + q_start + mi * 16 + wmma_lane;
+    }
+
+    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
+                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const int num_tiles = kv_max / BKV + 1;
+
+    int t_start = 0;
+    if constexpr (HAS_WINDOW) {
+        const int kv_lo_tile = past_len + q_start - local_window_size + 1;
+        t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
+    }
+
+    for (int t = t_start; t < num_tiles; ++t) {
+        const int kv0 = t * BKV;
+
+        // Stage V transposed (Vt[d][kv]) so each V^T A-fragment is one
+        // contiguous run of keys. Lanes take consecutive keys of one D-chunk,
+        // which keeps the scalar LDS writes on distinct banks.
+        #pragma unroll
+        for (int i = lane_id; i < BKV * D_TILES; i += 32) {
+            const int kv_local = i % BKV;
+            const int dt       = i / BKV;
+            const int kv_pos   = kv0 + kv_local;
+            half16_raw_t vv = (kv_pos < skv)
+                ? HALF16_RAW_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
+                : half16_raw_t{};
+            #pragma unroll
+            for (int c = 0; c < 16; ++c)
+                V_lds[(dt * 16 + c) * VT_STR + kv_local] = vv[c];
+        }
+
+        // S^T[mi][sj]: rows are keys kv0+sj*16+acc_row(pair,e), column query.
+        float8_t S_reg[M_TILES][S_TILES_J];
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mi][sj] = float8_t{};
+        #pragma unroll
+        for (int sj = 0; sj < S_TILES_J; ++sj) {
+            const int key = kv0 + sj * 16 + wmma_lane;
+            const bool kvalid = key < skv;
+            const size_t k_row = kv_base + static_cast<size_t>(kvalid ? key : 0) * D;
+            #pragma unroll
+            for (int tk = 0; tk < D_TILES; ++tk) {
+                half16_t k_frag = kvalid ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair)
+                                         : half16_t{};
+                #pragma unroll
+                for (int mi = 0; mi < M_TILES; ++mi)
+                    S_reg[mi][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
+                        k_frag, Q_reg[mi][tk], S_reg[mi][sj]);
+            }
+        }
+
+        // Only tiles crossing the causal diagonal, the window's lower edge or
+        // skv need a mask; every key of an interior tile is visible to every
+        // query of this Q tile.
+        bool need_mask = (kv0 + BKV > skv) || (kv0 + BKV - 1 > past_len + q_start);
+        if constexpr (HAS_WINDOW)
+            need_mask = need_mask ||
+                        (kv0 < past_len + q_start + ROWS - local_window_size);
+        if (need_mask) {
+            #pragma unroll
+            for (int mi = 0; mi < M_TILES; ++mi) {
+                int kv_lo = 0;
+                if constexpr (HAS_WINDOW) kv_lo = abs_q[mi] - local_window_size + 1;
+                #pragma unroll
+                for (int sj = 0; sj < S_TILES_J; ++sj)
+                    #pragma unroll
+                    for (int e = 0; e < kAcc; ++e) {
+                        const int kv_pos = kv0 + sj * 16 + hipdnn_wmma_acc_row(pair, e);
+                        bool masked = (kv_pos >= skv || kv_pos > abs_q[mi]);
+                        if constexpr (HAS_WINDOW) masked = masked || (kv_pos < kv_lo);
+                        if (masked) S_reg[mi][sj][e] = -INFINITY;
+                    }
+            }
+        }
+
+        // Scores stay unscaled; m_reg is kept in scaled log2 units, so
+        // p = exp2(s * c - m). c > 0, so the max commutes with the scaling.
+        const float c = scale * kLog2e;
+        half16_t Pb[M_TILES][S_TILES_J];
+        float corr[M_TILES];
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi) {
+            float rmax = -INFINITY;
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj)
+                #pragma unroll
+                for (int e = 0; e < kAcc; ++e) rmax = fmaxf(rmax, S_reg[mi][sj][e]);
+            rmax = fmaxf(rmax, __shfl_xor(rmax, 16));
+
+            const float m_old = m_reg[mi];
+            const float m_new = fmaxf(m_old, rmax * c);
+            bool empty = false;
+            if constexpr (HAS_WINDOW) empty = (m_new == -INFINITY);
+            corr[mi] = empty ? 1.0f : exp2f(m_old - m_new);
+
+            float rsum = 0.0f;
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) {
+                _Float16 own[kAcc];
+                #pragma unroll
+                for (int e = 0; e < kAcc; ++e) {
+                    const float p = empty ? 0.0f
+                                          : exp2f(fmaf(S_reg[mi][sj][e], c, -m_new));
+                    rsum += p;
+                    own[e] = static_cast<_Float16>(p);
+                }
+#if HIPDNN_WMMA_GFX12
+                #pragma unroll
+                for (int e = 0; e < kAcc; ++e) Pb[mi][sj][e] = own[e];
+#else
+                // Lane holds keys 2e+pair; the B operand wants keys 0..15, so
+                // take the other parity from the partner lane (lane ^ 16).
+                #pragma unroll
+                for (int j = 0; j < kAcc / 2; ++j) {
+                    _Float16 two[2] = {own[2 * j], own[2 * j + 1]};
+                    int packed;
+                    __builtin_memcpy(&packed, two, 4);
+                    const int other = __shfl_xor(packed, 16);
+                    _Float16 oth[2];
+                    __builtin_memcpy(oth, &other, 4);
+                    #pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int e = 2 * j + h;
+                        Pb[mi][sj][2 * e]     = pair ? oth[h] : own[e];
+                        Pb[mi][sj][2 * e + 1] = pair ? own[e] : oth[h];
+                    }
+                }
+#endif
+            }
+            rsum += __shfl_xor(rsum, 16);
+            m_reg[mi] = m_new;
+            l_reg[mi] = corr[mi] * l_reg[mi] + rsum;
+        }
+
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int tj = 0; tj < D_TILES; ++tj)
+                #pragma unroll
+                for (int e = 0; e < kAcc; ++e)
+                    O_frag[mi][tj][e] *= corr[mi];
+
+        __syncthreads();   // single wave: V_lds visible
+        #pragma unroll
+        for (int tj = 0; tj < D_TILES; ++tj) {
+            #pragma unroll
+            for (int tk = 0; tk < S_TILES_J; ++tk) {
+                // A operand V^T: row d = tj*16+wmma_lane, K = keys.
+                const half16_t v_frag = HALF16_LOAD(
+                    &V_lds[(tj * 16 + wmma_lane) * VT_STR + tk * 16], pair);
+                #pragma unroll
+                for (int mi = 0; mi < M_TILES; ++mi)
+                    O_frag[mi][tj] = HIPDNN_WMMA_F32_16X16X16_F16(
+                        v_frag, Pb[mi][tk], O_frag[mi][tj]);
+            }
+        }
+        __syncthreads();   // WAR: V_lds reused by the next tile
+    }
+
+    const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
+    float sink_logit = 0.0f;
+    if (head_sink != nullptr)
+        sink_logit = static_cast<float>(
+            head_sink[num_heads > 0 ? (head_q % num_heads) : head_q]);
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        float l = l_reg[mi];
+        if (apply_sink && m_reg[mi] > -INFINITY)
+            l += exp2f(sink_logit * kLog2e - m_reg[mi]);
+        const float inv_l = 1.0f / fmaxf(l, 1e-6f);
+        const int q_pos = q_start + mi * 16 + wmma_lane;
+        if (q_pos < sq) {
+            _Float16* o_row = &O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D];
+            #pragma unroll
+            for (int tj = 0; tj < D_TILES; ++tj)
+                #pragma unroll
+                for (int e = 0; e < kAcc; ++e)
+                    o_row[tj * 16 + hipdnn_wmma_acc_row(pair, e)] =
+                        static_cast<_Float16>(O_frag[mi][tj][e] * inv_l);
+        }
+    }
+}
+
+// HIPDNN_EP_GQA_PREFILL_V6=1 routes d == 64 prefill from v5 to v6 (default
+// off). Launch configs (M_TILES, BKV) are shared with v5.
+static bool prefillV6Enabled() {
+    static const bool on = [] {
+        const char* e = getenv("HIPDNN_EP_GQA_PREFILL_V6");
+        return e && e[0] >= '1';
+    }();
+    return on;
+}
+
+// ---------------------------------------------------------------------
 // Host side: LDS sizing, autotune (M_TILES x BKV), launcher.
 // ---------------------------------------------------------------------
 static inline size_t prefillV5SmemBytes(int m_tiles, int bkv, int d) {
@@ -3428,6 +3716,30 @@ static inline void dispatchPrefillV5(
                 B, Hq, G, d, sq, skv, m_tiles, bkv);
     const int rows = m_tiles * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
+
+    if (d == 64 && G > 0 && Hq % G == 0 && prefillV6Enabled()) {
+        dim3 grid6(Hq * num_q_tiles * B);
+        const size_t smem6 = (size_t)d * (bkv + 8) * sizeof(_Float16);
+        #define LAUNCH_V6(MT_, BKV_, HW_)                                       \
+            gqa_flash_prefill_v6_kernel<MT_, BKV_, 64, HW_>                     \
+                <<<grid6, 32, smem6, stream>>>(                                 \
+                    Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len, \
+                    scale, head_sink, num_heads, smooth_softmax,                \
+                    local_window_size)
+        #define LAUNCH_V6_CFG(HW_)                                              \
+            do {                                                                \
+                if (m_tiles == 2 && bkv == 64) LAUNCH_V6(2, 64, HW_);           \
+                else if (m_tiles == 2)         LAUNCH_V6(2, 32, HW_);           \
+                else if (bkv == 64)            LAUNCH_V6(1, 64, HW_);           \
+                else                           LAUNCH_V6(1, 32, HW_);           \
+            } while (0)
+        if (local_window_size > 0) LAUNCH_V6_CFG(true);
+        else                       LAUNCH_V6_CFG(false);
+        #undef LAUNCH_V6_CFG
+        #undef LAUNCH_V6
+        return;
+    }
+
     dim3 grid(num_q_tiles * B, Hq);
     const size_t smem = prefillV5SmemBytes(m_tiles, bkv, d);
     const int ablate = g_v5_ablate;
