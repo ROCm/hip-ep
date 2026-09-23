@@ -2705,14 +2705,15 @@ if (resultTy.getShape() != indicesTy.getShape() ||
       return rewriter.notifyMatchFailure(
           op, "result type is not ONNX GatherElements");
 
-    int64_t k = dataTy.getDimSize(axis);
+int64_t k = dataTy.getDimSize(axis);
     int64_t w = indicesTy.getDimSize(axis);
-    if (k <= 0)
-      return rewriter.notifyMatchFailure(op, "gathered axis must be non-empty");
     int64_t n = 1;
     for (int64_t i = 0; i < rank; ++i)
       if (i != axis)
         n *= indicesTy.getDimSize(i);
+    if (k <= 0 || w <= 0 || n <= 0)
+      return rewriter.notifyMatchFailure(op,
+                                         "gathered dimensions must be non-empty");
 
     SmallVector<int32_t> axisToBack, axisFromBack;
     axisToBackPermutations(rank, axis, axisToBack, axisFromBack);
