@@ -3221,6 +3221,51 @@ void GemmFp16U4Impl(
     return;
     }
 
+    if (epi.mode == kMnbEpiScatterAdd) {
+        // Loads before stores: out may alias itself across rows as far as the
+        // compiler knows, so an interleaved read-modify-write serializes every
+        // element on a global round trip. That dominated small-M experts.
+#pragma unroll
+        for(int wm = 0; wm < WT_M; wm++)
+        {
+            const int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
+            size_t dst[8];
+            float  w[8];
+            bool   m_ok[8];
+#pragma unroll
+            for(int e = 0; e < 8; e++)
+            {
+                const int m = mbase + hipdnn_wmma_acc_row(sub, e);
+                m_ok[e] = !BOUNDS_CHECK || m < M;
+                dst[e] = m_ok[e]
+                    ? static_cast<size_t>(epi.out_rows[m]) * epi.ldo : 0;
+                w[e] = m_ok[e] ? static_cast<float>(epi.out_weights[m]) : 0.0f;
+            }
+#pragma unroll
+            for(int wn = 0; wn < WT_N; wn++)
+            {
+                const int n = col0 + (wcol * WT_N + wn) * WMMA_TILE + lane;
+                const bool n_ok = !BOUNDS_CHECK || n < N;
+                const _Float16 b = (epi.bias && n_ok) ? epi.bias[n] : (_Float16)0;
+                float old[8];
+#pragma unroll
+                for(int e = 0; e < 8; e++)
+                    old[e] = (n_ok && m_ok[e])
+                        ? static_cast<float>(epi.out[dst[e] + n]) : 0.0f;
+#pragma unroll
+                for(int e = 0; e < 8; e++)
+                {
+                    if (!(n_ok && m_ok[e])) continue;
+                    _Float16 v = (_Float16)acc[wm][wn][e];
+                    if (epi.bias) v = v + b;
+                    epi.out[dst[e] + n] = static_cast<_Float16>(
+                        old[e] + w[e] * static_cast<float>(v));
+                }
+            }
+        }
+        return;
+    }
+
 #pragma unroll
     for(int wm = 0; wm < WT_M; wm++)
     {
@@ -3250,14 +3295,6 @@ void GemmFp16U4Impl(
                             1.0f / (1.0f + expf(-epi.alpha * G));
                         epi.out[static_cast<size_t>(m) * epi.ldo + (n >> 1)] =
                             static_cast<_Float16>(G * sigmoid_val * (L + epi.beta));
-                    }
-                } else if (epi.mode == kMnbEpiScatterAdd) {
-                    if (ok) {
-                        _Float16* o = epi.out +
-                            static_cast<size_t>(epi.out_rows[m]) * epi.ldo + n;
-                        const float w = static_cast<float>(epi.out_weights[m]);
-                        *o = static_cast<_Float16>(static_cast<float>(*o) +
-                                                   w * static_cast<float>(v));
                     }
                 } else if (ok) {
                     C[m * ldc + n] = v;
