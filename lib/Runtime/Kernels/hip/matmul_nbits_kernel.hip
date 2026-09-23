@@ -6404,7 +6404,7 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
 // Full-weight int4 -> fp16 dequantization into a row-major [N, K] buffer, used
 // by the CDNA/wave64 prefill fast path (lib/Runtime/real/matmul_nbits.cpp),
 // which lacks WMMA and instead dequantizes B once (weights are constant) and
-// calls a hipBLASLt fp16 GEMM. scales/zeros are fp16 [N, num_groups_k]; when
+// calls an fp16 GEMM. scales/zeros are fp16 [N, num_groups_k]; when
 // zeros_fp16 is null the ONNX 4-bit default zero-point (8) is used.
 extern "C" void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
@@ -7218,7 +7218,7 @@ extern "C" int hip_matmul_nbits(
 
   // WMMA is an RDNA3/RDNA4 (wave32) intrinsic. On CDNA (wave64, e.g. MI350)
   // there is no WMMA, so the prefill fast path is unavailable here; int4
-  // M>=kWmmaMinM is instead served by the dequant-once + hipBLASLt path in
+  // M>=kWmmaMinM is instead served by the dequant-once + GEMM path in
   // lib/Runtime/real/matmul_nbits.cpp, and any residual case falls through to
   // the correct GEMV/naive fallback below.
   if (wmma_data_format && M >= kWmmaMinM && !hipdnn_device_is_wave64()) {

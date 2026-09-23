@@ -440,10 +440,6 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
     return false;
   };
 
-  // The runtime imports amdhip64 directly and routes every GEMM through the
-  // Composable Kernel / reference kernels in custom_kernels, so no vendor BLAS
-  // DLL is loaded here.
-
 #ifdef _WIN32
   const char *const kHipdnnBackend = "hipdnn_backend.dll";
 #else

@@ -245,7 +245,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             ${_ck_gemm_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;
+            # matmul_nbits_autotune_generated.h, gqa_autotune_generated.h and
+            # ck_gemm_autotune_generated.h;
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>

@@ -233,17 +233,12 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 $<$<NOT:$<CONFIG:Debug>>:-D_ITERATOR_DEBUG_LEVEL=0>
                 $<$<NOT:$<CONFIG:Debug>>:-O2>
                 # Header dependencies come from clang, not from a hand-written
-                # list. The manual DEPENDS this replaces was missing 7 directly
-                # included headers -- among them hipdnn_ep_errors.h (80+ TUs),
-                # ck_gemm_select.h and error_check_macros.h -- plus everything
-                # they pull in transitively, such as hip/env.h. Editing one of
-                # those left the stale .bc in place, so the build kept silently
-                # running the old code.
+                # list.
                 -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}.d
                 ${COMPILE_FLAGS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-        # Only two entries remain: the source itself (the depfile is absent on
+        # Only two entries: the source itself (the depfile is absent on
         # the very first build, so nothing else would trigger it) and the
         # flatbuffers header, which must be *generated* before clang can open
         # it -- a depfile can only name files a previous compile already read.

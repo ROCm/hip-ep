@@ -799,8 +799,8 @@ HIP_KERNEL_API int hip_rope_forward(
  * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
  * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
  * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
- * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
- * buffers) lives in the runtime wrapper (real/gqa.cpp).
+ * only (Llama / gpt-oss). The orchestration (GEMMs, workspace, temp buffers)
+ * lives in the runtime wrapper (real/gqa.cpp).
  */
 
 /* KV-cache element format for the fused/append/concat/decode GQA kernels. This
@@ -1038,7 +1038,7 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_out_biased(
  * device kernel). The production decode path uses hip_gqa_flash_decode above
  * for EVERY fp16 causal GQA/MHA decode (window + sink folded in, split count
  * autotuned). This one entry backs gqa.cpp::gqa_forward_hipblaslt -- the
- * decomposed hipBLASLt fallback -- only for the odd geometries v2 does not
+ * decomposed fallback -- only for the odd geometries v2 does not
  * template. It MUST be exported (HIP_KERNEL_API) so the EP resolves it out of
  * custom_kernels_<arch> at JIT link / native import (same as every other
  * launcher here).
@@ -1122,8 +1122,8 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
  * decode reads int8 directly (hip_gqa_flash_decode with kv_dtype=INT8). */
 
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
- * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
- * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
+ * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Unlike the
+ * decomposed pipeline it never materializes the fp32 score matrix
  * S[B,N,sq,skv] in DRAM (~3.4 GB for the Qwen VLM vision encoder). Keeps the
  * running (m, l, O) softmax state in registers; K streamed from global, V/P
  * staged in LDS; score/value GEMMs on the RDNA3.5 WMMA unit. Head dim d need
@@ -2233,7 +2233,7 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
 
 /* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
  * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once
- * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
+ * (weights are constant) then run an fp16 GEMM. scales_fp16 and
  * zeros_fp16 are fp16 [N, ceil(K/group_size)]; zeros_fp16 may be null (ONNX
  * 4-bit default zero-point 8). */
 HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
@@ -3184,9 +3184,8 @@ HIP_KERNEL_API int hip_conv_transpose(
  * Computes C[M,N] = A[M,K] * B[K,N] using RDNA 3+ WMMA instructions.
  * FP16 inputs, FP32 accumulation, FP16 output. All matrices row-major.
  *
- * Designed for M <= 512 where hipBLASLt's register-heavy tiling (256 VGPRs,
- * 4/16 occupancy) underperforms. This kernel targets ~30 VGPRs and 16/16
- * occupancy via 16x16 WMMA tiles.
+ * Designed for M <= 512. This kernel targets ~30 VGPRs and 16/16 occupancy
+ * via 16x16 WMMA tiles.
  *
  * Requires K and N to be multiples of 16.
  *
@@ -3205,34 +3204,37 @@ HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B
                        void* C, int M, int K, int N);
 
 /* =========================================================================
- * Composable Kernel WMMA GEMM
+ * Composable Kernel GEMM
  * =========================================================================
  *
- * D = alpha * op(A) op(B) (+ bias), computed by one of a fixed set of CK WMMA
- * instances. Arguments follow hipBLASLt's column-major convention: D is
- * [m, n] with leading dimension ldd, op(A) is [m, k], op(B) is [k, n], and
- * bias (nullable) is length m.
+ * D = alpha * op(A) op(B) (+ bias), computed by one of a fixed set of CK
+ * instances. Column-major ABI: D is [m, n] with leading dimension ldd, op(A)
+ * is [m, k], op(B) is [k, n]. transB must be 0.
+ *
+ * Each instance serves one combo of (abDtype -> dDtype, transA, bias):
+ *   fp16 -> fp16, NN or TN, with or without bias (WMMA)
+ *   fp16 -> fp32, TN, no bias                     (WMMA, Scale epilogue)
+ *   fp32 -> fp32, NN or TN, no bias               (DL, Scale epilogue)
+ * bias is a length-m vector added to every column of D (Add epilogue). alpha
+ * is applied only by the fp32-output combos; the fp16-output combos refuse
+ * alpha != 1.
  *
  * CK ships no heuristic, so the caller names the instance. Instance indices
  * are a property of one build of ck_gemm.hip and must not be persisted;
  * select by measurement and key any cache on the problem geometry.
  *
- * hip_ck_gemm_run returns non-zero when the named instance cannot serve the
- * shape -- an alignment, layout or dtype combination it was not instantiated
- * for. That is a routing answer, not a failure: the caller is expected to try
- * another instance or fall back to hip_ref_gemm_run.
+ * Returns 0 on success, non-zero when the named instance does not serve the
+ * problem (combo, alignment or size). That is a routing answer, not a
+ * failure: the caller tries another instance or falls back to
+ * hip_ref_gemm_run.
  *
  * Parameters:
  *   stream     - hipStream_t cast to void*
  *   instance   - index in [0, hip_ck_gemm_num_instances())
- *   bias       - nullable; length m, added to every column of D
+ *   bias       - nullable; see above
  *   abDtype    - element type of A and B (hip_dtype_t value cast to int)
  *   dDtype     - element type of D (hip_dtype_t value cast to int)
  *   strideA/B/D - batch strides; ignored when batch == 1
- *
- * Instantiated dtype pairs: fp16/fp16 and fp16/fp32, the only ones any caller
- * asks for; everything else belongs to hip_ref_gemm_run. alpha is honoured only
- * where the epilogue carries it, i.e. fp16/fp32 but not fp16/fp16.
  */
 HIP_KERNEL_API int hip_ck_gemm_num_instances(void);
 
@@ -3266,9 +3268,11 @@ HIP_KERNEL_API int hip_ck_gemm_lut_candidates(int64_t m, int64_t n, int64_t k,
  * as hip_ck_gemm_run, but no bias and no instance selection. Covers
  * fp16/fp16, fp16/fp32, bf16/bf16, bf16/fp32, fp32/fp32 and fp64/fp64.
  *
- * ck::ReferenceGemm assumes packed operands, so lda/ldb/ldd are unused and the
- * caller must pass packed buffers; strideA/B/D are batch strides and are
- * honoured. Returns non-zero only for a dtype pair it does not cover.
+ * ck::ReferenceGemm assumes packed operands, so lda/ldb/ldd must be the packed
+ * values (lda = transA ? k : m, ldb = transB ? n : k, ldd = m); strideA/B/D
+ * are batch strides and are honoured. Returns non-zero for non-packed leading
+ * dimensions, a dtype pair it does not cover, or a shape too large for its
+ * naive kernel.
  */
 HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
                        void* D, int64_t m, int64_t n, int64_t k, int64_t batch,

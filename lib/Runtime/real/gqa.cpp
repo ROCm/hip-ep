@@ -5,7 +5,7 @@
 
 //===----------------------------------------------------------------------===//
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
-// decomposed hipBLASLt fallback).
+// decomposed GEMM fallback).
 //
 // The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in
 // lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
@@ -76,7 +76,7 @@
 
 //===----------------------------------------------------------------------===//
 // Legacy fast-path decode kernel (folded into gqa_kernel.hip as a legacy_*
-// device kernel) backs the decomposed hipBLASLt fallback below. Its entry
+// device kernel) backs the decomposed GEMM fallback below. Its entry
 // hip_gqa_fused_decode is declared (and HIP_KERNEL_API exported) in
 // hip_custom_kernels.h, so the EP resolves it out of custom_kernels_<arch> at
 // JIT link / native import.
@@ -340,7 +340,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 }
 
 //===----------------------------------------------------------------------===//
-// Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
+// Fused-only forward: fp16, causal, GQA. No GEMM, no decomposed fallback.
 //===----------------------------------------------------------------------===//
 static int gqa_forward_fused(
     RuntimeState *state, hipStream_t stream,
@@ -817,7 +817,7 @@ static int gqa_forward_fused(
 // the optimized fused path does not implement.
 //===----------------------------------------------------------------------===//
 
-// Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
+// Env-var gate for the group-batched "no-expand" GQA pipeline.
 // When HIPDNN_EP_GQA_NO_EXPAND=1 (default) the Score and Value GEMMs read
 // K and V directly from the BNSD [B, G, skv, d] present cache using
 // strided-batched mode with batch = B*G and per-operand batch strides:
@@ -933,12 +933,11 @@ static constexpr int64_t kScoreChunkAlign = 128;
 // there.
 static constexpr int64_t kWindowChunkRows = kScoreChunkAlign;
 
-// Env-var gate to force decode through the decomposed hipBLASLt pipeline
+// Env-var gate to force decode through the decomposed pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
 // A/B against decomposed at sq==1 -- useful for measuring whether the custom
-// fused kernel is actually faster than hipBLASLt's auto-tuned GEMMs at decode
-// shapes.
+// fused kernel is actually faster than the decomposed GEMMs at decode shapes.
 static bool gqa_fused_decode_disabled() {
   static const bool disabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_FUSED_DECODE");
@@ -948,7 +947,7 @@ static bool gqa_fused_decode_disabled() {
 }
 
 // Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
-// exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
+// exceeds this value, dispatch routes through the decomposed pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
 // uses a serial-over-time scheme with cross-wave reductions on the critical
 // path of every iteration, so it loses to the GEMM-based decomposed path on
@@ -1144,7 +1143,7 @@ static int gqaRunGemm(GqaGemmCacheEntry *st, hipStream_t stream, const void *A,
 }
 
 //===----------------------------------------------------------------------===//
-// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
+// 12-step decomposed GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
 //===----------------------------------------------------------------------===//
 static int gqa_forward_hipblaslt(
     RuntimeState *state, hipStream_t stream, const void *query, const void *key,
@@ -1240,12 +1239,12 @@ static int gqa_forward_hipblaslt(
   // gpt-oss (elem_size==2).
   // The fp32 GQA path (Whisper decoder self-attn, elem_size==4) must NOT reach
   // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
-  // produces garbage. The decomposed hipBLASLt pipeline below IS fp32-capable,
+  // produces garbage. The decomposed pipeline below IS fp32-capable,
   // so route fp32 decode there. This is the decode-side analogue of the
   // no_causal exemption (prefill sq>1 fp32 already used decomposed).
   bool fused_fp16 = (element_size_bytes == 2);
   // no_causal (Whisper encoder / cross-attn) always takes the decomposed
-  // hipBLASLt path. hip_gqa_fused_decode is decode-only (sq==1) and reads
+  // path. hip_gqa_fused_decode is decode-only (sq==1) and reads
   // seqlens_k with the +1 PAST-token convention, plus assumes the KV cache
   // is appended in BSHD->BNSD layout from `sq` new tokens. Neither holds for
   // bidirectional no-past attention where `key` is the full Skv-length KV
@@ -1269,9 +1268,8 @@ static int gqa_forward_hipblaslt(
   // kernel so they can read the actual sequence length on-device, eliminating
   // the D2H copy + hipStreamSynchronize stall entirely for the decode hot path.
   //
-  // All prefill (sq > 1) goes through the decomposed hipBLASLt path below where
-  // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
-  // (sliding window, smooth softmax, head sink) are supported.
+  // All prefill (sq > 1) goes through the decomposed path below, where all ORT
+  // GQA features (sliding window, smooth softmax, head sink) are supported.
   //===--------------------------------------------------------------------===//
   if (fused_predicate) {
     const void *qSrc = query;
@@ -1436,12 +1434,12 @@ static int gqa_forward_hipblaslt(
   }
 
   //===--------------------------------------------------------------------===//
-  // Decomposed hipBLASLt pipeline (all prefill sq > 1, unsupported d, or
+  // Decomposed pipeline (all prefill sq > 1, unsupported d, or
   // features requiring sliding window / smooth softmax / head sink / fp32)
   //===--------------------------------------------------------------------===//
 
-  // D2H readback of seqlens_k is required here because hipBLASLt descriptor
-  // creation and workspace sizing are host-side APIs that need total_seq. For
+  // D2H readback of seqlens_k is required here because the workspace layout
+  // and the GEMM extents are computed on the host from total_seq. For
   // B == 1 the value was already read (and cached when
   // HIPDNN_EP_GQA_CACHE_SEQLENS=1) by the pre-dispatch helper above; we just
   // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
@@ -1539,7 +1537,7 @@ static int gqa_forward_hipblaslt(
   bool packed_qkv = (key == nullptr && value == nullptr);
 
   //===--------------------------------------------------------------------===//
-  // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths).
+  // Unified GQA pipeline (shared by expand and no-expand paths).
   //
   // Two orthogonal knobs control the layout choices for the two GEMMs:
   //
@@ -1765,7 +1763,7 @@ static int gqa_forward_hipblaslt(
   //
   // Mathematically equivalent is not bitwise identical, though, and it is worth
   // being precise about which one this is. Chunking changes the score GEMM's n
-  // from sq to sq_chunk, so hipBLASLt's heuristic can select a different kernel
+  // from sq to sq_chunk, so CK instance selection can pick a different kernel
   // and a different tile accumulates in a different order. Measured on
   // gemma-4-12b at 2283 tokens: the same build run twice is byte-identical, and
   // chunked against unchunked agrees for ~45 greedy tokens before a near-tie
@@ -1916,10 +1914,10 @@ static int gqa_forward_hipblaslt(
   // only while the chunk reads the whole op-level range; once it reads a
   // sub-range
   // the dense default is short and every head after the first is mis-strided,
-  // silently, with no shape for hipBLASLt to reject. Keeping the 0 in the
-  // un-narrowed case is deliberate rather than tidy: it leaves the cache key
-  // bit-identical to what it was, so a shape that narrows nothing reuses
-  // exactly the descriptor it used before.
+  // silently, with no invalid shape for the GEMM to reject. Keeping the 0 in
+  // the un-narrowed case is deliberate rather than tidy: it leaves the cache
+  // key bit-identical to what it was, so a shape that narrows nothing reuses
+  // exactly the cache entry it used before.
   auto makeKeys = [&](int64_t n_rows, int64_t kv_ext, GqaGemmKey *score,
                       GqaGemmKey *value) {
     const int64_t strideA = (kv_ext != kv_span) ? kv_span * d : 0;
@@ -2086,13 +2084,12 @@ static int gqa_forward_hipblaslt(
     max_chunk_score_elems = std::max(max_chunk_score_elems, cp.c * cp.kv_ext);
 
   // ---- Workspace layout ----
-  // All temp buffers are packed contiguously into the shared workspace,
-  // followed by the GEMM workspace region. This eliminates per-call
-  // hipMalloc/hipFree -- after the first inference the workspace is already
-  // large enough and reuse is zero-cost.
+  // All temp buffers are packed contiguously into the shared workspace. This
+  // eliminates per-call hipMalloc/hipFree -- after the first inference the
+  // workspace is already large enough and reuse is zero-cost.
   //
   // Region order: Qtrans?, Kexp?, Vexp?, S_f32, S_fp16, O?, Qroped?, Kroped?,
-  // Qsplit?, Ksplit?, Vsplit?, then the GEMM workspace. Optional (?) regions
+  // Qsplit?, Ksplit?, Vsplit?. Optional (?) regions
   // are omitted when their feature is inactive.
   //
   // Qtrans / O are only allocated when need_transpose is true.
@@ -2110,8 +2107,8 @@ static int gqa_forward_hipblaslt(
   size_t Vexp_bytes = Kexp_bytes;
   // Both score buffers are sized to the widest chunk, not to
   // sq_chunk * total_seq: they hold exactly what the Score GEMM writes on the
-  // heaviest iteration. These offsets chain into off_S_fp16, off_O, temp_end
-  // and the GEMM workspace, so the same extent has to appear in both or the
+  // heaviest iteration. These offsets chain into off_S_fp16, off_O and
+  // temp_end, so the same extent has to appear in both or the
   // region boundaries disagree with the GEMM extents and it is a silent heap
   // overwrite rather than a crash. It must be the max over chunks and not the
   // current chunk's own extent for the same reason: the offsets are fixed for
@@ -2157,13 +2154,7 @@ static int gqa_forward_hipblaslt(
 
   int result = 0;
 
-  // Single workspace allocation: the reference GEMM needs no external
-  // workspace, so this covers only the temp buffers.
-  {
-    size_t gemm_ws = 0;
-    size_t total_needed = temp_end + gemm_ws;
-    HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
-  }
+  HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, temp_end));
 
   {
     char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
@@ -2487,7 +2478,7 @@ static int gqa_forward_hipblaslt(
       score_elems += cp.c * cp.kv_ext;
     }
     RUNTIME_DEBUG_LOG(
-        "[REAL] GQA hipBLASLt: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
+        "[REAL] GQA decomposed: B=%lld sq=%lld sq_chunk=%lld total_seq=%lld "
         "kv_lo=%lld kv_span=%lld chunks=%zu kv_ext=[%lld,%lld] "
         "score_elems=%lld/%lld H=%lld G=%lld d=%lld no_expand=%d "
         "transpose=%d kv_inplace=%d past_len=%lld past_buf_seq=%lld "
@@ -2817,7 +2808,7 @@ int wrap_group_query_attention(
   // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
   // geometry; prefill v3 supports sinks at head_dim == 64 and windows at
   // head_dim == 64 or 128. Everything else uses the feature-complete
-  // decomposed hipBLASLt fallback.
+  // decomposed fallback.
   //===------------------------------------------------------------------===//
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
@@ -2847,9 +2838,8 @@ int wrap_group_query_attention(
       is_decode || local_window_size <= 0 || head_dim == 64 || head_dim == 128;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
-  // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
-  // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
-  // feature-complete and correct on both wave sizes. RDNA is unaffected.
+  // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed pipeline
+  // below. RDNA is unaffected.
   const bool fused_geometry = no_causal == 0 && window_ok && sink_ok &&
                               head_dim_ok && decode_geometry_ok &&
                               attention_bias == nullptr &&

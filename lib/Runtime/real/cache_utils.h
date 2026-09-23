@@ -9,9 +9,6 @@
 #include <cstdint>
 #include <functional>
 
-// Shared constants for runtime operator caches.
-inline constexpr size_t kMaxWorkspaceBytes = 256ULL << 20; // 256 MB
-
 // Boost-style hash combine: mixes `value` into `seed` using the golden-ratio
 // constant. Used by all descriptor cache key hash structs.
 inline void hash_combine(size_t &seed, size_t value) {
