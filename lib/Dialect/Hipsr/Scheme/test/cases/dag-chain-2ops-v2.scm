@@ -80,12 +80,12 @@
                     (= (mlir-operation-num-results (vector-ref all-operations 1)) 1))
 
                ;; Bind: %a = argument operand 0 (from operands-ref for conversion pattern)
-               ;; Check bounds before accessing
+               ;; Check bounds before accessing, then check for nullptr
                (begin
                  (if (< 0 (value-array-ref-size operands-ref))
-                     (begin
-                       (set! %a (value-array-ref-at operands-ref 0))
-                       #t)
+                     (let ([val (value-array-ref-at operands-ref 0)])
+                       (and (not (zero? val))
+                            (begin (set! %a val) #t)))
                      #f))
 
                ;; Navigate: %a -> defining op (op1) and store in all-operations[0]
@@ -104,12 +104,12 @@
                  #t)
 
                ;; Bind: %y = argument operand 1 (free variable from operands-ref)
-               ;; Check bounds before accessing
+               ;; Check bounds before accessing, then check for nullptr
                (begin
                  (if (< 1 (value-array-ref-size operands-ref))
-                     (begin
-                       (set! %y (value-array-ref-at operands-ref 1))
-                       #t)
+                     (let ([val (value-array-ref-at operands-ref 1)])
+                       (and (not (zero? val))
+                            (begin (set! %y val) #t)))
                      #f)))
 
              ;; Rewrite: TODO - not implemented yet

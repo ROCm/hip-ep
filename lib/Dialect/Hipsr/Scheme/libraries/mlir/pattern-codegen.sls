@@ -231,9 +231,12 @@
            #`(begin
                ;; Check bounds: operand-idx < operands-ref size
                (if (< #,operand-idx (value-array-ref-size operands-ref))
-                   (begin
-                     (set! #,var (value-array-ref-at operands-ref #,operand-idx))
-                     #t)
+                   (let ([val (value-array-ref-at operands-ref #,operand-idx)])
+                     ;; Check for nullptr (uptr is 0)
+                     (and (not (zero? val))
+                          (begin
+                            (set! #,var val)
+                            #t)))
                    #f)))]
 
         [(:check-eq)
