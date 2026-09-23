@@ -348,8 +348,6 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
         S<1, 1, 4, 1>, S<4, 1, 16, 1>, S<0, 3, 1, 2>, S<0, 3, 1, 2>, S<1, 1, 4, 1>,         \
         S<0, 3, 1, 2>, S<1, 1, 4, 1>, S<0, 1, 2, 3, 4, 5>, 5
 
-// ComputeTypeA/B are the trailing pair. They default to ADataType/BDataType,
-// but naming them keeps the f32-output combos from instantiating GetWmma<float>.
 #define MAKE_OP(ABDATA, ALAY, BLAY, DSLAY, DSDATA, EDATA, CDEOP, EV, TILE)                \
     ck::tensor_operation::device::DeviceBatchedGemmMultiD_Wmma_CShuffleV3<ALAY,           \
                                                                          BLAY,           \
@@ -365,9 +363,7 @@ static constexpr auto V3        = ck::BlockGemmPipelineVersion::v3;
                                                                          PassThrough,    \
                                                                          CDEOP,          \
                                                                          GemmMNKPadding, \
-                                                                         TILE(EV),       \
-                                                                         ABDATA,         \
-                                                                         ABDATA>
+                                                                         TILE(EV)>
 
 // Variadic because the DL tiles above are comma lists, which a single-parameter
 // macro would see as too many arguments.
