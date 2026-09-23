@@ -19,6 +19,10 @@ if(COMMAND hipdnn_ep_apply_binary_compliance)
     DESCRIPTION "AMD GPU Execution Provider for ONNX Runtime")
 endif()
 
+# Exclusive export list: ORT's plugin EP loader only resolves
+# CreateEpFactories and ReleaseEpFactory. Do not add MorphiZen C++ / protobuf
+# symbols here -- they are linked internally (and would otherwise leak from
+# __declspec(dllexport) / default ELF visibility).
 if(MSVC)
   if(morphizen_ENABLE_ORT_BRIDGE)
     target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_morphizen_ep_with_ort_bridge.def)
@@ -27,18 +31,14 @@ if(MSVC)
   endif()
 endif(MSVC)
 
-
 # NOTE: do not use $<LINK_LIBRARY:WHOLE_ARCHIVE, morphizen-core-static
 #
 # WHY, it seems that WHOLE_ARCHIVE can be only marked once. It means
 # if we add the mark here, then, all targets dependes on
 # morphizen-core-static directly or indirectly, must be marked with
-# WHOLE_ARCHIVE. In stead, we manually maintain
-# onnxruntime_morphizen_ep.def file. tools/parse_cl_link_error.py is
-# used to parse the link error and update onnxruntime_morphizen_ep.def
-# automatically, see tools/parse_cl_link_error.py for more details.
-#
-# morphizen-graph and morphizen-pattern are already linked transitively
+# WHOLE_ARCHIVE. The .def / version script lists the two ORT entry points;
+# ort-bridge is WHOLE_ARCHIVE-linked separately so CreateEpFactories is not
+# GC'd. morphizen-graph and morphizen-pattern are already linked transitively
 # through morphizen-core-static, so we don't link them directly here
 # to avoid "link item occurred with different features" errors.
 target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
@@ -59,9 +59,14 @@ if(MSVC)
 else(MSVC)
   target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "-fPIC")
 endif(MSVC)
+# MORPHIZEN_USE_DLL=0 keeps MORPHIZEN_DLL_SPEC empty, so no MorphiZen API is
+# __declspec(dllexport)ed out of this DLL; ORT never links hipgpu.lib and only
+# resolves the two plugin symbols listed in the .def / version script.
+# MORPHIZEN_EXPORT_DLL=1 still marks these sources as internal code for
+# morphizen/_sanity_check.hpp. Same pairing as the static libs.
 target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE
-    "-DMORPHIZEN_USE_DLL=1"
+    "-DMORPHIZEN_USE_DLL=0"
     "-DMORPHIZEN_EXPORT_DLL=1"
     "-DHAVE_VERSION_INFO_CONFIG=1"  # Enable generated version header
   PUBLIC
@@ -70,10 +75,11 @@ target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
 target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 
-# Localize the statically-linked LLVM symbols (version script) so ROCm's
-# libamd_comgr.so cannot bind its own @LLVM_22.0 llvm:: references to our
-# ABI-incompatible copy and segfault its in-process device-code compile.
-# Windows controls the same surface via onnxruntime_morphizen_ep.def.
+# Export only CreateEpFactories / ReleaseEpFactory (version script). Also
+# localizes the statically-linked LLVM symbols so ROCm's libamd_comgr.so
+# cannot bind its own @LLVM_22.0 llvm:: references to our ABI-incompatible
+# copy and segfault its in-process device-code compile. Windows uses the
+# matching .def instead.
 if(NOT MSVC)
     target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE
         "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_morphizen_ep.exports")
