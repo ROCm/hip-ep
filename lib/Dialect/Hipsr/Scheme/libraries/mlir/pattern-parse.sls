@@ -74,17 +74,22 @@
   (define (parse-to-ast whole-stx)
     (syntax-case whole-stx ()
       [(_ . rest)
-       (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f))]))
+       (parse-rest #'rest (make-ast-pattern-expand #f #f #f #f #f '() #f #f '() '() #f #f #f #f #f))]))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rest - Parse function name, debug flags, then dispatch to :match
   ;;-----------------------------------------------------------------------
   (define (parse-rest rest ast)
-    (syntax-case rest (:debug-parse :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
+    (syntax-case rest (:debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
       ;; Debug flags
       [(:debug-parse . more)
        (begin
          (ast-pattern-expand-debug-parse?-set! ast #t)
+         (parse-rest #'more ast))]
+
+      [(:debug-validate . more)
+       (begin
+         (ast-pattern-expand-debug-validate?-set! ast #t)
          (parse-rest #'more ast))]
 
       [(:debug-analyze . more)

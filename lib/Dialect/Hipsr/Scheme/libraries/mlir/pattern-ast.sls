@@ -30,6 +30,7 @@
           ast-pattern-expand-rewrite ast-pattern-expand-rewrite-set!
           ast-pattern-expand-where ast-pattern-expand-where-set!
           ast-pattern-expand-debug-parse? ast-pattern-expand-debug-parse?-set!
+          ast-pattern-expand-debug-validate? ast-pattern-expand-debug-validate?-set!
           ast-pattern-expand-debug-analyze? ast-pattern-expand-debug-analyze?-set!
           ast-pattern-expand-debug-codegen? ast-pattern-expand-debug-codegen?-set!
           ast-pattern-expand-debug-matching? ast-pattern-expand-debug-matching?-set!
@@ -154,6 +155,9 @@
 
       (mutable debug-parse?)     ;; Phase 1 (parse): boolean - :debug-parse flag
                                  ;; When true, codegen outputs parsed AST as datum
+
+      (mutable debug-validate?)  ;; Phase 1 (parse): boolean - :debug-validate flag
+                                 ;; When true, codegen outputs validated AST as datum
 
       (mutable debug-analyze?)   ;; Phase 1 (parse): boolean - :debug-analyze flag
                                  ;; When true, codegen outputs match-actions as datum
