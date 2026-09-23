@@ -417,33 +417,14 @@ bool isSharedLibraryFile(llvm::StringRef path) {
 }
 
 // Install symbol search generators on the JIT's main JITDylib, in priority
-// order: per-OS ROCm libs, the per-arch kernel DLL/SO, plugin-contributed
-// libraries, then the process image.
+// order: the per-arch kernel DLL/SO, plugin-contributed libraries, then the
+// process image.
 // The kernel DLL is added before the process generator so its hip_* launchers
 // win over any look-alike symbol in another loaded module. Returns false only
 // when a mandatory load fails.
 bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   auto &jd = jit.getMainJITDylib();
   const char global_prefix = jit.getDataLayout().getGlobalPrefix();
-
-  std::string last_load_error;
-  auto loadFirst = [&](llvm::ArrayRef<const char *> names) {
-    for (const char *lib : names) {
-      auto gen =
-          llvm::orc::DynamicLibrarySearchGenerator::Load(lib, global_prefix);
-      if (!gen) {
-        last_load_error = llvm::toString(gen.takeError());
-        continue;
-      }
-      jd.addGenerator(std::move(*gen));
-      return true;
-    }
-    return false;
-  };
-
-  // The runtime imports amdhip64 directly and routes every GEMM through the
-  // Composable Kernel / reference kernels in custom_kernels, so no vendor BLAS
-  // DLL is loaded here.
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
   {

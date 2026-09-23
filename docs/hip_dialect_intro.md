@@ -271,7 +271,6 @@ examples/
 
 scripts/
   env.bat                          Shared environment config (edit paths here)
-  run_full_pipeline_hipblaslt.bat        Matmul: hip-compiler + cl.exe driver
   run_full_pipeline_miopen_add.bat       Add: hip-compiler + cl.exe driver
   run_full_pipeline_miopen_mul.bat       Mul: hip-compiler + cl.exe driver
   run_full_pipeline_miopen_rms_norm.bat  RMS Norm: hip-compiler + cl.exe driver

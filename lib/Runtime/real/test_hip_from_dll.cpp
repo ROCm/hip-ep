@@ -62,14 +62,12 @@ __declspec(dllexport)
   }
 
   fprintf(stderr, "[Model DLL Manual] Device: %s\n", prop.name);
-  fprintf(stderr, "[Model DLL Manual] gcnArchName (BEFORE hipBLASLt): '%s'\n",
-          prop.gcnArchName);
+  fprintf(stderr, "[Model DLL Manual] gcnArchName: '%s'\n", prop.gcnArchName);
   fprintf(stderr, "[Model DLL Manual] gcnArchName length: %zu\n",
           strlen(prop.gcnArchName));
 
   if (prop.gcnArchName[0] == '\0') {
-    fprintf(stderr, "[Model DLL Manual] WARNING: gcnArchName is EMPTY before "
-                    "hipBLASLt init\n");
+    fprintf(stderr, "[Model DLL Manual] WARNING: gcnArchName is EMPTY\n");
     return 1;
   }
 

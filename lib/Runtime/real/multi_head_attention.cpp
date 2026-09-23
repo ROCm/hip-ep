@@ -36,7 +36,7 @@
 //   value : [B, S_kv, N * H]   fp16
 //   output: [B, S_q,  N * H]   fp16
 //
-// Algorithm (decomposed hipBLASLt pipeline, same shape as GQA's decomposed
+// Algorithm (decomposed GEMM pipeline, same shape as GQA's decomposed
 // path but simpler because N_q == N_kv so no KV-expansion step is needed):
 //
 //   1. Q transpose [B, S_q,  N, H] -> [B, N, S_q,  H]   (skipped when S_q==1)
@@ -72,7 +72,7 @@
 namespace {
 
 //===----------------------------------------------------------------------===//
-// MHA hipBLASLt GEMM descriptor cache (per RuntimeState session)
+// MHA GEMM instance cache (per RuntimeState session)
 //===----------------------------------------------------------------------===//
 
 struct MhaGemmKey {
@@ -495,9 +495,8 @@ extern "C" int wrap_multi_head_attention(
   const size_t sz_s_f32 = align_up(B * N * Sq * Skv * 4);
   const size_t sz_p_f16 = align_up(B * N * Sq * Skv * 2);
   const size_t sz_o_bnsh = need_o_trans ? align_up(B * N * Sq * H * 2) : 0;
-  const size_t sz_gemm_ws = 0;
-  const size_t total_ws = sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 +
-                          sz_p_f16 + sz_o_bnsh + sz_gemm_ws;
+  const size_t total_ws =
+      sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 + sz_p_f16 + sz_o_bnsh;
 
   if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
     fprintf(stderr,
@@ -549,10 +548,10 @@ extern "C" int wrap_multi_head_attention(
 
   RUNTIME_DEBUG_LOG(
       "[multi_head_attention] workspace=%zu bytes (q=%zu k=%zu v=%zu "
-      "s=%zu p=%zu o=%zu gemm=%zu); need_q_trans=%d need_kv_trans=%d "
+      "s=%zu p=%zu o=%zu); need_q_trans=%d need_kv_trans=%d "
       "need_o_trans=%d\n",
       total_ws, sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
-      sz_gemm_ws, (int)need_q_trans, (int)need_kv_trans, (int)need_o_trans);
+      (int)need_q_trans, (int)need_kv_trans, (int)need_o_trans);
 
   int result = 0;
 
@@ -576,7 +575,7 @@ extern "C" int wrap_multi_head_attention(
   }
 
   // ---- Step 4: Score GEMM: S = Q @ K^T * scale, fp16->fp32 ---------------
-  // Following GQA's score-GEMM convention (hipBLASLt is column-major):
+  // Following GQA's column-major score-GEMM convention:
   //   A = K, transA=true; B = Q, transA=false
   //   m = Skv, n = Sq, k = H
   //   per-batch (b*N + n) strides: A=Skv*H, B=Sq*H, C=Skv*Sq
@@ -631,7 +630,7 @@ extern "C" int wrap_multi_head_attention(
       /*use_smooth_softmax=*/0));
 
   // ---- Step 7: Value GEMM: O = P @ V, fp16 ------------------------------
-  // hipBLASLt column-major: A = V (transA=false), B = P (transA=false)
+  // Column-major: A = V (transA=false), B = P (transA=false)
   //   m = H, n = Sq, k = Skv
   //   per-batch (b*N + n) strides: A=Skv*H, B=Sq*Skv, C=Sq*H
   // Produces fp16 O of shape [B*N, Sq, H] (BNSH layout).
