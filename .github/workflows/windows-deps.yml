@@ -30,8 +30,11 @@ env:
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  OGA_VERSION: "0.16.0"
+  OGA_PR_PATCHES: "2286"
+  # microsoft/onnxruntime-extensions PR numbers applied on top of the commit
+  # OGA's cmake/deps.txt pins.
+  EXTENSIONS_PR_PATCHES: "1091"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -483,7 +486,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ext${{ env.EXTENSIONS_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -561,25 +564,56 @@ jobs:
             Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           }
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
-          git config user.email "ci@rocm.amd.com"
-          git config user.name "ROCm CI"
+          # pull/<n>.diff is the PR's net diff against its merge base. Replaying
+          # pull/<n>.patch with `git am` drops the conflict resolution of any
+          # "merge main" commit in the PR.
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
-            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
-            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
+            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.diff"
+            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.diff"
             Write-Host "Fetching $url"
             Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
             Write-Host "Applying PR #$pr"
-            git am --3way --whitespace=nowarn $tmp
+            git apply --whitespace=nowarn $tmp
             if ($LASTEXITCODE -ne 0) {
-              git am --abort
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }
           }
+
+      - name: Apply onnxruntime-extensions PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          EXT_PRS: ${{ env.EXTENSIONS_PR_PATCHES }}
+        run: |
+          $prs = $env:EXT_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "EXTENSIONS_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          $dep = Select-String -Path "${{ github.workspace }}\source-oga\cmake\deps.txt" -Pattern '^onnxruntime_extensions;' |
+            Select-Object -ExpandProperty Line
+          $null, $repo, $sha = $dep -split ';'
+          $src = "${{ runner.workspace }}\source-extensions"
+          git init -q $src
+          git -C $src fetch -q --depth 1 $repo $sha
+          git -C $src checkout -q FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "failed to fetch onnxruntime-extensions $sha" }
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime-extensions/pull/$pr.diff"
+            $tmp = Join-Path $env:RUNNER_TEMP "ext-pr-$pr.diff"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr on onnxruntime-extensions $sha"
+            # OGA does not build the extensions tests, and the PR's test files
+            # conflict with the commits the pinned SHA has on top of its base.
+            git -C $src apply --whitespace=nowarn --exclude='test/*' $tmp
+            if ($LASTEXITCODE -ne 0) {
+              throw "onnxruntime-extensions PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
+          "OGA_EXTRA_DEFINES=FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS=$($src.Replace('\', '/'))" >> $env:GITHUB_ENV
 
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -602,13 +636,15 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --use_dml \
+            --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ${OGA_EXTRA_DEFINES:-}
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
