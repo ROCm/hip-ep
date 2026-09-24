@@ -179,8 +179,6 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   let dependentDialects = [
-    "mlir::arith::ArithDialect",
-    "mlir::tensor::TensorDialect",
     "mlir::ub::UBDialect"
   ];
 }

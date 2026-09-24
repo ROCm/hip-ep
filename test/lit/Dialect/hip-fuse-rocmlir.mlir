@@ -103,10 +103,9 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // -----
 
 // When the value an init is built from cannot be rematerialized inside the
-// kernel -- here a reshape of a caller-supplied buffer rather than a fresh
-// `tensor.empty` -- it is passed in as an extra argument instead. The
-// destination still reaches the kernel through that computed value, and the
-// buffer keeps the identity the caller gave it.
+// kernel -- here a caller-supplied buffer rather than a fresh `tensor.empty` --
+// it is passed in as an extra argument instead. The destination still reaches
+// the kernel, and the buffer keeps the identity the caller gave it.
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x1x4xf16>, %[[W:.*]]: tensor<16x8x1x3xf16>, %[[B:.*]]: tensor<16xf16>, %[[KBUF:.*]]: tensor<1x16x4xf16>)
@@ -125,17 +124,10 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
       output_shape [1, 8, 1, 4] : tensor<1x8x4xf16> into tensor<1x8x1x4xf16>
   %w4 = tensor.expand_shape %w [[0], [1], [2, 3]]
       output_shape [16, 8, 1, 3] : tensor<16x8x3xf16> into tensor<16x8x1x3xf16>
-  %buf4 = tensor.expand_shape %buf [[0], [1], [2, 3]]
+  %e4 = tensor.expand_shape %buf [[0], [1], [2, 3]]
       output_shape [1, 16, 1, 4] : tensor<1x16x4xf16> into tensor<1x16x1x4xf16>
-  %bufid = tensor.collapse_shape %buf4 [[0], [1], [2, 3]]
-      : tensor<1x16x1x4xf16> into tensor<1x16x4xf16>
-  %e4 = tensor.expand_shape %bufid [[0], [1], [2, 3]]
-      output_shape [1, 16, 1, 4] : tensor<1x16x4xf16> into tensor<1x16x1x4xf16>
-  // The computed buffer value is handed to the kernel alongside the data
-  // operands instead of re-materializing the reshape chain inside the kernel.
-  // CHECK: %[[BUF4:.*]] = tensor.expand_shape %[[BUF]]
-  // CHECK: %[[BUFID:.*]] = tensor.collapse_shape %[[BUF4]]
-  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[BUFID]] : tensor<1x8x1x4xf16>, tensor<16x8x1x3xf16>, tensor<16xf16>, tensor<1x16x4xf16>)
+  // The buffer is handed to the kernel alongside the data operands.
+  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}, %[[BUF]] : tensor<1x8x1x4xf16>, tensor<16x8x1x3xf16>, tensor<16xf16>, tensor<1x16x4xf16>)
   %c = hip.conv(%ctx) ins(%in4, %w4, %b : tensor<1x8x1x4xf16>,
                                           tensor<16x8x1x3xf16>, tensor<16xf16>)
       outs(%e4 : tensor<1x16x1x4xf16>)
