@@ -10,6 +10,7 @@
 
 #include "./morphizen-hip-gpu-allocator.hpp"
 
+#include "./morphizen-hip-device-select.hpp"
 #include "./ort-api-version.hpp"
 #include <glog/logging.h>
 #include <hip/hip_runtime.h>
@@ -44,13 +45,22 @@ inline OrtStatus *MakeHipStatus(const OrtApi &api, hipError_t err,
 // a single allocator call. We can't rely on the process-wide hipSetDevice
 // state because ORT may interleave calls into allocators bound to different
 // GPUs from the same thread (e.g. a session that uses MorphiZen on GPU 0
-// and another EP on GPU 1). The device id is read from the OrtMemoryInfo
-// that was passed to HipGpuAllocator's constructor; -1 means "leave the
-// current HIP device alone" (the OrtMemoryInfo didn't carry a device id).
+// and another EP on GPU 1). The ordinal comes from
+// HipGpuAllocator::HipDevice(); -1 means "leave the current HIP device alone".
 struct ScopedDevice {
   explicit ScopedDevice(int device_id) {
-    if (device_id >= 0) {
-      (void)hipSetDevice(device_id);
+    if (device_id < 0) {
+      return;
+    }
+    const hipError_t err = hipSetDevice(device_id);
+    if (err != hipSuccess) {
+      // A failed call stays in HIP's per-thread last-error slot until read.
+      // Graph outputs are allocated mid-inference on the thread that launches
+      // the kernels, so a leftover error would be reported by the next
+      // kernel's post-launch hipGetLastError() as its own launch failure.
+      (void)hipGetLastError();
+      LOG_FIRST_N(WARNING, 1) << "[MorphiZen HIP] hipSetDevice(" << device_id
+                              << ") failed: " << hipGetErrorString(err);
     }
   }
 };
@@ -92,19 +102,62 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
   }
 }
 
+bool IsOwnMemoryInfo(const OrtMemoryInfo *memory_info) noexcept {
+  if (memory_info == nullptr) {
+    return false;
+  }
+  try {
+    return IsOwnMemoryInfoName(
+        Ort::ConstMemoryInfo(memory_info).GetAllocatorName().c_str());
+  } catch (const Ort::Exception &) {
+    return false;
+  }
+}
+
 } // namespace
 
 // =============== HipGpuAllocator ===============
 
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
-    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
+    : memory_info_{memory_info},
+      requested_device_id_{TryGetDeviceId(memory_info)},
+      own_memory_info_{IsOwnMemoryInfo(memory_info)} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
   Info = InfoImpl;
   Reserve = ReserveImpl;
   GetStats = nullptr;
+}
+
+int HipGpuAllocator::HipDevice() {
+  std::call_once(hip_device_once_, [this] {
+    int count = 0;
+    const hipError_t err = hipGetDeviceCount(&count);
+    if (err != hipSuccess) {
+      (void)hipGetLastError();
+      count = 0;
+    }
+    hip_device_ =
+        SelectAllocatorHipDevice(requested_device_id_, own_memory_info_, count);
+    if (count == 0) {
+      const std::string filters = DescribeHipDeviceFilterEnv();
+      LOG(ERROR) << "[MorphiZen HIP] the HIP runtime reports no devices ("
+                 << (err != hipSuccess ? hipGetErrorString(err)
+                                       : "hipGetDeviceCount returned 0")
+                 << ")"
+                 << (filters.empty()
+                         ? std::string()
+                         : "; HIP device filtering is set: " + filters);
+    } else if (hip_device_ != requested_device_id_) {
+      LOG(INFO) << "[MorphiZen HIP] memory info device id "
+                << requested_device_id_
+                << (own_memory_info_ ? "" : " (from a parent EP)")
+                << " -> HIP device " << hip_device_ << " of " << count;
+    }
+  });
+  return hip_device_;
 }
 
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
@@ -131,7 +184,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     }
   }
 
-  ScopedDevice _(self->device_id_);
+  ScopedDevice _(self->HipDevice());
 
   // Cold miss: allocate. Pooled requests are rounded up to the full class
   // capacity so the buffer is reusable by any later request in the same class;
@@ -157,8 +210,10 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   hipError_t err = hipHostMalloc(&ptr, alloc_size,
                                  hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
+    (void)hipGetLastError();
     LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
-               << alloc_size << " bytes (device " << self->device_id_
+               << alloc_size << " bytes (HIP device " << self->hip_device_
+               << ", memory info device id " << self->requested_device_id_
                << "): " << hipGetErrorString(err);
     return nullptr;
   }
@@ -196,8 +251,10 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
     // Fall through for a large buffer, or for a pointer we never handed out
     // (defensive): in both cases release directly so we don't leak.
   }
-  ScopedDevice _(self->device_id_);
-  (void)hipHostFree(p);
+  ScopedDevice _(self->HipDevice());
+  if (hipHostFree(p) != hipSuccess) {
+    (void)hipGetLastError();
+  }
 }
 
 HipGpuAllocator::~HipGpuAllocator() {
@@ -205,13 +262,19 @@ HipGpuAllocator::~HipGpuAllocator() {
   // freed all outstanding tensors (they are back on free_lists_), but we walk
   // ptr_to_size_ rather than free_lists_ so any still-checked-out buffer is
   // also released instead of leaked.
-  ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
+  // An allocator that never allocated must not load the HIP runtime here:
+  // ORT may tear it down while unloading the EP library after enumeration.
+  if (ptr_to_size_.empty()) {
+    return;
+  }
+  ScopedDevice _(HipDevice());
   for (const auto &kv : ptr_to_size_) {
     hipError_t err = hipHostFree(kv.first);
     if (err != hipSuccess) {
-      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device "
-                   << device_id_ << "): " << hipGetErrorString(err);
+      (void)hipGetLastError();
+      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (HIP device "
+                   << hip_device_ << "): " << hipGetErrorString(err);
     }
   }
   for (auto &fl : free_lists_) {

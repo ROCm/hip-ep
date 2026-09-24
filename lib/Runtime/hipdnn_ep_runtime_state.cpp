@@ -167,6 +167,22 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   return 0;
 }
 
+// Prints the environment variables the HIP runtime filters devices by. On a
+// machine with an NVIDIA GPU, CUDA_VISIBLE_DEVICES is a common reason HIP
+// reports no device: HIP honors it as an alias while HIP_VISIBLE_DEVICES is
+// unset.
+static void report_hip_device_filters() {
+  static const char *const kFilterVars[] = {
+      "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+      "GPU_DEVICE_ORDINAL"};
+  for (const char *name : kFilterVars) {
+    char value[256];
+    const unsigned long n = hipdnn_ep::read_env(name, value, sizeof(value));
+    if (n > 0 && n < sizeof(value))
+      fprintf(stderr, "  HIP device filtering is set: %s=%s\n", name, value);
+  }
+}
+
 // Shared initialization that brings up HIP device, stream, and hipBLASLt
 // handles in a fresh RuntimeState. On any failure the partially
 // initialized state is released and a non-zero error code (matching the
@@ -242,14 +258,21 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_op_states = 0;
 
   int device_count = 0;
-  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    fprintf(stderr, "Failed to get HIP device count or no devices available\n");
+  const hipError_t count_err = hipGetDeviceCount(&device_count);
+  if (count_err != hipSuccess || device_count == 0) {
+    fprintf(stderr,
+            "Failed to get HIP device count or no devices available (%s)\n",
+            count_err != hipSuccess ? hipGetErrorString(count_err)
+                                    : "hipGetDeviceCount returned 0");
+    report_hip_device_filters();
     free(state);
     return 2;
   }
 
-  if (hipSetDevice(0) != hipSuccess) {
-    fprintf(stderr, "Failed to set HIP device 0\n");
+  const hipError_t set_err = hipSetDevice(0);
+  if (set_err != hipSuccess) {
+    fprintf(stderr, "Failed to set HIP device 0 (%s)\n",
+            hipGetErrorString(set_err));
     free(state);
     return 3;
   }

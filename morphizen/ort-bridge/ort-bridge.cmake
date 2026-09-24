@@ -20,6 +20,8 @@ set(_ORT_BRIDGE_SOURCES
   src/ir-converter.cpp
   src/ir-converter-imp.hpp
   src/ir-converter-imp.cpp
+  src/morphizen-hip-device-select.hpp
+  src/morphizen-hip-device-select.cpp
 )
 
 if(morphizen_ENABLE_HIP_GPU_ALLOCATOR)
