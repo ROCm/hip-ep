@@ -38,7 +38,8 @@ env:
   # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
   # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
   # 122 (draft): hip as the only backend (no MIGraphX).
-  AMDGPU_PR_PATCHES: "102 105 122"
+  # 132: load backend DLLs from the EP's own directory.
+  AMDGPU_PR_PATCHES: "102 105 122 132"
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
