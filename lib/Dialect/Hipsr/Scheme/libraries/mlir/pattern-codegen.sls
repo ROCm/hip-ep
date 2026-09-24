@@ -2,14 +2,25 @@
 (library (mlir pattern-codegen)
   (export generate-debug-ast
           generate-pattern-matchAndRewrite
-          generate-debug-codegen)
+          generate-debug-codegen
+          ;; Dummy parameter names for hygiene
+          op rewriter type-converter operands-ref make-unbound-value)
   (import (rnrs)
-          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier? hashtable-keys)
+          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier?)
           (rename (rime loop) (:with :rime-with))
-          (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor) expand)
+          (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor identifier?) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
-          (for (mlir pattern-analyze) expand))  ; for binding-manager-bindings
+          (for (mlir pattern-analyze) expand)  ; for binding-manager-bindings
+          (for (mlir ffi) expand))  ; FFI identifiers needed in generated syntax
+
+  ;; Dummy bindings so hygiene system knows these identifiers exist
+  ;; They're never actually used - just needed for quasiquote references
+  (define op (if #f #f))  ; Use if to avoid constant folding issues
+  (define rewriter (if #f #f))
+  (define type-converter (if #f #f))
+  (define operands-ref (if #f #f))
+  (define (make-unbound-value) (if #f #f))  ; Sentinel for uninitialized variables
 
   ;;=======================================================================
   ;; Phase 4: Code generation - generate lambda from analyzed AST
@@ -122,26 +133,26 @@
            ;; Generate root initialization code (bind all result variables)
            [root-inits (generate-root-inits root-result-vars)]
 
-           ;; Generate where bindings (from :then-let)
-           [where-inits (generate-where-bindings where-bindings)]
+           ;; Generate rewrite bindings (returns list of (var . binding) pairs)
+           [rewrite-pairs (generate-rewrite-bindings rewrite-ops)]
 
            ;; Collect all variables that need initialization
            [match-vars (collect-all-variables binding-mgr)]
-           [where-vars (collect-where-variables where-bindings)]
-           [rewrite-vars (collect-rewrite-variables rewrite-ops)]
+           [where-vars (map ast-where-binding-expand-var where-bindings)]
+           [rewrite-vars (map car rewrite-pairs)]  ; Extract vars from pairs
            [all-vars (append match-vars where-vars rewrite-vars)]
 
            ;; Generate check code from actions
            [check-code (generate-check-code actions match-vec)]
 
-           ;; Generate rewrite code
-           [rewrite-code (generate-rewrite-code rewrite-ops pattern-type)])
+           ;; Generate rewrite code using pre-generated pairs
+           [rewrite-code (generate-rewrite-code-from-pairs rewrite-pairs pattern-type)])
 
       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
                     [(var ...) all-vars]
                     [num-operations num-ops]
                     [(root-init ...) root-inits]
-                    [(where-init ...) where-inits]
+                    [(where-binding ...) (generate-where-let-bindings where-bindings #'fname)]
                     [checks check-code]
                     [rewrite rewrite-code])
         #'(define fname
@@ -151,12 +162,11 @@
                 ;; Bind all result variables of root operation
                 root-init ...
 
-                ;; Bind where variables (:then-let bindings)
-                where-init ...
-
                 ;; Match pattern and rewrite if successful
                 (if checks
-                    rewrite
+                    ;; Wrap rewrite with where bindings from :then-let
+                    (let* (where-binding ...)
+                      rewrite)
                     #f)))))))
 
   ;;-----------------------------------------------------------------------
@@ -166,24 +176,23 @@
   ;; For conversion patterns: generate let* bindings, then replaceOp
   ;; For rewrite patterns: generate let* bindings, then return last result
   ;;
-  (define (generate-rewrite-code rewrite-ops pattern-type)
-    (if (null? rewrite-ops)
+  (define (generate-rewrite-code-from-pairs pairs pattern-type)
+    (if (null? pairs)
         #'#t  ; No rewrite ops, just return #t for success
-        (let ([bindings (generate-rewrite-bindings rewrite-ops)])
+        (let* ([bindings (map cdr pairs)]  ; Extract bindings from (var . binding) pairs
+               [last-var (car (car (reverse pairs)))])  ; Last var from last pair
           (if (eq? pattern-type 'conversion)
               ;; Conversion pattern: replaceOp with last result
-              (let ([last-result (ast-operation-expand-result-var (car (reverse rewrite-ops)))])
-                (with-syntax ([(binding ...) bindings]
-                              [result last-result])
-                  #'(let* (binding ...)
-                      (mlir-replace-op op result)
-                      #t)))
+              (with-syntax ([(binding ...) bindings]
+                            [result last-var])
+                #'(let* (binding ...)
+                    (mlir-replace-op op result)
+                    #t))
               ;; Rewrite pattern: return last result
-              (let ([last-result (ast-operation-expand-result-var (car (reverse rewrite-ops)))])
-                (with-syntax ([(binding ...) bindings]
-                              [result last-result])
-                  #'(let* (binding ...)
-                      result)))))))
+              (with-syntax ([(binding ...) bindings]
+                            [result last-var])
+                #'(let* (binding ...)
+                    result))))))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Generate let* bindings for rewrite operations
@@ -193,32 +202,69 @@
   ;;
   (define (generate-rewrite-bindings rewrite-ops)
     (loop :for op-rec :in rewrite-ops
-          :collect (generate-one-rewrite-binding op-rec)))
+          :for idx :from 0
+          :rime-with pair := (generate-one-rewrite-binding op-rec idx)
+          :collect pair))
 
-  (define (generate-one-rewrite-binding op-rec)
-    (let* ([result-var (ast-operation-expand-result-var op-rec)]
+  (define (generate-one-rewrite-binding op-rec idx)
+    (let* ([result-var-raw (ast-operation-expand-result-var op-rec)]
+           ;; Check if empty by converting to datum and checking null
+           [is-empty? (let ([datum (if (identifier? result-var-raw)
+                                       result-var-raw  ; Keep identifiers as-is
+                                       (syntax->datum result-var-raw))])
+                        (null? datum))]
+           [result-var (if is-empty?
+                           (datum->syntax #'here (string->symbol (string-append "%rewrite-tmp-" (number->string idx))))
+                           result-var-raw)]
            [op-name (syntax->datum (ast-operation-expand-op-name op-rec))]
            [operands (ast-operation-expand-operands op-rec)]
-           [result-types (ast-operation-expand-result-types op-rec)])
-      (with-syntax ([var result-var]
-                    [name op-name]
-                    [(operand ...) operands]
-                    [types result-types])
-        ;; Create operation and extract first result as a Value
-        #'(var (let ([new-op (mlir-create-generic-op name (list operand ...) (list types))])
-                 (mlir-operation-get-result new-op 0))))))
+           [result-types (ast-operation-expand-result-types op-rec)]
+           [attrs (syntax->list (ast-operation-expand-attributes op-rec))])
+      (cons result-var  ; Return the var so caller knows what was generated
+            (if (null? attrs)
+                ;; No attributes - simple case
+                (with-syntax ([var result-var]
+                              [name op-name]
+                              [(operand ...) operands]
+                              [types result-types])
+                  #'(var (let ([new-op (mlir-create-generic-op name (list operand ...) (list types))])
+                           (mlir-operation-get-result new-op 0))))
+                ;; Has attributes - wrap with let to set them
+                (with-syntax ([var result-var]
+                              [name op-name]
+                              [(operand ...) operands]
+                              [types result-types]
+                              [(attr-setter ...) (map generate-attr-setter attrs)])
+                  #'(var (let ([new-op (mlir-create-generic-op name (list operand ...) (list types))])
+                           attr-setter ...
+                           (mlir-operation-get-result new-op 0))))))))
 
   ;;-----------------------------------------------------------------------
-  ;; Helper: Generate where bindings (:then-let)
+  ;; Helper: Generate attribute setter call
   ;;-----------------------------------------------------------------------
   ;;
-  ;; Each where binding becomes: (set! var expr)
+  ;; Attribute syntax: (attr-name value)
+  ;; Generates: (mlir-operation-set-attr new-op "attr-name" value)
   ;;
-  (define (generate-where-bindings where-list)
+  (define (generate-attr-setter attr-stx)
+    (syntax-case attr-stx ()
+      [(attr-name value)
+       (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
+         #'(mlir-operation-set-attr new-op name-str value))]))
+
+  ;;-----------------------------------------------------------------------
+  ;; Helper: Generate where bindings as let* bindings (:then-let)
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Each where binding becomes: (var expr) for let*
+  ;;
+  (define (generate-where-let-bindings where-list ctx-id)
+    ;; DON'T recontextualize - preserve original syntax
+    ;; The trick: wrap everything in (with-syntax ...) to inject op, rewriter, etc.
     (loop :for binding-rec :in where-list
           :rime-with var := (ast-where-binding-expand-var binding-rec)
           :rime-with expr := (ast-where-binding-expand-expr binding-rec)
-          :collect #`(set! #,var #,expr)))
+          :collect (list var expr)))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Generate root initialization statements
@@ -258,7 +304,7 @@
   (define (collect-rewrite-variables rewrite-ops)
     (loop :for op-rec :in rewrite-ops
           :rime-with result-var := (ast-operation-expand-result-var op-rec)
-          :when (not (null? result-var))  ; Skip void operations
+          :when (not (null? result-var))  ; Skip void/anonymous operations
           :collect result-var))
 
   ;;-----------------------------------------------------------------------

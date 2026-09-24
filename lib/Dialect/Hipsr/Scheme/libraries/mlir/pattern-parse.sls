@@ -166,14 +166,14 @@
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       ;; Match operation WITHOUT :where guard
-      [(result = op-name (operand ...) . rest)
-       (identifier? #'result)
+      [(result = op-name (operand ...)  . rest)
+       ;;(identifier? #'result)
        (let* ([operands (parse-operands #'(operand ...))]
               [match-op (make-ast-match-expand #'result #'op-name operands #f)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]
 
       [_ (syntax-violation 'parse-match-ops-recursive
-           "Invalid match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
+           "Invalid3 match operation (expected: result = \"op\" (...) [:where expr])" rest-stx)]))
 
   
   ;;-----------------------------------------------------------------------

@@ -2,14 +2,15 @@
 ;;===----------------------------------------------------------------------===;;
 ;; Data-Driven Test Runner
 ;;===----------------------------------------------------------------------===;;
-;;
-;; Usage:
-;;   scheme --script test/run-tests.scm              # Run all tests
-;;   scheme --script test/run-tests.scm NAME         # Run all phases for one test
-;;   scheme --script test/run-tests.scm NAME PHASE   # Show output for NAME/PHASE
-;;===----------------------------------------------------------------------===;;
 
-(library-directories '("." "libraries" "../../../../third_party/rime"))
+;; CRITICAL: library-directories MUST use pairs ("source" . "binary")
+;; Tests run interpreted (via eval), but Chez may auto-compile imports
+;; Use CHEZ_BUILD_DIR set by CMake, fallback to /tmp
+(define build-dir (or (getenv "CHEZ_BUILD_DIR") "/tmp/chez-scheme-test"))
+(library-directories
+  (list (cons "libraries" build-dir)
+        (cons "." build-dir)
+        (cons "../../../../third_party/rime" (string-append build-dir "/rime"))))
 
 (import (except (chezscheme) =)
         (mlir pattern-macro)
@@ -17,17 +18,17 @@
         (test test-helpers))
 
 ;; Import pattern-macro into interaction-environment so eval can use it
-(eval '(import (mlir pattern-macro)) (interaction-environment))
+(eval (quote (import (mlir pattern-macro))) (interaction-environment))
 
 ;;===----------------------------------------------------------------------===;;
-;; Phase Configuration
+;; Phase Configuration  
 ;;===----------------------------------------------------------------------===;;
 
 (define *phases*
-  '((parse    "  Parse"    :debug-parse    :expect-parse)
+  (quote ((parse    "  Parse"    :debug-parse    :expect-parse)
     (validate "  Validate" :debug-validate :expect-validate)
     (analyze  "  Analyze"  :debug-analyze  :expect-analyze)
-    (codegen  "  Codegen"  :debug-codegen  :expect-codegen)))
+    (codegen  "  Codegen"  :debug-codegen  :expect-codegen))))
 
 (define (phase-name->debug-flag phase-name)
   (let ([entry (assq phase-name *phases*)])
@@ -35,6 +36,7 @@
 
 (define (get-phase-info phase-name)
   (assq phase-name *phases*))
+
 
 ;;===----------------------------------------------------------------------===;;
 ;; Result Counting

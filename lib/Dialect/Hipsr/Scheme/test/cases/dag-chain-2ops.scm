@@ -56,6 +56,7 @@
        (let ([%x (make-unbound-value)]
              [%a (make-unbound-value)]
              [%b (make-unbound-value)]
+             [%rewrite-tmp-0 (make-unbound-value)]
              [all-operations (make-vector 2 (make-unbound-value))])
 
          ;; Bind root result: %b = result 0 of root operation
@@ -95,6 +96,10 @@
                            (vector-ref all-operations 0) 0))
                  #t))
 
-             ;; Rewrite: TODO - not implemented yet
-             (error 'todo "rewrite not implemented yet")
+             ;; Rewrite: wrapped in empty let* (no where bindings), then create op3 and replace root
+             (let* ()
+               (let* ([%rewrite-tmp-0 (let ([new-op (mlir-create-generic-op "op3" (list %a) (list !t))])
+                                        (mlir-operation-get-result new-op 0))])
+                 (mlir-replace-op op %rewrite-tmp-0)
+                 #t))
              #f)))))
