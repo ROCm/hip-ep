@@ -40,6 +40,9 @@ set(_kernel_sources
     hip/gqa_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
+    hip/ck_gemm.hip
+    hip/ref_gemm.hip
+    hip/gemv_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
@@ -94,6 +97,11 @@ set(_kernel_sources
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
 )
+
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/ck_gemm.hip
+    ${CMAKE_CURRENT_SOURCE_DIR}/hip/ref_gemm.hip
+    PROPERTIES HIP_KEEP_HOST_DEVICE_CONSTEXPR ON)
 
 # MatMulNBits offline autotune table.
 #
@@ -218,6 +226,8 @@ function(_gqa_lut_data_source arch out_var)
     set(${out_var} ${_gen} PARENT_SCOPE)
 endfunction()
 
+set(_ck_gemm_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/ck_gemm)
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
@@ -225,14 +235,18 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
+    _emit_lut_registry(${_arch} ${_ck_gemm_autotune_dir} kCkGemmLut _ck_gemm_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
             ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
             ${_matmul_lut_src}
             ${_gqa_autotune_dir}/gqa_autotune.cpp
             ${_gqa_lut_src}
+            ${_ck_gemm_autotune_dir}/ck_gemm_autotune.cpp
+            ${_ck_gemm_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;
+            # matmul_nbits_autotune_generated.h, gqa_autotune_generated.h and
+            # ck_gemm_autotune_generated.h;
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>

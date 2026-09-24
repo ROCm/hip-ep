@@ -799,8 +799,8 @@ HIP_KERNEL_API int hip_rope_forward(
  * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
  * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
  * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
- * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
- * buffers) lives in the runtime wrapper (real/gqa.cpp).
+ * only (Llama / gpt-oss). The orchestration (GEMMs, workspace, temp buffers)
+ * lives in the runtime wrapper (real/gqa.cpp).
  */
 
 /* KV-cache element format for the fused/append/concat/decode GQA kernels. This
@@ -1038,7 +1038,7 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_out_biased(
  * device kernel). The production decode path uses hip_gqa_flash_decode above
  * for EVERY fp16 causal GQA/MHA decode (window + sink folded in, split count
  * autotuned). This one entry backs gqa.cpp::gqa_forward_hipblaslt -- the
- * decomposed hipBLASLt fallback -- only for the odd geometries v2 does not
+ * decomposed fallback -- only for the odd geometries v2 does not
  * template. It MUST be exported (HIP_KERNEL_API) so the EP resolves it out of
  * custom_kernels_<arch> at JIT link / native import (same as every other
  * launcher here).
@@ -1083,7 +1083,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
 /* Same as hip_gqa_flash_prefill_v2, plus attention sinks / smooth softmax and
  * a sliding window.
  * Kept as a separate symbol rather than widening v2, because v2 is redeclared
- * locally by the standalone GQA harnesses and the dispatch_bench shim header;
+ * locally by the standalone GQA harnesses;
  * widening it in place would break those and risk a silent host/kernel ABI skew.
  *
  *   local_window_size : <= 0 for full attention. > 0 masks key k for query q
@@ -1122,8 +1122,8 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
  * decode reads int8 directly (hip_gqa_flash_decode with kv_dtype=INT8). */
 
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
- * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
- * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
+ * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Unlike the
+ * decomposed pipeline it never materializes the fp32 score matrix
  * S[B,N,sq,skv] in DRAM (~3.4 GB for the Qwen VLM vision encoder). Keeps the
  * running (m, l, O) softmax state in registers; K streamed from global, V/P
  * staged in LDS; score/value GEMMs on the RDNA3.5 WMMA unit. Head dim d need
@@ -2233,7 +2233,7 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
 
 /* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
  * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once
- * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
+ * (weights are constant) then run an fp16 GEMM. scales_fp16 and
  * zeros_fp16 are fp16 [N, ceil(K/group_size)]; zeros_fp16 may be null (ONNX
  * 4-bit default zero-point 8). */
 HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
@@ -3184,9 +3184,8 @@ HIP_KERNEL_API int hip_conv_transpose(
  * Computes C[M,N] = A[M,K] * B[K,N] using RDNA 3+ WMMA instructions.
  * FP16 inputs, FP32 accumulation, FP16 output. All matrices row-major.
  *
- * Designed for M <= 512 where hipBLASLt's register-heavy tiling (256 VGPRs,
- * 4/16 occupancy) underperforms. This kernel targets ~30 VGPRs and 16/16
- * occupancy via 16x16 WMMA tiles.
+ * Designed for M <= 512. This kernel targets ~30 VGPRs and 16/16 occupancy
+ * via 16x16 WMMA tiles.
  *
  * Requires K and N to be multiples of 16.
  *
@@ -3203,6 +3202,95 @@ HIP_KERNEL_API int hip_conv_transpose(
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* =========================================================================
+ * Composable Kernel GEMM
+ * =========================================================================
+ *
+ * D = alpha * op(A) op(B) (+ bias), computed by one of a fixed set of CK
+ * instances. Column-major ABI: D is [m, n] with leading dimension ldd, op(A)
+ * is [m, k], op(B) is [k, n]. transB must be 0.
+ *
+ * Each instance serves one combo of (abDtype -> dDtype, transA, bias):
+ *   fp16 -> fp16, NN or TN, with or without bias
+ *   fp16 -> fp32, TN, no bias
+ *   fp32 -> fp32, NN or TN, no bias
+ * bias is a length-m vector added to every column of D. alpha is applied only
+ * by the fp32-output combos; the fp16-output combos refuse alpha != 1.
+ *
+ * CK ships no heuristic, so the caller names the instance. Instance indices
+ * are a property of one build of ck_gemm.hip and must not be persisted;
+ * select by measurement and key any cache on the problem geometry.
+ *
+ * Returns 0 on success, non-zero when the named instance does not serve the
+ * problem (combo, alignment or size) or its launch fails; the two are not
+ * distinguished.
+ *
+ * Parameters:
+ *   stream     - hipStream_t cast to void*
+ *   instance   - index in [0, hip_ck_gemm_num_instances())
+ *   bias       - nullable; see above
+ *   abDtype    - element type of A and B (hip_dtype_t value cast to int)
+ *   dDtype     - element type of D (hip_dtype_t value cast to int)
+ *   strideA/B/D - batch strides; ignored when batch == 1
+ */
+HIP_KERNEL_API int hip_ck_gemm_num_instances(void);
+
+HIP_KERNEL_API int hip_ck_gemm_run(void* stream, int instance, const void* A,
+                       const void* B, const void* bias, void* D,
+                       int64_t m, int64_t n, int64_t k, int64_t batch,
+                       int transA, int transB, int abDtype, int dDtype,
+                       float alpha, int64_t lda, int64_t ldb, int64_t ldd,
+                       int64_t strideA, int64_t strideB, int64_t strideD);
+
+/* Stable name of an instance, e.g. "NN_F16:TKN_5"; nullptr out of range.
+ * Unlike the index, the name may be persisted. */
+HIP_KERNEL_API const char* hip_ck_gemm_instance_name(int instance);
+
+/* Instances the embedded offline table proposes for this problem, nearest
+ * measured shape first, de-duplicated, at most `cap`. Same column-major
+ * arguments as hip_ck_gemm_run. A proposal is not a guarantee: the caller must
+ * still check that hip_ck_gemm_run accepts it. Returns 0 when there is no
+ * usable table for this device, the problem class was never measured, or
+ * HIPDNN_CK_GEMM_AUTOTUNE_MODE=online. */
+HIP_KERNEL_API int hip_ck_gemm_lut_candidates(int64_t m, int64_t n, int64_t k,
+                       int64_t batch, int transA, int abDtype, int dDtype,
+                       int hasBias, int* out, int cap);
+
+/* =========================================================================
+ * Composable Kernel reference (naive) GEMM
+ * =========================================================================
+ *
+ * D = alpha * op(A) op(B) for any shape, untuned. Same column-major convention
+ * as hip_ck_gemm_run, without bias or instance selection. Covers fp16/fp16,
+ * fp16/fp32, bf16/bf16, bf16/fp32, fp32/fp32 and fp64/fp64.
+ *
+ * Operands must be packed (lda = transA ? k : m, ldb = transB ? n : k,
+ * ldd = m); strideA/B/D are batch strides and are honoured. Returns non-zero
+ * for non-packed leading dimensions, an uncovered dtype pair, or a shape too
+ * large for its naive kernel.
+ */
+HIP_KERNEL_API int hip_ref_gemm_run(void* stream, const void* A, const void* B,
+                       void* D, int64_t m, int64_t n, int64_t k, int64_t batch,
+                       int transA, int transB, int abDtype, int dDtype,
+                       float alpha, int64_t lda, int64_t ldb, int64_t ldd,
+                       int64_t strideA, int64_t strideB, int64_t strideD);
+
+/* =========================================================================
+ * fp16 GEMV
+ * =========================================================================
+ *
+ * y[1, n] = a[1, k] @ b[k, n], row-major fp16, no bias, alpha = 1. Unlike the
+ * GEMM entries above this takes the ONNX row-major form directly, since the
+ * single-row case has no transpose or leading-dimension freedom to express.
+ *
+ * Returns non-zero when declined: the output is too narrow to fill the
+ * device's CUs with one column per thread group and n < 64 or k < 256. The
+ * decision depends only on the shape and the device, so a declined call leaves
+ * y untouched. A launch failure returns the hipError_t value.
+ */
+HIP_KERNEL_API int hip_gemv_fp16(void* stream, const void* a, const void* b,
+                       void* y, int64_t n, int64_t k);
 
 #ifdef __cplusplus
 }
