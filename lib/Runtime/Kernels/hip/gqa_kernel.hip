@@ -3801,6 +3801,23 @@ static inline size_t prefillV5SmemBytes(int m_tiles, int bkv, int d) {
 }
 static constexpr size_t kPrefillV5MaxSmem = 65536;
 
+// Opt-in routing of head_dim 128 full attention to v6. v6 is generic in D, and
+// at 128 it supplies what the v7 path lacks: transposed V (one LDS read per
+// fragment), one K/V staging shared by a KV group's query heads instead of a
+// re-read per head, and P^T held in registers. Only (m_tiles 1, bkv 32) is
+// spill-free at this head dim -- the other three configs exceed the VGPR
+// budget and measure slower than v7 -- so the routing below pins that one
+// rather than leaving it to the (m_tiles, bkv) tuner.
+static inline bool prefillV6D128Enabled() {
+    static const bool on = [] {
+        const char* e = getenv("HIPDNN_GQA_PREFILL_V6_D128");
+        return e != nullptr && atoi(e) != 0;
+    }();
+    return on;
+}
+static constexpr int kPrefillV6D128MTiles = 1;
+static constexpr int kPrefillV6D128Bkv    = 32;
+
 static int g_v5_ablate = 0;  // perf-diagnostics ablation bitmask (default off)
 
 static inline void dispatchPrefillV5(
@@ -3814,7 +3831,7 @@ static inline void dispatchPrefillV5(
     // d == 64 runs the transposed-score kernel (v6), d == 128 the v5 kernel,
     // both with the same (M_TILES, BKV) config space, so the LUT and the tuner
     // below apply unchanged. Callers guarantee Hq % G == 0.
-    const bool use_v6 = d == 64;
+    const bool use_v6 = d == 64 || (d == 128 && prefillV6D128Enabled());
     static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
@@ -3833,28 +3850,34 @@ static inline void dispatchPrefillV5(
         dim3 grid6((Hq / nw) * num_q_tiles * B);
         const size_t smem6 = (size_t)d * (bkv + 8) * sizeof(_Float16) +
                              (nw > 1 ? (size_t)bkv * (d + 8) * sizeof(_Float16) : 0);
-        #define LAUNCH_V6_NW(MT_, BKV_, HW_, NW_)                               \
-            gqa_flash_prefill_v6_kernel<MT_, BKV_, 64, HW_, NW_>                \
+        #define LAUNCH_V6_NW(MT_, BKV_, D_, HW_, NW_)                           \
+            gqa_flash_prefill_v6_kernel<MT_, BKV_, D_, HW_, NW_>                \
                 <<<grid6, 32 * NW_, smem6, stream>>>(                           \
                     Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len, \
                     scale, head_sink, num_heads, smooth_softmax,                \
                     local_window_size)
-        #define LAUNCH_V6(MT_, BKV_, HW_)                                       \
+        #define LAUNCH_V6(MT_, BKV_, D_, HW_)                                   \
             do {                                                                \
-                if (nw == 4)      LAUNCH_V6_NW(MT_, BKV_, HW_, 4);              \
-                else if (nw == 2) LAUNCH_V6_NW(MT_, BKV_, HW_, 2);              \
-                else              LAUNCH_V6_NW(MT_, BKV_, HW_, 1);              \
+                if (nw == 4)      LAUNCH_V6_NW(MT_, BKV_, D_, HW_, 4);          \
+                else if (nw == 2) LAUNCH_V6_NW(MT_, BKV_, D_, HW_, 2);          \
+                else              LAUNCH_V6_NW(MT_, BKV_, D_, HW_, 1);          \
+            } while (0)
+        #define LAUNCH_V6_MT(D_, HW_)                                           \
+            do {                                                                \
+                if (m_tiles == 2 && bkv == 64) LAUNCH_V6(2, 64, D_, HW_);       \
+                else if (m_tiles == 2)         LAUNCH_V6(2, 32, D_, HW_);       \
+                else if (bkv == 64)            LAUNCH_V6(1, 64, D_, HW_);       \
+                else                           LAUNCH_V6(1, 32, D_, HW_);       \
             } while (0)
         #define LAUNCH_V6_CFG(HW_)                                              \
             do {                                                                \
-                if (m_tiles == 2 && bkv == 64) LAUNCH_V6(2, 64, HW_);           \
-                else if (m_tiles == 2)         LAUNCH_V6(2, 32, HW_);           \
-                else if (bkv == 64)            LAUNCH_V6(1, 64, HW_);           \
-                else                           LAUNCH_V6(1, 32, HW_);           \
+                if (d == 128) LAUNCH_V6_MT(128, HW_);                           \
+                else          LAUNCH_V6_MT(64, HW_);                            \
             } while (0)
         if (local_window_size > 0) LAUNCH_V6_CFG(true);
         else                       LAUNCH_V6_CFG(false);
         #undef LAUNCH_V6_CFG
+        #undef LAUNCH_V6_MT
         #undef LAUNCH_V6
         #undef LAUNCH_V6_NW
         return;
@@ -4924,6 +4947,19 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr       = static_cast<_Float16*>(O);
 
+    // Opt-in v6 routing for head_dim 128. This entry carries neither sinks nor
+    // a window, so v6's remaining requirement is Hq % G == 0, which
+    // wrap_group_query_attention already enforces. The config is pinned
+    // because only one of the four is spill-free at this head dim, so there is
+    // nothing for the tuner to choose between.
+    if (d == 128 && prefillV6D128Enabled() && Hq % G == 0) {
+        dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d, stream,
+                          Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq, skv,
+                          max_seq, past_len, scale, nullptr, Hq, 0,
+                          /*local_window_size=*/0);
+        return 0;
+    }
+
     // skv is bucketed by power of two, not exact (the decode autotune above does
     // the same, and v5 drops it from the key entirely on the grounds that it
     // scales every candidate's KV loop uniformly and so cannot reorder them).
@@ -4953,6 +4989,32 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     int mt = cfg / 1000000, nw = (cfg / 1000) % 1000, bkv = cfg % 1000;
     dispatchPrefillV7(nw, bkv, mt, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
                       B, Hq, G, sq, skv, max_seq, past_len, scale);
+    return 0;
+}
+
+// A/B entry: the v7 prefill arguments serviced by v6 with an explicit
+// (m_tiles, bkv). Exists so both head_dim 128 kernels can be timed in one
+// process; production routing goes through the entry above.
+extern "C" int hip_gqa_flash_prefill_v6_d128_configured(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int m_tiles, int bkv)
+{
+    if (d != 128 || !prefillV6D128Enabled()) return -1;
+    if ((m_tiles != 1 && m_tiles != 2) || (bkv != 32 && bkv != 64)) return -1;
+    if (Hq % G != 0) return -1;
+    const int nw = ((Hq / G) % 4 == 0) ? 4 : ((Hq / G) % 2 == 0) ? 2 : 1;
+    if ((size_t)d * (bkv + 8) * sizeof(_Float16) +
+            (nw > 1 ? (size_t)bkv * (d + 8) * sizeof(_Float16) : 0) >
+        kPrefillV5MaxSmem)
+        return -1;
+    dispatchPrefillV5(m_tiles, bkv, d, static_cast<hipStream_t>(stream_ptr),
+                      static_cast<const _Float16*>(Q),
+                      static_cast<const _Float16*>(Kcache),
+                      static_cast<const _Float16*>(Vcache),
+                      static_cast<_Float16*>(O), B, Hq, G, sq, skv, max_seq,
+                      past_len, scale, nullptr, Hq, 0, /*window=*/0);
     return 0;
 }
 
