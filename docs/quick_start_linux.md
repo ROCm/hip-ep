@@ -199,6 +199,12 @@ python3 onnxruntime-genai/examples/python/model-mm.py -m /path/to/vlm-model-dir 
   --image_paths /path/to/image.jpg --user_prompt "Describe this image." --non_interactive -v
 ```
 
+> **Note** `whisper-large-v3` (fp16/fp32) fails to compile through
+> the generic whisper.py script. Use `scripts/transcribe_whisper.py --variant large-v3`
+> from this repo instead, which uses pre-split decoder graphs
+> (`decoder_fixed_prefill.onnx`/`decoder_fixed_decode.onnx`) that avoid the
+> issue. All other Whisper sizes work fine via the generic script above.
+
 Make sure `genai_config.json` `provider_options` are set to
 `[{"AMDGPU": {"profile": "hip"}}]`
 
@@ -395,8 +401,15 @@ $ROOT/bin/onnxruntime_perf_test \
 ### OGA End-to-End Benchmarking with model_benchmark
 
 `model_benchmark` benchmarks the full generative pipeline (prefill +
-decode token generation). It is not part of the local build, so use the
-prebuilt package to get it.
+decode token generation). Prebuilt package includes it.
+
+> **Note:** `model_benchmark` is built by the OGA build above but not copied
+> anywhere automatically. Install it into `$ROOT` yourself:
+> ```bash
+> cp build/Linux/Release/benchmark/c/model_benchmark "$ROOT/bin/"
+> chmod +x "$ROOT/bin/model_benchmark"
+> cp -a build/Linux/Release/libonnxruntime-genai.so* "$ROOT/lib/"
+> ```
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
