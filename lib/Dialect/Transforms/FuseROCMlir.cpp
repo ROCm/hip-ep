@@ -8,6 +8,7 @@
 
 #include <llvm/ADT/SmallVectorExtras.h>
 #include <llvm/Support/Debug.h>
+#include <mlir/Analysis/TopologicalSortUtils.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/BuiltinAttributes.h>
@@ -15,6 +16,7 @@
 #include <mlir/IR/IRMapping.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Interfaces/DestinationStyleOpInterface.h>
+#include <mlir/Interfaces/SideEffectInterfaces.h>
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
@@ -52,7 +54,10 @@ public:
       }
       operands.insert_range(newOperands);
       for (auto init : endOp.getDpsInits()) {
-        ops.insert(init.getDefiningOp());
+        // An init with no producer is a block argument, which cannot be cloned.
+        // It is picked up as a kernel argument below instead.
+        if (Operation *initOp = init.getDefiningOp())
+          ops.insert(initOp);
       }
       ops.insert(endOp);
       prevOp = endOp;
@@ -65,6 +70,49 @@ public:
                                          "first operand not hip.context");
     }
     operands.erase(operands.begin());
+
+    // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
+    // has to resolve inside that func. The DPS inputs above cover the data,
+    // but they do not cover what the inits are built from: an init is only a
+    // bare tensor.empty when the anchor already has the rank rocMLIR wants.
+    // A 1-D convolution does not -- convert-onnx-to-hip widens it to 2-D by
+    // wrapping the operands *and the init* in tensor.expand_shape -- so the
+    // init's producer is a reshape whose own operand is the empty. Cloning
+    // just the reshape leaves it pointing at an empty back in main_graph.
+    //
+    // Absorb producers that carry no operands and no side effects, so a
+    // materialised destination travels with the ops that use it instead of
+    // becoming a kernel argument. That keeps the signature rocMLIR sees
+    // unchanged for the shapes that already worked. Values already headed for
+    // the argument list stay there: a weight is passed in even though
+    // hip.constant would qualify to be cloned.
+    SmallVector<Operation *> worklist(ops.begin(), ops.end());
+    while (!worklist.empty()) {
+      Operation *op = worklist.pop_back_val();
+      for (Value operand : op->getOperands()) {
+        if (operands.contains(operand))
+          continue;
+        Operation *producer = operand.getDefiningOp();
+        if (!producer || ops.contains(producer))
+          continue;
+        if (producer->getNumOperands() != 0 || !isMemoryEffectFree(producer))
+          continue;
+        ops.insert(producer);
+        worklist.push_back(producer);
+      }
+    }
+
+    // Whatever is still read from outside has to be passed in, which costs one
+    // more kernel argument and is what any init producer that cannot be
+    // rematerialized -- a caller-supplied buffer, say -- falls back on.
+    for (Operation *op : ops)
+      for (Value operand : op->getOperands())
+        if (operand != context && !ops.contains(operand.getDefiningOp()))
+          operands.insert(operand);
+
+    // Cloning follows this order, so a producer absorbed above has to come
+    // before the op that reads it.
+    ops = topologicalSort(ops);
 
     auto parentModule = anchorOp->template getParentOfType<ModuleOp>();
     func::FuncOp newFunc;
