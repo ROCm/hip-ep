@@ -63,11 +63,8 @@ struct ConversionInSchemePass
     std::string libraryName = moduleName;
     std::replace(libraryName.begin(), libraryName.end(), '/', ' ');
     std::string importCode = "(import (" + libraryName + "))";
-    // Set library-directories before importing
-    std::string libdirCode = "(library-directories (cons \"/home/build/hip-ep-chez/lib/scheme\" (library-directories)))";
-    if (!ChezSchemeInterpreter::eval(libdirCode.c_str())) {
-      emitWarning(getOperation().getLoc(), "Failed to set library-directories");
-    }
+
+    llvm::errs() << "[ConversionInScheme] About to import: " << importCode << "\n";
 
     if (!ChezSchemeInterpreter::eval(importCode.c_str())) {
       emitError(getOperation().getLoc(), "Failed to import (")
@@ -76,12 +73,7 @@ struct ConversionInSchemePass
       return;
     }
 
-    if (!ChezSchemeInterpreter::eval(importCode.c_str())) {
-      emitError(getOperation().getLoc(), "Failed to import (")
-        << moduleName << ") module";
-      signalPassFailure();
-      return;
-    }
+    llvm::errs() << "[ConversionInScheme] Import successful, calling run-pass\n";
 
     // Call the Scheme run-pass function
     ModuleOp module = getOperation();

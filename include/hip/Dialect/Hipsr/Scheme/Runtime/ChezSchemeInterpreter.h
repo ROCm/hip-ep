@@ -66,6 +66,9 @@ class ChezSchemeInterpreter {
   // Call a Scheme function with a single MLIR operation argument
   static void callPassFunction(const char* functionName, mlir::Operation* op);
 
+  // Add source and binary directories to library-directories for finding .sls files
+  static void addLibraryPath(const char* src_path, const char* bin_path);
+
  private:
   // Singleton - deleted constructors
   ChezSchemeInterpreter() = delete;

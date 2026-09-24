@@ -108,7 +108,16 @@
          (ast-pattern-expand-debug-matching?-set! ast #t)
          (parse-rest #'more ast))]
 
-      ;; Function name
+      ;; Function name with parameters: (fname param1 param2 ...)
+      [((fname param ...) . more)
+       (and (identifier? #'fname)
+            (not (ast-pattern-expand-function-name ast)))
+       (begin
+         (ast-pattern-expand-function-name-set! ast #'fname)
+         (ast-pattern-expand-parameters-set! ast (syntax->list #'(param ...)))
+         (parse-rest #'more ast))]
+
+      ;; Function name without parameters (old syntax, keep for compatibility)
       [(fname . more)
        (and (identifier? #'fname)
             (not (ast-pattern-expand-function-name ast)))
