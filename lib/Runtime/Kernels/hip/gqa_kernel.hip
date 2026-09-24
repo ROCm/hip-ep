@@ -3424,6 +3424,16 @@ gqa_flash_prefill_v5_kernel(
 // there is no P round-trip through LDS. V is staged transposed so each V^T
 // fragment is one contiguous LDS read.
 // ---------------------------------------------------------------------
+
+// Exchanges a value with lane ^ 16 on the VALU (__shfl_xor goes through
+// ds_bpermute and the LDS queue).
+__device__ __forceinline__ int v6_swap_halves(int x) {
+    return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false, false);
+}
+__device__ __forceinline__ float v6_swap_halves(float x) {
+    return __builtin_bit_cast(float, v6_swap_halves(__builtin_bit_cast(int, x)));
+}
+
 template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int NW>
 __global__ void __launch_bounds__(32 * NW)
 gqa_flash_prefill_v6_kernel(
@@ -3493,6 +3503,16 @@ gqa_flash_prefill_v6_kernel(
     const size_t kv_base =
         (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
 
+    // V_lds offset of key kv_local in head-dim row dd. On gfx11 each 16-key
+    // block of a row holds the 8 keys of parity dd & 1 first, then the other
+    // 8, which is the K order the P^T operand below uses for that row.
+    auto vt_idx = [&](int dd, int kv_local) {
+#if !HIPDNN_WMMA_GFX12
+        kv_local = (kv_local & ~15) | (((kv_local ^ dd) & 1) << 3) | ((kv_local & 15) >> 1);
+#endif
+        return dd * VT_STR + kv_local;
+    };
+
     half16_t Q_reg[M_TILES][D_TILES];
     #pragma unroll
     for (int mi = 0; mi < M_TILES; ++mi) {
@@ -3561,7 +3581,7 @@ gqa_flash_prefill_v6_kernel(
                 const int j = i - kKChunks;
                 #pragma unroll
                 for (int c = 0; c < 16; ++c)
-                    V_lds[((j / BKV) * 16 + c) * VT_STR + j % BKV] = pf[r][c];
+                    V_lds[vt_idx((j / BKV) * 16 + c, j % BKV)] = pf[r][c];
             }
         }
     };
@@ -3588,7 +3608,7 @@ gqa_flash_prefill_v6_kernel(
                     : half16_raw_t{};
                 #pragma unroll
                 for (int c = 0; c < 16; ++c)
-                    V_lds[(dt * 16 + c) * VT_STR + kv_local] = vv[c];
+                    V_lds[vt_idx(dt * 16 + c, kv_local)] = vv[c];
             }
         }
 
@@ -3654,7 +3674,7 @@ gqa_flash_prefill_v6_kernel(
             for (int sj = 0; sj < S_TILES_J; ++sj)
                 #pragma unroll
                 for (int e = 0; e < kAcc; ++e) rmax = fmaxf(rmax, S_reg[mi][sj][e]);
-            rmax = fmaxf(rmax, __shfl_xor(rmax, 16));
+            rmax = fmaxf(rmax, v6_swap_halves(rmax));
 
             // Every exponent here is <= 0, so the result is in (0, 1] and the
             // raw v_exp_f32 needs none of exp2f's denormal-range fixup:
@@ -3680,26 +3700,25 @@ gqa_flash_prefill_v6_kernel(
                 #pragma unroll
                 for (int e = 0; e < kAcc; ++e) Pb[mi][sj][e] = own[e];
 #else
-                // Lane holds keys 2e+pair; the B operand wants keys 0..15, so
-                // take the other parity from the partner lane (lane ^ 16).
+                // Lane holds keys 2e+pair; the B operand needs all 16 keys of
+                // the block, so the other parity comes from lane ^ 16. The
+                // gfx11 WMMA computes each half's accumulator rows (parity
+                // pair) from that half's own B lanes and A rows only, so the
+                // halves may order K differently: each takes its own 8 keys
+                // first, and vt_idx stages the V^T rows to match. That leaves
+                // one swap per packed pair and no per-half select.
+                typedef _Float16 half2v_t __attribute__((ext_vector_type(2)));
+                typedef int int8v_t __attribute__((ext_vector_type(8)));
+                int8v_t pk;
                 #pragma unroll
-                for (int j = 0; j < kAcc / 2; ++j) {
-                    _Float16 two[2] = {own[2 * j], own[2 * j + 1]};
-                    int packed;
-                    __builtin_memcpy(&packed, two, 4);
-                    const int other = __shfl_xor(packed, 16);
-                    _Float16 oth[2];
-                    __builtin_memcpy(oth, &other, 4);
-                    #pragma unroll
-                    for (int h = 0; h < 2; ++h) {
-                        const int e = 2 * j + h;
-                        Pb[mi][sj][2 * e]     = pair ? oth[h] : own[e];
-                        Pb[mi][sj][2 * e + 1] = pair ? own[e] : oth[h];
-                    }
-                }
+                for (int j = 0; j < kAcc / 2; ++j)
+                    pk[j] = __builtin_bit_cast(int, half2v_t{own[2 * j], own[2 * j + 1]});
+                #pragma unroll
+                for (int j = 0; j < kAcc / 2; ++j) pk[kAcc / 2 + j] = v6_swap_halves(pk[j]);
+                Pb[mi][sj] = __builtin_bit_cast(half16_t, pk);
 #endif
             }
-            rsum += __shfl_xor(rsum, 16);
+            rsum += v6_swap_halves(rsum);
             m_reg[mi] = m_new;
             l_reg[mi] = corr[mi] * l_reg[mi] + rsum;
         }
