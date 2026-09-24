@@ -3426,9 +3426,14 @@ gqa_flash_prefill_v5_kernel(
 // ---------------------------------------------------------------------
 
 // Exchanges a value with lane ^ 16 on the VALU (__shfl_xor goes through
-// ds_bpermute and the LDS queue).
+// ds_bpermute and the LDS queue). Archs without WMMA only need this to
+// compile, since the kernel traps there.
 __device__ __forceinline__ int v6_swap_halves(int x) {
+#if HIPDNN_HAS_WMMA
     return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false, false);
+#else
+    return __shfl_xor(x, 16);
+#endif
 }
 __device__ __forceinline__ float v6_swap_halves(float x) {
     return __builtin_bit_cast(float, v6_swap_halves(__builtin_bit_cast(int, x)));
