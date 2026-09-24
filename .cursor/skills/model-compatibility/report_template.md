@@ -2,75 +2,114 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Report templates
+# Report structure
 
-These templates are the contract between the pipeline and the user-facing markdown. **Do not paraphrase**. The pipeline's [scripts/generate_final_reports.py](scripts/generate_final_reports.py) already renders these files at `<OutputDir>/model_compatibility_report.md` and `<OutputDir>/model_compatibility_details.md`. When you read those generated files back to the user, preserve the section order and naming verbatim.
+`generate_final_reports.py` renders both files from `report_input.json`.
+This describes what it produces, so you know what you are reading and what
+is missing if a section is absent.
 
-## Non-negotiable rules
+Do not re-render or reformat the output. Read it and quote it.
 
-1. Never invent operators, counts, mappings, or reasons. Every number must match `compatibility/report_input.json`.
-2. Unsupported reason text policy:
-   - Compile-time ops: keep the specific compile-time reason text.
-   - All others: exactly `No Hip Dialect implementation available.`
-3. Status display rule:
-   - input `full` -> displayed as `supported`
-   - input `partial` -> kept as `partial`
-   - input `unsupported` -> kept as `unsupported`
-4. If a field is missing, render as `—` and add one short note in the "Data quality notes" section of the details file.
-5. For `unsupported` recommendations, use [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json) as the primary capability matrix, not just current repo wrappers.
-6. In summary, append percentage for `Supported instances` when total is available (e.g. `1294 (62.3%)`).
+## `model_compatibility_report.md`
 
-## Output files (rendered by the pipeline)
+| # | Section | Present when |
+|---|---|---|
+| 1 | `# Model compatibility report` | always |
+| 2 | metadata, including evidence level | always |
+| 3 | evidence badge | level is not A |
+| 4 | `## Summary` | always |
+| 5 | `## Original ONNX vs EP input` | the comparison ran |
+| 6 | `## Operator distribution` | always |
+| 7 | `### Compatibility summary` | always |
+| 8 | `## What needs doing` | always |
+| 9 | `## Capability gaps` | an attribute is ignored |
+| 10 | `## Documentation drift` | an operator compiles but is undocumented |
 
-| File | Purpose |
+Ordered widest to narrowest: the counts, then every operator, then the same
+operators bucketed by status, then only those needing work.
+
+### Summary
+
+Total instances, then the five statuses. The percentage counts `supported`
+only; the other four get their own lines. The denominator excludes weight
+constants, and says so. When some supported operators had no lowering
+check, the supported line says how many, since they are inside that figure
+rather than beside it.
+
+A line above the percentage says whether the model compiles as a whole.
+That is a different question from how many operators are supported, and at
+level C the answer is no while the percentage can still be high.
+
+### Compatibility summary
+
+The same operators as the table above, bucketed by status, one line each:
+where a supported operator lowers to and which runtime symbol it reaches,
+or for the rest, what stands in the way. Easier to scan than the nine-column
+table when the question is "what is in each bucket".
+
+### What needs doing
+
+One row per operator needing attention, with the kind of work and a one-line
+finding: which operand blocks conversion, which attribute the converter
+ignores, or the error.
+
+| Work | Comes from |
 |---|---|
-| `model_compatibility_report.md` | Executive summary + key tables (primary deliverable) |
-| `model_compatibility_details.md` | Per-operator diagnostics (supports, partials with reason codes, data quality notes) |
-| `compatibility/unsupported_reco_runtime.json` | Machine-readable unsupported recommendations |
+| Implement the operator | `unsupported` |
+| Extend an existing operator | `blocked` |
+| Finish the lowering pipeline | `lowering-broken` |
+| Handle an ignored attribute | `partial` |
+| Extend the MorphiZen ONNX importer | the importer refused the operator |
+| Check the lowering by hand | supported, but no slice could be built |
 
-## model_compatibility_report.md — section order
+The last two are not statuses; see SKILL.md. Supporting evidence is in the
+details file.
 
-Exact order, do not reorder:
+Neither this section nor the report names the converter source or the exact
+check that rejects the model. Both require reading the converter, so they
+are yours to add -- see SKILL.md.
 
-1. `# Model compatibility report`
-2. Metadata bullets (one bullet each):
-   - `EP input (compatibility target)` — only present when dump ran
-   - `Original model`
-   - `Generated UTC`
-3. *(conditional)* `> **Source:** original ONNX (no EP rewrites)` — when pipeline ran in `-SkipDump` mode (orchestrator injects this badge automatically)
-4. `## Summary`
-   - Total node instances
-   - Supported instances `<n> (<pct>%)`
-   - Unsupported instances
-   - Total Operator Types
-   - Fully Compatible
-   - Partially Compatible
-   - Unsupported
-5. *(conditional)* `## Original vs EP input (operator distribution)` — only when dump ran; embedded from `op_distribution_comparison.json`
-6. `## Operator Distribution with Compatibility Status`
-   - Columns (exact, in order): `Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description`
-7. `### Compatibility Summary`
-   - `#### Fully Compatible Operator (<count>)`
-   - `#### Partially Compatible Operators (<count>):`
-   - `#### Unsupported Operators (<count>):`
-8. `Unsupported operator recommendation buckets` (one bucket per recommended path)
-9. `## Hip Ops Summary` — copy the `## Operator Summary` table from `step2_hip_ops.md` when available
-10. `## ONNX-HIP-RUNTIME Mapping` — render from `mapping_chain`
-11. Final pointer line: `Detailed compatibility diagnostics are in model_compatibility_details.md`
+### Operator distribution
 
-## model_compatibility_details.md — section order
+Nine columns:
 
-1. Title + metadata
-2. *(conditional)* `Source: original ONNX (no EP rewrites)` badge when applicable
-3. *(conditional)* `## Original vs EP input (operator distribution)` block
-4. `## Supported operators table (full)`
-5. `## Partially compatible details` — columns: `Op Type | Domain | Reason Codes | Reason Texts | Evidence`
-6. `## Unsupported operators` — columns: `Op Type | Domain | Count | Reason`
-7. `## Data quality notes`
+```
+Op Type | Domain | Count | Data Types | Shapes | Status | Target |
+Backend (runtime) | Description
+```
 
-## Agent rendering rules
+`Target` is what the operator became, observed: a `hip.*` operation, a
+`tensor.*` one, or `(folded at compile time)` when nothing in the output
+carries its source line. `Backend` is `Compile-time` when the lowering
+reaches no runtime symbol, otherwise the documented implementation with the
+symbol.
 
-- When you echo the report back to the user, do not re-render or reformat; **read the generated markdown** and paste / quote it.
-- When you summarize verbally, the percentage in Summary is the headline number; mention any tool-FP rescued by diagnose and the resulting "true" supported percentage.
-- For every `unsupported` recommendation bucket you should include closest existing wrapper / entry point (if any) and short family-based rationale per [reference.md](reference.md).
-- When the report header carries the `Source: original ONNX` badge, lead your user-facing summary with that caveat — the numbers do not reflect EP fusions/folds.
+`Shapes` matters because dynamic shapes are a common reason an existing
+converter rejects a model.
+
+### Capability gaps
+
+Attributes no converter reads, proven by perturbation. `Set by the model`
+distinguishes a defect here from a gap another model would hit. A gap with
+`no` does not affect this model but would silently miscompile one that sets
+the attribute.
+
+### Documentation drift
+
+Operators that compile but are missing from
+`docs/supported-operations.md`. Informational; the probe outranks the doc.
+
+## `model_compatibility_details.md`
+
+The evidence behind each worklist row -- signature, data types, shapes,
+attributes, documented implementation, blocking operand, ignored
+attributes, lowering error, and the line in the EP input MLIR. Nothing
+else: every operator is already listed in the report.
+
+## Rules
+
+1. Every number comes from `report_input.json`. Do not recompute or round.
+2. A missing field renders as `—`.
+3. State the evidence level when it is not A, before anything else.
+4. At level D, lead with the caveat: no compilation happened, so operators
+   whose implementation rejects this model read as supported.
