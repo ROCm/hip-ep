@@ -137,6 +137,7 @@ The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.14.0-cp310-
 ```bash
 cp build/Linux/Release/benchmark/c/model_benchmark "$ROOT/bin/"
 chmod +x "$ROOT/bin/model_benchmark"
+cp -a build/Linux/Release/libonnxruntime-genai.so* "$ROOT/lib/"
 ```
 
 #### 3. Install both wheels
