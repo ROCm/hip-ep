@@ -42,6 +42,14 @@ public:
     SetVector<Value> operands;
     SetVector<Operation *> ops;
 
+    // Fail on dynamic shapes
+    for (Value operand : anchorOp->getOperands()) {
+      if (auto tensorType = dyn_cast<TensorType>(operand.getType());
+          tensorType && !tensorType.hasStaticShape())
+        return rewriter.notifyMatchFailure(anchorOp,
+                                           "only static shapes are supported");
+    }
+
     // Match all pointwise-ops
     do {
       if (prevOp) {
