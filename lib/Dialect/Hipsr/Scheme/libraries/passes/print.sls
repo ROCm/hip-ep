@@ -99,7 +99,7 @@
   (let ((config (if (null? args) (default-config) (car args))))
     (mlir-log-info "Starting Pure Scheme MLIR Pass")
     (mlir-log-debug (format "Module: ~a" (mlir-operation-name module-op)))
-
+  (display "ROCK ROCK222\n")
     ;; Walk all operations in the module
     (mlir-operation-walk module-op
       (lambda (op)

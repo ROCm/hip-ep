@@ -66,7 +66,7 @@ void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
   current_log_level = level;
 
   if (logLevel <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] ChezSchemeInterpreter: Initializing Chez Scheme runtime\n";
+    llvm::errs() << "[debug] ChezSchemeInterpreter1: Initializing Chez Scheme runtime\n";
   }
 
   // Initialize Scheme runtime

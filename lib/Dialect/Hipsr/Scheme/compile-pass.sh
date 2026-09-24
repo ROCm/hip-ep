@@ -27,23 +27,35 @@ if [ ! -f "$PASS_FILE" ]; then
     exit 1
 fi
 
+# Create build directory structure for compiled outputs
+# BUILD_DIR already points to /home/build/hip-ep-chez/lib/scheme
+mkdir -p "$BUILD_DIR/libraries/mlir"
+mkdir -p "$BUILD_DIR/libraries/patterns"
+mkdir -p "$BUILD_DIR/libraries/passes"
+mkdir -p "$BUILD_DIR/rime"
+
 # Everything must run in ONE Scheme session for matching compilation instance IDs
 $SCHEME_COMPILER <<EOF
 (generate-wpo-files #t)
 (compile-imported-libraries #t)
-(library-directories (list "$LIBRARY_DIR" "$BUILD_DIR" "$RIME_DIR"))
 
-; compile-library creates both .so and .wpo
+;; CRITICAL: Use pairs ("source" . "binary") to keep source tree clean
+;; Source .sls files stay in source tree, compiled .so go to build tree
+(library-directories
+  (list (cons "$LIBRARY_DIR" "$BUILD_DIR/libraries")
+        (cons "$RIME_DIR" "$BUILD_DIR/rime")))
+
+;; compile-library creates both .so and .wpo
 (compile-library "$PASS_FILE" "$BUILD_DIR/passes/${PASS_NAME}-temp.so")
 
-; Import to compile all dependencies with .wpo files
+;; Import to compile all dependencies with .wpo files
 (import (passes $PASS_NAME))
 
-; Bundle everything into standalone .so
+;; Bundle everything into standalone .so
 (compile-whole-library "$BUILD_DIR/passes/${PASS_NAME}-temp.wpo" 
                        "$BUILD_DIR/passes/${PASS_NAME}.so")
 
-; Clean up intermediate files
+;; Clean up intermediate files
 (for-each (lambda (f) (when (file-exists? f) (delete-file f)))
   (list "$BUILD_DIR/passes/${PASS_NAME}-temp.so"
         "$BUILD_DIR/passes/${PASS_NAME}-temp.wpo"

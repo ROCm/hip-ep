@@ -59,6 +59,13 @@
     mlir-operation-walk
     mlir-operation-walk-rewrite
 
+    ;; Value operations
+    mlir-value-get-defining-op
+    mlir-value-get-type
+
+    ;; Operation attributes
+    mlir-operation-set-attr
+
     ;; Logging
     mlir-log-trace
     mlir-log-debug
@@ -172,6 +179,12 @@
   ;;; @return OpResult* as uptr
   (define mlir-operation-get-result
     (foreign-procedure "mlir_operation_get_result" (uptr iptr) uptr))
+
+  ;;; @brief Get the defining operation of a value
+  ;;; @param value-ptr Value* as uptr
+  ;;; @return Operation* as uptr, or 0 for block arguments
+  (define mlir-value-get-defining-op
+    (foreign-procedure "mlir_value_get_defining_op" (uptr) uptr))
 
   ;;; @brief Get the parent operation
   ;;; @param op-ptr Operation* as uptr
@@ -475,6 +488,13 @@
   (define mlir-create-generic-op
     (foreign-procedure "mlir_create_generic_op"
                        (string scheme-object scheme-object) uptr))
+
+  ;;; @brief Set an integer attribute on an operation
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @param attr-name Attribute name as string
+  ;;; @param value Integer value
+  (define mlir-operation-set-attr
+    (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
 
   ;;; @brief Get a result Value* from an operation by index
   ;;; @param op-ptr Operation* as uptr

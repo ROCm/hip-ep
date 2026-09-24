@@ -275,6 +275,15 @@ uint64_t mlir_operation_get_result(uint64_t op, int64_t index) {
   return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
 }
 
+// Get the defining operation of a value (returns 0 for block arguments)
+uint64_t mlir_value_get_defining_op(uint64_t value) {
+  if (!value) return 0;
+  MlirValue cVal{reinterpret_cast<const void*>(value)};
+  mlir::Value val = unwrap(cVal);
+  mlir::Operation* defOp = val.getDefiningOp();
+  return reinterpret_cast<uint64_t>(defOp);
+}
+
 // Walk operation tree and call Scheme callback for each operation
 // callback: Scheme procedure (lambda (op) ...)
 void mlir_operation_walk(uint64_t op, ptr callback) {
@@ -988,6 +997,15 @@ int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_
   return 1;
 }
 
+// Set an integer attribute on an operation
+void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) {
+  if (!op) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  mlir::MLIRContext* ctx = cppOp->getContext();
+  mlir::IntegerAttr attr = mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64), value);
+  cppOp->setAttr(attr_name, attr);
+}
+
 // Note: mlir_operation_get_context is defined earlier in this file (around line 387)
 // Do not define it again here
 
@@ -1057,6 +1075,8 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_result_value", (void*)::mlir_operation_get_result_value);
   Sregister_symbol("mlir_operation_get_loc", (void*)::mlir_operation_get_loc);
   Sregister_symbol("mlir_operation_get_block_argument", (void*)::mlir_operation_get_block_argument);
+  Sregister_symbol("mlir_value_get_defining_op", (void*)::mlir_value_get_defining_op);
+  Sregister_symbol("mlir_operation_set_attr", (void*)::mlir_operation_set_attr);
 
   // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
   Sregister_symbol("mlir_create_placeholder_op", (void*)::mlir_create_placeholder_op);

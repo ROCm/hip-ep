@@ -98,9 +98,25 @@
   ;;-----------------------------------------------------------------------
 
   (define (validate-match-operations ast-rec)
+    (normalize-match-operation-names ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
     (validate-no-duplicate-result-variables ast-rec)
     (validate-where-guards ast-rec))
+
+  (define (normalize-match-operation-names ast-rec)
+    (let ([match-vec (ast-pattern-expand-match ast-rec)])
+      (loop :for op-idx :from 0 :below (vector-length match-vec)
+            :rime-with match-op := (vector-ref match-vec op-idx)
+            :do (let* ([op-name-stx (ast-match-expand-op-name match-op)]
+                       [op-name-datum (syntax->datum op-name-stx)])
+                  (unless (or (string? op-name-datum) (symbol? op-name-datum))
+                    (syntax-violation 'validate-match-operations
+                                     "Operation name must be string or symbol"
+                                     op-name-stx))
+                  ;; Normalize: convert symbol to string in-place
+                  (unless (string? op-name-datum)
+                    (ast-match-expand-op-name-set! match-op
+                      (datum->syntax op-name-stx (symbol->string op-name-datum))))))))
 
   (define (validate-match-identifiers-start-with-% ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])

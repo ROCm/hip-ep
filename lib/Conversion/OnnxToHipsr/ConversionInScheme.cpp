@@ -21,9 +21,6 @@
 
 #include <algorithm>
 
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
-
 namespace mlir {
 namespace hipsr {
 
@@ -31,38 +28,6 @@ namespace hipsr {
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
-
-// Get the absolute path to lib/scheme directory dynamically
-static std::string getSchemeLibraryPath() {
-  // Get the path to the current executable/library
-  // Use the address of this function as a hint for getMainExecutable
-  std::string execPath = llvm::sys::fs::getMainExecutable(nullptr, (void*)&getSchemeLibraryPath);
-  llvm::SmallString<256> basePath(execPath);
-  llvm::sys::path::remove_filename(basePath);  // Remove binary/library name
-
-  // Common layouts:
-  //   build/bin/hip-mlir-opt -> build/lib/scheme
-  //   install/bin/hip-mlir-opt -> install/lib/scheme
-  if (llvm::sys::path::filename(basePath) == "bin") {
-    llvm::sys::path::remove_filename(basePath);  // Go up to build/install root
-  }
-  // basePath now points to build root or install root
-
-  llvm::SmallString<256> schemePath = basePath;
-  llvm::sys::path::append(schemePath, "lib", "scheme");
-
-  // Make the path absolute
-  if (std::error_code ec = llvm::sys::fs::make_absolute(schemePath)) {
-    // If make_absolute fails, just return the path as-is
-    return std::string(schemePath.c_str());
-  }
-
-  // Normalize the path (resolve .., remove redundant separators)
-  llvm::sys::path::remove_dots(schemePath, /*remove_dot_dot=*/true);
-
-  return std::string(schemePath.c_str());
-}
-
 
 struct ConversionInSchemePass
     : impl::ConversionInSchemePassBase<ConversionInSchemePass> {
@@ -98,12 +63,17 @@ struct ConversionInSchemePass
     std::string libraryName = moduleName;
     std::replace(libraryName.begin(), libraryName.end(), '/', ' ');
     std::string importCode = "(import (" + libraryName + "))";
-
-    // Set library-directories before importing (use dynamic path resolution)
-    std::string schemePath = getSchemeLibraryPath();
-    std::string libdirCode = "(library-directories (cons \"" + schemePath + "\" (library-directories)))";
+    // Set library-directories before importing
+    std::string libdirCode = "(library-directories (cons \"/home/build/hip-ep-chez/lib/scheme\" (library-directories)))";
     if (!ChezSchemeInterpreter::eval(libdirCode.c_str())) {
-      emitWarning(getOperation().getLoc(), "Failed to set library-directories for path: " + schemePath);
+      emitWarning(getOperation().getLoc(), "Failed to set library-directories");
+    }
+
+    if (!ChezSchemeInterpreter::eval(importCode.c_str())) {
+      emitError(getOperation().getLoc(), "Failed to import (")
+        << moduleName << ") module";
+      signalPassFailure();
+      return;
     }
 
     if (!ChezSchemeInterpreter::eval(importCode.c_str())) {

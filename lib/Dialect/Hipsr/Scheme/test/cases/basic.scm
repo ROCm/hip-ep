@@ -140,5 +140,51 @@
   (debug-validate? . #f)
   (debug-analyze? . #t)
   (debug-codegen? . #f)
-  (debug-matching? . #f)))
+  (debug-matching? . #f))
+
+ ;; Phase 4: Full codegen - generates complete pattern matching function
+ ;; - Creates lambda with (op operands-ref rewriter type-converter) parameters
+ ;; - Initializes all variables: match (%a %b %out), where (!t1), rewrite (%x %y)
+ ;; - Binds root results
+ ;; - Performs match checks with bounds and nullptr validation
+ ;; - Where bindings from :then-let wrap rewrite code in outer let*
+ ;; - Creates new operations in inner let* bindings
+ ;; - Calls mlir-replace-op to replace matched op with new result
+ :expect-codegen
+   (define pattern-basic
+     (lambda (op operands-ref rewriter type-converter)
+       (let ([%a (make-unbound-value)]
+             [%b (make-unbound-value)]
+             [%out (make-unbound-value)]
+             [!t1 (make-unbound-value)]
+             [%x (make-unbound-value)]
+             [%y (make-unbound-value)]
+             [all-operations (make-vector 1 (make-unbound-value))])
+         (set! %out (mlir-operation-get-result op 0))
+         (if (and
+               (let ([def-op (mlir-value-get-defining-op %out)])
+                 (and def-op
+                      (begin (vector-set! all-operations 0 def-op) #t)))
+               (and (string=? (mlir-operation-name (vector-ref all-operations 0)) "test.op")
+                    (= (mlir-operation-num-results (vector-ref all-operations 0)) 1))
+               (begin
+                 (if (< 0 (value-array-ref-size operands-ref))
+                     (let ([val (value-array-ref-at operands-ref 0)])
+                       (and (not (zero? val))
+                            (begin (set! %a val) #t)))
+                     #f))
+               (begin
+                 (if (< 1 (value-array-ref-size operands-ref))
+                     (let ([val (value-array-ref-at operands-ref 1)])
+                       (and (not (zero? val))
+                            (begin (set! %b val) #t)))
+                     #f)))
+             (let* ([!t1 (mlir-value-get-type %out)])
+               (let* ([%x (let ([new-op (mlir-create-generic-op "temp.op" (list %a) (list !t1))])
+                            (mlir-operation-get-result new-op 0))]
+                      [%y (let ([new-op (mlir-create-generic-op "new.op" (list %x %b) (list !t1))])
+                            (mlir-operation-get-result new-op 0))])
+                 (mlir-replace-op op %y)
+                 #t))
+             #f)))))
 

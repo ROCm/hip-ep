@@ -31,11 +31,12 @@
       (if (= success 1)
           (begin
             (mlir-log-debug "Dialect conversion successful")
-            (mlir-log-debug "Erasing dead NoValue ops...")
-            (mlir-erase-dead-novalue-ops module-op)
-            (mlir-log-debug "Rewiring placeholder inputs...")
-            (mlir-rewire-placeholder-inputs module-op)
-            (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
+            ;; Skip cleanup steps for now to see converted IR
+            ;;(mlir-log-debug "Erasing dead NoValue ops...")
+            ;;(mlir-erase-dead-novalue-ops module-op)
+            ;;(mlir-log-debug "Rewiring placeholder inputs...")
+            ;;(mlir-rewire-placeholder-inputs module-op)
+            (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success - CLEANUP SKIPPED"))
           (begin
             (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
             (error (quote run-pass) "Dialect conversion failed")))))
