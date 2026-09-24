@@ -327,30 +327,56 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     auto bType = dyn_cast<RankedTensorType>(adaptor.getB().getType());
     if (!aType || !aType.hasStaticShape() || !bType || !bType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "operands not static ranked");
-    if (aType.getRank() < 2 || bType.getRank() != 2)
-      return rewriter.notifyMatchFailure(
-          op, "only [..,M,K] x [K,N] (rank-2 B) is supported");
+    if (aType.getRank() < 2 || bType.getRank() < 2)
+      return rewriter.notifyMatchFailure(op,
+                                         "operands must be at least rank 2");
 
     // tosa.matmul requires rank-3 operands with *equal* batch sizes -- it does
-    // not broadcast a size-1 batch against a larger one. hip.matmul here has an
-    // unbatched (rank-2) B, so instead of broadcasting B's batch up to A's,
-    // collapse all of A's leading dims and M into a single dimension:
-    //
-    //   A[.., M, K] -> [1, prod(..)*M, K]
-    //   B[K, N]     -> [1, K, N]
-    //   matmul      -> [1, prod(..)*M, N]
-    //   result      -> [.., M, N]   (original result shape)
+    // not broadcast a size-1 batch against a larger one. Both shapes below
+    // reach rank 3 without needing it, but which dimension absorbs A's leading
+    // dims differs, so they cannot be spelled as one case.
     ArrayRef<int64_t> aShape = aType.getShape();
+    ArrayRef<int64_t> bShape = bType.getShape();
     int64_t k = aShape.back();
-    int64_t collapsedM = 1;
-    for (int64_t d : aShape.drop_back())
-      collapsedM *= d;
-    int64_t n = bType.getShape().back();
+    int64_t n = bShape.back();
+    if (bShape[bShape.size() - 2] != k)
+      return rewriter.notifyMatchFailure(op, "inner dimensions disagree");
 
-    Value a = reshapeTo(adaptor.getA(), {1, collapsedM, k}, rewriter);
-    Value b = reshapeTo(adaptor.getB(), {1, k, n}, rewriter);
+    int64_t batch = 1;
+    int64_t m = aShape[aShape.size() - 2];
+    if (bType.getRank() == 2) {
+      // B is the same matrix for every batch element, so flattening A's
+      // leading dims into M leaves the arithmetic untouched and avoids
+      // broadcasting B's batch up to A's:
+      //
+      //   A[.., M, K] -> [1, prod(..)*M, K]
+      //   B[K, N]     -> [1, K, N]
+      //   matmul      -> [1, prod(..)*M, N]
+      //   result      -> [.., M, N]   (original result shape)
+      for (int64_t d : aShape.drop_back(2))
+        m *= d;
+    } else {
+      // A batched B -- attention's Q@K^T and attn@V, where every (batch, head)
+      // pair has its own matrix -- cannot be flattened into M that way. The
+      // leading dims collapse into tosa.matmul's batch dimension instead,
+      // which needs them to agree on both sides, as there is no broadcast to
+      // fall back on:
+      //
+      //   A[.., M, K] -> [prod(..), M, K]
+      //   B[.., K, N] -> [prod(..), K, N]
+      //   matmul      -> [prod(..), M, N]
+      //   result      -> [.., M, N]   (original result shape)
+      if (aType.getRank() != bType.getRank() ||
+          aShape.drop_back(2) != bShape.drop_back(2))
+        return rewriter.notifyMatchFailure(op, "batch dimensions disagree");
+      for (int64_t d : aShape.drop_back(2))
+        batch *= d;
+    }
 
-    auto matmulType = resultType.clone({1, collapsedM, n});
+    Value a = reshapeTo(adaptor.getA(), {batch, m, k}, rewriter);
+    Value b = reshapeTo(adaptor.getB(), {batch, k, n}, rewriter);
+
+    auto matmulType = resultType.clone({batch, m, n});
     // The quant-info builder appends the (zero) zero-point operands that
     // tosa.matmul requires for float inputs.
     Value matmul =
