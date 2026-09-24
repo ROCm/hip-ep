@@ -53,6 +53,11 @@ namespace hipsr {
 // Current log level - used by FFI logging functions
 SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
 
+// Update log level (called from ChezSchemeInterpreter)
+void setSchemeLogLevel(SchemeLogLevel level) {
+  current_log_level = level;
+}
+
 // Set/get the current rewriter for FFI operations
 void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
   g_current_rewriter = rewriter;
@@ -529,8 +534,12 @@ ptr mlir_create_generic_op(const char* op_name,
       return nullptr;
     }
     ptr operand_ptr = Scar(current);
+    uint64_t operand_val = Sinteger64_value(operand_ptr);
     mlir::Value operand = mlir::Value::getFromOpaquePointer(
-        reinterpret_cast<void*>(Sinteger64_value(operand_ptr)));
+        reinterpret_cast<void*>(operand_val));
+    mlir_log_info((std::string("  operand value=") + std::to_string(operand_val) +
+                   " defOp=" + std::to_string(reinterpret_cast<uintptr_t>(operand.getDefiningOp())) +
+                   " impl=" + std::to_string(reinterpret_cast<uintptr_t>(operand.getImpl()))).c_str());
     operands.push_back(operand);
     current = Scdr(current);
   }
@@ -550,11 +559,25 @@ ptr mlir_create_generic_op(const char* op_name,
   }
 
   // Create operation using OpBuilder
+  mlir_log_info((std::string("mlir_create_generic_op: creating op '") + op_name + "'").c_str());
   mlir::OperationState state(loc, op_name);
   state.addOperands(operands);
   state.addTypes(resultTypes);
 
+  // Add empty region and attributes for operations that require them
+  std::string op_name_str(op_name);
+  if (op_name_str == "hipsr.placeholder") {
+    state.addRegion();
+    // Add placeholder_type attribute (Normal = 0)
+    auto *mlirContext = g_current_operation->getContext();
+    auto placeholderTypeAttr = mlir::hipsr::PlaceholderTypeAttr::get(
+        mlirContext, mlir::hipsr::PlaceholderType::Normal);
+    state.addAttribute("placeholder_type", placeholderTypeAttr);
+  }
+
   mlir::Operation* op = g_current_rewriter->create(state);
+  mlir_log_info((std::string("mlir_create_generic_op: created op=") +
+                 std::to_string(reinterpret_cast<uintptr_t>(op))).c_str());
   return reinterpret_cast<ptr>(op);
 }
 
@@ -608,7 +631,11 @@ int mlir_replace_op(uint64_t old_op_ptr, uint64_t new_value_ptr) {
   mlir::Operation* op = reinterpret_cast<mlir::Operation*>(old_op_ptr);
   mlir::Value newVal = mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(new_value_ptr));
 
+  mlir_log_info((std::string("mlir_replace_op: replacing op=") +
+                 std::to_string(old_op_ptr) + " with value=" +
+                 std::to_string(new_value_ptr)).c_str());
   g_current_rewriter->replaceOp(op, newVal);
+  mlir_log_info("mlir_replace_op: replacement done");
   return 1;
 }
 
@@ -874,12 +901,19 @@ void mlir_rewire_placeholder_inputs(uint64_t module_ptr) {
 // Create a TypeConverter object
 // Returns TypeConverter* as uint64_t (opaque handle for Scheme)
 uint64_t mlir_create_type_converter() {
-  return reinterpret_cast<uint64_t>(new mlir::TypeConverter());
+  mlir::TypeConverter* tc = new mlir::TypeConverter();
+  uint64_t result = reinterpret_cast<uint64_t>(tc);
+  mlir_log_debug((std::string("mlir_create_type_converter: created TypeConverter at ") +
+                  std::to_string(result) + " (ptr=" +
+                  std::to_string(reinterpret_cast<uintptr_t>(tc)) + ")").c_str());
+  return result;
 }
 
 // Destroy a TypeConverter object
 void mlir_destroy_type_converter(uint64_t converter_ptr) {
   if (!converter_ptr) return;
+  mlir_log_debug((std::string("mlir_destroy_type_converter: destroying TypeConverter at ") +
+                  std::to_string(converter_ptr)).c_str());
   delete reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 }
 
@@ -947,11 +981,26 @@ void mlir_conversion_target_add_dynamically_legal_func(
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
   auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 
+  mlir_log_debug((std::string("mlir_conversion_target_add_dynamically_legal_func: IN converter_ptr=") +
+                  std::to_string(converter_ptr) + " (as ptr=" +
+                  std::to_string(reinterpret_cast<uintptr_t>(converter)) + ")").c_str());
+
   target->addDynamicallyLegalOp<mlir::func::FuncOp>([converter](mlir::func::FuncOp op) {
+    mlir_log_debug((std::string("FuncOp lambda: converter=") +
+                    std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
     return converter->isSignatureLegal(op.getFunctionType());
   });
   target->addDynamicallyLegalOp<mlir::func::ReturnOp>(
-      [converter](mlir::func::ReturnOp op) { return converter->isLegal(op); });
+      [converter](mlir::func::ReturnOp op) {
+        mlir_log_debug((std::string("ReturnOp lambda: IN converter=") +
+                        std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
+        bool result = converter->isLegal(op);
+        mlir_log_debug((std::string("ReturnOp lambda: OUT result=") +
+                        std::to_string(result)).c_str());
+        return result;
+      });
+
+  mlir_log_debug("mlir_conversion_target_add_dynamically_legal_func: lambdas registered");
 }
 
 // Mark unknown ops legal if nested inside ComputeOp or PlaceholderOp
@@ -982,6 +1031,10 @@ void mlir_destroy_rewrite_pattern_set(uint64_t patterns_ptr) {
 // Returns 1 on success, 0 on failure
 // NOTE: This takes ownership of the patterns (moves them)
 int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_t patterns_ptr) {
+  mlir_log_debug((std::string("mlir_apply_full_conversion: IN module=") +
+                  std::to_string(module_ptr) + " target=" + std::to_string(target_ptr) +
+                  " patterns=" + std::to_string(patterns_ptr)).c_str());
+
   if (!module_ptr || !target_ptr || !patterns_ptr) return 0;
 
   auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
@@ -990,10 +1043,13 @@ int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
   auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
 
+  mlir_log_debug("mlir_apply_full_conversion: calling applyFullConversion");
   if (mlir::failed(mlir::applyFullConversion(module, *target, std::move(*patterns)))) {
+    mlir_log_debug("mlir_apply_full_conversion: FAILED");
     return 0;
   }
 
+  mlir_log_debug("mlir_apply_full_conversion: SUCCESS");
   return 1;
 }
 

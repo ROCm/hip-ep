@@ -83,7 +83,14 @@ target_include_directories(HipsrSchemeRuntime
     ${ChezScheme_SOURCE_DIR}/boot/pb
 )
 
-add_dependencies(HipsrSchemeRuntime ChezScheme ChezBootHeaders SchemeLibraries)
+# Define paths for Scheme library directories (source .sls files and binary .so files)
+target_compile_definitions(HipsrSchemeRuntime PRIVATE
+  SCHEME_LIBRARIES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/libraries"
+  SCHEME_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/libraries"
+  RIME_DIR="${CMAKE_SOURCE_DIR}/third_party/rime"
+)
+
+add_dependencies(HipsrSchemeRuntime ChezScheme ChezBootHeaders)
 
 target_link_libraries(HipsrSchemeRuntime
   ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
@@ -100,71 +107,5 @@ target_link_libraries(HipsrSchemeRuntime
   util
 )
 
-# Set up Scheme library directory structure
-set(SCHEME_LIB_DIR ${CMAKE_BINARY_DIR}/lib/scheme)
-
-# Get the scheme compiler from ChezScheme build
-ExternalProject_Get_Property(ChezScheme BINARY_DIR)
-set(SCHEME_COMPILER ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/bin/${CHEZ_MACHINE}/scheme)
-
-# Mirror source directory structure in build tree
-file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir)
-file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/mlir)
-file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/patterns)
-file(MAKE_DIRECTORY ${SCHEME_LIB_DIR}/passes)
-
-# Compile all Scheme libraries in one shot - super fast!
-set(COMPILE_ALL_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/compile-all-libraries.sh)
-set(ALL_SCHEME_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/mlir/ffi.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/patterns/cast.sls
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/onnx-to-hipsr.sls
-)
-
-add_custom_command(
-  OUTPUT
-    ${SCHEME_LIB_DIR}/mlir/ffi.so
-    ${SCHEME_LIB_DIR}/patterns/cast.so
-    ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
-  COMMAND bash "${COMPILE_ALL_SCRIPT}"
-          "${SCHEME_COMPILER}"
-          "${CMAKE_CURRENT_SOURCE_DIR}"
-          "${SCHEME_LIB_DIR}"
-  DEPENDS ChezScheme ${ALL_SCHEME_SOURCES} ${COMPILE_ALL_SCRIPT}
-  COMMENT "Compiling all Scheme libraries to bytecode"
-  VERBATIM
-)
-
-# Target for all compiled Scheme libraries
-add_custom_target(SchemeLibraries ALL
-  DEPENDS
-    ${SCHEME_LIB_DIR}/mlir/ffi.so
-    ${SCHEME_LIB_DIR}/patterns/cast.so
-    ${SCHEME_LIB_DIR}/passes/onnx-to-hipsr.so
-)
-
-# Copy simple pass modules (these are just thin wrappers, not compiled)
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/print.sls
-  ${SCHEME_LIB_DIR}/passes/print.sls
-  COPYONLY
-)
-
-# Install R6RS pass modules to <prefix>/lib/scheme/
-install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/libraries/passes/print.sls
-  DESTINATION lib/scheme/passes
-)
-
-# Install compiled R6RS libraries (.so bytecode)
-install(FILES
-  ${SCHEME_LIB_DIR}/mlir/ffi.so
-  ${SCHEME_LIB_DIR}/mlir/conversion/cast.so
-  ${SCHEME_LIB_DIR}/onnx-to-hipsr.so
-  DESTINATION lib/scheme/mlir
-)
-
-# Install rime library (dependency)
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/rime/rime
-        DESTINATION lib/scheme
-        FILES_MATCHING PATTERN "*.sls" PATTERN "*.scm")
+# DO NOT compile .sls files - use them as source
+# Scheme libraries will be loaded directly from source by the runtime

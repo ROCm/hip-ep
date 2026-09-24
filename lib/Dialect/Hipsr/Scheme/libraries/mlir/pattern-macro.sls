@@ -4,8 +4,7 @@
           :match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
-          ;; Re-export dummy identifiers for hygiene
-          op rewriter type-converter operands-ref make-unbound-value)
+          make-unbound-value)
   (import (except (rnrs) =)
           (mlir pattern-keywords)  ;; Import keywords at run time for re-export
           (for (mlir pattern-keywords) expand)  ;; Also at expand time
@@ -14,8 +13,7 @@
           (for (mlir pattern-validate) expand)
           (for (mlir pattern-analyze) expand)
           (for (mlir pattern-codegen) expand)
-          ;; Import dummy identifiers
-          (for (only (mlir pattern-codegen) op rewriter type-converter operands-ref make-unbound-value) expand))
+          (for (only (mlir pattern-codegen) make-unbound-value) expand))
 
   ;; Main macro: orchestrate 4 phases (waterfall style)
   ;; Phase 1: Parse -> AST

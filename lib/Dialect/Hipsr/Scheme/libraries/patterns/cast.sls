@@ -20,36 +20,22 @@
 
   ;;===--------------------------------------------------------------------===;;
   ;; Cast Pattern - MLIR-like Syntax with :where Clause
-  ;;
   ;; Operations come first, helper bindings defined in :where (like Haskell)
   ;;===--------------------------------------------------------------------===;;
 
-  ;; Implement full conversion manually
-  (define (onnx-cast->hipsr op operands-ref rewriter type-converter)
-    (let* ([%input (mlir-operation-get-operand op 0)]
-           [%output (mlir-operation-get-result op 0)]
-           [%ctx (mlir-get-hipsr-context-arg op)]
-           [!input-type (mlir-value-get-type %input)]
-           [!output-type (mlir-value-get-type %output)]
-           [!input-device (mlir-tensor-type-in-device-space !input-type)]
-           [!output-device (mlir-tensor-type-in-device-space !output-type)])
-      (display "Creating hipsr.placeholder...\n")
-      (let ([%placeholder (mlir-create-generic-op "hipsr.placeholder"
-                            (list %ctx %input !output-device)
-                            (list !output-device))])
-        (display "Created placeholder\n")
-        (mlir-operation-set-attr %placeholder "placeholder_type" 0)
-        (let ([%placeholder-result (mlir-operation-get-result-value-from-op %placeholder 0)])
-          (display "Creating hipsr.cast...\n")
-          (let ([%cast (mlir-create-generic-op "hipsr.cast"
-                         (list %ctx %input %placeholder-result !output-device)
-                         (list !output-device))])
-            (display "Created cast\n")
-            (let ([%cast-result (mlir-operation-get-result-value-from-op %cast 0)])
-              (display "Replacing operation...\n")
-              (mlir-replace-op op %cast-result)
-              (display "SUCCESS! Replaced onnx.Cast with hipsr.cast\n")
-              #t))))))
+  ;; Use the pattern DSL macro with explicit parameters
+  (define-conversion-pattern (onnx-cast->hipsr op operands-ref rewriter type-converter)
+    :match
+        %output = onnx.Cast (%input)
+    :then-let
+        ([%ctx (mlir-get-hipsr-context-arg op)]
+         [!output-type (mlir-value-get-type %output)]
+         [!output-device (mlir-tensor-type-in-device-space !output-type)])
+    :rewrite %output :with
+        (%placeholder = hipsr.placeholder (%ctx %input !output-device)
+                        -> !output-device)
+        (%cast = hipsr.cast (%ctx %input %placeholder !output-device)
+                 -> !output-device))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Population
@@ -57,6 +43,7 @@
 
   (define (populate-cast-patterns type-converter patterns ctx)
     (mlir-log-info "Registering onnx.Cast pattern")
+    (mlir-log-info (string-append "onnx-cast->hipsr is a procedure? " (if (procedure? onnx-cast->hipsr) "yes" "no")))
     (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr type-converter)
     (mlir-log-info "onnx.Cast pattern registered successfully"))
 

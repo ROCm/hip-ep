@@ -3,8 +3,7 @@
   (export generate-debug-ast
           generate-pattern-matchAndRewrite
           generate-debug-codegen
-          ;; Dummy parameter names for hygiene
-          op rewriter type-converter operands-ref make-unbound-value)
+          make-unbound-value)
   (import (rnrs)
           (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier?)
           (rename (rime loop) (:with :rime-with))
@@ -14,12 +13,7 @@
           (for (mlir pattern-analyze) expand)  ; for binding-manager-bindings
           (for (mlir ffi) expand))  ; FFI identifiers needed in generated syntax
 
-  ;; Dummy bindings so hygiene system knows these identifiers exist
-  ;; They're never actually used - just needed for quasiquote references
-  (define op (if #f #f))  ; Use if to avoid constant folding issues
-  (define rewriter (if #f #f))
-  (define type-converter (if #f #f))
-  (define operands-ref (if #f #f))
+
   (define (make-unbound-value) (if #f #f))  ; Sentinel for uninitialized variables
 
   ;;=======================================================================
@@ -116,47 +110,61 @@
   ;;-----------------------------------------------------------------------
 
   (define (generate-pattern-matchAndRewrite ast-rec)
-    (let* ([match-vec (ast-pattern-expand-match ast-rec)]
-           [binding-mgr (ast-pattern-expand-match-bindings ast-rec)]
-           [actions (ast-pattern-expand-match-actions ast-rec)]
-           [root-var (ast-pattern-expand-root-var ast-rec)]
-           [root-op-name (ast-pattern-expand-root-op-name ast-rec)]
-           [num-ops (vector-length match-vec)]
-           [pattern-type (ast-pattern-expand-pattern-type ast-rec)]
-           [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
-           [where-bindings (ast-pattern-expand-where ast-rec)]
+    ;; FIRST: Extract user parameters - these are needed for code generation templates
+    (let* ([user-params (ast-pattern-expand-parameters ast-rec)]
+           [params (if (null? user-params)
+                       #'(op operands-ref rewriter type-converter)
+                       user-params)]
+           ;; Extract individual parameters - bind them early so templates can use them
+           [op (car params)]
+           [operands-ref (cadr params)]
+           [rewriter (caddr params)]
+           [type-converter (cadddr params)])
 
-           ;; Find root operation to get all its result variables
-           [root-op (find-root-op match-vec root-op-name)]
-           [root-result-vars (ast-match-expand-result-var root-op)]
+      ;; NOW: Generate code with parameters in scope
+      (let* ([match-vec (ast-pattern-expand-match ast-rec)]
+             [binding-mgr (ast-pattern-expand-match-bindings ast-rec)]
+             [actions (ast-pattern-expand-match-actions ast-rec)]
+             [root-var (ast-pattern-expand-root-var ast-rec)]
+             [root-op-name (ast-pattern-expand-root-op-name ast-rec)]
+             [num-ops (vector-length match-vec)]
+             [pattern-type (ast-pattern-expand-pattern-type ast-rec)]
+             [rewrite-ops (ast-pattern-expand-rewrite ast-rec)]
+             [where-bindings (ast-pattern-expand-where ast-rec)]
 
-           ;; Generate root initialization code (bind all result variables)
-           [root-inits (generate-root-inits root-result-vars)]
+             ;; Find root operation to get all its result variables
+             [root-op (find-root-op match-vec root-op-name)]
+             [root-result-vars (ast-match-expand-result-var root-op)]
 
-           ;; Generate rewrite bindings (returns list of (var . binding) pairs)
-           [rewrite-pairs (generate-rewrite-bindings rewrite-ops)]
+             ;; Generate root initialization code (bind all result variables)
+             [root-inits (generate-root-inits root-result-vars op)]
 
-           ;; Collect all variables that need initialization
-           [match-vars (collect-all-variables binding-mgr)]
-           [where-vars (map ast-where-binding-expand-var where-bindings)]
-           [rewrite-vars (map car rewrite-pairs)]  ; Extract vars from pairs
-           [all-vars (append match-vars where-vars rewrite-vars)]
+             ;; Generate rewrite bindings (returns list of (var . binding) pairs)
+             [rewrite-pairs (generate-rewrite-bindings rewrite-ops)]
 
-           ;; Generate check code from actions
-           [check-code (generate-check-code actions match-vec)]
+             ;; Collect all variables that need initialization
+             [match-vars (collect-all-variables binding-mgr)]
+             [where-vars (map ast-where-binding-expand-var where-bindings)]
+             [rewrite-vars (map car rewrite-pairs)]  ; Extract vars from pairs
+             [all-vars (append match-vars where-vars rewrite-vars)]
 
-           ;; Generate rewrite code using pre-generated pairs
-           [rewrite-code (generate-rewrite-code-from-pairs rewrite-pairs pattern-type)])
+             ;; Generate check code from actions (pass operands-ref parameter)
+             [check-code (generate-check-code actions match-vec operands-ref)]
+
+             ;; Generate rewrite code using pre-generated pairs
+             [rewrite-code (generate-rewrite-code-from-pairs rewrite-pairs pattern-type op)])
 
       (with-syntax ([fname (ast-pattern-expand-function-name ast-rec)]
+                    [(param ...) params]
                     [(var ...) all-vars]
                     [num-operations num-ops]
                     [(root-init ...) root-inits]
-                    [(where-binding ...) (generate-where-let-bindings where-bindings #'fname)]
+                    [(where-binding ...) (generate-where-let-bindings where-bindings)]
                     [checks check-code]
                     [rewrite rewrite-code])
+        ;; Use user-provided parameter names - they share lexical scope with :then-let
         #'(define fname
-            (lambda (op operands-ref rewriter type-converter)
+            (lambda (param ...)
               (let ([var (make-unbound-value)] ...
                     [all-operations (make-vector num-operations (make-unbound-value))])
                 ;; Bind all result variables of root operation
@@ -167,7 +175,7 @@
                     ;; Wrap rewrite with where bindings from :then-let
                     (let* (where-binding ...)
                       rewrite)
-                    #f)))))))
+                    #f))))))))  ;; Extra paren for outer let* that binds parameters
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Generate rewrite code
@@ -176,7 +184,7 @@
   ;; For conversion patterns: generate let* bindings, then replaceOp
   ;; For rewrite patterns: generate let* bindings, then return last result
   ;;
-  (define (generate-rewrite-code-from-pairs pairs pattern-type)
+  (define (generate-rewrite-code-from-pairs pairs pattern-type op)
     (if (null? pairs)
         #'#t  ; No rewrite ops, just return #t for success
         (let* ([bindings (map cdr pairs)]  ; Extract bindings from (var . binding) pairs
@@ -185,8 +193,8 @@
               ;; Conversion pattern: replaceOp with last result
               (with-syntax ([(binding ...) bindings]
                             [result last-var])
-                #'(let* (binding ...)
-                    (mlir-replace-op op result)
+                #`(let* (binding ...)
+                    (mlir-replace-op #,op result)
                     #t))
               ;; Rewrite pattern: return last result
               (with-syntax ([(binding ...) bindings]
@@ -217,7 +225,12 @@
                            (datum->syntax #'here (string->symbol (string-append "%rewrite-tmp-" (number->string idx))))
                            result-var-raw)]
            [op-name (syntax->datum (ast-operation-expand-op-name op-rec))]
-           [operands (ast-operation-expand-operands op-rec)]
+           [all-operands (syntax->list (ast-operation-expand-operands op-rec))]
+           ;; Filter out Type names (starting with !) - they should only be in result types, not operands
+           [operands (filter (lambda (operand-stx)
+                              (let ([name (symbol->string (syntax->datum operand-stx))])
+                                (not (char=? (string-ref name 0) #\!))))
+                            all-operands)]
            [result-types (ast-operation-expand-result-types op-rec)]
            [attrs (syntax->list (ast-operation-expand-attributes op-rec))])
       (cons result-var  ; Return the var so caller knows what was generated
@@ -258,9 +271,9 @@
   ;;
   ;; Each where binding becomes: (var expr) for let*
   ;;
-  (define (generate-where-let-bindings where-list ctx-id)
-    ;; DON'T recontextualize - preserve original syntax
-    ;; The trick: wrap everything in (with-syntax ...) to inject op, rewriter, etc.
+  (define (generate-where-let-bindings where-list)
+    ;; Keep original syntax context - do NOT recontextualize
+    ;; The with-syntax wrapping will handle parameter injection
     (loop :for binding-rec :in where-list
           :rime-with var := (ast-where-binding-expand-var binding-rec)
           :rime-with expr := (ast-where-binding-expand-expr binding-rec)
@@ -272,10 +285,10 @@
   ;;
   ;; For each root result variable, generate: (set! var (mlir-operation-get-result op idx))
   ;;
-  (define (generate-root-inits root-result-vars)
+  (define (generate-root-inits root-result-vars op-param)
     (loop :for var :in root-result-vars
           :for idx :from 0
-          :collect #`(set! #,var (mlir-operation-get-result op #,idx))))
+          :collect #`(set! #,var (mlir-operation-get-result #,op-param #,idx))))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Find root operation by name
@@ -311,17 +324,17 @@
   ;; Helper: Generate check code from actions
   ;;-----------------------------------------------------------------------
 
-  (define (generate-check-code actions match-vec)
+  (define (generate-check-code actions match-vec operands-ref)
     (if (null? actions)
         #'#t
-        (let ([checks (map (lambda (act) (action->check-code act match-vec)) actions)])
+        (let ([checks (map (lambda (act) (action->check-code act match-vec operands-ref)) actions)])
           #`(and #,@checks))))
 
   ;;-----------------------------------------------------------------------
   ;; Helper: Translate single action to check code
   ;;-----------------------------------------------------------------------
 
-  (define (action->check-code action match-vec)
+  (define (action->check-code action match-vec operands-ref)
     (let ([tag (car action)])
       (case tag
         [(:set-current-op)
@@ -364,8 +377,8 @@
                 [operand-idx (cdr (assq 'operand-idx fields))])
            #`(begin
                ;; Check bounds: operand-idx < operands-ref size
-               (if (< #,operand-idx (value-array-ref-size operands-ref))
-                   (let ([val (value-array-ref-at operands-ref #,operand-idx)])
+               (if (< #,operand-idx (value-array-ref-size #,operands-ref))
+                   (let ([val (value-array-ref-at #,operands-ref #,operand-idx)])
                      ;; Check for nullptr (uptr is 0)
                      (and (not (zero? val))
                           (begin

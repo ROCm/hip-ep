@@ -15,6 +15,13 @@
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
 
+// Forward declaration from SchemeMlirBindings.cpp
+namespace mlir {
+namespace hipsr {
+void setSchemeLogLevel(SchemeLogLevel level);
+}
+}
+
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
 const size_t scheme_boot_size = sizeof(scheme_boot_data) - 1;
@@ -55,6 +62,8 @@ SchemeLogLevel ChezSchemeInterpreter::parseLogLevel(const std::string& level) {
 void ChezSchemeInterpreter::setLogLevel(SchemeLogLevel level) {
   current_log_level = level;
   logLevel = level;
+  // Also update the log level in SchemeMlirBindings.cpp
+  mlir::hipsr::setSchemeLogLevel(level);
 }
 
 void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
@@ -92,6 +101,10 @@ void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
   Sbuild_heap(nullptr, custom_init);
   initialized = true;
 
+  // Add Scheme library paths (source and binary)
+  addLibraryPath(SCHEME_LIBRARIES_DIR, SCHEME_BINARY_DIR);
+  addLibraryPath(RIME_DIR, RIME_DIR);
+
   if (logLevel <= SchemeLogLevel::Info) {
     llvm::errs() << "[info] ChezSchemeInterpreter: Initialization complete\n";
   }
@@ -108,6 +121,37 @@ void ChezSchemeInterpreter::shutdown() {
 
   // Chez Scheme doesn't require explicit cleanup
   initialized = false;
+}
+
+void ChezSchemeInterpreter::addLibraryPath(const char* src_path, const char* bin_path) {
+  if (!initialized) {
+    llvm::errs() << "[error] ChezSchemeInterpreter: Cannot add library path - runtime not initialized\n";
+    return;
+  }
+
+  // Build Scheme code to add paths as a single (src . bin) pair
+  std::string code =
+    "(library-directories "
+    "  (cons (cons \"" + std::string(src_path) + "\" \"" + std::string(bin_path) + "\") "
+    "  (library-directories)))";
+
+  if (!eval(code.c_str())) {
+    llvm::errs() << "[error] ChezSchemeInterpreter: Failed to add library paths: "
+                 << src_path << ", " << bin_path << "\n";
+    return;
+  }
+
+  if (logLevel <= SchemeLogLevel::Debug) {
+    // Define a helper function to get library-directories as a string and call it
+    std::string helper_code =
+      "(define (__get-libdirs-string) "
+      "  (call-with-port (open-output-string) "
+      "    (lambda (p) (write (library-directories) p) (get-output-string p))))";
+    eval(helper_code.c_str());
+
+    std::string result = callFunction("__get-libdirs-string", {});
+    llvm::errs() << "[debug] ChezSchemeInterpreter: library-directories = " << result << "\n";
+  }
 }
 
 bool ChezSchemeInterpreter::load(const char* scriptPath) {
@@ -187,14 +231,19 @@ void ChezSchemeInterpreter::callPassFunction(const char* functionName, mlir::Ope
   if (!initialized)
     return;
 
+  llvm::errs() << "[callPassFunction] Looking up function: " << functionName << "\n";
+
   ptr func = Stop_level_value(Sstring_to_symbol(functionName));
   if (func == Sfalse) {
     llvm::errs() << "Warning: Scheme function '" << functionName << "' not found\n";
     return;
   }
 
+  llvm::errs() << "[callPassFunction] Function found, creating scheme operation ptr\n";
   ptr schemeOp = makeSchemeOperation(op);
+  llvm::errs() << "[callPassFunction] Calling Scheme function with op=" << reinterpret_cast<uintptr_t>(op) << "\n";
   Scall1(func, schemeOp);
+  llvm::errs() << "[callPassFunction] Scheme function returned\n";
 }
 
 } // namespace hipsr

@@ -21,6 +21,7 @@
   (export ast-pattern-expand make-ast-pattern-expand make-default-ast-pattern-expand ast-pattern-expand?
           ast-pattern-expand-pattern-type ast-pattern-expand-pattern-type-set!
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!
+          ast-pattern-expand-parameters ast-pattern-expand-parameters-set!
           ast-pattern-expand-root-var ast-pattern-expand-root-var-set!
           ast-pattern-expand-root-op-name ast-pattern-expand-root-op-name-set!
           ast-pattern-expand-root-op-index ast-pattern-expand-root-op-index-set!
@@ -109,6 +110,10 @@
       (mutable function-name)    ;; Phase 1 (parse): syntax identifier - name of generated pattern function
                                  ;; Example: #'my-pattern
 
+      (mutable parameters)       ;; Phase 1 (parse): list of syntax identifiers - lambda parameters
+                                 ;; Example: (#'op #'operands-ref #'rewriter #'type-converter)
+                                 ;; User-provided parameters that will be visible in :then-let scope
+
       (mutable root-var)         ;; Phase 1 (parse): syntax identifier - result variable of the root operation
                                  ;; Example: #'%out
                                  ;; The root operation is the one matched against the input op
@@ -186,6 +191,7 @@
     (make-ast-pattern-expand
       pattern-type  ;; pattern-type: 'conversion or 'rewrite
       #f            ;; function-name: set by parse-rest
+      '()           ;; parameters: set by parse-rest (list of parameter identifiers)
       #f            ;; root-var: set by parse-rest
       #f            ;; root-op-name: set by validate phase
       #f            ;; root-op-index: set by validate phase
