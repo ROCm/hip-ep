@@ -119,12 +119,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
   size_t sz_gather_buf = align_up_64(num_tokens * hidden_size * elem_size);
   size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
-  // Fused decode (num_tokens == 1) reuses act_buf and fc2_buf as the [k,
-  // inter] activation slots and [k, hidden] per-expert output slots needed
-  // by hip_qmoe_decode_fused (gather/scatter happen inline inside the
-  // kernel, indexed by expert_indices). For num_tokens > 1 the multi-pass
-  // path uses [num_tokens, ...] sizing. Take the max so the per-state
-  // scratch is never under-sized regardless of which path runs.
+  // The fused path reuses act_buf and fc2_buf as the [k, inter] activation
+  // slots and [k, hidden] per-expert output slots needed by
+  // hip_qmoe_decode_fused (gather/scatter happen inline inside the kernel,
+  // indexed by expert_indices). It serves a narrow burst one token at a time,
+  // so it needs k slots rather than num_tokens * k. The bucketed path below
+  // uses [num_tokens, ...] sizing. Take the max so the per-state scratch is
+  // never under-sized regardless of which path runs.
   int64_t act_slots = std::max<int64_t>(num_tokens, k);
   size_t sz_act_buf = align_up_64(act_slots * inter_size * elem_size);
   size_t sz_fc2_buf = align_up_64(act_slots * hidden_size * elem_size);
@@ -195,14 +196,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                   d_expert_weights, num_tokens, num_experts, k,
                                   normalize_routing_weights, elem_size));
 
-  // Fused decode fast path: single-token MoE collapses to three back-to-back
-  // kernel launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
+  // Fused path: one token's MoE collapses to three back-to-back kernel
+  // launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,
   // hipStreamSynchronize, or host-side bucketing. Replaces the multi-pass
   // bucket -> sync -> per-active-expert (gather, fc1, swiglu, fc2,
   // scatter_add) sequence below. d_act_buf is reused as the [k, inter]
   // activation slots, d_fc2_buf as the [k, hidden] per-expert output slots
   // (gather/scatter happen inline via expert_indices).
-  if (num_tokens == 1) {
+  //
+  // A burst narrow enough is cheaper served a token at a time by the fused path
+  // than handed to the bucketed path below, which pays a stream synchronize and
+  // a launch per expert per layer to save weight traffic the burst is too
+  // narrow to reuse. See hipdnn_ep_qmoe_fused_max_tokens.
+  //
+  // Each iteration is independent -- one token's k experts, reduced into that
+  // token's output row -- so the slot buffers are reused across iterations
+  // rather than indexed by token. They are sized max(num_tokens, k) above, and
+  // every iteration uses k.
+  if (num_tokens <= hipdnn_ep_qmoe_fused_max_tokens()) {
     // W4A8 dp4a decode variant (env-gated). Requires fp16 and 32-aligned
     // block_size / hidden / inter (all true for the MoE targets: block_size
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
@@ -211,26 +222,34 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     const bool dp4a_ok = hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
                          block_size > 0 && (block_size % 32 == 0) &&
                          (hidden_size % 32 == 0) && (inter_size % 32 == 0);
-    if (dp4a_ok) {
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld)\n",
-                        (long long)k);
-      HIP_CHECK(hip_qmoe_decode_fused_dp4a(
-          stream, input, d_expert_indices, d_expert_weights, fc1_weights,
-          fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
-          fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
-          d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
-          block_size, activation_alpha, activation_beta, swiglu_limit,
-          elem_size));
-      return 0;
-    }
-    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode%s path (tokens=%lld, "
+                      "k=%lld)\n",
+                      dp4a_ok ? " dp4a" : "", (long long)num_tokens,
                       (long long)k);
-    HIP_CHECK(hip_qmoe_decode_fused(
-        stream, input, d_expert_indices, d_expert_weights, fc1_weights,
-        fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
-        fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, hidden_size,
-        inter_size, k, block_size, activation_alpha, activation_beta,
-        swiglu_limit, elem_size));
+    for (int64_t t = 0; t < num_tokens; t++) {
+      const void *in_t =
+          static_cast<const char *>(input) + t * hidden_size * elem_size;
+      void *out_t = static_cast<char *>(output) + t * hidden_size * elem_size;
+      const void *idx_t =
+          static_cast<const char *>(d_expert_indices) + t * k * sizeof(int32_t);
+      const void *wts_t =
+          static_cast<const char *>(d_expert_weights) + t * k * elem_size;
+      if (dp4a_ok) {
+        HIP_CHECK(hip_qmoe_decode_fused_dp4a(
+            stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
+            fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+            fc2_bias, d_fc2_buf, d_act_buf, out_t, d_a_qb_in, d_a_scale_in,
+            d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k, block_size,
+            activation_alpha, activation_beta, swiglu_limit, elem_size));
+      } else {
+        HIP_CHECK(hip_qmoe_decode_fused(
+            stream, in_t, idx_t, wts_t, fc1_weights, fc1_scales,
+            fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+            fc2_bias, d_fc2_buf, d_act_buf, out_t, hidden_size, inter_size, k,
+            block_size, activation_alpha, activation_beta, swiglu_limit,
+            elem_size));
+      }
+    }
     return 0;
   }
 
