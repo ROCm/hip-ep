@@ -3438,6 +3438,13 @@ __device__ __forceinline__ int v6_swap_halves(int x) {
 __device__ __forceinline__ float v6_swap_halves(float x) {
     return __builtin_bit_cast(float, v6_swap_halves(__builtin_bit_cast(int, x)));
 }
+__device__ __forceinline__ bool v6_wave_any(bool p) {
+#if HIPDNN_HAS_WMMA
+    return __builtin_amdgcn_ballot_w32(p) != 0;
+#else
+    return __any(p);
+#endif
+}
 
 template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int NW>
 __global__ void __launch_bounds__(32 * NW)
@@ -3728,13 +3735,20 @@ gqa_flash_prefill_v6_kernel(
             l_reg[mi] = corr[mi] * l_reg[mi] + rsum;
         }
 
+        // Once the running max stops moving every corr is exactly 1, so the
+        // rescale is an identity and the wave can skip it.
+        bool rescale = false;
         #pragma unroll
-        for (int mi = 0; mi < M_TILES; ++mi)
+        for (int mi = 0; mi < M_TILES; ++mi) rescale = rescale || corr[mi] != 1.0f;
+        if (v6_wave_any(rescale)) {
             #pragma unroll
-            for (int tj = 0; tj < D_TILES; ++tj)
+            for (int mi = 0; mi < M_TILES; ++mi)
                 #pragma unroll
-                for (int e = 0; e < kAcc; ++e)
-                    O_frag[mi][tj][e] *= corr[mi];
+                for (int tj = 0; tj < D_TILES; ++tj)
+                    #pragma unroll
+                    for (int e = 0; e < kAcc; ++e)
+                        O_frag[mi][tj][e] *= corr[mi];
+        }
 
         if constexpr (NW == 1) __syncthreads();   // single wave: V_lds visible
         #pragma unroll
