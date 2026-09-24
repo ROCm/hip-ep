@@ -18,9 +18,23 @@
  *      with double-buffered shared memory, grid swizzling, and inline-asm
  *      batched dequant. Requires gfx11xx/gfx12xx.
  *
- *   2. GEMV col-major path (batch==1, K%32==0, 1 < M < 16):
+ *   2. GEMV col-major path (batch==1, K%32==0, 1 < M < kWmmaMinM):
  *      Transposes A/C internally. K-parallel reduction GEMV with
- *      COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N).
+ *      COL_MAJOR=true, autotuned (BLOCK_SIZE, TILE_N). One block per row,
+ *      so an M-row call streams the weight M times -- see the GEMV-M
+ *      autotune section for why that is the main cost in this range.
+ *
+ *   2b. M-blocked variant of 2, on by default, HIPDNN_EP_MATMUL_SMALLM=0 to
+ *      disable: as 2 but with TILE_M>1, so one block covers several output
+ *      rows and reads the weight once per tile of rows. The bits=8 GEMV has
+ *      the same treatment behind HIPDNN_EP_MATMUL_SMALLM_I8.
+ *
+ *      For bits=4 this is only the fallback in the verify band: M in
+ *      [2, HIPDNN_EP_MATMUL_DP4A_MAX_M] prefers the W4A8 integer-dot kernel
+ *      (Section 1b-dp4a), which is M-blocked too and both reads the weight
+ *      once and dequantizes it once per tile of rows. The float path here
+ *      repeats the dequant per row, so it stays ALU-bound where the dp4a one
+ *      is not.
  *
  *   3. GEMV row-major path (batch==1, K%32==0, M=1 or fallthrough):
  *      Direct row-major GEMV with uint8 zero points (no ZP conversion).
@@ -60,10 +74,12 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -219,9 +235,9 @@ __global__ void matmul_nbits_kernel_i8(
  *   default zp = 128 (= 2^(bits-1) per the ONNX MatMulNBits spec)
  *   no col-major / WMMA-compat path: int8 always runs row-major.
  *
- * Each threadblock computes TILE_N output elements at row m, sharing the
- * same A row across the N dimension. BLOCK_SIZE threads cooperate on the
- * K reduction via warp shuffle + shared mem (identical to int4 path).
+ * Each threadblock computes TILE_N output elements for TILE_M rows, sharing
+ * the loaded weight bytes across those rows. BLOCK_SIZE threads cooperate on
+ * the K reduction via warp shuffle + shared mem (identical to int4 path).
  *
  * Key optimizations carried over from int4:
  *   - 16-byte main loop (uint4 = 128 bits): 16 weights per global txn
@@ -231,16 +247,51 @@ __global__ void matmul_nbits_kernel_i8(
  *     subtract by hoisting it out of the K-inner loop -- ~30% fewer
  *     fp32 ops in the FMA tree)
  *   - Bit-shift group index (block_size is power-of-2; gated at dispatch)
+ *   - TILE_M row blocking, so the weight is read once per tile of rows
+ *     rather than once per row (see the GEMV-M-i8 autotune section)
+ *
+ * WHY TILE_M matters more here than it does for int4. A speculative verify
+ * pass calls this with M = k+1 rows, and at TILE_M == 1 grid.y = M gives each
+ * row its own threadblock streaming the whole weight: M times the traffic for
+ * the same answer. Measured on a 622 MB int8 lm_head, M=1 -> M=8 costs
+ * 4.10 -> 31.54 ms with M*W/t pinned at 152-158 GB/s at every M, which is the
+ * signature of a kernel that is purely traffic-bound and reading per row.
+ * int8 also has more headroom for the trade than int4 does: one byte-extract
+ * plus one FMA per weight per row against int4's shift+mask+convert+FMA over
+ * half the bytes, so blocking rows costs a quarter of the ALU per byte that
+ * the same change costs on the nibble path.
  *
  * Constraint: requires block_size >= 16 (so a 16-element vector lies in one
  * group). The Qwen3.5 int8 ops use block_size=128, which satisfies this.
  * Smaller block_size falls back to the naive int8 kernel above.
  *
- * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
+ * Launch: grid(ceil(N/TILE_N), ceil(M/TILE_M), batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N>
-__global__ void matmul_nbits_gemv_kernel_i8(
+// Occupancy target, which is really a register-budget request: the VGPR file is
+// 1536 per SIMD in wave32, so N waves/SIMD caps a kernel at 1536/N registers.
+//
+// Left at the compiler's preferred 9 for TILE_M == 1, which fits in 166 with no
+// scratch. For TILE_M > 1 it must be lowered, because the default heuristic
+// picks 8 waves (a 192-register cap) and then spills the remainder: measured
+// 1024-2264 bytes of scratch per lane, reloaded inside the K loop, which is what
+// made every multi-row config 6-10x slower than the single-row one it was meant
+// to beat. 6 waves gives 256, the wave32 architectural maximum, and is the
+// correct trade for a kernel whose limit is memory latency rather than
+// arithmetic: fewer, fatter waves that never touch scratch.
+// A minimum alone does nothing here: asking for "at least 6" leaves the
+// compiler free to reach 8, which it prefers, so the cap has to be a maximum.
+//
+// Shared by the int8 GEMV below and the int4 GEMV in section 1b, which have the
+// same accumulator tile and the same reason to want it in registers.
+#define GEMV_WAVES_MIN(TM) ((TM) > 1 ? 1 : 9)
+#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 4 : 9)
+
+template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
+__global__
+__attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
+                                   GEMV_WAVES_MAX(TILE_M))))
+void matmul_nbits_gemv_kernel_i8(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -251,37 +302,76 @@ __global__ void matmul_nbits_gemv_kernel_i8(
     int64_t block_size)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
-    const int64_t m      = blockIdx.y;
+    const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int64_t batch  = blockIdx.z;
     const int tid        = threadIdx.x;
 
-    if (m >= M) return;
+    if (m0 >= M) return;
+
+    // Rows owned by this block. TILE_M == 1 collapses every TILE_M-dependent
+    // construct below to exactly the pre-existing single-row code.
+    const int rows = (TILE_M == 1)
+                       ? 1
+                       : static_cast<int>((M - m0) < TILE_M ? (M - m0) : TILE_M);
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift = __builtin_ctzll(
                                  static_cast<unsigned long long>(block_size));
 
     // Row-major A only (no COL_MAJOR variant -- int8 has no WMMA path).
-    const __half* a_base   = A + batch * M * K + m * K;
+    const __half* a_base   = A + batch * M * K + m0 * K;
 
     // Per-tile-N column pointers (clamped to N-1 for OOB lanes; the
     // out-of-bounds tile guards in the writeback skip those results).
-    const uint8_t* b_base_arr[TILE_N];
-    const __half*  s_rows[TILE_N];
-    int64_t        n_idx[TILE_N];
+    //
+    // Held in registers at TILE_M == 1 exactly as they always were. At
+    // TILE_M > 1 they cost 6 dwords per column that partial[][] needs more, so
+    // they are recomputed from the tile base instead -- the same trade the int4
+    // M-blocked path makes, and for the same reason: every entry is affine in
+    // tn, so it is two multiplies against a tile that would otherwise spill.
+    constexpr int NADDR = (TILE_M == 1) ? TILE_N : 1;
+    [[maybe_unused]] const uint8_t* b_base_arr[NADDR];
+    [[maybe_unused]] const __half*  s_rows[NADDR];
+    [[maybe_unused]] int64_t        n_idx[NADDR];
+    if constexpr (TILE_M == 1) {
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        int64_t n  = n_base + tn;
-        int64_t sn = (n < N) ? n : 0;
-        n_idx[tn]  = sn;
-        b_base_arr[tn] = B + sn * K;
-        s_rows[tn] = scales + sn * k_blocks;
+        for (int tn = 0; tn < NADDR; tn++) {
+            int64_t n  = n_base + tn;
+            int64_t sn = (n < N) ? n : 0;
+            n_idx[tn]  = sn;
+            b_base_arr[tn] = B + sn * K;
+            s_rows[tn] = scales + sn * k_blocks;
+        }
     }
 
-    float partial[TILE_N];
+    // Column offset inside the tile, clamped so an out-of-range column aliases
+    // the tile's first column. Which in-bounds column it reads is irrelevant:
+    // the writeback drops those lanes.
+    auto col_off = [&](int tn) __attribute__((always_inline)) -> int64_t {
+        return (n_base + tn < N) ? tn : 0;
+    };
+    auto b_ptr = [&](int tn) __attribute__((always_inline)) -> const uint8_t* {
+        if constexpr (TILE_M == 1) return b_base_arr[tn];
+        else return B + (n_base + col_off(tn)) * K;
+    };
+    auto s_ptr = [&](int tn) __attribute__((always_inline)) -> const __half* {
+        if constexpr (TILE_M == 1) return s_rows[tn];
+        else return scales + (n_base + col_off(tn)) * k_blocks;
+    };
+    auto zp_row = [&](int tn) __attribute__((always_inline)) -> int64_t {
+        if constexpr (TILE_M == 1) return n_idx[tn];
+        else return n_base + col_off(tn);
+    };
+    auto read_a = [&](int tm, int64_t k) __attribute__((always_inline)) -> float {
+        return static_cast<float>(a_base[static_cast<int64_t>(tm) * K + k]);
+    };
+
+    float partial[TILE_M][TILE_N];
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++)
-        partial[tn] = 0.0f;
+    for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++)
+            partial[tm][tn] = 0.0f;
 
     const bool has_zp = (zp != nullptr);
 
@@ -294,55 +384,121 @@ __global__ void matmul_nbits_gemv_kernel_i8(
          idx += static_cast<int64_t>(BLOCK_SIZE)) {
         const int64_t k16 = idx * 16;
 
-        float a_vals[16];
-        float a_sum = 0.0f;
-#pragma unroll
-        for (int i = 0; i < 16; i++) {
-            a_vals[i] = static_cast<float>(a_base[k16 + i]);
-            a_sum += a_vals[i];
-        }
-
         // 16-byte chunks lie in one group iff block_size >= 16 (precondition).
         const int64_t grp = k16 >> bs_shift;
 
-        // 16-byte (uint4) loads from each of TILE_N B columns.
+        // 16-byte (uint4) loads from each of TILE_N B columns, consumed by
+        // every row this block owns. That reuse is the point of TILE_M > 1.
         uint4 b_pk[TILE_N];
         float sv[TILE_N];
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
-            b_pk[tn] = *reinterpret_cast<const uint4*>(
-                            &b_base_arr[tn][k16]);
-            sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+            b_pk[tn] = *reinterpret_cast<const uint4*>(&b_ptr(tn)[k16]);
+            sv[tn]   = static_cast<float>(s_ptr(tn)[grp]);
+        }
+        // Hoisting the zero point costs TILE_N registers, which is only worth
+        // it when there are rows to amortise it over; at TILE_M == 1 it stays
+        // inside the tn loop so the decode path's register pressure is
+        // unchanged.
+        float zv_h[TILE_M > 1 ? TILE_N : 1];
+        if (TILE_M > 1 && has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv_h[tn] = static_cast<float>(zp[zp_row(tn) * k_blocks + grp]);
         }
 
+        if constexpr (TILE_M == 1) {
+            // Single row: the 16-wide A window is live once, so keep the
+            // original shape. This is the decode path and its codegen is tuned.
+            float a_vals[16];
+            float a_sum = 0.0f;
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++) {
-            // Decode 16 uint8 weights from the four 32-bit lanes of the
-            // uint4 vector. Each uint32 holds 4 bytes (little-endian).
-            float dot = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 4; i++)
-                dot += a_vals[i] *
-                       static_cast<float>((b_pk[tn].x >> (i * 8)) & 0xFFu);
-#pragma unroll
-            for (int i = 0; i < 4; i++)
-                dot += a_vals[4 + i] *
-                       static_cast<float>((b_pk[tn].y >> (i * 8)) & 0xFFu);
-#pragma unroll
-            for (int i = 0; i < 4; i++)
-                dot += a_vals[8 + i] *
-                       static_cast<float>((b_pk[tn].z >> (i * 8)) & 0xFFu);
-#pragma unroll
-            for (int i = 0; i < 4; i++)
-                dot += a_vals[12 + i] *
-                       static_cast<float>((b_pk[tn].w >> (i * 8)) & 0xFFu);
+            for (int i = 0; i < 16; i++) {
+                a_vals[i] = read_a(0, k16 + i);
+                a_sum += a_vals[i];
+            }
 
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
-            } else {
-                // ONNX MatMulNBits default zp for bits=8 is 2^(bits-1) = 128.
-                partial[tn] += dot * sv[tn] - a_sum * 128.0f * sv[tn];
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                // Decode 16 uint8 weights from the four 32-bit lanes of the
+                // uint4 vector. Each uint32 holds 4 bytes (little-endian).
+                float dot = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dot += a_vals[i] *
+                           static_cast<float>((b_pk[tn].x >> (i * 8)) & 0xFFu);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dot += a_vals[4 + i] *
+                           static_cast<float>((b_pk[tn].y >> (i * 8)) & 0xFFu);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dot += a_vals[8 + i] *
+                           static_cast<float>((b_pk[tn].z >> (i * 8)) & 0xFFu);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dot += a_vals[12 + i] *
+                           static_cast<float>((b_pk[tn].w >> (i * 8)) & 0xFFu);
+
+                if (has_zp) {
+                    float zv = static_cast<float>(
+                                   zp[n_idx[tn] * k_blocks + grp]);
+                    partial[0][tn] += dot * sv[tn] - a_sum * zv * sv[tn];
+                } else {
+                    // ONNX MatMulNBits default zp for bits=8 is 2^(bits-1).
+                    partial[0][tn] += dot * sv[tn] - a_sum * 128.0f * sv[tn];
+                }
+            }
+        } else {
+            // Several rows: quarter the 16-wide group so the unrolled row loop
+            // holds one 4-wide A window rather than TILE_M copies of a 16-wide
+            // one, and so each quarter lines up with one uint32 lane of b_pk.
+            //
+            // The row loop must stay a compile-time unroll -- a data-dependent
+            // exit on `rows` makes the trip count dynamic, partial[tm][tn] gets
+            // a runtime index, and the whole accumulator tile lands in scratch.
+            // That, not a register shortfall, is what made the int4 version of
+            // this path 6-10x slower before it was predicated instead. Rows
+            // beyond `rows` are computed against a clamped A row and dropped at
+            // the store: wasted FMAs against an already-loaded weight, which is
+            // the cheap half of this kernel.
+#pragma unroll
+            for (int tm = 0; tm < TILE_M; tm++) {
+                const int tm_r = (tm < rows) ? tm : 0;
+
+                float acc[TILE_N];
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) acc[tn] = 0.0f;
+                float a_sum = 0.0f;
+
+#pragma unroll
+                for (int q = 0; q < 4; q++) {
+                    float a4[4];
+#pragma unroll
+                    for (int i = 0; i < 4; i++) {
+                        a4[i] = read_a(tm_r, k16 + q * 4 + i);
+                        a_sum += a4[i];
+                    }
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        const uint32_t w = (q == 0)   ? b_pk[tn].x
+                                           : (q == 1) ? b_pk[tn].y
+                                           : (q == 2) ? b_pk[tn].z
+                                                      : b_pk[tn].w;
+#pragma unroll
+                        for (int i = 0; i < 4; i++)
+                            acc[tn] = __fmaf_rn(
+                                a4[i],
+                                static_cast<float>((w >> (i * 8)) & 0xFFu),
+                                acc[tn]);
+                    }
+                }
+
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    const float zv = has_zp ? zv_h[tn] : 128.0f;
+                    partial[tm][tn] += (acc[tn] - a_sum * zv) * sv[tn];
+                }
             }
         }
     }
@@ -354,39 +510,46 @@ __global__ void matmul_nbits_gemv_kernel_i8(
         for (int64_t idx2 = static_cast<int64_t>(tid); idx2 < num_u64_m;
              idx2 += static_cast<int64_t>(BLOCK_SIZE)) {
             const int64_t k8 = k_after_p1 + idx2 * 8;
-
-            float a_vals[8];
-            float a_sum = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                a_vals[i] = static_cast<float>(a_base[k8 + i]);
-                a_sum += a_vals[i];
-            }
-
             const int64_t grp = k8 >> bs_shift;
 
+            // Only runs when K % 16 != 0, so it shares the function's register
+            // budget but can never be its peak: an 8-wide A window per row is
+            // narrow enough to leave the phase-1 tile shape unconstrained.
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                float sv = static_cast<float>(s_rows[tn][grp]);
-                uint2 packed = *reinterpret_cast<const uint2*>(
-                                    &b_base_arr[tn][k8]);
+            for (int tm = 0; tm < TILE_M; tm++) {
+                const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
 
-                float dot = 0.0f;
+                float a_vals[8];
+                float a_sum = 0.0f;
 #pragma unroll
-                for (int i = 0; i < 4; i++)
-                    dot += a_vals[i] *
-                           static_cast<float>((packed.x >> (i * 8)) & 0xFFu);
-#pragma unroll
-                for (int i = 0; i < 4; i++)
-                    dot += a_vals[4 + i] *
-                           static_cast<float>((packed.y >> (i * 8)) & 0xFFu);
+                for (int i = 0; i < 8; i++) {
+                    a_vals[i] = read_a(tm_r, k8 + i);
+                    a_sum += a_vals[i];
+                }
 
-                if (has_zp) {
-                    float zv = static_cast<float>(
-                                   zp[n_idx[tn] * k_blocks + grp]);
-                    partial[tn] += dot * sv - a_sum * zv * sv;
-                } else {
-                    partial[tn] += dot * sv - a_sum * 128.0f * sv;
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    float sv = static_cast<float>(s_ptr(tn)[grp]);
+                    uint2 packed = *reinterpret_cast<const uint2*>(
+                                        &b_ptr(tn)[k8]);
+
+                    float dot = 0.0f;
+#pragma unroll
+                    for (int i = 0; i < 4; i++)
+                        dot += a_vals[i] *
+                               static_cast<float>((packed.x >> (i * 8)) & 0xFFu);
+#pragma unroll
+                    for (int i = 0; i < 4; i++)
+                        dot += a_vals[4 + i] *
+                               static_cast<float>((packed.y >> (i * 8)) & 0xFFu);
+
+                    if (has_zp) {
+                        float zv = static_cast<float>(
+                                       zp[zp_row(tn) * k_blocks + grp]);
+                        partial[tm][tn] += dot * sv - a_sum * zv * sv;
+                    } else {
+                        partial[tm][tn] += dot * sv - a_sum * 128.0f * sv;
+                    }
                 }
             }
         }
@@ -397,18 +560,21 @@ __global__ void matmul_nbits_gemv_kernel_i8(
         const int64_t k_tail = (K / 8) * 8;
         for (int64_t k = k_tail + static_cast<int64_t>(tid);
              k < K; k += static_cast<int64_t>(BLOCK_SIZE)) {
-            const float   a_val = static_cast<float>(a_base[k]);
-            const int64_t grp   = k >> bs_shift;
+            const int64_t grp = k >> bs_shift;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
-                float sv = static_cast<float>(s_rows[tn][grp]);
+                float sv = static_cast<float>(s_ptr(tn)[grp]);
                 float zv = has_zp
                               ? static_cast<float>(
-                                    zp[n_idx[tn] * k_blocks + grp])
+                                    zp[zp_row(tn) * k_blocks + grp])
                               : 128.0f;
-                float qval = static_cast<float>(b_base_arr[tn][k]);
-                partial[tn] += a_val * (qval - zv) * sv;
+                float qval = static_cast<float>(b_ptr(tn)[k]);
+#pragma unroll
+                for (int tm = 0; tm < TILE_M; tm++) {
+                    const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
+                    partial[tm][tn] += read_a(tm_r, k) * (qval - zv) * sv;
+                }
             }
         }
     }
@@ -420,36 +586,48 @@ __global__ void matmul_nbits_gemv_kernel_i8(
     const int num_warps = BLOCK_SIZE / wave_size;
 
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
-            partial[tn] += __shfl_down(partial[tn], offset);
+    for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++) {
+            for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
+                partial[tm][tn] += __shfl_down(partial[tm][tn], offset);
+        }
     }
 
     constexpr int MAX_WARPS = BLOCK_SIZE / 32;
-    __shared__ float warp_sums[TILE_N * MAX_WARPS];
+    __shared__ float warp_sums[TILE_M * TILE_N * MAX_WARPS];
 
     if (lane_id == 0) {
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++)
-            warp_sums[tn * MAX_WARPS + warp_id] = partial[tn];
+        for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                warp_sums[(tm * TILE_N + tn) * MAX_WARPS + warp_id] =
+                    partial[tm][tn];
     }
     __syncthreads();
 
     if (warp_id == 0) {
 #pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++) {
-            float val = (lane_id < num_warps)
-                            ? warp_sums[tn * MAX_WARPS + lane_id] : 0.0f;
-            for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
-                val += __shfl_down(val, offset);
+        for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float val =
+                    (lane_id < num_warps)
+                        ? warp_sums[(tm * TILE_N + tn) * MAX_WARPS + lane_id]
+                        : 0.0f;
+                for (int offset = wave_size >> 1; offset > 0; offset >>= 1)
+                    val += __shfl_down(val, offset);
 
-            if (lane_id == 0) {
-                int64_t n = n_base + tn;
-                if (n < N) {
-                    if (bias)
-                        val += static_cast<float>(bias[n]);
-                    output[batch * M * N + m * N + n] =
-                        static_cast<__half>(val);
+                if (lane_id == 0) {
+                    if (TILE_M > 1 && tm >= rows) continue;
+                    int64_t n = n_base + tn;
+                    if (n < N) {
+                        if (bias)
+                            val += static_cast<float>(bias[n]);
+                        output[batch * M * N + (m0 + tm) * N + n] =
+                            static_cast<__half>(val);
+                    }
                 }
             }
         }
@@ -490,8 +668,14 @@ __global__ void matmul_nbits_gemv_kernel_i8(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false>
-__global__ void matmul_nbits_gemv_kernel(
+// GEMV_WAVES_MIN/MAX are defined next to the int8 GEMV in section 1a-gemv;
+// both kernels hold the same partial[TILE_M][TILE_N] accumulator and want the
+// same register budget for it.
+template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
+__global__
+__attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
+                                   GEMV_WAVES_MAX(TILE_M))))
+void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -502,51 +686,96 @@ __global__ void matmul_nbits_gemv_kernel(
     int64_t block_size)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
-    const int64_t m      = blockIdx.y;
+    const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int64_t batch  = COL_MAJOR ? 0 : blockIdx.z;
     const int tid        = threadIdx.x;
 
-    if (m >= M) return;
+    if (m0 >= M) return;
+
+    // Rows owned by this block. TILE_M == 1 collapses every TILE_M-dependent
+    // construct below to exactly the pre-existing single-row code.
+    const int rows = (TILE_M == 1)
+                       ? 1
+                       : static_cast<int>((M - m0) < TILE_M ? (M - m0) : TILE_M);
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift = __builtin_ctzll(
                                  static_cast<unsigned long long>(block_size));
 
     const __half* a_base;
-    int64_t       a_stride;
+    int64_t       a_stride;  // step between consecutive k
+    int64_t       a_mstep;   // step between consecutive rows
     if constexpr (COL_MAJOR) {
-        a_base   = A + m;
+        a_base   = A + m0;
         a_stride = M;
+        a_mstep  = 1;
     } else {
-        a_base   = A + batch * M * K + m * K;
+        a_base   = A + batch * M * K + m0 * K;
         a_stride = 1;
+        a_mstep  = K;
     }
 
     [[maybe_unused]] const __half* zp_fp16 =
         COL_MAJOR ? reinterpret_cast<const __half*>(zp) : nullptr;
 
-    const uint8_t* b_base_arr[TILE_N];
-    const __half*  s_rows[TILE_N];
-    int64_t        n_idx[TILE_N];
+    // Packed 4-bit weight rows are [N, k_blocks, block_size/2] bytes. The row
+    // stride must use k_blocks (= ceil(K/block_size)), NOT K/2: when K is not a
+    // multiple of block_size the last block is padded, so the true row is
+    // k_blocks*(block_size/2) bytes, which exceeds K/2. Using K/2 misaligns
+    // every row n>0 by the padding delta and corrupts the output. When
+    // K % block_size == 0 this equals K/2 (backward compatible).
+    const int64_t b_row_stride = k_blocks * (block_size / 2);
+
+    // Per-column addressing. At TILE_M == 1 it is held in registers exactly as
+    // it always was; at TILE_M > 1 it is recomputed from the tile base instead.
+    //
+    // WHY the split: the three arrays below cost 6 dwords per column (96 at
+    // TILE_N=16, over a third of the 256-VGPR file) and every entry is affine in
+    // tn, so holding them is a pure trade of registers for two multiplies. At
+    // TILE_M == 1 that trade is right and the decode configs are tuned around
+    // it. At TILE_M > 1 the registers are needed for partial[][] and the tile
+    // spills without them, which is what made the first attempt at this path
+    // 5-12x slower than the code it replaced.
+    constexpr int NADDR = (TILE_M == 1) ? TILE_N : 1;
+    [[maybe_unused]] const uint8_t* b_base_arr[NADDR];
+    [[maybe_unused]] const __half*  s_rows[NADDR];
+    [[maybe_unused]] int64_t        n_idx[NADDR];
+    if constexpr (TILE_M == 1) {
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        int64_t n  = n_base + tn;
-        int64_t sn = (n < N) ? n : 0;
-        n_idx[tn]  = sn;
-        // Packed 4-bit weight rows are [N, k_blocks, block_size/2] bytes. The
-        // row stride must use k_blocks (= ceil(K/block_size)), NOT K/2: when K
-        // is not a multiple of block_size the last block is padded, so the true
-        // row is k_blocks*(block_size/2) bytes, which exceeds K/2. Using K/2
-        // misaligns every row n>0 by the padding delta and corrupts the output.
-        // When K % block_size == 0 this equals K/2 (backward compatible).
-        b_base_arr[tn] = B + sn * (k_blocks * (block_size / 2));
-        s_rows[tn] = scales + sn * k_blocks;
+        for (int tn = 0; tn < NADDR; tn++) {
+            int64_t n  = n_base + tn;
+            int64_t sn = (n < N) ? n : 0;
+            n_idx[tn]  = sn;
+            b_base_arr[tn] = B + sn * b_row_stride;
+            s_rows[tn] = scales + sn * k_blocks;
+        }
     }
 
-    float partial[TILE_N];
+    // Column offset inside the tile, clamped so an out-of-range column aliases
+    // the tile's first column (n_base < N always, since grid.x covers N). Which
+    // in-bounds column it reads is irrelevant: `store` drops those lanes.
+    auto col_off = [&](int tn) __attribute__((always_inline)) -> int64_t {
+        return (n_base + tn < N) ? tn : 0;
+    };
+    auto b_ptr = [&](int tn) __attribute__((always_inline)) -> const uint8_t* {
+        if constexpr (TILE_M == 1) return b_base_arr[tn];
+        else return B + (n_base + col_off(tn)) * b_row_stride;
+    };
+    auto s_ptr = [&](int tn) __attribute__((always_inline)) -> const __half* {
+        if constexpr (TILE_M == 1) return s_rows[tn];
+        else return scales + (n_base + col_off(tn)) * k_blocks;
+    };
+    auto zp_row = [&](int tn) __attribute__((always_inline)) -> int64_t {
+        if constexpr (TILE_M == 1) return n_idx[tn];
+        else return n_base + col_off(tn);
+    };
+
+    float partial[TILE_M][TILE_N];
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++)
-        partial[tn] = 0.0f;
+    for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++)
+            partial[tm][tn] = 0.0f;
 
     const bool has_zp = (zp != nullptr);
 
@@ -558,9 +787,9 @@ __global__ void matmul_nbits_gemv_kernel(
             return static_cast<float>(zp[nidx * k_blocks + grp]);
     };
 
-    // Helper: read A element at K-offset
-    auto read_a = [&](int64_t k_off) __attribute__((always_inline)) -> float {
-        return static_cast<float>(a_base[k_off * a_stride]);
+    // Helper: read A element for row `tm` of this block at K-offset
+    auto read_a = [&](int tm, int64_t k_off) __attribute__((always_inline)) -> float {
+        return static_cast<float>(a_base[tm * a_mstep + k_off * a_stride]);
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -573,82 +802,42 @@ __global__ void matmul_nbits_gemv_kernel(
     const int num_u128 = static_cast<int>(K / 32);
     for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
         const int k32 = idx * 32;
-
-        float a_vals[32];
-        float a_sum = 0.0f;
-#pragma unroll
-        for (int i = 0; i < 32; i++) {
-            a_vals[i] = read_a(k32 + i);
-            a_sum += a_vals[i];
-        }
-
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 8.0f;
 
+        // B, its scales and its zero points are loaded once here and consumed by
+        // every row this block owns. That reuse is the entire purpose of
+        // TILE_M > 1: the packed weight is by far the dominant traffic, and one
+        // threadblock per row streams all of it once per row.
         uint4   b_pk[TILE_N];
         float   sv[TILE_N];
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
             b_pk[tn] = *reinterpret_cast<const uint4*>(
-                            &b_base_arr[tn][idx * 16]);
-            sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+                            &b_ptr(tn)[idx * 16]);
+            sv[tn]   = static_cast<float>(s_ptr(tn)[grp]);
+        }
+        // Hoisting the zero point costs TILE_N registers, which is only worth it
+        // when there are rows to amortise it over; at TILE_M == 1 it stays where
+        // it was, inside the tn loop, so register pressure is unchanged for the
+        // wide-TILE_N decode configs.
+        float zv_h[TILE_M > 1 ? TILE_N : 1];
+        if (TILE_M > 1 && has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv_h[tn] = read_zp(zp_row(tn), grp);
         }
 
-#pragma unroll
-        for (int tn = 0; tn < TILE_N; tn++) {
-            float dot = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot = __fmaf_rn(a_vals[i],
-                       static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot = __fmaf_rn(a_vals[8 + i],
-                       static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot = __fmaf_rn(a_vals[16 + i],
-                       static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF), dot);
-#pragma unroll
-            for (int i = 0; i < 8; i++)
-                dot = __fmaf_rn(a_vals[24 + i],
-                       static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF), dot);
-
-            if (has_zp) {
-                float zv = read_zp(n_idx[tn], grp);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
-        }
-    }
-
-    // ---- Phase 1b: 16-nibble (64-bit) remainder (K%32 ≥ 16) ----
-    {
-        const int k16_base = num_u128 * 32;
-        const int num_u64 = (static_cast<int>(K) - k16_base) / 16;
-        for (int idx = tid; idx < num_u64; idx += BLOCK_SIZE) {
-            const int k16 = k16_base + idx * 16;
-
-            float a_vals[16];
+        if constexpr (TILE_M == 1) {
+            // Single row: the 32-wide A window is live once, so keep the
+            // original shape. This is the decode path and its codegen is tuned.
+            float a_vals[32];
             float a_sum = 0.0f;
 #pragma unroll
-            for (int i = 0; i < 16; i++) {
-                a_vals[i] = read_a(k16 + i);
+            for (int i = 0; i < 32; i++) {
+                a_vals[i] = read_a(0, k32 + i);
                 a_sum += a_vals[i];
             }
-
-            const int grp = k16 >> bs_shift;
             const float a_sum_x_default_zp = a_sum * 8.0f;
-
-            uint2   b_pk[TILE_N];
-            float   sv[TILE_N];
-#pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                b_pk[tn] = *reinterpret_cast<const uint2*>(
-                                &b_base_arr[tn][(k16_base / 2) + idx * 8]);
-                sv[tn]   = static_cast<float>(s_rows[tn][grp]);
-            }
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
@@ -661,12 +850,185 @@ __global__ void matmul_nbits_gemv_kernel(
                 for (int i = 0; i < 8; i++)
                     dot = __fmaf_rn(a_vals[8 + i],
                            static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot = __fmaf_rn(a_vals[16 + i],
+                           static_cast<float>((b_pk[tn].z >> (i * 4)) & 0xF), dot);
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+                    dot = __fmaf_rn(a_vals[24 + i],
+                           static_cast<float>((b_pk[tn].w >> (i * 4)) & 0xF), dot);
 
                 if (has_zp) {
-                    float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += (dot - a_sum * zv) * sv[tn];
+                    partial[0][tn] += (dot - a_sum * read_zp(zp_row(tn), grp))
+                                      * sv[tn];
                 } else {
-                    partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
+                    partial[0][tn] += (dot - a_sum_x_default_zp) * sv[tn];
+                }
+            }
+        } else {
+            // Several rows: quarter the 32-wide group, dequantize each quarter of
+            // B once, then apply it to every row.
+            //
+            // Two things force this shape. First, the row loop must stay a
+            // compile-time unroll: a data-dependent `break` on `rows` makes the
+            // trip count dynamic, and then raw[tm][tn] has a runtime index and
+            // cannot live in registers at all -- the whole tile lands in scratch.
+            // That, not a register shortfall, is what made this path 6-10x slower
+            // than the single-row one. Out-of-range rows are computed against a
+            // clamped A row and dropped by `store`: wasted arithmetic, no spill.
+            //
+            // Second, quartering caps the A window at 8 values and ends its live
+            // range inside each quarter, so the unrolled row loop stops holding
+            // TILE_M copies of it -- 128 dwords at TILE_M=4, half the register
+            // file. The per-row accumulator acc[] is reused the same way.
+            //
+            // Hoisting the nibble unpack out of the row loop was tried here, so
+            // each weight is dequantized once per tile instead of once per row
+            // (bq[TILE_N][8] holding the unpacked quarter). It is the obvious win
+            // on paper -- unpack is ~3 ops against the 1 FMA that consumes it --
+            // and it did help the isolated benchmark slightly (3.84 -> 3.79 ms on
+            // a 311 MB lm_head at M=4). In the full model it lost, on every shape:
+            // 37.1 -> 41.1 ms for the 36 gate/up projections, 13.2 -> 15.4 for
+            // q/o, 92 -> 100 ms on the whole verify call. The extra live state
+            // costs more in latency hiding on cold weights than it saves in ALU,
+            // and in-model these weights are always cold. Left out deliberately.
+            //
+            // Accumulation order changes (four chained 8-FMA runs per group rather
+            // than one 32-FMA run), which moves the last bits; measured worst-case
+            // relative error stays ~2e-4 against a 2e-2 tolerance.
+#pragma unroll
+            for (int tm = 0; tm < TILE_M; tm++) {
+                const int tm_r = (tm < rows) ? tm : 0;
+
+                float acc[TILE_N];
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) acc[tn] = 0.0f;
+                float a_sum = 0.0f;
+
+#pragma unroll
+                for (int q = 0; q < 4; q++) {
+                    float a8[8];
+#pragma unroll
+                    for (int i = 0; i < 8; i++) {
+                        a8[i] = read_a(tm_r, k32 + q * 8 + i);
+                        a_sum += a8[i];
+                    }
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        const uint32_t w = (q == 0)   ? b_pk[tn].x
+                                           : (q == 1) ? b_pk[tn].y
+                                           : (q == 2) ? b_pk[tn].z
+                                                      : b_pk[tn].w;
+#pragma unroll
+                        for (int i = 0; i < 8; i++)
+                            acc[tn] = __fmaf_rn(
+                                a8[i],
+                                static_cast<float>((w >> (i * 4)) & 0xF),
+                                acc[tn]);
+                    }
+                }
+
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    const float zv = has_zp ? zv_h[tn] : 8.0f;
+                    partial[tm][tn] += (acc[tn] - a_sum * zv) * sv[tn];
+                }
+            }
+        }
+    }
+
+    // ---- Phase 1b: 16-nibble (64-bit) remainder (K%32 ≥ 16) ----
+    {
+        const int k16_base = num_u128 * 32;
+        const int num_u64 = (static_cast<int>(K) - k16_base) / 16;
+        for (int idx = tid; idx < num_u64; idx += BLOCK_SIZE) {
+            const int k16 = k16_base + idx * 16;
+            const int grp = k16 >> bs_shift;
+
+            uint2   b_pk[TILE_N];
+            float   sv[TILE_N];
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                b_pk[tn] = *reinterpret_cast<const uint2*>(
+                                &b_ptr(tn)[(k16_base / 2) + idx * 8]);
+                sv[tn]   = static_cast<float>(s_ptr(tn)[grp]);
+            }
+            float zv_h[TILE_M > 1 ? TILE_N : 1];
+            if (TILE_M > 1 && has_zp) {
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++)
+                    zv_h[tn] = read_zp(zp_row(tn), grp);
+            }
+
+            if constexpr (TILE_M == 1) {
+                float a_vals[16];
+                float a_sum = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 16; i++) {
+                    a_vals[i] = read_a(0, k16 + i);
+                    a_sum += a_vals[i];
+                }
+                const float a_sum_x_default_zp = a_sum * 8.0f;
+
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    float dot = 0.0f;
+#pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        dot = __fmaf_rn(a_vals[i],
+                               static_cast<float>((b_pk[tn].x >> (i * 4)) & 0xF), dot);
+#pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        dot = __fmaf_rn(a_vals[8 + i],
+                               static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF), dot);
+
+                    if (has_zp) {
+                        partial[0][tn] += (dot - a_sum * read_zp(zp_row(tn), grp))
+                                          * sv[tn];
+                    } else {
+                        partial[0][tn] += (dot - a_sum_x_default_zp) * sv[tn];
+                    }
+                }
+            } else {
+                // Halved for the same reason phase 1 is quartered: an unrolled
+                // row loop would otherwise hold TILE_M copies of a 16-wide A
+                // window. Only runs when K % 32 != 0, but it shares the
+                // function's register budget, so it cannot be the peak.
+#pragma unroll
+                for (int tm = 0; tm < TILE_M; tm++) {
+                    const int tm_r = (tm < rows) ? tm : 0;  // see phase 1
+
+                    float acc[TILE_N];
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) acc[tn] = 0.0f;
+                    float a_sum = 0.0f;
+
+#pragma unroll
+                    for (int q = 0; q < 2; q++) {
+                        float a8[8];
+#pragma unroll
+                        for (int i = 0; i < 8; i++) {
+                            a8[i] = read_a(tm_r, k16 + q * 8 + i);
+                            a_sum += a8[i];
+                        }
+#pragma unroll
+                        for (int tn = 0; tn < TILE_N; tn++) {
+                            const uint32_t w = (q == 0) ? b_pk[tn].x : b_pk[tn].y;
+#pragma unroll
+                            for (int i = 0; i < 8; i++)
+                                acc[tn] = __fmaf_rn(
+                                    a8[i],
+                                    static_cast<float>((w >> (i * 4)) & 0xF),
+                                    acc[tn]);
+                        }
+                    }
+
+#pragma unroll
+                    for (int tn = 0; tn < TILE_N; tn++) {
+                        const float zv = has_zp ? zv_h[tn] : 8.0f;
+                        partial[tm][tn] += (acc[tn] - a_sum * zv) * sv[tn];
+                    }
                 }
             }
         }
@@ -677,36 +1039,51 @@ __global__ void matmul_nbits_gemv_kernel(
         const int k8_base   = (static_cast<int>(K) / 16) * 16;
         const int num_u32_m = (static_cast<int>(K) - k8_base) / 8;
         for (int idx2 = tid; idx2 < num_u32_m; idx2 += BLOCK_SIZE) {
-            const int k8 = k8_base + idx2 * 8;
-
-            float a_vals[8];
-            float a_sum = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                a_vals[i] = read_a(k8 + i);
-                a_sum += a_vals[i];
-            }
-
+            const int k8  = k8_base + idx2 * 8;
             const int grp = k8 >> bs_shift;
-            const float a_sum_x_default_zp = a_sum * 8.0f;
 
+            uint32_t b_pk[TILE_N];
+            float    sv[TILE_N];
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
-                float sv = static_cast<float>(s_rows[tn][grp]);
-                uint32_t packed = *reinterpret_cast<const uint32_t*>(
-                                      &b_base_arr[tn][k8 / 2]);
-
-                float dot = 0.0f;
+                b_pk[tn] = *reinterpret_cast<const uint32_t*>(
+                                &b_ptr(tn)[k8 / 2]);
+                sv[tn]   = static_cast<float>(s_ptr(tn)[grp]);
+            }
+            float zv_h[TILE_M > 1 ? TILE_N : 1];
+            if (TILE_M > 1 && has_zp) {
 #pragma unroll
-                for (int i = 0; i < 8; i++)
-                    dot = __fmaf_rn(a_vals[i],
-                           static_cast<float>((packed >> (i * 4)) & 0xF), dot);
+                for (int tn = 0; tn < TILE_N; tn++)
+                    zv_h[tn] = read_zp(zp_row(tn), grp);
+            }
 
-                if (has_zp) {
-                    float zv = read_zp(n_idx[tn], grp);
-                    partial[tn] += (dot - a_sum * zv) * sv;
-                } else {
-                    partial[tn] += (dot - a_sum_x_default_zp) * sv;
+#pragma unroll
+            for (int tm = 0; tm < TILE_M; tm++) {
+                const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
+
+                float a_vals[8];
+                float a_sum = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    a_vals[i] = read_a(tm_r, k8 + i);
+                    a_sum += a_vals[i];
+                }
+                const float a_sum_x_default_zp = a_sum * 8.0f;
+
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    float dot = 0.0f;
+#pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        dot = __fmaf_rn(a_vals[i],
+                               static_cast<float>((b_pk[tn] >> (i * 4)) & 0xF), dot);
+
+                    if (has_zp) {
+                        float zv = (TILE_M > 1) ? zv_h[tn] : read_zp(zp_row(tn), grp);
+                        partial[tm][tn] += (dot - a_sum * zv) * sv[tn];
+                    } else {
+                        partial[tm][tn] += (dot - a_sum_x_default_zp) * sv[tn];
+                    }
                 }
             }
         }
@@ -717,19 +1094,22 @@ __global__ void matmul_nbits_gemv_kernel(
         const int k_tail = (static_cast<int>(K) / 8) * 8;
         for (int k = k_tail + tid; k < static_cast<int>(K);
              k += BLOCK_SIZE) {
-            const float a_val  = read_a(k);
             const int   grp    = k >> bs_shift;
             const int   nibble = k & 1;
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
-                float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = has_zp ? read_zp(n_idx[tn], grp) : 8.0f;
-                uint8_t packed = b_base_arr[tn][k / 2];
+                float sv = static_cast<float>(s_ptr(tn)[grp]);
+                float zv = has_zp ? read_zp(zp_row(tn), grp) : 8.0f;
+                uint8_t packed = b_ptr(tn)[k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
                                    : static_cast<float>(packed >> 4);
-                partial[tn] += a_val * (qval - zv) * sv;
+#pragma unroll
+                for (int tm = 0; tm < TILE_M; tm++) {
+                    const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
+                    partial[tm][tn] += read_a(tm_r, k) * (qval - zv) * sv;
+                }
             }
         }
     }
@@ -748,62 +1128,66 @@ __global__ void matmul_nbits_gemv_kernel(
     constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
-            partial[tn] += __shfl_down(partial[tn], offset);
+    for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++) {
+            for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
+                partial[tm][tn] += __shfl_down(partial[tm][tn], offset);
+        }
     }
+
+    // NOTE: nontemporal stores were tried here but regressed perf by ~3% on
+    // gfx1150 LPDDR5X — the output is too small (28KB) to pollute cache, and NT
+    // writes compete with read traffic on the shared memory bus.
+    auto store = [&](int tm, int tn, float val)
+                     __attribute__((always_inline)) -> void {
+        if (TILE_M > 1 && tm >= rows) return;
+        int64_t n = n_base + tn;
+        if (n >= N) return;
+        if (bias)
+            val += static_cast<float>(bias[n]);
+        if constexpr (COL_MAJOR)
+            output[n * M + m0 + tm] = static_cast<__half>(val);
+        else
+            output[batch * M * N + (m0 + tm) * N + n] = static_cast<__half>(val);
+    };
 
     // Single warp (BLOCK_SIZE==32 in wave32): shuffle has the final result.
     if constexpr (BLOCK_SIZE <= WARP_SIZE) {
         if (lane_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                int64_t n = n_base + tn;
-                if (n < N) {
-                    float val = partial[tn];
-                    if (bias)
-                        val += static_cast<float>(bias[n]);
-                    // NOTE: nontemporal stores were tried here but regressed
-                    // perf by ~3% on gfx1150 LPDDR5X — the output is too small
-                    // (28KB) to pollute cache, and NT writes compete with read
-                    // traffic on the shared memory bus.
-                    if constexpr (COL_MAJOR)
-                        output[n * M + m] = static_cast<__half>(val);
-                    else
-                        output[batch * M * N + m * N + n] =
-                            static_cast<__half>(val);
-                }
-            }
+            for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++)
+                    store(tm, tn, partial[tm][tn]);
         }
     } else {
-        __shared__ float warp_sums[TILE_N * NUM_WARPS];
+        __shared__ float warp_sums[TILE_M * TILE_N * NUM_WARPS];
 
         if (lane_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++)
-                warp_sums[tn * NUM_WARPS + warp_id] = partial[tn];
+            for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++)
+                    warp_sums[(tm * TILE_N + tn) * NUM_WARPS + warp_id] =
+                        partial[tm][tn];
         }
         __syncthreads();
 
         if (warp_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                float val = (lane_id < NUM_WARPS)
-                                ? warp_sums[tn * NUM_WARPS + lane_id] : 0.0f;
-                for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
-                    val += __shfl_down(val, offset);
+            for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    float val =
+                        (lane_id < NUM_WARPS)
+                            ? warp_sums[(tm * TILE_N + tn) * NUM_WARPS + lane_id]
+                            : 0.0f;
+                    for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                        val += __shfl_down(val, offset);
 
-                if (lane_id == 0) {
-                    int64_t n = n_base + tn;
-                    if (n < N) {
-                        if (bias)
-                            val += static_cast<float>(bias[n]);
-                        if constexpr (COL_MAJOR)
-                            output[n * M + m] = static_cast<__half>(val);
-                        else
-                            output[batch * M * N + m * N + n] =
-                                static_cast<__half>(val);
-                    }
+                    if (lane_id == 0)
+                        store(tm, tn, val);
                 }
             }
         }
@@ -811,7 +1195,7 @@ __global__ void matmul_nbits_gemv_kernel(
 }
 
 /* =======================================================================
- * Section 1c: W4A8 integer-dot-product (dp4a) GEMV path  [decode, M==1]
+ * Section 1c: W4A8 integer-dot-product (dp4a) GEMV path  [decode + verify]
  *
  * WHY: the int4 GEMV kernel above is dequant-ALU-bound, not bandwidth-bound
  * (external RDNA3 W4A16 roofline: ~4-6 ALU instructions per weight byte --
@@ -835,6 +1219,17 @@ __global__ void matmul_nbits_gemv_kernel(
  *
  * Only the K%32==0 main path is implemented (all target decode shapes have
  * K a multiple of 32); the dispatcher falls back to the fp GEMV otherwise.
+ *
+ * TILE_M extends the same idea to the speculative verify pass. That pass runs
+ * M = k+1 rows through the identical weights, and on the fp path those weights
+ * are the binding cost twice over: read once per row-tile at best, and
+ * dequantized once per row always, since the nibble unpack sits inside the row
+ * loop. The integer-dot form removes the second cost outright -- the two mask
+ * operations that split a uint32 of packed nibbles into even/odd bytes are
+ * per-weight, not per-row, and every row after the first adds only two sudot4.
+ * Against the fp M-blocked path's shift + mask + convert + FMA per weight per
+ * row, that is ~16x less row-dependent arithmetic, which is what it takes to
+ * turn a read-once kernel from ALU-bound back into traffic-bound.
  * ======================================================================= */
 
 // Deinterleaved-int8 activation layout, per 8-element chunk c (k = 8c + p):
@@ -842,15 +1237,22 @@ __global__ void matmul_nbits_gemv_kernel(
 //   bytes[8c+4..7] = {aq[8c+1], aq[8c+3], aq[8c+5], aq[8c+7]}   (a_hi, odd p)
 // This matches the byte order produced by masking a packed-nibble uint32 with
 // 0x0F0F0F0F (even nibbles) and (>>4)&0x0F0F0F0F (odd nibbles). One block per
-// K-group; group boundaries are 8-aligned (block_size is a power of two >= 32),
-// so no chunk straddles a group.
+// (K-group, row); group boundaries are 8-aligned (block_size is a power of two
+// >= 32), so no chunk straddles a group. Rows are quantized independently --
+// each gets its own per-group scale -- because they are different tokens and a
+// shared scale would let one row's outliers cost every other row precision.
 template <int BLOCK_SIZE>
 __global__ void matmul_nbits_quant_act_i8_kernel(
-    const __half* __restrict__ A,
-    int8_t*       __restrict__ a_qb,
-    float*        __restrict__ a_scale,
-    int64_t K, int64_t block_size)
+    const __half* __restrict__ A_all,
+    int8_t*       __restrict__ a_qb_all,
+    float*        __restrict__ a_scale_all,
+    int64_t K, int64_t block_size, int64_t k_blocks)
 {
+    const int64_t row = blockIdx.y;
+    const __half* __restrict__ A     = A_all + row * K;
+    int8_t*       __restrict__ a_qb  = a_qb_all + row * K;
+    float*        __restrict__ a_scale = a_scale_all + row * k_blocks;
+
     const int64_t grp = blockIdx.x;
     const int64_t g0  = grp * block_size;
     const int64_t g1  = min(g0 + block_size, K);
@@ -903,15 +1305,35 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
 
 // dp4a GEMV: mirrors matmul_nbits_gemv_kernel's main uint4 phase, but the
 // per-element dequant/FMA chain is replaced by two sudot4 per 8 nibbles.
-// Row-major only (decode); requires K % 32 == 0. Reads the per-group int8
-// activation (a_qb) + scales (a_scale) prepared ONCE per token by
+// Row-major only; requires K % 32 == 0. Reads the per-group int8 activation
+// (a_qb) + scales (a_scale) prepared ONCE per call by
 // matmul_nbits_quant_act_i8_kernel above -- the quant is amortized across all
 // N/TILE_N column blocks (fusing it into the GEMV instead re-quantizes A in
 // every block, which is a net loss: measured ~1.3-2x slower on decode shapes
 // because the redundant fp16 read + convert per block dwarfs the one launch it
 // would save).
-template <int BLOCK_SIZE, int TILE_N>
-__global__ void matmul_nbits_gemv_dp4a_kernel(
+//
+// TILE_M rows share one pass over B. Unlike the fp kernel this does not need
+// the A window quartered to stay off scratch: a row's contribution to a 32-wide
+// K step is 8 ints of deinterleaved int8 (a_lo/a_hi), not 32 floats, so at
+// TILE_M=4 the whole activation tile is 32 registers rather than 128.
+//
+// The occupancy request differs from the fp kernel's and must: this kernel had
+// no waves_per_eu attribute at all before TILE_M existed, and giving the
+// single-row instantiation the fp path's (9, 9) cost 2.2x on a 311 MB lm_head
+// at M=1 (2.24 -> 5.02 ms) -- a 170-register budget the integer path does not
+// fit. (1, 16) is the wave32 architectural range, i.e. no constraint, which
+// restores the codegen the decode path was tuned with. TILE_M > 1 still needs
+// the cap for the same reason the fp kernel does: the accumulator tile has to
+// stay in registers.
+#define DP4A_WAVES_MIN(TM) 1
+#define DP4A_WAVES_MAX(TM) ((TM) > 1 ? 4 : 16)
+
+template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
+__global__
+__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
+                                   DP4A_WAVES_MAX(TILE_M))))
+void matmul_nbits_gemv_dp4a_kernel(
     const int8_t*  __restrict__ a_qb,
     const float*   __restrict__ a_scale,
     const uint8_t* __restrict__ B,
@@ -919,71 +1341,118 @@ __global__ void matmul_nbits_gemv_dp4a_kernel(
     const uint8_t* __restrict__ zp,
     const __half*  __restrict__ bias,
     __half*        __restrict__ output,
-    int64_t N, int64_t K, int64_t block_size)
+    int64_t M, int64_t N, int64_t K, int64_t block_size)
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
+    const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int     tid    = threadIdx.x;
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift =
         __builtin_ctzll(static_cast<unsigned long long>(block_size));
     const bool has_zp = (zp != nullptr);
 
-    const uint8_t* b_base_arr[TILE_N];
-    const __half*  s_rows[TILE_N];
-    int64_t        n_idx[TILE_N];
-#pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        int64_t n  = n_base + tn;
-        int64_t sn = (n < N) ? n : 0;
-        n_idx[tn]  = sn;
-        b_base_arr[tn] = B + sn * (K / 2);
-        s_rows[tn] = scales + sn * k_blocks;
-    }
+    if (m0 >= M) return;
+    const int rows = (TILE_M == 1)
+                       ? 1
+                       : static_cast<int>((M - m0) < TILE_M ? (M - m0) : TILE_M);
 
-    float partial[TILE_N];
+    // Held in registers at TILE_M == 1, recomputed at TILE_M > 1 -- the same
+    // trade the fp M-blocked kernel makes, for the same reason.
+    constexpr int NADDR = (TILE_M == 1) ? TILE_N : 1;
+    [[maybe_unused]] const uint8_t* b_base_arr[NADDR];
+    [[maybe_unused]] const __half*  s_rows[NADDR];
+    [[maybe_unused]] int64_t        n_idx[NADDR];
+    if constexpr (TILE_M == 1) {
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++)
-        partial[tn] = 0.0f;
+        for (int tn = 0; tn < NADDR; tn++) {
+            int64_t n  = n_base + tn;
+            int64_t sn = (n < N) ? n : 0;
+            n_idx[tn]  = sn;
+            b_base_arr[tn] = B + sn * (K / 2);
+            s_rows[tn] = scales + sn * k_blocks;
+        }
+    }
+    auto col_idx = [&](int tn) __attribute__((always_inline)) -> int64_t {
+        if constexpr (TILE_M == 1) return n_idx[tn];
+        else return n_base + ((n_base + tn < N) ? tn : 0);
+    };
+    auto b_ptr = [&](int tn) __attribute__((always_inline)) -> const uint8_t* {
+        if constexpr (TILE_M == 1) return b_base_arr[tn];
+        else return B + col_idx(tn) * (K / 2);
+    };
+    auto s_ptr = [&](int tn) __attribute__((always_inline)) -> const __half* {
+        if constexpr (TILE_M == 1) return s_rows[tn];
+        else return scales + col_idx(tn) * k_blocks;
+    };
+
+    float partial[TILE_M][TILE_N];
+#pragma unroll
+    for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++)
+            partial[tm][tn] = 0.0f;
 
     const int num_u128 = static_cast<int>(K / 32);
     for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
-        const int   k32 = idx * 32;
-        const int   grp = k32 >> bs_shift;
-        const float a_sc = a_scale[grp];
+        const int k32 = idx * 32;
+        const int grp = k32 >> bs_shift;
 
-        // 4 deinterleaved chunks (a_lo/a_hi) covering the 32 activations.
-        const int8_t* aq = a_qb + static_cast<int64_t>(idx) * 32;
-        int a_lo[4], a_hi[4];
+        // 4 deinterleaved chunks (a_lo/a_hi) covering the 32 activations, for
+        // each row this block owns. Out-of-range rows alias row 0 and are
+        // dropped at the store: the row loop has to stay a compile-time unroll
+        // or partial[][] gets a runtime index and spills to scratch.
+        int   a_lo[TILE_M][4], a_hi[TILE_M][4];
+        int   a_sum_q[TILE_M];
+        float a_sc[TILE_M];
 #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
-            a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
-        }
-        // sum(aq) over the 32 elements: signed-int8 dot against all-ones.
-        int a_sum_q = 0;
+        for (int tm = 0; tm < TILE_M; tm++) {
+            const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
+            const int8_t* aq = a_qb + static_cast<int64_t>(tm_r) * K +
+                               static_cast<int64_t>(idx) * 32;
+            a_sc[tm] = a_scale[static_cast<int64_t>(tm_r) * k_blocks + grp];
 #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
-            a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
+            for (int j = 0; j < 4; j++) {
+                a_lo[tm][j] = *reinterpret_cast<const int*>(aq + j * 8);
+                a_hi[tm][j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+            }
+            // sum(aq) over the 32 elements: signed-int8 dot against all-ones.
+            int s = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                s = hipdnn_sudot4(a_lo[tm][j], 0x01010101, s);
+                s = hipdnn_sudot4(a_hi[tm][j], 0x01010101, s);
+            }
+            a_sum_q[tm] = s;
         }
 
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
-            uint4 b = *reinterpret_cast<const uint4*>(&b_base_arr[tn][idx * 16]);
+            uint4 b = *reinterpret_cast<const uint4*>(&b_ptr(tn)[idx * 16]);
             const unsigned comp[4] = {b.x, b.y, b.z, b.w};
-            int dot = 0;
+            int dot[TILE_M];
+#pragma unroll
+            for (int tm = 0; tm < TILE_M; tm++) dot[tm] = 0;
+            // The two masks below are what TILE_M amortises: they split the
+            // packed nibbles once per weight, and every extra row costs only
+            // the two sudot4 that consume the result.
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
                 const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
-                dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
-                dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
+#pragma unroll
+                for (int tm = 0; tm < TILE_M; tm++) {
+                    dot[tm] = hipdnn_sudot4(a_lo[tm][j], lo_w, dot[tm]);
+                    dot[tm] = hipdnn_sudot4(a_hi[tm][j], hi_w, dot[tm]);
+                }
             }
-            const float sv = static_cast<float>(s_rows[tn][grp]);
+            const float sv = static_cast<float>(s_ptr(tn)[grp]);
             const int   zv = has_zp
-                                 ? static_cast<int>(zp[n_idx[tn] * k_blocks + grp])
+                                 ? static_cast<int>(zp[col_idx(tn) * k_blocks + grp])
                                  : 8;
-            partial[tn] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
+#pragma unroll
+            for (int tm = 0; tm < TILE_M; tm++)
+                partial[tm][tn] += a_sc[tm] * sv *
+                                   static_cast<float>(dot[tm] - a_sum_q[tm] * zv);
         }
     }
 
@@ -999,46 +1468,56 @@ __global__ void matmul_nbits_gemv_dp4a_kernel(
     constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
-    for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
-            partial[tn] += __shfl_down(partial[tn], offset);
+    for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++) {
+            for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
+                partial[tm][tn] += __shfl_down(partial[tm][tn], offset);
+        }
     }
+
+    auto store = [&](int tm, int tn, float val)
+                     __attribute__((always_inline)) -> void {
+        if (TILE_M > 1 && tm >= rows) return;
+        int64_t n = n_base + tn;
+        if (n >= N) return;
+        if (bias)
+            val += static_cast<float>(bias[n]);
+        output[(m0 + tm) * N + n] = static_cast<__half>(val);
+    };
 
     if constexpr (BLOCK_SIZE <= WARP_SIZE) {
         if (lane_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                int64_t n = n_base + tn;
-                if (n < N) {
-                    float val = partial[tn];
-                    if (bias)
-                        val += static_cast<float>(bias[n]);
-                    output[n] = static_cast<__half>(val);
-                }
-            }
+            for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++)
+                    store(tm, tn, partial[tm][tn]);
         }
     } else {
-        __shared__ float warp_sums[TILE_N * NUM_WARPS];
+        __shared__ float warp_sums[TILE_M * TILE_N * NUM_WARPS];
         if (lane_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++)
-                warp_sums[tn * NUM_WARPS + warp_id] = partial[tn];
+            for (int tm = 0; tm < TILE_M; tm++)
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++)
+                    warp_sums[(tm * TILE_N + tn) * NUM_WARPS + warp_id] =
+                        partial[tm][tn];
         }
         __syncthreads();
         if (warp_id == 0) {
 #pragma unroll
-            for (int tn = 0; tn < TILE_N; tn++) {
-                float val = (lane_id < NUM_WARPS)
-                                ? warp_sums[tn * NUM_WARPS + lane_id] : 0.0f;
-                for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
-                    val += __shfl_down(val, offset);
-                if (lane_id == 0) {
-                    int64_t n = n_base + tn;
-                    if (n < N) {
-                        if (bias)
-                            val += static_cast<float>(bias[n]);
-                        output[n] = static_cast<__half>(val);
-                    }
+            for (int tm = 0; tm < TILE_M; tm++) {
+#pragma unroll
+                for (int tn = 0; tn < TILE_N; tn++) {
+                    float val =
+                        (lane_id < NUM_WARPS)
+                            ? warp_sums[(tm * TILE_N + tn) * NUM_WARPS + lane_id]
+                            : 0.0f;
+                    for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                        val += __shfl_down(val, offset);
+                    if (lane_id == 0)
+                        store(tm, tn, val);
                 }
             }
         }
@@ -1132,6 +1611,54 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
+// ---------------------------------------------------------------------------
+// Cold probing for the M=1 GEMV autotune.
+//
+// Timing launches back to back on the real weight leaves that weight in the
+// 32 MB Infinity Cache after the first one, so the tuner ranks configs on cache
+// behaviour. A decode step never sees it that way: 5.7 GB of weights stream past
+// between one use of a tensor and the next, so every read is a DRAM read. The
+// bias is systematic rather than random -- with no memory latency to hide, the
+// extra waves of a wide config have nothing to do, so warm probing prefers
+// narrow ones. On Qwen3-8B it picked 32- and 128-thread configs where 256
+// threads is 6.8% faster over the whole decode step (36.4 -> 34.1 ms).
+//
+// Streaming a buffer larger than the cache before each timed launch restores the
+// conditions the kernel actually runs in. HIPDNN_EP_MATMUL_TUNE_COLD=0 restores
+// warm probing, which is the A/B control for the numbers above.
+// ---------------------------------------------------------------------------
+
+// Overshoots gfx1151's 32 MB Infinity Cache so no part of B survives a pass.
+static constexpr size_t kGemvEvictBytes = 64u << 20;
+
+static bool gemvTuneColdEnabled() {
+    static const bool on = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_TUNE_COLD", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_TUNE_COLD");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return on;
+}
+
+// Scratch for the eviction stream. Null means probe warm -- a tuning pass that
+// cannot get 64 MB should still produce a config rather than fail.
+static void* gemvEvictAlloc() {
+    if (!gemvTuneColdEnabled()) return nullptr;
+    void* p = nullptr;
+    if (hipMalloc(&p, kGemvEvictBytes) != hipSuccess) return nullptr;
+    return p;
+}
+
+static void gemvEvict(void* scratch, hipStream_t stream) {
+    if (scratch) (void)hipMemsetAsync(scratch, 0, kGemvEvictBytes, stream);
+}
+
 // Drive `launch()` until per-iter latency plateaus at the sustained clock
 // (>=60 ms total so the still-boosted first samples are not accepted, then 3
 // consecutive iters within 2% of each other). Shared by all GEMV/decode
@@ -1163,16 +1690,19 @@ static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
 // comparable to the signal at that scale, so a small-iters min alone is not
 // trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
 // timer noise at sub-0.1ms scale can yield this); it must never win the min.
+// `evict`, when not null, streams the eviction buffer before each timed
+// launch; that is recorded ahead of ev0, so it stays out of the reading.
 template <typename LaunchFn>
 static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
                             int warmup, int iters, int floor_iters, float floor_ms,
-                            LaunchFn&& launch) {
+                            void* evict, LaunchFn&& launch) {
     for (int w = 0; w < warmup; w++) launch();
 
     float best = 1e30f;
     int iter_count = 0;
     while (iter_count < iters ||
            (best < floor_ms && iter_count < floor_iters)) {
+        gemvEvict(evict, stream);
         hipEventRecord(ev0, stream);
         launch();
         hipEventRecord(ev1, stream);
@@ -1194,15 +1724,17 @@ static int tuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
+    float best_ms = 1e30f;
+    int   best_id = 8;
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
 
-    float best_ms = 1e30f;
-    int   best_id = 8;
     constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    void* evict = gemvEvictAlloc();
 
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfig(best_id, stream, A, B, sc, zp, bi, out,
@@ -1211,7 +1743,7 @@ static int tuneGemvConfig(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
                              M, N, K, batch, bs, col_major);
         });
@@ -1227,6 +1759,7 @@ static int tuneGemvConfig(
         }
     }
 
+    if (evict) (void)hipFree(evict);
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
@@ -1439,7 +1972,387 @@ static int getOrTuneGemvConfig(
 }
 
 /* -----------------------------------------------------------------------
- * W4A8 dp4a GEMV Autotune + dispatch (decode, M==1, K%32==0)
+ * M-blocked GEMV autotune + dispatch (small M: 1 < M < kWmmaMinM)
+ *
+ * WHY: the plain GEMV launches grid(N/TILE_N, M, batch), i.e. one threadblock
+ * per output row, so an M-row call streams the whole packed weight M times.
+ * Measured on gfx1151 with a 311 MB lm_head (4096x151936, int4, block 32), the
+ * per-token cost is flat at 1.52-1.56 ms for every M in 2..7 while aggregate
+ * traffic sits at ~201 GB/s of a ~256 GB/s bus: the kernel is bandwidth-bound
+ * on a weight it re-reads once per row. Weights smaller than the 32 MB
+ * Infinity Cache (e.g. a 25 MB MLP projection) hide most of it, which is why
+ * this only shows up on the widest matmuls -- and in real decode, where the
+ * cache is being swept by the rest of the layer, it shows up on all of them.
+ *
+ * TILE_M > 1 gives one block several rows so the B load is amortised: traffic
+ * drops from M x weight to 1 x weight, and A (M*K*2 bytes, tens of KB) is
+ * re-read instead, which is cache-resident. This is the same reuse a GEMM gets
+ * from its M tile, without WMMA's requirement that M fill a 16-row tile.
+ *
+ * TILE_M is autotuned rather than fixed, because the traffic-optimal choice is
+ * not the fastest one: a larger TILE_M cuts weight traffic but costs registers
+ * (partial[TILE_M][TILE_N]) and parallelism (grid.y shrinks), and rows past M
+ * are computed and discarded, so tile_m=8 at M=4 wastes half its arithmetic.
+ * TILE_M*TILE_N is capped at 32, and TILE_M=1 is kept in the table so the tuner
+ * can always fall back to per-row behaviour.
+ *
+ * Measured on a 4096x151936 lm_head at M=4 (isolated, 512 threads): tile_m=1 is
+ * 6.54 ms, and every spill-free tile_m=8 config lands at 3.77-3.88 ms whatever
+ * the thread count -- a flat plateau at ~82 GB/s of weight read once, against
+ * ~48 GB/s read four times. The configs that still spill (tile_n>=8 with
+ * tile_m=2, tile_n=16 with tile_m=2) remain 6-10x slower and the tuner avoids
+ * them; check with -Rpass-analysis=kernel-resource-usage before adding shapes.
+ * ----------------------------------------------------------------------- */
+
+// Default ON; set HIPDNN_EP_MATMUL_SMALLM=0 to fall back to the per-row path.
+//
+// This was default-off for as long as tile_m > 1 was slower than the tile_m = 1
+// path it was meant to beat -- by 5-12x, which looked like register pressure but
+// was not. The cause was `if (tm >= rows) break;` in the row loop: a
+// data-dependent exit makes the trip count dynamic, so the loop is no longer a
+// compile-time unroll, partial[tm][tn] gets a runtime index, and the whole
+// accumulator tile is forced to scratch. The compiler reported it plainly once
+// asked (-Rpass-analysis=kernel-resource-usage): 192 VGPRs and 1024-2264 bytes
+// of scratch per lane for every tile_m > 1 config, against 165 and zero for
+// tile_m = 1. Predicating the row bound instead of branching on it, and
+// quartering the A window so the unrolled row loop stops holding TILE_M copies
+// of it, removes the scratch entirely for the tile shapes that matter.
+//
+// What it buys, measured on a 4096x151936 lm_head at M=4: 6.54 ms -> 3.79 ms
+// isolated (1.73x), and on a full Qwen3-8B verify call 99.2 -> 94.4 ms with
+// v/step 2.72 -> 2.60. The end-to-end gain is much smaller than the isolated one
+// because the int4 kernel only carries about half this model's matmul traffic;
+// the rest is int8, which has no M-blocking (see matmul_nbits_gemv_kernel_i8).
+static bool gemvMBlockedEnabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        // Static-CRT DLLs cannot see the host process environment through
+        // getenv; go to Win32 directly (same reason as debug_log.h).
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_SMALLM", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_SMALLM");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return enabled;
+}
+
+// M at or above which int4 dispatch prefers WMMA over the col-major GEMV, used
+// when the tier is not tuned (see preferWmmaTier). HIPDNN_EP_MATMUL_WMMA_MIN_M
+// pins it to a fixed value and disables tuning, which is how the per-shape
+// crossovers quoted at preferWmmaTier were measured in the first place.
+// Clamped to [1, kTierTuneMaxM] so a bad value degrades to a valid tier.
+static constexpr int kWmmaMinMDefault = 8;
+
+// Widest M whose tier is decided by measurement. Above this WMMA always wins
+// and is not worth timing against: GEMV's cost grows linearly in M without
+// bound (it re-reads the weight per row) while WMMA's is flat per row-tile, so
+// the gap only widens. The cap also keeps tuning affordable -- one GEMV launch
+// on a 311 MB lm_head costs ~1.55 ms per row, so timing it at a prefill M of
+// 16k would take ~25 s per launch.
+static constexpr int kTierTuneMaxM = 64;
+
+// -1 when unset, meaning "tune the tier instead of using a fixed cutoff".
+static int wmmaMinMOverride() {
+    static const int m = [] {
+#ifdef _WIN32
+        // Static-CRT DLLs cannot see the host process environment through
+        // getenv; go to Win32 directly (same reason as debug_log.h).
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_WMMA_MIN_M", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        int v = atoi(buf);
+#else
+        const char* s = getenv("HIPDNN_EP_MATMUL_WMMA_MIN_M");
+        if (!s) return -1;
+        int v = atoi(s);
+#endif
+        if (v < 1 || v > kTierTuneMaxM) return -1;
+        return v;
+    }();
+    return m;
+}
+
+static int wmmaMinM() {
+    const int ov = wmmaMinMOverride();
+    return ov > 0 ? ov : kWmmaMinMDefault;
+}
+
+// Tier tuning is on unless a fixed cutoff is pinned or it is switched off with
+// HIPDNN_EP_MATMUL_TIER_TUNE=0.
+static bool wmmaTierTuningEnabled() {
+    if (wmmaMinMOverride() > 0) return false;
+    static const bool on = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_TIER_TUNE", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_TIER_TUNE");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return on;
+}
+
+struct GemvMConfig {
+    int threads;
+    int tile_n;
+    int tile_m;
+};
+
+// Three parameters, and the one that turned out to dominate is not tile shape:
+//
+//   threads * tile_n  outstanding B loads per block. This kernel is memory-
+//                     LATENCY bound, not occupancy bound, so what matters is
+//                     how many loads are in flight. The pre-existing col-major
+//                     tune picks threads=512 tile_n=16 for a 4096x151936
+//                     lm_head even though K/32 = 128 leaves 3 of 4 threads with
+//                     no K work at all; a table capped at 256 threads measured
+//                     17-23 ms against that config's 6.3 ms.
+//   tile_m            amortises the weight read across rows (traffic ~ 1/tile_m)
+//   tile_n            amortises the activation window across columns: each
+//                     k-step issues 32 scalar fp16 A loads per row against
+//                     tile_m * tile_n * 32 FMAs
+//
+// So the table sweeps threads widely and keeps tile_m * tile_n in the 16-32
+// band, which bounds partial[][]. tile_m = 1 is retained so the tuner can
+// always fall back to per-row behaviour.
+static constexpr GemvMConfig kGemvMConfigs[] = {
+    // tile_m=2 is deliberately narrow (tile_n 2 and 4, not 8 and 16). The wide
+    // pairings are the ones that still spill -- 476 bytes/lane at tile_n=8, 1124
+    // at tile_n=16 -- so the tuner could never use them, and without a spill-free
+    // tile_m=2 its only read-once options at M=2 were tile_m=4 and 8, which
+    // compute two to four times the rows they need. That cost 5% at M=2.
+    {  64,  8, 1}, {  64, 16, 1}, {  64,  2, 2}, {  64,  4, 2},
+    {  64,  4, 4}, {  64,  8, 4}, {  64,  2, 8}, {  64,  4, 8},
+    { 128,  8, 1}, { 128, 16, 1}, { 128,  2, 2}, { 128,  4, 2},
+    { 128,  4, 4}, { 128,  8, 4}, { 128,  2, 8}, { 128,  4, 8},
+    { 256,  8, 1}, { 256, 16, 1}, { 256,  2, 2}, { 256,  4, 2},
+    { 256,  4, 4}, { 256,  8, 4}, { 256,  2, 8}, { 256,  4, 8},
+    { 512,  8, 1}, { 512, 16, 1}, { 512,  2, 2}, { 512,  4, 2},
+    { 512,  4, 4}, { 512,  8, 4}, { 512,  2, 8}, { 512,  4, 8},
+    {1024,  8, 1}, {1024, 16, 1}, {1024,  2, 2}, {1024,  4, 2},
+    {1024,  4, 4}, {1024,  8, 4}, {1024,  2, 8}, {1024,  4, 8},
+    // Wide-tile_n M-blocked variants, appended so the ids above keep meaning
+    // (the on-disk tune cache stores ids). Rationale: once the tuner is
+    // restricted to one traffic class, what separates candidates is how many B
+    // loads are in flight -- threads * tile_n -- and the widest M-blocked tile
+    // the table offered was tile_n=8. A read-once tile_m=4 config reaches only
+    // ~55 GB/s on a 12288x4096 layer where the tile_m=1 config reaches ~138,
+    // which is the signature of too few outstanding loads, not of traffic.
+    // These may exceed the register file and spill; that is safe to offer,
+    // because within a single traffic class the back-to-back timing below is a
+    // valid latency comparison and will simply not pick them.
+    {  64, 16, 4}, { 128, 16, 4}, { 256, 16, 4}, { 512, 16, 4},
+    {  64,  8, 8}, { 128,  8, 8}, { 256,  8, 8}, { 512,  8, 8},
+};
+static constexpr int kNumGemvMConfigs =
+    static_cast<int>(sizeof(kGemvMConfigs) / sizeof(kGemvMConfigs[0]));
+
+static void launchGemvMConfig(
+    int config_id, hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    auto& c = kGemvMConfigs[config_id];
+    dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
+              static_cast<unsigned>((M + c.tile_m - 1) / c.tile_m),
+              1);
+    dim3 block(c.threads);
+
+    // COL_MAJOR, not row-major. Measured at 512 threads / tile_n 16 / tile_m 1
+    // on a 4096x151936 lm_head at M=4, the row-major instantiation of this same
+    // kernel costs 11.6 ms against the col-major one's 6.3 ms -- 1.85x, for
+    // identical tiling and B indexing. Row-major looked preferable on paper
+    // (no A/C transposes, uint8 zero points instead of a nibble->fp16 pass) but
+    // it loses far more than those cost, so M-blocking is layered on top of the
+    // layout that is actually fast.
+#define GEMV_M_CASE(ID, BS, TN, TM)                                            \
+    case ID:                                                                   \
+        hipLaunchKernelGGL(                                                    \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true, TM>),        \
+            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs);        \
+        break
+
+#define GEMV_M_BLOCK(BASE, BS)                                                  \
+    GEMV_M_CASE(BASE + 0, BS,  8, 1); GEMV_M_CASE(BASE + 1, BS, 16, 1);         \
+    GEMV_M_CASE(BASE + 2, BS,  2, 2); GEMV_M_CASE(BASE + 3, BS,  4, 2);         \
+    GEMV_M_CASE(BASE + 4, BS,  4, 4); GEMV_M_CASE(BASE + 5, BS,  8, 4);         \
+    GEMV_M_CASE(BASE + 6, BS,  2, 8); GEMV_M_CASE(BASE + 7, BS,  4, 8)
+
+    switch (config_id) {
+        GEMV_M_BLOCK( 0,   64);
+        GEMV_M_BLOCK( 8,  128);
+        GEMV_M_BLOCK(16,  256);
+        GEMV_M_BLOCK(24,  512);
+        GEMV_M_BLOCK(32, 1024);
+        GEMV_M_CASE(40,   64, 16, 4); GEMV_M_CASE(41,  128, 16, 4);
+        GEMV_M_CASE(42,  256, 16, 4); GEMV_M_CASE(43,  512, 16, 4);
+        GEMV_M_CASE(44,   64,  8, 8); GEMV_M_CASE(45,  128,  8, 8);
+        GEMV_M_CASE(46,  256,  8, 8); GEMV_M_CASE(47,  512,  8, 8);
+        default: break;
+    }
+#undef GEMV_M_BLOCK
+#undef GEMV_M_CASE
+}
+
+static int tuneGemvMConfig(
+    hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    float best_ms = 1e30f;
+    int   best_id = 25;  // 512 threads, tile_n 16, tile_m 1: safe default
+    constexpr int WARMUP = 1;
+    constexpr int ITERS  = 5;
+
+    // Weight reads per call: grid.y = ceil(M/tile_m) threadblocks each stream the
+    // whole packed weight, so this is the traffic multiplier and nothing else in
+    // the config changes it. Only configs that achieve the minimum are timed.
+    //
+    // WHY restrict instead of letting the measurement decide: the loop below
+    // times 5 back-to-back launches on one weight, so from the second launch on
+    // it is resident in the 32 MB Infinity Cache, where re-reading it per row is
+    // nearly free. That makes the measurement blind to precisely the quantity
+    // that dominates a real forward pass, where every layer's weight arrives
+    // cold from DRAM. Measured in-model at M=4 on a 12288x4096 layer: the
+    // tuner's own pick costs 41.0 ms against 36.3 ms for a minimum-traffic
+    // config, and 58.5 ms for the tile_m=1 config the warm ranking prefers.
+    // Comparisons *within* one traffic class are still latency comparisons,
+    // which back-to-back timing does handle, so the measurement keeps its job of
+    // choosing threads and tile_n -- it just no longer gets to choose traffic.
+    int min_reads = 1 << 30;
+    for (int cid = 0; cid < kNumGemvMConfigs; cid++) {
+        if (kGemvMConfigs[cid].tile_n > N) continue;
+        const int reads =
+            static_cast<int>((M + kGemvMConfigs[cid].tile_m - 1) /
+                             kGemvMConfigs[cid].tile_m);
+        if (reads < min_reads) min_reads = reads;
+    }
+
+    for (int cid = 0; cid < kNumGemvMConfigs; cid++) {
+        // A tile wider than N only adds bounds-checked lanes.
+        if (kGemvMConfigs[cid].tile_n > N) continue;
+        // A tile taller than M is *not* excluded: at M=3 only tile_m=4 reads the
+        // weight once, and at M=5..7 only tile_m=8 does. The rows beyond M are
+        // clamped and discarded at the store, so the cost is wasted FMAs against
+        // an already-loaded weight -- which is the cheap half of this kernel.
+        if ((M + kGemvMConfigs[cid].tile_m - 1) / kGemvMConfigs[cid].tile_m >
+            min_reads)
+            continue;
+
+        for (int w = 0; w < WARMUP; w++)
+            launchGemvMConfig(cid, stream, A, B, sc, zp, bi, out,
+                              M, N, K, batch, bs);
+
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < ITERS; i++)
+            launchGemvMConfig(cid, stream, A, B, sc, zp, bi, out,
+                              M, N, K, batch, bs);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   configM[%2d] threads=%3d tile_n=%d tile_m=%d "
+            ": %.4f ms\n",
+            cid, kGemvMConfigs[cid].threads, kGemvMConfigs[cid].tile_n,
+            kGemvMConfigs[cid].tile_m, ms / ITERS);
+
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_id = cid;
+        }
+    }
+
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] GEMV-M autotune: M=%lld N=%lld K=%lld bs=%lld -> "
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
+        (long long)M, (long long)N, (long long)K, (long long)bs,
+        best_id, kGemvMConfigs[best_id].threads,
+        kGemvMConfigs[best_id].tile_n, kGemvMConfigs[best_id].tile_m,
+        best_ms / ITERS);
+
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> gemv_m_cache;
+static std::mutex gemv_m_tune_mutex;
+
+// HIPDNN_EP_MATMUL_SMALLM_CFG=<id> pins the config, bypassing the autotune.
+// The autotune measures 5 back-to-back launches on the first call, which ranks
+// configs under conditions a real decode loop does not reproduce -- its winner
+// for lm_head at M=4 measured 5.5 ms while the same config measured 14.7 ms in
+// steady state. Pinning lets a config be evaluated the way it will be used.
+static int gemvMConfigOverride() {
+    static const int cfg = [] {
+#ifdef _WIN32
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_SMALLM_CFG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        return atoi(buf);
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_SMALLM_CFG");
+        return v ? atoi(v) : -1;
+#endif
+    }();
+    return cfg;
+}
+
+static int getOrTuneGemvMConfig(
+    hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    const int forced = gemvMConfigOverride();
+    if (forced >= 0 && forced < kNumGemvMConfigs &&
+        kGemvMConfigs[forced].tile_m <= M)
+        return forced;
+
+    std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
+                      std::to_string(K) + "_" + std::to_string(bs) + "_" +
+                      (zp != nullptr ? "1" : "0");
+
+    std::lock_guard<std::mutex> lock(gemv_m_tune_mutex);
+
+    auto it = gemv_m_cache.find(key);
+    if (it != gemv_m_cache.end())
+        return it->second;
+
+    int best = tuneGemvMConfig(stream, A, B, sc, zp, bi, out,
+                               M, N, K, batch, bs);
+    gemv_m_cache[key] = best;
+
+    return best;
+}
+
+/* -----------------------------------------------------------------------
+ * W4A8 dp4a GEMV Autotune + dispatch (M >= 1, K%32==0)
  *
  * Reuses kGemvConfigs + the tune-cache mechanics; a separate cache is kept
  * because the dp4a kernel's per-config ranking differs from the fp path
@@ -1460,9 +2373,9 @@ static void launchDp4aConfig(
 #define DP4A_CASE(ID, BS, TN) \
     case ID: \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN>), \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, 1>), \
             grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
-            N, K, bs); \
+            1, N, K, bs); \
         break
 
     switch (config_id) {
@@ -1511,7 +2424,7 @@ static int tuneDp4aConfig(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, [&]{
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
                              N, K, bs);
         });
@@ -1570,23 +2483,178 @@ static int getOrTuneDp4aConfig(
     return best;
 }
 
-// Public entry: W4A8 dp4a GEMV for a single decode row.
-//   A          : fp16 activation row [K] (row-major, batch==M==1)
+/* -----------------------------------------------------------------------
+ * W4A8 dp4a GEMV-M: the same integer-dot GEMV with rows blocked.
+ *
+ * Why this and not the fp M-blocked path for the verify pass: at M > 1 the fp
+ * kernel is already read-once, and Phase H established that it is nonetheless
+ * ~2.5x less efficient per byte than the single-row path -- because the nibble
+ * unpack sits inside the row loop, so a tile_m=4 block dequantizes every weight
+ * four times, and hoisting it costs more live state than it saves. The integer
+ * form does not have that trade to make: the unpack is two mask instructions
+ * per uint32 and they are already outside the row loop, so a fourth row costs
+ * two sudot4 and nothing else.
+ *
+ * The config table mirrors kGemvMConfigs so the tile shapes are ones already
+ * known not to spill, minus the 1024-thread row (K/32 <= 384 here).
+ * ----------------------------------------------------------------------- */
+
+static constexpr GemvMConfig kGemvMDp4aConfigs[] = {
+    {  64,  8, 1}, {  64, 16, 1}, {  64,  2, 2}, {  64,  4, 2},
+    {  64,  4, 4}, {  64,  8, 4}, {  64,  2, 8}, {  64,  4, 8},
+    { 128,  8, 1}, { 128, 16, 1}, { 128,  2, 2}, { 128,  4, 2},
+    { 128,  4, 4}, { 128,  8, 4}, { 128,  2, 8}, { 128,  4, 8},
+    { 256,  8, 1}, { 256, 16, 1}, { 256,  2, 2}, { 256,  4, 2},
+    { 256,  4, 4}, { 256,  8, 4}, { 256,  2, 8}, { 256,  4, 8},
+    { 512,  8, 1}, { 512, 16, 1}, { 512,  2, 2}, { 512,  4, 2},
+    { 512,  4, 4}, { 512,  8, 4}, { 512,  2, 8}, { 512,  4, 8},
+    {  64, 16, 4}, { 128, 16, 4}, { 256, 16, 4}, { 512, 16, 4},
+    {  64,  8, 8}, { 128,  8, 8}, { 256,  8, 8}, { 512,  8, 8},
+};
+static constexpr int kNumGemvMDp4aConfigs =
+    static_cast<int>(sizeof(kGemvMDp4aConfigs) / sizeof(kGemvMDp4aConfigs[0]));
+
+static void launchDp4aMConfig(
+    int config_id, hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K, int64_t bs)
+{
+    auto& c = kGemvMDp4aConfigs[config_id];
+    dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
+              static_cast<unsigned>((M + c.tile_m - 1) / c.tile_m), 1u);
+    dim3 block(c.threads);
+
+    // The (BS, TN, TM) at every case ID below MUST match
+    // kGemvMDp4aConfigs[ID]; see launchGemvConfigI8 for what drift costs.
+#define DP4A_M_CASE(ID, BS, TN, TM)                                            \
+    case ID:                                                                   \
+        hipLaunchKernelGGL(                                                    \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN, TM>),        \
+            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out,         \
+            M, N, K, bs);                                                      \
+        break
+
+#define DP4A_M_BLOCK(BASE, BS)                                                 \
+    DP4A_M_CASE(BASE + 0, BS,  8, 1); DP4A_M_CASE(BASE + 1, BS, 16, 1);        \
+    DP4A_M_CASE(BASE + 2, BS,  2, 2); DP4A_M_CASE(BASE + 3, BS,  4, 2);        \
+    DP4A_M_CASE(BASE + 4, BS,  4, 4); DP4A_M_CASE(BASE + 5, BS,  8, 4);        \
+    DP4A_M_CASE(BASE + 6, BS,  2, 8); DP4A_M_CASE(BASE + 7, BS,  4, 8)
+
+    switch (config_id) {
+        DP4A_M_BLOCK( 0,   64);
+        DP4A_M_BLOCK( 8,  128);
+        DP4A_M_BLOCK(16,  256);
+        DP4A_M_BLOCK(24,  512);
+        DP4A_M_CASE(32,   64, 16, 4); DP4A_M_CASE(33,  128, 16, 4);
+        DP4A_M_CASE(34,  256, 16, 4); DP4A_M_CASE(35,  512, 16, 4);
+        DP4A_M_CASE(36,   64,  8, 8); DP4A_M_CASE(37,  128,  8, 8);
+        DP4A_M_CASE(38,  256,  8, 8); DP4A_M_CASE(39,  512,  8, 8);
+        default: break;
+    }
+#undef DP4A_M_BLOCK
+#undef DP4A_M_CASE
+}
+
+static std::unordered_map<std::string, int> dp4a_m_cache;
+static std::mutex dp4a_m_tune_mutex;
+
+static int getOrTuneDp4aMConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K, int64_t bs)
+{
+    std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
+                      std::to_string(K) + "_" + std::to_string(bs) + "_" +
+                      (zp ? "1" : "0");
+
+    std::lock_guard<std::mutex> lock(dp4a_m_tune_mutex);
+    auto it = dp4a_m_cache.find(key);
+    if (it != dp4a_m_cache.end())
+        return it->second;
+
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+    float best_ms = 1e30f;
+    int   best_id = 29;  // 512 threads, tile_n 8, tile_m 4: read-once default
+    constexpr int WARMUP = 1;
+    constexpr int ITERS  = 5;
+
+    // Only minimum-traffic configs are timed, for the reason spelled out in
+    // tuneGemvMConfig: five back-to-back launches leave the weight in the
+    // Infinity Cache, so this measurement cannot see traffic, only latency.
+    int min_reads = 1 << 30;
+    for (int cid = 0; cid < kNumGemvMDp4aConfigs; cid++) {
+        if (kGemvMDp4aConfigs[cid].tile_n > N) continue;
+        const int reads =
+            static_cast<int>((M + kGemvMDp4aConfigs[cid].tile_m - 1) /
+                             kGemvMDp4aConfigs[cid].tile_m);
+        if (reads < min_reads) min_reads = reads;
+    }
+
+    for (int cid = 0; cid < kNumGemvMDp4aConfigs; cid++) {
+        if (kGemvMDp4aConfigs[cid].tile_n > N) continue;
+        if ((M + kGemvMDp4aConfigs[cid].tile_m - 1) /
+                kGemvMDp4aConfigs[cid].tile_m > min_reads)
+            continue;
+
+        for (int w = 0; w < WARMUP; w++)
+            launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                              M, N, K, bs);
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < ITERS; i++)
+            launchDp4aMConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                              M, N, K, bs);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   dp4a configM[%2d] threads=%3d tile_n=%d "
+            "tile_m=%d : %.4f ms\n",
+            cid, kGemvMDp4aConfigs[cid].threads, kGemvMDp4aConfigs[cid].tile_n,
+            kGemvMDp4aConfigs[cid].tile_m, ms / ITERS);
+
+        if (ms < best_ms) { best_ms = ms; best_id = cid; }
+    }
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] dp4a-M autotune: M=%lld N=%lld K=%lld bs=%lld -> "
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
+        (long long)M, (long long)N, (long long)K, (long long)bs, best_id,
+        kGemvMDp4aConfigs[best_id].threads, kGemvMDp4aConfigs[best_id].tile_n,
+        kGemvMDp4aConfigs[best_id].tile_m, best_ms / ITERS);
+
+    dp4a_m_cache[key] = best_id;
+    return best_id;
+}
+
+// Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
+//   A          : fp16 activations [M, K] (row-major, batch==1)
 //   B          : packed int4 weights [N, K/2]
 //   scales     : fp16 [N, k_blocks]
 //   zp_u8      : pre-unpacked uint8 zero points [N, k_blocks] or nullptr (sym)
-//   out        : fp16 [N]
+//   out        : fp16 [M, N]
 //   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
-//       >= K bytes and >= k_blocks floats respectively.
+//       >= M*K bytes and >= M*k_blocks floats respectively.
 // Returns hip status (hipSuccess on success). K must be a multiple of 32.
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v,
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch)
 {
     if (K % 32 != 0) return hipErrorInvalidValue;
+    if (M < 1) return hipErrorInvalidValue;
     hipStream_t stream = static_cast<hipStream_t>(stream_v);
 
     const __half*  Ah   = static_cast<const __half*>(A);
@@ -1600,18 +2668,28 @@ extern "C" int hip_matmul_nbits_dp4a(
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
-    // Step 1: dynamic per-group int8 quantization of the activation row.
-    // One block per K-group, fixed 128 threads (handles bs in {32,64,128,256}).
+    // Step 1: dynamic per-group int8 quantization of the activations.
+    // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks)), dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size);
+                       dim3(static_cast<unsigned>(k_blocks),
+                            static_cast<unsigned>(M)),
+                       dim3(128), 0,
+                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
 
-    // Step 2: dp4a GEMV (autotuned config).
-    int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                  N, K, block_size);
-    launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                     N, K, block_size);
+    // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
+    // launcher and its own tune cache, which has more history behind it.
+    if (M == 1) {
+        int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                                      N, K, block_size);
+        launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                         N, K, block_size);
+    } else {
+        int cfg = getOrTuneDp4aMConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                                       M, N, K, block_size);
+        launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                          M, N, K, block_size);
+    }
     return hipGetLastError();
 }
 
@@ -1691,15 +2769,17 @@ static int tuneGemvConfigI8(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
+    float best_ms = 1e30f;
+    int   best_id = 8; // 128 threads, TILE_N=8 -- safe default for typical N
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
     hipEventCreate(&ev1);
 
-    float best_ms = 1e30f;
-    int   best_id = 8; // 128 threads, TILE_N=8 -- safe default for typical N
     constexpr int WARMUP = 3;
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    void* evict = gemvEvictAlloc();
 
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigI8(best_id, stream, A, B, sc, zp, bi, out,
@@ -1708,7 +2788,7 @@ static int tuneGemvConfigI8(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -1724,6 +2804,7 @@ static int tuneGemvConfigI8(
         }
     }
 
+    if (evict) (void)hipFree(evict);
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
@@ -1774,6 +2855,234 @@ static int getOrTuneGemvConfigI8(
         "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
         "(cache size=%zu)\n",
         key.c_str(), best, gemv_i8_cache.size());
+
+    return best;
+}
+
+/* -----------------------------------------------------------------------
+ * GEMV-M (int8) Autotune: config table, dispatch, benchmark, cache
+ *
+ * The int8 sibling of the GEMV-M section further down, and the reason it
+ * exists: on a mixed int4/int8 checkpoint like Qwen3-8B int4-KLD, the int8 ops
+ * carry roughly half the weight traffic -- every k/v projection, a third of the
+ * attention and MLP projections, and the whole 622 MB lm_head -- and until now
+ * none of it was M-blocked. A width-4 verify pass therefore streamed those
+ * ~2.6 GB four times while the int4 half streamed its ~2.5 GB once.
+ *
+ * Same three parameters as the int4 table and the same reasoning about them
+ * (threads * tile_n sets outstanding B loads, tile_m sets traffic, tile_n
+ * amortises the A window), so the shapes are kept identical. The 1024-thread
+ * row is dropped: int8 walks K in 16-byte steps, so K/16 <= 768 for every shape
+ * in this model and a 1024-thread block leaves most of itself with no K work.
+ * ----------------------------------------------------------------------- */
+
+static constexpr GemvMConfig kGemvMI8Configs[] = {
+    {  64,  8, 1}, {  64, 16, 1}, {  64,  2, 2}, {  64,  4, 2},
+    {  64,  4, 4}, {  64,  8, 4}, {  64,  2, 8}, {  64,  4, 8},
+    { 128,  8, 1}, { 128, 16, 1}, { 128,  2, 2}, { 128,  4, 2},
+    { 128,  4, 4}, { 128,  8, 4}, { 128,  2, 8}, { 128,  4, 8},
+    { 256,  8, 1}, { 256, 16, 1}, { 256,  2, 2}, { 256,  4, 2},
+    { 256,  4, 4}, { 256,  8, 4}, { 256,  2, 8}, { 256,  4, 8},
+    { 512,  8, 1}, { 512, 16, 1}, { 512,  2, 2}, { 512,  4, 2},
+    { 512,  4, 4}, { 512,  8, 4}, { 512,  2, 8}, { 512,  4, 8},
+    // Wide-tile_n M-blocked variants, appended so the ids above keep meaning
+    // (the on-disk tune cache stores ids).
+    {  64, 16, 4}, { 128, 16, 4}, { 256, 16, 4}, { 512, 16, 4},
+    {  64,  8, 8}, { 128,  8, 8}, { 256,  8, 8}, { 512,  8, 8},
+};
+static constexpr int kNumGemvMI8Configs =
+    static_cast<int>(sizeof(kGemvMI8Configs) / sizeof(kGemvMI8Configs[0]));
+
+static void launchGemvMConfigI8(
+    int config_id, hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    auto& c = kGemvMI8Configs[config_id];
+    dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
+              static_cast<unsigned>((M + c.tile_m - 1) / c.tile_m),
+              static_cast<unsigned>(batch));
+    dim3 block(c.threads);
+
+    // The (BS, TN, TM) at every case ID below MUST match kGemvMI8Configs[ID];
+    // see the warning on launchGemvConfigI8 for what drift costs.
+#define GEMV_MI8_CASE(ID, BS, TN, TM)                                          \
+    case ID:                                                                   \
+        hipLaunchKernelGGL(                                                    \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_kernel_i8<BS, TN, TM>),          \
+            grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs);       \
+        break
+
+#define GEMV_MI8_BLOCK(BASE, BS)                                               \
+    GEMV_MI8_CASE(BASE + 0, BS,  8, 1); GEMV_MI8_CASE(BASE + 1, BS, 16, 1);    \
+    GEMV_MI8_CASE(BASE + 2, BS,  2, 2); GEMV_MI8_CASE(BASE + 3, BS,  4, 2);    \
+    GEMV_MI8_CASE(BASE + 4, BS,  4, 4); GEMV_MI8_CASE(BASE + 5, BS,  8, 4);    \
+    GEMV_MI8_CASE(BASE + 6, BS,  2, 8); GEMV_MI8_CASE(BASE + 7, BS,  4, 8)
+
+    switch (config_id) {
+        GEMV_MI8_BLOCK( 0,   64);
+        GEMV_MI8_BLOCK( 8,  128);
+        GEMV_MI8_BLOCK(16,  256);
+        GEMV_MI8_BLOCK(24,  512);
+        GEMV_MI8_CASE(32,   64, 16, 4); GEMV_MI8_CASE(33,  128, 16, 4);
+        GEMV_MI8_CASE(34,  256, 16, 4); GEMV_MI8_CASE(35,  512, 16, 4);
+        GEMV_MI8_CASE(36,   64,  8, 8); GEMV_MI8_CASE(37,  128,  8, 8);
+        GEMV_MI8_CASE(38,  256,  8, 8); GEMV_MI8_CASE(39,  512,  8, 8);
+        default: break;
+    }
+#undef GEMV_MI8_BLOCK
+#undef GEMV_MI8_CASE
+}
+
+static int tuneGemvMConfigI8(
+    hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    float best_ms = 1e30f;
+    int   best_id = 29;  // 512 threads, tile_n 8, tile_m 4: read-once default
+    constexpr int WARMUP = 1;
+    constexpr int ITERS  = 5;
+
+    // Weight reads per call: grid.y = ceil(M/tile_m) threadblocks each stream
+    // the whole weight, so this is the traffic multiplier and nothing else in
+    // the config changes it. Only configs that achieve the minimum are timed --
+    // the loop below runs 5 back-to-back launches on one weight, which is
+    // resident in the 32 MB Infinity Cache from the second launch on, so it
+    // cannot see traffic at all. Comparisons within one traffic class are still
+    // valid latency comparisons, which is the job the measurement keeps.
+    int min_reads = 1 << 30;
+    for (int cid = 0; cid < kNumGemvMI8Configs; cid++) {
+        if (kGemvMI8Configs[cid].tile_n > N) continue;
+        const int reads =
+            static_cast<int>((M + kGemvMI8Configs[cid].tile_m - 1) /
+                             kGemvMI8Configs[cid].tile_m);
+        if (reads < min_reads) min_reads = reads;
+    }
+
+    for (int cid = 0; cid < kNumGemvMI8Configs; cid++) {
+        if (kGemvMI8Configs[cid].tile_n > N) continue;
+        // A tile taller than M is not excluded: at M=3 only tile_m=4 reads the
+        // weight once, and at M=5..7 only tile_m=8 does.
+        if ((M + kGemvMI8Configs[cid].tile_m - 1) / kGemvMI8Configs[cid].tile_m >
+            min_reads)
+            continue;
+
+        for (int w = 0; w < WARMUP; w++)
+            launchGemvMConfigI8(cid, stream, A, B, sc, zp, bi, out,
+                                M, N, K, batch, bs);
+
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < ITERS; i++)
+            launchGemvMConfigI8(cid, stream, A, B, sc, zp, bi, out,
+                                M, N, K, batch, bs);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   i8 configM[%2d] threads=%3d tile_n=%d "
+            "tile_m=%d : %.4f ms\n",
+            cid, kGemvMI8Configs[cid].threads, kGemvMI8Configs[cid].tile_n,
+            kGemvMI8Configs[cid].tile_m, ms / ITERS);
+
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_id = cid;
+        }
+    }
+
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] GEMV-M-i8 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
+        "best configM[%d] threads=%d tile_n=%d tile_m=%d (%.4f ms/iter)\n",
+        (long long)M, (long long)N, (long long)K, (long long)bs,
+        best_id, kGemvMI8Configs[best_id].threads,
+        kGemvMI8Configs[best_id].tile_n, kGemvMI8Configs[best_id].tile_m,
+        best_ms / ITERS);
+
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> gemv_m_i8_cache;
+static std::mutex gemv_m_i8_tune_mutex;
+
+// HIPDNN_EP_MATMUL_SMALLM_I8=0 falls back to the per-row int8 path. Separate
+// from HIPDNN_EP_MATMUL_SMALLM so the int4 and int8 M-blocked paths can be
+// attributed independently; both are on by default.
+static bool gemvMBlockedEnabledI8() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_SMALLM_I8", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_SMALLM_I8");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return enabled;
+}
+
+// HIPDNN_EP_MATMUL_SMALLM_I8_CFG=<id> pins the config, bypassing the autotune,
+// so a candidate can be evaluated in a real forward pass rather than under the
+// cache-warm conditions the tuner measures in.
+static int gemvMI8ConfigOverride() {
+    static const int cfg = [] {
+#ifdef _WIN32
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_SMALLM_I8_CFG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        return atoi(buf);
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_SMALLM_I8_CFG");
+        return v ? atoi(v) : -1;
+#endif
+    }();
+    return cfg;
+}
+
+static int getOrTuneGemvMConfigI8(
+    hipStream_t stream,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch, int64_t bs)
+{
+    const int forced = gemvMI8ConfigOverride();
+    if (forced >= 0 && forced < kNumGemvMI8Configs)
+        return forced;
+
+    std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
+                      std::to_string(K) + "_" + std::to_string(bs) + "_" +
+                      (zp != nullptr ? "1" : "0");
+
+    std::lock_guard<std::mutex> lock(gemv_m_i8_tune_mutex);
+
+    auto it = gemv_m_i8_cache.find(key);
+    if (it != gemv_m_i8_cache.end())
+        return it->second;
+
+    int best = tuneGemvMConfigI8(stream, A, B, sc, zp, bi, out,
+                                 M, N, K, batch, bs);
+    gemv_m_i8_cache[key] = best;
 
     return best;
 }
@@ -2134,7 +3443,7 @@ static int tuneGemvConfigU3(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, [&]{
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -2537,7 +3846,7 @@ static int tuneGemvConfigU2(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, [&]{
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -3484,6 +4793,34 @@ static bool wmmaConfigApplies(const WmmaConfig& c, int N, int gs) {
     return gs % wmmaBNibblesPerThread(c) == 0;
 }
 
+// Whether a config may serve this shape at all. Both the autotune and the
+// launch consult this, so a config that cannot produce the right answer is
+// never timed and never cached.
+//
+// K % BK == 0 is a correctness requirement, not a preference: the kernel walks
+// K in whole BK-wide tiles with no tail predication, so a partial final tile
+// reads past the end of the dequantized B and accumulates garbage. The
+// dispatcher's own gate is only K % 32 == 0, which is enough for every config
+// except the two BN=32 (WT2x1) tile shapes -- those have BK = 64. The gap was
+// invisible for a long time because BN=32 is only considered when N <= 64, and
+// no shape in a real checkpoint is that narrow: it reproduces at K=32 or K=96
+// with N=64, where it cost ~97% relative error.
+static bool wmmaConfigSupported(const WmmaConfig& c, int N, int K, int gs) {
+    if (!wmmaConfigApplies(c, N, gs)) return false;
+    return K % wmmaBk(c) == 0;
+}
+
+// Config to fall back on when the requested one cannot serve the shape.
+// Config 9 ({128, 64, sw=4, fused}, BK = 32) is the historical default and is
+// supported for every K the dispatcher lets through; the scan is there so this
+// still returns something valid if the table is reordered.
+static int wmmaFallbackConfig(int N, int K, int gs) {
+    if (wmmaConfigSupported(kWmmaConfigs[9], N, K, gs)) return 9;
+    for (int cid = 0; cid < kNumWmmaConfigs; cid++)
+        if (wmmaConfigSupported(kWmmaConfigs[cid], N, K, gs)) return cid;
+    return 9;
+}
+
 /* WMMA half of the LUT bridge; see the GEMV half above kGemvConfigs for the
  * cache-then-LUT-then-sweep ordering this serves. */
 
@@ -3532,6 +4869,10 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     // A padded stride can only be served by a fused config; the dequant pass
     // behind a !fused one has no stride argument.
     if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
+    // The geometry match above does not see K, so a table row can name a config
+    // whose BK does not divide it. Reject here rather than let the launch fall
+    // back, which would cache a config that is replaced on every call.
+    if (cid >= 0 && K % wmmaBk(kWmmaConfigs[cid]) != 0) return -1;
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
@@ -3565,6 +4906,9 @@ static void launchWmmaConfig(
     _Float16* C, int ldc, bool has_zp,
     _Float16* B_fp16_buf = nullptr, int b_row_bytes = 0)
 {
+    if (!wmmaConfigSupported(kWmmaConfigs[config_id], N, K, gs))
+        config_id = wmmaFallbackConfig(N, K, gs);
+
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
 
@@ -3966,7 +5310,7 @@ static int tuneWmmaConfig(
     const bool fused_only = (b_row_bytes != 0);
 
     float best_ms = 1e30f;
-    int   best_id = 9;
+    int   best_id = wmmaFallbackConfig(N, K, gs);
     constexpr int WARMUP = 1;
     constexpr int ITERS  = 5;
 
@@ -3977,7 +5321,7 @@ static int tuneWmmaConfig(
      * sweep, not here -- see autotune/matmul_nbits. */
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         auto& cfg = kWmmaConfigs[cid];
-        if (!wmmaConfigApplies(cfg, N, gs)) continue;
+        if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
         if (fused_only && !cfg.fused) continue;
 
         for (int w = 0; w < WARMUP; w++)
@@ -4119,6 +5463,111 @@ static int getOrTuneWmmaConfig(
         key.c_str(), best, wmma_cache.size());
 
     return best;
+}
+
+/* -----------------------------------------------------------------------
+ * Section 2b-tier: WMMA-vs-GEMV tier selection for int4, by measurement
+ *
+ * Both tiers compute the same row-major output from the same inputs for any
+ * M >= 2, so which one to use is purely a timing question -- and a fixed M
+ * cutoff answers it with a guess that is wrong in both directions. Measured
+ * crossovers on gfx1151 (int4, block 32), GEMV vs WMMA at equal M:
+ *
+ *   shape                    weight   GEMV wins   WMMA wins   crossover
+ *   lm_head   4096x151936    311 MB   M <= 4      M >= 5      5
+ *   mlp_down  12288x4096      25 MB   M <= 16     M >= 24     ~17
+ *   attn_qkv  4096x4096        8 MB   M <= 16     M >= 24     ~22
+ *   mlp_gate  4096x12288      25 MB   M <= 24     M >= 32     ~28
+ *
+ * The old fixed cutoff of 8 was too high for lm_head (WMMA is 1.39x faster at
+ * M=7, which it never got to run) and far too low for the other three (GEMV is
+ * 1.7-2.2x faster at M=8, which it was no longer allowed to run).
+ *
+ * The spread has a cause: GEMV re-reads the whole packed weight once per output
+ * row, so its cost is M * W / B_eff, and B_eff depends on whether W fits the
+ * last-level cache. lm_head at 311 MB cannot, so every row pays a full DRAM
+ * pass (measured ~200 GB/s aggregate, ~79% of the 256 GB/s bus, flat in M). The
+ * 8-25 MB shapes do fit, and their aggregate re-read rate measures 300-410 GB/s
+ * -- above bus peak, i.e. served from cache -- so extra rows are nearly free and
+ * GEMV stays ahead much longer. WMMA reads the weight once but computes a whole
+ * row-tile whatever M is, giving it a per-shape fixed floor.
+ *
+ * That is enough to explain the ordering but not to predict it: mlp_gate and
+ * mlp_down are both 25 MB yet cross at 28 and 17, because WMMA's floor also
+ * depends on how much N-parallelism the grid has. So this does not become a
+ * formula. It becomes a measurement, cached per shape like every other tuning
+ * decision in this file.
+ * ----------------------------------------------------------------------- */
+
+// Median wall time of ITERS launches, each isolated by a stream sync.
+//
+// WHY isolate: timing a burst of back-to-back launches and dividing lets each
+// launch's tail overlap the next one's head, which flatters exactly the
+// low-occupancy candidates this decision has to discriminate between. Measured
+// on a 4096x151936 lm_head at M=4, burst timing reported 5.5 ms/iter for a
+// configuration that costs 14.7 ms per step in a real decode loop -- a 2.7x
+// error, and more than enough to invert a tier choice. A decode step waits for
+// its own result, so the tuner has to as well.
+static float timeLaunchIsolated(hipStream_t stream,
+                                const std::function<void()>& launch,
+                                int iters = 5) {
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    launch();                       // warm up JIT, caches, and any lazy alloc
+    hipStreamSynchronize(stream);
+
+    float samples[16];
+    if (iters > 16) iters = 16;
+    for (int i = 0; i < iters; i++) {
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        hipEventElapsedTime(&samples[i], ev0, ev1);
+    }
+
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    // Median, not min: min rewards a lucky run that found the weight already
+    // resident, which is not what a steady decode loop sees.
+    std::sort(samples, samples + iters);
+    return samples[iters / 2];
+}
+
+static std::unordered_map<std::string, int> tier_cache;
+static std::mutex tier_tune_mutex;
+// Returns true if WMMA should serve this shape, false for the col-major GEMV.
+// Times both once per (M,N,K,gs,zp) and remembers the answer.
+static bool preferWmmaTier(hipStream_t stream,
+                           int M, int N, int K, int gs, bool has_zp,
+                           const std::function<void()>& wmma_launch,
+                           const std::function<void()>& gemv_launch) {
+    std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
+
+    std::lock_guard<std::mutex> lock(tier_tune_mutex);
+
+    auto it = tier_cache.find(key);
+    if (it != tier_cache.end())
+        return it->second != 0;
+
+    float wmma_ms = timeLaunchIsolated(stream, wmma_launch);
+    float gemv_ms = timeLaunchIsolated(stream, gemv_launch);
+
+    // Ties go to WMMA: it is the path whose cost stays flat as M grows, so it
+    // is the safer side of a coin flip if M rises later in the same shape.
+    bool wmma = wmma_ms <= gemv_ms;
+    tier_cache[key] = wmma ? 1 : 0;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] tier autotune: M=%d N=%d K=%d gs=%d zp=%s -> %s "
+        "(wmma %.4f ms vs gemv %.4f ms)\n",
+        M, N, K, gs, has_zp ? "yes" : "no", wmma ? "WMMA" : "GEMV",
+        wmma_ms, gemv_ms);
+
+    return wmma;
 }
 
 /* =======================================================================
@@ -6695,19 +8144,42 @@ extern "C" int hip_matmul_nbits(
       const auto* bi_ptr = static_cast<const __half*>(bias);
       auto*       o_ptr  = static_cast<__half*>(output);
 
-      int cfg_id = getOrTuneGemvConfigI8(
-          hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
-          M, N, K, batch_count, block_size);
+      // 1 < M < kBlockDim is the speculative verify band: too many rows to
+      // stream the weight once per row, too few for the WMMA-i8 tiles above.
+      // The M-blocked kernel reads it once per tile of rows instead. M == 1 is
+      // excluded because the two are then the same kernel, and the per-row
+      // table has been tuned for that shape for longer.
+      if (M > 1 && M < kBlockDim && gemvMBlockedEnabledI8()) {
+        int cfg_id = getOrTuneGemvMConfigI8(
+            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+            M, N, K, batch_count, block_size);
 
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] hip_matmul_nbits: int8 GEMV M=%lld N=%lld "
-          "K=%lld batch=%lld bs=%lld zp=%s bias=%s cfg=%d\n",
-          (long long)M, (long long)N, (long long)K, (long long)batch_count,
-          (long long)block_size, zero_points ? "yes" : "null",
-          bias ? "yes" : "null", cfg_id);
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] hip_matmul_nbits: int8 GEMV M-blocked M=%lld "
+            "N=%lld K=%lld batch=%lld bs=%lld zp=%s bias=%s cfg=%d "
+            "(tile_n=%d tile_m=%d threads=%d)\n",
+            (long long)M, (long long)N, (long long)K, (long long)batch_count,
+            (long long)block_size, zero_points ? "yes" : "null",
+            bias ? "yes" : "null", cfg_id, kGemvMI8Configs[cfg_id].tile_n,
+            kGemvMI8Configs[cfg_id].tile_m, kGemvMI8Configs[cfg_id].threads);
 
-      launchGemvConfigI8(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
-                         bi_ptr, o_ptr, M, N, K, batch_count, block_size);
+        launchGemvMConfigI8(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
+                            bi_ptr, o_ptr, M, N, K, batch_count, block_size);
+      } else {
+        int cfg_id = getOrTuneGemvConfigI8(
+            hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr, bi_ptr, o_ptr,
+            M, N, K, batch_count, block_size);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels] hip_matmul_nbits: int8 GEMV M=%lld N=%lld "
+            "K=%lld batch=%lld bs=%lld zp=%s bias=%s cfg=%d\n",
+            (long long)M, (long long)N, (long long)K, (long long)batch_count,
+            (long long)block_size, zero_points ? "yes" : "null",
+            bias ? "yes" : "null", cfg_id);
+
+        launchGemvConfigI8(cfg_id, hip_stream, a_ptr, b_ptr, sc_ptr, zp_ptr,
+                           bi_ptr, o_ptr, M, N, K, batch_count, block_size);
+      }
     } else {
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels] hip_matmul_nbits: int8 naive M=%lld N=%lld K=%lld "
@@ -7118,9 +8590,22 @@ extern "C" int hip_matmul_nbits(
   // where moving the whole tier down to 2 is +47 ms, i.e. worse than leaving
   // it alone. 4 and 12 are untested.
   //
+  // A single cutoff cannot be right for every shape, because the two sides
+  // scale differently and by shape-dependent amounts -- see preferWmmaTier for
+  // the measured crossovers (5 to ~28 across four shapes of one model). So the
+  // cutoff below is only the fallback for when tuning is off; normally the tier
+  // is timed per shape. Override with HIPDNN_EP_MATMUL_WMMA_MIN_M to pin it.
+  //
   // Any cutoff is safe for partial tiles: need_bc in launchWmmaConfig selects
   // the bounds-checked variant whenever M is not a multiple of the tile.
-  static constexpr int kWmmaMinM = 8;
+  const int kWmmaMinM = wmmaMinM();
+
+  // Both int4 tiers can serve any M >= 2 in the tuned window, so decide by
+  // measurement there and by cutoff elsewhere. The two bodies are packaged as
+  // callables so the same code runs whether it is being timed or used.
+  const bool tier_is_tuned =
+      wmma_data_format && !hipdnn_device_is_wave64() &&
+      M > 1 && M <= kTierTuneMaxM && wmmaTierTuningEnabled();
 
   // Defensive guard: the M>1 bits=4 asymmetric prefill paths below (WMMA, the
   // WMMA K-pad variant for K%32!=0, and the col-major GEMV for 1<M<8) all read
@@ -7221,7 +8706,7 @@ extern "C" int hip_matmul_nbits(
   // M>=kWmmaMinM is instead served by the dequant-once + hipBLASLt path in
   // lib/Runtime/real/matmul_nbits.cpp, and any residual case falls through to
   // the correct GEMV/naive fallback below.
-  if (wmma_data_format && M >= kWmmaMinM && !hipdnn_device_is_wave64()) {
+  auto run_wmma_int4 = [&]() -> int {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",
@@ -7282,7 +8767,7 @@ extern "C" int hip_matmul_nbits(
     }
 
     return static_cast<int>(hipGetLastError());
-  }
+  };
 
   /* -------------------------------------------------------------------
    * GEMV path with col-major data — small M, WMMA data format
@@ -7297,7 +8782,54 @@ extern "C" int hip_matmul_nbits(
    * pre_unpacked_zp_fp16 instead falls through to the row-major path below,
    * which already has the uint8 zp it needs at no extra cost.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M < kWmmaMinM && (M > 1 || fp16_zp_ready)) {
+  /* -------------------------------------------------------------------
+   * M-blocked col-major GEMV — small M (>1), WMMA data format
+   *
+   * Same transposes and the same fp16 zero points as the col-major path
+   * below, but one block covers up to tile_m rows, so the packed weight is
+   * read once per tile of rows instead of once per row. See the GEMV-M
+   * autotune section for why that matters and what it costs.
+   * ------------------------------------------------------------------- */
+  auto run_gemv_mblocked_int4 = [&]() -> int {
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: GEMV M-blocked path M=%lld "
+        "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)block_size,
+        zero_points ? "yes" : "null", bias ? "yes" : "null");
+
+    int iM = static_cast<int>(M);
+    int iN = static_cast<int>(N);
+    int iK = static_cast<int>(K);
+
+    _Float16* a_buf = ensureAColBuffer(iM, iK);
+    launchTranspose2DFp16(hip_stream, A, a_buf, iM, iK);
+    const auto* a_col = reinterpret_cast<const __half*>(a_buf);
+    auto* o_col = reinterpret_cast<__half*>(ensureOutColBuffer(iM, iN));
+
+    const auto* b_u = static_cast<const uint8_t*>(B);
+    const auto* s_h = static_cast<const __half*>(scales);
+    const auto* z_u = static_cast<const uint8_t*>(zp_for_fp16_paths);
+    const auto* bi_h = static_cast<const __half*>(bias);
+
+    int cfg_id = getOrTuneGemvMConfig(hip_stream, a_col, b_u, s_h, z_u, bi_h,
+                                      o_col, M, N, K, 1, block_size);
+    launchGemvMConfig(cfg_id, hip_stream, a_col, b_u, s_h, z_u, bi_h, o_col,
+                      M, N, K, 1, block_size);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits GEMV M-blocked launch "
+              "failed: %s\n",
+              hipGetErrorString(err));
+      return static_cast<int>(err);
+    }
+
+    launchTranspose2DFp16(hip_stream, o_col, output, iN, iM);
+    return static_cast<int>(hipGetLastError());
+  };
+
+  auto run_gemv_col_int4 = [&]() -> int {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
@@ -7361,7 +8893,59 @@ extern "C" int hip_matmul_nbits(
       }
     }
     return static_cast<int>(err);
+  };
+
+  /* -------------------------------------------------------------------
+   * Tier selection between the two paths above.
+   *
+   * In the tuned window both are timed once for this shape and the winner is
+   * cached (preferWmmaTier); outside it, or when tuning is pinned off, the
+   * fixed kWmmaMinM cutoff decides. M == 1 belongs to neither: it takes the
+   * per-row col-major GEMV directly when its zero points are already FP16
+   * (just below), and otherwise falls through to the row-major GEMV, which
+   * skips the transposes and the zero-point conversion entirely.
+   * ------------------------------------------------------------------- */
+  if (wmma_data_format && M > 1 && !hipdnn_device_is_wave64()) {
+    // Which GEMV serves this M. Below the WMMA cutoff the M-blocked variant
+    // reads the packed weight once per tile of rows instead of once per row,
+    // which is worth 1.05x on a Qwen3-8B verify call at M=4 (99.2 -> 94.4 ms,
+    // v/step 2.72 -> 2.60). Above the cutoff it is untuned territory: the
+    // config table stops at tile_m=8, so the per-row path stays.
+    //
+    // Note this is the GEMV *candidate*, not the decision. It is what the tier
+    // probe times against WMMA, so M-blocking can never make a shape slower
+    // than WMMA would have been -- which matters because forcing M-blocking
+    // globally used to disable tier tuning and cost 1.54x at M=8 (168 -> 259 ms).
+    const bool use_mblocked = (M < kWmmaMinM) && gemvMBlockedEnabled();
+    auto run_gemv = [&]() -> int {
+      return use_mblocked ? run_gemv_mblocked_int4() : run_gemv_col_int4();
+    };
+
+    bool use_wmma;
+    if (tier_is_tuned) {
+      use_wmma = preferWmmaTier(
+          hip_stream, static_cast<int>(M), static_cast<int>(N),
+          static_cast<int>(K), static_cast<int>(block_size),
+          zp_for_fp16_paths != nullptr,
+          [&]() { run_wmma_int4(); }, [&]() { run_gemv(); });
+    } else {
+      use_wmma = (M >= kWmmaMinM);
+    }
+    return use_wmma ? run_wmma_int4() : run_gemv();
   }
+
+  // M == 1 with FP16 zero points already in hand. The col-major GEMV is the
+  // only kernel variant that reads them directly, so it has to serve this case
+  // even though M == 1 has no WMMA or M-blocked alternative to be tiered
+  // against. M == 1 with uint8 zero points and no pre-built FP16 buffer is
+  // deliberately not here: it falls through to the row-major kernel below,
+  // which already has the uint8 zp it needs at no extra cost.
+  if (wmma_data_format && M == 1 && M < kWmmaMinM && fp16_zp_ready)
+    return run_gemv_col_int4();
+
+  // M == 1 with the cutoff pinned to 1: WMMA was explicitly asked for.
+  if (wmma_data_format && M >= kWmmaMinM && !hipdnn_device_is_wave64())
+    return run_wmma_int4();
 
   /* -------------------------------------------------------------------
    * GEMV path — small M, row-major data (non-WMMA format)
