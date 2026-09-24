@@ -2671,10 +2671,20 @@ static std::mutex g_flash_decode_mutex;
 // CPU cost is on the critical path). skv is bucketed to its next-power-of-two
 // exponent. Layout: B[40..51] H[28..39] G[16..27] d[6..15] log2bucket[0..5].
 // d gets a full 10 bits so d=256 (Qwen3 16:4) does not spill into G.
-static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
+//
+// Bucketing skv is what keeps an autotune cache usable in a decode loop at all:
+// the KV length grows by one every token, so a key holding the exact length
+// misses on every single call and re-tunes forever. The exponent changes only
+// when the context doubles, so a whole run costs a handful of tunes.
+static inline int skvLog2Bucket(int skv) {
   int blog = 0;
   uint32_t bucket = 1;
   while (bucket < (uint32_t)skv) { bucket <<= 1; ++blog; }
+  return blog;
+}
+
+static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
+  const int blog = skvLog2Bucket(skv);
   return ((uint64_t)(uint32_t)B << 40) | ((uint64_t)(uint32_t)H << 28) |
          ((uint64_t)(uint32_t)G << 16) | ((uint64_t)(uint32_t)d << 6) |
          (uint64_t)(uint32_t)blog;
@@ -4385,9 +4395,10 @@ static int runPrefillV8(
     int past_len, float scale)
 {
     if (d != 256) return -1;
-    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
-                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+    // Bucketed on skv for the same reason as v7 above.
+    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_b" +
+                      std::to_string(skvLog2Bucket(skv)) + "_" +
+                      std::to_string(Hq) + "_" + std::to_string(G);
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v8_cfg_mutex);
@@ -4505,9 +4516,17 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr       = static_cast<_Float16*>(O);
 
-    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
-                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+    // skv is bucketed by power of two, not exact (the decode autotune above does
+    // the same, and v5 drops it from the key entirely on the grounds that it
+    // scales every candidate's KV loop uniformly and so cannot reorder them).
+    // Keying on the exact length made this cache miss on *every* call of any
+    // loop that grows its context: a speculative verify pass at sq=k+1 re-tuned
+    // 12 candidates x 4 rounds x 30 iters, ~145 ms, once per generated token on
+    // Qwen3-8B -- more than the entire rest of the pass. Prefill chunks and
+    // verify passes now tune once per (shape, length decade) instead.
+    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_b" +
+                      std::to_string(skvLog2Bucket(skv)) + "_" +
+                      std::to_string(Hq) + "_" + std::to_string(G);
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v7_cfg_mutex);
