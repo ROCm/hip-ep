@@ -28,6 +28,17 @@ namespace mlir::hip {
 
 namespace {
 
+// Rank-0 inline hip.constant used by fused pointwise ops (Relu zero, Clip
+// bounds, residual Mul scale). File- and memory-backed carriers have no dense
+// attr for in-kernel tosa.const and stay kernel arguments.
+static bool isInlineScalarConstant(Value v) {
+  auto type = dyn_cast<RankedTensorType>(v.getType());
+  if (!type || type.getRank() != 0)
+    return false;
+  auto constant = v.getDefiningOp<ConstantOp>();
+  return constant && constant.getValueAttr();
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -79,6 +90,20 @@ public:
     }
     operands.erase(operands.begin());
 
+    // Pointwise scalar literals belong in the outlined subgraph, not the
+    // kernel ABI. A rank-0 buffer argument has no index for
+    // rock.transforms_to_ptr. Clone only inline constants: a dynamic Clip
+    // bound remains an argument.
+    SetVector<Value> kernelOperands;
+    for (Value operand : operands) {
+      if (isInlineScalarConstant(operand)) {
+        ops.insert(operand.getDefiningOp());
+        continue;
+      }
+      kernelOperands.insert(operand);
+    }
+    operands = std::move(kernelOperands);
+
     // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
     // has to resolve inside that func. The DPS inputs above cover the data,
     // but they do not cover what the inits are built from: an init is only a
@@ -92,8 +117,8 @@ public:
     // materialised destination travels with the ops that use it instead of
     // becoming a kernel argument. That keeps the signature rocMLIR sees
     // unchanged for the shapes that already worked. Values already headed for
-    // the argument list stay there: a weight is passed in even though
-    // hip.constant would qualify to be cloned.
+    // the argument list stay there: a non-scalar weight is passed in even
+    // though hip.constant would otherwise qualify to be cloned.
     SmallVector<Operation *> worklist(ops.begin(), ops.end());
     while (!worklist.empty()) {
       Operation *op = worklist.pop_back_val();
