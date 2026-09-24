@@ -199,11 +199,11 @@ python3 onnxruntime-genai/examples/python/model-mm.py -m /path/to/vlm-model-dir 
   --image_paths /path/to/image.jpg --user_prompt "Describe this image." --non_interactive -v
 ```
 
-> **Note** `whisper-large-v3` (fp16/fp32) fails to compile through
-> the generic whisper.py script. Use `scripts/transcribe_whisper.py --variant large-v3`
-> from this repo instead, which uses pre-split decoder graphs
-> (`decoder_fixed_prefill.onnx`/`decoder_fixed_decode.onnx`) that avoid the
-> issue. All other Whisper sizes work fine via the generic script above.
+> **Note** `whisper-large-v3` (fp16/fp32) does not compile through
+> the generic whisper.py script. Use hip-ep repo's `scripts/transcribe_whisper.py
+> --variant large-v3` instead, which uses pre-split decoder graphs
+> (`decoder_fixed_prefill.onnx`/`decoder_fixed_decode.onnx`).
+> All other Whisper sizes work fine via the generic script above.
 
 Make sure `genai_config.json` `provider_options` are set to
 `[{"AMDGPU": {"profile": "hip"}}]`
