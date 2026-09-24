@@ -779,10 +779,6 @@ int main(int argc, char **argv) {
   for (auto func : tosaModule->getOps<mlir::func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
       kernelNames.push_back(func.getSymName().str());
-  if (kernelNames.empty()) {
-    llvm::errs() << "error: no rock.kernel func to compile\n";
-    return 1;
-  }
 
   // The tuning and backend entry points are module-scoped and assume a single
   // anchor op per module, so a graph with several outlined kernels (a
@@ -846,7 +842,6 @@ int main(int argc, char **argv) {
     if (func->hasAttr("rock.kernel"))
       kernelFuncs.push_back(func);
 
-  unsigned stamped = 0;
   size_t totalBytes = 0;
   mlir::WalkResult walked = module->walk([&](mlir::hip::RocMlirOp op) {
     llvm::StringRef callee = op.getKernel();
@@ -860,16 +855,11 @@ int main(int argc, char **argv) {
         &context, llvm::StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(mlir::IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(mlir::IntegerAttr::get(i64, kernel.blockSize));
-    ++stamped;
     totalBytes += kernel.binary.size();
     return mlir::WalkResult::advance();
   });
   if (walked.wasInterrupted())
     return 1;
-  if (stamped == 0) {
-    llvm::errs() << "error: no hip.rocmlir op found to embed the binary into\n";
-    return 1;
-  }
 
   // Delete the successfully compiled kernel funcs; their body now lives in the
   // embedded binary and the symbol is no longer needed.
@@ -878,20 +868,16 @@ int main(int argc, char **argv) {
 
   // Keep the single-kernel line byte-for-byte what it was; log the geometry
   // per kernel first when there is more than one, since they differ.
-  if (kernelNames.size() > 1)
-    for (const std::string &name : kernelNames) {
-      const CompiledKernel &kernel = compiledByKernel[name];
-      llvm::errs() << "[hip-rocmlir-compiler]   " << name << ": "
-                   << kernel.binary.size()
-                   << "-byte binary, grid_size=" << kernel.gridSize
-                   << " block_size=" << kernel.blockSize << "\n";
-    }
-  const CompiledKernel &first = compiledByKernel[kernelNames.front()];
+  for (const std::string &name : kernelNames) {
+    const CompiledKernel &kernel = compiledByKernel[name];
+    llvm::errs() << "[hip-rocmlir-compiler]   " << name << ": "
+                 << kernel.binary.size()
+                 << "-byte binary, grid_size=" << kernel.gridSize
+                 << " block_size=" << kernel.blockSize << "\n";
+  }
   llvm::errs() << "[hip-rocmlir-compiler] embedded " << totalBytes
-               << "-byte binary into " << stamped << " hip.rocmlir op(s); "
-               << "grid_size=" << first.gridSize
-               << " block_size=" << first.blockSize << "; deleted "
-               << kernelFuncs.size() << " kernel func(s)\n";
+               << "-byte binary; deleted " << kernelFuncs.size()
+               << " kernel func(s)\n";
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-
