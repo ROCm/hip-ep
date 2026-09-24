@@ -115,8 +115,8 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
 // context -- rocMLIR dialects are registered alongside ours):
 //   1. high-level pipeline (tosa -> rock.gemm)
 //   2. affix a perfConfig to the gemm op (the `perf_config` string attribute):
-//      either the caller-supplied `userPerfConfig`, or -- when empty -- the
-//      first entry enumerated from the tuning search space.
+//      either the autotune winner, or -- without --autotune -- the first
+//      entry enumerated from the tuning search space.
 //   3. backend pipeline (rock -> LLVM / binary)
 // When `stopAfterHighLevel` is set, stops after step 1 and returns the printed
 // rock MLIR in `out.highLevelMlir` (steps 2-3 are skipped). Otherwise returns
@@ -131,6 +131,7 @@ struct CompiledKernel {
 
 struct AutotuneOptions {
   bool enabled = false;
+  bool verbose = false;
   mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
   unsigned warmupRuns = 5;
   unsigned measuredRuns = 20;
@@ -426,8 +427,10 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
   std::string bestConfig;
   unsigned compiled = 0;
   unsigned benchmarked = 0;
-  llvm::errs() << "[hip-rocmlir-compiler] autotuning kernel '" << kernelName
-               << "' across " << space->tuningRange.size() << " perfConfigs\n";
+  if (options.verbose)
+    llvm::errs() << "[hip-rocmlir-compiler] autotuning kernel '" << kernelName
+                 << "' across " << space->tuningRange.size()
+                 << " perfConfigs\n";
 
   for (auto [index, tuningAttr] : llvm::enumerate(space->tuningRange)) {
     llvm::SmallString<1024> perfConfig;
@@ -439,8 +442,9 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
 
     CompiledKernel compiledKernel;
     if (!compileBackend(candidateModule, arch, perfConfig, compiledKernel)) {
-      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                   << space->tuningRange.size() << ": compile failed\n";
+      if (options.verbose)
+        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                     << space->tuningRange.size() << ": compile failed\n";
       continue;
     }
     ++compiled;
@@ -448,14 +452,16 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
     double elapsed = 0.0;
     if (!benchmarkKernel(compiledKernel, kernelName, options, buffers,
                          elapsed)) {
-      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                   << space->tuningRange.size() << ": benchmark failed\n";
+      if (options.verbose)
+        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                     << space->tuningRange.size() << ": benchmark failed\n";
       continue;
     }
     ++benchmarked;
-    llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                 << space->tuningRange.size() << ": " << elapsed << " ms  "
-                 << perfConfig << "\n";
+    if (options.verbose)
+      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                   << space->tuningRange.size() << ": " << elapsed << " ms  "
+                   << perfConfig << "\n";
     if (elapsed < bestMilliseconds) {
       bestMilliseconds = elapsed;
       bestConfig = perfConfig.str().str();
@@ -468,14 +474,14 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
                  << compiled << ", benchmarked " << benchmarked << ")\n";
     return false;
   }
-  llvm::errs() << "[hip-rocmlir-compiler] autotune winner for '" << kernelName
-               << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
+  if (options.verbose)
+    llvm::errs() << "[hip-rocmlir-compiler] autotune winner for '" << kernelName
+                 << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
   return true;
 }
 #endif
 
 static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
-                       const std::string &userPerfConfig,
                        bool stopAfterHighLevel, const AutotuneOptions &autotune,
                        CompiledKernel &out) {
   auto fail = [&](const char *msg) {
@@ -500,7 +506,7 @@ static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
   }
 
 #if HIP_ROCMLIR_AUTOTUNE
-  if (autotune.enabled && userPerfConfig.empty()) {
+  if (autotune.enabled) {
     auto kernel = *module.getOps<mlir::func::FuncOp>().begin();
     return autotuneKernel(module, arch, kernel.getSymName(), autotune, out);
   }
@@ -510,36 +516,28 @@ static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
 #endif
 
   // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
-  //    A caller-supplied config is used verbatim; otherwise take the first
-  //    entry enumerated from the tuning search space. rock::tuningSetStr stamps
-  //    `perf_config` onto the gemm op.
+  //    Take the first entry enumerated from the tuning search space.
+  //    rock::tuningSetStr stamps `perf_config` onto the gemm op.
   llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
-  if (!userPerfConfig.empty()) {
-    perfConfig.assign(userPerfConfig.begin(), userPerfConfig.end());
-    llvm::errs() << "[hip-rocmlir-compiler] affixing supplied perfConfig: "
-                 << perfConfig << "\n";
-    if (!mlir::rock::tuningSetStr(module, perfConfig))
-      return fail("failed to affix supplied perfConfig to the gemm op");
-  } else {
-    mlir::rock::TuningParamSet *space = mlir::rock::createTunableParamSpace(
-        module, mlir::rock::TuningParamSetKind::Full);
-    unsigned num = space ? space->tuningRange.size() : 0;
-    if (num == 0) {
-      delete space;
-      return fail("perfConfig search space is empty");
-    }
-    mlir::rock::ParamEntry entry;
-    if (!mlir::rock::tuningGetParam(space, /*pos=*/0, &entry)) {
-      delete space;
-      return fail("failed to read the first perfConfig entry");
-    }
-    entry.param.getPerfConfigStr(perfConfig);
+  mlir::rock::TuningParamSet *space = mlir::rock::createTunableParamSpace(
+      module, mlir::rock::TuningParamSetKind::Full);
+  unsigned num = space ? space->tuningRange.size() : 0;
+  if (num == 0) {
     delete space;
+    return fail("perfConfig search space is empty");
+  }
+  mlir::rock::ParamEntry entry;
+  if (!mlir::rock::tuningGetParam(space, /*pos=*/0, &entry)) {
+    delete space;
+    return fail("failed to read the first perfConfig entry");
+  }
+  entry.param.getPerfConfigStr(perfConfig);
+  delete space;
+  if (autotune.verbose)
     llvm::errs() << "[hip-rocmlir-compiler] perfConfig search space size: "
                  << num << "; affixing first entry: " << perfConfig << "\n";
-    if (!mlir::rock::tuningSetStr(module, perfConfig))
-      return fail("failed to affix perfConfig to the gemm op");
-  }
+  if (!mlir::rock::tuningSetStr(module, perfConfig))
+    return fail("failed to affix perfConfig to the gemm op");
 
   // 3-4. Run the backend and extract the binary + launch geometry.
   if (!compileBackend(module, arch, perfConfig, out))
@@ -580,11 +578,6 @@ int main(int argc, char **argv) {
 
   std::string inputFilename;
   std::string outputPath;
-  // A bare --perf-config applies to every kernel; `<kernel>=<config>` targets
-  // one. A config is always `<anchor>:<field>=<value>,...`, so the text before
-  // the first '=' contains a ':' exactly when the argument is unkeyed.
-  std::string defaultPerfConfig;
-  llvm::StringMap<std::string> perfConfigByKernel;
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
@@ -593,19 +586,14 @@ int main(int argc, char **argv) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
       outputPath = argv[++i];
-    } else if (arg == "--perf-config" && i + 1 < argc) {
-      llvm::StringRef value(argv[++i]);
-      auto [head, tail] = value.split('=');
-      if (!tail.empty() && !head.contains(':'))
-        perfConfigByKernel[head] = tail.str();
-      else
-        defaultPerfConfig = value.str();
     } else if (arg == "--dump-hip" && i + 1 < argc) {
       dumpHipPath = argv[++i];
     } else if (arg == "--dump-tosa" && i + 1 < argc) {
       dumpTosaPath = argv[++i];
     } else if (arg == "--dump-high-level") {
       dumpHighLevel = true;
+    } else if (arg == "--verbose") {
+      autotune.verbose = true;
     } else if (arg == "--autotune") {
       autotune.enabled = true;
     } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
@@ -649,15 +637,6 @@ int main(int argc, char **argv) {
         << "  <output>.\n"
         << "\n"
         << "Options:\n"
-        << "  --perf-config <str>  Affix this perfConfig to the gemm op "
-           "instead of\n"
-        << "                       enumerating the tuning space and taking "
-           "the first.\n"
-        << "                       Use <kernel>=<config> to target one kernel; "
-           "repeat\n"
-        << "                       the flag to configure several. A bare "
-           "config applies\n"
-        << "                       to every kernel without one of its own.\n"
         << "  --autotune[=quick|full|exhaustive]\n"
         << "                       Benchmark the tuning space and embed the "
            "fastest\n"
@@ -666,6 +645,9 @@ int main(int argc, char **argv) {
         << "                       Warmup launches per candidate (default: "
            "5).\n"
         << "  --autotune-runs <n> Timed launches per candidate (default: 20).\n"
+        << "  --verbose            Print per-config compile/benchmark lines "
+           "and the\n"
+        << "                       selected perfConfig.\n"
         << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
            "passes\n"
         << "                       and fuse-rocmlir, then keep going.\n"
@@ -802,21 +784,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // A keyed --perf-config naming a kernel that does not exist would otherwise
-  // be dropped on the floor and that kernel compiled with the default config,
-  // so a typo or a stale name reads as a successful run of a configuration
-  // that was never applied. Tuning decisions get made off those numbers, so
-  // refuse the run instead.
-  for (const auto &entry : perfConfigByKernel) {
-    if (llvm::is_contained(kernelNames, entry.getKey()))
-      continue;
-    llvm::errs() << "error: --perf-config names unknown kernel '"
-                 << entry.getKey() << "'; this module has:\n";
-    for (const std::string &name : kernelNames)
-      llvm::errs() << "  " << name << "\n";
-    return 1;
-  }
-
   // The tuning and backend entry points are module-scoped and assume a single
   // anchor op per module, so a graph with several outlined kernels (a
   // decomposed conv_transpose, say) has to be compiled one kernel at a time.
@@ -832,14 +799,11 @@ int main(int argc, char **argv) {
       if (func.getSymName() != name)
         func.erase();
 
-    auto it = perfConfigByKernel.find(name);
-    const std::string &perfConfig =
-        it != perfConfigByKernel.end() ? it->second : defaultPerfConfig;
     if (kernelNames.size() > 1)
       llvm::errs() << "[hip-rocmlir-compiler] compiling kernel '" << name
                    << "' (" << (index + 1) << " of " << kernelNames.size()
                    << ")\n";
-    if (!runRocmlir(*single, arch, perfConfig, dumpHighLevel, autotune,
+    if (!runRocmlir(*single, arch, dumpHighLevel, autotune,
                     compiledByKernel[name]))
       return 1;
   }

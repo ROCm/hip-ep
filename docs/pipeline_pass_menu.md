@@ -99,8 +99,9 @@ Options use MLIR's pipeline-option syntax:
 
 `hip-rocmlir-compiler --autotune[=quick|full|exhaustive]` enumerates the
 selected rocMLIR tuning space, compiles and benchmarks each applicable
-candidate on the current HIP device, and embeds the fastest binary. An explicit
-`--perf-config` for a kernel takes precedence over autotuning that kernel.
+candidate on the current HIP device, and embeds the fastest binary. Without
+`--autotune`, the first enumerated perfConfig is used. Per-config timing
+and the selected perfConfig string are printed only with `--verbose`.
 
 > These pipeline names reproduce the same flow the EP / `hip-compiler`
 > front-end runs, so composing them is the way to match the default compile
