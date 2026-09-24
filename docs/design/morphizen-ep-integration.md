@@ -43,8 +43,19 @@ registry; no standalone `hip-compiler.dll` / `libhip-compiler.so` is produced.
 first and only falls back to `LoadLibrary`/`dlopen` when no static registration
 is present.
 
-`morphizen-ep.dll` integrates with `onnxruntime.dll` via the standard
+`morphizen-ep.dll` (shipped as `hipgpu.dll` / `libhipgpu.so`) integrates with
+`onnxruntime.dll` via the standard
 [ORT Plugin EP v2 API](https://onnxruntime.ai/docs/execution-providers/plugin-ep-libraries.html).
+ORT loads the plugin with `GetProcAddress` / `dlsym` and requires only two
+exported symbols:
+
+- `CreateEpFactories`
+- `ReleaseEpFactory`
+
+The Windows `.def` and ELF version script export exactly those names. MorphiZen
+C++ APIs, generated protobuf classes, and the statically-linked compiler stay
+internal to the DSO; ORT never links `hipgpu.lib`.
+
 The two contracts specific to this project are described below.
 
 **Compile time (session creation):**
