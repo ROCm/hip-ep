@@ -68,6 +68,9 @@ if(WIN32)
 endif()
 
 # LLD: Windows only (Linux uses clang++ driver subprocess). Prefer
+
+# Avoid Cygwin LibXml2 discovery pulling an unavailable LibLZMA dependency.
+set(CMAKE_DISABLE_FIND_PACKAGE_LibXml2 TRUE)
 # find_package(LLD CONFIG) (apt.llvm.org / IMPORTED targets); fall back to
 # find_library for legacy trees that omit LLDConfig.cmake.
 set(lld_libs "")
