@@ -195,13 +195,20 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     ArrayRef<int64_t> inputShape = inputType.getShape();
     ArrayRef<int64_t> weightShape = weightType.getShape();
     ArrayRef<int64_t> resultShape = resultType.getShape();
-    // tosa.conv2d has no grouped form (weight IC must equal input C). Depthwise
-    // is a separate op and is not handled here.
-    if (op.getGroup() != 1)
+    // Standard TOSA conv2d is ungrouped (weight IC == input C). rocMLIR
+    // accepts an optional discardable `group` attribute and passes it to
+    // rock.conv, which covers both ordinary grouped convolution and ONNX
+    // depthwise (group == C, weight IC == 1).
+    int64_t group = op.getGroup();
+    if (group < 1)
+      return rewriter.notifyMatchFailure(op, "expected a positive group");
+    if (inputShape[1] % group != 0 || resultShape[1] % group != 0)
       return rewriter.notifyMatchFailure(
-          op, "grouped convolution has no TOSA conv2d spelling");
-    if (inputShape[0] != resultShape[0] || weightShape[1] != inputShape[1] ||
-        weightShape[0] != resultShape[1])
+          op, "input/output channels must be divisible by group");
+    if (weightShape[1] != inputShape[1] / group)
+      return rewriter.notifyMatchFailure(
+          op, "weight input channels must equal C / group");
+    if (inputShape[0] != resultShape[0] || weightShape[0] != resultShape[1])
       return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
 
     SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
@@ -296,6 +303,7 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
         rewriter, op.getLoc(), nhwkType, input, weight, bias, tosaPads,
         rewriter.getDenseI64ArrayAttr(strides),
         rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+    conv->setAttr("group", rewriter.getI64IntegerAttr(group));
 
     rewriter.replaceOp(op, transposeTo(conv.getResult(), resultShape,
                                        {0, 3, 1, 2}, rewriter, op.getLoc()));
