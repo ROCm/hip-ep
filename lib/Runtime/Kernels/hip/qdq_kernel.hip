@@ -290,28 +290,6 @@ __global__ void dequantize_linear_kernel(
   output[tid] = FloatIO<OutT>::store(static_cast<float>(x - zp) * s);
 }
 
-// Materialize the device-side parameters consumed by the existing Q/DQ and
-// RMS kernels used by wrap_qlpnormalization. Keeping this stream-ordered avoids
-// synchronous hipMemcpy calls that would otherwise drain all preceding work
-// and incorrectly charge that GPU time to the wrapper's CPU profile.
-__global__ void qlpnormalization_prepare_params_kernel(
-    float *__restrict__ rms_scale, int64_t norm_num_elements,
-    float norm_scale, float *__restrict__ input_scale_device,
-    float input_scale, float *__restrict__ output_scale_device,
-    float output_scale, uint16_t *__restrict__ input_zp_device,
-    uint16_t input_zp, uint16_t *__restrict__ output_zp_device,
-    uint16_t output_zp) {
-  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (tid < norm_num_elements)
-    rms_scale[tid] = norm_scale;
-  if (tid == 0) {
-    *input_scale_device = input_scale;
-    *output_scale_device = output_scale;
-    *input_zp_device = input_zp;
-    *output_zp_device = output_zp;
-  }
-}
-
 // ---- host-side plan ------------------------------------------------------
 
 // Returns 0 to launch, 1 when there is nothing to do (empty tensor), <0 on
@@ -624,79 +602,72 @@ int dispatch_dequantize_scale(hipStream_t stream, const void *input,
 
 } // namespace
 
-extern "C" int hip_qlpnormalization_prepare_params(
-    void *stream, void *rms_scale, int64_t norm_num_elements, float norm_scale,
-    void *input_scale_device, float input_scale, void *output_scale_device,
-    float output_scale, void *input_zp_device, uint16_t input_zp,
-    void *output_zp_device, uint16_t output_zp) {
-  if (!rms_scale || !input_scale_device || !output_scale_device ||
-      !input_zp_device || !output_zp_device || norm_num_elements <= 0) {
-    fprintf(stderr,
-            "[custom_kernels] hip_qlpnormalization_prepare_params: invalid "
-            "argument\n");
+// Q(sigmoid(DQ(x))) for a per-tensor quantized tensor, in one pass.
+//
+// Sigmoid is elementwise, so nothing crosses threads and the value never has to
+// leave a register: the separate dequantize, sigmoid and quantize this replaces
+// wrote a full f32 copy to scratch and read it back twice, and needed a
+// fourth launch to stage the scalars where their device pointers could reach
+// them.
+//
+// Each step is spelled exactly as the kernel it came from spelled it, so the
+// result is the same value, not merely a close one: the zero point is
+// subtracted in int32 before the widen, rintf rounds ties to even, and the
+// output scale stays a division -- multiplying by a reciprocal would round a
+// second time and can move the result by one LSB at a tie.
+template <typename QuantT>
+__global__ void qsigmoid_kernel(const QuantT *__restrict__ input,
+                                QuantT *__restrict__ output, int64_t total,
+                                float input_scale, int32_t input_zp,
+                                float output_scale, int32_t output_zp) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total)
+    return;
+
+  int32_t x = QuantLoad<QuantT>::load(input, tid);
+  float dq = static_cast<float>(x - input_zp) * input_scale;
+  float y = 1.0f / (1.0f + expf(-dq));
+
+  float q = rintf(y / output_scale) + static_cast<float>(output_zp);
+  q = fmaxf(q, static_cast<float>(QuantRange<QuantT>::lo));
+  q = fminf(q, static_cast<float>(QuantRange<QuantT>::hi));
+  output[tid] = static_cast<QuantT>(q);
+}
+
+extern "C" int hip_qsigmoid(void *stream, const void *input, void *output,
+                            int64_t num_elements, int dtype, float input_scale,
+                            int32_t input_zp, float output_scale,
+                            int32_t output_zp) {
+  if (!input || !output) {
+    fprintf(stderr, "[custom_kernels] hip_qsigmoid: invalid argument\n");
+    return -1;
+  }
+  if (num_elements <= 0)
+    return 0;
+  if (dtype != HIP_DTYPE_UINT16) {
+    fprintf(stderr, "[custom_kernels] hip_qsigmoid: unsupported dtype %d\n",
+            dtype);
+    return kUnsupportedDtype;
+  }
+  if (output_scale == 0.0f) {
+    fprintf(stderr, "[custom_kernels] hip_qsigmoid: output_scale is 0\n");
     return -1;
   }
 
   constexpr int kBlockSize = 256;
   int grid = 0;
-  if (qdq_grid_size("hip_qlpnormalization_prepare_params", norm_num_elements,
-                    kBlockSize, &grid) != 0)
+  if (qdq_grid_size("hip_qsigmoid", num_elements, kBlockSize, &grid) != 0)
     return -1;
 
   (void)hipGetLastError();
-  hipLaunchKernelGGL(
-      qlpnormalization_prepare_params_kernel, dim3(grid), dim3(kBlockSize), 0,
-      static_cast<hipStream_t>(stream), static_cast<float *>(rms_scale),
-      norm_num_elements, norm_scale, static_cast<float *>(input_scale_device),
-      input_scale, static_cast<float *>(output_scale_device), output_scale,
-      static_cast<uint16_t *>(input_zp_device), input_zp,
-      static_cast<uint16_t *>(output_zp_device), output_zp);
+  hipLaunchKernelGGL((qsigmoid_kernel<uint16_t>), dim3(grid), dim3(kBlockSize),
+                     0, static_cast<hipStream_t>(stream),
+                     static_cast<const uint16_t *>(input),
+                     static_cast<uint16_t *>(output), num_elements, input_scale,
+                     input_zp, output_scale, output_zp);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr,
-            "[custom_kernels] hip_qlpnormalization_prepare_params launch "
-            "failed: %s\n",
-            hipGetErrorString(err));
-  }
-  return static_cast<int>(err);
-}
-
-// Materialize the device-side scale/zp scalars consumed by the existing Q/DQ
-// kernels used by wrap_qsigmoid. Keeping this stream-ordered avoids
-// synchronous hipMemcpy that would drain preceding GPU work.
-__global__ void qsigmoid_prepare_params_kernel(
-    float *__restrict__ input_scale_device, float input_scale,
-    float *__restrict__ output_scale_device, float output_scale,
-    uint16_t *__restrict__ input_zp_device, uint16_t input_zp,
-    uint16_t *__restrict__ output_zp_device, uint16_t output_zp) {
-  *input_scale_device = input_scale;
-  *output_scale_device = output_scale;
-  *input_zp_device = input_zp;
-  *output_zp_device = output_zp;
-}
-
-extern "C" int hip_qsigmoid_prepare_params(
-    void *stream, void *input_scale_device, float input_scale,
-    void *output_scale_device, float output_scale, void *input_zp_device,
-    uint16_t input_zp, void *output_zp_device, uint16_t output_zp) {
-  if (!input_scale_device || !output_scale_device || !input_zp_device ||
-      !output_zp_device) {
-    fprintf(stderr,
-            "[custom_kernels] hip_qsigmoid_prepare_params: invalid argument\n");
-    return -1;
-  }
-
-  (void)hipGetLastError();
-  hipLaunchKernelGGL(qsigmoid_prepare_params_kernel, dim3(1), dim3(1), 0,
-                     static_cast<hipStream_t>(stream),
-                     static_cast<float *>(input_scale_device), input_scale,
-                     static_cast<float *>(output_scale_device), output_scale,
-                     static_cast<uint16_t *>(input_zp_device), input_zp,
-                     static_cast<uint16_t *>(output_zp_device), output_zp);
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    fprintf(stderr,
-            "[custom_kernels] hip_qsigmoid_prepare_params launch failed: %s\n",
+    fprintf(stderr, "[custom_kernels] hip_qsigmoid launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

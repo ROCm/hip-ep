@@ -836,6 +836,17 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
     const void* seqlens_k, int element_size_bytes,
     int kv_dtype, const void* scale);
 
+/* KV cache append for key and value together, otherwise identical to
+ * hip_gqa_kv_cache_append: both halves share every extent, so they index the
+ * cache the same way and one launch can do both. HIP_KV_DTYPE_INT8 uses a
+ * merged kernel; the other formats sequence the single-half entry twice, to
+ * keep each half on the widest vectorized path its own pointers qualify for. */
+HIP_KERNEL_API int hip_gqa_kv_cache_append_kv(
+    void* stream, const void* src_k, void* cache_k, const void* scale_k,
+    const void* src_v, void* cache_v, const void* scale_v,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k, int element_size_bytes, int kv_dtype);
+
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
  * past [B,G,past_seq,d] at positions [0,past_len) AND transposing new tokens
@@ -2369,31 +2380,6 @@ HIP_KERNEL_API int hip_gather_block_quantized(
  * integer target supported here is unconditional. It would have to be
  * forwarded again if float8 support is added.
  */
-HIP_KERNEL_API int hip_qlpnormalization_prepare_params(
-    void* stream,
-    void* rms_scale,
-    int64_t norm_num_elements,
-    float norm_scale,
-    void* input_scale_device,
-    float input_scale,
-    void* output_scale_device,
-    float output_scale,
-    void* input_zp_device,
-    uint16_t input_zp,
-    void* output_zp_device,
-    uint16_t output_zp);
-
-HIP_KERNEL_API int hip_qsigmoid_prepare_params(
-    void* stream,
-    void* input_scale_device,
-    float input_scale,
-    void* output_scale_device,
-    float output_scale,
-    void* input_zp_device,
-    uint16_t input_zp,
-    void* output_zp_device,
-    uint16_t output_zp);
-
 HIP_KERNEL_API int hip_quantize_linear(
     void* stream,
     const void* input,           // high precision
@@ -2433,6 +2419,41 @@ HIP_KERNEL_API int hip_dequantize_linear(
     // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
     // first, over the flattened row-major sequence. input_shape stays logical.
     int in_bits);
+
+/* Q(op(DQ(x))) for the two ops whose Q/DQ sandwich collapses into one kernel.
+ * Both take their scale and zero point by value rather than through device
+ * memory: neither needs them staged, because the whole chain runs in one
+ * launch. Only HIP_DTYPE_UINT16 storage is implemented.
+ *
+ * hip_qsigmoid is elementwise over num_elements.
+ *
+ * hip_qlpnormalization is LpNormalization with p=2 over the last axis: outer
+ * rows of norm_size each, with norm_scale carrying the row factor
+ * 1/sqrt(norm_size).
+ */
+HIP_KERNEL_API int hip_qsigmoid(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int dtype,
+    float input_scale,
+    int32_t input_zp,
+    float output_scale,
+    int32_t output_zp);
+
+HIP_KERNEL_API int hip_qlpnormalization(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    float norm_scale,
+    float input_scale,
+    int32_t input_zp,
+    float output_scale,
+    int32_t output_zp,
+    int hip_dtype);
 
 /* =========================================================================
  * QMoE Sub-Kernels

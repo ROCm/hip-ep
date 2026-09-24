@@ -595,6 +595,34 @@ hasHipIntAttrEqual(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(value && *value == expected.getInt());
 }
 
+/// the element type of a shaped value, null when it is not shaped
+inline mlir::Type shapedElementType(mlir::Value value) {
+  auto shaped = mlir::dyn_cast<mlir::ShapedType>(value.getType());
+  return shaped ? shaped.getElementType() : mlir::Type();
+}
+
+/// cast only rewidens a float, between the two widths the Q/DQ runtime
+/// dispatch implements
+inline mlir::LogicalResult
+isAbsorbableFloatCast(mlir::PatternRewriter &, mlir::PDLResultList &,
+                      llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto cast = mlir::dyn_cast_or_null<mlir::hip::CastOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  if (!cast || cast->getNumResults() != 1)
+    return mlir::failure();
+  mlir::Type from = shapedElementType(cast.getInput());
+  mlir::Type to = shapedElementType(cast->getResult(0));
+  if (!from || !to || from == to)
+    return mlir::failure();
+  // f32 and f16 are the whole float side of the quantize/dequantize dispatch,
+  // so naming either as a Q/DQ op's own float type reaches an implemented
+  // instantiation. A cast to any other type has to stay a separate op.
+  auto implemented = [](mlir::Type t) { return t.isF32() || t.isF16(); };
+  return mlir::success(implemented(from) && implemented(to));
+}
+
 //===----------------------------------------------------------------------===//
 // Rewrite helpers
 //===----------------------------------------------------------------------===//
@@ -667,6 +695,69 @@ createRequantizedLayoutOp(mlir::PatternRewriter &rewriter,
   state.addTypes(resultType);
   state.addAttributes(layout->getAttrs());
   results.push_back(rewriter.create(state)->getResult(0));
+  return mlir::success();
+}
+
+/// a copy of op over the given operands and result types, attributes carried
+/// over untouched
+inline mlir::Value cloneWithOperands(mlir::PatternRewriter &rewriter,
+                                     mlir::Operation *op,
+                                     llvm::ArrayRef<mlir::Value> operands,
+                                     mlir::TypeRange resultTypes) {
+  mlir::OperationState state(op->getLoc(), op->getName());
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  state.addAttributes(op->getAttrs());
+  return rewriter.create(state)->getResult(0);
+}
+
+/// dq rebuilt to produce cast's float type directly, writing a matching init
+inline mlir::LogicalResult
+createDequantizeThroughCast(mlir::PatternRewriter &rewriter,
+                            mlir::PDLResultList &results,
+                            llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by IsAbsorbableFloatCast and HasSingleUseResult, so the casts hold.
+  auto dq = mlir::cast<mlir::hip::DequantizeLinearOp>(
+      args[0].dyn_cast<mlir::Operation *>());
+  auto *cast = args[1].dyn_cast<mlir::Operation *>();
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(cast->getResult(0).getType());
+
+  // A dequantize names its float type through its init rather than an
+  // attribute, so a retyped result needs a retyped init; the old one supplies
+  // the extents, which the cast leaves alone.
+  llvm::SmallVector<mlir::Value> operands(dq->getOperands());
+  mlir::OpOperand &init =
+      mlir::cast<mlir::DestinationStyleOpInterface>(dq.getOperation())
+          .getDpsInitsMutable()[0];
+  operands[init.getOperandNumber()] =
+      buildInitValue(rewriter, resultType, init.get());
+
+  mlir::Type resultTypes[] = {resultType};
+  results.push_back(cloneWithOperands(rewriter, dq, operands, resultTypes));
+  return mlir::success();
+}
+
+/// q rebuilt to read what cast converted, its own result left untouched
+inline mlir::LogicalResult
+createQuantizeThroughCast(mlir::PatternRewriter &rewriter,
+                          mlir::PDLResultList &results,
+                          llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by IsAbsorbableFloatCast, so the casts hold.
+  auto cast =
+      mlir::cast<mlir::hip::CastOp>(args[0].dyn_cast<mlir::Operation *>());
+  auto *q = args[1].dyn_cast<mlir::Operation *>();
+
+  // Only the float input changes width. The scale, the zero point and the init
+  // all describe the quantized side, which keeps its type, so unlike the
+  // dequantize direction nothing has to be rebuilt.
+  llvm::SmallVector<mlir::Value> operands(q->getOperands());
+  for (mlir::Value &operand : operands)
+    if (operand == cast->getResult(0))
+      operand = cast.getInput();
+
+  results.push_back(
+      cloneWithOperands(rewriter, q, operands, q->getResultTypes()));
   return mlir::success();
 }
 
@@ -818,6 +909,12 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          canRequantizeLayoutOp);
   pdlPatterns.registerRewriteFunction("CreateRequantizedLayoutOp",
                                       createRequantizedLayoutOp);
+  pdlPatterns.registerConstraintFunction("IsAbsorbableFloatCast",
+                                         isAbsorbableFloatCast);
+  pdlPatterns.registerRewriteFunction("CreateDequantizeThroughCast",
+                                      createDequantizeThroughCast);
+  pdlPatterns.registerRewriteFunction("CreateQuantizeThroughCast",
+                                      createQuantizeThroughCast);
 }
 
 /// Benefit of the native patterns added alongside the PDLL ones.

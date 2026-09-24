@@ -52,56 +52,11 @@ int wrap_qsigmoid(RuntimeState *state, const void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  const size_t f32_bytes = static_cast<size_t>(num_elements) * sizeof(float);
-  const size_t scratch_bytes =
-      f32_bytes + 2 * sizeof(float) + 2 * sizeof(uint16_t);
-  if (hipdnn_ep_state_ensure_qsigmoid_scratch(state, scratch_bytes) != 0) {
-    fprintf(stderr, "[REAL] wrap_qsigmoid: scratch allocation failed\n");
-    return -1;
-  }
-
-  auto *scratch =
-      static_cast<uint8_t *>(hipdnn_ep_state_get_qsigmoid_scratch(state));
-  void *dq = scratch;
-  void *in_scale = scratch + f32_bytes;
-  void *out_scale = static_cast<uint8_t *>(in_scale) + sizeof(float);
-  void *in_zp = static_cast<uint8_t *>(out_scale) + sizeof(float);
-  void *out_zp = static_cast<uint8_t *>(in_zp) + sizeof(uint16_t);
-
-  int rc = hip_qsigmoid_prepare_params(stream, in_scale, input_scale, out_scale,
-                                       output_scale, in_zp,
-                                       static_cast<uint16_t>(input_zp), out_zp,
-                                       static_cast<uint16_t>(output_zp));
+  int rc = hip_qsigmoid(stream, input, output, num_elements, HIP_DTYPE_UINT16,
+                        input_scale, static_cast<int32_t>(input_zp),
+                        output_scale, static_cast<int32_t>(output_zp));
   if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qsigmoid: parameter preparation failed (%d)\n",
-            rc);
-    return rc;
-  }
-
-  const int64_t flat_shape[1] = {num_elements};
-  const int64_t scalar_shape[1] = {1};
-
-  rc = hip_dequantize_linear(
-      stream, input, in_scale, in_zp, dq, flat_shape, 1, scalar_shape, 0,
-      /*axis=*/0, /*block_size=*/0, HIP_DTYPE_UINT16, HIP_DTYPE_FLOAT32,
-      HIP_DTYPE_FLOAT32, /*in_bits=*/16);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qsigmoid: dequant failed (%d)\n", rc);
-    return rc;
-  }
-
-  rc = hip_elementwise_sigmoid(stream, dq, dq, num_elements, HIP_DTYPE_FLOAT32);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qsigmoid: sigmoid failed (%d)\n", rc);
-    return rc;
-  }
-
-  rc = hip_quantize_linear(
-      stream, dq, out_scale, out_zp, output, flat_shape, 1, scalar_shape, 0,
-      /*axis=*/0, /*block_size=*/0, /*precision=*/0, HIP_DTYPE_FLOAT32,
-      HIP_DTYPE_FLOAT32, HIP_DTYPE_UINT16, /*out_bits=*/16);
-  if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_qsigmoid: quant failed (%d)\n", rc);
+    fprintf(stderr, "[REAL] wrap_qsigmoid: qsigmoid failed (%d)\n", rc);
     return rc;
   }
   return 0;

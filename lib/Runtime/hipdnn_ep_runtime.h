@@ -372,20 +372,6 @@ void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
 
-// Per-session scratch for wrap_qlpnormalization intermediate tensors and
-// scalar parameters. A single contiguous device allocation is shared by all
-// instances on the session stream, grows on demand, and never shrinks.
-void *hipdnn_ep_state_get_qlpnormalization_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
-                                                    size_t needed_size);
-
-// Per-session scratch for wrap_qsigmoid: one f32 workspace plus device
-// scalars for the Q/DQ kernels. Same grow-on-demand, never-shrink policy
-// as conv_scratch; lazily allocated on first call, freed in cleanup.
-void *hipdnn_ep_state_get_qsigmoid_scratch(RuntimeState *state);
-int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
-                                            size_t needed_size);
-
 // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
 // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
 // activation row (int8) plus the per-group activation scales (float). Lazily
