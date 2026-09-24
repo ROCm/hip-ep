@@ -97,6 +97,12 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 Options use MLIR's pipeline-option syntax:
 `onnx-to-hip-pipeline{skip-constant-data=true}`.
 
+`hip-rocmlir-compiler --autotune[=quick|full|exhaustive]` enumerates the
+selected rocMLIR tuning space, compiles and benchmarks each applicable
+candidate on the current HIP device, and embeds the fastest binary. Without
+`--autotune`, the first enumerated perfConfig is used. Per-config timing
+and the selected perfConfig string are printed only with `--verbose`.
+
 > These pipeline names reproduce the same flow the EP / `hip-compiler`
 > front-end runs, so composing them is the way to match the default compile
 > exactly. Graph outputs are always allocated in-graph via `hip.alloc_output`

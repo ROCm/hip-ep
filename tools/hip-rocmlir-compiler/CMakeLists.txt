@@ -59,6 +59,16 @@ target_link_libraries(hip-rocmlir-compiler PRIVATE
   ${llvm_libs}
 )
 
+if(NOT BUILD_MOCK_RUNTIME)
+  find_package(hip REQUIRED)
+  target_link_libraries(hip-rocmlir-compiler PRIVATE hip::host)
+  target_compile_definitions(hip-rocmlir-compiler
+    PRIVATE HIP_ROCMLIR_AUTOTUNE=1)
+else()
+  target_compile_definitions(hip-rocmlir-compiler
+    PRIVATE HIP_ROCMLIR_AUTOTUNE=0)
+endif()
+
 target_include_directories(hip-rocmlir-compiler PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/include

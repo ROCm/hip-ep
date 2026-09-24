@@ -386,6 +386,9 @@ if(ENABLE_ROCMLIRTRITON)
   # unnecessary and harmful (duplicate symbols, ~4x binary size). Build the
   # ordinary per-target static libs instead and link the curated closure.
   set(BUILD_FAT_LIBROCKCOMPILER OFF CACHE BOOL "" FORCE)
+  # rocmlirTriton's mlir/test/common_utils imports pip pybind11 at configure
+  # time. hip-ep does not run those tests, so skip that tree.
+  set(MLIR_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   if(NOT DEFINED rocmlirtriton_SOURCE_DIR)
     FetchContent_Declare(rocmlirtriton
       GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
