@@ -3084,12 +3084,12 @@ extern "C" int hip_gqa_flash_decode_configured(
 }
 
 //===----------------------------------------------------------------------===//
-// Fused FA-2 WMMA prefill kernels (v5 d64 / v7 d128 / v8 d256)
+// Fused FA-2 WMMA prefill kernels (v6 d64 / v7 d128 / v8 d256; v5 d128 window)
 //
 // fp16 in/out, fp32 accumulate, causal, GQA. Q [B,sq,Hq,D]; K/V cache
 // [B,G,max_seq,D]. Each launcher self-tunes its config per (d,sq,skv,Hq,G)
 // shape on first use. The unified hip_gqa_flash_prefill_v2 entry selects:
-//   d==64  -> v5 (warp-private, register-resident)
+//   d==64  -> v6 (transposed scores, KV tiles shared across a group's heads)
 //   d==128 -> v7 (M-register-blocked, K streamed from global)
 //   d==256 -> v8 (output-D split across ND waves + secondary score
 //                 reduction; halves per-wave Q_reg/O_h to lift occupancy)
@@ -3118,7 +3118,8 @@ typedef _Float16 half16_raw_t __attribute__((ext_vector_type(16)));
 
 
 // ---------------------------------------------------------------------
-// Warp-private prefill kernel (v5). Grid: (num_q_tiles*B, Hq). Block: 32.
+// Warp-private prefill kernel (v5), instantiated for d == 128 only (the
+// sliding-window path; d == 64 runs v6). Grid: (num_q_tiles*B, Hq). Block: 32.
 // Each wave owns M_TILES 16-row q-subtiles x all BKV columns. Only LDS is
 // P_lds (C->A transpose); only sync is single-wave around it.
 // ---------------------------------------------------------------------
@@ -3769,10 +3770,10 @@ static inline void dispatchPrefillV5(
     const _Float16* head_sink, int num_heads, int smooth_softmax,
     int local_window_size)
 {
-    // d == 64 runs the transposed-score kernel (v6) with the same (M_TILES,
-    // BKV) config, so the LUT and the tuner below apply unchanged. On gfx1151
-    // it is 1.7-5.4x faster than v5 across the prefill test shapes.
-    const bool use_v6 = d == 64 && G > 0 && Hq % G == 0;
+    // d == 64 runs the transposed-score kernel (v6), d == 128 the v5 kernel,
+    // both with the same (M_TILES, BKV) config space, so the LUT and the tuner
+    // below apply unchanged. Callers guarantee Hq % G == 0.
+    const bool use_v6 = d == 64;
     static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
     if (s_log_cfg)
         fprintf(stderr,
@@ -3829,30 +3830,16 @@ static inline void dispatchPrefillV5(
                 scale, ablate, head_sink, num_heads, smooth_softmax,            \
                 local_window_size)
 
-    if (d == 64) {
-        if (local_window_size > 0) {
-            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, true);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, true);
-            else if (bkv == 64)             LAUNCH_V5(1, 64, 64, true);
-            else                            LAUNCH_V5(1, 32, 64, true);
-        } else {
-            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, false);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, false);
-            else if (bkv == 64)             LAUNCH_V5(1, 64, 64, false);
-            else                            LAUNCH_V5(1, 32, 64, false);
-        }
+    if (local_window_size > 0) {
+        if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, true);
+        else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, true);
+        else if (bkv == 64)             LAUNCH_V5(1, 64, 128, true);
+        else                            LAUNCH_V5(1, 32, 128, true);
     } else {
-        if (local_window_size > 0) {
-            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, true);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, true);
-            else if (bkv == 64)             LAUNCH_V5(1, 64, 128, true);
-            else                            LAUNCH_V5(1, 32, 128, true);
-        } else {
-            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, false);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, false);
-            else if (bkv == 64)             LAUNCH_V5(1, 64, 128, false);
-            else                            LAUNCH_V5(1, 32, 128, false);
-        }
+        if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 128, false);
+        else if (m_tiles == 2)          LAUNCH_V5(2, 32, 128, false);
+        else if (bkv == 64)             LAUNCH_V5(1, 64, 128, false);
+        else                            LAUNCH_V5(1, 32, 128, false);
     }
     #undef LAUNCH_V5
 }
@@ -4946,7 +4933,7 @@ extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
 // also implemented for d == 128 by v5. Unsupported feature/head
 // combinations return -1 rather than silently dropping the requested feature.
 // A request carrying neither is forwarded to v2 and keeps v2's head-dim
-// coverage and its v5/v7/v8 selection.
+// coverage and its v6/v7/v8 selection.
 extern "C" int hip_gqa_flash_prefill(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
@@ -4973,9 +4960,9 @@ extern "C" int hip_gqa_flash_prefill(
 }
 
 // Unified fused flash-prefill entry. The kernel-selection strategy lives here
-// (in the kernel TU) instead of in the runtime dispatcher: v5 wins at d==64
-// (warp-private register-resident), v7 at d==128 (M-register-blocked with
-// global-streamed K), v8 at d==256 (output-D split + secondary score reduction
+// (in the kernel TU) instead of in the runtime dispatcher: v6 at d==64
+// (transposed scores, KV tiles shared across a group's heads), v7 at d==128
+// (M-register-blocked with global-streamed K), v8 at d==256 (output-D split + secondary score reduction
 // to lift occupancy). The runtime only has to call this one symbol for any
 // eligible (fp16, causal, GQA) prefill and gets the right kernel automatically.
 // Returns -1 for unsupported head dims so the caller can fall back.
