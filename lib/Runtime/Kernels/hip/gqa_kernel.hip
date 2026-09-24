@@ -3656,11 +3656,14 @@ gqa_flash_prefill_v6_kernel(
                 for (int e = 0; e < kAcc; ++e) rmax = fmaxf(rmax, S_reg[mi][sj][e]);
             rmax = fmaxf(rmax, __shfl_xor(rmax, 16));
 
+            // Every exponent here is <= 0, so the result is in (0, 1] and the
+            // raw v_exp_f32 needs none of exp2f's denormal-range fixup:
+            // anything below 2^-126 rounds to zero in the fp16 P anyway.
             const float m_old = m_reg[mi];
             const float m_new = fmaxf(m_old, rmax * c);
             bool empty = false;
             if constexpr (HAS_WINDOW) empty = (m_new == -INFINITY);
-            corr[mi] = empty ? 1.0f : exp2f(m_old - m_new);
+            corr[mi] = empty ? 1.0f : __builtin_amdgcn_exp2f(m_old - m_new);
 
             float rsum = 0.0f;
             #pragma unroll
@@ -3669,7 +3672,7 @@ gqa_flash_prefill_v6_kernel(
                 #pragma unroll
                 for (int e = 0; e < kAcc; ++e) {
                     const float p = empty ? 0.0f
-                                          : exp2f(fmaf(S_reg[mi][sj][e], c, -m_new));
+                                          : __builtin_amdgcn_exp2f(fmaf(S_reg[mi][sj][e], c, -m_new));
                     rsum += p;
                     own[e] = static_cast<_Float16>(p);
                 }
