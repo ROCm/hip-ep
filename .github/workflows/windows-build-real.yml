@@ -44,6 +44,7 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
       HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
       SCCACHE_CACHE_SIZE: "200M"
+      VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -218,12 +219,15 @@ jobs:
 
           # ---------------------------------------------------------------
           # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll, plus
-          # model_mm.exe + benchmark_multimodal.py for the VL model tests.
+          # model_mm.exe + benchmark_multimodal.py + vlm_benchmark.py for the
+          # VL model tests.
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
+          curl -fsSL --retry 3 -o staging/bin/vlm_benchmark.py \
+            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) bundled into the artifact under
@@ -269,8 +273,6 @@ jobs:
 
       - name: Stage Python wheel package
         shell: bash
-        env:
-          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
         run: |
           mkdir -p wheelpkg/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
@@ -289,8 +291,7 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" "$AMDGPU_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
-          curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \
-            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
+          cp staging/bin/vlm_benchmark.py wheelpkg/
           echo "=== Python wheel package layout ==="
           find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
 
