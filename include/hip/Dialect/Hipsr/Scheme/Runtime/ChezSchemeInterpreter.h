@@ -14,6 +14,9 @@
 
 namespace mlir {
 class Operation;
+class Value;
+class Type;
+class Attribute;
 
 namespace hipsr {
 
@@ -79,6 +82,12 @@ class ChezSchemeInterpreter {
   static bool initialized;
   static SchemeLogLevel logLevel;
 };
+
+// MLIR C++ to Scheme conversions - wrap MLIR objects as foreign pointers
+ptr makeSchemeOperation(mlir::Operation* op);
+ptr makeSchemeValue(mlir::Value val);
+ptr makeSchemeType(mlir::Type type);
+ptr makeSchemeAttribute(mlir::Attribute attr);
 
 }  // namespace hipsr
 }  // namespace mlir
