@@ -72,14 +72,23 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
 
+// Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
+// "0" is off; any other value skips GPU benchmarking and affixes the first
+// enumerated perfConfig.
+static bool skipBenchmarking() {
+  const char *env = std::getenv("HIP_ROCMLIR_SKIP_BENCHMARKING");
+  return env && std::strcmp(env, "0") != 0;
+}
+
 struct AutotuneOptions {
-  bool enabled = false;
+  bool enabled = true;
   bool verbose = false;
   mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
   unsigned warmupRuns = 5;
@@ -381,6 +390,7 @@ int main(int argc, char **argv) {
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
+  bool autotuneFlagSeen = false;
   AutotuneOptions autotune;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -395,8 +405,11 @@ int main(int argc, char **argv) {
     } else if (arg == "--verbose") {
       autotune.verbose = true;
     } else if (arg == "--autotune") {
+      autotuneFlagSeen = true;
       autotune.enabled = true;
+      autotune.kind = mlir::rock::TuningParamSetKind::Quick;
     } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
+      autotuneFlagSeen = true;
       autotune.enabled = true;
       llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
       if (kind == "quick")
@@ -425,6 +438,15 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
+  if (skipBenchmarking())
+    autotune.enabled = false;
+#if !HIP_ROCMLIR_AUTOTUNE
+  if (autotuneFlagSeen && autotune.enabled) {
+    llvm::errs() << "error: autotune requires a real HIP build\n";
+    return 1;
+  }
+  autotune.enabled = false;
+#endif
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
         << "Usage: " << argv[0]
@@ -438,9 +460,9 @@ int main(int argc, char **argv) {
         << "\n"
         << "Options:\n"
         << "  --autotune[=quick|full|exhaustive]\n"
-        << "                       Benchmark the tuning space and embed the "
-           "fastest\n"
-        << "                       GPU candidate (default space: quick).\n"
+        << "                       Override the default quick autotune space "
+           "and\n"
+        << "                       embed the fastest GPU candidate.\n"
         << "  --autotune-warmup <n>\n"
         << "                       Warmup launches per candidate (default: "
            "5).\n"
@@ -460,7 +482,11 @@ int main(int argc, char **argv) {
            "instead of\n"
         << "                       the compiled bitcode.\n"
         << "  Set ROCK_ARCH to override the target GPU arch (default: "
-        << mlir::hip::resolveRocMlirArch() << ").\n";
+        << mlir::hip::resolveRocMlirArch() << ").\n"
+        << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
+           "the\n"
+        << "  first enumerated perfConfig (same role as "
+           "MIGRAPHX_SKIP_BENCHMARKING).\n";
     return 1;
   }
 
