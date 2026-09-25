@@ -8,19 +8,16 @@
 
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/CAPI/IR.h"
+#include "mlir/CAPI/Wrap.h"
 
 // Note: scheme.h already included via ChezSchemeInterpreter.h
 // Do NOT include it again here to avoid redefinition errors with static inline functions
 
 #include "ChezBootPetite.h"
 #include "ChezBootScheme.h"
-
-// Forward declaration from SchemeMlirBindings.cpp
-namespace mlir {
-namespace hipsr {
-void setSchemeLogLevel(SchemeLogLevel level);
-}
-}
 
 namespace {
 const size_t petite_boot_size = sizeof(petite_boot_data) - 1;
@@ -31,9 +28,6 @@ static void custom_init() {
   // Register all MLIR foreign functions
   mlir::hipsr::registerMlirForeignFunctions();
 }
-
-// Global log level
-static mlir::hipsr::SchemeLogLevel current_log_level = mlir::hipsr::SchemeLogLevel::Warning;
 
 } // anonymous namespace
 
@@ -58,12 +52,8 @@ SchemeLogLevel ChezSchemeInterpreter::parseLogLevel(const std::string& level) {
   return SchemeLogLevel::Warning;
 }
 
-// Set global log level
 void ChezSchemeInterpreter::setLogLevel(SchemeLogLevel level) {
-  current_log_level = level;
   logLevel = level;
-  // Also update the log level in SchemeMlirBindings.cpp
-  mlir::hipsr::setSchemeLogLevel(level);
 }
 
 void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
@@ -72,7 +62,6 @@ void ChezSchemeInterpreter::initialize(SchemeLogLevel level) {
   }
 
   logLevel = level;
-  current_log_level = level;
 
   if (logLevel <= SchemeLogLevel::Debug) {
     llvm::errs() << "[debug] ChezSchemeInterpreter1: Initializing Chez Scheme runtime\n";
@@ -192,6 +181,26 @@ ptr ChezSchemeInterpreter::makeString(const char* str) {
 
 ptr ChezSchemeInterpreter::makeInteger(long value) {
   return Sinteger(value);
+}
+
+// MLIR C++ to Scheme conversions
+ptr makeSchemeOperation(mlir::Operation* op) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(op));
+}
+
+ptr makeSchemeValue(mlir::Value val) {
+  MlirValue cVal = wrap(val);
+  return const_cast<void*>(cVal.ptr);
+}
+
+ptr makeSchemeType(mlir::Type type) {
+  MlirType cType = wrap(type);
+  return const_cast<void*>(cType.ptr);
+}
+
+ptr makeSchemeAttribute(mlir::Attribute attr) {
+  MlirAttribute cAttr = wrap(attr);
+  return const_cast<void*>(cAttr.ptr);
 }
 
 // Call a Scheme function with primitive arguments

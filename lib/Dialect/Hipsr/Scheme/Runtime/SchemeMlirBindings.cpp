@@ -10,8 +10,6 @@
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Attributes.h"
@@ -23,25 +21,13 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include <cstddef>
 #include <cstring>
-#include <fstream>
 
 #define DEBUG_TYPE "scheme-bindings"
 
 // Note: scheme.h already included via SchemeMlirBindings.h → ChezSchemeInterpreter.h
 // Do NOT include it again here to avoid redefinition errors
 
-
 namespace {
-}
-
-namespace {
-bool scheme_initialized = false;
-// Cached Scheme symbols for script loading
-ptr cached_eval_sym = nullptr;
-ptr cached_read_sym = nullptr;
-ptr cached_open_string_input_port_sym = nullptr;
-ptr cached_eof_object_p = nullptr;
-
 // Thread-local RewriterBase context for FFI functions
 thread_local mlir::RewriterBase* g_current_rewriter = nullptr;
 thread_local mlir::Operation* g_current_operation = nullptr;
@@ -49,14 +35,6 @@ thread_local mlir::Operation* g_current_operation = nullptr;
 
 namespace mlir {
 namespace hipsr {
-
-// Current log level - used by FFI logging functions
-SchemeLogLevel current_log_level = SchemeLogLevel::Warning;
-
-// Update log level (called from ChezSchemeInterpreter)
-void setSchemeLogLevel(SchemeLogLevel level) {
-  current_log_level = level;
-}
 
 // Set/get the current rewriter for FFI operations
 void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
@@ -67,160 +45,6 @@ void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
 void clearCurrentRewriter() {
   g_current_rewriter = nullptr;
   g_current_operation = nullptr;
-}
-
-std::string callSchemeFunction(const char* functionName,
-                                const std::vector<void*>& args) {
-  if (!scheme_initialized)
-    return "";
-
-  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
-  if (func == Sfalse)
-    return "";
-
-  ptr args_list = Snil;
-  for (auto it = args.rbegin(); it != args.rend(); ++it) {
-    args_list = Scons(*it, args_list);
-  }
-
-  ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
-  ptr result = Scall2(apply_proc, func, args_list);
-
-  ptr string_p = Stop_level_value(Sstring_to_symbol("string?"));
-  if (Scall1(string_p, result) != Sfalse) {
-    // Extract string using macros - Chez strings are 32-bit chars, convert to C string
-    iptr len = Sstring_length(result);
-    std::string str;
-    str.reserve(len);
-    for (iptr i = 0; i < len; i++) {
-      str.push_back(static_cast<char>(Sstring_ref(result, i)));
-    }
-    return str;
-  }
-
-  return "";
-}
-
-void* makeSchemeString(const char* str) {
-  return Sstring(str);
-}
-
-void* makeSchemeInteger(long value) {
-  return Sinteger(value);
-}
-
-// MLIR C++ to Scheme conversions - wrap as foreign pointers
-ptr makeSchemeOperation(mlir::Operation* op) {
-  // Convert pointer to Scheme unsigned-64
-  return Sunsigned64(reinterpret_cast<uint64_t>(op));
-}
-
-ptr makeSchemeValue(mlir::Value val) {
-  MlirValue cVal = wrap(val);
-  // Cast away const - Scheme needs non-const pointer
-  return const_cast<void*>(cVal.ptr);
-}
-
-ptr makeSchemeType(mlir::Type type) {
-  MlirType cType = wrap(type);
-  return const_cast<void*>(cType.ptr);
-}
-
-ptr makeSchemeAttribute(mlir::Attribute attr) {
-  MlirAttribute cAttr = wrap(attr);
-  return const_cast<void*>(cAttr.ptr);
-}
-
-// Load and evaluate a Scheme script file
-bool loadSchemeScript(const char* scriptPath) {
-  if (!scheme_initialized)
-    return false;
-
-  std::ifstream file(scriptPath);
-  if (!file.is_open()) {
-    llvm::errs() << "error: cannot open Scheme script: " << scriptPath << "\n";
-    return false;
-  }
-
-  std::string scm_code((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
-  file.close();
-
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Loading " << scriptPath << " (" << scm_code.size() << " bytes)\n";
-    llvm::errs() << "[debug] First 100 chars: " << scm_code.substr(0, 100) << "\n";
-  }
-  LLVM_DEBUG(llvm::dbgs() << "Loading Scheme script: " << scriptPath << "\n");
-
-  // Evaluate the script content using cached symbols from initialization
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Creating string input port for " << scm_code.size() << " bytes\n";
-    llvm::errs() << "[debug] cached_open_string_input_port_sym: " << cached_open_string_input_port_sym << "\n";
-    llvm::errs() << "[debug] cached_read_sym: " << cached_read_sym << "\n";
-  }
-
-  ptr scheme_string = Sstring(scm_code.c_str());
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Created Scheme string: " << scheme_string << "\n";
-  }
-
-  ptr port = Scall1(cached_open_string_input_port_sym, scheme_string);
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Created port: " << port << "\n";
-  }
-
-  while (true) {
-    ptr expr = Scall1(cached_read_sym, port);
-    if (Scall1(cached_eof_object_p, expr) != Sfalse)
-      break;
-    Scall1(cached_eval_sym, expr);
-  }
-
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Loaded " << scriptPath << "\n";
-  }
-  LLVM_DEBUG(llvm::dbgs() << "Loaded Scheme script: " << scriptPath << "\n");
-  return true;
-}
-
-// Evaluate Scheme code string (for (import ...) etc.)
-bool evaluateSchemeCode(const char* code) {
-  if (!scheme_initialized)
-    return false;
-
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Evaluating Scheme code: " << code << "\n";
-  }
-
-  // Top-level evaluation: read and eval in top-level environment
-  // This works for (import ...) and other top-level forms
-  ptr scheme_string = Sstring(code);
-  ptr port = Scall1(cached_open_string_input_port_sym, scheme_string);
-  ptr expr = Scall1(cached_read_sym, port);
-
-  // Eval in top-level environment (not a special environment)
-  Scall1(cached_eval_sym, expr);
-
-  if (current_log_level <= SchemeLogLevel::Debug) {
-    llvm::errs() << "[debug] Evaluated successfully\n";
-  }
-
-  return true;
-}
-
-// Call a Scheme function with a single MLIR operation argument
-void callSchemePassFunction(const char* functionName, mlir::Operation* op) {
-  if (!scheme_initialized)
-    return;
-
-  ptr func = Stop_level_value(Sstring_to_symbol(functionName));
-  if (func == Sfalse) {
-    llvm::errs() << "Warning: Scheme function '" << functionName << "' not found\n";
-    return;
-  }
-
-  ptr schemeOp = makeSchemeOperation(op);
-  Scall1(func, schemeOp);
 }
 
 } // namespace hipsr
@@ -289,6 +113,57 @@ uint64_t mlir_value_get_defining_op(uint64_t value) {
   return reinterpret_cast<uint64_t>(defOp);
 }
 
+// Returns 1 if value is a block argument, 0 if it is an op result
+int mlir_value_is_block_argument(uint64_t value) {
+  if (!value) return 0;
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  return mlir::isa<mlir::BlockArgument>(val) ? 1 : 0;
+}
+
+// Returns the result index of an OpResult value (-1 for block arguments)
+int mlir_value_get_result_number(uint64_t value) {
+  if (!value) return -1;
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  auto result = mlir::dyn_cast<mlir::OpResult>(val);
+  if (!result) return -1;
+  return static_cast<int>(result.getResultNumber());
+}
+
+// Returns the number of DPS init (destination/outs) operands of an operation
+int mlir_operation_num_dps_inits(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto dpsOp = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+  if (!dpsOp) return 0;
+  return static_cast<int>(dpsOp.getNumDpsInits());
+}
+
+// Returns the Value* of the i-th DPS init (outs) operand (0 if out of range)
+uint64_t mlir_operation_get_dps_init_value(uint64_t op_ptr, int index) {
+  if (!op_ptr) return 0;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto dpsOp = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+  if (!dpsOp) return 0;
+  if (index < 0 || index >= static_cast<int>(dpsOp.getNumDpsInits())) return 0;
+  mlir::Value v = dpsOp.getDpsInits()[index];
+  return reinterpret_cast<uint64_t>(v.getAsOpaquePointer());
+}
+
+// Set the i-th operand of an operation to a new value
+void mlir_operation_set_operand(uint64_t op_ptr, int index, uint64_t value) {
+  if (!op_ptr || !value) return;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  op->setOperand(static_cast<unsigned>(index), val);
+}
+
+// Returns 1 if all results of the operation have no uses, 0 otherwise
+int mlir_operation_use_empty(uint64_t op_ptr) {
+  if (!op_ptr) return 1;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return op->use_empty() ? 1 : 0;
+}
+
 // Walk operation tree and call Scheme callback for each operation
 // callback: Scheme procedure (lambda (op) ...)
 void mlir_operation_walk(uint64_t op, ptr callback) {
@@ -328,32 +203,32 @@ void mlir_operation_walk_rewrite(uint64_t op, ptr callback) {
 
 // Logging functions callable from Scheme
 void mlir_log_trace(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Trace)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Trace)
     llvm::errs() << "[trace] " << msg << "\n";
 }
 
 void mlir_log_debug(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Debug)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Debug)
     llvm::errs() << "[debug] " << msg << "\n";
 }
 
 void mlir_log_info(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Info)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Info)
     llvm::errs() << "[info] " << msg << "\n";
 }
 
 void mlir_log_warning(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Warning)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Warning)
     llvm::errs() << "[warning] " << msg << "\n";
 }
 
 void mlir_log_error(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Error)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Error)
     llvm::errs() << "[error] " << msg << "\n";
 }
 
 void mlir_log_fatal(const char* msg) {
-  if (mlir::hipsr::current_log_level <= mlir::hipsr::SchemeLogLevel::Fatal)
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Fatal)
     llvm::errs() << "[fatal] " << msg << "\n";
 }
 
@@ -951,6 +826,108 @@ void mlir_destroy_conversion_target(uint64_t target_ptr) {
   delete reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
 }
 
+// Generic: mark a named dialect illegal in the conversion target
+void mlir_conversion_target_add_illegal_dialect(uint64_t target_ptr, const char* dialect_name) {
+  if (!target_ptr || !dialect_name) return;
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)->addIllegalDialect(dialect_name);
+}
+
+// Generic: mark a named dialect legal in the conversion target
+void mlir_conversion_target_add_legal_dialect(uint64_t target_ptr, const char* dialect_name) {
+  if (!target_ptr || !dialect_name) return;
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)->addLegalDialect(dialect_name);
+}
+
+// Generic: mark a named op legal in the conversion target
+void mlir_conversion_target_add_legal_op(uint64_t target_ptr, uint64_t ctx_ptr, const char* op_name) {
+  if (!target_ptr || !ctx_ptr || !op_name) return;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)
+      ->addLegalOp(mlir::OperationName(op_name, ctx));
+}
+
+// Generic: mark a named op dynamically legal with a Scheme callback (op → bool)
+void mlir_conversion_target_add_dynamically_legal_op(
+    uint64_t target_ptr, uint64_t ctx_ptr, const char* op_name, ptr callback) {
+  if (!target_ptr || !ctx_ptr || !op_name) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  Slock_object(callback);
+  target->addDynamicallyLegalOp(
+      mlir::OperationName(op_name, ctx),
+      [callback](mlir::Operation* op) -> bool {
+        ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
+        ptr result = Scall1(callback, op_arg);
+        return result != Sfalse && result != Sfixnum(0);
+      });
+}
+
+// Generic: mark unknown ops dynamically legal with a Scheme callback (op → bool)
+void mlir_conversion_target_mark_unknown_ops_dynamically_legal(uint64_t target_ptr, ptr callback) {
+  if (!target_ptr) return;
+  Slock_object(callback);
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)
+      ->markUnknownOpDynamicallyLegal([callback](mlir::Operation* op) -> bool {
+        ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
+        ptr result = Scall1(callback, op_arg);
+        return result != Sfalse && result != Sfixnum(0);
+      });
+}
+
+// Generic: add a Scheme type-conversion callback to a TypeConverter
+// callback: (lambda (type-uptr) -> type-uptr-or-#f)
+// Returns #f or 0 from callback means "not handled by this conversion"
+void mlir_type_converter_add_conversion(uint64_t converter_ptr, ptr callback) {
+  if (!converter_ptr) return;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  Slock_object(callback);
+  converter->addConversion([callback](mlir::Type type) -> std::optional<mlir::Type> {
+    ptr type_arg = Sunsigned64(reinterpret_cast<uint64_t>(type.getAsOpaquePointer()));
+    ptr result = Scall1(callback, type_arg);
+    if (result == Sfalse) return std::nullopt;
+    uint64_t result_val = Sunsigned64_value(result);
+    if (result_val == 0) return std::nullopt;
+    return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(result_val));
+  });
+}
+
+// Generic: check if a type is legal according to a TypeConverter
+int mlir_type_converter_is_legal_type(uint64_t converter_ptr, uint64_t type_ptr) {
+  if (!converter_ptr || !type_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  return converter->isLegal(type) ? 1 : 0;
+}
+
+// Generic: check if all operand/result types of an op are legal
+int mlir_type_converter_is_legal(uint64_t converter_ptr, uint64_t op_ptr) {
+  if (!converter_ptr || !op_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return converter->isLegal(op) ? 1 : 0;
+}
+
+// Generic: check if a func op's signature is legal according to a TypeConverter
+int mlir_type_converter_is_signature_legal(uint64_t converter_ptr, uint64_t func_op_ptr) {
+  if (!converter_ptr || !func_op_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto func_op = mlir::dyn_cast<mlir::func::FuncOp>(
+      reinterpret_cast<mlir::Operation*>(func_op_ptr));
+  if (!func_op) return 0;
+  return converter->isSignatureLegal(func_op.getFunctionType()) ? 1 : 0;
+}
+
+// Generic: get the encoding attribute of a type (0 if no encoding)
+uint64_t mlir_type_get_encoding(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  mlir::Attribute enc = tensorType.getEncoding();
+  if (!enc) return 0;
+  return reinterpret_cast<uint64_t>(enc.getAsOpaquePointer());
+}
+
 // Mark ONNX dialect illegal (except NoValueOp)
 void mlir_conversion_target_add_illegal_onnx(uint64_t target_ptr) {
   if (!target_ptr) return;
@@ -1096,6 +1073,16 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_type_converter_add_device_memory_conversions", (void*)mlir_type_converter_add_device_memory_conversions);
   Sregister_symbol("mlir_create_conversion_target", (void*)mlir_create_conversion_target);
   Sregister_symbol("mlir_destroy_conversion_target", (void*)mlir_destroy_conversion_target);
+  Sregister_symbol("mlir_conversion_target_add_illegal_dialect", (void*)mlir_conversion_target_add_illegal_dialect);
+  Sregister_symbol("mlir_conversion_target_add_legal_dialect", (void*)mlir_conversion_target_add_legal_dialect);
+  Sregister_symbol("mlir_conversion_target_add_legal_op", (void*)mlir_conversion_target_add_legal_op);
+  Sregister_symbol("mlir_conversion_target_add_dynamically_legal_op", (void*)mlir_conversion_target_add_dynamically_legal_op);
+  Sregister_symbol("mlir_conversion_target_mark_unknown_ops_dynamically_legal", (void*)mlir_conversion_target_mark_unknown_ops_dynamically_legal);
+  Sregister_symbol("mlir_type_converter_add_conversion", (void*)mlir_type_converter_add_conversion);
+  Sregister_symbol("mlir_type_converter_is_legal_type", (void*)mlir_type_converter_is_legal_type);
+  Sregister_symbol("mlir_type_converter_is_legal", (void*)mlir_type_converter_is_legal);
+  Sregister_symbol("mlir_type_converter_is_signature_legal", (void*)mlir_type_converter_is_signature_legal);
+  Sregister_symbol("mlir_type_get_encoding", (void*)mlir_type_get_encoding);
   Sregister_symbol("mlir_conversion_target_add_illegal_onnx", (void*)mlir_conversion_target_add_illegal_onnx);
   Sregister_symbol("mlir_conversion_target_add_legal_hipsr", (void*)mlir_conversion_target_add_legal_hipsr);
   Sregister_symbol("mlir_conversion_target_add_legal_common_ops", (void*)mlir_conversion_target_add_legal_common_ops);
@@ -1132,6 +1119,12 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_loc", (void*)::mlir_operation_get_loc);
   Sregister_symbol("mlir_operation_get_block_argument", (void*)::mlir_operation_get_block_argument);
   Sregister_symbol("mlir_value_get_defining_op", (void*)::mlir_value_get_defining_op);
+  Sregister_symbol("mlir_value_is_block_argument", (void*)::mlir_value_is_block_argument);
+  Sregister_symbol("mlir_value_get_result_number", (void*)::mlir_value_get_result_number);
+  Sregister_symbol("mlir_operation_num_dps_inits", (void*)::mlir_operation_num_dps_inits);
+  Sregister_symbol("mlir_operation_get_dps_init_value", (void*)::mlir_operation_get_dps_init_value);
+  Sregister_symbol("mlir_operation_set_operand", (void*)::mlir_operation_set_operand);
+  Sregister_symbol("mlir_operation_use_empty", (void*)::mlir_operation_use_empty);
   Sregister_symbol("mlir_operation_set_attr", (void*)::mlir_operation_set_attr);
 
   // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
