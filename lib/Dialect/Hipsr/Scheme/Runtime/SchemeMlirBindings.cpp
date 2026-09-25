@@ -6,6 +6,7 @@
 #include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/LockedSchemeObject.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "llvm/Support/raw_ostream.h"
@@ -35,6 +36,26 @@ thread_local mlir::Operation* g_current_operation = nullptr;
 
 namespace mlir {
 namespace hipsr {
+
+// MLIR C++ to Scheme conversions - box as GC-safe integers (Sunsigned64)
+// so the Chez GC never mistakes them for heap pointers.
+// mlir::Value's opaque pointer has tag bits (bit 0 = BlockArgument),
+// which would alias Chez's non-fixnum tag if returned as a raw ptr.
+ptr makeSchemeOperation(mlir::Operation* op) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(op));
+}
+
+ptr makeSchemeValue(mlir::Value val) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(val.getAsOpaquePointer()));
+}
+
+ptr makeSchemeType(mlir::Type type) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(type.getAsOpaquePointer()));
+}
+
+ptr makeSchemeAttribute(mlir::Attribute attr) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(attr.getAsOpaquePointer()));
+}
 
 // Set/get the current rewriter for FFI operations
 void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
@@ -1039,8 +1060,78 @@ void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) 
   cppOp->setAttr(attr_name, attr);
 }
 
-// Note: mlir_operation_get_context is defined earlier in this file (around line 387)
-// Do not define it again here
+// Create the entry block of op's region[region_idx] and set the rewriter
+// insertion point to its end. For hipsr.placeholder region 0 uses
+// createPlaceholderShapeBlock so arg types match getShapeRegionArgumentTypes().
+// Returns Block* as uint64_t.
+uint64_t mlir_op_create_region_block(uint64_t op_ptr, int region_idx) {
+  if (!op_ptr || !g_current_rewriter) return 0;
+  auto* rawOp = reinterpret_cast<mlir::Operation*>(op_ptr);
+
+  mlir::Block* block = nullptr;
+  if (auto placeholder = mlir::dyn_cast<mlir::hipsr::PlaceholderOp>(rawOp);
+      placeholder && region_idx == 0) {
+    block = &mlir::hipsr::createPlaceholderShapeBlock(*g_current_rewriter, placeholder);
+  } else {
+    mlir::Region& region = rawOp->getRegion(region_idx);
+    block = g_current_rewriter->createBlock(&region);
+  }
+  g_current_rewriter->setInsertionPointToEnd(block);
+  return reinterpret_cast<uint64_t>(block);
+}
+
+// Get the i-th argument of a block as a Value opaque pointer (uint64_t).
+uint64_t mlir_block_get_argument(uint64_t block_ptr, int idx) {
+  if (!block_ptr) return 0;
+  auto* block = reinterpret_cast<mlir::Block*>(block_ptr);
+  if (idx < 0 || idx >= (int)block->getNumArguments()) return 0;
+  return reinterpret_cast<uint64_t>(block->getArgument(idx).getAsOpaquePointer());
+}
+
+// Like mlir_create_generic_op but uses the current rewriter insertion point
+// without resetting it to g_current_operation. Used inside region blocks.
+// Returns the created Operation* as ptr.
+ptr mlir_create_op_at_current_point(const char* op_name,
+                                    ptr operands_list,
+                                    ptr result_types_list) {
+  if (!g_current_rewriter || !g_current_operation) {
+    mlir_log_error("mlir_create_op_at_current_point: no rewriter context");
+    return nullptr;
+  }
+  mlir::Location loc = g_current_operation->getLoc();
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type> resultTypes;
+
+  ptr current = static_cast<ptr>(operands_list);
+  while (current != Snil) {
+    if (!Spairp(current)) { mlir_log_error("mlir_create_op_at_current_point: bad operands"); return nullptr; }
+    uint64_t v = Sinteger64_value(Scar(current));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+    current = Scdr(current);
+  }
+
+  current = static_cast<ptr>(result_types_list);
+  while (current != Snil) {
+    if (!Spairp(current)) { mlir_log_error("mlir_create_op_at_current_point: bad result-types"); return nullptr; }
+    uint64_t t = Sinteger64_value(Scar(current));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
+    current = Scdr(current);
+  }
+
+  mlir::OperationState state(loc, op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  mlir::Operation* op = g_current_rewriter->create(state);
+  return reinterpret_cast<ptr>(op);
+}
+
+// Restore the rewriter insertion point to immediately before g_current_operation.
+// Call this after emitting region bodies to return to the outer insertion context.
+void mlir_set_insertion_point_to_current_op() {
+  if (g_current_rewriter && g_current_operation)
+    g_current_rewriter->setInsertionPoint(g_current_operation);
+}
 
 } // extern "C"
 
