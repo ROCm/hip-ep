@@ -137,3 +137,98 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4xf16>,
       : tensor<1x16x1x4xf16> into tensor<1x16x4xf16>
   return %out : tensor<1x16x4xf16>
 }
+
+// -----
+
+// A rank-0 operand cannot be a kernel argument: rocMLIR turns each argument
+// into a `rock.transforms_to_ptr`, which needs a coordinate to linearize, and
+// a scalar has none. The Relu zero is an inline `hip.constant`, so it is
+// cloned into the kernel and lowers to a `tosa.const` there.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
+// CHECK: %[[ZERO:.*]] = hip.constant
+// CHECK-SAME: value = dense<0.000000e+00> : tensor<f16>
+// CHECK: hip.max
+// CHECK-SAME: %[[ZERO]]
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %zero = hip.constant {value = dense<0.000000e+00> : tensor<f16>} : tensor<f16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %maxInit = tensor.empty() : tensor<1x16x4x4xf16>
+  // The scalar does not appear in the dispatch operand list.
+  // CHECK: hip.rocmlir
+  // CHECK-SAME: tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>) outs
+  %r = hip.max(%ctx) ins(%c, %zero : tensor<1x16x4x4xf16>, tensor<f16>)
+      outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// The same applies to any pointwise op, not just the min/max pair Relu and
+// Clip lower to. A residual block scales its sum by a splat before adding it
+// back, which reaches the pass as `hip.mul` against a rank-0 constant.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
+// CHECK: %[[SCALE:.*]] = hip.constant
+// CHECK-SAME: value = dense<1.999510e-01> : tensor<f16>
+// CHECK: hip.mul
+// CHECK-SAME: %[[SCALE]]
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %scale = hip.constant {value = dense<1.999510e-01> : tensor<f16>} : tensor<f16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %mulInit = tensor.empty() : tensor<1x16x4x4xf16>
+  // CHECK: hip.rocmlir
+  // CHECK-SAME: tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>) outs
+  %r = hip.mul(%ctx) ins(%c, %scale : tensor<1x16x4x4xf16>, tensor<f16>)
+      outs(%mulInit : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// Only inline constants are cloned. A bound the caller supplies at runtime has
+// no value to rematerialize, so it stays a kernel argument.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: tensor<16xf16>, %[[KBOUND:.*]]: tensor<f16>)
+// CHECK: hip.max
+// CHECK-SAME: %[[KBOUND]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-SAME: %[[BOUND:.[a-z0-9_]+]]: tensor<f16>) ->
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %bound: tensor<f16>) -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %maxInit = tensor.empty() : tensor<1x16x4x4xf16>
+  // CHECK: hip.rocmlir
+  // CHECK-SAME: %[[BOUND]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>, tensor<f16>) outs
+  %r = hip.max(%ctx) ins(%c, %bound : tensor<1x16x4x4xf16>, tensor<f16>)
+      outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
