@@ -62,9 +62,15 @@
     ;; Value operations
     mlir-value-get-defining-op
     mlir-value-get-type
+    mlir-value-is-block-argument
+    mlir-value-get-result-number
 
-    ;; Operation attributes
+    ;; Operation attributes and mutation
     mlir-operation-set-attr
+    mlir-operation-set-operand
+    mlir-operation-use-empty
+    mlir-operation-num-dps-inits
+    mlir-operation-get-dps-init-value
 
     ;; Logging
     mlir-log-trace
@@ -80,38 +86,36 @@
     mlir-type-get-shape
     mlir-type-get-rank
     mlir-type-set-memory-space
-    mlir-tensor-type-in-device-space
+    mlir-type-get-encoding
     mlir-value-get-type
 
     ;; Utility
-    mlir-get-hipsr-context-arg
     mlir-operation-get-context
 
-    ;; Dialect conversion framework primitives
+    ;; Dialect conversion framework — lifecycle
     mlir-create-type-converter
     mlir-destroy-type-converter
-    mlir-type-converter-add-device-memory-conversions
     mlir-create-conversion-target
     mlir-destroy-conversion-target
-    mlir-conversion-target-add-illegal-onnx
-    mlir-conversion-target-add-legal-hipsr
-    mlir-conversion-target-add-legal-common-ops
-    mlir-conversion-target-add-dynamically-legal-func
-    mlir-conversion-target-mark-unknown-ops-nested-legal
     mlir-create-rewrite-pattern-set
     mlir-destroy-rewrite-pattern-set
     mlir-apply-full-conversion
 
-    ;; Dialect conversion helpers
-    mlir-populate-cast-conversion-patterns
-    mlir-populate-return-conversion-patterns
+    ;; Dialect conversion framework — generic configuration
+    mlir-type-converter-add-conversion
+    mlir-type-converter-is-legal-type
+    mlir-type-converter-is-legal
+    mlir-type-converter-is-signature-legal
+    mlir-conversion-target-add-illegal-dialect
+    mlir-conversion-target-add-legal-dialect
+    mlir-conversion-target-add-legal-op
+    mlir-conversion-target-add-dynamically-legal-op
+    mlir-conversion-target-mark-unknown-ops-dynamically-legal
+
+    ;; Dialect conversion helpers (generic MLIR utilities)
     mlir-populate-func-type-conversion-pattern
-    mlir-erase-dead-novalue-ops
-    mlir-rewire-placeholder-inputs
 
     ;; IR construction
-    mlir-create-placeholder-op
-    mlir-create-cast-op
     mlir-create-generic-op
     mlir-operation-get-result-value-from-op
     mlir-create-unrealized-conversion-cast
@@ -123,6 +127,12 @@
 
     ;; Pattern registration (for Scheme-defined patterns)
     mlir-register-conversion-pattern
+
+    ;; Resource management
+    with-raii
+    with-type-converter
+    with-conversion-target
+    with-rewrite-pattern-set
     )
 
   (import (chezscheme))
@@ -185,6 +195,18 @@
   ;;; @return Operation* as uptr, or 0 for block arguments
   (define mlir-value-get-defining-op
     (foreign-procedure "mlir_value_get_defining_op" (uptr) uptr))
+
+  ;;; @brief Check whether a value is a block argument
+  ;;; @param value-ptr Value* as uptr
+  ;;; @return 1 if block argument, 0 if op result
+  (define mlir-value-is-block-argument
+    (foreign-procedure "mlir_value_is_block_argument" (uptr) int))
+
+  ;;; @brief Get the result index of an OpResult value
+  ;;; @param value-ptr Value* as uptr
+  ;;; @return Result index, or -1 if value is a block argument
+  (define mlir-value-get-result-number
+    (foreign-procedure "mlir_value_get_result_number" (uptr) int))
 
   ;;; @brief Get the parent operation
   ;;; @param op-ptr Operation* as uptr
@@ -320,6 +342,12 @@
   (define mlir-value-get-type
     (foreign-procedure "mlir_value_get_type" (uptr) uptr))
 
+  ;;; @brief Get the encoding attribute of a RankedTensorType (0 if none)
+  ;;; @param type-ptr Type* as uptr
+  ;;; @return Attribute* as uptr, or 0 if not a ranked tensor or has no encoding
+  (define mlir-type-get-encoding
+    (foreign-procedure "mlir_type_get_encoding" (uptr) uptr))
+
   ;;===--------------------------------------------------------------------===;;
   ;; Utility Functions
   ;;===--------------------------------------------------------------------===;;
@@ -344,6 +372,34 @@
   (define mlir-destroy-type-converter
     (foreign-procedure "mlir_destroy_type_converter" (uptr) void))
 
+  ;;; @brief Add a Scheme type-conversion callback to a TypeConverter
+  ;;; @param converter-ptr TypeConverter* as uptr
+  ;;; @param callback Scheme procedure: (lambda (type-uptr) -> type-uptr or #f)
+  ;;; @note Returns #f from callback means "not handled"; return a Type* uptr to convert
+  (define mlir-type-converter-add-conversion
+    (foreign-procedure "mlir_type_converter_add_conversion" (uptr scheme-object) void))
+
+  ;;; @brief Check if a single type is legal according to a TypeConverter
+  ;;; @param converter-ptr TypeConverter* as uptr
+  ;;; @param type-ptr Type* as uptr
+  ;;; @return 1 if legal, 0 otherwise
+  (define mlir-type-converter-is-legal-type
+    (foreign-procedure "mlir_type_converter_is_legal_type" (uptr uptr) int))
+
+  ;;; @brief Check if all operand/result types of an op are legal
+  ;;; @param converter-ptr TypeConverter* as uptr
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @return 1 if legal, 0 otherwise
+  (define mlir-type-converter-is-legal
+    (foreign-procedure "mlir_type_converter_is_legal" (uptr uptr) int))
+
+  ;;; @brief Check if a func op's signature is legal according to a TypeConverter
+  ;;; @param converter-ptr TypeConverter* as uptr
+  ;;; @param func-op-ptr func::FuncOp Operation* as uptr
+  ;;; @return 1 if legal, 0 otherwise
+  (define mlir-type-converter-is-signature-legal
+    (foreign-procedure "mlir_type_converter_is_signature_legal" (uptr uptr) int))
+
   ;;; @brief Add device memory space conversions to a TypeConverter
   ;;; @param converter-ptr TypeConverter* as uptr
   ;;; @note Registers conversions for tensor types to device memory space
@@ -360,6 +416,31 @@
   ;;; @param target-ptr ConversionTarget* as uptr
   (define mlir-destroy-conversion-target
     (foreign-procedure "mlir_destroy_conversion_target" (uptr) void))
+
+  ;;; @brief Mark a dialect illegal by name
+  (define mlir-conversion-target-add-illegal-dialect
+    (foreign-procedure "mlir_conversion_target_add_illegal_dialect" (uptr string) void))
+
+  ;;; @brief Mark a dialect legal by name
+  (define mlir-conversion-target-add-legal-dialect
+    (foreign-procedure "mlir_conversion_target_add_legal_dialect" (uptr string) void))
+
+  ;;; @brief Mark a specific op legal by name (overrides dialect-level legality)
+  ;;; @param ctx-ptr MLIRContext* as uptr (needed to construct OperationName)
+  (define mlir-conversion-target-add-legal-op
+    (foreign-procedure "mlir_conversion_target_add_legal_op" (uptr uptr string) void))
+
+  ;;; @brief Mark a specific op dynamically legal with a Scheme callback
+  ;;; @param callback Scheme procedure: (lambda (op-uptr) -> bool)
+  (define mlir-conversion-target-add-dynamically-legal-op
+    (foreign-procedure "mlir_conversion_target_add_dynamically_legal_op"
+                       (uptr uptr string scheme-object) void))
+
+  ;;; @brief Mark all unknown ops dynamically legal with a Scheme callback
+  ;;; @param callback Scheme procedure: (lambda (op-uptr) -> bool)
+  (define mlir-conversion-target-mark-unknown-ops-dynamically-legal
+    (foreign-procedure "mlir_conversion_target_mark_unknown_ops_dynamically_legal"
+                       (uptr scheme-object) void))
 
   ;;; @brief Mark all ONNX dialect operations as illegal in conversion target
   ;;; @param target-ptr ConversionTarget* as uptr
@@ -496,6 +577,32 @@
   (define mlir-operation-set-attr
     (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
 
+  ;;; @brief Set the i-th operand of an operation to a new value
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @param index Operand index as int
+  ;;; @param value New Value* as uptr
+  (define mlir-operation-set-operand
+    (foreign-procedure "mlir_operation_set_operand" (uptr int uptr) void))
+
+  ;;; @brief Check whether all results of an operation have no uses
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @return 1 if use-empty, 0 otherwise
+  (define mlir-operation-use-empty
+    (foreign-procedure "mlir_operation_use_empty" (uptr) int))
+
+  ;;; @brief Get the number of DPS init (outs) operands of an operation
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @return Count, or 0 if not a DPS op
+  (define mlir-operation-num-dps-inits
+    (foreign-procedure "mlir_operation_num_dps_inits" (uptr) int))
+
+  ;;; @brief Get the Value* of the i-th DPS init (outs) operand
+  ;;; @param op-ptr Operation* as uptr
+  ;;; @param index Init index as int
+  ;;; @return Value* as uptr, or 0 if out of range
+  (define mlir-operation-get-dps-init-value
+    (foreign-procedure "mlir_operation_get_dps_init_value" (uptr int) uptr))
+
   ;;; @brief Get a result Value* from an operation by index
   ;;; @param op-ptr Operation* as uptr
   ;;; @param index Result index as int
@@ -581,5 +688,42 @@
            [offset (* index 8)])  ; Assuming 64-bit pointers
       ;; Read pointer at offset
       (foreign-ref 'uptr data-ptr offset)))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Resource Management
+  ;;===--------------------------------------------------------------------===;;
+
+  ;;; @brief RAII-style resource management via dynamic-wind
+  ;;; @syntax (with-raii ((var ctor dtor) ...) body ...)
+  ;;; Each resource is created by ctor, bound to var, and destroyed by (dtor var)
+  ;;; on exit — whether normal, exception, or continuation escape.
+  (define-syntax with-raii
+    (syntax-rules ()
+      [(_ () body ...)
+       (begin body ...)]
+      [(_ ((val ctor dtor) rest ...) body ...)
+       (let ([val ctor])
+         (dynamic-wind
+           void
+           (lambda () (with-raii (rest ...) body ...))
+           (lambda () (dtor val))))]))
+
+  (define-syntax with-type-converter
+    (syntax-rules ()
+      [(_ (var) body ...)
+       (with-raii ((var (mlir-create-type-converter) mlir-destroy-type-converter))
+         body ...)]))
+
+  (define-syntax with-conversion-target
+    (syntax-rules ()
+      [(_ (var ctx) body ...)
+       (with-raii ((var (mlir-create-conversion-target ctx) mlir-destroy-conversion-target))
+         body ...)]))
+
+  (define-syntax with-rewrite-pattern-set
+    (syntax-rules ()
+      [(_ (var ctx) body ...)
+       (with-raii ((var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set))
+         body ...)]))
 
 ) ;; end library (mlir ffi)
