@@ -8,10 +8,6 @@
 
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
-#include "mlir/IR/Value.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/CAPI/IR.h"
-#include "mlir/CAPI/Wrap.h"
 
 // Note: scheme.h already included via ChezSchemeInterpreter.h
 // Do NOT include it again here to avoid redefinition errors with static inline functions
@@ -118,28 +114,14 @@ void ChezSchemeInterpreter::addLibraryPath(const char* src_path, const char* bin
     return;
   }
 
-  // Build Scheme code to add paths as a single (src . bin) pair
-  std::string code =
-    "(library-directories "
-    "  (cons (cons \"" + std::string(src_path) + "\" \"" + std::string(bin_path) + "\") "
-    "  (library-directories)))";
-
-  if (!eval(code.c_str())) {
-    llvm::errs() << "[error] ChezSchemeInterpreter: Failed to add library paths: "
-                 << src_path << ", " << bin_path << "\n";
-    return;
-  }
+  ptr lib_dirs_param = Stop_level_value(Sstring_to_symbol("library-directories"));
+  ptr current_dirs = Scall0(lib_dirs_param);
+  ptr pair = Scons(Sstring(src_path), Sstring(bin_path));
+  Scall1(lib_dirs_param, Scons(pair, current_dirs));
 
   if (logLevel <= SchemeLogLevel::Debug) {
-    // Define a helper function to get library-directories as a string and call it
-    std::string helper_code =
-      "(define (__get-libdirs-string) "
-      "  (call-with-port (open-output-string) "
-      "    (lambda (p) (write (library-directories) p) (get-output-string p))))";
-    eval(helper_code.c_str());
-
-    std::string result = callFunction("__get-libdirs-string", {});
-    llvm::errs() << "[debug] ChezSchemeInterpreter: library-directories = " << result << "\n";
+    llvm::errs() << "[debug] ChezSchemeInterpreter: added library path ("
+                 << src_path << " . " << bin_path << ")\n";
   }
 }
 
@@ -181,26 +163,6 @@ ptr ChezSchemeInterpreter::makeString(const char* str) {
 
 ptr ChezSchemeInterpreter::makeInteger(long value) {
   return Sinteger(value);
-}
-
-// MLIR C++ to Scheme conversions
-ptr makeSchemeOperation(mlir::Operation* op) {
-  return Sunsigned64(reinterpret_cast<uint64_t>(op));
-}
-
-ptr makeSchemeValue(mlir::Value val) {
-  MlirValue cVal = wrap(val);
-  return const_cast<void*>(cVal.ptr);
-}
-
-ptr makeSchemeType(mlir::Type type) {
-  MlirType cType = wrap(type);
-  return const_cast<void*>(cType.ptr);
-}
-
-ptr makeSchemeAttribute(mlir::Attribute attr) {
-  MlirAttribute cAttr = wrap(attr);
-  return const_cast<void*>(cAttr.ptr);
 }
 
 // Call a Scheme function with primitive arguments

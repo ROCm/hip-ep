@@ -9,10 +9,21 @@
 #include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
 
 namespace mlir {
+class Operation;
+class Value;
+class Type;
+class Attribute;
+
 namespace hipsr {
 
 // Register all MLIR foreign functions accessible from Scheme
 void registerMlirForeignFunctions();
+
+// MLIR C++ to Scheme conversions - wrap MLIR objects as GC-safe Scheme integers
+ptr makeSchemeOperation(mlir::Operation* op);
+ptr makeSchemeValue(mlir::Value val);
+ptr makeSchemeType(mlir::Type type);
+ptr makeSchemeAttribute(mlir::Attribute attr);
 
 } // namespace hipsr
 } // namespace mlir
