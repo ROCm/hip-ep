@@ -791,12 +791,12 @@ static int gqa_forward_fused(
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG(
-        "[REAL] GQA prefill config source=%s v%d "
-        "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
-        hipdnn_ep::gqa_tune_source_name(selected.source), fused_prefill_version,
-        selected.config.m_tiles, selected.config.bkv, selected.config.nw,
-        selected.config.mt, selected.config.nd);
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
+                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+                      hipdnn_ep::gqa_tune_source_name(selected.source),
+                      fused_prefill_version, selected.config.m_tiles,
+                      selected.config.bkv, selected.config.nw,
+                      selected.config.mt, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
@@ -2911,10 +2911,10 @@ int wrap_group_query_attention(
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  // head_dim gate: the fused WMMA prefill (v6/v7/v8) and the scalar flash-decode
-  // kernels both cover d in {64,128,256} now (d=256 for Qwen3-family 16:4). For
-  // decode, flash_decode_geometry_ok already validates d; for prefill we clamp
-  // to the templated set here.
+  // head_dim gate: the fused WMMA prefill (v6/v7/v8) and the scalar
+  // flash-decode kernels both cover d in {64,128,256} now (d=256 for
+  // Qwen3-family 16:4). For decode, flash_decode_geometry_ok already validates
+  // d; for prefill we clamp to the templated set here.
   const bool head_dim_ok =
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
