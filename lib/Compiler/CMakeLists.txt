@@ -15,6 +15,34 @@ add_library(LibHipCompiler STATIC
   StaticPlugins.cpp
 )
 
+# rocMLIR kernel compilation. Attached here rather than to
+# hip-rocmlir-compiler so that everything linking LibHipCompiler -- including
+# hipgpu.dll, which picks it up transitively through morphizen-core-static --
+# can compile rock.kernel funcs in process. Without it the EP can outline
+# kernels but never fills in hip.rocmlir's kernel_binary, and every dispatch
+# fails at hipModuleLoadData.
+if(ENABLE_ROCMLIRTRITON)
+  target_sources(LibHipCompiler PRIVATE RocMlirKernelCompiler.cpp)
+  # rocMLIR/Triton's per-library static archives have circular dependencies,
+  # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
+  # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
+  # automatically and do not support the feature.
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
+  else()
+    set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
+  endif()
+  target_link_libraries(LibHipCompiler PUBLIC
+    HipToTosa
+    # rocMLIR/Triton reference this MLIR extension (registerInlinerExtension)
+    # but it is a leaf target not pulled in transitively by the rock/triton
+    # closure.
+    MLIRFuncInlinerExtension
+    "${_rocmlir_link_closure}"
+  )
+  target_compile_definitions(LibHipCompiler PUBLIC HIP_EP_HAS_ROCMLIR=1)
+endif()
+
 # When hipBLASLt is disabled, the model link must not add -lhipblaslt
 # (CompilerDriver gates that behind this define).
 if(HIPDNN_EP_DISABLE_VENDOR_BLAS)

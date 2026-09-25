@@ -8,9 +8,16 @@
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
+
+#ifdef HIP_EP_HAS_ROCMLIR
+#include "hip/Compiler/RocMlirKernelCompiler.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/Passes.h"
+#endif
 
 #include "hip/Target/LLVM/DLLLinker.h"
 #include "hip/Target/LLVM/LLVMBackend.h"
@@ -52,6 +59,21 @@ bool fileExists(const std::string &path) {
 
 bool hipsrPipelineRequested() {
   return !hip_get_env("HIPDNN_EP_HIPSR").empty();
+}
+
+// Offload eligible subgraphs to rocMLIR instead of the hipBLASLt/hipDNN
+// library path. Opt-in because it compiles GPU kernels during session
+// creation: a graph with many outlined kernels pays that serially, once per
+// session. hip_env_is_on, not std::getenv -- this code is linked into the
+// static-CRT EP DLL, which cannot see host-process env vars otherwise. It also
+// honours HIPDNN_EP_ROCMLIR=0 as off, so a run can be forced back onto the
+// library path without unsetting the variable.
+bool rocMlirPipelineRequested() {
+#ifdef HIP_EP_HAS_ROCMLIR
+  return hip_env_is_on("HIPDNN_EP_ROCMLIR");
+#else
+  return false;
+#endif
 }
 
 OnnxDialectKind onnxDialectKind() {
@@ -338,6 +360,68 @@ bool CompilerDriver::runMLIRPasses(
     mlir::hipsr::buildHipsrPipeline(pm, hipsrOpts);
 
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
+  } else if (rocMlirPipelineRequested()) {
+#ifdef HIP_EP_HAS_ROCMLIR
+    // rocMLIR sits between the ONNX->HIP head and its tail: fuse-rocmlir
+    // needs tensor-level HIP IR, and each kernel's compiled binary has to be
+    // embedded in its hip.rocmlir dispatch before the tail bufferizes that op
+    // like any other DPS op. Embedding is not a pass, so the head runs here
+    // on its own rather than through `pm`, which then carries the tail.
+    //
+    // Consequence worth knowing: HIPDNN_EP_IR_DUMP_PATH is attached to `pm`
+    // below, so it captures the tail only. The head and the outlining are not
+    // in that dump.
+    mlir::hip::registerRocMlirDialects(*module.getContext());
+
+    {
+      mlir::PassManager headPm(module.getContext());
+      mlir::hip::buildOnnxToHipPipelineHead(headPm);
+      // rocMLIR has no transposed-convolution anchor, so split
+      // conv_transpose into plain convolutions before anything tries to
+      // outline a kernel around it.
+      headPm.addNestedPass<mlir::func::FuncOp>(
+          mlir::hip::createDecomposeConvTransposePass());
+      headPm.addPass(mlir::createCanonicalizerPass());
+      headPm.addNestedPass<mlir::func::FuncOp>(
+          mlir::hip::createFuseROCMlirPass());
+      headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
+      if (mlir::failed(headPm.run(module))) {
+        error_message = "ONNX->HIP + fuse-rocmlir passes failed";
+        return false;
+      }
+    }
+
+    mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
+        mlir::hip::buildRocMlirTosaClone(module);
+    if (!tosaModule) {
+      error_message = "hip->tosa conversion failed";
+      return false;
+    }
+
+    mlir::hip::RocMlirEmbedOptions embedOpts;
+    embedOpts.arch = mlir::hip::resolveRocMlirArch();
+    if (hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE")) {
+      embedOpts.log = &llvm::errs();
+      embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
+    }
+    if (mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(
+            module, *tosaModule, embedOpts))) {
+      error_message = "rocMLIR kernel compilation failed";
+      return false;
+    }
+
+    mlir::hip::OnnxToHipPipelineOptions tailOpts;
+    tailOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+    tailOpts.skipConstantData = options.skip_constant_data;
+    mlir::hip::buildOnnxToHipPipelineTail(pm, tailOpts, fileSystem_);
+
+    mlir::hip::HipToLLVMPipelineOptions rocMlirLlvmOpts;
+    rocMlirLlvmOpts.constantsFile = options.constants_file;
+    mlir::hip::buildHipToLLVMPipeline(pm, rocMlirLlvmOpts);
+
+    COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_ROCMLIR set\n");
+#endif
   } else {
     mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
     onnxToHipOpts.externalizeMinNumElements =

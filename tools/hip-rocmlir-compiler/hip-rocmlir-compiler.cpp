@@ -22,6 +22,7 @@
 // containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops are
 // dropped from the clone we compile).
 
+#include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
@@ -77,58 +78,6 @@
 #include <string>
 #include <vector>
 
-// Resolve the target GPU arch: ROCK_ARCH wins, else a default. The rock
-// backend pipeline validates and parses this (triple/chip/features).
-static std::string resolveArch() {
-  if (const char *env = std::getenv("ROCK_ARCH"))
-    if (env[0] != '\0')
-      return env;
-  return "gfx1151";
-}
-
-// Read one `name=value` field out of a serialized perfConfig string of the form
-// `prefix:key=value,key=value,...` (see getPerfConfigStr in RockAttrDefs.td).
-// Returns `fallback` when the field is absent or unparseable.
-static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
-                               int64_t fallback) {
-  // Drop the `gemm:`/`attn:` prefix if present so a prefix substring can't be
-  // mistaken for a field.
-  size_t colon = perf.find(':');
-  if (colon != llvm::StringRef::npos)
-    perf = perf.drop_front(colon + 1);
-
-  while (!perf.empty()) {
-    auto [field, rest] = perf.split(',');
-    auto [key, value] = field.split('=');
-    if (key.trim() == name) {
-      int64_t parsed = 0;
-      if (!value.trim().getAsInteger(10, parsed))
-        return parsed;
-      return fallback;
-    }
-    perf = rest;
-  }
-  return fallback;
-}
-
-// Drive the rocMLIR flow directly on the tosa `rock.kernel` module (in our own
-// context -- rocMLIR dialects are registered alongside ours):
-//   1. high-level pipeline (tosa -> rock.gemm)
-//   2. affix a perfConfig to the gemm op (the `perf_config` string attribute):
-//      either the autotune winner, or -- without --autotune -- the first
-//      entry enumerated from the tuning search space.
-//   3. backend pipeline (rock -> LLVM / binary)
-// When `stopAfterHighLevel` is set, stops after step 1 and returns the printed
-// rock MLIR in `out.highLevelMlir` (steps 2-3 are skipped). Otherwise returns
-// the compiled GPU binary in `binary` and the kernel launch geometry in
-// `gridSize`/`blockSize`.
-struct CompiledKernel {
-  std::string binary;
-  int64_t gridSize = 0;
-  int64_t blockSize = 0;
-  std::string highLevelMlir;
-};
-
 struct AutotuneOptions {
   bool enabled = false;
   bool verbose = false;
@@ -136,93 +85,6 @@ struct AutotuneOptions {
   unsigned warmupRuns = 5;
   unsigned measuredRuns = 20;
 };
-
-// Map a parsed perfConfig string + arch onto rock's Triton/backend option
-// structs. Mirrors the option wiring the fork's C-API entrypoint
-// (hipEpAddBackendPipeline) did: the Triton/backend knobs are the tuning
-// fields of the chosen perfConfig, read straight out of the string rather than
-// re-defaulted (perfConfig field `numWaves` is the backend's `numWarps`); a
-// missing field falls back to the rock default and kKnobDefault (-1) leaves a
-// bool knob at its arch default.
-static bool buildBackendPipelineFor(mlir::OpPassManager &pm,
-                                    llvm::StringRef arch,
-                                    llvm::StringRef perfConfig) {
-  mlir::RocmDeviceName devName;
-  if (arch.empty() || mlir::failed(devName.parse(arch))) {
-    llvm::errs() << "error: invalid architecture: " << arch << "\n";
-    return false;
-  }
-
-  mlir::rock::KernelOptions kOpts;
-  mlir::rock::buildKernelPipeline(pm, kOpts);
-
-  mlir::rock::TritonOptions tOpts;
-  tOpts.arch = devName.getChip().str();
-  tOpts.numWarps = static_cast<int>(perfConfigField(perfConfig, "numWaves", 4));
-  tOpts.numCTAs = static_cast<int>(perfConfigField(perfConfig, "numCTAs", 1));
-  tOpts.numStages =
-      static_cast<int>(perfConfigField(perfConfig, "numStages", 1));
-  tOpts.matrixInstrNonkdim =
-      static_cast<int>(perfConfigField(perfConfig, "matrixInstrNonkdim", 0));
-  tOpts.kpack = static_cast<int>(perfConfigField(perfConfig, "kpack", 1));
-  tOpts.useAsyncCopy = perfConfigField(perfConfig, "useAsyncCopy", -1);
-  tOpts.useBlockPingpong = perfConfigField(perfConfig, "useBlockPingpong", -1);
-  tOpts.useInThreadTranspose =
-      perfConfigField(perfConfig, "useInThreadTranspose", -1);
-  tOpts.useBufferOps = perfConfigField(perfConfig, "useBufferOps", -1);
-  tOpts.useBufferAtomics = perfConfigField(perfConfig, "useBufferAtomics", -1);
-  tOpts.useReductionLayout =
-      perfConfigField(perfConfig, "useReductionLayout", -1);
-  tOpts.useOptimizeEpilogue =
-      perfConfigField(perfConfig, "useOptimizeEpilogue", -1);
-  mlir::rock::buildTritonPipeline(pm, tOpts);
-
-  mlir::rock::BackendOptions bOpts;
-  bOpts.triple = devName.getTriple().str();
-  bOpts.chip = devName.getChip().str();
-  bOpts.features = devName.getFeaturesForBackend();
-  bOpts.optLevel = 3;
-  bOpts.numWarps = tOpts.numWarps;
-  bOpts.numCTAs = tOpts.numCTAs;
-  bOpts.wavesPerEU =
-      static_cast<int>(perfConfigField(perfConfig, "wavesPerEU", 0));
-  mlir::rock::buildBackendPipeline(pm, bOpts);
-  return true;
-}
-
-// Walk the compiled module for the single gpu.binary object and pull out its
-// ELF blob plus the {block, grid} launch geometry (mirrors the fork's
-// mlirGetBinary / mlirGetKernelAttrs C-API, in C++).
-static bool extractCompiledKernel(mlir::ModuleOp mod, CompiledKernel &out) {
-  unsigned count = 0;
-  mod.walk([&](mlir::gpu::BinaryOp binary) {
-    auto object = llvm::cast<mlir::gpu::ObjectAttr>(binary.getObjects()[0]);
-    llvm::StringRef blob = object.getObject().getValue();
-    out.binary.assign(blob.begin(), blob.end());
-    for (auto kernel : object.getKernels()) {
-      auto block = kernel.getAttr<mlir::IntegerAttr>(
-          mlir::rock::BlockSizeAttr::getMnemonic());
-      auto grid = kernel.getAttr<mlir::IntegerAttr>(
-          mlir::rock::GridSizeAttr::getMnemonic());
-      if (!block || !grid)
-        continue;
-      out.blockSize = block.getInt();
-      out.gridSize = grid.getInt();
-      ++count;
-    }
-  });
-  return count == 1 && !out.binary.empty();
-}
-
-static bool compileBackend(mlir::ModuleOp module, llvm::StringRef arch,
-                           llvm::StringRef perfConfig, CompiledKernel &out) {
-  mlir::PassManager pm(module.getContext());
-  pm.setNesting(mlir::PassManager::Nesting::Implicit);
-  if (!buildBackendPipelineFor(pm, arch, perfConfig) ||
-      mlir::failed(pm.run(module)))
-    return false;
-  return extractCompiledKernel(module, out);
-}
 
 #if HIP_ROCMLIR_AUTOTUNE
 static bool reportHipError(hipError_t status, llvm::StringRef operation) {
@@ -311,7 +173,8 @@ private:
   std::vector<void *> deviceBuffers;
 };
 
-static bool launchKernel(hipFunction_t function, const CompiledKernel &kernel,
+static bool launchKernel(hipFunction_t function,
+                         const mlir::hip::CompiledKernel &kernel,
                          AutotuneBuffers &buffers) {
   std::vector<void *> &deviceBuffers = buffers.getDeviceBuffers();
   size_t kernargSize = deviceBuffers.size() * sizeof(void *);
@@ -327,7 +190,7 @@ static bool launchKernel(hipFunction_t function, const CompiledKernel &kernel,
          reportHipError(hipGetLastError(), "kernel launch");
 }
 
-static bool benchmarkKernel(const CompiledKernel &kernel,
+static bool benchmarkKernel(const mlir::hip::CompiledKernel &kernel,
                             llvm::StringRef kernelName,
                             const AutotuneOptions &options,
                             AutotuneBuffers &buffers, double &milliseconds) {
@@ -398,7 +261,7 @@ static bool benchmarkKernel(const CompiledKernel &kernel,
 static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
                            llvm::StringRef kernelName,
                            const AutotuneOptions &options,
-                           CompiledKernel &winner) {
+                           mlir::hip::CompiledKernel &winner) {
   hipDeviceProp_t properties{};
   int device = 0;
   if (!reportHipError(hipGetDevice(&device), "hipGetDevice") ||
@@ -440,8 +303,9 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
     if (!mlir::rock::tuningSetStr(candidateModule, perfConfig))
       continue;
 
-    CompiledKernel compiledKernel;
-    if (!compileBackend(candidateModule, arch, perfConfig, compiledKernel)) {
+    mlir::hip::CompiledKernel compiledKernel;
+    if (!mlir::hip::compileRocMlirBackend(candidateModule, arch, perfConfig,
+                                          compiledKernel)) {
       if (options.verbose)
         llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
                      << space->tuningRange.size() << ": compile failed\n";
@@ -480,70 +344,6 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
   return true;
 }
 #endif
-
-static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
-                       bool stopAfterHighLevel, const AutotuneOptions &autotune,
-                       CompiledKernel &out) {
-  auto fail = [&](const char *msg) {
-    llvm::errs() << "error: " << msg << "\n";
-    return false;
-  };
-
-  // 1. High-level pipeline: tosa -> rock.gemm.
-  {
-    mlir::PassManager pm(module.getContext());
-    pm.setNesting(mlir::PassManager::Nesting::Implicit);
-    mlir::rock::buildHighlevelPipeline(pm);
-    if (mlir::failed(pm.run(module)))
-      return fail("rocMLIR high-level pipeline failed");
-  }
-
-  // Stop after the high-level pipeline: capture the rock MLIR text and return.
-  if (stopAfterHighLevel) {
-    llvm::raw_string_ostream os(out.highLevelMlir);
-    module.print(os);
-    return true;
-  }
-
-#if HIP_ROCMLIR_AUTOTUNE
-  if (autotune.enabled) {
-    auto kernel = *module.getOps<mlir::func::FuncOp>().begin();
-    return autotuneKernel(module, arch, kernel.getSymName(), autotune, out);
-  }
-#else
-  if (autotune.enabled)
-    return fail("autotune requires a real HIP build");
-#endif
-
-  // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
-  //    Take the first entry enumerated from the tuning search space.
-  //    rock::tuningSetStr stamps `perf_config` onto the gemm op.
-  llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
-  mlir::rock::TuningParamSet *space = mlir::rock::createTunableParamSpace(
-      module, mlir::rock::TuningParamSetKind::Full);
-  unsigned num = space ? space->tuningRange.size() : 0;
-  if (num == 0) {
-    delete space;
-    return fail("perfConfig search space is empty");
-  }
-  mlir::rock::ParamEntry entry;
-  if (!mlir::rock::tuningGetParam(space, /*pos=*/0, &entry)) {
-    delete space;
-    return fail("failed to read the first perfConfig entry");
-  }
-  entry.param.getPerfConfigStr(perfConfig);
-  delete space;
-  if (autotune.verbose)
-    llvm::errs() << "[hip-rocmlir-compiler] perfConfig search space size: "
-                 << num << "; affixing first entry: " << perfConfig << "\n";
-  if (!mlir::rock::tuningSetStr(module, perfConfig))
-    return fail("failed to affix perfConfig to the gemm op");
-
-  // 3-4. Run the backend and extract the binary + launch geometry.
-  if (!compileBackend(module, arch, perfConfig, out))
-    return fail("rocMLIR backend compilation failed");
-  return true;
-}
 
 // Write a module as MLIR text for --dump-hip / --dump-tosa. Those dumps are
 // diagnostics on the way to `-o`, so a failure to write one is reported but
@@ -660,7 +460,7 @@ int main(int argc, char **argv) {
            "instead of\n"
         << "                       the compiled bitcode.\n"
         << "  Set ROCK_ARCH to override the target GPU arch (default: "
-        << resolveArch() << ").\n";
+        << mlir::hip::resolveRocMlirArch() << ").\n";
     return 1;
   }
 
@@ -747,19 +547,14 @@ int main(int argc, char **argv) {
 
   // Stage 2: on a CLONE, run the hip->tosa conversion (front of
   // buildRocMlirPipeline, minus its terminal hipEpAddHighLevelPipeline -- that
-  // runs in the .so), then serialize only the `rock.kernel` funcs and compile
-  // them through the in-tree rocMLIR pipeline. The clone is
-  // discarded; we only want the compiled binary + launch geometry back.
-  mlir::OwningOpRef<mlir::ModuleOp> tosaModule = module->clone();
-  {
-    mlir::PassManager tpm(tosaModule->getContext());
-    tpm.addNestedPass<mlir::func::FuncOp>(
-        mlir::hip::createConvertHipToTosaPass());
-    tpm.addPass(mlir::createCanonicalizerPass());
-    if (mlir::failed(tpm.run(*tosaModule))) {
-      llvm::errs() << "error: hip->tosa conversion failed\n";
-      return 1;
-    }
+  // runs in the .so), then compile the `rock.kernel` funcs through the
+  // in-tree rocMLIR pipeline. The clone is discarded; we only want the
+  // compiled binary + launch geometry back.
+  mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
+      mlir::hip::buildRocMlirTosaClone(*module);
+  if (!tosaModule) {
+    llvm::errs() << "error: hip->tosa conversion failed\n";
+    return 1;
   }
 
   // Dumped before the non-kernel funcs are dropped below, so the dump shows the
@@ -770,45 +565,30 @@ int main(int argc, char **argv) {
   if (!dumpTosaPath.empty())
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
 
-  // The rocMLIR high-level pipeline errors on any non-kernel func (its
-  // tosa->rock passes assert a `rock.kernel` attribute and walk ops assuming
-  // registered dialects). So collect the `rock.kernel` functions; each is
-  // compiled from a clone that drops every other func (e.g. `main_graph` and
-  // its hip.* ops).
-  llvm::SmallVector<std::string> kernelNames;
-  for (auto func : tosaModule->getOps<mlir::func::FuncOp>())
-    if (func->hasAttr("rock.kernel"))
-      kernelNames.push_back(func.getSymName().str());
+  const std::string arch = mlir::hip::resolveRocMlirArch();
 
-  // The tuning and backend entry points are module-scoped and assume a single
-  // anchor op per module, so a graph with several outlined kernels (a
-  // decomposed conv_transpose, say) has to be compiled one kernel at a time.
-  // Each single-kernel module keeps the original module-level attributes; only
-  // the sibling kernel funcs are dropped, then the linked-in rocMLIR pipelines
-  // run on it directly (same context, no serialization).
-  llvm::StringMap<CompiledKernel> compiledByKernel;
-  const std::string arch = resolveArch();
-  for (auto [index, name] : llvm::enumerate(kernelNames)) {
-    mlir::OwningOpRef<mlir::ModuleOp> single = tosaModule->clone();
-    for (auto func :
-         llvm::make_early_inc_range(single->getOps<mlir::func::FuncOp>()))
-      if (func.getSymName() != name)
-        func.erase();
-
-    if (kernelNames.size() > 1)
-      llvm::errs() << "[hip-rocmlir-compiler] compiling kernel '" << name
-                   << "' (" << (index + 1) << " of " << kernelNames.size()
-                   << ")\n";
-    if (!runRocmlir(*single, arch, dumpHighLevel, autotune,
-                    compiledByKernel[name]))
-      return 1;
-  }
-
-  // --dump-high-level: write the rock MLIR (text) and stop. A single kernel
-  // writes <output> verbatim so existing tuning scripts keep working; several
-  // get one file each because each dump contains one tunable kernel.
+  // --dump-high-level: write the rock MLIR (text) and stop, so nothing is
+  // embedded. A single kernel writes <output> verbatim so existing tuning
+  // scripts keep working; several get one file each because each dump
+  // contains one tunable kernel.
   if (dumpHighLevel) {
+    llvm::SmallVector<std::string> kernelNames =
+        mlir::hip::collectRocMlirKernelNames(*tosaModule);
     for (const std::string &name : kernelNames) {
+      mlir::OwningOpRef<mlir::ModuleOp> single = tosaModule->clone();
+      for (auto func :
+           llvm::make_early_inc_range(single->getOps<mlir::func::FuncOp>()))
+        if (func.getSymName() != name)
+          func.erase();
+
+      mlir::hip::CompiledKernel kernel;
+      if (!mlir::hip::runRocMlirOnKernel(*single, arch,
+                                         /*stopAfterHighLevel=*/true, kernel)) {
+        llvm::errs() << "error: rocMLIR high-level pipeline failed for '"
+                     << name << "'\n";
+        return 1;
+      }
+
       std::string path = kernelNames.size() == 1
                              ? outputPath
                              : outputPath + "." + name + ".mlir";
@@ -819,65 +599,38 @@ int main(int argc, char **argv) {
                      << "\n";
         return 1;
       }
-      os << compiledByKernel[name].highLevelMlir << "\n";
+      os << kernel.highLevelMlir << "\n";
       llvm::errs() << "[hip-rocmlir-compiler] wrote rock high-level MLIR to "
                    << path << "\n";
     }
     return 0;
   }
 
-  // Stage 3: embed the compiled artifact back into `module`'s `hip.rocmlir`
-  // dispatch op (kernel_binary + grid_size + block_size), then delete the
-  // now-compiled `rock.kernel` funcs. This matches what hip-compiler consumes:
-  // a self-contained hip module carrying the GPU binary inline.
-  //
-  // Each dispatch names its kernel func, so give it that kernel's binary and
-  // launch geometry. hip.rocmlir -> wrap_rocmlir lowering already reads both
-  // per op, so several kernels in one module need nothing further downstream.
-  mlir::Builder b(&context);
-  auto i64 = mlir::IntegerType::get(&context, 64);
-
-  llvm::SmallVector<mlir::func::FuncOp> kernelFuncs;
-  for (auto func : module->getOps<mlir::func::FuncOp>())
-    if (func->hasAttr("rock.kernel"))
-      kernelFuncs.push_back(func);
-
-  size_t totalBytes = 0;
-  mlir::WalkResult walked = module->walk([&](mlir::hip::RocMlirOp op) {
-    llvm::StringRef callee = op.getKernel();
-    auto it = compiledByKernel.find(callee);
-    if (it == compiledByKernel.end()) {
-      op.emitError() << "no compiled kernel for '" << callee << "'";
-      return mlir::WalkResult::interrupt();
-    }
-    const CompiledKernel &kernel = it->second;
-    op.setKernelBinaryAttr(mlir::StringAttr::get(
-        &context, llvm::StringRef(kernel.binary.data(), kernel.binary.size())));
-    op.setGridSizeAttr(mlir::IntegerAttr::get(i64, kernel.gridSize));
-    op.setBlockSizeAttr(mlir::IntegerAttr::get(i64, kernel.blockSize));
-    totalBytes += kernel.binary.size();
-    return mlir::WalkResult::advance();
-  });
-  if (walked.wasInterrupted())
+  // Stage 3: compile each `rock.kernel` and embed the artifact back into
+  // `module`'s `hip.rocmlir` dispatches, leaving a self-contained hip module
+  // carrying the GPU binary inline -- what hip-compiler consumes.
+  mlir::hip::RocMlirEmbedOptions embedOpts;
+  embedOpts.arch = arch;
+  embedOpts.log = &llvm::errs();
+  embedOpts.logPrefix = "[hip-rocmlir-compiler]";
+  // --autotune replaces the default "first perfConfig" choice with a
+  // benchmarked winner. It needs a real HIP device, so it stays in the tool.
+#if HIP_ROCMLIR_AUTOTUNE
+  auto autotuneOne = [&](mlir::ModuleOp single, llvm::StringRef name,
+                         mlir::hip::CompiledKernel &out) {
+    return autotuneKernel(single, arch, name, autotune, out);
+  };
+  if (autotune.enabled)
+    embedOpts.compileOne = autotuneOne;
+#else
+  if (autotune.enabled) {
+    llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
-
-  // Delete the successfully compiled kernel funcs; their body now lives in the
-  // embedded binary and the symbol is no longer needed.
-  for (auto func : kernelFuncs)
-    func.erase();
-
-  // Keep the single-kernel line byte-for-byte what it was; log the geometry
-  // per kernel first when there is more than one, since they differ.
-  for (const std::string &name : kernelNames) {
-    const CompiledKernel &kernel = compiledByKernel[name];
-    llvm::errs() << "[hip-rocmlir-compiler]   " << name << ": "
-                 << kernel.binary.size()
-                 << "-byte binary, grid_size=" << kernel.gridSize
-                 << " block_size=" << kernel.blockSize << "\n";
   }
-  llvm::errs() << "[hip-rocmlir-compiler] embedded " << totalBytes
-               << "-byte binary; deleted " << kernelFuncs.size()
-               << " kernel func(s)\n";
+#endif
+  if (mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(
+          *module, *tosaModule, embedOpts)))
+    return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-
