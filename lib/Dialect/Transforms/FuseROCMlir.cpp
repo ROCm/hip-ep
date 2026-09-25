@@ -9,7 +9,9 @@
 #include <llvm/ADT/SmallVectorExtras.h>
 #include <llvm/Support/Debug.h>
 #include <mlir/Analysis/TopologicalSortUtils.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/IR/BuiltinAttributes.h>
 #include <mlir/IR/BuiltinOps.h>
@@ -37,6 +39,19 @@ static bool isInlineScalarConstant(Value v) {
     return false;
   auto constant = v.getDefiningOp<ConstantOp>();
   return constant && constant.getValueAttr();
+}
+
+// The kernel ABI rocMLIR expects for a scalar: MIGraphX gives one the shape
+// {1}, and rock-flatten-tosa-func-args leaves rank-1 boundaries alone. A rank-0
+// argument reaches rock.transforms_to_ptr with no coordinate to linearize
+// (`affine_map -> ()`), which fails as "Transforms are not well formed";
+// tensor<1xT> still carries the single index 0.
+static Type promoteRankZero(Type type) {
+  auto tensorType = dyn_cast<RankedTensorType>(type);
+  if (!tensorType || tensorType.getRank() != 0)
+    return type;
+  return RankedTensorType::get({1}, tensorType.getElementType(),
+                               tensorType.getEncoding());
 }
 
 template <typename AnchorOp>
@@ -153,7 +168,8 @@ public:
       PatternRewriter::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(parentModule.getBody());
       auto funcType = rewriter.getFunctionType(
-          llvm::map_to_vector(operands, [](Value v) { return v.getType(); }),
+          llvm::map_to_vector(
+              operands, [](Value v) { return promoteRankZero(v.getType()); }),
           endOp->getResultTypes());
 
       newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
@@ -186,10 +202,31 @@ public:
     }
 
     rewriter.setInsertionPointAfter(endOp);
+
+    // The graph outside keeps its rank-0 value; only what crosses into the
+    // kernel is reshaped, so the dispatch matches the signature built above.
+    SmallVector<Value> dispatchOperands;
+    dispatchOperands.reserve(operands.size());
+    Value rankOneShape;
+    for (Value operand : operands) {
+      Type promoted = promoteRankZero(operand.getType());
+      if (promoted == operand.getType()) {
+        dispatchOperands.push_back(operand);
+        continue;
+      }
+      if (!rankOneShape) {
+        auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
+        rankOneShape = arith::ConstantOp::create(
+            rewriter, rewriter.getUnknownLoc(), shapeType,
+            DenseIntElementsAttr::get(shapeType, ArrayRef<int64_t>{1}));
+      }
+      dispatchOperands.push_back(tensor::ReshapeOp::create(
+          rewriter, rewriter.getUnknownLoc(), promoted, operand, rankOneShape));
+    }
+
     auto rocMlirOp = RocMlirOp::create(
         rewriter, rewriter.getUnknownLoc(), endOp->getResultTypes(),
-        SymbolRefAttr::get(newFunc), context,
-        SmallVector<Value>(operands.begin(), operands.end()),
+        SymbolRefAttr::get(newFunc), context, dispatchOperands,
         endOp.getDpsInits().front());
 
     rewriter.replaceOp(endOp, rocMlirOp);

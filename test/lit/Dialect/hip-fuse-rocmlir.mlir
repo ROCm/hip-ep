@@ -207,10 +207,12 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 // -----
 
 // Only inline constants are cloned. A bound the caller supplies at runtime has
-// no value to rematerialize, so it stays a kernel argument.
+// no value to rematerialize, so it stays a kernel argument -- but crosses the
+// boundary as tensor<1xT>. A rank-0 argument reaches rock.transforms_to_ptr
+// with no coordinate to linearize; tensor<1xT> carries the single index 0.
 
 // CHECK-LABEL: func.func @rocMlir
-// CHECK-SAME: tensor<16xf16>, %[[KBOUND:.*]]: tensor<f16>)
+// CHECK-SAME: tensor<16xf16>, %[[KBOUND:.*]]: tensor<1xf16>)
 // CHECK: hip.max
 // CHECK-SAME: %[[KBOUND]]
 
@@ -226,8 +228,12 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
        pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
   %maxInit = tensor.empty() : tensor<1x16x4x4xf16>
+  // The graph keeps its rank-0 value; only what crosses into the kernel is
+  // reshaped.
+  // CHECK: %[[R1:.*]] = tensor.reshape %[[BOUND]]
+  // CHECK-SAME: (tensor<f16>, tensor<1xindex>) -> tensor<1xf16>
   // CHECK: hip.rocmlir
-  // CHECK-SAME: %[[BOUND]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>, tensor<f16>) outs
+  // CHECK-SAME: %[[R1]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>, tensor<1xf16>) outs
   %r = hip.max(%ctx) ins(%c, %bound : tensor<1x16x4x4xf16>, tensor<f16>)
       outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
   return %r : tensor<1x16x4x4xf16>
