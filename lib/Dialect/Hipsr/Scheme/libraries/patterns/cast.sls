@@ -16,6 +16,7 @@
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)
           (mlir ffi)
+          (mlir hipsr)
           (mlir pattern-macro))
 
   ;;===--------------------------------------------------------------------===;;
@@ -30,7 +31,7 @@
     :then-let
         ([%ctx (mlir-get-hipsr-context-arg op)]
          [!output-type (mlir-value-get-type %output)]
-         [!output-device (mlir-tensor-type-in-device-space !output-type)])
+         [!output-device (mlir-tensor-type-in-device-space! !output-type)])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %input !output-device)
                         -> !output-device)
