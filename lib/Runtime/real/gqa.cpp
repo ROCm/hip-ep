@@ -735,9 +735,12 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  const bool d128_window_prefill = d == 128 && local_window_size > 0;
-  const int fused_prefill_version =
-      (d == 64 || d128_window_prefill) ? 5 : (d == 128 ? 7 : 8);
+  // d128 runs v6 where it beats v7 and v5: with a window, or with a KV group
+  // of a multiple of 4 heads. hip_gqa_flash_prefill_v2 applies the same rule
+  // when tuning online.
+  const bool v6_prefill =
+      d == 64 || (d == 128 && (local_window_size > 0 || (H / G) % 4 == 0));
+  const int fused_prefill_version = v6_prefill ? 6 : (d == 128 ? 7 : 8);
   int fp_rc;
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
       static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
@@ -748,8 +751,11 @@ static int gqa_forward_fused(
         static_cast<int>(past_len), scale, local_window_size, head_sink,
         static_cast<int>(H), use_smooth_softmax ? 1 : 0);
   } else {
+    // v6 configs are keyed in the table as PrefillV5. The table has no d128
+    // PrefillV5 points, so d128 resolves to the heuristic, M_TILES=1/BKV=32,
+    // the only config v6 builds at d128.
     const hipdnn_ep::GqaPrefillVariant variant =
-        d == 64    ? hipdnn_ep::GqaPrefillVariant::V5
+        v6_prefill ? hipdnn_ep::GqaPrefillVariant::V5
         : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7
                    : hipdnn_ep::GqaPrefillVariant::V8;
     const hipdnn_ep::GqaPrefillRequest request{variant,
@@ -785,13 +791,12 @@ static int gqa_forward_fused(
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG(
-        "[REAL] GQA prefill config source=%s v%d "
-        "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
-        hipdnn_ep::gqa_tune_source_name(selected.source), fused_prefill_version,
-        d128_window_prefill ? 1 : selected.config.m_tiles, selected.config.bkv,
-        d128_window_prefill ? 0 : selected.config.nw,
-        d128_window_prefill ? 0 : selected.config.mt, selected.config.nd);
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
+                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+                      hipdnn_ep::gqa_tune_source_name(selected.source),
+                      fused_prefill_version, selected.config.m_tiles,
+                      selected.config.bkv, selected.config.nw,
+                      selected.config.mt, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
@@ -2906,10 +2911,10 @@ int wrap_group_query_attention(
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  // head_dim gate: the fused WMMA prefill (v7) and the scalar flash-decode
-  // kernels both cover d in {64,128,256} now (d=256 for Qwen3-family 16:4). For
-  // decode, flash_decode_geometry_ok already validates d; for prefill we clamp
-  // to the templated set here.
+  // head_dim gate: the fused WMMA prefill (v6/v7/v8) and the scalar
+  // flash-decode kernels both cover d in {64,128,256} now (d=256 for
+  // Qwen3-family 16:4). For decode, flash_decode_geometry_ok already validates
+  // d; for prefill we clamp to the templated set here.
   const bool head_dim_ok =
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
