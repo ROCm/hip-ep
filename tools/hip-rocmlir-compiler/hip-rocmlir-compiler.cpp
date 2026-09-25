@@ -71,6 +71,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -84,6 +85,14 @@ static std::string resolveArch() {
     if (env[0] != '\0')
       return env;
   return "gfx1151";
+}
+
+// Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
+// "0" is off; any other value skips GPU benchmarking and affixes the first
+// enumerated perfConfig.
+static bool skipBenchmarking() {
+  const char *env = std::getenv("HIP_ROCMLIR_SKIP_BENCHMARKING");
+  return env && std::strcmp(env, "0") != 0;
 }
 
 // Read one `name=value` field out of a serialized perfConfig string of the form
@@ -115,8 +124,8 @@ static int64_t perfConfigField(llvm::StringRef perf, llvm::StringRef name,
 // context -- rocMLIR dialects are registered alongside ours):
 //   1. high-level pipeline (tosa -> rock.gemm)
 //   2. affix a perfConfig to the gemm op (the `perf_config` string attribute):
-//      either the autotune winner, or -- without --autotune -- the first
-//      entry enumerated from the tuning search space.
+//      either the autotune winner (quick space by default), or the first
+//      entry of that space when HIP_ROCMLIR_SKIP_BENCHMARKING is set.
 //   3. backend pipeline (rock -> LLVM / binary)
 // When `stopAfterHighLevel` is set, stops after step 1 and returns the printed
 // rock MLIR in `out.highLevelMlir` (steps 2-3 are skipped). Otherwise returns
@@ -130,7 +139,7 @@ struct CompiledKernel {
 };
 
 struct AutotuneOptions {
-  bool enabled = false;
+  bool enabled = true;
   bool verbose = false;
   mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
   unsigned warmupRuns = 5;
@@ -516,11 +525,11 @@ static bool runRocmlir(mlir::ModuleOp module, const std::string &arch,
 #endif
 
   // 2. Affix a perfConfig to the gemm op (as the `perf_config` string attr).
-  //    Take the first entry enumerated from the tuning search space.
-  //    rock::tuningSetStr stamps `perf_config` onto the gemm op.
+  //    Take the first entry of the selected space (quick unless --autotune=
+  //    overrode it). rock::tuningSetStr stamps `perf_config` onto the gemm op.
   llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
-  mlir::rock::TuningParamSet *space = mlir::rock::createTunableParamSpace(
-      module, mlir::rock::TuningParamSetKind::Full);
+  mlir::rock::TuningParamSet *space =
+      mlir::rock::createTunableParamSpace(module, autotune.kind);
   unsigned num = space ? space->tuningRange.size() : 0;
   if (num == 0) {
     delete space;
@@ -581,6 +590,7 @@ int main(int argc, char **argv) {
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
+  bool autotuneFlagSeen = false;
   AutotuneOptions autotune;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -595,8 +605,11 @@ int main(int argc, char **argv) {
     } else if (arg == "--verbose") {
       autotune.verbose = true;
     } else if (arg == "--autotune") {
+      autotuneFlagSeen = true;
       autotune.enabled = true;
+      autotune.kind = mlir::rock::TuningParamSetKind::Quick;
     } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
+      autotuneFlagSeen = true;
       autotune.enabled = true;
       llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
       if (kind == "quick")
@@ -625,6 +638,15 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
+  if (skipBenchmarking())
+    autotune.enabled = false;
+#if !HIP_ROCMLIR_AUTOTUNE
+  if (autotuneFlagSeen && autotune.enabled) {
+    llvm::errs() << "error: autotune requires a real HIP build\n";
+    return 1;
+  }
+  autotune.enabled = false;
+#endif
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
         << "Usage: " << argv[0]
@@ -638,9 +660,9 @@ int main(int argc, char **argv) {
         << "\n"
         << "Options:\n"
         << "  --autotune[=quick|full|exhaustive]\n"
-        << "                       Benchmark the tuning space and embed the "
-           "fastest\n"
-        << "                       GPU candidate (default space: quick).\n"
+        << "                       Override the default quick autotune space "
+           "and\n"
+        << "                       embed the fastest GPU candidate.\n"
         << "  --autotune-warmup <n>\n"
         << "                       Warmup launches per candidate (default: "
            "5).\n"
@@ -660,7 +682,11 @@ int main(int argc, char **argv) {
            "instead of\n"
         << "                       the compiled bitcode.\n"
         << "  Set ROCK_ARCH to override the target GPU arch (default: "
-        << resolveArch() << ").\n";
+        << resolveArch() << ").\n"
+        << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
+           "the\n"
+        << "  first enumerated perfConfig (same role as "
+           "MIGRAPHX_SKIP_BENCHMARKING).\n";
     return 1;
   }
 
