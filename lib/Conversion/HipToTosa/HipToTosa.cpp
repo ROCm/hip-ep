@@ -98,6 +98,21 @@ static Value transposeTo(Value input, ArrayRef<int64_t> shape,
                                    rewriter.getDenseI32ArrayAttr(permutation));
 }
 
+// Swap the trailing two dimensions, leaving any leading batch dims in place.
+static Value transposeTrailingDims(Value input,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  int64_t rank = type.getRank();
+  SmallVector<int32_t> permutation;
+  for (int64_t d = 0; d < rank; ++d)
+    permutation.push_back(static_cast<int32_t>(d));
+  std::swap(permutation[rank - 2], permutation[rank - 1]);
+  SmallVector<int64_t> shape(type.getShape());
+  std::swap(shape[rank - 2], shape[rank - 1]);
+  return transposeTo(input, shape, permutation, rewriter, loc);
+}
+
 // Zero-pad `input` by `padding`, given as [before, after] per dimension.
 static Value zeroPadTo(Value input, ArrayRef<int64_t> padding,
                        ArrayRef<int64_t> shape,
@@ -323,10 +338,6 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     if (op.getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected tensor mode");
 
-    // tosa.matmul is a plain A @ B; transposes must have been folded away.
-    if (op.getTransA() != 0 || op.getTransB() != 0)
-      return rewriter.notifyMatchFailure(op, "transA/transB unsupported");
-
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
@@ -339,19 +350,28 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
       return rewriter.notifyMatchFailure(op,
                                          "operands must be at least rank 2");
 
+    // tosa.matmul is a plain A @ B, so a transposed operand has to become a
+    // real tosa.transpose of its trailing two dims, the way GemmConverter
+    // already does for its rank-2 case. Only the dimension lookups move here;
+    // the transposes themselves are materialized further down, once every
+    // bail-out is behind us, so the collapse below still sees A[.., M, K] and
+    // B[.., K, N]. Leading dims are untouched by the swap either way.
+    bool transA = op.getTransA() != 0;
+    bool transB = op.getTransB() != 0;
+
+    ArrayRef<int64_t> aShape = aType.getShape();
+    ArrayRef<int64_t> bShape = bType.getShape();
+    int64_t k = aShape[aShape.size() - (transA ? 2 : 1)];
+    int64_t n = bShape[bShape.size() - (transB ? 2 : 1)];
+    if (bShape[bShape.size() - (transB ? 1 : 2)] != k)
+      return rewriter.notifyMatchFailure(op, "inner dimensions disagree");
+
     // tosa.matmul requires rank-3 operands with *equal* batch sizes -- it does
     // not broadcast a size-1 batch against a larger one. Both shapes below
     // reach rank 3 without needing it, but which dimension absorbs A's leading
     // dims differs, so they cannot be spelled as one case.
-    ArrayRef<int64_t> aShape = aType.getShape();
-    ArrayRef<int64_t> bShape = bType.getShape();
-    int64_t k = aShape.back();
-    int64_t n = bShape.back();
-    if (bShape[bShape.size() - 2] != k)
-      return rewriter.notifyMatchFailure(op, "inner dimensions disagree");
-
     int64_t batch = 1;
-    int64_t m = aShape[aShape.size() - 2];
+    int64_t m = aShape[aShape.size() - (transA ? 1 : 2)];
     if (bType.getRank() == 2) {
       // B is the same matrix for every batch element, so flattening A's
       // leading dims into M leaves the arithmetic untouched and avoids
@@ -381,8 +401,15 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
         batch *= d;
     }
 
-    Value a = reshapeTo(adaptor.getA(), {batch, m, k}, rewriter);
-    Value b = reshapeTo(adaptor.getB(), {batch, k, n}, rewriter);
+    Value aVal =
+        transA ? transposeTrailingDims(adaptor.getA(), rewriter, op.getLoc())
+               : adaptor.getA();
+    Value bVal =
+        transB ? transposeTrailingDims(adaptor.getB(), rewriter, op.getLoc())
+               : adaptor.getB();
+
+    Value a = reshapeTo(aVal, {batch, m, k}, rewriter);
+    Value b = reshapeTo(bVal, {batch, k, n}, rewriter);
 
     auto matmulType = resultType.clone({batch, m, n});
     // The quant-info builder appends the (zero) zero-point operands that
