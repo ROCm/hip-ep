@@ -17,6 +17,7 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/BuiltinOps.h"
 
 #include <algorithm>
@@ -33,11 +34,14 @@ struct ConversionInSchemePass
     : impl::ConversionInSchemePassBase<ConversionInSchemePass> {
   using impl::ConversionInSchemePassBase<ConversionInSchemePass>::ConversionInSchemePassBase;
 
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::hipsr::HipsrDialect,
+                    mlir::onnx::OnnxDialect,
+                    mlir::func::FuncDialect,
+                    mlir::shape::ShapeDialect>();
+  }
+
   void runOnOperation() override {
-    // Ensure required dialects are loaded
-    getContext().loadDialect<mlir::hipsr::HipsrDialect>();
-    getContext().loadDialect<mlir::onnx::OnnxDialect>();
-    getContext().loadDialect<mlir::func::FuncDialect>();
 
     // Check if module name is specified
     if (moduleName.empty()) {

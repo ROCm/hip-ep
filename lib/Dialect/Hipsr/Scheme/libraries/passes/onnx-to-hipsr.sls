@@ -29,8 +29,9 @@
   (define (onnx-return->func-return op operands-ref rewriter type-converter)
     (let ((operands (loop :for i :from 0 :below (value-array-ref-size operands-ref)
                          :collect (value-array-ref-at operands-ref i))))
-      (mlir-create-generic-op "func.return" operands '())
-      (mlir-erase-op op)
+      (mlir-set-insertion-point-before rewriter op)
+      (mlir-build-op rewriter op "func.return" operands '())
+      (mlir-erase-op rewriter op)
       #t))
 
   (define (populate-return-patterns type-converter patterns ctx)
@@ -51,7 +52,7 @@
           (when (and (string=? (mlir-operation-name op) "onnx.NoValue")
                      (= 1 (mlir-operation-use-empty op)))
             (set! dead (cons op dead)))))
-      (for-each mlir-erase-op dead)))
+      (for-each mlir-op-erase dead)))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Post-processing: rewire placeholder inputs to follow the shape graph
