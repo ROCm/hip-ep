@@ -1,0 +1,8 @@
+{
+    "_comment": "Qwen3.8-27B MatMulNBits shapes at the M values the PR changes. M=1 is the untouched GEMV path (control), M=2..7 are the new M-blocked paths, M=8/16 sit on and above the WMMA tier cutoff.",
+    "M_array": [1, 2, 3, 4, 5, 6, 7, 8, 16],
+    "KN_pairs": {
+        "K": [5120, 5120, 5120, 6144, 17408, 5120],
+        "N": [17408, 10240, 1024, 5120, 5120, 48]
+    }
+}
