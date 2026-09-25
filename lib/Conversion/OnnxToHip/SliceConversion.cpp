@@ -34,12 +34,11 @@ namespace {
 //   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
 //     steps. Produces a native `hip.slice` DPS op, executed by `wrap_slice` in
 //     Runtime/real/slice.cpp since #284 (this comment claimed a throwing stub
-//     long after that landed). Worth knowing when reading the extent logic
-//     below: that runtime D2Hs starts/ends/axes/steps and synchronizes the
-//     stream on every call, so this op already costs a host sync per
-//     execution. Dynamic output dims are computed from
-//     the slice bounds when those are host-resolvable, and otherwise fall back
-//     to `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//     long after that landed). wrap_slice launches without a D2H of the index
+//     tensors; ONNX clamp / axis mapping runs in the kernel. Dynamic output
+//     dims are computed from the slice bounds when those are host-resolvable,
+//     and otherwise fall back to `tensor.dim` on `data` (an upper bound —
+//     Slice cannot widen any axis).
 //
 // That fallback is only an upper bound, and an upper bound is not a safe
 // stand-in for the extent: the extent this pattern puts on the `tensor.empty`
@@ -543,15 +542,14 @@ struct SliceToHip : public mlir::RewritePattern {
     // therefore keeps the over-sized shape. It could be exact instead:
     // CompressConversion solves the same shrinking-extent problem by reading
     // the true count back from the device with `hip.ReadbackDimOp`. That is not
-    // done here, but not because a readback is unaffordable on this op --
-    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
-    // so the sync is paid regardless. It is that a readback would add a second
-    // sync point, in the shape computation ahead of the slice, to serve a case
-    // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
-    // bounds, and host arithmetic is strictly better than a readback wherever
-    // it is available. If a model does land here, revisit it -- the cost is
-    // lower than it looks. Hence the debug line below: the fallback is a known
-    // performance cliff, and it should be findable without an RGP capture.
+    // done here: wrap_slice no longer stalls the stream on the index tensors
+    // (the kernel resolves them), so a shape readback would be a *new* host
+    // sync ahead of the slice, for a case no model in scope reaches. On
+    // Gemma-4 every sliced axis resolves from its bounds, and host arithmetic
+    // is strictly better than a readback wherever it is available. If a model
+    // does land here, revisit it -- and budget the stall. Hence the debug line
+    // below: the fallback is a known performance cliff, and it should be
+    // findable without an RGP capture.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))

@@ -1,6 +1,15 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
+ *
+ * Before: wrap_top_k D2H'd the K scalar with a blocking hipMemcpy plus
+ *         hipStreamSynchronize, then passed K as a kernel argument so the
+ *         host could build output strides and reject K > 256.
+ * After:  no host wait. Thread 0 of each block loads K, computes k_eff
+ *         and output strides into shared memory. K > 256 sets the session
+ *         device-error flag and writes nothing (same cap as the row-local
+ *         picked arrays). Dynamic-K graphs may still readback K once in
+ *         TopKToHip to size tensor.empty; wrap_top_k does not D2H again.
  */
 
 #include "hip_custom_kernels.h"
@@ -14,17 +23,47 @@
 namespace {
 
 constexpr int kMaxRank = 8;
+constexpr int64_t kTopKMaxK = 256;
 
 struct TopKGeom {
   int64_t rank;
   int64_t axis;
-  int64_t k;
   int64_t in_shape[kMaxRank];
   int64_t in_stride[kMaxRank];
-  int64_t out_stride[kMaxRank];
   int64_t num_rows;
   int64_t axis_size;
 };
+
+struct TopKResolved {
+  int64_t k_eff;
+  int64_t out_stride[kMaxRank];
+  int error;
+};
+
+__device__ void resolve_topk_k(const int64_t *__restrict__ k_dev,
+                               const TopKGeom &geom, TopKResolved *out) {
+  out->error = 0;
+  out->k_eff = 0;
+  int64_t k = *k_dev;
+  if (k <= 0)
+    return;
+  if (k > kTopKMaxK) {
+    out->error = -1;
+    return;
+  }
+  int64_t k_eff = k;
+  if (k_eff > geom.axis_size)
+    k_eff = geom.axis_size;
+  out->k_eff = k_eff;
+
+  int64_t out_shape[kMaxRank];
+  for (int64_t i = 0; i < geom.rank; ++i)
+    out_shape[i] = geom.in_shape[i];
+  out_shape[geom.axis] = k_eff;
+  out->out_stride[geom.rank - 1] = 1;
+  for (int64_t i = geom.rank - 2; i >= 0; --i)
+    out->out_stride[i] = out->out_stride[i + 1] * out_shape[i + 1];
+}
 
 __device__ float topk_elem_to_float(float v) { return v; }
 
@@ -54,7 +93,8 @@ __device__ bool topk_better(float candidate, float best, bool largest) {
 template <typename T>
 __device__ void topk_row(const T *__restrict__ data, T *__restrict__ values,
                          int64_t *__restrict__ indices, TopKGeom geom,
-                         int64_t row_id, int largest, int sorted) {
+                         const TopKResolved &resolved, int64_t row_id,
+                         int largest, int sorted) {
   (void)sorted;
   int64_t coords[kMaxRank] = {0};
   int64_t rem = row_id;
@@ -74,14 +114,12 @@ __device__ void topk_row(const T *__restrict__ data, T *__restrict__ values,
     base_offset += coords[d] * geom.in_stride[d];
   }
 
-  int64_t k_eff = geom.k;
-  if (k_eff > geom.axis_size)
-    k_eff = geom.axis_size;
+  int64_t k_eff = resolved.k_eff;
   if (k_eff <= 0)
     return;
 
-  int64_t picked_idx[256];
-  float picked_val[256];
+  int64_t picked_idx[kTopKMaxK];
+  float picked_val[kTopKMaxK];
   int64_t picked_count = 0;
 
   for (int64_t j = 0; j < k_eff; ++j) {
@@ -121,7 +159,7 @@ __device__ void topk_row(const T *__restrict__ data, T *__restrict__ values,
     coords[geom.axis] = j;
     int64_t out_offset = 0;
     for (int64_t d = 0; d < geom.rank; ++d)
-      out_offset += coords[d] * geom.out_stride[d];
+      out_offset += coords[d] * resolved.out_stride[d];
     topk_store_value(values, out_offset, picked_val[j]);
     indices[out_offset] = picked_idx[j];
   }
@@ -130,18 +168,31 @@ __device__ void topk_row(const T *__restrict__ data, T *__restrict__ values,
 template <typename T>
 __global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
                              int64_t *__restrict__ indices, TopKGeom geom,
-                             int largest, int sorted) {
+                             const int64_t *__restrict__ k_dev, int largest,
+                             int sorted, int *device_error_flag) {
+  __shared__ TopKResolved resolved;
+  if (threadIdx.x == 0)
+    resolve_topk_k(k_dev, geom, &resolved);
+  __syncthreads();
+
+  if (resolved.error && device_error_flag && threadIdx.x == 0 &&
+      blockIdx.x == 0)
+    *device_error_flag = -1;
+  if (resolved.k_eff <= 0)
+    return;
+
   int64_t row_id =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (row_id >= geom.num_rows)
     return;
-  topk_row(data, values, indices, geom, row_id, largest, sorted);
+  topk_row(data, values, indices, geom, resolved, row_id, largest, sorted);
 }
 
 template <typename T>
 static int launch_top_k(void *stream, const void *data, void *values,
-                        void *indices, const TopKGeom &geom, int largest,
-                        int sorted) {
+                        void *indices, const TopKGeom &geom,
+                        const int64_t *k_dev, int largest, int sorted,
+                        int *device_error_flag) {
   if (geom.num_rows <= 0)
     return 0;
 
@@ -154,7 +205,8 @@ static int launch_top_k(void *stream, const void *data, void *values,
   hipLaunchKernelGGL(HIP_KERNEL_NAME(top_k_kernel<T>), dim3(grid_size),
                    dim3(kBlockSize), 0, hip_stream,
                    static_cast<const T *>(data), static_cast<T *>(values),
-                   static_cast<int64_t *>(indices), geom, largest, sorted);
+                   static_cast<int64_t *>(indices), geom, k_dev, largest,
+                   sorted, device_error_flag);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
@@ -167,22 +219,15 @@ static int launch_top_k(void *stream, const void *data, void *values,
 
 } // namespace
 
-extern "C" int hip_top_k(void *stream, const void *data, void *values,
-                         void *indices, int64_t axis, int64_t largest,
-                         int64_t sorted, int64_t rank,
-                         const int64_t *x_shape, int64_t k,
-                         int element_size_bytes) {
-  if (!data || !values || !indices || !x_shape)
+extern "C" int hip_top_k(void *stream, const void *data, const void *k,
+                         void *values, void *indices, int64_t axis,
+                         int64_t largest, int64_t sorted, int64_t rank,
+                         const int64_t *x_shape, int element_size_bytes,
+                         void *device_error_flag) {
+  if (!data || !k || !values || !indices || !x_shape)
     return -1;
   if (rank <= 0 || rank > kMaxRank)
     return -1;
-  if (k <= 0)
-    return 0;
-  if (k > 256) {
-    fprintf(stderr, "[custom_kernels] hip_top_k: K=%lld exceeds max 256\n",
-            (long long)k);
-    return -1;
-  }
 
   TopKGeom geom{};
   geom.rank = rank;
@@ -192,7 +237,6 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
   if (geom.axis < 0 || geom.axis >= rank)
     return -1;
 
-  geom.k = k;
   for (int64_t i = 0; i < rank; ++i)
     geom.in_shape[i] = x_shape[i];
 
@@ -201,18 +245,6 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
     geom.in_stride[i] = geom.in_stride[i + 1] * geom.in_shape[i + 1];
 
   geom.axis_size = geom.in_shape[geom.axis];
-  int64_t k_eff = geom.k;
-  if (k_eff > geom.axis_size)
-    k_eff = geom.axis_size;
-
-  int64_t out_shape[kMaxRank];
-  for (int64_t i = 0; i < rank; ++i)
-    out_shape[i] = geom.in_shape[i];
-  out_shape[geom.axis] = k_eff;
-
-  geom.out_stride[rank - 1] = 1;
-  for (int64_t i = rank - 2; i >= 0; --i)
-    geom.out_stride[i] = geom.out_stride[i + 1] * out_shape[i + 1];
   geom.num_rows = 1;
   for (int64_t i = 0; i < rank; ++i) {
     if (i == geom.axis)
@@ -221,25 +253,26 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
   }
 
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_top_k: axis=%lld, k=%lld, rank=%lld, "
+      "[custom_kernels] hip_top_k: axis=%lld, rank=%lld, "
       "rows=%lld, axis_size=%lld, elem=%d\n",
-      (long long)geom.axis, (long long)geom.k, (long long)rank,
-      (long long)geom.num_rows, (long long)geom.axis_size,
-      element_size_bytes);
+      (long long)geom.axis, (long long)rank, (long long)geom.num_rows,
+      (long long)geom.axis_size, element_size_bytes);
 
+  const int64_t *k_dev = static_cast<const int64_t *>(k);
+  int *err_flag = static_cast<int *>(device_error_flag);
   switch (element_size_bytes) {
   case 2:
-    return launch_top_k<__half>(stream, data, values, indices, geom,
+    return launch_top_k<__half>(stream, data, values, indices, geom, k_dev,
                                 static_cast<int>(largest),
-                                static_cast<int>(sorted));
+                                static_cast<int>(sorted), err_flag);
   case 4:
-    return launch_top_k<float>(stream, data, values, indices, geom,
+    return launch_top_k<float>(stream, data, values, indices, geom, k_dev,
                                static_cast<int>(largest),
-                               static_cast<int>(sorted));
+                               static_cast<int>(sorted), err_flag);
   case 8:
-    return launch_top_k<double>(stream, data, values, indices, geom,
+    return launch_top_k<double>(stream, data, values, indices, geom, k_dev,
                               static_cast<int>(largest),
-                              static_cast<int>(sorted));
+                              static_cast<int>(sorted), err_flag);
   default:
     fprintf(stderr,
             "[custom_kernels] hip_top_k: unsupported element_size=%d\n",

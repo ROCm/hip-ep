@@ -382,7 +382,7 @@ class TestGatherND:
 # `tensor.extract_slice` upstream; this test exercises the runtime fallback
 # kernel by:
 #   (a) feeding `starts` / `ends` as *graph inputs* (non-constant) -- forces
-#       the runtime D2H + host-side resolution path, OR
+#       the device-side index-resolution path, OR
 #   (b) using negative steps -- the fold rejects this case so it falls
 #       through to the runtime kernel as well.
 #
