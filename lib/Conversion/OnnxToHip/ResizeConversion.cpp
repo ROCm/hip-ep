@@ -59,7 +59,14 @@ struct ResizeToHip : public mlir::RewritePattern {
       : RewritePattern("onnx.Resize", /*benefit=*/1, ctx) {}
 
   static bool isAbsent(mlir::Value v) {
-    return !v || mlir::isa<mlir::NoneType>(v.getType());
+    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+      return true;
+    // Some exporters supply an omitted optional input (e.g. roi) as a
+    // statically empty tensor (0 elements) rather than a NoValue. Treat that as
+    // absent so a Resize with an empty roi still matches the supported subset.
+    if (auto tt = mlir::dyn_cast<mlir::RankedTensorType>(v.getType()))
+      return tt.hasStaticShape() && tt.getNumElements() == 0;
+    return false;
   }
 
   mlir::LogicalResult
