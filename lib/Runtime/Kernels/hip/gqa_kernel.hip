@@ -3818,6 +3818,17 @@ static inline bool prefillV6D128Enabled() {
 static constexpr int kPrefillV6D128MTiles = 1;
 static constexpr int kPrefillV6D128Bkv    = 32;
 
+// True when this full-attention head_dim 128 prefill should run v6. Sinks and
+// windows stay on their existing kernels, and v6 needs whole KV groups.
+static inline bool prefillV6D128Applies(
+    int d, int Hq, int G, const void* head_sink, int smooth_softmax,
+    int local_window_size)
+{
+    return d == 128 && prefillV6D128Enabled() && G > 0 && Hq % G == 0 &&
+           head_sink == nullptr && smooth_softmax == 0 &&
+           local_window_size <= 0;
+}
+
 static int g_v5_ablate = 0;  // perf-diagnostics ablation bitmask (default off)
 
 static inline void dispatchPrefillV5(
@@ -4947,19 +4958,6 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr       = static_cast<_Float16*>(O);
 
-    // Opt-in v6 routing for head_dim 128. This entry carries neither sinks nor
-    // a window, so v6's remaining requirement is Hq % G == 0, which
-    // wrap_group_query_attention already enforces. The config is pinned
-    // because only one of the four is spill-free at this head dim, so there is
-    // nothing for the tuner to choose between.
-    if (d == 128 && prefillV6D128Enabled() && Hq % G == 0) {
-        dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d, stream,
-                          Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq, skv,
-                          max_seq, past_len, scale, nullptr, Hq, 0,
-                          /*local_window_size=*/0);
-        return 0;
-    }
-
     // skv is bucketed by power of two, not exact (the decode autotune above does
     // the same, and v5 drops it from the key entirely on the grounds that it
     // scales every candidate's KV loop uniformly and so cannot reorder them).
@@ -5095,6 +5093,20 @@ extern "C" int hip_gqa_flash_prefill_v2(
         // fall through to v7
     }
     if (d == 128 || d == 256) {
+        // Opt-in: head_dim 128 full attention runs v6. Kept here rather than
+        // inside the v7 entry so that entry still means "run v7", which the
+        // prefill benchmark relies on for an unchanged A/B reference.
+        if (prefillV6D128Applies(d, Hq, G, nullptr, 0, 0)) {
+            dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d,
+                              static_cast<hipStream_t>(stream_ptr),
+                              static_cast<const _Float16*>(Q),
+                              static_cast<const _Float16*>(Kcache),
+                              static_cast<const _Float16*>(Vcache),
+                              static_cast<_Float16*>(O), B, Hq, G, sq, skv,
+                              max_seq, past_len, scale, nullptr, Hq, 0,
+                              /*local_window_size=*/0);
+            return 0;
+        }
         // v7 is D-generic (M-register-blocked, K streamed from global).
         return hip_gqa_flash_prefill_v7_v2(stream_ptr, Q, Kcache, Vcache, O,
                                         B, Hq, G, sq, skv, d, max_seq, past_len,
@@ -5145,6 +5157,18 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
             dispatchPrefillV5(1, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
                               B, Hq, G, sq, skv, max_seq, past_len, scale,
                               nullptr, Hq, 0, local_window_size);
+            return 0;
+        }
+        // Opt-in v6 routing. This is the entry the EP uses in the default
+        // lookup mode, so it has to be hooked here as well as in the online
+        // path. The LUT's (nw, bkv, mt) does not apply to v6, whose one
+        // spill-free config at this head dim is pinned instead.
+        if (prefillV6D128Applies(d, Hq, G, head_sink, smooth_softmax,
+                                 local_window_size)) {
+            dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d,
+                              stream, Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq,
+                              skv, max_seq, past_len, scale, nullptr, Hq, 0,
+                              /*local_window_size=*/0);
             return 0;
         }
         PrefillV7Cfg candidates[12];
