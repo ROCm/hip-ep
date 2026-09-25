@@ -57,7 +57,6 @@
 
     ;; Operation traversal
     mlir-operation-walk
-    mlir-operation-walk-rewrite
 
     ;; Value operations
     mlir-value-get-defining-op
@@ -115,14 +114,20 @@
     ;; Dialect conversion helpers (generic MLIR utilities)
     mlir-populate-func-type-conversion-pattern
 
-    ;; IR construction
-    mlir-create-generic-op
-    mlir-operation-get-result-value-from-op
-    mlir-create-unrealized-conversion-cast
+    ;; Builder — explicit rewriter-based op construction
+    mlir-build-op
+    mlir-set-insertion-point-before
+    mlir-set-insertion-point-to-block-end
+    mlir-op-get-region
+    mlir-region-create-block
+    mlir-block-get-argument
+    mlir-get-shape-shape-type
+    mlir-operation-get-result           ; get result value from op at index
 
     ;; Pattern rewriting
-    mlir-replace-op
-    mlir-erase-op
+    mlir-replace-op     ; (rewriter old-op new-value) → int
+    mlir-erase-op       ; (rewriter op) → int
+    mlir-op-erase       ; (op) → void  — direct erase, no rewriter needed
     mlir-notify-match-failure
 
     ;; Pattern registration (for Scheme-defined patterns)
@@ -251,14 +256,6 @@
   ;;; @note Callback is passed as scheme-object (GC-tracked), NOT uptr
   (define mlir-operation-walk
     (foreign-procedure "mlir_operation_walk" (uptr scheme-object) void))
-
-  ;;; @brief Walk all operations with rewriter support
-  ;;; @param op-ptr Root Operation* as uptr
-  ;;; @param callback Scheme procedure taking one argument (Operation* as uptr)
-  ;;; @note Callback is passed as scheme-object (GC-tracked), NOT uptr
-  ;;; @note Callback can use mlir-replace-op/mlir-erase-op during walk
-  (define mlir-operation-walk-rewrite
-    (foreign-procedure "mlir_operation_walk_rewrite" (uptr scheme-object) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Logging
@@ -539,36 +536,44 @@
   ;; IR Construction
   ;;===--------------------------------------------------------------------===;;
 
-  ;;; @brief Create a hipsr.placeholder operation
-  ;;; @param ctx-ptr MLIRContext* as uptr
-  ;;; @param input-value Input Value* as uptr
-  ;;; @param result-type Result Type* as uptr
-  ;;; @param placeholder-type Placeholder type enum as int
+  ;;; @brief Create an MLIR operation at the current rewriter insertion point.
+  ;;; @param rewriter Rewriter* as uptr (passed explicitly by pattern callback)
+  ;;; @param loc-op   Operation* whose location is used for the new op
+  ;;; @param op-name  Operation name string (e.g., "hipsr.cast")
+  ;;; @param operands Scheme list of Value* uptrs
+  ;;; @param result-types Scheme list of Type* uptrs
   ;;; @return Created Operation* as uptr
-  ;;; @note Placeholder ops are temporary and get replaced during conversion
-  (define mlir-create-placeholder-op
-    (foreign-procedure "mlir_create_placeholder_op"
-                       (uptr uptr uptr int) uptr))
+  (define mlir-build-op
+    (foreign-procedure "mlir_build_op"
+                       (uptr uptr string scheme-object scheme-object) uptr))
 
-  ;;; @brief Create a hipsr.cast operation
-  ;;; @param ctx-ptr MLIRContext* as uptr
-  ;;; @param input-value Input Value* as uptr
-  ;;; @param output-value Output Value* as uptr (typically from placeholder)
-  ;;; @param result-type Result Type* as uptr
-  ;;; @return Created Operation* as uptr
-  (define mlir-create-cast-op
-    (foreign-procedure "mlir_create_cast_op"
-                       (uptr uptr uptr uptr) uptr))
+  ;;; @brief Set rewriter insertion point to immediately before an operation.
+  (define mlir-set-insertion-point-before
+    (foreign-procedure "mlir_set_insertion_point_before" (uptr uptr) void))
 
-  ;;; @brief Create a generic MLIR operation by name
-  ;;; @param op-name Operation name as string (e.g., "hipsr.add")
-  ;;; @param operands-list Scheme list of Value* (as uptr)
-  ;;; @param result-types-list Scheme list of Type* (as uptr)
-  ;;; @return Created Operation* as uptr
-  ;;; @note Lists are passed as scheme-object (GC-tracked), NOT uptr
-  (define mlir-create-generic-op
-    (foreign-procedure "mlir_create_generic_op"
-                       (string scheme-object scheme-object) uptr))
+  ;;; @brief Set rewriter insertion point to the end of a block.
+  (define mlir-set-insertion-point-to-block-end
+    (foreign-procedure "mlir_set_insertion_point_to_block_end" (uptr uptr) void))
+
+  ;;; @brief Get the i-th region of an operation. Returns Region* as uptr.
+  (define mlir-op-get-region
+    (foreign-procedure "mlir_op_get_region" (uptr int) uptr))
+
+  ;;; @brief Create a block in a region with given arg types. Sets IP to its end.
+  ;;; @param rewriter Rewriter* as uptr
+  ;;; @param region   Region* as uptr
+  ;;; @param arg-types Scheme list of Type* uptrs
+  ;;; @return Block* as uptr
+  (define mlir-region-create-block
+    (foreign-procedure "mlir_region_create_block" (uptr uptr scheme-object) uptr))
+
+  ;;; @brief Get the i-th argument of a block as a Value* uptr.
+  (define mlir-block-get-argument
+    (foreign-procedure "mlir_block_get_argument" (uptr int) uptr))
+
+  ;;; @brief Get the shape::ShapeType from an MLIRContext.
+  (define mlir-get-shape-shape-type
+    (foreign-procedure "mlir_get_shape_shape_type" (uptr) uptr))
 
   ;;; @brief Set an integer attribute on an operation
   ;;; @param op-ptr Operation* as uptr
@@ -603,41 +608,27 @@
   (define mlir-operation-get-dps-init-value
     (foreign-procedure "mlir_operation_get_dps_init_value" (uptr int) uptr))
 
-  ;;; @brief Get a result Value* from an operation by index
-  ;;; @param op-ptr Operation* as uptr
-  ;;; @param index Result index as int
-  ;;; @return Value* as uptr
-  (define mlir-operation-get-result-value-from-op
-    (foreign-procedure "mlir_operation_get_result_value_from_op"
-                       (uptr int) uptr))
-
-  ;;; @brief Create an unrealized_conversion_cast operation
-  ;;; @param input-value Input Value* as uptr
-  ;;; @param result-type Result Type* as uptr
-  ;;; @return Created Operation* as uptr
-  ;;; @note Used for type conversions that will be resolved later
-  (define mlir-create-unrealized-conversion-cast
-    (foreign-procedure "mlir_create_unrealized_conversion_cast"
-                       (uptr uptr) uptr))
-
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Rewriting
   ;;===--------------------------------------------------------------------===;;
 
-  ;;; @brief Replace an operation with another operation's results
-  ;;; @param old-op-ptr Operation* to replace as uptr
-  ;;; @param new-op-ptr Operation* whose results replace old-op as uptr
-  ;;; @return 0 on success, non-zero on failure
-  ;;; @note Old operation is marked for deletion, new operation provides results
+  ;;; @brief Replace an operation with a value. Takes explicit rewriter.
+  ;;; @param rewriter Rewriter* as uptr
+  ;;; @param old-op   Operation* to replace as uptr
+  ;;; @param new-val  Replacement Value* as uptr
   (define mlir-replace-op
-    (foreign-procedure "mlir_replace_op" (uptr uptr) int))
+    (foreign-procedure "mlir_replace_op" (uptr uptr uptr) int))
 
-  ;;; @brief Erase an operation from the IR
-  ;;; @param op-ptr Operation* to erase as uptr
-  ;;; @return 0 on success, non-zero on failure
-  ;;; @note Operation must have no uses remaining
+  ;;; @brief Erase an operation. Takes explicit rewriter.
+  ;;; @param rewriter Rewriter* as uptr
+  ;;; @param op       Operation* to erase as uptr
   (define mlir-erase-op
-    (foreign-procedure "mlir_erase_op" (uptr) int))
+    (foreign-procedure "mlir_erase_op" (uptr uptr) int))
+
+  ;;; @brief Erase an operation directly without a rewriter.
+  ;;; For post-pass cleanup outside a ConversionPattern callback.
+  (define mlir-op-erase
+    (foreign-procedure "mlir_op_erase" (uptr) void))
 
   ;;; @brief Notify pattern matching system of a match failure
   ;;; @param op-ptr Operation* that failed to match as uptr

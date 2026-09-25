@@ -293,7 +293,10 @@ def ConversionInSchemePass : Pass<"conversion-in-scheme", "mlir::ModuleOp"> {
            "Logging level: trace, debug, info, warning, error, fatal">
   ];
   let dependentDialects = [
-    "::mlir::hipsr::HipsrDialect"
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::onnx::OnnxDialect",
+    "::mlir::func::FuncDialect",
+    "::mlir::shape::ShapeDialect"
   ];
 }
 

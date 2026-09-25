@@ -6,8 +6,8 @@
 #include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
 #include "hip/Dialect/Hipsr/Scheme/Runtime/LockedSchemeObject.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Debug.h"
@@ -27,12 +27,6 @@
 
 // Note: scheme.h already included via SchemeMlirBindings.h → ChezSchemeInterpreter.h
 // Do NOT include it again here to avoid redefinition errors
-
-namespace {
-// Thread-local RewriterBase context for FFI functions
-thread_local mlir::RewriterBase* g_current_rewriter = nullptr;
-thread_local mlir::Operation* g_current_operation = nullptr;
-}
 
 namespace mlir {
 namespace hipsr {
@@ -55,17 +49,6 @@ ptr makeSchemeType(mlir::Type type) {
 
 ptr makeSchemeAttribute(mlir::Attribute attr) {
   return Sunsigned64(reinterpret_cast<uint64_t>(attr.getAsOpaquePointer()));
-}
-
-// Set/get the current rewriter for FFI operations
-void setCurrentRewriter(mlir::RewriterBase* rewriter, mlir::Operation* op) {
-  g_current_rewriter = rewriter;
-  g_current_operation = op;
-}
-
-void clearCurrentRewriter() {
-  g_current_rewriter = nullptr;
-  g_current_operation = nullptr;
 }
 
 } // namespace hipsr
@@ -197,30 +180,6 @@ void mlir_operation_walk(uint64_t op, ptr callback) {
   });
 }
 
-// Walk operation tree with pattern rewriting support
-// callback: Scheme procedure (lambda (op) ...) that returns #t if it rewrote the op
-void mlir_operation_walk_rewrite(uint64_t op, ptr callback) {
-  if (!op) return;
-  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
-
-  // Use IRRewriter for greedy pattern application
-  mlir::IRRewriter rewriter(cppOp->getContext());
-
-  cppOp->walk([callback, &rewriter](mlir::Operation* walkOp) {
-    // Set rewriter context for this operation
-    mlir::hipsr::setCurrentRewriter(&rewriter, walkOp);
-
-    ptr schemeOp = Sunsigned64(reinterpret_cast<uint64_t>(walkOp));
-    ptr result = Scall1(callback, schemeOp);
-
-    // Clear rewriter context
-    mlir::hipsr::clearCurrentRewriter();
-
-    // result is #t if Scheme code rewrote the operation, #f otherwise
-    // We don't need to do anything special here - the Scheme code
-    // already called mlir_replace_op if it wanted to rewrite
-  });
-}
 
 // Logging functions callable from Scheme
 void mlir_log_trace(const char* msg) {
@@ -351,203 +310,130 @@ ptr mlir_operation_get_block_argument(ptr op_ptr, int index) {
 }
 
 //===----------------------------------------------------------------------===//
-// Phase 3: IR Construction FFI (OpBuilder)
+// Phase 3 & 4: Explicit builder API
 //===----------------------------------------------------------------------===//
 
-ptr mlir_create_placeholder_op(ptr ctx_value, ptr input_value,
-                                       ptr result_type, int placeholder_type_int) {
-  if (!g_current_rewriter || !g_current_operation) {
-    mlir_log_error("mlir_create_placeholder_op: No active PatternRewriter context");
-    return nullptr;
-  }
+// Create an operation at the current rewriter insertion point.
+// Caller must set the insertion point explicitly before calling.
+// For hipsr.placeholder: automatically adds the shape region and placeholder_type attr.
+uint64_t mlir_build_op(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
+                        const char* op_name,
+                        ptr operands_list, ptr result_types_list) {
+  if (!rewriter_ptr || !loc_op_ptr) return 0;
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* loc_op   = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
 
-  mlir::Value ctx = mlir::Value::getFromOpaquePointer(ctx_value);
-  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
-  mlir::Type resType = mlir::Type::getFromOpaquePointer(result_type);
-
-  mlir::Location loc = g_current_operation->getLoc();
-  mlir::hipsr::PlaceholderType placeholderType =
-      static_cast<mlir::hipsr::PlaceholderType>(placeholder_type_int);
-
-  // Set insertion point before the operation being replaced
-  g_current_rewriter->setInsertionPoint(g_current_operation);
-
-  auto placeholderOp = g_current_rewriter->create<mlir::hipsr::PlaceholderOp>(
-      loc, mlir::TypeRange{resType}, ctx, mlir::ValueRange{input}, placeholderType);
-
-  return const_cast<void*>(placeholderOp.getResult(0).getAsOpaquePointer());
-}
-
-ptr mlir_create_cast_op(ptr ctx_value, ptr input_value,
-                                ptr output_value, ptr result_type) {
-  if (!g_current_rewriter || !g_current_operation) {
-    mlir_log_error("mlir_create_cast_op: No active PatternRewriter context");
-    return nullptr;
-  }
-
-  // Ensure HipsrDialect is loaded in the rewriter's context
-  auto *mlirContext = g_current_operation->getContext();
-  mlirContext->loadDialect<mlir::hipsr::HipsrDialect>();
-
-  mlir::Value ctx = mlir::Value::getFromOpaquePointer(ctx_value);
-  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
-  mlir::Value output = mlir::Value::getFromOpaquePointer(output_value);
-  mlir::Type resType = mlir::Type::getFromOpaquePointer(result_type);
-
-  mlir::Location loc = g_current_operation->getLoc();
-
-  auto castOp = g_current_rewriter->create<mlir::hipsr::CastOp>(
-      loc, mlir::TypeRange{resType}, ctx, input, output);
-
-  return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
-}
-
-// Generic operation builder
-// op_name: operation name string (e.g., "hipsr.min")
-// operands_list: Scheme list of operand Values
-// result_types_list: Scheme list of result Types
-// Returns: Operation* as ptr
-ptr mlir_create_generic_op(const char* op_name,
-                                   ptr operands_list,
-                                   ptr result_types_list) {
-  if (!g_current_rewriter || !g_current_operation) {
-    mlir_log_error("mlir_create_generic_op: No active PatternRewriter context");
-    return nullptr;
-  }
-
-  mlir::Location loc = g_current_operation->getLoc();
-  g_current_rewriter->setInsertionPoint(g_current_operation);
-
-  // Convert Scheme list to C++ vectors
   llvm::SmallVector<mlir::Value> operands;
-  llvm::SmallVector<mlir::Type> resultTypes;
+  llvm::SmallVector<mlir::Type>  resultTypes;
 
-  // Parse operands list
-  ptr current = static_cast<ptr>(operands_list);
-  while (current != Snil) {
-    if (!Spairp(current)) {
-      mlir_log_error("mlir_create_generic_op: operands must be a proper list");
-      return nullptr;
-    }
-    ptr operand_ptr = Scar(current);
-    uint64_t operand_val = Sinteger64_value(operand_ptr);
-    mlir::Value operand = mlir::Value::getFromOpaquePointer(
-        reinterpret_cast<void*>(operand_val));
-    mlir_log_info((std::string("  operand value=") + std::to_string(operand_val) +
-                   " defOp=" + std::to_string(reinterpret_cast<uintptr_t>(operand.getDefiningOp())) +
-                   " impl=" + std::to_string(reinterpret_cast<uintptr_t>(operand.getImpl()))).c_str());
-    operands.push_back(operand);
-    current = Scdr(current);
+  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op: bad operands list"); return 0; }
+    uint64_t v = Sunsigned64_value(Scar(cur));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+  }
+  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op: bad result types list"); return 0; }
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
   }
 
-  // Parse result types list
-  current = static_cast<ptr>(result_types_list);
-  while (current != Snil) {
-    if (!Spairp(current)) {
-      mlir_log_error("mlir_create_generic_op: result types must be a proper list");
-      return nullptr;
-    }
-    ptr type_ptr = Scar(current);
-    mlir::Type type = mlir::Type::getFromOpaquePointer(
-        reinterpret_cast<void*>(Sinteger64_value(type_ptr)));
-    resultTypes.push_back(type);
-    current = Scdr(current);
-  }
-
-  // Create operation using OpBuilder
-  mlir_log_info((std::string("mlir_create_generic_op: creating op '") + op_name + "'").c_str());
-  mlir::OperationState state(loc, op_name);
+  mlir::OperationState state(loc_op->getLoc(), op_name);
   state.addOperands(operands);
   state.addTypes(resultTypes);
 
-  // Add empty region and attributes for operations that require them
-  std::string op_name_str(op_name);
-  if (op_name_str == "hipsr.placeholder") {
+  // hipsr.placeholder requires an empty shape region and placeholder_type attr
+  if (std::string_view(op_name) == "hipsr.placeholder") {
     state.addRegion();
-    // Add placeholder_type attribute (Normal = 0)
-    auto *mlirContext = g_current_operation->getContext();
-    auto placeholderTypeAttr = mlir::hipsr::PlaceholderTypeAttr::get(
-        mlirContext, mlir::hipsr::PlaceholderType::Normal);
-    state.addAttribute("placeholder_type", placeholderTypeAttr);
+    state.addAttribute("placeholder_type",
+        mlir::hipsr::PlaceholderTypeAttr::get(loc_op->getContext(),
+                                               mlir::hipsr::PlaceholderType::Normal));
   }
 
-  mlir::Operation* op = g_current_rewriter->create(state);
-  mlir_log_info((std::string("mlir_create_generic_op: created op=") +
-                 std::to_string(reinterpret_cast<uintptr_t>(op))).c_str());
-  return reinterpret_cast<ptr>(op);
+  return reinterpret_cast<uint64_t>(rewriter->create(state));
 }
 
-// Get result value from operation
-// op: Operation* as ptr
-// index: result index
-// Returns: Value as ptr
-ptr mlir_operation_get_result_value_from_op(ptr op_ptr, int index) {
-  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
-  if (!op) {
-    mlir_log_error("mlir_operation_get_result_value_from_op: null operation");
-    return nullptr;
-  }
-
-  if (index < 0 || index >= static_cast<int>(op->getNumResults())) {
-    mlir_log_error("mlir_operation_get_result_value_from_op: index out of range");
-    return nullptr;
-  }
-
-  return const_cast<void*>(op->getResult(index).getAsOpaquePointer());
+// Set rewriter insertion point to immediately before op.
+void mlir_set_insertion_point_before(uint64_t rewriter_ptr, uint64_t op_ptr) {
+  if (!rewriter_ptr || !op_ptr) return;
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->setInsertionPoint(reinterpret_cast<mlir::Operation*>(op_ptr));
 }
 
-//===----------------------------------------------------------------------===//
-// Phase 4: Pattern Rewriter FFI
-//===----------------------------------------------------------------------===//
-
-ptr mlir_create_unrealized_conversion_cast(ptr input_value, ptr target_type) {
-  if (!g_current_rewriter || !g_current_operation) {
-    mlir_log_error("mlir_create_unrealized_conversion_cast: No active PatternRewriter context");
-    return nullptr;
-  }
-
-  mlir::Value input = mlir::Value::getFromOpaquePointer(input_value);
-  mlir::Type targetType = mlir::Type::getFromOpaquePointer(target_type);
-  mlir::Location loc = g_current_operation->getLoc();
-
-  g_current_rewriter->setInsertionPoint(g_current_operation);
-
-  auto castOp = g_current_rewriter->create<mlir::UnrealizedConversionCastOp>(
-      loc, mlir::TypeRange{targetType}, mlir::ValueRange{input});
-
-  return const_cast<void*>(castOp.getResult(0).getAsOpaquePointer());
+// Set rewriter insertion point to the end of a block.
+void mlir_set_insertion_point_to_block_end(uint64_t rewriter_ptr, uint64_t block_ptr) {
+  if (!rewriter_ptr || !block_ptr) return;
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->setInsertionPointToEnd(reinterpret_cast<mlir::Block*>(block_ptr));
 }
 
-int mlir_replace_op(uint64_t old_op_ptr, uint64_t new_value_ptr) {
-  if (!g_current_rewriter) {
-    mlir_log_error("mlir_replace_op: No active PatternRewriter context");
-    return 0;
+// Get the i-th region of an operation.
+uint64_t mlir_op_get_region(uint64_t op_ptr, int region_idx) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (region_idx < 0 || region_idx >= (int)op->getNumRegions()) return 0;
+  return reinterpret_cast<uint64_t>(&op->getRegion(region_idx));
+}
+
+// Create a new block in a region with the given argument types.
+// Sets the rewriter insertion point to the end of the new block.
+// arg_types_list: Scheme list of type uptrs (stored as Sunsigned64).
+uint64_t mlir_region_create_block(uint64_t rewriter_ptr, uint64_t region_ptr,
+                                   ptr arg_types_list) {
+  if (!rewriter_ptr || !region_ptr) return 0;
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* region   = reinterpret_cast<mlir::Region*>(region_ptr);
+  mlir::Location loc = region->getParentOp()->getLoc();
+
+  mlir::Block* block = rewriter->createBlock(region);
+  for (ptr cur = static_cast<ptr>(arg_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    block->addArgument(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)), loc);
   }
+  rewriter->setInsertionPointToEnd(block);
+  return reinterpret_cast<uint64_t>(block);
+}
 
-  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(old_op_ptr);
-  mlir::Value newVal = mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(new_value_ptr));
+// Get the i-th argument of a block as a Value opaque pointer.
+uint64_t mlir_block_get_argument(uint64_t block_ptr, int idx) {
+  if (!block_ptr) return 0;
+  auto* block = reinterpret_cast<mlir::Block*>(block_ptr);
+  if (idx < 0 || idx >= (int)block->getNumArguments()) return 0;
+  return reinterpret_cast<uint64_t>(block->getArgument(idx).getAsOpaquePointer());
+}
 
-  mlir_log_info((std::string("mlir_replace_op: replacing op=") +
-                 std::to_string(old_op_ptr) + " with value=" +
-                 std::to_string(new_value_ptr)).c_str());
-  g_current_rewriter->replaceOp(op, newVal);
-  mlir_log_info("mlir_replace_op: replacement done");
+// Get the shape::ShapeType from an MLIRContext.
+uint64_t mlir_get_shape_shape_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::shape::ShapeType::get(ctx).getAsOpaquePointer());
+}
+
+int mlir_replace_op(uint64_t rewriter_ptr, uint64_t old_op_ptr, uint64_t new_value_ptr) {
+  if (!rewriter_ptr) { mlir_log_error("mlir_replace_op: no rewriter"); return 0; }
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* op  = reinterpret_cast<mlir::Operation*>(old_op_ptr);
+  auto  val = mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(new_value_ptr));
+  rewriter->replaceOp(op, val);
   return 1;
 }
 
-int mlir_erase_op(uint64_t op_ptr) {
-  if (!g_current_rewriter) {
-    mlir_log_error("mlir_erase_op: No active PatternRewriter context");
-    return 0;
-  }
-
-  mlir::Operation* operation = reinterpret_cast<mlir::Operation*>(op_ptr);
-  g_current_rewriter->eraseOp(operation);
+int mlir_erase_op(uint64_t rewriter_ptr, uint64_t op_ptr) {
+  if (!rewriter_ptr) { mlir_log_error("mlir_erase_op: no rewriter"); return 0; }
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->eraseOp(reinterpret_cast<mlir::Operation*>(op_ptr));
   return 1;
 }
 
 void mlir_notify_match_failure(uint64_t op_ptr, const char* reason) {
   mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
+}
+
+// Direct erase without a rewriter — for post-pass cleanup outside a pattern callback.
+void mlir_op_erase(uint64_t op_ptr) {
+  if (!op_ptr) return;
+  reinterpret_cast<mlir::Operation*>(op_ptr)->erase();
 }
 
 //===----------------------------------------------------------------------===//
@@ -575,28 +461,16 @@ public:
       return mlir::failure();
     }
 
-    // Set rewriter context for FFI functions
-    mlir::hipsr::setCurrentRewriter(&rewriter, op);
-
-    // Pass ArrayRef directly - its layout matches ValueArrayRef (pointer + size)
-    // ArrayRef<T> layout: { const T *Data; size_t Length; }
-    // Scheme ValueArrayRef: { void* data; uint64_t size; }
-    // These are compatible on 64-bit platforms
-
     // Call Scheme callback: (callback op operands-ref rewriter type-converter)
-    // Callback should return #t on successful match, #f on failure
-    ptr opPtr = Sunsigned64(reinterpret_cast<uint64_t>(op));
-    ptr operandsRefPtr = Sunsigned64(reinterpret_cast<uint64_t>(&operands));
-    ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
+    // rewriter and op are passed explicitly — no implicit global state
+    ptr opPtr            = Sunsigned64(reinterpret_cast<uint64_t>(op));
+    ptr operandsRefPtr   = Sunsigned64(reinterpret_cast<uint64_t>(&operands));
+    ptr rewriterPtr      = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
     ptr typeConverterPtr = Sunsigned64(reinterpret_cast<uint64_t>(getTypeConverter()));
 
-    // Chez only has Scall0-3, for 4 args we build a list and use apply
     ptr args_list = Scons(opPtr, Scons(operandsRefPtr, Scons(rewriterPtr, Scons(typeConverterPtr, Snil))));
     ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
     ptr result = Scall2(apply_proc, callback_.get(), args_list);
-
-    // Clear rewriter context
-    mlir::hipsr::clearCurrentRewriter();
 
     // Check result: #t = success, #f = failure
     if (result == Strue) {
@@ -1060,79 +934,6 @@ void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) 
   cppOp->setAttr(attr_name, attr);
 }
 
-// Create the entry block of op's region[region_idx] and set the rewriter
-// insertion point to its end. For hipsr.placeholder region 0 uses
-// createPlaceholderShapeBlock so arg types match getShapeRegionArgumentTypes().
-// Returns Block* as uint64_t.
-uint64_t mlir_op_create_region_block(uint64_t op_ptr, int region_idx) {
-  if (!op_ptr || !g_current_rewriter) return 0;
-  auto* rawOp = reinterpret_cast<mlir::Operation*>(op_ptr);
-
-  mlir::Block* block = nullptr;
-  if (auto placeholder = mlir::dyn_cast<mlir::hipsr::PlaceholderOp>(rawOp);
-      placeholder && region_idx == 0) {
-    block = &mlir::hipsr::createPlaceholderShapeBlock(*g_current_rewriter, placeholder);
-  } else {
-    mlir::Region& region = rawOp->getRegion(region_idx);
-    block = g_current_rewriter->createBlock(&region);
-  }
-  g_current_rewriter->setInsertionPointToEnd(block);
-  return reinterpret_cast<uint64_t>(block);
-}
-
-// Get the i-th argument of a block as a Value opaque pointer (uint64_t).
-uint64_t mlir_block_get_argument(uint64_t block_ptr, int idx) {
-  if (!block_ptr) return 0;
-  auto* block = reinterpret_cast<mlir::Block*>(block_ptr);
-  if (idx < 0 || idx >= (int)block->getNumArguments()) return 0;
-  return reinterpret_cast<uint64_t>(block->getArgument(idx).getAsOpaquePointer());
-}
-
-// Like mlir_create_generic_op but uses the current rewriter insertion point
-// without resetting it to g_current_operation. Used inside region blocks.
-// Returns the created Operation* as ptr.
-ptr mlir_create_op_at_current_point(const char* op_name,
-                                    ptr operands_list,
-                                    ptr result_types_list) {
-  if (!g_current_rewriter || !g_current_operation) {
-    mlir_log_error("mlir_create_op_at_current_point: no rewriter context");
-    return nullptr;
-  }
-  mlir::Location loc = g_current_operation->getLoc();
-
-  llvm::SmallVector<mlir::Value> operands;
-  llvm::SmallVector<mlir::Type> resultTypes;
-
-  ptr current = static_cast<ptr>(operands_list);
-  while (current != Snil) {
-    if (!Spairp(current)) { mlir_log_error("mlir_create_op_at_current_point: bad operands"); return nullptr; }
-    uint64_t v = Sinteger64_value(Scar(current));
-    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
-    current = Scdr(current);
-  }
-
-  current = static_cast<ptr>(result_types_list);
-  while (current != Snil) {
-    if (!Spairp(current)) { mlir_log_error("mlir_create_op_at_current_point: bad result-types"); return nullptr; }
-    uint64_t t = Sinteger64_value(Scar(current));
-    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
-    current = Scdr(current);
-  }
-
-  mlir::OperationState state(loc, op_name);
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  mlir::Operation* op = g_current_rewriter->create(state);
-  return reinterpret_cast<ptr>(op);
-}
-
-// Restore the rewriter insertion point to immediately before g_current_operation.
-// Call this after emitting region bodies to return to the outer insertion context.
-void mlir_set_insertion_point_to_current_op() {
-  if (g_current_rewriter && g_current_operation)
-    g_current_rewriter->setInsertionPoint(g_current_operation);
-}
-
 } // extern "C"
 
 namespace mlir {
@@ -1148,7 +949,6 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_operand", (void*)mlir_operation_get_operand);
   Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
   Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
-  Sregister_symbol("mlir_operation_walk_rewrite", (void*)mlir_operation_walk_rewrite);
 
   // Register utility functions (extern "C" - use :: prefix for global namespace)
   Sregister_symbol("mlir_get_hipsr_context_arg", (void*)::mlir_get_hipsr_context_arg);
@@ -1218,16 +1018,17 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_use_empty", (void*)::mlir_operation_use_empty);
   Sregister_symbol("mlir_operation_set_attr", (void*)::mlir_operation_set_attr);
 
-  // Phase 3: IR Construction FFI (OpBuilder) - TODO: needs PatternRewriter integration
-  Sregister_symbol("mlir_create_placeholder_op", (void*)::mlir_create_placeholder_op);
-  Sregister_symbol("mlir_create_cast_op", (void*)::mlir_create_cast_op);
-  Sregister_symbol("mlir_create_generic_op", (void*)::mlir_create_generic_op);
-  Sregister_symbol("mlir_operation_get_result_value_from_op", (void*)::mlir_operation_get_result_value_from_op);
-
-  // Phase 4: Pattern Rewriter FFI - TODO: needs PatternRewriter integration
-  Sregister_symbol("mlir_create_unrealized_conversion_cast", (void*)::mlir_create_unrealized_conversion_cast);
-  Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
-  Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
+  // Builder API — explicit rewriter, no implicit globals
+  Sregister_symbol("mlir_build_op",                         (void*)::mlir_build_op);
+  Sregister_symbol("mlir_set_insertion_point_before",       (void*)::mlir_set_insertion_point_before);
+  Sregister_symbol("mlir_set_insertion_point_to_block_end", (void*)::mlir_set_insertion_point_to_block_end);
+  Sregister_symbol("mlir_op_get_region",                    (void*)::mlir_op_get_region);
+  Sregister_symbol("mlir_region_create_block",              (void*)::mlir_region_create_block);
+  Sregister_symbol("mlir_block_get_argument",               (void*)::mlir_block_get_argument);
+  Sregister_symbol("mlir_get_shape_shape_type",             (void*)::mlir_get_shape_shape_type);
+  Sregister_symbol("mlir_replace_op",                       (void*)::mlir_replace_op);
+  Sregister_symbol("mlir_erase_op",                         (void*)::mlir_erase_op);
+  Sregister_symbol("mlir_op_erase",                         (void*)::mlir_op_erase);
   Sregister_symbol("mlir_notify_match_failure", (void*)(void (*)(uint64_t, const char*))::mlir_notify_match_failure);
 
   // Pattern registration for Scheme-defined patterns

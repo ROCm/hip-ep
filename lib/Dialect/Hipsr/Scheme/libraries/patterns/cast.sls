@@ -29,11 +29,14 @@
     :match
         %output = onnx.Cast (%input)
     :then-let
-        ([%ctx (mlir-get-hipsr-context-arg op)]
-         [!output-type (mlir-value-get-type %output)]
-         [!output-device (mlir-tensor-type-in-device-space! !output-type)])
+        ([%ctx           (mlir-get-hipsr-context-arg op)]
+         [!output-type   (mlir-value-get-type %output)]
+         [!output-device (mlir-tensor-type-in-device-space! !output-type)]
+         [!shape-type    (mlir-get-shape-shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %input !output-device)
+                        :regions ((^bb0 ((%shape-in : !shape-type))
+                                   (%yield = hipsr.shape_yield (%shape-in) -> ())))
                         -> !output-device)
         (%cast = hipsr.cast (%ctx %input %placeholder !output-device)
                  -> !output-device))
