@@ -3801,17 +3801,20 @@ static inline size_t prefillV5SmemBytes(int m_tiles, int bkv, int d) {
 }
 static constexpr size_t kPrefillV5MaxSmem = 65536;
 
-// Opt-in routing of head_dim 128 full attention to v6. v6 is generic in D, and
-// at 128 it supplies what the v7 path lacks: transposed V (one LDS read per
+// Routing of head_dim 128 full attention to v6. v6 is generic in D, and at 128
+// it supplies what the v7 path lacks: transposed V (one LDS read per
 // fragment), one K/V staging shared by a KV group's query heads instead of a
 // re-read per head, and P^T held in registers. Only (m_tiles 1, bkv 32) is
 // spill-free at this head dim -- the other three configs exceed the VGPR
 // budget and measure slower than v7 -- so the routing below pins that one
 // rather than leaving it to the (m_tiles, bkv) tuner.
+//
+// On by default. HIPDNN_GQA_PREFILL_V6_D128=0 restores v7, which is the
+// fallback to reach for if a head_dim 128 geometry regresses.
 static inline bool prefillV6D128Enabled() {
     static const bool on = [] {
         const char* e = getenv("HIPDNN_GQA_PREFILL_V6_D128");
-        return e != nullptr && atoi(e) != 0;
+        return e == nullptr || atoi(e) != 0;
     }();
     return on;
 }
@@ -5093,9 +5096,9 @@ extern "C" int hip_gqa_flash_prefill_v2(
         // fall through to v7
     }
     if (d == 128 || d == 256) {
-        // Opt-in: head_dim 128 full attention runs v6. Kept here rather than
-        // inside the v7 entry so that entry still means "run v7", which the
-        // prefill benchmark relies on for an unchanged A/B reference.
+        // head_dim 128 full attention runs v6. Kept here rather than inside
+        // the v7 entry so that entry still means "run v7", which the prefill
+        // benchmark relies on for an unchanged A/B reference.
         if (prefillV6D128Applies(d, Hq, G, nullptr, 0, 0)) {
             dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d,
                               static_cast<hipStream_t>(stream_ptr),
@@ -5159,10 +5162,10 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
                               nullptr, Hq, 0, local_window_size);
             return 0;
         }
-        // Opt-in v6 routing. This is the entry the EP uses in the default
-        // lookup mode, so it has to be hooked here as well as in the online
-        // path. The LUT's (nw, bkv, mt) does not apply to v6, whose one
-        // spill-free config at this head dim is pinned instead.
+        // v6 routing. This is the entry the EP uses in the default lookup
+        // mode, so it has to be hooked here as well as in the online path.
+        // The LUT's (nw, bkv, mt) does not apply to v6, whose one spill-free
+        // config at this head dim is pinned instead.
         if (prefillV6D128Applies(d, Hq, G, head_sink, smooth_softmax,
                                  local_window_size)) {
             dispatchPrefillV5(kPrefillV6D128MTiles, kPrefillV6D128Bkv, d,
