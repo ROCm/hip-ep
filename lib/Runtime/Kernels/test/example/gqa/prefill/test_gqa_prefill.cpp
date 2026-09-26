@@ -8,10 +8,11 @@
 //
 // Verifies the ported FA-2 WMMA prefill kernels that gqa.cpp routes to on the
 // fused-prefill fast path:
-//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry, and
-//                              d == 128, llama-3.1 geometry; both run the
+//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry,
+//                              d == 128, llama-3.1 geometry, and d == 256,
+//                              Qwen3.6 / Qwen3.8 geometry; all run the
 //                              transposed-score v6 kernel)
-//   hip_gqa_flash_prefill_v8  (d == 256, Qwen3.6 geometry)
+//   hip_gqa_flash_prefill_v8  (d == 256 groups of neither 3 nor 4 heads)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
 //
@@ -77,10 +78,12 @@ static void* gqa_policy() {
 }
 
 // Mirrors real/gqa.cpp: d128 uses v6 (PrefillV5) with a window or a KV group
-// of a multiple of 4 heads, v7 otherwise.
+// of a multiple of 4 heads, v7 otherwise; d256 uses v6 with a group of a
+// multiple of 3 or 4 heads, v8 otherwise.
 static hipdnn_ep::GqaPrefillVariant prefill_variant(int d, int H, int G,
                                                     int window) {
-  if (d == 256) return hipdnn_ep::GqaPrefillVariant::V8;
+  if (d == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0)
+    return hipdnn_ep::GqaPrefillVariant::V8;
   if (d == 128 && window <= 0 && (H / G) % 4 != 0)
     return hipdnn_ep::GqaPrefillVariant::V7;
   return hipdnn_ep::GqaPrefillVariant::V5;
@@ -315,9 +318,9 @@ static bool run_case(const Case& c, int iters) {
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
          pass ? "PASS" : "FAIL",
-         D == 256 ? 8
-         : (D == 128 && c.window <= 0 && (H / G) % 4 != 0) ? 7
-                                                           : 6);
+         (D == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0) ? 8
+         : (D == 128 && c.window <= 0 && (H / G) % 4 != 0)  ? 7
+                                                            : 6);
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
@@ -330,13 +333,22 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
 
   const Case cases[] = {
-      // Qwen3.6-35B-A3B text decoder: d=256 routes to the v8 kernel, which no
-      // other case covered. sq=1000 is deliberately not a multiple of the 16-row
-      // Q tile or the 16-key KV tile, so it exercises the partial tiles that 512
-      // and 2048 both skip.
+      // Qwen3.6-35B-A3B text decoder: d=256, a group of 8, runs v6 at 4 heads
+      // per block. sq=1000 is deliberately not a multiple of the 16-row Q tile
+      // or the 16-key KV tile, so it exercises the partial tiles that 512 and
+      // 2048 both skip.
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 2048, 0,    kSinkNone,    false, 0},
+      {"qwen3.6-d256", 1, 16, 2, 256, 512,  8192, kSinkNone,    false, 0},
+      // Qwen3.8-27B: a group of 6 runs 3 heads per block.
+      {"qwen3.8-d256", 1, 24, 4, 256, 1000, 0,    kSinkNone,    false, 0},
+      {"qwen3.8-d256", 1, 24, 4, 256, 512,  8192, kSinkNone,    false, 0},
+      // Qwen3 16:4 (group of 4), and a group of 2 (Gemma-3) that stays on v8.
+      {"qwen3-16:4",   1, 16, 4, 256, 1000, 0,    kSinkNone,    false, 0},
+      {"gemma3-d256",  1,  8, 4, 256, 1000, 0,    kSinkNone,    false, 0},
+      // v6 has no windowed d256 instance, so a d256 window still declines.
+      {"qwen3.6-win",  1, 16, 2, 256, 512,  0,    kSinkNone,    true,  128},
       // No-sink regression set (must stay as accurate as before).
       {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false, 0},
       {"gpt_oss-20b",  1, 64, 8,  64, 2048, 0,    kSinkNone,    false, 0},

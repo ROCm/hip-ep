@@ -736,10 +736,12 @@ static int gqa_forward_fused(
   }
 
   // d128 runs v6 where it beats v7 and v5: with a window, or with a KV group
-  // of a multiple of 4 heads. hip_gqa_flash_prefill_v2 applies the same rule
-  // when tuning online.
+  // of a multiple of 4 heads. d256 runs v6 where it beats v8: a KV group of a
+  // multiple of 3 or 4 heads (d256 prefill never has a window here).
+  // hip_gqa_flash_prefill_v2 applies the same rule when tuning online.
   const bool v6_prefill =
-      d == 64 || (d == 128 && (local_window_size > 0 || (H / G) % 4 == 0));
+      d == 64 || (d == 128 && (local_window_size > 0 || (H / G) % 4 == 0)) ||
+      (d == 256 && ((H / G) % 4 == 0 || (H / G) % 3 == 0));
   const int fused_prefill_version = v6_prefill ? 6 : (d == 128 ? 7 : 8);
   int fp_rc;
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
@@ -751,9 +753,9 @@ static int gqa_forward_fused(
         static_cast<int>(past_len), scale, local_window_size, head_sink,
         static_cast<int>(H), use_smooth_softmax ? 1 : 0);
   } else {
-    // v6 configs are keyed in the table as PrefillV5. The table has no d128
-    // PrefillV5 points, so d128 resolves to the heuristic, M_TILES=1/BKV=32,
-    // the only config v6 builds at d128.
+    // v6 configs are keyed in the table as PrefillV5. The table has no d128 or
+    // d256 PrefillV5 points, so those resolve to the heuristic, which is the
+    // only config v6 builds at that head dim.
     const hipdnn_ep::GqaPrefillVariant variant =
         v6_prefill ? hipdnn_ep::GqaPrefillVariant::V5
         : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7

@@ -271,7 +271,9 @@ GqaDecodeConfig decodeHeuristic(const GqaDecodeRequest &request, int cus) {
 GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
   switch (request.variant) {
   case GqaPrefillVariant::V5:
-    return {/*m_tiles=*/1, /*bkv=*/32, /*nw=*/0, /*mt=*/0, /*nd=*/0};
+    // v6 builds only BKV=16 at d == 256 (see prefillV5Candidates).
+    return {/*m_tiles=*/1, /*bkv=*/request.head_dim == 256 ? 16 : 32,
+            /*nw=*/0, /*mt=*/0, /*nd=*/0};
   case GqaPrefillVariant::V7:
     return {/*m_tiles=*/0, /*bkv=*/32, /*nw=*/1, /*mt=*/1, /*nd=*/0};
   case GqaPrefillVariant::V8:
