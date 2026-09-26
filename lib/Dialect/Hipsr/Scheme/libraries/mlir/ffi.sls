@@ -66,6 +66,13 @@
 
     ;; Operation attributes and mutation
     mlir-operation-set-attr
+    mlir-operation-get-integer-attr
+    mlir-operation-get-integer-array-attr
+    mlir-operation-set-dense-i64-array
+    mlir-placeholder-set-barrier-type
+    mlir-operation-copy-attr
+    mlir-type-is-device-tensor
+    mlir-operation-has-attr
     mlir-operation-set-operand
     mlir-operation-use-empty
     mlir-operation-num-dps-inits
@@ -625,11 +632,36 @@
     (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
 
   ;;; @brief Set an integer attribute on an operation
-  ;;; @param op-ptr Operation* as uptr
-  ;;; @param attr-name Attribute name as string
-  ;;; @param value Integer value
   (define mlir-operation-set-attr
     (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
+
+  ;;; @brief Read a single i64 integer attribute; returns default if absent.
+  (define mlir-operation-get-integer-attr
+    (foreign-procedure "mlir_operation_get_integer_attr" (uptr string integer-64) integer-64))
+
+  ;;; @brief Read a dense-i64 or array-of-integer attr as a Scheme list. Returns '() if absent.
+  (define mlir-operation-get-integer-array-attr
+    (foreign-procedure "mlir_operation_get_integer_array_attr" (uptr string) scheme-object))
+
+  ;;; @brief Set a DenseI64ArrayAttr on an operation from a Scheme list of fixnums.
+  (define mlir-operation-set-dense-i64-array
+    (foreign-procedure "mlir_operation_set_dense_i64_array" (uptr string scheme-object) void))
+
+  ;;; @brief Change a hipsr.placeholder's placeholder_type attribute to Barrier.
+  (define mlir-placeholder-set-barrier-type
+    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
+
+  ;;; @brief Copy a named attribute from src-op to dst-op.
+  (define mlir-operation-copy-attr
+    (foreign-procedure "mlir_operation_copy_attr" (uptr string uptr string) void))
+
+  ;;; @brief Returns 1 if type is a RankedTensorType with device memory space.
+  (define mlir-type-is-device-tensor
+    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
+
+  ;;; @brief Returns 1 if the named attribute exists on the operation.
+  (define mlir-operation-has-attr
+    (foreign-procedure "mlir_operation_has_attr" (uptr string) int))
 
   ;;; @brief Set the i-th operand of an operation to a new value
   ;;; @param op-ptr Operation* as uptr
