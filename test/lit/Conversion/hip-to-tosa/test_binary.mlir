@@ -230,15 +230,14 @@ func.func @dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
 
 // -----
 
-// Rank equalization prepends 1s, so tensor<8xf16> becomes 1x1x1x8. The
-// trailing 8 still cannot broadcast to 112, which the post-equalization check
-// catches rather than emitting invalid TOSA.
+// The trailing 8 cannot broadcast to 112. HIP verification rejects the
+// mismatch before TOSA rank equalization.
 func.func @incompatible_broadcast(%ctx: !hip.context,
                                   %x: tensor<1x64x112x112xf16>,
                                   %y: tensor<8xf16>,
                                   %init: tensor<1x64x112x112xf16>)
     -> tensor<1x64x112x112xf16> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.add'}}
+  // expected-error @+1 {{broadcast verification: incompatible broadcast shapes [1, 64, 112, 112] and [8]}}
   %r = hip.add(%ctx) ins(%x, %y : tensor<1x64x112x112xf16>, tensor<8xf16>)
                      outs(%init : tensor<1x64x112x112xf16>)
                      -> tensor<1x64x112x112xf16>
