@@ -4,131 +4,147 @@ Licensed under the MIT License.
 -->
 ---
 name: model-compatibility
-description: Analyze ONNX models for AMD HIP / HIP EP compatibility against the hip-ep dialect. Dumps the EP-input graph via VOE when available, classifies every operator as supported / partial / unsupported, generates markdown reports, and verifies every non-supported entry against the actual source in lib/Conversion and include/hip/Dialect/IR/HipOps.td to catch parser false positives. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
+description: Analyze ONNX models for AMD HIP / hip-ep compatibility by running the compiler. Dumps the EP-input graph hip-ep receives from ONNX Runtime, runs the real ONNX-to-HIP conversion over it, classifies every operator as supported / partial / unsupported from what the conversion produced, and generates markdown reports. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
 ---
 
 # model-compatibility
 
-Run the ONNX -> HIP / HIP EP compatibility pipeline against a given ONNX model. The pipeline lives entirely under [scripts/](scripts/); this document tells you how to drive it, interpret outputs, and avoid the well-known parser false-positive class.
+Report whether hip-ep can run a model, using the compiler itself as the oracle. The pipeline lives under [scripts/](scripts/); this document tells you how to drive it, what each step produces, and how to check it.
+
+The classification never comes from reading conversion source code. It comes from running `convert-onnx-to-hip` over the graph the compiler actually receives:
+
+- an operator still present as `onnx.*` afterwards is **unsupported**;
+- an operator that converted but lost an ONNX attribute carrying a non-default value is **partial**;
+- everything else is **supported**.
+
+When the whole graph does not get through, each operator is put through the conversion on its own, and those verdicts are reported instead. They are a weaker claim, worded as such: an operator that converts alone is not what stopped the model, which is not the same as the model running.
+
+Source is read for two things, neither of which decides support:
+
+- **Whether a converter exists.** "Unsupported" covers two very different findings — no implementation at all, or one that refused this model's instances — and they ask for different work. *Why* it refused is not read from source: the conversion prints the constraint when a single operator goes through it, and the report quotes that.
+- **Naming the runtime path.** Which runtime function executes a `hip.*` op is written down once in its HIP-to-LLVM lowering, so it is a lookup keyed on an op the conversion actually produced, not an inference about support.
 
 ## Gather inputs
 
 | Input | Required | Default if omitted |
 |---|---|---|
 | `<model.onnx>` | Yes | — |
-| `<VoePackageRoot>` | No (optional) | `$env:VOE_PACKAGE_ROOT` if set; otherwise must use `-SkipDump` |
-| `<OutputDir>` | No | `$env:TEMP\<meaningful-path-name>_ep_compat` (auto-derived from path; see below) |
+| `<HipEpPackageRoot>` | Yes, unless `-SkipDump` | `$env:HIP_EP_PACKAGE_ROOT` |
+| `<OutputDir>` | No | `$env:TEMP\<meaningful-path-name>_ep_compat` (auto-derived) |
 
-Before running, ask the user only for `<model.onnx>` if missing. **Never invent paths**. Do not reuse a path from an earlier chat unless the user confirms it again.
+Ask the user only for `<model.onnx>` if it is missing. **Never invent paths**, and do not reuse a path from an earlier chat unless the user confirms it.
+
+The package must contain `bin\hip-onnx-runner.exe` (with `--no-run`, `--provider-options` and `--allow-cpu-fallback`), `bin\hipgpu.dll` and `bin\hip-mlir-opt.exe`. A local build tree works as a package.
 
 ## Workflow
 
-### 1. Configure (VOE is optional)
+### 1. Configure
 
-VOE detection order inside [scripts/run_ep_compatibility_check.ps1](scripts/run_ep_compatibility_check.ps1):
+Package detection order in [scripts/run_ep_compatibility_check.ps1](scripts/run_ep_compatibility_check.ps1):
 
-1. `-VoePackageRoot <path>` parameter
-2. `$env:VOE_PACKAGE_ROOT`
-3. Neither: the orchestrator emits `[VOE_NOT_CONFIGURED] ...` to stdout and exits with code **10** (does NOT silently continue).
+1. `-HipEpPackageRoot <path>`
+2. `$env:HIP_EP_PACKAGE_ROOT`
+3. Neither: the orchestrator prints `[HIP_EP_NOT_CONFIGURED] ...` and exits **10**.
 
-**When you see `[VOE_NOT_CONFIGURED]`** you MUST call `AskQuestion` with exactly two options:
+**On `[HIP_EP_NOT_CONFIGURED]`** call `AskQuestion` with exactly two options:
 
-- **Provide VOE path** — re-run with `-VoePackageRoot <path>`. Also suggest the user run `setx VOE_PACKAGE_ROOT <path>` once for persistence.
-- **Skip dump** — re-run with `-SkipDump`. The pipeline then analyzes the **original** ONNX (not the EP-rewritten graph). The generated `model_compatibility_report.md` will carry a `> **Source:** original ONNX (no EP rewrites)` badge at the top so the limitation is impossible to miss.
+- **Provide the package path** — re-run with `-HipEpPackageRoot <path>`; suggest `setx HIP_EP_PACKAGE_ROOT <path>` for persistence.
+- **Skip the dump** — re-run with `-SkipDump`. The pipeline then counts operators in the original ONNX but **verifies nothing**; every row is reported `partial / CONVERSION_NOT_PROBED` and the report carries a badge saying so.
 
-### 2. Single-model run
+`[HIP_EP_RUNNER_TOO_OLD]` (exit 11) means the package predates the runner flags; ask for a newer package.
+
+### 2. Run
 
 ```powershell
 .\scripts\run_ep_compatibility_check.ps1 -ModelPath <model.onnx>
-# add -SkipDump when the user chose to skip dump
-# add -VoePackageRoot <path> when not on env
-# add -OutputDir <dir> only if the user wants a fixed location
+# add -HipEpPackageRoot <path> when not on the environment
+# add -SkipDump when the user chose to skip
+# add -OutputDir <dir> only when the user wants a fixed location
 ```
 
-The orchestrator auto-derives a human-readable `OutputDir` from the model's path so that closing the chat and returning later still lets you see which model a directory belongs to. The rule: take the last 3 parent path segments, skip generic ones (`onnx`, `models`), append the basename when it is non-generic, lowercase and sanitize, suffix with `_ep_compat`. Examples:
+`OutputDir` is derived from the model path so a directory is still identifiable later: take the last 3 parent segments, drop generic ones (`onnx`, `models`), append a non-generic basename, lowercase, sanitize, suffix `_ep_compat`.
 
 | Input model path | Auto OutputDir |
 |---|---|
 | `...\blip\onnx\decoder\fp16\model.onnx` | `$env:TEMP\blip_decoder_fp16_ep_compat` |
-| `...\blip\onnx\encoder\fp16\model.onnx` | `$env:TEMP\blip_encoder_fp16_ep_compat` |
 | `<any-drive>\bar\custom_v2.onnx` | `$env:TEMP\bar_custom_v2_ep_compat` |
 
-Re-runs against the same model reuse the same dir. If two genuinely-distinct models would collide on the auto name, pass `-OutputDir <dir>` explicitly.
+Re-runs reuse the directory, and an existing `compatibility\ep_input.mlir` is reused instead of re-dumping. Pass `-OutputDir` explicitly when two distinct models would collide, or when an earlier result must be kept for comparison.
 
-Key produced artifacts (under `<OutputDir>`):
+### 3. Steps, outputs and checkpoints
 
-| File | Purpose |
-|---|---|
-| `model_compatibility_report.md` | Primary deliverable; the markdown you read back to the user |
-| `model_compatibility_details.md` | Full per-operator diagnostics |
-| `op_distribution_comparison.md` | Original vs EP-input operator counts (only when dump ran) |
-| `compatibility/report_input.json` | Normalized intermediate data (input to report generators) |
-| `compatibility/unsupported_reco_runtime.json` | Machine-readable unsupported recommendations |
-| `ep_input/onnx.onnx` | EP-rewritten graph (only when dump ran) |
-| `pipeline_status.md` | Pipeline run metadata + warnings |
+The three markdown files sit at the top of `<OutputDir>`; everything the pipeline produced on the way to them is in `<OutputDir>\compatibility`, named below without that prefix.
 
-### 3. Triage every non-supported entry (mandatory diagnose pass)
+| Step | Script | Produces | Check before continuing |
+|---|---|---|---|
+| 1 dump | `dump_ep_input.ps1` | `ep_input.mlir`, `dump_meta.json` | file is text MLIR starting with `module` and contains `onnx.` ops |
+| 2 count | `op_distribution.py` | `step1_original_onnx_ops.json`, `step1_ep_input_ops.json`, `op_distribution_comparison.json` | `_analysis_meta.excluded_carrier_ops` lists the `onnx.Constant` carriers, not compute ops; deltas explain themselves (ORT fusions, `Swish` to `Sigmoid`+`Mul`) |
+| 3 convert | `run_convert_probe.ps1` | `converted.mlir`, `convert_log.txt` | probe exited 0; the log's unconverted list matches step 4 |
+| — failure | orchestrator, or step 3 | `pipeline_failure.json` | written only when step 1 or 3 failed; step 4 is then skipped and step 5 carries the run |
+| 4 analyze | `analyze_conversion.py` | `leftover_onnx.json`, `leftover_reasons.json`, `attr_transfer.json`, `hip_runtime_map.json` | every leftover also appears in the EP-input counts and says whether a converter exists; `unpaired_instances` is small and explainable; every observed `hip.*` op resolves to a runtime function |
+| 5 slice | `slice_probe.py` | `slice_probe.json`, `slices/*.mlir` | every case names the operator it holds; `unbuildable` entries give a reason; a refusal quotes the conversion rather than describing it |
+| 6 report | `build_report_input.py`, `generate_final_reports.py` | `report_input.json`, and the three markdown files above it | `report_input.json` is validated against its schema as it is written; summary numbers match it |
 
-Open `model_compatibility_report.md`. For each operator with status `unsupported` or `partial`, you MUST run the playbook in [diagnose.md](diagnose.md). The parser is **not** a source of truth; it has known false-positive classes. Recent example: the parser mis-tagged `onnx.LayerNormalization` as `unsupported` because of a regex substring collision; the actual source has full support. The diagnose playbook catches this in ~30 seconds via three grep calls against `lib/Conversion`, `include/hip/Dialect/IR/HipOps.td`, and `lib/Runtime/real/`.
+Step 5 runs either way, and what it covers depends on step 3. With a whole-graph result it probes only the leftovers, to quote why each was refused. Without one it probes every operator, and those verdicts become the report's support numbers — which is why a failed conversion no longer reads as nothing being supported.
 
-Each non-supported entry resolves to one of three labels:
+Each fact is written once. The comparison and the operator distribution are rendered only in the report, and the evidence behind non-supported rows only in the details file; `op_distribution_comparison.json` is the report's input, not a second copy for the reader. `ep_input_loc.mlir` is a location-carrying copy the probe recreates on demand, so it is removed after the analysis reads it.
 
-- **truly supported (tool-FP)** — source proves the mapping exists; report as supported and record the parser bug location for future fix in [scripts/step2_1_onnx_to_hip_parser.py](scripts/step2_1_onnx_to_hip_parser.py).
-- **partial (real attribute / shape mismatch)** — keep `partial` status; cite the reason code from [reference.md](reference.md).
-- **truly unsupported** — apply ROCm family routing from [reference.md](reference.md) (and the machine-readable [scripts/unsupported_reco_rules.json](scripts/unsupported_reco_rules.json)) to recommend a wrapper extension target.
+The whole run is seconds, not minutes; nothing here compiles a kernel or touches the GPU.
 
-### 4. Batch (inline, no extra script)
+### 4. Explain every non-supported entry
 
-When the user asks for multiple models, drive the loop yourself. The ONNX file name is **not** standardized (it may be `model.onnx`, `<model_name>.onnx`, `decoder.onnx`, etc.); ask the user for the filter pattern or default to `*.onnx`:
+For each `unsupported` or `partial` operator, follow [diagnose.md](diagnose.md). The conversion result is trustworthy, but it only says *that* an operator did not convert, not *why*. The playbook finds the bail-out in `lib/Conversion/OnnxToHip/` so the report can state the actual constraint (a dtype the converter rejects, a missing pattern, an attribute it cannot honour).
+
+Report the finding; do not silently promote a leftover to supported. If the diagnose pass shows the pipeline itself is wrong (a pairing miss, a bad default), fix the script and re-run rather than editing the generated markdown.
+
+When the dump or the conversion probe fails, the run still produces a report, and its `## Where it failed` section is the result: the step, the reason quoted from the log, and the source line for a crash. Lead your summary with it and treat the failing step as the model's blocking issue.
+
+The support numbers under it then come from the single-operator conversions, and `meta.tool_versions.support_evidence` says so. Report them as what they are: they name the operators that are *not* in the way and the few that are, which is the useful part, but none of them says the model compiles. If even the slices produced nothing, the 0% headline is the absence of a measurement rather than a measurement — say that.
+
+### 5. Batch
+
+Drive the loop yourself; ONNX file names are not standardized, so ask for the pattern or default to `*.onnx`:
 
 ```powershell
 $skill = ".cursor\skills\model-compatibility"
-# Pick ONE of:
-#   - Explicit list:           $models = @("<path>\foo.onnx", "<path>\bar.onnx")
-#   - All .onnx under a root:  $models = Get-ChildItem -Recurse -Filter *.onnx <models-root> | % FullName
-#   - Custom pattern:          $models = Get-ChildItem -Recurse -Filter <user-glob> <models-root> | % FullName
+$models = Get-ChildItem -Recurse -Filter *.onnx <models-root> | % FullName
 foreach ($m in $models) {
     & "$skill\scripts\run_ep_compatibility_check.ps1" -ModelPath $m -ContinueOnDumpFailure
 }
 ```
 
-If the user just points at a directory without specifying a pattern, ask: "filter as `*.onnx` (all ONNX files) or a more specific glob like `decoder*.onnx`?". Aggregate the per-model reports manually. Only consider promoting batch / diff / aggregation to a dedicated script after you have done this loop more than three times.
+Aggregate the per-model reports manually. Consider a dedicated script only after doing this more than three times.
 
-### 5. Output to the user
+### 6. Answer the user
 
-Render the markdown templates from [report_template.md](report_template.md) verbatim. Status display rule (mandatory):
+The deliverable is `<OutputDir>\model_compatibility_report.md`. Quote that file; do not keep a second summary in chat with different numbers. Status display: `full` reads as `supported`, `partial` and `unsupported` keep their names. Append the percentage to `Supported instances`.
 
-- input `full` -> displayed `supported`
-- input `partial` -> displayed `partial`
-- input `unsupported` -> displayed `unsupported`
+Lead with what the model would do on hip-ep: the unsupported instance count is the part that falls back to CPU, and one unsupported operator in a hot path (a quantized matmul, say) matters far more than its type count suggests.
 
-In the summary line append the percentage to `Supported instances`, e.g. `682 (94.7%)`.
+### 7. Validate before responding
 
-### 6. Validation before responding
-
-- [ ] Counts in summary equal computed counts from `operator_distribution`
-- [ ] Diagnose pass executed for every non-supported entry (no shortcuts)
-- [ ] No unsupported non-compile-time line uses any reason text other than `No Hip Dialect implementation available.`
-- [ ] Every operator in the compatibility summary appears in operator distribution
-- [ ] `mapping_chain` table rows match input JSON exactly
-- [ ] If `-SkipDump` mode was used, the report header shows the `Source: original ONNX (no EP rewrites)` badge
+- [ ] Checkpoints in the step table are green
+- [ ] Diagnose ran for every `unsupported` / `partial` row
+- [ ] Chat numbers equal `model_compatibility_report.md`
+- [ ] Every operator in the compatibility summary appears in the distribution
+- [ ] `-SkipDump` runs carry the unverified badge and the caveat leads your summary
 
 ## Agent checklist
 
 ```
 - [ ] User provided <model.onnx> (no guessed path)
-- [ ] VOE configured OR user chose -SkipDump via AskQuestion
-- [ ] Ran scripts/run_ep_compatibility_check.ps1 with auto OutputDir
+- [ ] hip-ep package configured OR user chose -SkipDump via AskQuestion
+- [ ] Ran scripts/run_ep_compatibility_check.ps1
 - [ ] Read model_compatibility_report.md from <OutputDir>
-- [ ] Ran diagnose.md playbook on every unsupported / partial entry
-- [ ] Promoted tool-FP entries to supported in the user-facing summary
-- [ ] Reported using report_template.md format with correct status display
+- [ ] Ran diagnose.md for every unsupported / partial entry
+- [ ] Reported the cause of each unsupported operator, not just its name
+- [ ] Chat Summary matches the generated markdown
 - [ ] Validation checklist all green
 ```
 
 ## Additional resources
 
-- [reference.md](reference.md) — status semantics, reason code catalog, ROCm family routing matrix
-- [report_template.md](report_template.md) — exact markdown templates for the final report (do not paraphrase)
-- [diagnose.md](diagnose.md) — false-positive detection playbook (mandatory for every non-supported entry); contains the BLIP fp16 decoder walked example
-- [scripts/](scripts/) — full pipeline source; orchestrator entry is [scripts/run_ep_compatibility_check.ps1](scripts/run_ep_compatibility_check.ps1)
+- [reference.md](reference.md) — status semantics, reason codes, ROCm family routing
+- [report_template.md](report_template.md) — exact report structure
+- [diagnose.md](diagnose.md) — finding why an operator did not convert
+- [scripts/](scripts/) — pipeline source; entry point is [scripts/run_ep_compatibility_check.ps1](scripts/run_ep_compatibility_check.ps1)
