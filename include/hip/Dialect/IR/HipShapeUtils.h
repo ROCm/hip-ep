@@ -214,18 +214,18 @@ reifyConvTransposeResultShape(OpBuilder &b, Location loc, Value input,
                               ArrayRef<int64_t> outputPadding, int64_t group,
                               function_ref<InFlightDiagnostic()> emitError);
 
-/// Compute the only output shape implemented by the default
-/// `hip.multi_head_attention` runtime: separate rank-3 fp16 Q/K/V with equal
-/// batch and hidden extents, and equal K/V sequence extents. The result is
-/// exactly `[query.B, query.S, query.hidden]`.
+/// Infer the primary MHA shape for separate rank-3/rank-4 K/V, packed rank-5
+/// KV, or packed rank-5 QKV. The result is `[query.B, query.S, value.hidden]`;
+/// packed forms derive value.hidden from query. Backend support is separate
+/// from this semantic shape contract.
 FailureOr<SmallVector<int64_t>> inferMultiHeadAttentionOutputShape(
-    ArrayRef<int64_t> queryShape, ArrayRef<int64_t> keyShape,
-    ArrayRef<int64_t> valueShape, int64_t numHeads,
+    ArrayRef<int64_t> queryShape, std::optional<ArrayRef<int64_t>> keyShape,
+    std::optional<ArrayRef<int64_t>> valueShape, int64_t numHeads,
     function_ref<InFlightDiagnostic()> emitError);
 
 /// Mixed-shape form of `inferMultiHeadAttentionOutputShape`. Validation
-/// completes before dimensions are materialized; all result extents come from
-/// `query`.
+/// completes before dimensions are materialized. Key/value may be null for
+/// the corresponding packed layout.
 FailureOr<SmallVector<OpFoldResult>> reifyMultiHeadAttentionOutputShape(
     OpBuilder &b, Location loc, Value query, Value key, Value value,
     int64_t numHeads, function_ref<InFlightDiagnostic()> emitError);

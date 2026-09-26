@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
@@ -2168,47 +2169,44 @@ void MultiHeadAttentionOp::getEffects(
 }
 
 LogicalResult MultiHeadAttentionOp::verify() {
-  if (!getKey() || !getValue())
-    return emitOpError(
-        "default runtime requires separate query, key, and value inputs");
-  if (getBias() || getKeyPaddingMask() || getAttentionBias() || getPastKey() ||
-      getPastValue() || getPastSequenceLength() || getCacheIndirection())
-    return emitOpError(
-        "default runtime does not support bias, masks, past/cache inputs, or "
-        "cache indirection");
-  if (getPresentKey() || getPresentValue() || getQk())
-    return emitOpError(
-        "default runtime does not support present_key, present_value, or qk "
-        "outputs");
-
-  SmallVector<Value> operands = {getQuery(), getKey(), getValue(), getOutput()};
-  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+  SmallVector<Value> operands = {getQuery()};
+  for (Value value : {getKey(), getValue(), getBias(), getKeyPaddingMask(),
+                      getAttentionBias(), getPastKey(), getPastValue(),
+                      getPastSequenceLength(), getCacheIndirection()})
+    if (value)
+      operands.push_back(value);
+  auto inits = getDpsInits();
+  llvm::append_range(operands, inits);
+  if (failed(verifyDpsComputeOp(*this, operands, inits.size())))
     return failure();
 
   auto queryType = cast<ShapedType>(getQuery().getType());
-  auto keyType = cast<ShapedType>(getKey().getType());
-  auto valueType = cast<ShapedType>(getValue().getType());
   auto outputType = cast<ShapedType>(getOutput().getType());
-  if (!queryType.getElementType().isF16() ||
-      keyType.getElementType() != queryType.getElementType() ||
-      valueType.getElementType() != queryType.getElementType() ||
-      outputType.getElementType() != queryType.getElementType())
-    return emitOpError(
-        "default runtime requires fp16 query, key, value, and output");
+  Type elementType = queryType.getElementType();
+  if (!isa<FloatType>(elementType))
+    return emitOpError("query must have floating-point element type");
+  for (Value value :
+       {getKey(), getValue(), getBias(), getAttentionBias(), getPastKey(),
+        getPastValue(), getOutput(), getPresentKey(), getPresentValue()})
+    if (value &&
+        cast<ShapedType>(value.getType()).getElementType() != elementType)
+      return emitOpError(
+          "Q/K/V, bias, cache, and output element types must match");
   if (getUnidirectional() != 0 && getUnidirectional() != 1)
     return emitOpError("unidirectional must be 0 or 1");
-  if (getMaskFilterValue().convertToFloat() != -10000.0f)
-    return emitOpError(
-        "default runtime supports only mask_filter_value = -10000");
 
+  std::optional<ArrayRef<int64_t>> keyShape, valueShape;
+  if (getKey())
+    keyShape = cast<ShapedType>(getKey().getType()).getShape();
+  if (getValue())
+    valueShape = cast<ShapedType>(getValue().getType()).getShape();
   FailureOr<SmallVector<int64_t>> expected = inferMultiHeadAttentionOutputShape(
-      queryType.getShape(), keyType.getShape(), valueType.getShape(),
-      getNumHeads(), [&]() { return this->emitOpError(); });
+      queryType.getShape(), keyShape, valueShape, getNumHeads(),
+      [&]() { return this->emitOpError(); });
   if (failed(expected))
     return failure();
 
-  // An output template may keep a known query extent dynamic, but it cannot
-  // make an unknown runtime query extent static.
+  // An output template cannot specialize an unknown semantic source extent.
   ArrayRef<int64_t> outputShape = outputType.getShape();
   if (outputShape.size() == expected->size()) {
     for (size_t dim : llvm::seq<size_t>(0, outputShape.size())) {
@@ -2217,11 +2215,93 @@ LogicalResult MultiHeadAttentionOp::verify() {
         return emitOpError("output dimension ")
                << dim
                << " must remain dynamic because the corresponding "
-                  "query extent is dynamic";
+                  "source extent is dynamic";
     }
   }
-  return verifyHipOpShape(
-      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+  if (failed(verifyHipOpShape(*this, [&]() -> FailureOr<SmallVector<int64_t>> {
+        return *expected;
+      })))
+    return failure();
+
+  auto compatible = [&](int64_t actual, int64_t wanted,
+                        const Twine &name) -> LogicalResult {
+    if (!ShapedType::isDynamic(actual) && !ShapedType::isDynamic(wanted) &&
+        actual != wanted)
+      return emitOpError() << name << " must be " << wanted << ", got "
+                           << actual;
+    return success();
+  };
+  int64_t keyHeadSize = queryType.getRank() == 5 ? queryType.getDimSize(4)
+                                                 : queryType.getDimSize(2);
+  if (queryType.getRank() == 3 && !ShapedType::isDynamic(keyHeadSize))
+    keyHeadSize /= getNumHeads();
+  int64_t valueHeadSize = (*expected)[2];
+  if (!ShapedType::isDynamic(valueHeadSize))
+    valueHeadSize /= getNumHeads();
+  auto verifyCache = [&](Value cache, int64_t headSize,
+                         StringRef name) -> LogicalResult {
+    if (!cache)
+      return success();
+    auto type = cast<ShapedType>(cache.getType());
+    if (type.getRank() != 4)
+      return emitOpError() << name << " must be rank-4 BNSH";
+    for (auto [dim, wanted] : {std::pair<int64_t, int64_t>{0, (*expected)[0]},
+                               {1, getNumHeads()},
+                               {3, headSize}})
+      if (failed(compatible(type.getDimSize(dim), wanted,
+                            Twine(name) + " dimension " + Twine(dim))))
+        return failure();
+    return success();
+  };
+  if (static_cast<bool>(getPastKey()) != static_cast<bool>(getPastValue()))
+    return emitOpError(
+        "past_key and past_value must both be provided or omitted");
+  if (failed(verifyCache(getPastKey(), keyHeadSize, "past_key")) ||
+      failed(verifyCache(getPastValue(), valueHeadSize, "past_value")) ||
+      failed(verifyCache(getPresentKey(), keyHeadSize, "present_key")) ||
+      failed(verifyCache(getPresentValue(), valueHeadSize, "present_value")))
+    return failure();
+  auto verifyCapacityPair = [&](Value key, Value value) -> LogicalResult {
+    if (!key || !value)
+      return success();
+    return compatible(cast<ShapedType>(key.getType()).getDimSize(2),
+                      cast<ShapedType>(value.getType()).getDimSize(2),
+                      "key/value cache capacity");
+  };
+  if (failed(verifyCapacityPair(getPastKey(), getPastValue())) ||
+      failed(verifyCapacityPair(getPresentKey(), getPresentValue())))
+    return failure();
+
+  if (Value qk = getQk()) {
+    auto type = cast<ShapedType>(qk.getType());
+    if (type.getRank() != 4 || !isa<FloatType>(type.getElementType()))
+      return emitOpError("qk must be a rank-4 floating-point tensor or memref");
+    for (auto [dim, wanted] : {std::pair<int64_t, int64_t>{0, (*expected)[0]},
+                               {1, getNumHeads()},
+                               {2, (*expected)[1]}})
+      if (failed(compatible(type.getDimSize(dim), wanted,
+                            Twine("qk dimension ") + Twine(dim))))
+        return failure();
+    if (!getPastSequenceLength() && !getCacheIndirection()) {
+      int64_t current = queryType.getRank() == 5
+                            ? queryType.getDimSize(1)
+                            : (*keyShape)[keyShape->size() == 4 ? 2 : 1];
+      int64_t past =
+          getPastKey() ? cast<ShapedType>(getPastKey().getType()).getDimSize(2)
+                       : 0;
+      if (!ShapedType::isDynamic(current) && !ShapedType::isDynamic(past)) {
+        APInt total = APInt(128, current) + APInt(128, past);
+        if (!total.isSignedIntN(64))
+          return emitOpError("qk logical sequence extent is out of range");
+        if (failed(compatible(type.getDimSize(3), total.getSExtValue(),
+                              "qk logical sequence extent")))
+          return failure();
+      }
+    }
+  }
+  // Cache sequence dimensions describe caller-provided physical capacity;
+  // do not require it to equal QK's logical sequence length.
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
