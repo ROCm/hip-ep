@@ -292,10 +292,10 @@ int8_t get_int4_value(gsl::span<const int8_t> data, size_t idx) {
   if (idx & 1) { // odd, upper
     value = static_cast<int8_t>(static_cast<uint8_t>(value) >> 4);
   } else {
-    value = value & 0xf;
+    value = static_cast<int8_t>(value & 0xf);
   }
   if (value > 7) {
-    value -= 16;
+    value = static_cast<int8_t>(value - 16);
   }
   return value;
 }
@@ -305,9 +305,9 @@ uint8_t get_uint4_value(gsl::span<const uint8_t> data, size_t idx) {
   size_t byte_idx = idx / 2;
   uint8_t value = data[byte_idx];
   if (idx & 1) { // odd, upper
-    value = value >> 4;
+    value = static_cast<uint8_t>(value >> 4);
   } else {
-    value = value & 0xf;
+    value = static_cast<uint8_t>(value & 0xf);
   }
   return value;
 }

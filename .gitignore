@@ -170,3 +170,5 @@ lib/Runtime/Kernels/test/example/*/data_*/
 .depend/
 CMakeUserPresets.json
 build.*/
+lib/**/*.wpo
+third_party/**/*.wpo

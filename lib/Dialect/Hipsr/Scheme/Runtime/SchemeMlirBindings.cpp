@@ -1,0 +1,1183 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
+#include "hip/Dialect/Hipsr/Scheme/Runtime/LockedSchemeObject.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Debug.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "mlir/CAPI/IR.h"
+#include "mlir/CAPI/Wrap.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include <cstddef>
+#include <cstring>
+
+#define DEBUG_TYPE "scheme-bindings"
+
+// Note: scheme.h already included via SchemeMlirBindings.h → ChezSchemeInterpreter.h
+// Do NOT include it again here to avoid redefinition errors
+
+namespace mlir {
+namespace hipsr {
+
+// MLIR C++ to Scheme conversions - box as GC-safe integers (Sunsigned64)
+// so the Chez GC never mistakes them for heap pointers.
+// mlir::Value's opaque pointer has tag bits (bit 0 = BlockArgument),
+// which would alias Chez's non-fixnum tag if returned as a raw ptr.
+ptr makeSchemeOperation(mlir::Operation* op) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(op));
+}
+
+ptr makeSchemeValue(mlir::Value val) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(val.getAsOpaquePointer()));
+}
+
+ptr makeSchemeType(mlir::Type type) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(type.getAsOpaquePointer()));
+}
+
+ptr makeSchemeAttribute(mlir::Attribute attr) {
+  return Sunsigned64(reinterpret_cast<uint64_t>(attr.getAsOpaquePointer()));
+}
+
+} // namespace hipsr
+} // namespace mlir
+
+//===----------------------------------------------------------------------===//
+// C functions callable from Scheme via FFI (global scope, C linkage)
+//===----------------------------------------------------------------------===//
+
+extern "C" {
+
+// Get operation name - takes unsigned-64 (pointer as uint64_t)
+const char* mlir_operation_get_name(uint64_t op) {
+  if (!op) return "";
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  return cppOp->getName().getStringRef().data();
+}
+
+// Get MLIRContext from operation
+uint64_t mlir_operation_get_context(uint64_t op) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  return reinterpret_cast<uint64_t>(cppOp->getContext());
+}
+
+// Get number of operands
+int64_t mlir_operation_num_operands(uint64_t op) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  return cppOp->getNumOperands();
+}
+
+// Get number of results
+int64_t mlir_operation_num_results(uint64_t op) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  return cppOp->getNumResults();
+}
+
+// Get operand at index
+uint64_t mlir_operation_get_operand(uint64_t op, int64_t index) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  if (index < 0 || index >= (int64_t)cppOp->getNumOperands()) return 0;
+  mlir::Value val = cppOp->getOperand(index);
+  MlirValue cVal = wrap(val);
+  return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
+}
+
+// Get result at index
+uint64_t mlir_operation_get_result(uint64_t op, int64_t index) {
+  if (!op) return 0;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  if (index < 0 || index >= (int64_t)cppOp->getNumResults()) return 0;
+  mlir::Value val = cppOp->getResult(index);
+  MlirValue cVal = wrap(val);
+  return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
+}
+
+// Get the defining operation of a value (returns 0 for block arguments)
+uint64_t mlir_value_get_defining_op(uint64_t value) {
+  if (!value) return 0;
+  MlirValue cVal{reinterpret_cast<const void*>(value)};
+  mlir::Value val = unwrap(cVal);
+  mlir::Operation* defOp = val.getDefiningOp();
+  return reinterpret_cast<uint64_t>(defOp);
+}
+
+// Returns 1 if value is a block argument, 0 if it is an op result
+int mlir_value_is_block_argument(uint64_t value) {
+  if (!value) return 0;
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  return mlir::isa<mlir::BlockArgument>(val) ? 1 : 0;
+}
+
+// Returns the result index of an OpResult value (-1 for block arguments)
+int mlir_value_get_result_number(uint64_t value) {
+  if (!value) return -1;
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  auto result = mlir::dyn_cast<mlir::OpResult>(val);
+  if (!result) return -1;
+  return static_cast<int>(result.getResultNumber());
+}
+
+// Returns the number of DPS init (destination/outs) operands of an operation
+int mlir_operation_num_dps_inits(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto dpsOp = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+  if (!dpsOp) return 0;
+  return static_cast<int>(dpsOp.getNumDpsInits());
+}
+
+// Returns the Value* of the i-th DPS init (outs) operand (0 if out of range)
+uint64_t mlir_operation_get_dps_init_value(uint64_t op_ptr, int index) {
+  if (!op_ptr) return 0;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto dpsOp = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op);
+  if (!dpsOp) return 0;
+  if (index < 0 || index >= static_cast<int>(dpsOp.getNumDpsInits())) return 0;
+  mlir::Value v = dpsOp.getDpsInits()[index];
+  return reinterpret_cast<uint64_t>(v.getAsOpaquePointer());
+}
+
+// Set the i-th operand of an operation to a new value
+void mlir_operation_set_operand(uint64_t op_ptr, int index, uint64_t value) {
+  if (!op_ptr || !value) return;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
+  op->setOperand(static_cast<unsigned>(index), val);
+}
+
+// Returns 1 if all results of the operation have no uses, 0 otherwise
+int mlir_operation_use_empty(uint64_t op_ptr) {
+  if (!op_ptr) return 1;
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return op->use_empty() ? 1 : 0;
+}
+
+// Walk operation tree and call Scheme callback for each operation
+// callback: Scheme procedure (lambda (op) ...)
+void mlir_operation_walk(uint64_t op, ptr callback) {
+  if (!op) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+
+  cppOp->walk([callback](mlir::Operation* walkOp) {
+    ptr schemeOp = Sunsigned64(reinterpret_cast<uint64_t>(walkOp));
+    Scall1(callback, schemeOp);
+  });
+}
+
+
+// Logging functions callable from Scheme
+void mlir_log_trace(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Trace)
+    llvm::errs() << "[trace] " << msg << "\n";
+}
+
+void mlir_log_debug(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Debug)
+    llvm::errs() << "[debug] " << msg << "\n";
+}
+
+void mlir_log_info(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Info)
+    llvm::errs() << "[info] " << msg << "\n";
+}
+
+void mlir_log_warning(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Warning)
+    llvm::errs() << "[warning] " << msg << "\n";
+}
+
+void mlir_log_error(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Error)
+    llvm::errs() << "[error] " << msg << "\n";
+}
+
+void mlir_log_fatal(const char* msg) {
+  if (mlir::hipsr::ChezSchemeInterpreter::getLogLevel() <= mlir::hipsr::SchemeLogLevel::Fatal)
+    llvm::errs() << "[fatal] " << msg << "\n";
+}
+
+//===----------------------------------------------------------------------===//
+// Phase 1: Type System FFI
+//===----------------------------------------------------------------------===//
+
+// Set memory space on a RankedTensorType
+// Returns: new Type* with memory space set
+ptr mlir_type_set_memory_space(ptr type_ptr, int space_int) {
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) {
+    mlir_log_error("mlir_type_set_memory_space: Type is not a RankedTensorType");
+    return type_ptr;
+  }
+
+  mlir::hipsr::MemorySpace space = static_cast<mlir::hipsr::MemorySpace>(space_int);
+  auto newType = tensorType.cloneWithEncoding(
+      mlir::hipsr::MemorySpaceAttr::get(tensorType.getContext(), space));
+
+  return const_cast<void*>(newType.getAsOpaquePointer());
+}
+
+// Type shape query - returns Scheme list
+ptr mlir_type_get_shape(ptr type_ptr) {
+  if (!type_ptr) return Snil;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
+  if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(type)) {
+    llvm::ArrayRef<int64_t> shape = tensorType.getShape();
+    // Convert to Scheme list
+    ptr list = Snil;
+    for (int i = shape.size() - 1; i >= 0; --i) {
+      list = Scons(Sinteger(shape[i]), list);
+    }
+    return list;
+  }
+  return Snil;
+}
+
+// Get type from value
+ptr mlir_value_get_type(ptr value_ptr) {
+  if (!value_ptr) return nullptr;
+  mlir::Value value = mlir::Value::getFromOpaquePointer(value_ptr);
+  return const_cast<void*>(value.getType().getAsOpaquePointer());
+}
+
+//===----------------------------------------------------------------------===//
+// Phase 2: Operation/Value Navigation FFI
+//===----------------------------------------------------------------------===//
+
+ptr mlir_operation_get_parent(ptr op_ptr) {
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  mlir::Operation* parent = op->getParentOp();
+  return parent;
+}
+
+ptr mlir_operation_get_operand_value(ptr op_ptr, int index) {
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  if (index < 0 || index >= (int)op->getNumOperands())
+    return nullptr;
+  mlir::Value operand = op->getOperand(index);
+  return const_cast<void*>(operand.getAsOpaquePointer());
+}
+
+ptr mlir_operation_get_result_value(ptr op_ptr, int index) {
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  if (index < 0 || index >= (int)op->getNumResults())
+    return nullptr;
+  mlir::Value result = op->getResult(index);
+  return const_cast<void*>(result.getAsOpaquePointer());
+}
+
+ptr mlir_operation_get_loc(ptr op_ptr) {
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  return const_cast<void*>(op->getLoc().getAsOpaquePointer());
+}
+
+ptr mlir_operation_get_block_argument(ptr op_ptr, int index) {
+  if (!op_ptr) return nullptr;
+  mlir::Operation* op = static_cast<mlir::Operation*>(op_ptr);
+  // Walk up to parent function
+  while (op && !llvm::isa<mlir::func::FuncOp>(op)) {
+    op = op->getParentOp();
+  }
+  if (!op)
+    return nullptr;
+
+  auto funcOp = llvm::cast<mlir::func::FuncOp>(op);
+  if (index < 0 || index >= (int)funcOp.getNumArguments())
+    return nullptr;
+
+  mlir::Value arg = funcOp.getArgument(index);
+  return const_cast<void*>(arg.getAsOpaquePointer());
+}
+
+//===----------------------------------------------------------------------===//
+// Phase 3 & 4: Explicit builder API
+//===----------------------------------------------------------------------===//
+
+// Create an operation at the current rewriter insertion point.
+// Caller must set the insertion point explicitly before calling.
+// For hipsr.placeholder: automatically adds the shape region and placeholder_type attr.
+uint64_t mlir_build_op(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
+                        const char* op_name,
+                        ptr operands_list, ptr result_types_list) {
+  if (!rewriter_ptr || !loc_op_ptr) return 0;
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* loc_op   = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type>  resultTypes;
+
+  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op: bad operands list"); return 0; }
+    uint64_t v = Sunsigned64_value(Scar(cur));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+  }
+  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op: bad result types list"); return 0; }
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
+  }
+
+  mlir::OperationState state(loc_op->getLoc(), op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+
+  // hipsr.placeholder requires an empty shape region and placeholder_type attr
+  if (std::string_view(op_name) == "hipsr.placeholder") {
+    state.addRegion();
+    state.addAttribute("placeholder_type",
+        mlir::hipsr::PlaceholderTypeAttr::get(loc_op->getContext(),
+                                               mlir::hipsr::PlaceholderType::Normal));
+  }
+
+  return reinterpret_cast<uint64_t>(rewriter->create(state));
+}
+
+// Set rewriter insertion point to immediately before op.
+void mlir_set_insertion_point_before(uint64_t rewriter_ptr, uint64_t op_ptr) {
+  if (!rewriter_ptr || !op_ptr) return;
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->setInsertionPoint(reinterpret_cast<mlir::Operation*>(op_ptr));
+}
+
+// Set rewriter insertion point to the end of a block.
+void mlir_set_insertion_point_to_block_end(uint64_t rewriter_ptr, uint64_t block_ptr) {
+  if (!rewriter_ptr || !block_ptr) return;
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->setInsertionPointToEnd(reinterpret_cast<mlir::Block*>(block_ptr));
+}
+
+// Get the i-th region of an operation.
+uint64_t mlir_op_get_region(uint64_t op_ptr, int region_idx) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (region_idx < 0 || region_idx >= (int)op->getNumRegions()) return 0;
+  return reinterpret_cast<uint64_t>(&op->getRegion(region_idx));
+}
+
+// Create a new block in a region with the given argument types.
+// Sets the rewriter insertion point to the end of the new block.
+// arg_types_list: Scheme list of type uptrs (stored as Sunsigned64).
+uint64_t mlir_region_create_block(uint64_t rewriter_ptr, uint64_t region_ptr,
+                                   ptr arg_types_list) {
+  if (!rewriter_ptr || !region_ptr) return 0;
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* region   = reinterpret_cast<mlir::Region*>(region_ptr);
+  mlir::Location loc = region->getParentOp()->getLoc();
+
+  mlir::Block* block = rewriter->createBlock(region);
+  for (ptr cur = static_cast<ptr>(arg_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    block->addArgument(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)), loc);
+  }
+  rewriter->setInsertionPointToEnd(block);
+  return reinterpret_cast<uint64_t>(block);
+}
+
+// Get the i-th argument of a block as a Value opaque pointer.
+uint64_t mlir_block_get_argument(uint64_t block_ptr, int idx) {
+  if (!block_ptr) return 0;
+  auto* block = reinterpret_cast<mlir::Block*>(block_ptr);
+  if (idx < 0 || idx >= (int)block->getNumArguments()) return 0;
+  return reinterpret_cast<uint64_t>(block->getArgument(idx).getAsOpaquePointer());
+}
+
+// Get the shape::ShapeType from an MLIRContext.
+uint64_t mlir_get_shape_shape_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::shape::ShapeType::get(ctx).getAsOpaquePointer());
+}
+
+uint64_t mlir_get_shape_size_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::shape::SizeType::get(ctx).getAsOpaquePointer());
+}
+
+int mlir_replace_op(uint64_t rewriter_ptr, uint64_t old_op_ptr, uint64_t new_value_ptr) {
+  if (!rewriter_ptr) { mlir_log_error("mlir_replace_op: no rewriter"); return 0; }
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* op  = reinterpret_cast<mlir::Operation*>(old_op_ptr);
+  auto  val = mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(new_value_ptr));
+  rewriter->replaceOp(op, val);
+  return 1;
+}
+
+int mlir_erase_op(uint64_t rewriter_ptr, uint64_t op_ptr) {
+  if (!rewriter_ptr) { mlir_log_error("mlir_erase_op: no rewriter"); return 0; }
+  reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr)
+      ->eraseOp(reinterpret_cast<mlir::Operation*>(op_ptr));
+  return 1;
+}
+
+void mlir_notify_match_failure(uint64_t op_ptr, const char* reason) {
+  mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
+}
+
+// Direct erase without a rewriter — for post-pass cleanup outside a pattern callback.
+void mlir_op_erase(uint64_t op_ptr) {
+  if (!op_ptr) return;
+  reinterpret_cast<mlir::Operation*>(op_ptr)->erase();
+}
+
+//===----------------------------------------------------------------------===//
+// Pattern Registration - Scheme-defined patterns
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// Wrapper class that implements ConversionPattern by calling a Scheme callback
+class SchemeConversionPattern : public mlir::ConversionPattern {
+public:
+  SchemeConversionPattern(mlir::TypeConverter *typeConverter, mlir::MLIRContext *ctx,
+                          ptr schemeCallback, llvm::StringRef opName)
+      : ConversionPattern(*typeConverter, opName, 1 /*benefit*/, ctx),
+        callback_(schemeCallback),  // RAII lock
+        targetOpName(opName.str()) {}
+
+  // Destructor automatically unlocks via LockedSchemeObject
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op, mlir::ArrayRef<mlir::Value> operands,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    // Check if this is the target operation
+    if (op->getName().getStringRef() != targetOpName) {
+      return mlir::failure();
+    }
+
+    // Call Scheme callback: (callback op operands-ref rewriter type-converter)
+    // rewriter and op are passed explicitly — no implicit global state
+    ptr opPtr            = Sunsigned64(reinterpret_cast<uint64_t>(op));
+    ptr operandsRefPtr   = Sunsigned64(reinterpret_cast<uint64_t>(&operands));
+    ptr rewriterPtr      = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
+    ptr typeConverterPtr = Sunsigned64(reinterpret_cast<uint64_t>(getTypeConverter()));
+
+    ptr args_list = Scons(opPtr, Scons(operandsRefPtr, Scons(rewriterPtr, Scons(typeConverterPtr, Snil))));
+    ptr apply_proc = Stop_level_value(Sstring_to_symbol("apply"));
+    ptr result = Scall2(apply_proc, callback_.get(), args_list);
+
+    // Check result: #t = success, #f = failure
+    if (result == Strue) {
+      return mlir::success();
+    } else {
+      return mlir::failure();
+    }
+  }
+
+private:
+  mlir::hipsr::LockedSchemeObject callback_;  // RAII-locked Scheme procedure
+  std::string targetOpName;      // Target operation name
+};
+
+} // anonymous namespace
+
+void mlir_register_conversion_pattern(ptr patterns_ptr,
+                                      const char* op_name,
+                                      ptr callback,
+                                      ptr type_converter_ptr) {
+  auto *patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto *typeConverter = reinterpret_cast<mlir::TypeConverter*>(type_converter_ptr);
+  ptr schemeCallback = static_cast<ptr>(callback);
+
+  mlir_log_debug((std::string("Registering Scheme pattern for ") + op_name).c_str());
+
+  // Add pattern to the pattern set
+  patterns->add<SchemeConversionPattern>(
+      typeConverter, patterns->getContext(), schemeCallback, llvm::StringRef(op_name));
+}
+
+//===----------------------------------------------------------------------===//
+// Additional utility FFI functions
+//===----------------------------------------------------------------------===//
+
+// Get HipSR context argument (first function argument)
+// Returns Value* as unsigned-64, or 0 if not found
+uint64_t mlir_get_hipsr_context_arg(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+
+  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
+
+  if (!funcOp || funcOp.getBody().empty()) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: not inside a function body");
+    return 0;
+  }
+
+  mlir::Block &entry = funcOp.getBody().front();
+  if (entry.getNumArguments() == 0) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: function has no arguments");
+    return 0;
+  }
+
+  mlir::Value ctx = entry.getArgument(0);
+  if (!mlir::isa<mlir::hipsr::ContextType>(ctx.getType())) {
+    mlir_log_debug("mlir_get_hipsr_context_arg: arg 0 is not !hipsr.context");
+    return 0;
+  }
+
+  MlirValue cVal = wrap(ctx);
+  return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
+}
+
+// Check if a type is RankedTensorType
+// Returns 1 if true, 0 if false
+int mlir_type_is_ranked_tensor(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  return mlir::isa<mlir::RankedTensorType>(type) ? 1 : 0;
+}
+
+// Get rank of RankedTensorType
+// Returns rank, or -1 if not a ranked tensor
+int64_t mlir_type_get_rank(uint64_t type_ptr) {
+  if (!type_ptr) return -1;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return -1;
+  return tensorType.getRank();
+}
+
+// Get element type of tensor type
+// Returns Type* as unsigned-64, or 0 if not a tensor
+uint64_t mlir_type_get_element_type(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  return reinterpret_cast<uint64_t>(const_cast<void*>(tensorType.getElementType().getAsOpaquePointer()));
+}
+
+// Clone tensor type with device memory space
+// Returns new Type* as unsigned-64, or original if not a ranked tensor
+uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return type_ptr; // Return original if not a tensor
+
+  // Use tensorTypeInSpace from OnnxToHipsrUtils
+  auto newType = tensorType.cloneWithEncoding(
+      mlir::hipsr::MemorySpaceAttr::get(tensorType.getContext(), mlir::hipsr::MemorySpace::Device));
+
+  return reinterpret_cast<uint64_t>(const_cast<void*>(newType.getAsOpaquePointer()));
+}
+
+//===----------------------------------------------------------------------===//
+// MLIR Dialect Conversion Primitives
+//===----------------------------------------------------------------------===//
+
+// Helper: Populate Cast conversion patterns
+// This is kept as a helper since it's a reusable component
+void mlir_populate_cast_conversion_patterns(
+    uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
+  if (!converter_ptr || !patterns_ptr || !ctx_ptr) return;
+
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+
+  mlir::hipsr::populateCastConversionPatterns(*converter, *patterns, ctx);
+}
+
+// Helper: Populate Return conversion patterns
+void mlir_populate_return_conversion_patterns(
+    uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
+  if (!converter_ptr) {
+    llvm::errs() << "[SCHEME FFI ERROR] mlir_populate_return_conversion_patterns: converter_ptr is null!\n";
+    return;
+  }
+  if (!patterns_ptr) {
+    llvm::errs() << "[SCHEME FFI ERROR] mlir_populate_return_conversion_patterns: patterns_ptr is null!\n";
+    return;
+  }
+  if (!ctx_ptr) {
+    llvm::errs() << "[SCHEME FFI ERROR] mlir_populate_return_conversion_patterns: ctx_ptr is null!\n";
+    return;
+  }
+
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+
+  mlir::hipsr::populateReturnConversionPatterns(*converter, *patterns, ctx);
+}
+
+// Helper: Populate FuncOp type conversion pattern
+void mlir_populate_func_type_conversion_pattern(
+    uint64_t patterns_ptr, uint64_t converter_ptr) {
+  if (!patterns_ptr || !converter_ptr) return;
+
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+
+  mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(*patterns, *converter);
+}
+
+// Helpers: Populate conversion patterns for remaining ONNX ops
+#define DEFINE_POPULATE_PATTERNS(name, fn) \
+  void name(uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) { \
+    if (!converter_ptr || !patterns_ptr || !ctx_ptr) return; \
+    mlir::hipsr::fn( \
+      *reinterpret_cast<mlir::TypeConverter*>(converter_ptr), \
+      *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr), \
+      reinterpret_cast<mlir::MLIRContext*>(ctx_ptr)); \
+  }
+
+DEFINE_POPULATE_PATTERNS(mlir_populate_matmul_conversion_patterns,    populateMatMulConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_expand_conversion_patterns,     populateExpandConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_min_conversion_patterns,        populateMinConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_shape_conversion_patterns,      populateShapeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_reshape_conversion_patterns,    populateReshapeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_unsqueeze_conversion_patterns,  populateUnsqueezeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_equal_conversion_patterns,      populateEqualConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_transpose_conversion_patterns,  populateTransposeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_gather_conversion_patterns,     populateGatherConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_slice_conversion_patterns,      populateSliceConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_scatter_nd_conversion_patterns, populateScatterNDConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_nonzero_conversion_patterns,    populateNonZeroConversionPatterns)
+
+#undef DEFINE_POPULATE_PATTERNS
+
+// Constant patterns take no ctx (type converter only)
+void mlir_populate_constant_conversion_patterns(
+    uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t /*ctx_ptr*/) {
+  if (!converter_ptr || !patterns_ptr) return;
+  mlir::hipsr::populateOnnxToHipsrConstantPatterns(
+    *reinterpret_cast<mlir::TypeConverter*>(converter_ptr),
+    *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr));
+}
+
+// Helper: Erase dead NoValue operations
+void mlir_erase_dead_novalue_ops(uint64_t module_ptr) {
+  if (!module_ptr) return;
+
+  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
+  if (!module) return;
+
+  llvm::SmallVector<mlir::onnx::NoValueOp> dead;
+  module.walk([&](mlir::onnx::NoValueOp op) {
+    if (op->use_empty()) {
+      dead.push_back(op);
+    }
+  });
+
+  for (auto op : dead) {
+    op.erase();
+  }
+}
+
+// Helper: Rewire placeholder inputs to follow shape graph
+void mlir_rewire_placeholder_inputs(uint64_t module_ptr) {
+  if (!module_ptr) return;
+
+  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
+  if (!module) return;
+
+  module.walk([](mlir::hipsr::PlaceholderOp placeholder) {
+    llvm::SmallVector<mlir::Value> resolvedInputs;
+    for (mlir::Value input : placeholder.getInputs()) {
+      resolvedInputs.push_back(mlir::hipsr::getShapeGraphCounterpart(input));
+    }
+    placeholder.getInputsMutable().assign(resolvedInputs);
+  });
+}
+
+//===----------------------------------------------------------------------===//
+// MLIR Dialect Conversion Framework Primitives
+//===----------------------------------------------------------------------===//
+
+// Create a TypeConverter object
+// Returns TypeConverter* as uint64_t (opaque handle for Scheme)
+uint64_t mlir_create_type_converter() {
+  mlir::TypeConverter* tc = new mlir::TypeConverter();
+  uint64_t result = reinterpret_cast<uint64_t>(tc);
+  mlir_log_debug((std::string("mlir_create_type_converter: created TypeConverter at ") +
+                  std::to_string(result) + " (ptr=" +
+                  std::to_string(reinterpret_cast<uintptr_t>(tc)) + ")").c_str());
+  return result;
+}
+
+// Destroy a TypeConverter object
+void mlir_destroy_type_converter(uint64_t converter_ptr) {
+  if (!converter_ptr) return;
+  mlir_log_debug((std::string("mlir_destroy_type_converter: destroying TypeConverter at ") +
+                  std::to_string(converter_ptr)).c_str());
+  delete reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+}
+
+// Add standard type conversions to TypeConverter
+// This adds: identity conversion + ranked tensor device memory space conversion
+void mlir_type_converter_add_device_memory_conversions(uint64_t converter_ptr) {
+  if (!converter_ptr) return;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+
+  // Identity conversion for all types
+  converter->addConversion([](mlir::Type type) { return type; });
+
+  // Ranked tensor conversion: add device memory space attribute
+  converter->addConversion([](mlir::RankedTensorType type) -> mlir::Type {
+    if (type.getRank() == 0 || type.getEncoding()) {
+      return type;
+    }
+    auto encoding = mlir::hipsr::MemorySpaceAttr::get(type.getContext(),
+                                                      mlir::hipsr::MemorySpace::Device);
+    return mlir::RankedTensorType::get(type.getShape(), type.getElementType(), encoding);
+  });
+}
+
+// Create a ConversionTarget object
+// Returns ConversionTarget* as uint64_t (opaque handle for Scheme)
+uint64_t mlir_create_conversion_target(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(new mlir::ConversionTarget(*ctx));
+}
+
+// Destroy a ConversionTarget object
+void mlir_destroy_conversion_target(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  delete reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+}
+
+// Generic: mark a named dialect illegal in the conversion target
+void mlir_conversion_target_add_illegal_dialect(uint64_t target_ptr, const char* dialect_name) {
+  if (!target_ptr || !dialect_name) return;
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)->addIllegalDialect(dialect_name);
+}
+
+// Generic: mark a named dialect legal in the conversion target
+void mlir_conversion_target_add_legal_dialect(uint64_t target_ptr, const char* dialect_name) {
+  if (!target_ptr || !dialect_name) return;
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)->addLegalDialect(dialect_name);
+}
+
+// Generic: mark a named op legal in the conversion target
+void mlir_conversion_target_add_legal_op(uint64_t target_ptr, uint64_t ctx_ptr, const char* op_name) {
+  if (!target_ptr || !ctx_ptr || !op_name) return;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)
+      ->addLegalOp(mlir::OperationName(op_name, ctx));
+}
+
+// Generic: mark a named op dynamically legal with a Scheme callback (op → bool)
+void mlir_conversion_target_add_dynamically_legal_op(
+    uint64_t target_ptr, uint64_t ctx_ptr, const char* op_name, ptr callback) {
+  if (!target_ptr || !ctx_ptr || !op_name) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  Slock_object(callback);
+  target->addDynamicallyLegalOp(
+      mlir::OperationName(op_name, ctx),
+      [callback](mlir::Operation* op) -> bool {
+        ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
+        ptr result = Scall1(callback, op_arg);
+        return result != Sfalse && result != Sfixnum(0);
+      });
+}
+
+// Generic: mark unknown ops dynamically legal with a Scheme callback (op → bool)
+void mlir_conversion_target_mark_unknown_ops_dynamically_legal(uint64_t target_ptr, ptr callback) {
+  if (!target_ptr) return;
+  Slock_object(callback);
+  reinterpret_cast<mlir::ConversionTarget*>(target_ptr)
+      ->markUnknownOpDynamicallyLegal([callback](mlir::Operation* op) -> bool {
+        ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
+        ptr result = Scall1(callback, op_arg);
+        return result != Sfalse && result != Sfixnum(0);
+      });
+}
+
+// Generic: add a Scheme type-conversion callback to a TypeConverter
+// callback: (lambda (type-uptr) -> type-uptr-or-#f)
+// Returns #f or 0 from callback means "not handled by this conversion"
+void mlir_type_converter_add_conversion(uint64_t converter_ptr, ptr callback) {
+  if (!converter_ptr) return;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  Slock_object(callback);
+  converter->addConversion([callback](mlir::Type type) -> std::optional<mlir::Type> {
+    ptr type_arg = Sunsigned64(reinterpret_cast<uint64_t>(type.getAsOpaquePointer()));
+    ptr result = Scall1(callback, type_arg);
+    if (result == Sfalse) return std::nullopt;
+    uint64_t result_val = Sunsigned64_value(result);
+    if (result_val == 0) return std::nullopt;
+    return mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(result_val));
+  });
+}
+
+// Generic: check if a type is legal according to a TypeConverter
+int mlir_type_converter_is_legal_type(uint64_t converter_ptr, uint64_t type_ptr) {
+  if (!converter_ptr || !type_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  return converter->isLegal(type) ? 1 : 0;
+}
+
+// Generic: check if all operand/result types of an op are legal
+int mlir_type_converter_is_legal(uint64_t converter_ptr, uint64_t op_ptr) {
+  if (!converter_ptr || !op_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return converter->isLegal(op) ? 1 : 0;
+}
+
+// Generic: check if a func op's signature is legal according to a TypeConverter
+int mlir_type_converter_is_signature_legal(uint64_t converter_ptr, uint64_t func_op_ptr) {
+  if (!converter_ptr || !func_op_ptr) return 0;
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  auto func_op = mlir::dyn_cast<mlir::func::FuncOp>(
+      reinterpret_cast<mlir::Operation*>(func_op_ptr));
+  if (!func_op) return 0;
+  return converter->isSignatureLegal(func_op.getFunctionType()) ? 1 : 0;
+}
+
+// Generic: get the encoding attribute of a type (0 if no encoding)
+uint64_t mlir_type_get_encoding(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  mlir::Attribute enc = tensorType.getEncoding();
+  if (!enc) return 0;
+  return reinterpret_cast<uint64_t>(enc.getAsOpaquePointer());
+}
+
+// Mark ONNX dialect illegal (except NoValueOp)
+void mlir_conversion_target_add_illegal_onnx(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addIllegalDialect<mlir::onnx::OnnxDialect>();
+  target->addLegalOp<mlir::onnx::NoValueOp>();
+}
+
+// Mark HipSR dialect legal
+void mlir_conversion_target_add_legal_hipsr(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addLegalDialect<mlir::hipsr::HipsrDialect>();
+}
+
+// Mark common operations legal (ModuleOp, arith.constant)
+void mlir_conversion_target_add_legal_common_ops(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->addLegalOp<mlir::ModuleOp>();
+  target->addLegalOp<mlir::arith::ConstantOp>();
+}
+
+// Mark func.func and func.return dynamically legal based on TypeConverter
+void mlir_conversion_target_add_dynamically_legal_func(
+    uint64_t target_ptr, uint64_t converter_ptr) {
+  if (!target_ptr || !converter_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+
+  mlir_log_debug((std::string("mlir_conversion_target_add_dynamically_legal_func: IN converter_ptr=") +
+                  std::to_string(converter_ptr) + " (as ptr=" +
+                  std::to_string(reinterpret_cast<uintptr_t>(converter)) + ")").c_str());
+
+  target->addDynamicallyLegalOp<mlir::func::FuncOp>([converter](mlir::func::FuncOp op) {
+    mlir_log_debug((std::string("FuncOp lambda: converter=") +
+                    std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
+    return converter->isSignatureLegal(op.getFunctionType());
+  });
+  target->addDynamicallyLegalOp<mlir::func::ReturnOp>(
+      [converter](mlir::func::ReturnOp op) {
+        mlir_log_debug((std::string("ReturnOp lambda: IN converter=") +
+                        std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
+        bool result = converter->isLegal(op);
+        mlir_log_debug((std::string("ReturnOp lambda: OUT result=") +
+                        std::to_string(result)).c_str());
+        return result;
+      });
+
+  mlir_log_debug("mlir_conversion_target_add_dynamically_legal_func: lambdas registered");
+}
+
+// Mark unknown ops legal if nested inside ComputeOp or PlaceholderOp
+void mlir_conversion_target_mark_unknown_ops_nested_legal(uint64_t target_ptr) {
+  if (!target_ptr) return;
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  target->markUnknownOpDynamicallyLegal([](mlir::Operation *op) {
+    return op->getParentOfType<mlir::hipsr::ComputeOp>() != nullptr ||
+           op->getParentOfType<mlir::hipsr::PlaceholderOp>() != nullptr;
+  });
+}
+
+// Create a RewritePatternSet
+// Returns RewritePatternSet* as uint64_t (opaque handle for Scheme)
+uint64_t mlir_create_rewrite_pattern_set(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(new mlir::RewritePatternSet(ctx));
+}
+
+// Destroy a RewritePatternSet object
+void mlir_destroy_rewrite_pattern_set(uint64_t patterns_ptr) {
+  if (!patterns_ptr) return;
+  delete reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+}
+
+// Apply full conversion
+// Returns 1 on success, 0 on failure
+// NOTE: This takes ownership of the patterns (moves them)
+int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_t patterns_ptr) {
+  mlir_log_debug((std::string("mlir_apply_full_conversion: IN module=") +
+                  std::to_string(module_ptr) + " target=" + std::to_string(target_ptr) +
+                  " patterns=" + std::to_string(patterns_ptr)).c_str());
+
+  if (!module_ptr || !target_ptr || !patterns_ptr) return 0;
+
+  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
+  if (!module) return 0;
+
+  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+
+  mlir_log_debug("mlir_apply_full_conversion: calling applyFullConversion");
+  if (mlir::failed(mlir::applyFullConversion(module, *target, std::move(*patterns)))) {
+    mlir_log_debug("mlir_apply_full_conversion: FAILED");
+    return 0;
+  }
+
+  mlir_log_debug("mlir_apply_full_conversion: SUCCESS");
+  return 1;
+}
+
+// Set an integer attribute on an operation
+void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) {
+  if (!op) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
+  mlir::MLIRContext* ctx = cppOp->getContext();
+  mlir::IntegerAttr attr = mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64), value);
+  cppOp->setAttr(attr_name, attr);
+}
+
+// Read a single integer attribute; returns default_val if absent.
+int64_t mlir_operation_get_integer_attr(uint64_t op_ptr, const char* attr_name, int64_t default_val) {
+  if (!op_ptr) return default_val;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>(attr_name))
+    return attr.getInt();
+  return default_val;
+}
+
+// Read a dense-i64 or array-of-integer-attr as a Scheme list. Returns Snil when absent.
+ptr mlir_operation_get_integer_array_attr(uint64_t op_ptr, const char* attr_name) {
+  if (!op_ptr) return Snil;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(attr_name)) {
+    ptr list = Snil;
+    for (int i = (int)attr.size() - 1; i >= 0; --i)
+      list = Scons(Sinteger(attr[i]), list);
+    return list;
+  }
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>(attr_name)) {
+    ptr list = Snil;
+    for (int i = (int)attr.size() - 1; i >= 0; --i) {
+      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr[i]);
+      if (!intAttr) return Snil;
+      list = Scons(Sinteger(intAttr.getInt()), list);
+    }
+    return list;
+  }
+  return Snil;
+}
+
+// Set a DenseI64ArrayAttr on an operation. values_list is a Scheme list of fixnums.
+void mlir_operation_set_dense_i64_array(uint64_t op_ptr, const char* attr_name, ptr values_list) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  llvm::SmallVector<int64_t> values;
+  for (ptr cur = static_cast<ptr>(values_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    values.push_back(Sinteger_value(Scar(cur)));
+  }
+  op->setAttr(attr_name, mlir::DenseI64ArrayAttr::get(op->getContext(), values));
+}
+
+// Change a hipsr.placeholder's placeholder_type attribute to Barrier.
+void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  op->setAttr("placeholder_type",
+      mlir::hipsr::PlaceholderTypeAttr::get(op->getContext(),
+                                             mlir::hipsr::PlaceholderType::Barrier));
+}
+
+// Copy a named attribute from src_op to dst_op. No-op if attr is absent on src.
+void mlir_operation_copy_attr(uint64_t dst_op_ptr, const char* dst_name,
+                               uint64_t src_op_ptr, const char* src_name) {
+  if (!dst_op_ptr || !src_op_ptr) return;
+  auto* dst = reinterpret_cast<mlir::Operation*>(dst_op_ptr);
+  auto* src = reinterpret_cast<mlir::Operation*>(src_op_ptr);
+  auto attr = src->getAttr(src_name);
+  if (attr) dst->setAttr(dst_name, attr);
+}
+
+// Returns 1 if type is a RankedTensorType with device memory space, 0 otherwise.
+int mlir_type_is_device_tensor(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  auto enc = mlir::dyn_cast_or_null<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding());
+  return (enc && enc.getValue() == mlir::hipsr::MemorySpace::Device) ? 1 : 0;
+}
+
+// Returns 1 if the named attribute exists on the operation.
+int mlir_operation_has_attr(uint64_t op_ptr, const char* attr_name) {
+  if (!op_ptr) return 0;
+  return reinterpret_cast<mlir::Operation*>(op_ptr)->hasAttr(attr_name) ? 1 : 0;
+}
+
+} // extern "C"
+
+namespace mlir {
+namespace hipsr {
+
+// Register all MLIR foreign functions in Scheme
+void registerMlirForeignFunctions() {
+  // Register C functions so Scheme can call them via foreign-procedure
+  Sregister_symbol("mlir_operation_get_name", (void*)mlir_operation_get_name);
+  Sregister_symbol("mlir_operation_get_context", (void*)mlir_operation_get_context);
+  Sregister_symbol("mlir_operation_num_operands", (void*)mlir_operation_num_operands);
+  Sregister_symbol("mlir_operation_num_results", (void*)mlir_operation_num_results);
+  Sregister_symbol("mlir_operation_get_operand", (void*)mlir_operation_get_operand);
+  Sregister_symbol("mlir_operation_get_result", (void*)mlir_operation_get_result);
+  Sregister_symbol("mlir_operation_walk", (void*)mlir_operation_walk);
+
+  // Register utility functions (extern "C" - use :: prefix for global namespace)
+  Sregister_symbol("mlir_get_hipsr_context_arg", (void*)::mlir_get_hipsr_context_arg);
+  Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
+  Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
+  Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
+  Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
+
+  // Dialect conversion framework primitives
+  // Note: mlir_operation_get_context already registered above (line 1137)
+  Sregister_symbol("mlir_create_type_converter", (void*)mlir_create_type_converter);
+  Sregister_symbol("mlir_destroy_type_converter", (void*)mlir_destroy_type_converter);
+  Sregister_symbol("mlir_type_converter_add_device_memory_conversions", (void*)mlir_type_converter_add_device_memory_conversions);
+  Sregister_symbol("mlir_create_conversion_target", (void*)mlir_create_conversion_target);
+  Sregister_symbol("mlir_destroy_conversion_target", (void*)mlir_destroy_conversion_target);
+  Sregister_symbol("mlir_conversion_target_add_illegal_dialect", (void*)mlir_conversion_target_add_illegal_dialect);
+  Sregister_symbol("mlir_conversion_target_add_legal_dialect", (void*)mlir_conversion_target_add_legal_dialect);
+  Sregister_symbol("mlir_conversion_target_add_legal_op", (void*)mlir_conversion_target_add_legal_op);
+  Sregister_symbol("mlir_conversion_target_add_dynamically_legal_op", (void*)mlir_conversion_target_add_dynamically_legal_op);
+  Sregister_symbol("mlir_conversion_target_mark_unknown_ops_dynamically_legal", (void*)mlir_conversion_target_mark_unknown_ops_dynamically_legal);
+  Sregister_symbol("mlir_type_converter_add_conversion", (void*)mlir_type_converter_add_conversion);
+  Sregister_symbol("mlir_type_converter_is_legal_type", (void*)mlir_type_converter_is_legal_type);
+  Sregister_symbol("mlir_type_converter_is_legal", (void*)mlir_type_converter_is_legal);
+  Sregister_symbol("mlir_type_converter_is_signature_legal", (void*)mlir_type_converter_is_signature_legal);
+  Sregister_symbol("mlir_type_get_encoding", (void*)mlir_type_get_encoding);
+  Sregister_symbol("mlir_conversion_target_add_illegal_onnx", (void*)mlir_conversion_target_add_illegal_onnx);
+  Sregister_symbol("mlir_conversion_target_add_legal_hipsr", (void*)mlir_conversion_target_add_legal_hipsr);
+  Sregister_symbol("mlir_conversion_target_add_legal_common_ops", (void*)mlir_conversion_target_add_legal_common_ops);
+  Sregister_symbol("mlir_conversion_target_add_dynamically_legal_func", (void*)mlir_conversion_target_add_dynamically_legal_func);
+  Sregister_symbol("mlir_conversion_target_mark_unknown_ops_nested_legal", (void*)mlir_conversion_target_mark_unknown_ops_nested_legal);
+  Sregister_symbol("mlir_create_rewrite_pattern_set", (void*)mlir_create_rewrite_pattern_set);
+  Sregister_symbol("mlir_destroy_rewrite_pattern_set", (void*)mlir_destroy_rewrite_pattern_set);
+  Sregister_symbol("mlir_apply_full_conversion", (void*)mlir_apply_full_conversion);
+
+  // Dialect conversion helpers (reusable pattern populations)
+  Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)mlir_populate_cast_conversion_patterns);
+  Sregister_symbol("mlir_populate_return_conversion_patterns", (void*)mlir_populate_return_conversion_patterns);
+  Sregister_symbol("mlir_populate_func_type_conversion_pattern", (void*)mlir_populate_func_type_conversion_pattern);
+  Sregister_symbol("mlir_erase_dead_novalue_ops", (void*)mlir_erase_dead_novalue_ops);
+  Sregister_symbol("mlir_rewire_placeholder_inputs", (void*)mlir_rewire_placeholder_inputs);
+
+  // Register logging functions
+  Sregister_symbol("mlir_log_trace", (void*)mlir_log_trace);
+  Sregister_symbol("mlir_log_debug", (void*)mlir_log_debug);
+  Sregister_symbol("mlir_log_info", (void*)mlir_log_info);
+  Sregister_symbol("mlir_log_warning", (void*)mlir_log_warning);
+  Sregister_symbol("mlir_log_error", (void*)mlir_log_error);
+  Sregister_symbol("mlir_log_fatal", (void*)mlir_log_fatal);
+
+  // Phase 1: Type System FFI
+  Sregister_symbol("mlir_type_set_memory_space", (void*)::mlir_type_set_memory_space);
+  Sregister_symbol("mlir_type_get_shape", (void*)::mlir_type_get_shape);
+  Sregister_symbol("mlir_value_get_type", (void*)::mlir_value_get_type);
+
+  // Phase 2: Operation/Value Navigation FFI
+  Sregister_symbol("mlir_operation_get_parent", (void*)::mlir_operation_get_parent);
+  Sregister_symbol("mlir_operation_get_operand_value", (void*)::mlir_operation_get_operand_value);
+  Sregister_symbol("mlir_operation_get_result_value", (void*)::mlir_operation_get_result_value);
+  Sregister_symbol("mlir_operation_get_loc", (void*)::mlir_operation_get_loc);
+  Sregister_symbol("mlir_operation_get_block_argument", (void*)::mlir_operation_get_block_argument);
+  Sregister_symbol("mlir_value_get_defining_op", (void*)::mlir_value_get_defining_op);
+  Sregister_symbol("mlir_value_is_block_argument", (void*)::mlir_value_is_block_argument);
+  Sregister_symbol("mlir_value_get_result_number", (void*)::mlir_value_get_result_number);
+  Sregister_symbol("mlir_operation_num_dps_inits", (void*)::mlir_operation_num_dps_inits);
+  Sregister_symbol("mlir_operation_get_dps_init_value", (void*)::mlir_operation_get_dps_init_value);
+  Sregister_symbol("mlir_operation_set_operand", (void*)::mlir_operation_set_operand);
+  Sregister_symbol("mlir_operation_use_empty", (void*)::mlir_operation_use_empty);
+  Sregister_symbol("mlir_operation_set_attr",              (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_get_integer_attr",      (void*)::mlir_operation_get_integer_attr);
+  Sregister_symbol("mlir_operation_get_integer_array_attr",(void*)::mlir_operation_get_integer_array_attr);
+  Sregister_symbol("mlir_operation_set_dense_i64_array",   (void*)::mlir_operation_set_dense_i64_array);
+  Sregister_symbol("mlir_placeholder_set_barrier_type",    (void*)::mlir_placeholder_set_barrier_type);
+  Sregister_symbol("mlir_operation_copy_attr",             (void*)::mlir_operation_copy_attr);
+  Sregister_symbol("mlir_type_is_device_tensor",           (void*)::mlir_type_is_device_tensor);
+  Sregister_symbol("mlir_operation_has_attr",              (void*)::mlir_operation_has_attr);
+
+  // Builder API — explicit rewriter, no implicit globals
+  Sregister_symbol("mlir_build_op",                         (void*)::mlir_build_op);
+  Sregister_symbol("mlir_set_insertion_point_before",       (void*)::mlir_set_insertion_point_before);
+  Sregister_symbol("mlir_set_insertion_point_to_block_end", (void*)::mlir_set_insertion_point_to_block_end);
+  Sregister_symbol("mlir_op_get_region",                    (void*)::mlir_op_get_region);
+  Sregister_symbol("mlir_region_create_block",              (void*)::mlir_region_create_block);
+  Sregister_symbol("mlir_block_get_argument",               (void*)::mlir_block_get_argument);
+  Sregister_symbol("mlir_get_shape_shape_type",             (void*)::mlir_get_shape_shape_type);
+  Sregister_symbol("mlir_get_shape_size_type",              (void*)::mlir_get_shape_size_type);
+
+  // Populate patterns for remaining ONNX ops
+  Sregister_symbol("mlir_populate_matmul_conversion_patterns",    (void*)::mlir_populate_matmul_conversion_patterns);
+  Sregister_symbol("mlir_populate_expand_conversion_patterns",    (void*)::mlir_populate_expand_conversion_patterns);
+  Sregister_symbol("mlir_populate_min_conversion_patterns",       (void*)::mlir_populate_min_conversion_patterns);
+  Sregister_symbol("mlir_populate_shape_conversion_patterns",     (void*)::mlir_populate_shape_conversion_patterns);
+  Sregister_symbol("mlir_populate_reshape_conversion_patterns",   (void*)::mlir_populate_reshape_conversion_patterns);
+  Sregister_symbol("mlir_populate_unsqueeze_conversion_patterns", (void*)::mlir_populate_unsqueeze_conversion_patterns);
+  Sregister_symbol("mlir_populate_equal_conversion_patterns",     (void*)::mlir_populate_equal_conversion_patterns);
+  Sregister_symbol("mlir_populate_transpose_conversion_patterns", (void*)::mlir_populate_transpose_conversion_patterns);
+  Sregister_symbol("mlir_populate_gather_conversion_patterns",    (void*)::mlir_populate_gather_conversion_patterns);
+  Sregister_symbol("mlir_populate_slice_conversion_patterns",     (void*)::mlir_populate_slice_conversion_patterns);
+  Sregister_symbol("mlir_populate_scatter_nd_conversion_patterns",(void*)::mlir_populate_scatter_nd_conversion_patterns);
+  Sregister_symbol("mlir_populate_nonzero_conversion_patterns",   (void*)::mlir_populate_nonzero_conversion_patterns);
+  Sregister_symbol("mlir_populate_constant_conversion_patterns",  (void*)::mlir_populate_constant_conversion_patterns);
+  Sregister_symbol("mlir_replace_op",                       (void*)::mlir_replace_op);
+  Sregister_symbol("mlir_erase_op",                         (void*)::mlir_erase_op);
+  Sregister_symbol("mlir_op_erase",                         (void*)::mlir_op_erase);
+  Sregister_symbol("mlir_notify_match_failure", (void*)(void (*)(uint64_t, const char*))::mlir_notify_match_failure);
+
+  // Pattern registration for Scheme-defined patterns
+  Sregister_symbol("mlir_register_conversion_pattern", (void*)::mlir_register_conversion_pattern);
+
+  LLVM_DEBUG(llvm::dbgs() << "Registered " << 28 << " MLIR FFI functions\n");
+}
+
+} // namespace hipsr
+} // namespace mlir
