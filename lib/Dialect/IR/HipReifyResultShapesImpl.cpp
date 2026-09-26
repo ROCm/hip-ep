@@ -34,8 +34,8 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
   if (getNumResults() == 0)
     return failure();
   auto dims = mlir::hip::reifyMatmulResultShape(
-      b, getLoc(), getA(), getB(), [&] { return emitOpError(); },
-      getTransA(), getTransB());
+      b, getLoc(), getA(), getB(), [&] { return emitOpError(); }, getTransA(),
+      getTransB());
   if (failed(dims))
     return failure();
   reifiedReturnShapes.assign({std::move(*dims)});
@@ -48,8 +48,8 @@ QMatMulOp::reifyResultShapes(OpBuilder &b,
   if (getNumResults() == 0)
     return failure();
   auto dims = mlir::hip::reifyMatmulResultShape(
-      b, getLoc(), getA(), getB(), [&] { return emitOpError(); },
-      getTransA(), getTransB());
+      b, getLoc(), getA(), getB(), [&] { return emitOpError(); }, getTransA(),
+      getTransB());
   if (failed(dims))
     return failure();
   reifiedReturnShapes.assign({std::move(*dims)});
@@ -236,9 +236,9 @@ QGemmOp::reifyResultShapes(OpBuilder &b,
                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  auto dims = mlir::hip::reifyGemmResultShape(
-      b, getLoc(), getA(), getB(), getC(), getTransA(), getTransB(),
-      [&] { return emitOpError(); });
+  auto dims = mlir::hip::reifyGemmResultShape(b, getLoc(), getA(), getB(),
+                                              getC(), getTransA(), getTransB(),
+                                              [&] { return emitOpError(); });
   if (failed(dims))
     return failure();
   reifiedReturnShapes.assign({std::move(*dims)});
