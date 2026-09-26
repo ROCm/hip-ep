@@ -72,15 +72,29 @@ LogicalResult ConvTransposeOp::reifyResultShapes(
 
 LogicalResult MultiHeadAttentionOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() != 1 || !getKey() || !getValue())
+  if (failed(verify()))
     return failure();
+  auto inits = getDpsInits();
+  if (getNumResults() != inits.size())
+    return failure();
+  for (auto [result, init] : llvm::zip(getResults(), inits))
+    if (!isa<RankedTensorType>(init.getType()) ||
+        result.getType() != init.getType())
+      return failure();
   FailureOr<SmallVector<OpFoldResult>> shape =
       mlir::hip::reifyMultiHeadAttentionOutputShape(
           b, getLoc(), getQuery(), getKey(), getValue(), getNumHeads(),
           [&]() { return this->emitOpError(); });
   if (failed(shape))
     return failure();
-  reifiedReturnShapes.assign({std::move(*shape)});
+  ReifiedRankedShapedTypeDims shapes;
+  shapes.push_back(std::move(*shape));
+  // Cache destinations own physical capacity; QK's logical length can depend
+  // on runtime payloads. Preserve these explicit destinations after
+  // verification.
+  for (Value init : llvm::drop_begin(inits))
+    shapes.push_back(tensor::getMixedSizes(b, getLoc(), init));
+  reifiedReturnShapes = std::move(shapes);
   return success();
 }
 
