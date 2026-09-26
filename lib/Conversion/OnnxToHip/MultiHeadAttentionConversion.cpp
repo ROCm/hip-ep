@@ -318,6 +318,14 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
       outputType.getElementType() != queryType.getElementType())
     return op->emitError(
         "default MultiHeadAttention runtime requires fp16 Q/K/V and output");
+  if (queryType.getRank() != 3 || keyType.getRank() != 3 ||
+      valueType.getRank() != 3)
+    return op->emitError(
+        "default MultiHeadAttention runtime requires rank-3 Q/K/V");
+  if (!queryType.isDynamicDim(2) && !valueType.isDynamicDim(2) &&
+      queryType.getDimSize(2) != valueType.getDimSize(2))
+    return op->emitError(
+        "default MultiHeadAttention runtime requires equal Q/V hidden extents");
   if (unidirectionalAttr.getValue().getSExtValue() != 0 &&
       unidirectionalAttr.getValue().getSExtValue() != 1)
     return op->emitError("MultiHeadAttention unidirectional must be 0 or 1");

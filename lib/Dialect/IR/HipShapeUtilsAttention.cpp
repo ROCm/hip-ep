@@ -50,37 +50,36 @@ LogicalResult validateRank3Qkv(StringRef opName, ArrayRef<int64_t> queryShape,
   return failure();
 }
 
-} // namespace
+struct MhaOutputShape {
+  SmallVector<int64_t> shape;
+  bool hiddenFromValue;
+  int64_t hiddenDim;
+  int64_t hiddenScale;
+};
 
-FailureOr<SmallVector<int64_t>> mlir::hip::inferMultiHeadAttentionOutputShape(
-    ArrayRef<int64_t> queryShape, ArrayRef<int64_t> keyShape,
-    ArrayRef<int64_t> valueShape, int64_t numHeads,
-    function_ref<InFlightDiagnostic()> emitError) {
-  if (failed(validateRank3Qkv("multi_head_attention", queryShape, keyShape,
-                              valueShape, emitError)))
-    return failure();
-  if (numHeads <= 0) {
+/// Select the semantic source of each output extent without emitting IR.
+FailureOr<MhaOutputShape>
+inferMhaOutputShape(ArrayRef<int64_t> query,
+                    std::optional<ArrayRef<int64_t>> key,
+                    std::optional<ArrayRef<int64_t>> value, int64_t heads,
+                    function_ref<InFlightDiagnostic()> emitError) {
+  if (heads <= 0) {
     emitError() << "multi_head_attention num_heads must be positive";
     return failure();
   }
-
-  if (!areCompatibleStaticExtents(queryShape[0], keyShape[0]) ||
-      !areCompatibleStaticExtents(queryShape[0], valueShape[0])) {
-    emitError() << "multi_head_attention Q/K/V batch extents must agree";
+  if (query.size() != 3 && query.size() != 5) {
+    emitError() << "multi_head_attention query must have rank 3 or 5";
     return failure();
   }
-  if (!areCompatibleStaticExtents(keyShape[1], valueShape[1])) {
-    emitError() << "multi_head_attention K/V sequence extents must agree";
+  auto compatible = [&](int64_t lhs, int64_t rhs,
+                        StringRef message) -> LogicalResult {
+    if (areCompatibleStaticExtents(lhs, rhs))
+      return success();
+    emitError() << "multi_head_attention " << message;
     return failure();
-  }
-  if (!areCompatibleStaticExtents(queryShape[2], keyShape[2]) ||
-      !areCompatibleStaticExtents(queryShape[2], valueShape[2])) {
-    emitError() << "multi_head_attention Q/K/V hidden extents must agree";
-    return failure();
-  }
-
-  auto verifyPositive = [&](StringRef name,
-                            ArrayRef<int64_t> shape) -> LogicalResult {
+  };
+  auto positive = [&](ArrayRef<int64_t> shape,
+                      StringRef name) -> LogicalResult {
     for (auto [dim, extent] : llvm::enumerate(shape)) {
       if (!ShapedType::isDynamic(extent) && extent <= 0) {
         emitError() << "multi_head_attention " << name << " dimension " << dim
@@ -90,16 +89,108 @@ FailureOr<SmallVector<int64_t>> mlir::hip::inferMultiHeadAttentionOutputShape(
     }
     return success();
   };
-  if (failed(verifyPositive("query", queryShape)) ||
-      failed(verifyPositive("key", keyShape)) ||
-      failed(verifyPositive("value", valueShape)))
+  if (failed(positive(query, "query")) ||
+      (key && failed(positive(*key, "key"))) ||
+      (value && failed(positive(*value, "value"))))
     return failure();
-  if (!ShapedType::isDynamic(queryShape[2]) && queryShape[2] % numHeads != 0) {
-    emitError() << "multi_head_attention query hidden extent " << queryShape[2]
-                << " must be divisible by num_heads " << numHeads;
+  auto hiddenWidth = [&](int64_t headSize) -> FailureOr<int64_t> {
+    if (ShapedType::isDynamic(headSize))
+      return ShapedType::kDynamic;
+    APInt product = APInt(128, headSize) * APInt(128, heads);
+    if (!product.isSignedIntN(64)) {
+      emitError() << "multi_head_attention hidden extent is out of range";
+      return failure();
+    }
+    return product.getSExtValue();
+  };
+  auto divisible = [&](int64_t hidden, StringRef name) -> LogicalResult {
+    if (ShapedType::isDynamic(hidden) || hidden % heads == 0)
+      return success();
+    emitError() << "multi_head_attention " << name << " hidden extent "
+                << hidden << " must be divisible by num_heads " << heads;
+    return failure();
+  };
+
+  if (query.size() == 5) {
+    if (key || value) {
+      emitError() << "multi_head_attention packed QKV requires absent key "
+                     "and value";
+      return failure();
+    }
+    if (failed(compatible(query[2], heads, "packed QKV head count mismatch")) ||
+        failed(compatible(query[3], 3, "packed QKV packing extent must be 3")))
+      return failure();
+    FailureOr<int64_t> hidden = hiddenWidth(query[4]);
+    if (failed(hidden))
+      return failure();
+    return MhaOutputShape{{query[0], query[1], *hidden}, false, 4, heads};
+  }
+
+  if (failed(divisible(query[2], "query")))
+    return failure();
+  if (!key || (key->size() != 3 && key->size() != 4 && key->size() != 5)) {
+    emitError() << "multi_head_attention rank-3 query requires rank-3, "
+                   "rank-4, or packed rank-5 key";
     return failure();
   }
-  return SmallVector<int64_t>(queryShape);
+  if (failed(compatible(query[0], (*key)[0], "Q/K/V batch extents must agree")))
+    return failure();
+  if (key->size() == 5) {
+    if (value) {
+      emitError() << "multi_head_attention packed KV requires absent value";
+      return failure();
+    }
+    FailureOr<int64_t> hidden = hiddenWidth((*key)[4]);
+    if (failed(hidden) ||
+        failed(compatible((*key)[2], heads, "packed KV head count mismatch")) ||
+        failed(
+            compatible((*key)[3], 2, "packed KV packing extent must be 2")) ||
+        failed(compatible(query[2], *hidden, "Q/K hidden extents must agree")))
+      return failure();
+    return MhaOutputShape{SmallVector<int64_t>(query), false, 2, 1};
+  }
+
+  if (!value || value->size() != key->size()) {
+    emitError() << "multi_head_attention separate key and value must have "
+                   "matching rank 3 or 4";
+    return failure();
+  }
+  int64_t sequenceDim = key->size() == 3 ? 1 : 2;
+  if (failed(compatible(query[0], (*value)[0],
+                        "Q/K/V batch extents must agree")) ||
+      failed(compatible((*key)[sequenceDim], (*value)[sequenceDim],
+                        "K/V sequence extents must agree")))
+    return failure();
+  if (key->size() == 3) {
+    if (failed(
+            compatible(query[2], (*key)[2], "Q/K hidden extents must agree")) ||
+        failed(divisible((*key)[2], "key")) ||
+        failed(divisible((*value)[2], "value")))
+      return failure();
+    return MhaOutputShape{{query[0], query[1], (*value)[2]}, true, 2, 1};
+  }
+
+  FailureOr<int64_t> keyHidden = hiddenWidth((*key)[3]);
+  FailureOr<int64_t> valueHidden = hiddenWidth((*value)[3]);
+  if (failed(keyHidden) || failed(valueHidden) ||
+      failed(compatible((*key)[1], heads, "key head count mismatch")) ||
+      failed(compatible((*value)[1], heads, "value head count mismatch")) ||
+      failed(compatible(query[2], *keyHidden, "Q/K hidden extents must agree")))
+    return failure();
+  return MhaOutputShape{{query[0], query[1], *valueHidden}, true, 3, heads};
+}
+
+} // namespace
+
+FailureOr<SmallVector<int64_t>> mlir::hip::inferMultiHeadAttentionOutputShape(
+    ArrayRef<int64_t> queryShape, std::optional<ArrayRef<int64_t>> keyShape,
+    std::optional<ArrayRef<int64_t>> valueShape, int64_t numHeads,
+    function_ref<InFlightDiagnostic()> emitError) {
+  FailureOr<MhaOutputShape> result = inferMhaOutputShape(
+      queryShape, keyShape, valueShape, numHeads, emitError);
+  if (failed(result))
+    return failure();
+  return std::move(result->shape);
 }
 
 FailureOr<SmallVector<OpFoldResult>>
@@ -107,16 +198,39 @@ mlir::hip::reifyMultiHeadAttentionOutputShape(
     OpBuilder &b, Location loc, Value query, Value key, Value value,
     int64_t numHeads, function_ref<InFlightDiagnostic()> emitError) {
   auto queryType = dyn_cast<RankedTensorType>(query.getType());
-  auto keyType = dyn_cast<RankedTensorType>(key.getType());
-  auto valueType = dyn_cast<RankedTensorType>(value.getType());
-  if (!queryType || !keyType || !valueType ||
-      failed(inferMultiHeadAttentionOutputShape(
-          queryType.getShape(), keyType.getShape(), valueType.getShape(),
-          numHeads, emitError)))
+  auto keyType =
+      key ? dyn_cast<RankedTensorType>(key.getType()) : RankedTensorType{};
+  auto valueType =
+      value ? dyn_cast<RankedTensorType>(value.getType()) : RankedTensorType{};
+  if (!queryType || (key && !keyType) || (value && !valueType))
+    return failure();
+  std::optional<ArrayRef<int64_t>> keyShape, valueShape;
+  if (keyType)
+    keyShape = keyType.getShape();
+  if (valueType)
+    valueShape = valueType.getShape();
+  FailureOr<MhaOutputShape> result = inferMhaOutputShape(
+      queryType.getShape(), keyShape, valueShape, numHeads, emitError);
+  if (failed(result))
     return failure();
 
-  // Validation above is complete before mixed sizes materialize tensor.dim.
-  return tensor::getMixedSizes(b, loc, query);
+  // The complete layout and static arithmetic are validated before emission.
+  SmallVector<OpFoldResult> dims = {tensor::getMixedSize(b, loc, query, 0),
+                                    tensor::getMixedSize(b, loc, query, 1)};
+  if (!ShapedType::isDynamic(result->shape[2])) {
+    dims.push_back(b.getIndexAttr(result->shape[2]));
+  } else {
+    Value source = result->hiddenFromValue ? value : query;
+    OpFoldResult hidden =
+        tensor::getMixedSize(b, loc, source, result->hiddenDim);
+    if (result->hiddenScale != 1) {
+      Value extent = getValueOrCreateConstantIndexOp(b, loc, hidden);
+      Value scale = arith::ConstantIndexOp::create(b, loc, result->hiddenScale);
+      hidden = arith::MulIOp::create(b, loc, extent, scale).getResult();
+    }
+    dims.push_back(hidden);
+  }
+  return dims;
 }
 
 FailureOr<SmallVector<SmallVector<int64_t>>>

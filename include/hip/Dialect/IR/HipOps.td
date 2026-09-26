@@ -3501,11 +3501,12 @@ def Hip_MultiHeadAttentionOp :
       * `unidirectional` is 0 or 1
       * `mask_filter_value` remains its schema default, -10000
 
-    Biases, masks, packed layouts, KV cache inputs, cache indirection, and the
-    optional present/QK outputs are not implemented by this HIP op and are
-    rejected by its verifier. The ONNX converter routes separately supported
+    These restrictions belong to the default LLVM/runtime lowering. The HIP
+    operation also represents packed layouts, biases, masks, and cache outputs
+    supported by the TOSA backend. Its verifier checks semantic shapes rather
+    than selecting a backend. The ONNX converter routes separately supported
     decoder/cache and rank-4 cross-attention forms to `hip.gqa` before applying
-    this default-path contract.
+    the default-path contract.
 
     Inputs (1-10, MS spec order):
       1. query                 (required, T) - either:

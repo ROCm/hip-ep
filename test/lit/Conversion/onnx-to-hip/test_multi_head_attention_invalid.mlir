@@ -85,5 +85,21 @@ module {
   }
 }
 
+// -----
+
+module {
+  func.func @main_graph(
+      %q: tensor<1x8x128xf16>, %k: tensor<1x16x128xf16>,
+      %v: tensor<1x16x64xf16>) -> tensor<1x8x64xf16> {
+    // CHECK: error: default MultiHeadAttention runtime requires equal Q/V hidden extents
+    %out = "onnx.Custom"(%q, %k, %v)
+        <{function_name = "MultiHeadAttention"}>
+        {domain_name = "com.microsoft", num_heads = 8 : si64}
+        : (tensor<1x8x128xf16>, tensor<1x16x128xf16>, tensor<1x16x64xf16>)
+        -> tensor<1x8x64xf16>
+    return %out : tensor<1x8x64xf16>
+  }
+}
+
 // CHECK-NOT: tensor.empty
 // CHECK-NOT: hip.multi_head_attention
