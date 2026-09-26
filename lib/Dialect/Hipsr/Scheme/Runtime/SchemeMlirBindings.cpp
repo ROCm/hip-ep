@@ -410,6 +410,13 @@ uint64_t mlir_get_shape_shape_type(uint64_t ctx_ptr) {
       mlir::shape::ShapeType::get(ctx).getAsOpaquePointer());
 }
 
+uint64_t mlir_get_shape_size_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::shape::SizeType::get(ctx).getAsOpaquePointer());
+}
+
 int mlir_replace_op(uint64_t rewriter_ptr, uint64_t old_op_ptr, uint64_t new_value_ptr) {
   if (!rewriter_ptr) { mlir_log_error("mlir_replace_op: no rewriter"); return 0; }
   auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
@@ -627,6 +634,40 @@ void mlir_populate_func_type_conversion_pattern(
   auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 
   mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(*patterns, *converter);
+}
+
+// Helpers: Populate conversion patterns for remaining ONNX ops
+#define DEFINE_POPULATE_PATTERNS(name, fn) \
+  void name(uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) { \
+    if (!converter_ptr || !patterns_ptr || !ctx_ptr) return; \
+    mlir::hipsr::fn( \
+      *reinterpret_cast<mlir::TypeConverter*>(converter_ptr), \
+      *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr), \
+      reinterpret_cast<mlir::MLIRContext*>(ctx_ptr)); \
+  }
+
+DEFINE_POPULATE_PATTERNS(mlir_populate_matmul_conversion_patterns,    populateMatMulConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_expand_conversion_patterns,     populateExpandConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_min_conversion_patterns,        populateMinConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_shape_conversion_patterns,      populateShapeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_reshape_conversion_patterns,    populateReshapeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_unsqueeze_conversion_patterns,  populateUnsqueezeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_equal_conversion_patterns,      populateEqualConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_transpose_conversion_patterns,  populateTransposeConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_gather_conversion_patterns,     populateGatherConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_slice_conversion_patterns,      populateSliceConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_scatter_nd_conversion_patterns, populateScatterNDConversionPatterns)
+DEFINE_POPULATE_PATTERNS(mlir_populate_nonzero_conversion_patterns,    populateNonZeroConversionPatterns)
+
+#undef DEFINE_POPULATE_PATTERNS
+
+// Constant patterns take no ctx (type converter only)
+void mlir_populate_constant_conversion_patterns(
+    uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t /*ctx_ptr*/) {
+  if (!converter_ptr || !patterns_ptr) return;
+  mlir::hipsr::populateOnnxToHipsrConstantPatterns(
+    *reinterpret_cast<mlir::TypeConverter*>(converter_ptr),
+    *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr));
 }
 
 // Helper: Erase dead NoValue operations
@@ -1026,6 +1067,22 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_region_create_block",              (void*)::mlir_region_create_block);
   Sregister_symbol("mlir_block_get_argument",               (void*)::mlir_block_get_argument);
   Sregister_symbol("mlir_get_shape_shape_type",             (void*)::mlir_get_shape_shape_type);
+  Sregister_symbol("mlir_get_shape_size_type",              (void*)::mlir_get_shape_size_type);
+
+  // Populate patterns for remaining ONNX ops
+  Sregister_symbol("mlir_populate_matmul_conversion_patterns",    (void*)::mlir_populate_matmul_conversion_patterns);
+  Sregister_symbol("mlir_populate_expand_conversion_patterns",    (void*)::mlir_populate_expand_conversion_patterns);
+  Sregister_symbol("mlir_populate_min_conversion_patterns",       (void*)::mlir_populate_min_conversion_patterns);
+  Sregister_symbol("mlir_populate_shape_conversion_patterns",     (void*)::mlir_populate_shape_conversion_patterns);
+  Sregister_symbol("mlir_populate_reshape_conversion_patterns",   (void*)::mlir_populate_reshape_conversion_patterns);
+  Sregister_symbol("mlir_populate_unsqueeze_conversion_patterns", (void*)::mlir_populate_unsqueeze_conversion_patterns);
+  Sregister_symbol("mlir_populate_equal_conversion_patterns",     (void*)::mlir_populate_equal_conversion_patterns);
+  Sregister_symbol("mlir_populate_transpose_conversion_patterns", (void*)::mlir_populate_transpose_conversion_patterns);
+  Sregister_symbol("mlir_populate_gather_conversion_patterns",    (void*)::mlir_populate_gather_conversion_patterns);
+  Sregister_symbol("mlir_populate_slice_conversion_patterns",     (void*)::mlir_populate_slice_conversion_patterns);
+  Sregister_symbol("mlir_populate_scatter_nd_conversion_patterns",(void*)::mlir_populate_scatter_nd_conversion_patterns);
+  Sregister_symbol("mlir_populate_nonzero_conversion_patterns",   (void*)::mlir_populate_nonzero_conversion_patterns);
+  Sregister_symbol("mlir_populate_constant_conversion_patterns",  (void*)::mlir_populate_constant_conversion_patterns);
   Sregister_symbol("mlir_replace_op",                       (void*)::mlir_replace_op);
   Sregister_symbol("mlir_erase_op",                         (void*)::mlir_erase_op);
   Sregister_symbol("mlir_op_erase",                         (void*)::mlir_op_erase);

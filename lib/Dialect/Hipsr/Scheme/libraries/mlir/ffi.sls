@@ -113,6 +113,22 @@
 
     ;; Dialect conversion helpers (generic MLIR utilities)
     mlir-populate-func-type-conversion-pattern
+    ;; Per-op pattern populations
+    mlir-populate-cast-conversion-patterns
+    mlir-populate-matmul-conversion-patterns
+    mlir-populate-expand-conversion-patterns
+    mlir-populate-min-conversion-patterns
+    mlir-populate-shape-conversion-patterns
+    mlir-populate-reshape-conversion-patterns
+    mlir-populate-unsqueeze-conversion-patterns
+    mlir-populate-equal-conversion-patterns
+    mlir-populate-transpose-conversion-patterns
+    mlir-populate-gather-conversion-patterns
+    mlir-populate-slice-conversion-patterns
+    mlir-populate-scatter-nd-conversion-patterns
+    mlir-populate-nonzero-conversion-patterns
+    mlir-populate-constant-conversion-patterns
+    mlir-populate-return-conversion-patterns
 
     ;; Builder — explicit rewriter-based op construction
     mlir-build-op
@@ -122,6 +138,7 @@
     mlir-region-create-block
     mlir-block-get-argument
     mlir-get-shape-shape-type
+    mlir-get-shape-size-type
     mlir-operation-get-result           ; get result value from op at index
 
     ;; Pattern rewriting
@@ -520,6 +537,34 @@
     (foreign-procedure "mlir_populate_func_type_conversion_pattern"
                        (uptr uptr) void))
 
+  ;; Per-op populate helpers — all take (converter patterns ctx) as uptr uptr uptr
+  (define mlir-populate-matmul-conversion-patterns
+    (foreign-procedure "mlir_populate_matmul_conversion_patterns"    (uptr uptr uptr) void))
+  (define mlir-populate-expand-conversion-patterns
+    (foreign-procedure "mlir_populate_expand_conversion_patterns"    (uptr uptr uptr) void))
+  (define mlir-populate-min-conversion-patterns
+    (foreign-procedure "mlir_populate_min_conversion_patterns"       (uptr uptr uptr) void))
+  (define mlir-populate-shape-conversion-patterns
+    (foreign-procedure "mlir_populate_shape_conversion_patterns"     (uptr uptr uptr) void))
+  (define mlir-populate-reshape-conversion-patterns
+    (foreign-procedure "mlir_populate_reshape_conversion_patterns"   (uptr uptr uptr) void))
+  (define mlir-populate-unsqueeze-conversion-patterns
+    (foreign-procedure "mlir_populate_unsqueeze_conversion_patterns" (uptr uptr uptr) void))
+  (define mlir-populate-equal-conversion-patterns
+    (foreign-procedure "mlir_populate_equal_conversion_patterns"     (uptr uptr uptr) void))
+  (define mlir-populate-transpose-conversion-patterns
+    (foreign-procedure "mlir_populate_transpose_conversion_patterns" (uptr uptr uptr) void))
+  (define mlir-populate-gather-conversion-patterns
+    (foreign-procedure "mlir_populate_gather_conversion_patterns"    (uptr uptr uptr) void))
+  (define mlir-populate-slice-conversion-patterns
+    (foreign-procedure "mlir_populate_slice_conversion_patterns"     (uptr uptr uptr) void))
+  (define mlir-populate-scatter-nd-conversion-patterns
+    (foreign-procedure "mlir_populate_scatter_nd_conversion_patterns"(uptr uptr uptr) void))
+  (define mlir-populate-nonzero-conversion-patterns
+    (foreign-procedure "mlir_populate_nonzero_conversion_patterns"   (uptr uptr uptr) void))
+  (define mlir-populate-constant-conversion-patterns
+    (foreign-procedure "mlir_populate_constant_conversion_patterns"  (uptr uptr uptr) void))
+
   ;;; @brief Erase dead operations with no values
   ;;; @param module-ptr Module Operation* as uptr
   ;;; @note Cleanup pass to remove operations marked as dead during conversion
@@ -574,6 +619,10 @@
   ;;; @brief Get the shape::ShapeType from an MLIRContext.
   (define mlir-get-shape-shape-type
     (foreign-procedure "mlir_get_shape_shape_type" (uptr) uptr))
+
+  ;;; @brief Get the shape::SizeType from an MLIRContext.
+  (define mlir-get-shape-size-type
+    (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
 
   ;;; @brief Set an integer attribute on an operation
   ;;; @param op-ptr Operation* as uptr
