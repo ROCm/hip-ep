@@ -923,9 +923,9 @@ LogicalResult QGemmOp::verify() {
   if (getC())
     cShape = detail::getShapeOf(getC());
   return mlir::hip::verifyHipOpShape(*this, [&] {
-    return mlir::hip::inferGemmShape(
-        aShape, bShape, cShape, getTransA(), getTransB(),
-        [&] { return emitOpError(); });
+    return mlir::hip::inferGemmShape(aShape, bShape, cShape, getTransA(),
+                                     getTransB(),
+                                     [&] { return emitOpError(); });
   });
 }
 
