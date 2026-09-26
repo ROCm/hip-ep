@@ -975,6 +975,84 @@ void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) 
   cppOp->setAttr(attr_name, attr);
 }
 
+// Read a single integer attribute; returns default_val if absent.
+int64_t mlir_operation_get_integer_attr(uint64_t op_ptr, const char* attr_name, int64_t default_val) {
+  if (!op_ptr) return default_val;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>(attr_name))
+    return attr.getInt();
+  return default_val;
+}
+
+// Read a dense-i64 or array-of-integer-attr as a Scheme list. Returns Snil when absent.
+ptr mlir_operation_get_integer_array_attr(uint64_t op_ptr, const char* attr_name) {
+  if (!op_ptr) return Snil;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(attr_name)) {
+    ptr list = Snil;
+    for (int i = (int)attr.size() - 1; i >= 0; --i)
+      list = Scons(Sinteger(attr[i]), list);
+    return list;
+  }
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>(attr_name)) {
+    ptr list = Snil;
+    for (int i = (int)attr.size() - 1; i >= 0; --i) {
+      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr[i]);
+      if (!intAttr) return Snil;
+      list = Scons(Sinteger(intAttr.getInt()), list);
+    }
+    return list;
+  }
+  return Snil;
+}
+
+// Set a DenseI64ArrayAttr on an operation. values_list is a Scheme list of fixnums.
+void mlir_operation_set_dense_i64_array(uint64_t op_ptr, const char* attr_name, ptr values_list) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  llvm::SmallVector<int64_t> values;
+  for (ptr cur = static_cast<ptr>(values_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    values.push_back(Sinteger_value(Scar(cur)));
+  }
+  op->setAttr(attr_name, mlir::DenseI64ArrayAttr::get(op->getContext(), values));
+}
+
+// Change a hipsr.placeholder's placeholder_type attribute to Barrier.
+void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  op->setAttr("placeholder_type",
+      mlir::hipsr::PlaceholderTypeAttr::get(op->getContext(),
+                                             mlir::hipsr::PlaceholderType::Barrier));
+}
+
+// Copy a named attribute from src_op to dst_op. No-op if attr is absent on src.
+void mlir_operation_copy_attr(uint64_t dst_op_ptr, const char* dst_name,
+                               uint64_t src_op_ptr, const char* src_name) {
+  if (!dst_op_ptr || !src_op_ptr) return;
+  auto* dst = reinterpret_cast<mlir::Operation*>(dst_op_ptr);
+  auto* src = reinterpret_cast<mlir::Operation*>(src_op_ptr);
+  auto attr = src->getAttr(src_name);
+  if (attr) dst->setAttr(dst_name, attr);
+}
+
+// Returns 1 if type is a RankedTensorType with device memory space, 0 otherwise.
+int mlir_type_is_device_tensor(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
+  if (!tensorType) return 0;
+  auto enc = mlir::dyn_cast_or_null<mlir::hipsr::MemorySpaceAttr>(tensorType.getEncoding());
+  return (enc && enc.getValue() == mlir::hipsr::MemorySpace::Device) ? 1 : 0;
+}
+
+// Returns 1 if the named attribute exists on the operation.
+int mlir_operation_has_attr(uint64_t op_ptr, const char* attr_name) {
+  if (!op_ptr) return 0;
+  return reinterpret_cast<mlir::Operation*>(op_ptr)->hasAttr(attr_name) ? 1 : 0;
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -1057,7 +1135,14 @@ void registerMlirForeignFunctions() {
   Sregister_symbol("mlir_operation_get_dps_init_value", (void*)::mlir_operation_get_dps_init_value);
   Sregister_symbol("mlir_operation_set_operand", (void*)::mlir_operation_set_operand);
   Sregister_symbol("mlir_operation_use_empty", (void*)::mlir_operation_use_empty);
-  Sregister_symbol("mlir_operation_set_attr", (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_set_attr",              (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_get_integer_attr",      (void*)::mlir_operation_get_integer_attr);
+  Sregister_symbol("mlir_operation_get_integer_array_attr",(void*)::mlir_operation_get_integer_array_attr);
+  Sregister_symbol("mlir_operation_set_dense_i64_array",   (void*)::mlir_operation_set_dense_i64_array);
+  Sregister_symbol("mlir_placeholder_set_barrier_type",    (void*)::mlir_placeholder_set_barrier_type);
+  Sregister_symbol("mlir_operation_copy_attr",             (void*)::mlir_operation_copy_attr);
+  Sregister_symbol("mlir_type_is_device_tensor",           (void*)::mlir_type_is_device_tensor);
+  Sregister_symbol("mlir_operation_has_attr",              (void*)::mlir_operation_has_attr);
 
   // Builder API — explicit rewriter, no implicit globals
   Sregister_symbol("mlir_build_op",                         (void*)::mlir_build_op);
