@@ -153,8 +153,8 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, *init, KAttr,
-      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
+      rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, *init,
+      KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
       scaleElemSizeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
