@@ -6,13 +6,13 @@
 
 // Conversion preserves the general rank-5 Conv. Patch embedding is a HIP
 // fusion decision, after the shared shape contract has sized its destination.
-// CONVERT-LABEL: func.func @conv3d_patch_boundary
+// CONVERT-LABEL: func.func @main_graph
 // CONVERT-NOT: hip.gemm
 // CONVERT: hip.conv
 // CONVERT-SAME: outs({{.*}} : tensor<?x1152x1x1x1xf16>)
 // CONVERT-NOT: hip.gemm
 // CONVERT: return
-// FUSE-LABEL: func.func @conv3d_patch_boundary
+// FUSE-LABEL: func.func @main_graph
 // FUSE-NOT: hip.conv
 // FUSE-NOT: hip.transpose
 // FUSE: hip.gemm
@@ -25,7 +25,7 @@
 // FUSE-NOT: hip.conv
 // FUSE-NOT: hip.transpose
 // FUSE: return
-func.func @conv3d_patch_boundary(
+func.func @main_graph(
     %x: tensor<?x3x2x16x16xf16>,
     %w: tensor<1152x3x2x16x16xf16>,
     %b: tensor<1152xf16>) -> tensor<?x1152x1x1x1xf16> {
