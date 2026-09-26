@@ -249,8 +249,8 @@ FailureOr<ConvShapeInference> inferConvShapeAndKernel(
     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
     ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations, int64_t group,
     function_ref<InFlightDiagnostic()> emitError) {
-  if (inputShape.size() != weightShape.size() ||
-      inputShape.size() < 3 || inputShape.size() > 5) {
+  if (inputShape.size() != weightShape.size() || inputShape.size() < 3 ||
+      inputShape.size() > 5) {
     emitError() << "conv input and weights must have matching rank in [3, 5]";
     return failure();
   }
