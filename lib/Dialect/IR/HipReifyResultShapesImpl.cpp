@@ -34,12 +34,13 @@ LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
   if (op->getNumResults() == 0)
     return failure();
 
-  ArrayRef<int64_t> aShape = detail::getShapeOf(A);
-  ArrayRef<int64_t> bShape = detail::getShapeOf(B);
+  ArrayRef<int64_t> aShape = mlir::hip::detail::getShapeOf(A);
+  ArrayRef<int64_t> bShape = mlir::hip::detail::getShapeOf(B);
   if (aShape.empty() || bShape.empty())
     return failure();
 
-  // Validate before emitting dimension queries, including pre-verification calls.
+  // Validate before emitting dimension queries, including pre-verification
+  // calls.
   FailureOr<SmallVector<int64_t>> inferredShape = mlir::hip::inferMatmulShape(
       aShape, bShape, [&]() { return op->emitOpError(); }, transA, transB);
   if (failed(inferredShape))
