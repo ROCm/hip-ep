@@ -20,6 +20,36 @@ struct MultiHeadAttentionOpLowering
   LogicalResult
   matchAndRewrite(MultiHeadAttentionOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // These are properties of the runtime wrapper, not of the HIP operation:
+    // the TOSA backend also implements packed layouts, biases, and KV caches.
+    if (!op.getKey() || !op.getValue())
+      return op.emitOpError(
+          "default runtime requires separate query, key, and value inputs");
+    if (op.getBias() || op.getKeyPaddingMask() || op.getAttentionBias() ||
+        op.getPastKey() || op.getPastValue() || op.getPastSequenceLength() ||
+        op.getCacheIndirection())
+      return op.emitOpError(
+          "default runtime does not support bias, masks, past/cache inputs, "
+          "or cache indirection");
+    if (op.getPresentKey() || op.getPresentValue() || op.getQk())
+      return op.emitOpError("default runtime does not support present_key, "
+                            "present_value, or qk outputs");
+    auto queryShape = cast<ShapedType>(op.getQuery().getType());
+    auto keyShape = cast<ShapedType>(op.getKey().getType());
+    auto valueShape = cast<ShapedType>(op.getValue().getType());
+    if (queryShape.getRank() != 3 || keyShape.getRank() != 3 ||
+        valueShape.getRank() != 3)
+      return op.emitOpError("default runtime requires rank-3 Q/K/V");
+    if (!queryShape.getElementType().isF16())
+      return op.emitOpError("default runtime requires fp16 Q/K/V and output");
+    if (!queryShape.isDynamicDim(2) && !valueShape.isDynamicDim(2) &&
+        queryShape.getDimSize(2) != valueShape.getDimSize(2))
+      return op.emitOpError(
+          "default runtime requires equal Q/V hidden extents");
+    if (op.getMaskFilterValue().convertToFloat() != -10000.0f)
+      return op.emitOpError(
+          "default runtime supports only mask_filter_value = -10000");
+
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
