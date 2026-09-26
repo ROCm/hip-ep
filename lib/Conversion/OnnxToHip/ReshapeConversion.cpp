@@ -806,14 +806,6 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // clang-format on
         mlir::Type elemTy = shapeTy.getElementType();
         unsigned bits = elemTy.getIntOrFloatBitWidth();
-        // `allowzero` is emitted as SI64Attr (signed), not a signless/index
-        // integer, so IntegerAttr::getInt() asserts. Read via getValue()
-        // (APInt) + getSExtValue(), matching every other SI64Attr read in
-        // this codebase (e.g. GqaConversion.cpp, TransposeConversion.cpp).
-        bool allowzero = false;
-        if (auto allowzeroAttr =
-                op->getAttrOfType<mlir::IntegerAttr>("allowzero"))
-          allowzero = allowzeroAttr.getValue().getSExtValue() != 0;
         mlir::Value cMinusOne = mlir::arith::ConstantOp::create(
             rewriter, loc,
             rewriter.getIntegerAttr(elemTy, mlir::APInt(bits, /*val=*/-1,

@@ -561,11 +561,11 @@ module {
   }
 
   // A tensor dimension is nonnegative but not strictly positive. Combined
-  // with allowzero=1 and -1, provenance must refuse the marker and retain the
-  // synchronized fallback.
+  // with allowzero=1 and -1, provenance must refuse the marker and retain
+  // minus-one inference. The fallback forwards these already-host scalars.
   // CHECK-LABEL: func.func @allowzero_minus_one_nonnegative_fallback
-  // CHECK-COUNT-3: hip.readback_scalar
   // CHECK-NOT: hip.readback_scalar
+  // CHECK: arith.divsi
   // CHECK: tensor.reshape
   func.func @allowzero_minus_one_nonnegative_fallback(
       %data: tensor<?x?x?xf16>) -> tensor<?x?x3xf16> {
@@ -585,8 +585,9 @@ module {
   // shape must safely remain unknown instead of asserting in APInt accessors.
   // CHECK-LABEL: func.func @wide_integer_constant_fallback
   // CHECK: arith.constant 1208925819614629174706176 : i128
-  // CHECK-COUNT-3: hip.readback_scalar
+  // CHECK: arith.trunci {{.*}} : i128 to i64
   // CHECK-NOT: hip.readback_scalar
+  // CHECK: arith.divsi
   // CHECK: tensor.reshape
   func.func @wide_integer_constant_fallback(
       %data: tensor<?x?x?xf16>,
