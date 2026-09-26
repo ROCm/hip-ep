@@ -21,7 +21,10 @@
   (export ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?
           ast-pattern-expand-pattern-type ast-pattern-expand-pattern-type-set!
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!
-          ast-pattern-expand-parameters ast-pattern-expand-parameters-set!
+          ast-pattern-expand-param-op ast-pattern-expand-param-op-set!
+          ast-pattern-expand-param-operands-ref ast-pattern-expand-param-operands-ref-set!
+          ast-pattern-expand-param-rewriter ast-pattern-expand-param-rewriter-set!
+          ast-pattern-expand-param-type-converter ast-pattern-expand-param-type-converter-set!
           ast-pattern-expand-root-var ast-pattern-expand-root-var-set!
           ast-pattern-expand-root-op-name ast-pattern-expand-root-op-name-set!
           ast-pattern-expand-root-op-index ast-pattern-expand-root-op-index-set!
@@ -30,7 +33,7 @@
           ast-pattern-expand-match-bindings ast-pattern-expand-match-bindings-set!
           ast-pattern-expand-match-actions ast-pattern-expand-match-actions-set!
           ast-pattern-expand-rewrite ast-pattern-expand-rewrite-set!
-          ast-pattern-expand-where ast-pattern-expand-where-set!
+          ast-pattern-expand-then-let ast-pattern-expand-then-let-set!
           ast-pattern-expand-debug-parse? ast-pattern-expand-debug-parse?-set!
           ast-pattern-expand-debug-validate? ast-pattern-expand-debug-validate?-set!
           ast-pattern-expand-debug-analyze? ast-pattern-expand-debug-analyze?-set!
@@ -51,9 +54,9 @@
           ast-operation-expand-attributes ast-operation-expand-attributes-set!
           ast-operation-expand-result-types ast-operation-expand-result-types-set!
 
-          ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?
-          ast-where-binding-expand-var ast-where-binding-expand-var-set!
-          ast-where-binding-expand-expr ast-where-binding-expand-expr-set!
+          ast-then-let-binding-expand make-ast-then-let-binding-expand ast-then-let-binding-expand?
+          ast-then-let-binding-expand-var ast-then-let-binding-expand-var-set!
+          ast-then-let-binding-expand-expr ast-then-let-binding-expand-expr-set!
 
           ast-region-expand make-ast-region-expand ast-region-expand?
           ast-region-expand-blocks ast-region-expand-blocks-set!
@@ -77,7 +80,7 @@
   ;; ast-pattern-expand (ROOT)
   ;; ├── match: list of ast-match-expand
   ;; │   └── operands: list of ast-operand
-  ;; ├── where: list of ast-where-binding-expand
+  ;; ├── where: list of ast-then-let-binding-expand
   ;; └── rewrite: list of ast-operation-expand
   ;;     └── regions: list of ast-region-expand
   ;;         └── blocks: list of ast-block-expand
@@ -97,7 +100,7 @@
   ;;
   ;; Contains:
   ;;   - match: list of ast-match-expand (operations to match)
-  ;;   - where: list of ast-where-binding-expand (computed bindings)
+  ;;   - where: list of ast-then-let-binding-expand (computed bindings)
   ;;   - rewrite: list of ast-operation-expand (operations to construct)
   ;;
   (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
@@ -106,7 +109,10 @@
         (lambda (pattern-type)
           (new pattern-type  ;; pattern-type: 'conversion or 'rewrite
                #f            ;; function-name: set by parse-rest
-               '()           ;; parameters: set by parse-rest
+               #f            ;; param-op
+               #f            ;; param-operands-ref
+               #f            ;; param-rewriter
+               #f            ;; param-type-converter
                #f            ;; root-var: set by parse-rest
                #f            ;; root-op-name: set by validate phase
                #f            ;; root-op-index: set by validate phase
@@ -115,7 +121,7 @@
                #f            ;; match-bindings: set by analyze phase
                #f            ;; match-actions: set by analyze phase
                '()           ;; rewrite: accumulated during parse
-               '()           ;; where: accumulated during parse
+               '()           ;; then-let: accumulated during parse
                #f            ;; debug-parse?
                #f            ;; debug-validate?
                #f            ;; debug-analyze?
@@ -128,11 +134,11 @@
                                  ;; - 'rewrite: all operations use mlir-operation-get-operand-value
 
       (mutable function-name)    ;; Phase 1 (parse): syntax identifier - name of generated pattern function
-                                 ;; Example: #'my-pattern
 
-      (mutable parameters)       ;; Phase 1 (parse): list of syntax identifiers - lambda parameters
-                                 ;; Example: (#'op #'operands-ref #'rewriter #'type-converter)
-                                 ;; User-provided parameters that will be visible in :then-let scope
+      (mutable param-op)              ;; Phase 1 (parse): syntax identifier - the op being rewritten
+      (mutable param-operands-ref)    ;; Phase 1 (parse): syntax identifier - converted operands array
+      (mutable param-rewriter)        ;; Phase 1 (parse): syntax identifier - the ConversionPatternRewriter
+      (mutable param-type-converter)  ;; Phase 1 (parse): syntax identifier - the TypeConverter
 
       (mutable root-var)         ;; Phase 1 (parse): syntax identifier - result variable of the root operation
                                  ;; Example: #'%out
@@ -178,9 +184,9 @@
                                  ;; Operations to construct when pattern matches
                                  ;; Contains: list of ast-operation-expand records
 
-      (mutable where)            ;; Phase 1 (parse): list of ast-where-binding-expand - constraint bindings
+      (mutable then-let)            ;; Phase 1 (parse): list of ast-then-let-binding-expand - constraint bindings
                                  ;; Additional computed bindings for rewrite
-                                 ;; Contains: list of ast-where-binding-expand records
+                                 ;; Contains: list of ast-then-let-binding-expand records
 
       (mutable debug-parse?)     ;; Phase 1 (parse): boolean - :debug-parse flag
                                  ;; When true, codegen outputs parsed AST as datum
@@ -290,7 +296,7 @@
                                ;; Phase 3 (analyze): used to bind/access this operand
 
   ;;-----------------------------------------------------------------------
-  ;; WHERE-BINDING-LEVEL RECORD: ast-where-binding-expand (child of ast-pattern-expand)
+  ;; WHERE-BINDING-LEVEL RECORD: ast-then-let-binding-expand (child of ast-pattern-expand)
   ;;-----------------------------------------------------------------------
   ;;
   ;; Used by: ast-pattern-expand (where field)
@@ -302,7 +308,7 @@
   ;;   :where ((!new-type (compute-type !old-type))
   ;;           (%ctx (get-context)))
   ;;
-  (define-record-type (ast-where-binding-expand make-ast-where-binding-expand ast-where-binding-expand?)
+  (define-record-type (ast-then-let-binding-expand make-ast-then-let-binding-expand ast-then-let-binding-expand?)
     (fields
       (mutable var)            ;; Phase 1 (parse): syntax identifier - variable to bind
                                ;; Example: #'!new-type or #'%ctx

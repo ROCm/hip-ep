@@ -108,21 +108,16 @@
          (ast-pattern-expand-debug-matching?-set! ast #t)
          (parse-rest #'more ast))]
 
-      ;; Function name with parameters: (fname param1 param2 ...)
-      [((fname param ...) . more)
+      ;; Function name with exactly 4 parameters: (fname op operands-ref rewriter type-converter)
+      [((fname p-op p-operands-ref p-rewriter p-type-converter) . more)
        (and (identifier? #'fname)
             (not (ast-pattern-expand-function-name ast)))
        (begin
-         (ast-pattern-expand-function-name-set! ast #'fname)
-         (ast-pattern-expand-parameters-set! ast (syntax->list #'(param ...)))
-         (parse-rest #'more ast))]
-
-      ;; Function name without parameters (old syntax, keep for compatibility)
-      [(fname . more)
-       (and (identifier? #'fname)
-            (not (ast-pattern-expand-function-name ast)))
-       (begin
-         (ast-pattern-expand-function-name-set! ast #'fname)
+         (ast-pattern-expand-function-name-set!         ast #'fname)
+         (ast-pattern-expand-param-op-set!              ast #'p-op)
+         (ast-pattern-expand-param-operands-ref-set!    ast #'p-operands-ref)
+         (ast-pattern-expand-param-rewriter-set!        ast #'p-rewriter)
+         (ast-pattern-expand-param-type-converter-set!  ast #'p-type-converter)
          (parse-rest #'more ast))]
 
       [(:match . match-rest)
@@ -250,12 +245,12 @@
        (identifier? #'root)
        (begin
          (ast-pattern-expand-root-var-set! ast #'root)
-         (ast-pattern-expand-where-set! ast
+         (ast-pattern-expand-then-let-set! ast
            (map (lambda (binding)
                   (syntax-case binding ()
                     [(v e)
                      (identifier? #'v)
-                     (make-ast-where-binding-expand #'v #'e)]
+                     (make-ast-then-let-binding-expand #'v #'e)]
                     [_ (syntax-violation 'parse-after-match "Invalid :then-let binding (expected: (var expr))" binding)]))
                 (syntax->list #'((var expr) ...))))
          (parse-rewrite-ops-recursive #'rewrite-rest '() ast))]

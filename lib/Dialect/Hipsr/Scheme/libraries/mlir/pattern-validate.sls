@@ -18,6 +18,9 @@
     ;; Phase 2 validates and normalizes the AST from Phase 1 (parse).
     ;; Order matters: normalization must happen before validation that depends on it.
 
+    ;; Rule: Parameters (op operands-ref rewriter type-converter) must be present and valid
+    (validate-parameters ast-rec)
+
     ;; Rule: Function name must be an identifier
     (validate-ast-match-function-name ast-rec)
 
@@ -46,13 +49,25 @@
     (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
 
     ;; Rule: Where binding variables must be identifiers
-    (validate-where-bindings ast-rec)
+    (validate-then-let-bindings ast-rec)
 
     ast-rec)
 
   ;;-----------------------------------------------------------------------
   ;; Top-level AST field validation
   ;;-----------------------------------------------------------------------
+
+  (define (validate-parameters ast-rec)
+    (define (check-param field-val name)
+      (unless (identifier? field-val)
+        (syntax-violation 'validate-ast
+          (string-append "Pattern parameter '" name
+                         "' must be an identifier — write (fname op operands-ref rewriter type-converter)")
+          (ast-pattern-expand-function-name ast-rec))))
+    (check-param (ast-pattern-expand-param-op             ast-rec) "op")
+    (check-param (ast-pattern-expand-param-operands-ref   ast-rec) "operands-ref")
+    (check-param (ast-pattern-expand-param-rewriter       ast-rec) "rewriter")
+    (check-param (ast-pattern-expand-param-type-converter ast-rec) "type-converter"))
 
   (define (validate-ast-match-function-name ast-rec)
     (unless (identifier? (ast-pattern-expand-function-name ast-rec))
@@ -101,7 +116,7 @@
     (normalize-match-operation-names ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
     (validate-no-duplicate-result-variables ast-rec)
-    (validate-where-guards ast-rec))
+    (validate-match-where-guards ast-rec))
 
   (define (normalize-match-operation-names ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
@@ -143,7 +158,7 @@
                                 "Duplicate result variable" var))
                             (hashtable-set! seen-results var #t))))))
 
-  (define (validate-where-guards ast-rec)
+  (define (validate-match-where-guards ast-rec)
     ;; Validate :where guards in match operations
     ;; Guards are arbitrary Scheme expressions stored as syntax objects
     ;; Actual correctness validation happens at Scheme expansion time
@@ -224,12 +239,12 @@
   ;; Where binding validation
   ;;-----------------------------------------------------------------------
 
-  (define (validate-where-bindings ast-rec)
-    (for-each (lambda (where-binding)
-                (unless (identifier? (ast-where-binding-expand-var where-binding))
+  (define (validate-then-let-bindings ast-rec)
+    (for-each (lambda (then-let-binding)
+                (unless (identifier? (ast-then-let-binding-expand-var then-let-binding))
                   (syntax-violation 'validate-ast "Where binding variable must be an identifier"
-                                   (ast-where-binding-expand-var where-binding))))
-              (ast-pattern-expand-where ast-rec)))
+                                   (ast-then-let-binding-expand-var then-let-binding))))
+              (ast-pattern-expand-then-let ast-rec)))
 
   ;;-----------------------------------------------------------------------
   ;; Utilities
