@@ -373,11 +373,8 @@
   ;; Utility Functions
   ;;===--------------------------------------------------------------------===;;
 
-  ;;; @brief Get the HipSR context argument from a function operation
-  ;;; @param op-ptr Function Operation* as uptr
-  ;;; @return BlockArgument (Value*) representing the context argument as uptr
-  (define mlir-get-hipsr-context-arg
-    (foreign-procedure "mlir_get_hipsr_context_arg" (uptr) uptr))
+  ;; mlir-get-hipsr-context-arg removed: implemented as a Scheme function in
+  ;; (mlir hipsr helpers) using mlir-operation-get-block-argument.
 
   ;;===--------------------------------------------------------------------===;;
   ;; Dialect Conversion Framework Primitives

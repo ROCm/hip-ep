@@ -6,8 +6,6 @@
 #include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/CAPI/IR.h"
-#include "mlir/CAPI/Wrap.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "llvm/Support/raw_ostream.h"
@@ -23,35 +21,8 @@
 
 extern "C" {
 
-uint64_t mlir_get_hipsr_context_arg(uint64_t op_ptr) {
-  if (!op_ptr) return 0;
-
-  mlir::Operation* op = reinterpret_cast<mlir::Operation*>(op_ptr);
-  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
-
-  if (!funcOp || funcOp.getBody().empty()) {
-    mlir_log_debug("mlir_get_hipsr_context_arg: not inside a function body");
-    return 0;
-  }
-
-  mlir::Block &entry = funcOp.getBody().front();
-  if (entry.getNumArguments() == 0) {
-    mlir_log_debug("mlir_get_hipsr_context_arg: function has no arguments");
-    return 0;
-  }
-
-  mlir::Value ctx = entry.getArgument(0);
-  if (!mlir::isa<mlir::hipsr::ContextType>(ctx.getType())) {
-    mlir_log_debug("mlir_get_hipsr_context_arg: arg 0 is not !hipsr.context");
-    return 0;
-  }
-
-  MlirValue cVal = wrap(ctx);
-  return reinterpret_cast<uint64_t>(const_cast<void*>(cVal.ptr));
-}
-
-// Check if a type is RankedTensorType
-// Returns 1 if true, 0 if false
+// mlir_get_hipsr_context_arg was removed: the Scheme implementation in
+// (mlir hipsr helpers) using mlir-operation-get-block-argument is sufficient.
 void mlir_populate_cast_conversion_patterns(
     uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
   if (!converter_ptr || !patterns_ptr || !ctx_ptr) return;
@@ -138,7 +109,6 @@ namespace mlir {
 namespace hipsr {
 
 void registerHipsrBindings() {
-  Sregister_symbol("mlir_get_hipsr_context_arg", (void*)::mlir_get_hipsr_context_arg);
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)::mlir_populate_cast_conversion_patterns);
   Sregister_symbol("mlir_erase_dead_novalue_ops", (void*)::mlir_erase_dead_novalue_ops);
   Sregister_symbol("mlir_rewire_placeholder_inputs", (void*)::mlir_rewire_placeholder_inputs);
