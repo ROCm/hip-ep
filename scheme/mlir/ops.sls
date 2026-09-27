@@ -33,26 +33,50 @@
   (export current-mlir-builder
           current-mlir-loc
           with-current-mlir-builder
+          with-current-block-builder
           with-mlir-ops)
 
   (import (rnrs (6))
           (only (chezscheme) make-parameter parameterize
                              syntax->list syntax->datum datum->syntax)
+          (rename (rime loop) (:with :rime-with))
+          (for (rename (rime loop) (:with :rime-with)) expand)
           (mlir ffi))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Dynamic builder context
   ;;===--------------------------------------------------------------------===;;
 
-  (define current-mlir-builder (make-parameter #f))
-  (define current-mlir-loc     (make-parameter #f))
+  (define current-mlir-builder  (make-parameter #f))
+  (define current-mlir-loc      (make-parameter #f))
+  ;; Holds a 3-arg function (name operands types) -> op-ptr,
+  ;; capturing the right builder and C++ call for the current context.
+  (define current-mlir-build-fn (make-parameter #f))
 
   (define-syntax with-current-mlir-builder
     (syntax-rules ()
       [(_ (rw loc) body ...)
-       (parameterize ([current-mlir-builder rw]
-                      [current-mlir-loc     loc])
-         body ...)]))
+       (let ([rw_ rw] [loc_ loc])
+         (parameterize ([current-mlir-builder  rw_]
+                        [current-mlir-loc      loc_]
+                        [current-mlir-build-fn
+                         (lambda (name operands types)
+                           (mlir-build-op rw_ loc_ name operands types))])
+           body ...))]))
+
+  ;; Like with-current-mlir-builder but for region block bodies where the
+  ;; builder is an OpBuilder* (from mlir-builder-at-block-end) rather than
+  ;; a RewriterBase*.
+  (define-syntax with-current-block-builder
+    (syntax-rules ()
+      [(_ (builder loc) body ...)
+       (let ([b_ builder] [loc_ loc])
+         (parameterize ([current-mlir-builder  b_]
+                        [current-mlir-loc      loc_]
+                        [current-mlir-build-fn
+                         (lambda (name operands types)
+                           (mlir-build-op-in-block b_ loc_ name operands types))])
+           body ...))]))
 
   ;;===--------------------------------------------------------------------===;;
   ;; with-mlir-ops
@@ -100,14 +124,19 @@
              (let* ([%var        (list-ref form 0)]
                     [op-name     (syntax->datum (list-ref form 2))]
                     [vals        (value-operands (list-ref form 3))]
-                    [result-type (list-ref form 5)])
-               (with-syntax ([var %var] [(v ...) vals] [n op-name] [rt result-type])
-                 (list (cons #'var
-                             #'(mlir-operation-get-result
-                                 (mlir-build-op (current-mlir-builder)
-                                                (current-mlir-loc)
-                                                n (list v ...) (list rt))
-                                 0)))))]
+                    [result-type (list-ref form 5)]
+                    [zero-result? (null? (syntax->datum result-type))])
+               (if zero-result?
+                   ;; Zero results (e.g. terminators): build for side effect
+                   (with-syntax ([var %var] [(v ...) vals] [n op-name])
+                     (list (cons #'var
+                                 #'((current-mlir-build-fn) n (list v ...) '()))))
+                   ;; Single result: build and get result 0
+                   (with-syntax ([var %var] [(v ...) vals] [n op-name] [rt result-type])
+                     (list (cons #'var
+                                 #'(mlir-operation-get-result
+                                     ((current-mlir-build-fn) n (list v ...) (list rt))
+                                     0))))))]
 
             ;; Multi-result MLIR op:
             ;;   ((%a %b) = "op.name" (operands...) -> (t1 t2 ...))   length=6,
@@ -128,9 +157,7 @@
                (with-syntax ([(v ...) vals] [n op-name]
                              [(rt ...) rtypes] [t tmp])
                  (cons (cons #'t
-                             #'(mlir-build-op (current-mlir-builder)
-                                              (current-mlir-loc)
-                                              n (list v ...) (list rt ...)))
+                             #'((current-mlir-build-fn) n (list v ...) (list rt ...)))
                        (let loop ([vs rvars] [i 0] [acc '()])
                          (if (null? vs)
                              (reverse acc)
@@ -153,12 +180,9 @@
         [(_ op ...)
          (let* ([ops      (syntax->list #'(op ...))]
                 [pairs    (apply append
-                                 (let loop ([ops ops] [i 0] [acc '()])
-                                   (if (null? ops)
-                                       (reverse acc)
-                                       (loop (cdr ops) (+ i 1)
-                                             (cons (process-op (car ops) i)
-                                                   acc)))))]
+                                 (loop :for op-stx :in ops
+                                       :for i :from 0
+                                       :collect (process-op op-stx i)))]
                 [last-var (and (pair? pairs)
                                (car (car (reverse pairs))))])
            (if (null? pairs)

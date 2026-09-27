@@ -20,6 +20,8 @@
   (import (except (rnrs (6)) =)
           (mlir ffi)
           (mlir hipsr)
+          (mlir ops)
+          (rename (rime loop) (:with :rime-with))
           (mlir pattern-macro))
 
   (define-conversion-pattern (onnx-shape->hipsr op operands-ref rewriter type-converter)
@@ -51,30 +53,31 @@
                                                          "shape.const_size" '() (list !size-type))])
                                                (mlir-operation-set-index-attr x "value" num-dims)
                                                (mlir-operation-get-result x 0)))
-                                     (%r  = shape.from_extents (%cN) -> !shape-type)
-                                     (%y  = hipsr.shape_yield (%r) -> ())))
+                                     ;; from_extents and shape_yield need no attrs — use with-mlir-ops
+                                     (%_ = (with-current-block-builder ((current-block-builder) op)
+                                             (with-mlir-ops
+                                               (%r = "shape.from_extents" (%cN) -> !shape-type)
+                                               (%y = "hipsr.shape_yield" (%r) -> ()))))))
                         -> !out-host)
         ;; Compute body: for each axis [start, end), emit tensor.dim + arith.index_cast
         (%result = hipsr.compute (%ctx %input %placeholder !out-host)
                    :attrs (operandSegmentSizes (list 1 1 1) :i32-array)
                    :regions ((^bb0 ((%c : !ctx-type) (%in : !input-type) (%dest : !out-host))
-                                (%dim-vals = (let loop ([axis start] [acc '()])
-                                              (if (>= axis end) (reverse acc)
-                                                (let* ([ci (mlir-build-op-in-block
-                                                              (current-block-builder) op
-                                                              "arith.constant" '() (list !index-type))])
-                                                  (mlir-operation-set-index-attr ci "value" axis)
-                                                  (let* ([di (mlir-build-op-in-block
-                                                                (current-block-builder) op "tensor.dim"
-                                                                (list %in (mlir-operation-get-result ci 0))
-                                                                (list !index-type))]
-                                                         [ii (mlir-build-op-in-block
-                                                                (current-block-builder) op "arith.index_cast"
-                                                                (list (mlir-operation-get-result di 0))
-                                                                (list !i64-type))])
-                                                    (loop (+ axis 1)
-                                                          (cons (mlir-operation-get-result ii 0)
-                                                                acc)))))))
+                                (%dim-vals = (loop :for axis :from start :below end
+                                              :rime-with ci := (let* ([x (mlir-build-op-in-block
+                                                                            (current-block-builder) op
+                                                                            "arith.constant" '() (list !index-type))])
+                                                                  (mlir-operation-set-index-attr x "value" axis)
+                                                                  x)
+                                              :collect (with-current-block-builder
+                                                           ((current-block-builder) op)
+                                                         (with-mlir-ops
+                                                           (%d = "tensor.dim"
+                                                               (%in (mlir-operation-get-result ci 0))
+                                                               -> !index-type)
+                                                           (%i = "arith.index_cast" (%d)
+                                                               -> !i64-type)))))
+                                ;; tensor.from_elements: dynamic operand list, keep direct call
                                 (%r  = (mlir-operation-get-result
                                          (mlir-build-op-in-block (current-block-builder) op
                                            "tensor.from_elements" %dim-vals (list !out-host)) 0))
