@@ -135,21 +135,18 @@
   ;;                 effect only; return unspecified (if #f #f)
   ;;
   ;; Generated shape ('conversion):
-  ;;   (begin
-  ;;     (mlir-set-insertion-point-before rw op)
-  ;;     (let* ((%p  (let* ([new-op (mlir-build-op ...)]) (mlir-operation-get-result new-op 0)))
-  ;;            (%c  (let* ([new-op (mlir-build-op ...)]) (mlir-operation-get-result new-op 0))))
-  ;;       (mlir-replace-op rw op %c)
-  ;;       #t))
+  ;;   (let* ((%p (let* ([new-op (mlir-build-op rw loc "hipsr.placeholder" ...)]) (mlir-operation-get-result new-op 0)))
+  ;;          (%c (let* ([new-op (mlir-build-op rw loc "hipsr.cast" ...)]) (mlir-operation-get-result new-op 0))))
+  ;;     (mlir-replace-op rw op %c)
+  ;;     #t)
+  ;;   mlir-build-op sets its own IP to before loc each time it is called.
   ;;
   ;; Generated shape ('conversion, multi-result last op):
-  ;;   (begin
-  ;;     (mlir-set-insertion-point-before rw op)
-  ;;     (let* ((%multi-tmp-0 (let* ([new-op (mlir-build-op ...)]) new-op))
-  ;;            (%a           (mlir-operation-get-result %multi-tmp-0 0))
-  ;;            (%b           (mlir-operation-get-result %multi-tmp-0 1)))
-  ;;       (mlir-replace-op rw op %b)
-  ;;       #t))
+  ;;   (let* ((%multi-tmp-0 (let* ([new-op (mlir-build-op rw loc "hipsr.foo" ...)]) new-op))
+  ;;          (%a           (mlir-operation-get-result %multi-tmp-0 0))
+  ;;          (%b           (mlir-operation-get-result %multi-tmp-0 1)))
+  ;;     (mlir-replace-op rw op %b)
+  ;;     #t)
   ;;
   ;; Generated shape ('region):
   ;;   (let* ((var0 binding0) ...)
@@ -164,18 +161,14 @@
             [(conversion)
              (with-syntax ([(binding ...) bindings]
                            [result last-var])
-               #`(begin
-                   (mlir-set-insertion-point-before #,rw #,op)
-                   (let* (binding ...)
-                     (mlir-replace-op #,rw #,op result)
-                     #t)))]
+               #`(let* (binding ...)
+                   (mlir-replace-op #,rw #,op result)
+                   #t))]
             [(rewrite)
              (with-syntax ([(binding ...) bindings]
                            [result last-var])
-               #`(begin
-                   (mlir-set-insertion-point-before #,rw #,op)
-                   (let* (binding ...)
-                     result)))]
+               #`(let* (binding ...)
+                   result))]
             [(region)
              ;; IP already at block end; emit bindings for side effect only.
              (with-syntax ([(binding ...) bindings])

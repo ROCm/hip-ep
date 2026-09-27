@@ -223,6 +223,8 @@ uint64_t mlir_build_op(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
     resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
   }
 
+  rewriter->setInsertionPoint(loc_op);
+
   mlir::OperationState state(loc_op->getLoc(), op_name);
   state.addOperands(operands);
   state.addTypes(resultTypes);
