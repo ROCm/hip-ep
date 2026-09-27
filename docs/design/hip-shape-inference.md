@@ -181,7 +181,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
 | GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past |
 | MultiHeadAttention | Primary result follows query batch/sequence and value hidden width; packed forms share the same infer/reify rule. Cache capacity and payload-dependent QK length remain destination-owned. |
-| Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
+| Forward Conv (rank-3/4/5 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
 | Resize | N/C from input plus static spatial extents from the imported output template |
@@ -349,11 +349,12 @@ intermediate arithmetic are required because the numerator can be negative
 even when the final extent is the valid value zero. Dilation contributes through
 `effectiveKernel = (kernel - 1) * dilation + 1`.
 
-Conv conversion applies the shared rule to the original rank-3 NCL shape before
-its NC1L expansion; `hip.conv` itself uses the rank-4 form. An omitted ONNX Conv
-`kernel_shape` is derived from static weight spatial dimensions. ConvTranspose
-likewise uses one rule for destination construction, reification, and static
-verification.
+Forward Conv accepts matching rank-3, rank-4, or rank-5 input and weights.
+ONNX conversion applies the shared rule at the original rank: rank-3 NCL is
+then expanded to NC1L and collapsed back after `hip.conv`, while rank-4 and
+rank-5 lower directly. An omitted ONNX Conv `kernel_shape` is derived from
+static weight spatial dimensions. ConvTranspose likewise uses one rule for
+destination construction, reification, and static verification.
 
 Dynamic spatial-window arithmetic uses signed i128 from the input-dimension
 cast through effective-kernel multiplication, padded input, signed numerator,
