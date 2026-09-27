@@ -45,8 +45,11 @@
     ;; Cache: root-op-index, root-result-idx, root-op-name for codegen
     (validate-and-cache-root-var ast-rec)
 
-    ;; TODO: Document specific validation rules for rewrite operations
-    (for-each validate-operation (ast-pattern-expand-rewrite ast-rec))
+    ;; Validate rewrite operations — ast-scheme-binding-expand items pass through unchanged
+    (for-each (lambda (item)
+                (when (ast-operation-expand? item)
+                  (validate-operation item)))
+              (ast-pattern-expand-rewrite ast-rec))
 
     ;; Rule: Where binding variables must be identifiers
     (validate-then-let-bindings ast-rec)
@@ -233,7 +236,10 @@
     (for-each validate-block (ast-region-expand-blocks region)))
 
   (define (validate-block block)
-    (for-each validate-operation (ast-block-expand-operations block)))
+    (for-each (lambda (item)
+                (when (ast-operation-expand? item)
+                  (validate-operation item)))
+              (ast-block-expand-operations block)))
 
   ;;-----------------------------------------------------------------------
   ;; Where binding validation

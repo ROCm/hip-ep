@@ -8,46 +8,78 @@
 ;;
 ;; onnx.Gather → hipsr.gather  (device data path)
 ;;
-;; Only the device-data path is implemented here. Host-data (compile-time
-;; constant indices, hipsr.compute expansion) is not yet ported and falls
-;; through to failure.
-;;
-;; Creates a Normal placeholder with ins=(data, indices) then hipsr.gather{axis}.
-;; The placeholder shape region is filled by hipsr-populate-shape-region.
+;; DSL pattern: placeholder with inline shape region + hipsr.gather{axis}.
+;; Shape region: split data_shape at axis, concat with indices_shape.
+;; A :scheme helper builds the split/concat chain using the fresh OpBuilder.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
 (library (patterns gather)
   (export populate-gather-patterns)
-  (import (rnrs (6))
+  (import (except (rnrs (6)) =)
+          (only (chezscheme) format)
           (mlir ffi)
-          (mlir hipsr))
+          (mlir hipsr)
+          (mlir pattern-macro))
 
-  (define (onnx-gather->hipsr op operands-ref rewriter type-converter)
-    (let* ((data    (value-array-ref-at operands-ref 0))
-           (indices (value-array-ref-at operands-ref 1))
-           (data-type (mlir-value-get-type data)))
-      ;; Only handle device data
-      (if (not (= 1 (mlir-type-is-device-tensor data-type)))
-          #f
-          (let* ((ctx      (mlir-get-hipsr-context-arg op))
-                 (out-type (mlir-value-get-type (mlir-operation-get-result op 0)))
-                 (out-dev  (mlir-tensor-type-in-device-space! out-type))
-                 ;; axis attribute (ONNX stores as si64; default 0)
-                 (axis     (let ((a (mlir-operation-get-integer-attr op "axis" 0)))
-                              (if (< a 0) (+ a (mlir-type-get-rank data-type)) a))))
-            ;; Normal placeholder with ins=(data, indices)
-            (mlir-set-insertion-point-before rewriter op)
-            (let* ((ph-op  (mlir-build-op rewriter op "hipsr.placeholder"
-                              (list ctx data indices out-dev) (list out-dev)))
-                   (ph-val (mlir-operation-get-result ph-op 0)))
-              ;; hipsr.gather with axis attribute
-              (mlir-set-insertion-point-before rewriter op)
-              (let* ((g-op (mlir-build-op rewriter op "hipsr.gather"
-                               (list ctx data indices ph-val out-dev) (list out-dev))))
-                (mlir-operation-set-attr g-op "axis" axis)
-                (mlir-replace-op rewriter op (mlir-operation-get-result g-op 0))
-                #t))))))
+  ;; Build the gather output shape inside a region block.
+  ;; Shape logic:
+  ;;   leading, _ = split_at(data_shape, axis)
+  ;;   _, trailing = split_at(data_shape, axis+1)
+  ;;   result = concat(concat(leading, indices_shape), trailing)
+  (define (build-gather-shape! b loc axis data-shape idx-shape shape-type size-type)
+    (let* ([mk-sz (lambda (n)
+                    (let ([op (mlir-build-op-in-block b loc "shape.const_size"
+                                '() (list size-type))])
+                      (mlir-operation-set-attr op "value" n)
+                      (mlir-operation-get-result op 0)))]
+           ;; split at axis: (leading, _)
+           [sz1    (mk-sz axis)]
+           [sp1    (mlir-build-op-in-block b loc "shape.split_at"
+                     (list data-shape sz1) (list shape-type shape-type))]
+           [leading  (mlir-operation-get-result sp1 0)]
+           ;; split at axis+1: (_, trailing)
+           [sz2    (mk-sz (+ axis 1))]
+           [sp2    (mlir-build-op-in-block b loc "shape.split_at"
+                     (list data-shape sz2) (list shape-type shape-type))]
+           [trailing (mlir-operation-get-result sp2 1)]
+           ;; concat(leading, indices_shape)
+           [gathered (mlir-build-op-in-block b loc "shape.concat"
+                       (list leading idx-shape) (list shape-type))]
+           ;; concat(gathered, trailing)
+           [result   (mlir-build-op-in-block b loc "shape.concat"
+                       (list gathered trailing) (list shape-type))])
+      result))
+
+  (define-conversion-pattern (onnx-gather->hipsr op operands-ref rewriter type-converter)
+    :match
+        %output = onnx.Gather (%data %indices)
+    :then-let
+        ([%ctx        (mlir-get-hipsr-context-arg op)]
+         [!data-type  (mlir-value-get-type %data)]
+         [!out-type   (mlir-value-get-type %output)]
+         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
+         [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
+         [axis        (let ([a (mlir-operation-get-integer-attr op "axis" 0)])
+                        (if (< a 0) (+ a (mlir-type-get-rank !data-type)) a))]
+         ;; guard: only handle device data (eqv? avoids shadowed = keyword)
+         [ok?         (eqv? 1 (mlir-type-is-device-tensor !data-type))])
+    :rewrite %output :with
+        ;; Guard check via scheme escape — return #f to signal match failure
+        (_ = (if (not ok?) (error 'onnx-gather->hipsr "host data not supported") 'ok))
+        (%placeholder = "hipsr.placeholder" (%ctx %data %indices !out-device)
+                        :regions ((^bb0 ((%ds : !shape-type) (%is : !shape-type))
+                                    (%result-shape = (build-gather-shape!
+                                                       block-builder-0 op axis %ds %is !shape-type !size-type))
+                                    (%yield = "hipsr.shape_yield" (%result-shape) -> ())))
+                        -> !out-device)
+        ;; :scheme — create gather op and set axis attribute
+        (%result = (let* ([new-op (mlir-build-op rewriter op "hipsr.gather"
+                                    (list %ctx %data %indices %placeholder !out-device)
+                                    (list !out-device))])
+                     (mlir-operation-set-attr new-op "axis" axis)
+                     (mlir-operation-get-result new-op 0))))
 
   (define (populate-gather-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Gather"

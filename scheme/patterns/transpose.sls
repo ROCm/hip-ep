@@ -8,45 +8,75 @@
 ;;
 ;; onnx.Transpose → hipsr.transpose
 ;;
-;; Reads the perm attribute from the ONNX op (absent = reverse permutation).
-;; Creates a Normal placeholder with ins=(input) then hipsr.transpose{perm}.
-;; The placeholder shape region is filled by hipsr-populate-shape-region.
+;; DSL pattern: placeholder with inline shape region + hipsr.transpose.
+;; The shape region permutes input extents according to the perm attribute
+;; (absent perm = reverse permutation).
+;; A :scheme helper builds the shape.const_size / shape.get_extent /
+;; shape.from_extents chain inside the region using the fresh OpBuilder.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
 (library (patterns transpose)
   (export populate-transpose-patterns)
-  (import (rnrs (6))
+  (import (except (rnrs (6)) =)
+          (only (chezscheme) format)
           (mlir ffi)
-          (mlir hipsr))
+          (mlir hipsr)
+          (mlir pattern-macro))
 
-  ;; Returns (rank-1 rank-2 ... 1 0) — the reverse permutation.
-  (define (reverse-perm rank)
-    (let loop ((i 0) (acc '()))
-      (if (= i rank) acc (loop (+ i 1) (cons i acc)))))
+  ;; Build the permuted output shape inside a region block.
+  ;; b = OpBuilder* at block end (block-builder-0 in caller).
+  ;; Returns the output !shape.shape value.
+  (define (build-permuted-shape! b loc perm input-shape shape-type size-type)
+    (let* ([extents
+            (map (lambda (p)
+                   ;; shape.const_size p : index
+                   (let* ([sz-op (mlir-build-op-in-block b loc "shape.const_size"
+                                   '() (list size-type))])
+                     (mlir-operation-set-attr sz-op "value" p)
+                     ;; shape.get_extent input_shape, sz_p : size
+                     (let* ([ext-op (mlir-build-op-in-block b loc "shape.get_extent"
+                                      (list input-shape
+                                            (mlir-operation-get-result sz-op 0))
+                                      (list size-type))])
+                       (mlir-operation-get-result ext-op 0))))
+                 perm)]
+           ;; shape.from_extents ext_0, ext_1, ... : shape
+           [out-op (mlir-build-op-in-block b loc "shape.from_extents"
+                     extents (list shape-type))])
+      (mlir-operation-get-result out-op 0)))
 
-  (define (onnx-transpose->hipsr op operands-ref rewriter type-converter)
-    (let* ((input     (value-array-ref-at operands-ref 0))
-           (ctx       (mlir-get-hipsr-context-arg op))
-           (in-type   (mlir-value-get-type input))
-           (rank      (mlir-type-get-rank in-type))
-           (out-type  (mlir-value-get-type (mlir-operation-get-result op 0)))
-           (out-dev   (mlir-tensor-type-in-device-space! out-type))
-           ;; perm attribute: ArrayAttr on ONNX op; absent = reverse permutation
-           (perm      (let ((p (mlir-operation-get-integer-array-attr op "perm")))
-                        (if (null? p) (reverse-perm rank) p))))
-      ;; Normal placeholder with ins=(input)
-      (mlir-set-insertion-point-before rewriter op)
-      (let* ((ph-op  (mlir-build-op rewriter op "hipsr.placeholder"
-                        (list ctx input out-dev) (list out-dev)))
-             (ph-val (mlir-operation-get-result ph-op 0)))
-        ;; hipsr.transpose with perm attribute
-        (mlir-set-insertion-point-before rewriter op)
-        (let* ((t-op (mlir-build-op rewriter op "hipsr.transpose"
-                        (list ctx input ph-val out-dev) (list out-dev))))
-          (mlir-operation-set-dense-i64-array t-op "perm" perm)
-          (mlir-replace-op rewriter op (mlir-operation-get-result t-op 0))
-          #t))))
+  (define-conversion-pattern (onnx-transpose->hipsr op operands-ref rewriter type-converter)
+    :match
+        %output = onnx.Transpose (%input)
+    :then-let
+        ([%ctx        (mlir-get-hipsr-context-arg op)]
+         [!in-type    (mlir-value-get-type %input)]
+         [!out-type   (mlir-value-get-type %output)]
+         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
+         [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
+         [perm        (let ([raw (mlir-operation-get-integer-array-attr op "perm")])
+                        (if (null? raw)
+                            ;; absent perm → reverse permutation
+                            (let ([rank (mlir-type-get-rank !in-type)])
+                              (let loop ([i 0] [acc '()])
+                                (if (eqv? i rank) acc (loop (+ i 1) (cons i acc)))))
+                            raw))])
+    :rewrite %output :with
+        (%placeholder = "hipsr.placeholder" (%ctx %input !out-device)
+                        :regions ((^bb0 ((%is : !shape-type))
+                                    ;; :scheme — permute extents using block-builder-0
+                                    (%out-shape = (build-permuted-shape!
+                                                    block-builder-0 op perm %is !shape-type !size-type))
+                                    (%yield = "hipsr.shape_yield" (%out-shape) -> ())))
+                        -> !out-device)
+        ;; :scheme — create transpose op and set perm attribute
+        (%result = (let* ([new-op (mlir-build-op rewriter op "hipsr.transpose"
+                                    (list %ctx %input %placeholder !out-device)
+                                    (list !out-device))])
+                     (mlir-operation-set-dense-i64-array new-op "perm" perm)
+                     (mlir-operation-get-result new-op 0))))
 
   (define (populate-transpose-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Transpose"

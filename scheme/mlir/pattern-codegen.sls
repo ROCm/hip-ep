@@ -247,31 +247,22 @@
   ;;   ast-operation-expand multi-result → N+1 pairs (tmp-op + N result vars)
 
   (define (generate-rewrite-bindings rewrite-ops rw loc-op)
-    (let loop ([ops rewrite-ops] [idx 0] [acc '()])
-      (if (null? ops)
-          (reverse acc)
-          (let ([op-rec (car ops)])
-            (if (ast-scheme-binding-expand? op-rec)
-                (loop (cdr ops) (+ idx 1)
-                      (cons (generate-scheme-binding op-rec idx) acc))
-                (let ([pairs (generate-one-rewrite-binding op-rec idx rw loc-op)])
-                  ;; pairs is a LIST — flatmap it into acc (reversed)
-                  (loop (cdr ops) (+ idx 1)
-                        (append (reverse pairs) acc))))))))
+    (loop :for op-rec :in rewrite-ops
+          :for idx :from 0
+          :rime-with pairs := (if (ast-scheme-binding-expand? op-rec)
+                                  (list (generate-scheme-binding op-rec idx))
+                                  (generate-one-rewrite-binding op-rec idx rw loc-op))
+          :append pairs))
 
   ;; Like generate-rewrite-bindings but uses mlir-build-op-in-block (OpBuilder*)
   ;; for region body ops where the builder is a fresh OpBuilder, not a RewriterBase.
   (define (generate-rewrite-bindings-in-block rewrite-ops builder loc-op)
-    (let loop ([ops rewrite-ops] [idx 0] [acc '()])
-      (if (null? ops)
-          (reverse acc)
-          (let ([op-rec (car ops)])
-            (if (ast-scheme-binding-expand? op-rec)
-                (loop (cdr ops) (+ idx 1)
-                      (cons (generate-scheme-binding op-rec idx) acc))
-                (let ([pairs (generate-one-rewrite-binding-in-block op-rec idx builder loc-op)])
-                  (loop (cdr ops) (+ idx 1)
-                        (append (reverse pairs) acc))))))))
+    (loop :for op-rec :in rewrite-ops
+          :for idx :from 0
+          :rime-with pairs := (if (ast-scheme-binding-expand? op-rec)
+                                  (list (generate-scheme-binding op-rec idx))
+                                  (generate-one-rewrite-binding-in-block op-rec idx builder loc-op))
+          :append pairs))
 
   ;; Like generate-one-rewrite-binding but generates mlir-build-op-in-block calls.
   (define (generate-one-rewrite-binding-in-block op-rec idx builder loc-op)
@@ -437,7 +428,8 @@
                               acc))))]
            ;; Fresh OpBuilder symbol for region body — independent of the ConversionPatternRewriter.
            ;; Uses mlir-build-op-in-block instead of mlir-build-op for all region body ops.
-           [b-sym (datum->syntax #'here
+           ;; Use loc-op (user call-site syntax) so block-builder-N has matching hygiene marks.
+           [b-sym (datum->syntax loc-op
                     (string->symbol (string-append "block-builder-" (number->string region-idx))))]
            ;; Recurse: region body ops use b-sym (OpBuilder*), not rw (RewriterBase*)
            [block-op-bindings (generate-rewrite-bindings-in-block block-ops b-sym loc-op)]
