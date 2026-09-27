@@ -2269,6 +2269,46 @@ void PadOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+/// Element count of \p v when its shape is static, else -1.
+static int64_t staticNumElements(Value v) {
+  auto t = dyn_cast<ShapedType>(v.getType());
+  return (t && t.hasStaticShape()) ? t.getNumElements() : -1;
+}
+
+/// A host mirror of an optional device operand must come with that operand
+/// and, where the operand's size is static, match it.
+static LogicalResult verifyHostMirror(Operation *op, llvm::StringRef name,
+                                      Value operand, int64_t hostSize) {
+  if (!operand)
+    return op->emitOpError() << name << " requires the operand it mirrors";
+  int64_t n = staticNumElements(operand);
+  if (n >= 0 && n != hostSize)
+    return op->emitOpError() << name << " has " << hostSize
+                             << " entries but the operand has " << n;
+  return success();
+}
+
+LogicalResult PadOp::verify() {
+  if (!getHostPads().empty() &&
+      failed(verifyHostMirror(*this, "host_pads", getPads(),
+                              static_cast<int64_t>(getHostPads().size()))))
+    return failure();
+  if (auto hostAxes = getHostAxesAttr())
+    if (failed(verifyHostMirror(*this, "host_axes", getAxes(),
+                                static_cast<int64_t>(hostAxes.size()))))
+      return failure();
+  if (auto hostCval = getHostConstantValueAttr()) {
+    if (failed(verifyHostMirror(*this, "host_constant_value",
+                                getConstantValue(), 1)))
+      return failure();
+    if (hostCval.getType() !=
+        cast<ShapedType>(getConstantValue().getType()).getElementType())
+      return emitOpError("host_constant_value type must match the element "
+                         "type of constant_value");
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // TileOp: ins(input, repeats), outs(output)
 //===----------------------------------------------------------------------===//
@@ -2345,6 +2385,27 @@ void SliceOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SliceOp::verify() {
+  int64_t numBounds = static_cast<int64_t>(getHostBounds().size());
+  if (numBounds % 2 != 0)
+    return emitOpError("host_bounds must hold starts then ends, got ")
+           << numBounds << " entries";
+  if (numBounds != 0 && (failed(verifyHostMirror(*this, "host_bounds (starts)",
+                                                 getStarts(), numBounds / 2)) ||
+                         failed(verifyHostMirror(*this, "host_bounds (ends)",
+                                                 getEnds(), numBounds / 2))))
+    return failure();
+  if (auto hostAxes = getHostAxesAttr())
+    if (failed(verifyHostMirror(*this, "host_axes", getAxes(),
+                                static_cast<int64_t>(hostAxes.size()))))
+      return failure();
+  if (auto hostSteps = getHostStepsAttr())
+    if (failed(verifyHostMirror(*this, "host_steps", getSteps(),
+                                static_cast<int64_t>(hostSteps.size()))))
+      return failure();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "HostIndex.h"
 #include "OnnxToHipUtils.h"
 #include "ReadbackScalar.h"
 
@@ -12,37 +13,6 @@
 namespace mlir {
 namespace hip {
 namespace {
-
-/// Try to recognise \p v as a compile-time 1-D integer constant tensor
-/// (`arith.constant`, an inspectable `hip.constant` value carrier, or a legacy
-/// initialized global bridge). Returns null otherwise. Mirrors the helper in
-/// SliceConversion.cpp.
-static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
-  mlir::Operation *defOp = value.getDefiningOp();
-  if (!defOp)
-    return nullptr;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (auto attr = defOp->getAttr("value"))
-    if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))
-      return dense;
-  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef =
-        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
-    if (!bufDef)
-      return nullptr;
-    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
-    if (!module)
-      return nullptr;
-    auto global =
-        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
-    if (!global)
-      return nullptr;
-    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        global.getInitialValueAttr());
-  }
-  return nullptr;
-}
 
 static mlir::LogicalResult
 extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
@@ -84,8 +54,10 @@ static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
 ///   out_dim[i] = data_dim[i] + pads[i] + pads[i + N]
 /// where `N` is the number of padded axes. Two cases:
 ///
-///   * pads is a compile-time constant: use the literal pad amounts.
-///   * pads is dynamic: emit `tensor.extract` + `arith.addi`.
+///   * \p hostPads holds every pad amount as a host `index` value (compile-time
+///     constants or shape arithmetic): use those.
+///   * otherwise: read each needed entry back with a synchronized
+///     `hip.readback_scalar`.
 ///
 /// When `axes` is supplied and not the default identity, only those axes
 /// participate; dims outside `axes` keep their input size. We require
@@ -93,16 +65,13 @@ static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
 /// `axes` would make the per-dim pad lookup data-dependent, which we
 /// can't express with `tensor.empty` dynsizes.
 ///
-/// `padsAttr` / `axesAttr` carry the compile-time `pads` / `axes` values when
-/// the pre-lowering `PadShapeFold` stamped them onto the generic ONNX op. When
-/// present we use them directly -- no producer-form dependency, operand read,
-/// or `hip.readback_scalar`. When absent (genuinely runtime-dynamic `pads`) we
-/// fall back to the synchronized readback path.
+/// `axesAttr` carries the compile-time `axes` value when the pre-lowering
+/// `PadShapeFold` stamped it onto the generic ONNX op.
 static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Operation *op,
     mlir::Value ctx, mlir::RankedTensorType resultType, mlir::Value data,
-    mlir::Value pads, mlir::Value axes, llvm::ArrayRef<int64_t> padsAttr,
-    bool hasPadsAttr, llvm::ArrayRef<int64_t> axesAttr, bool hasAxesAttr) {
+    mlir::Value pads, mlir::Value axes, llvm::ArrayRef<mlir::Value> hostPads,
+    llvm::ArrayRef<int64_t> axesAttr, bool hasAxesAttr) {
   // Fully static result: the empty tensor needs no dynamic sizes, and we do
   // not have to look at `pads` / `axes` at all. This is important when
   // either operand is a function argument (dynamic) but the output shape is
@@ -141,17 +110,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
   for (auto [slot, axis] : llvm::enumerate(axesVec))
     axisToSlot[axis] = static_cast<int64_t>(slot);
   int64_t nPadded = static_cast<int64_t>(axesVec.size());
-
-  // Decide whether we can use compile-time pad values. Prefer the attribute
-  // stamped by PadShapeFold while the producer was generic ONNX; otherwise
-  // inspect an inline arith/hip carrier value. A miss leaves
-  // `padsAreConst == false` -> readback fallback.
-  llvm::SmallVector<int64_t> padsConst;
-  if (hasPadsAttr)
-    padsConst.assign(padsAttr.begin(), padsAttr.end());
-  else
-    (void)extractIntVector(pads, padsConst);
-  bool padsAreConst = static_cast<int64_t>(padsConst.size()) == 2 * nPadded;
+  bool padsOnHost = static_cast<int64_t>(hostPads.size()) == 2 * nPadded;
 
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t i = 0; i < resultType.getRank(); ++i) {
@@ -175,11 +134,9 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     int64_t slot = it->second;
 
     mlir::Value begin, end;
-    if (padsAreConst) {
-      begin =
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, padsConst[slot]);
-      end = mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                 padsConst[slot + nPadded]);
+    if (padsOnHost) {
+      begin = hostPads[slot];
+      end = hostPads[slot + nPadded];
     } else {
       begin = extractAsIndex(rewriter, loc, ctx, pads, slot);
       end = extractAsIndex(rewriter, loc, ctx, pads, slot + nPadded);
@@ -230,17 +187,6 @@ struct PadToHip : public mlir::RewritePattern {
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-    // Compile-time pads/axes stamped by the pre-lowering PadShapeFold pattern
-    // while the producer was still generic ONNX. Their presence lets
-    // buildPadOutputInit fold the output shape with zero device traffic;
-    // absence falls back to the synchronized readback path.
-    llvm::ArrayRef<int64_t> padsAttr;
-    bool hasPadsAttr = false;
-    if (auto a =
-            op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.pad_amounts")) {
-      padsAttr = a.asArrayRef();
-      hasPadsAttr = true;
-    }
     llvm::ArrayRef<int64_t> axesAttr;
     bool hasAxesAttr = false;
     if (auto a =
@@ -248,19 +194,55 @@ struct PadToHip : public mlir::RewritePattern {
       axesAttr = a.asArrayRef();
       hasAxesAttr = true;
     }
+    llvm::SmallVector<int64_t> axesVec;
+    bool axesKnown = hasAxesAttr || !axes ||
+                     mlir::succeeded(extractIntVector(axes, axesVec));
+    // Checked before anything is materialized: buildPadOutputInit cannot size
+    // a dynamic result without knowing which axes are padded.
+    if (!resultType.hasStaticShape() && !axesKnown)
+      return rewriter.notifyMatchFailure(
+          op, "dynamic `axes` operand is not supported by Pad conversion");
+
+    // Pad amounts on the host: the constant PadShapeFold stamped while the
+    // producer was still generic ONNX, else whatever resolveHostIndices can
+    // compute (inline constants, shape arithmetic such as Gemma-4's
+    // `Concat(0, Shape(attn)[1] - Shape(ids)[1], 0, 0)`). They size the output
+    // and are handed to `wrap_pad`, which otherwise reads `pads` back from the
+    // device and syncs the stream on every call.
+    llvm::SmallVector<mlir::Value> hostPads;
+    if (auto a =
+            op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.pad_amounts")) {
+      for (int64_t p : a.asArrayRef())
+        hostPads.push_back(
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, p));
+    } else {
+      (void)resolveHostIndices(rewriter, loc, pads, hostPads);
+    }
 
     // Build the output buffer. When the result is fully static, the helper
     // collapses to a `tensor.empty` with no dynsizes (identical to the old
     // `createEmptyTensor` behaviour). When at least one dim is dynamic, the
     // dynamic dims are computed as data_dim + pads_begin + pads_end at IR
-    // build time (using the stamped constant `pads` if available, an inline
-    // operand if still present, otherwise a synchronized readback).
+    // build time, from the host pads when available and otherwise from a
+    // synchronized readback.
     auto initOrFailure =
         buildPadOutputInit(rewriter, loc, op, context, resultType, data, pads,
-                           axes, padsAttr, hasPadsAttr, axesAttr, hasAxesAttr);
+                           axes, hostPads, axesAttr, hasAxesAttr);
     if (mlir::failed(initOrFailure))
       return mlir::failure();
     mlir::Value init = *initOrFailure;
+
+    mlir::DenseI64ArrayAttr hostAxes;
+    if (axes && axesKnown)
+      hostAxes =
+          rewriter.getDenseI64ArrayAttr(hasAxesAttr ? axesAttr : axesVec);
+    mlir::TypedAttr hostConstantValue;
+    if (constantValue)
+      if (mlir::DenseElementsAttr dense =
+              getCompileTimeConstantTensor(constantValue))
+        if (dense.getNumElements() == 1)
+          hostConstantValue = mlir::dyn_cast<mlir::TypedAttr>(
+              *dense.getValues<mlir::Attribute>().begin());
 
     mlir::StringAttr modeAttr;
     if (auto attr = op->getAttrOfType<mlir::StringAttr>("mode"))
@@ -268,37 +250,17 @@ struct PadToHip : public mlir::RewritePattern {
     else
       modeAttr = rewriter.getStringAttr("constant");
 
-    // Build operands [ctx, data, pads, cval?, axes?, output] and segment
-    // sizes for AttrSizedOperandSegments.
-    mlir::SmallVector<mlir::Value> operands;
-    operands.push_back(context);
-    operands.push_back(data);
-    operands.push_back(pads);
-    if (constantValue)
-      operands.push_back(constantValue);
-    if (axes)
-      operands.push_back(axes);
-    operands.push_back(init);
+    // The runtime indexes the mirror exactly like `pads`, so it must cover
+    // every entry of a statically-sized `pads`.
+    auto pp = mlir::dyn_cast<mlir::RankedTensorType>(pads.getType());
+    if (!pp || !pp.hasStaticShape() ||
+        static_cast<int64_t>(hostPads.size()) != pp.getNumElements())
+      hostPads.clear();
 
-    llvm::SmallVector<int32_t, 6> segmentSizes = {
-        /*ctx=*/1,
-        /*data=*/1,
-        /*pads=*/1,
-        /*constant_value=*/constantValue ? 1 : 0,
-        /*axes=*/axes ? 1 : 0,
-        /*output=*/1};
-
-    mlir::SmallVector<mlir::NamedAttribute> attrs;
-    attrs.push_back(rewriter.getNamedAttr("mode", modeAttr));
-
-    mlir::OperationState state(loc, "hip.pad");
-    state.addOperands(operands);
-    state.addAttributes(attrs);
-    state.addTypes({resultType});
-    state.addAttribute("operand_segment_sizes",
-                       rewriter.getDenseI32ArrayAttr(segmentSizes));
-
-    mlir::Operation *hipOp = rewriter.create(state);
+    auto hipOp = mlir::hip::PadOp::create(
+        rewriter, loc, mlir::TypeRange{resultType}, context, data, pads,
+        constantValue, axes, hostPads, init, modeAttr, hostAxes,
+        hostConstantValue);
     rewriter.replaceOp(op, hipOp->getResults());
     return mlir::success();
   }

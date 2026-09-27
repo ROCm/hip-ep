@@ -89,6 +89,7 @@ add_library(OnnxToHip STATIC
   ModConversion.cpp
   ConstantOfShapeConversion.cpp
   SliceConversion.cpp
+  HostIndex.cpp
   ScatterNDConversion.cpp
   IdentityConversion.cpp
   OrConversion.cpp

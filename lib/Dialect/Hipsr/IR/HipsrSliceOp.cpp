@@ -313,6 +313,15 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
     Value axesPtr = windowPtr(op.getAxesAttrAttr(), adaptor.getAxes());
     Value stepsPtr = windowPtr(op.getStepsAttrAttr(), adaptor.getSteps());
 
+    // A slot built from an attribute is already on the host, so it also goes
+    // over as the host copy and spares the runtime its readback and sync; an
+    // operand slot sends none.
+    Value noHostCopy = LLVM::ZeroOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()));
+    auto hostCopy = [&](DenseI64ArrayAttr attr, Value ptr) -> Value {
+      return attr ? ptr : noHostCopy;
+    };
+
     // The runtime counts each slot's entries separately, but every slot is the
     // same length here and that length is known, so one constant covers them.
     Value entries = i64Const(
@@ -321,7 +330,8 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
 
     using SliceCall =
         RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, hostPtr, hostPtr, hostPtr,
-                    devicePtr, hostPtr, i64, hostPtr, i64, i64, i64, i64, i64>;
+                    devicePtr, hostPtr, i64, hostPtr, i64, i64, i64, i64, i64,
+                    hostPtr, hostPtr, hostPtr, hostPtr>;
     auto sliceFunc =
         SliceCall::lookupOrCreateFn(rewriter, loc, module, kWrapSlice);
     if (failed(sliceFunc)) {
@@ -331,7 +341,10 @@ struct SliceLowering : ConvertOpToLLVMPattern<SliceOp> {
                                endsPtr, axesPtr, stepsPtr, adaptor.getInit(),
                                dataShape, dataType.getRank(), outputShape,
                                outputType.getRank(), entries, entries, entries,
-                               elementType))) {
+                               elementType, hostCopy(startsAttr, startsPtr),
+                               hostCopy(op.getEndsAttrAttr(), endsPtr),
+                               hostCopy(op.getAxesAttrAttr(), axesPtr),
+                               hostCopy(op.getStepsAttrAttr(), stepsPtr)))) {
       return failure();
     }
     rewriter.eraseOp(op);

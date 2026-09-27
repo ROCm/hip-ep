@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from onnx import helper, numpy_helper
+from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
@@ -41,11 +41,13 @@ def _make_cumsum_model(
     axis: int,
     exclusive: int = 0,
     reverse: int = 0,
+    axis_as_input: bool = False,
 ):
+    """CumSum's `axis` is a 0-D scalar tensor. As an initializer the compiler
+    hands it to the runtime on the host; as a graph input the runtime has to
+    read it back from the device."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
-    # CumSum's `axis` is a 0-D scalar tensor (initializer here).
-    axis_init = numpy_helper.from_array(np.array(axis, dtype=np.int64), name="axis")
     Y = helper.make_tensor_value_info("Y", tp, list(input_shape))
     attrs = {}
     if exclusive:
@@ -53,6 +55,10 @@ def _make_cumsum_model(
     if reverse:
         attrs["reverse"] = reverse
     node = helper.make_node("CumSum", ["X", "axis"], ["Y"], **attrs)
+    if axis_as_input:
+        A = helper.make_tensor_value_info("axis", TensorProto.INT64, [])
+        return make_model_from_nodes([node], [X, A], [Y])
+    axis_init = numpy_helper.from_array(np.array(axis, dtype=np.int64), name="axis")
     return make_model_from_nodes([node], [X], [Y], initializers=[axis_init])
 
 
@@ -116,4 +122,15 @@ class TestCumSum:
         rng = np.random.default_rng(503)
         x = rng.integers(0, 2, shape, dtype=np.int64)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("axis", [0, 1, -1])
+    def test_cumsum_runtime_axis(self, model_runner, axis):
+        """Axis fed as a graph input -- the runtime reads it from the device."""
+        shape = [3, 5]
+        model = _make_cumsum_model(np.int64, shape, axis, axis_as_input=True)
+        rng = np.random.default_rng(504)
+        x = rng.integers(-5, 5, shape, dtype=np.int64)
+        axis_a = np.array(axis, dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, axis_a])
         compare_outputs(actual, expected, atol=0)

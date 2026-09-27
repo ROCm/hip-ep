@@ -8,7 +8,8 @@
 // reaches it as a host pointer: `starts`, `axes` and `steps` are attributes, so
 // their entries go on the stack, while `ends` is an operand and its buffer goes
 // over as an address-space-0 pointer. Every slot is the same length, so one
-// count covers the three the runtime takes.
+// count covers the three the runtime takes. The attribute slots are repeated
+// as the trailing host copies, so the runtime reads back only `ends`.
 // CHECK-LABEL: llvm.func @slice
 // CHECK-SAME:  (%[[CTX:[^,]+]]: !llvm.ptr,
 // CHECK:       %[[DATA_DIM0:.*]] = llvm.mlir.constant(8 : i64) : i64
@@ -31,13 +32,14 @@
 // CHECK:       %[[STEPS_PTR:.*]] = llvm.alloca {{.*}} x !llvm.array<1 x i64>
 // CHECK-NEXT:  %[[STEPS_SLOT0:.*]] = llvm.getelementptr %[[STEPS_PTR]][0]
 // CHECK-NEXT:  llvm.store %{{.*}}, %[[STEPS_SLOT0]]
+// CHECK-NEXT:  %[[NO_HOST:.*]] = llvm.mlir.zero : !llvm.ptr
 // CHECK-NEXT:  %[[ENTRIES:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:  %[[DATA_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DATA_RANK:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT:  %[[OUT_RANK:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT:  %[[DATA_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_slice(%[[CTX]], %[[DATA_PTR]], %[[STARTS_PTR]], %[[ENDS_PTR]], %[[AXES_PTR]], %[[STEPS_PTR]], %[[OUT_PTR]], %[[DATA_SHAPE]], %[[DATA_RANK]], %[[OUT_SHAPE]], %[[OUT_RANK]], %[[ENTRIES]], %[[ENTRIES]], %[[ENTRIES]], %[[DATA_TYPE]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_slice(%[[CTX]], %[[DATA_PTR]], %[[STARTS_PTR]], %[[ENDS_PTR]], %[[AXES_PTR]], %[[STEPS_PTR]], %[[OUT_PTR]], %[[DATA_SHAPE]], %[[DATA_RANK]], %[[OUT_SHAPE]], %[[OUT_RANK]], %[[ENTRIES]], %[[ENTRIES]], %[[ENTRIES]], %[[DATA_TYPE]], %[[STARTS_PTR]], %[[NO_HOST]], %[[AXES_PTR]], %[[STEPS_PTR]]) : (!llvm.ptr, !llvm.ptr<1>, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr<1>, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr) -> i32
 func.func @slice(%ctx: !hipsr.context,
                  %data: memref<8x4xf16, #hipsr.mem<device>>,
                  %ends: memref<1xi64, #hipsr.mem<host>>,

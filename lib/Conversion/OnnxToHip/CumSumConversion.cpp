@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "HostIndex.h"
 #include "OnnxToHipUtils.h"
 
 namespace mlir {
@@ -38,10 +39,19 @@ struct CumSumToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("reverse"))
       reverse = attr.getValue().getSExtValue();
 
-    auto hipOp =
-        mlir::hip::CumSumOp::create(rewriter, loc, context, x, axis, init,
-                                    rewriter.getI64IntegerAttr(exclusive),
-                                    rewriter.getI64IntegerAttr(reverse));
+    // A compile-time axis spares the runtime a device readback and stream sync
+    // per call.
+    mlir::IntegerAttr axisValue;
+    if (mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(axis))
+      if (dense.getNumElements() == 1 &&
+          dense.getElementType().isSignlessInteger())
+        axisValue = rewriter.getI64IntegerAttr(
+            (*dense.getValues<mlir::APInt>().begin()).getSExtValue());
+
+    auto hipOp = mlir::hip::CumSumOp::create(
+        rewriter, loc, context, x, axis, init,
+        rewriter.getI64IntegerAttr(exclusive),
+        rewriter.getI64IntegerAttr(reverse), axisValue);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

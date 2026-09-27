@@ -1797,14 +1797,14 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
 
 // CumSum operation wrapper (cumulative sum along an axis).
 // `axis` is a rank-0 (scalar) GPU tensor whose i32/i64 value selects the
-// reduction axis; the runtime is responsible for reading it (typically a
-// single hipMemcpyAsync D2H or kernel-side load).
+// reduction axis. `host_axis` is its compile-time value, or INT64_MIN when
+// unknown, in which case the runtime reads `axis` back (D2H + stream sync).
 // `axis_dtype` is HIPDNN_EP_DATATYPE_INT32 / _INT64.
 // `data_type` is HIPDNN_EP_DATATYPE_* of the data tensor.
 int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
-                int64_t exclusive, int64_t reverse);
+                int64_t exclusive, int64_t reverse, int64_t host_axis);
 
 // Pad operation wrapper (constant / reflect / edge / wrap modes).
 // pads:           int64 1-D tensor [2 * num_axes]
@@ -1813,11 +1813,17 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
 // axes:           nullable int64 1-D tensor selecting axes; nullptr/empty
 //                 means "all axes"
 // mode_id:        0=constant, 1=reflect, 2=edge, 3=wrap
+// host_pads / host_axes / host_constant_value: nullable host copies of the
+//                 matching device inputs (the constant value as its bits in an
+//                 8-byte slot, low bytes first). Only inputs without one are
+//                 read back, and the stream is synced only if any was.
 int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
              void *axes, void *output, const int64_t *data_shape,
              int64_t data_rank, const int64_t *output_shape,
              int64_t output_rank, int64_t pads_num_elements,
-             int64_t axes_num_elements, int64_t data_type, int64_t mode_id);
+             int64_t axes_num_elements, int64_t data_type, int64_t mode_id,
+             const int64_t *host_pads, const int64_t *host_axes,
+             const void *host_constant_value);
 
 // Tile operation wrapper.
 // repeats: int64 1-D tensor of length `data_rank`.
@@ -1870,21 +1876,23 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
-// Today this is a stub: the OnnxToHip decompose pattern handles the common
-// case (compile-time constant starts/ends/axes/steps with positive unit
-// stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
-// entry is only called for non-constant-indices or negative-step Slices.
-// The stub only logs its parameters and returns success — models that
-// exercise it will produce incorrect Slice output but will still link and
-// run end-to-end for IR-shape debugging.
+// The OnnxToHip decompose pattern handles the common case (compile-time
+// constant starts/ends/axes/steps with positive unit stride) by rewriting
+// onnx.Slice to tensor.extract_slice, so this runtime entry is only called
+// for non-constant-indices, dynamic-sliced-axis or negative-step Slices.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
+// host_starts / host_ends / host_axes / host_steps: nullable host copies of
+// the matching device inputs. Only inputs without one are read back, and the
+// stream is synced only if any was.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                void *axes, void *steps, void *output, const int64_t *data_shape,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type);
+               int64_t data_type, const int64_t *host_starts,
+               const int64_t *host_ends, const int64_t *host_axes,
+               const int64_t *host_steps);
 
 // ScatterND: output = copy(data), then output[indices[i]] (reduction)
 // updates[i].

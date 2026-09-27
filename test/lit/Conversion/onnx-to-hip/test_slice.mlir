@@ -7,7 +7,9 @@
 //      constants with positive unit stride, so onnx.Slice is rewritten to
 //      a zero-cost tensor.extract_slice.
 //   2. SliceToHip (fallback) — non-constant indices or negative steps fall
-//      through to a native hip.slice op whose runtime is a stub today.
+//      through to a native hip.slice op. Control operands the conversion can
+//      compute on the host are mirrored onto it (`host_bounds`, `host_axes`,
+//      `host_steps`) so the runtime skips their readback.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -80,9 +82,15 @@ module {
         : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>, tensor<1xi64>) -> tensor<3xf32>
 
+    // Every control operand is constant, so each is mirrored on the host and
+    // wrap_slice needs no readback.
+    // CHECK-DAG: %[[S:.*]] = arith.constant 5 : index
+    // CHECK-DAG: %[[E:.*]] = arith.constant -1 : index
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.empty() : tensor<3xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<6xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK-SAME: host_bounds(%[[S]], %[[E]])
+    // CHECK-SAME: {host_axes = array<i64: 0>, host_steps = array<i64: -2>}
 
     return %r : tensor<3xf32>
   }
@@ -198,7 +206,16 @@ module {
     // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
     // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[D1]], %[[EXT]] : index
     // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // The same host arithmetic is handed to wrap_slice, so it neither reads the
+    // bounds back nor syncs the stream: `ends` is dim(attn, 1) and `starts` is
+    // that minus dim(ids, 1).
+    // CHECK-DAG: %[[ATTN:.*]] = tensor.dim %arg3, %{{.*}} : tensor<?x?xi64>
+    // CHECK-DAG: %[[IDS:.*]] = tensor.dim %arg2, %{{.*}} : tensor<?x?xi64>
+    // CHECK: %[[START:.*]] = arith.subi %[[ATTN]], %[[IDS]] : index
+    // CHECK: %[[END:.*]] = tensor.dim %arg3, %{{.*}} : tensor<?x?xi64>
     // CHECK: hip.slice
+    // CHECK-SAME: host_bounds(%[[START]], %[[END]])
+    // CHECK-SAME: {host_axes = array<i64: 1>}
     return %r : tensor<?x?xi64>
   }
 
@@ -217,7 +234,11 @@ module {
     // CHECK-NOT: arith.minsi
     // CHECK: %[[DIM:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?xi64>
     // CHECK: tensor.empty(%[[DIM]]) : tensor<?xi64>
+    // The bounds stay device-only (wrap_slice reads them back); only the
+    // constant axes are mirrored.
     // CHECK: hip.slice
+    // CHECK-NOT: host_bounds
+    // CHECK-SAME: {host_axes = array<i64: 0>}
     return %r : tensor<?xi64>
   }
 
@@ -265,7 +286,10 @@ module {
     // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
     // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[D1]], %[[EXT]] : index
     // CHECK: tensor.empty(%[[D0]], %[[CAP]]) : tensor<?x?xi64>
+    // The host bounds reuse the dims the from_elements were packed from.
+    // CHECK: %[[START:.*]] = arith.subi %[[ATTN_DIM:[^,]+]], %{{[^ ]+}} : index
     // CHECK: hip.slice
+    // CHECK-SAME: host_bounds(%[[START]], %[[ATTN_DIM]])
     return %r : tensor<?x?xi64>
   }
 

@@ -5,20 +5,22 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
 
-// hip.cumsum(ctx, x, axis, y, exclusive, reverse)
+// hip.cumsum(ctx, x, axis, y, exclusive, reverse, [axis_value])
 //   -> wrap_cumsum(state, x_ptr, axis_ptr, y_ptr,
 //                  x_shape_ptr, x_rank,
 //                  num_elements, data_type, axis_dtype,
-//                  exclusive, reverse)
+//                  exclusive, reverse, host_axis)
 //
 // `axis` is a rank-0 (scalar) GPU tensor of i32/i64 selecting the reduction
-// axis. The runtime is responsible for reading it -- we only forward the
-// pointer plus the axis dtype enum so the runtime knows whether to treat
-// the byte buffer as int32 or int64.
+// axis. `host_axis` carries `axis_value` when the conversion knew it, and
+// INT64_MIN otherwise; only in that case does the runtime read `axis` back
+// (the axis dtype enum tells it whether the buffer is int32 or int64).
 struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -76,22 +78,27 @@ struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
     Value axisDtypeVal = createI64Const(axisDtype);
     Value exclusiveVal = createI64Const(op.getExclusive());
     Value reverseVal = createI64Const(op.getReverse());
+    int64_t hostAxis = std::numeric_limits<int64_t>::min();
+    if (IntegerAttr axisValue = op.getAxisValueAttr())
+      hostAxis = axisValue.getInt();
+    Value hostAxisVal = createI64Const(hostAxis);
 
-    SmallVector<Type, 11> paramTypes = {
+    SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, // state, x, axis, y
         ptrType, i64Type,                   // x_shape, x_rank
         i64Type, i64Type, i64Type, // num_elements, data_type, axis_dtype
-        i64Type, i64Type};         // exclusive, reverse
+        i64Type, i64Type,          // exclusive, reverse
+        i64Type};                  // host_axis
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapCumSum, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {statePtr,     xPtr,        axisPtr,
+    SmallVector<Value, 12> args = {statePtr,     xPtr,        axisPtr,
                                    yPtr,         shapeArr,    rankVal,
                                    numElements,  dataTypeVal, axisDtypeVal,
-                                   exclusiveVal, reverseVal};
+                                   exclusiveVal, reverseVal,  hostAxisVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
