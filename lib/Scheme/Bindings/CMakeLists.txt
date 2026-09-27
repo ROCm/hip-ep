@@ -16,7 +16,6 @@ add_library(HipsrSchemeRuntime
   Conversion.cpp
   Dialects/Tensor.cpp
   Dialects/Shape.cpp
-  Dialects/Func.cpp
   Dialects/Hipsr.cpp
   Dialects/Onnx.cpp
 )

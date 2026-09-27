@@ -321,6 +321,17 @@ int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_
 
 // Set an integer attribute on an operation
 
+// Populate FuncOp type conversion pattern — conversion framework utility,
+// not func dialect bindings per se.
+void mlir_populate_func_type_conversion_pattern(
+    uint64_t patterns_ptr, uint64_t converter_ptr) {
+  if (!patterns_ptr || !converter_ptr) return;
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
+  mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(
+      *patterns, *converter);
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -347,28 +358,6 @@ void registerConversionBindings() {
   Sregister_symbol("mlir_create_rewrite_pattern_set", (void*)::mlir_create_rewrite_pattern_set);
   Sregister_symbol("mlir_destroy_rewrite_pattern_set", (void*)::mlir_destroy_rewrite_pattern_set);
   Sregister_symbol("mlir_apply_full_conversion", (void*)::mlir_apply_full_conversion);
-  registerFuncTypeConversionBinding();
-}
-
-} // namespace hipsr
-} // namespace mlir
-
-// Populate FuncOp type conversion pattern — belongs with the conversion
-// framework since it configures how func.func signatures are converted.
-extern "C" {
-void mlir_populate_func_type_conversion_pattern(
-    uint64_t patterns_ptr, uint64_t converter_ptr) {
-  if (!patterns_ptr || !converter_ptr) return;
-  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
-  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
-  mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(
-      *patterns, *converter);
-}
-} // extern "C"
-
-namespace mlir {
-namespace hipsr {
-void registerFuncTypeConversionBinding() {
   Sregister_symbol("mlir_populate_func_type_conversion_pattern",
                    (void*)::mlir_populate_func_type_conversion_pattern);
 }
