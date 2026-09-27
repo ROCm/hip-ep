@@ -70,8 +70,16 @@ add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
 )
 add_library(HipsrSchemeRuntime
-  Runtime/ChezSchemeInterpreter.cpp
-  Runtime/SchemeMlirBindings.cpp
+  Bindings/ChezSchemeInterpreter.cpp
+  Bindings/MainModule.cpp
+  Bindings/Core.cpp
+  Bindings/Logging.cpp
+  Bindings/Conversion.cpp
+  Bindings/Dialects/Tensor.cpp
+  Bindings/Dialects/Shape.cpp
+  Bindings/Dialects/Func.cpp
+  Bindings/Dialects/Hipsr.cpp
+  Bindings/Dialects/Onnx.cpp
 )
 
 target_include_directories(HipsrSchemeRuntime

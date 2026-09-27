@@ -6,7 +6,7 @@
 #ifndef LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
 #define LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
 
-#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
+#include "hip/Dialect/Hipsr/Scheme/Bindings/ChezSchemeInterpreter.h"
 
 namespace mlir {
 class Operation;

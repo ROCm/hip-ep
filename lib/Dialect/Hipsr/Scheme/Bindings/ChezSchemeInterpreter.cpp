@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Scheme/Runtime/ChezSchemeInterpreter.h"
-#include "hip/Dialect/Hipsr/Scheme/Runtime/SchemeMlirBindings.h"
+#include "hip/Dialect/Hipsr/Scheme/Bindings/ChezSchemeInterpreter.h"
+#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeMlirBindings.h"
 
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"
