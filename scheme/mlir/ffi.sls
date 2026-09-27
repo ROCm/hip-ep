@@ -73,6 +73,7 @@
     mlir-placeholder-set-barrier-type
     mlir-operation-copy-attr
     mlir-type-is-device-tensor
+    mlir-tensor-type-in-host-space
     mlir-operation-has-attr
     mlir-operation-set-operand
     mlir-operation-use-empty
@@ -154,6 +155,10 @@
     mlir-get-shape-shape-type
     mlir-get-shape-size-type
     mlir-get-shape-witness-type
+    mlir-get-index-type                 ; (uptr) → uptr  mlir::IndexType
+    mlir-get-i64-type                   ; (uptr) → uptr  mlir::IntegerType(64)
+    mlir-get-i1-type                    ; (uptr) → uptr  mlir::IntegerType(1)
+    mlir-get-hipsr-context-type         ; (uptr) → uptr  hipsr::ContextType
     mlir-operation-get-result           ; get result value from op at index
 
     ;; Pattern rewriting
@@ -364,6 +369,10 @@
   ;;; @return New Type* in device memory space as uptr
   (define mlir-tensor-type-in-device-space
     (foreign-procedure "mlir_tensor_type_in_device_space" (uptr) uptr))
+
+  ;;; @brief Clone tensor type with host memory-space encoding.
+  (define mlir-tensor-type-in-host-space
+    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
 
   ;;; @brief Get the type of a value
   ;;; @param value-ptr Value* as uptr
@@ -667,6 +676,22 @@
   ;;; @brief Get the shape::WitnessType from an MLIRContext.
   (define mlir-get-shape-witness-type
     (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
+
+  ;;; @brief Get mlir::IndexType from an MLIRContext.
+  (define mlir-get-index-type
+    (foreign-procedure "mlir_get_index_type" (uptr) uptr))
+
+  ;;; @brief Get mlir::IntegerType(64) from an MLIRContext.
+  (define mlir-get-i64-type
+    (foreign-procedure "mlir_get_i64_type" (uptr) uptr))
+
+  ;;; @brief Get mlir::IntegerType(1) from an MLIRContext.
+  (define mlir-get-i1-type
+    (foreign-procedure "mlir_get_i1_type" (uptr) uptr))
+
+  ;;; @brief Get hipsr::ContextType from an MLIRContext.
+  (define mlir-get-hipsr-context-type
+    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
 
   ;;; @brief Set an integer attribute on an operation (i64 typed)
   (define mlir-operation-set-attr

@@ -29,6 +29,7 @@
           (patterns gather)
           (patterns expand)
           (patterns constant)
+          (patterns shape)
           (for (rime loop) expand))
 
   ;; Populate return-conversion patterns in Scheme.
@@ -160,7 +161,7 @@
             ;;   inline shape region (arith + tensor + shape ops) and a
             ;;   hipsr.compute body (tensor.extract_slice with dynamic
             ;;   offsets). Both inline regions need new DSL capabilities.
-            (mlir-populate-shape-conversion-patterns     type-converter patterns ctx)
+            (populate-shape-patterns                      type-converter patterns ctx)
             (mlir-populate-reshape-conversion-patterns   type-converter patterns ctx)
             (mlir-populate-unsqueeze-conversion-patterns type-converter patterns ctx)
             (mlir-populate-slice-conversion-patterns     type-converter patterns ctx)

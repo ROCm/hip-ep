@@ -450,7 +450,7 @@ int64_t mlir_operation_get_integer_attr(uint64_t op_ptr, const char* attr_name, 
   if (!op_ptr) return default_val;
   auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>(attr_name))
-    return attr.getInt();
+    return attr.getValue().getSExtValue();  // works for signless, signed, and index types
   return default_val;
 }
 
@@ -537,6 +537,25 @@ void mlir_destroy_builder(uint64_t builder_ptr) {
   delete reinterpret_cast<mlir::OpBuilder*>(builder_ptr);
 }
 
+// Primitive type accessors
+uint64_t mlir_get_index_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(mlir::IndexType::get(ctx).getAsOpaquePointer());
+}
+
+uint64_t mlir_get_i64_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(mlir::IntegerType::get(ctx, 64).getAsOpaquePointer());
+}
+
+uint64_t mlir_get_i1_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(mlir::IntegerType::get(ctx, 1).getAsOpaquePointer());
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -585,6 +604,9 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_operation_set_dense_i64_array", (void*)::mlir_operation_set_dense_i64_array);
   Sregister_symbol("mlir_operation_copy_attr", (void*)::mlir_operation_copy_attr);
   Sregister_symbol("mlir_operation_has_attr", (void*)::mlir_operation_has_attr);
+  Sregister_symbol("mlir_get_index_type", (void*)::mlir_get_index_type);
+  Sregister_symbol("mlir_get_i64_type",   (void*)::mlir_get_i64_type);
+  Sregister_symbol("mlir_get_i1_type",    (void*)::mlir_get_i1_type);
 }
 
 } // namespace hipsr

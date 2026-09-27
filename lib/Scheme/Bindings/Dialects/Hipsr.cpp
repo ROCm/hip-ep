@@ -103,6 +103,13 @@ void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {
 
 // Copy a named attribute from src_op to dst_op. No-op if attr is absent on src.
 
+uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
+  if (!ctx_ptr) return 0;
+  auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::hipsr::ContextType::get(ctx).getAsOpaquePointer());
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -115,6 +122,7 @@ void registerHipsrBindings() {
   Sregister_symbol("mlir_conversion_target_add_legal_hipsr", (void*)::mlir_conversion_target_add_legal_hipsr);
   Sregister_symbol("mlir_conversion_target_mark_unknown_ops_nested_legal", (void*)::mlir_conversion_target_mark_unknown_ops_nested_legal);
   Sregister_symbol("mlir_placeholder_set_barrier_type", (void*)::mlir_placeholder_set_barrier_type);
+  Sregister_symbol("mlir_get_hipsr_context_type", (void*)::mlir_get_hipsr_context_type);
 }
 
 } // namespace hipsr
