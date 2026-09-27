@@ -468,7 +468,13 @@
   ;; Attributes are accumulated in reverse order (cons), then reversed when done.
   ;;
   (define (parse-attrs-section rec rest-stx attrs-acc)
-    (syntax-case rest-stx (->)
+    (syntax-case rest-stx (:regions ->)
+      [(:regions . more)
+       ;; :regions follows :attrs — save accumulated attrs and continue
+       (begin
+         (ast-operation-expand-attributes-set! rec (reverse attrs-acc))
+         (parse-regions-section rec #'more '()))]
+
       [(-> result-types)
        (begin
          (ast-operation-expand-attributes-set! rec (reverse attrs-acc))
@@ -478,7 +484,7 @@
        (parse-attrs-section rec #'more (cons #'attr attrs-acc))]
 
       [_ (syntax-violation 'parse-attrs-section
-           "Expected attr or -> result-types"
+           "Expected attr, :regions, or -> result-types"
            rest-stx)]))
 )
 

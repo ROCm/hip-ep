@@ -18,18 +18,9 @@
   (export populate-shape-patterns
           onnx-shape->hipsr)
   (import (except (rnrs (6)) =)
-          (only (chezscheme) format)
           (mlir ffi)
           (mlir hipsr)
           (mlir pattern-macro))
-
-  ;; Helper: emit shape.const_size with an index-typed value attr
-  (define (emit-const-size val)
-    (let* ([op (mlir-build-op-in-block (current-block-builder) #f
-                  "shape.const_size" '()
-                  (list (mlir-get-shape-size-type
-                          (mlir-operation-get-context #f))))])
-      op))
 
   (define-conversion-pattern (onnx-shape->hipsr op operands-ref rewriter type-converter)
     :match
@@ -55,7 +46,6 @@
         (%placeholder = hipsr.placeholder (%ctx %input !out-host)
                         :attrs (operandSegmentSizes (list 1 1 1) :i32-array)
                         :regions ((^bb0 ((%s : !shape-type))
-                                     ;; shape.const_size needs an index attr — use :scheme
                                      (%cN = (let* ([x (mlir-build-op-in-block
                                                          (current-block-builder) op
                                                          "shape.const_size" '() (list !size-type))])
@@ -68,8 +58,6 @@
         (%result = hipsr.compute (%ctx %input %placeholder !out-host)
                    :attrs (operandSegmentSizes (list 1 1 1) :i32-array)
                    :regions ((^bb0 ((%c : !ctx-type) (%in : !input-type) (%dest : !out-host))
-                                ;; Collect i64 dim values via loop — (current-block-builder) gives
-                                ;; the fresh OpBuilder for this block, set by parameterize.
                                 (%dim-vals = (let loop ([axis start] [acc '()])
                                               (if (>= axis end) (reverse acc)
                                                 (let* ([ci (mlir-build-op-in-block
