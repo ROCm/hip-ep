@@ -141,7 +141,7 @@
                [arg-vars  (list-ref parsed 0)]
                [arg-types (list-ref parsed 1)]
                [body-ops  (list-ref parsed 2)]
-               ;; Generate body via recursive with-mlir-ops call
+               ;; body-ops is a plain Scheme list; cons it into a syntax list for with-syntax.
                [body-stx  (with-syntax ([(body ...) body-ops])
                              #'(with-mlir-ops body ...))]
                [n-args    (length arg-vars)]
@@ -281,7 +281,8 @@
                      (if regs-pos
                          (emit-regions (list-ref form (+ regs-pos 1)) idx)
                          #f)]
-                    [multi-vars (and (list? (syntax->list %var))
+                    ;; multi-result: %var is a list form like (%a %b); use datum to check safely
+                    [multi-vars (and (list? (syntax->datum %var))
                                      (syntax->list %var))])
                (if multi-vars
                    ;; Multi-result: tmp binding + N result extractions
