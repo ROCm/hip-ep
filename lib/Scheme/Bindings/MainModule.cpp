@@ -16,7 +16,6 @@ namespace mlir {
 namespace hipsr {
 extern void registerConversionBindings();
 extern void registerCoreBindings();
-extern void registerFuncBindings();
 extern void registerHipsrBindings();
 extern void registerOnnxBindings();
 extern void registerShapeBindings();
@@ -52,7 +51,6 @@ namespace hipsr {
 void registerMlirForeignFunctions() {
   registerConversionBindings();
   registerCoreBindings();
-  registerFuncBindings();
   registerHipsrBindings();
   registerOnnxBindings();
   registerShapeBindings();
