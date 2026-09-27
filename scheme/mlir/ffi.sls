@@ -144,6 +144,10 @@
     mlir-op-get-region
     mlir-region-create-block
     mlir-block-get-argument
+    mlir-new-block              ; create block without moving rewriter IP
+    mlir-builder-at-block-end  ; fresh OpBuilder at block end (independent of rewriter)
+    mlir-destroy-builder        ; destroy builder from mlir-builder-at-block-end
+    mlir-build-op-in-block     ; like mlir-build-op but takes OpBuilder* (for region bodies)
     mlir-get-shape-shape-type
     mlir-get-shape-size-type
     mlir-operation-get-result           ; get result value from op at index
@@ -619,6 +623,24 @@
   ;;; @brief Get the i-th argument of a block as a Value* uptr.
   (define mlir-block-get-argument
     (foreign-procedure "mlir_block_get_argument" (uptr int) uptr))
+
+  ;;; @brief Create a block in a region with given arg types. Does NOT move any rewriter's IP.
+  (define mlir-new-block
+    (foreign-procedure "mlir_new_block" (uptr scheme-object) uptr))
+
+  ;;; @brief Create a heap-allocated OpBuilder at the end of a block.
+  ;;; Independent of any ConversionPatternRewriter. Destroy with mlir-destroy-builder.
+  (define mlir-builder-at-block-end
+    (foreign-procedure "mlir_builder_at_block_end" (uptr) uptr))
+
+  ;;; @brief Destroy a builder created by mlir-builder-at-block-end.
+  (define mlir-destroy-builder
+    (foreign-procedure "mlir_destroy_builder" (uptr) void))
+
+  ;;; @brief Like mlir-build-op but uses a plain OpBuilder* (from mlir-builder-at-block-end).
+  ;;; Use for ops inside region blocks where a fresh OpBuilder is the builder.
+  (define mlir-build-op-in-block
+    (foreign-procedure "mlir_build_op_in_block" (uptr uptr string scheme-object scheme-object) uptr))
 
   ;;; @brief Get the shape::ShapeType from an MLIRContext.
   (define mlir-get-shape-shape-type

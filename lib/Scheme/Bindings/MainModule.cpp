@@ -11,18 +11,6 @@
 
 #define DEBUG_TYPE "scheme-bindings"
 
-// Forward declarations of per-dialect registration functions
-namespace mlir {
-namespace hipsr {
-extern void registerConversionBindings();
-extern void registerCoreBindings();
-extern void registerHipsrBindings();
-extern void registerOnnxBindings();
-extern void registerShapeBindings();
-extern void registerTensorBindings();
-extern void registerLoggingBindings();
-} // namespace hipsr
-} // namespace mlir
 
 namespace mlir {
 namespace hipsr {

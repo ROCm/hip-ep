@@ -68,7 +68,11 @@
 
           ast-operand make-ast-operand ast-operand?
           ast-operand-kind ast-operand-kind-set!
-          ast-operand-var ast-operand-var-set!)
+          ast-operand-var ast-operand-var-set!
+
+          ast-scheme-binding-expand make-ast-scheme-binding-expand ast-scheme-binding-expand?
+          ast-scheme-binding-expand-var ast-scheme-binding-expand-var-set!
+          ast-scheme-binding-expand-expr ast-scheme-binding-expand-expr-set!)
   (import (rnrs))
 
   ;;=======================================================================
@@ -413,4 +417,22 @@
       (mutable operations)))   ;; Phase 1 (parse): list of ast-operation-expand
                                ;; Operations in this block (can be recursive - blocks in regions in ops)
                                ;; Contains: list of ast-operation-expand records (recursive)
+
+  ;;-----------------------------------------------------------------------
+  ;; SCHEME-BINDING RECORD: ast-scheme-binding-expand
+  ;;-----------------------------------------------------------------------
+  ;;
+  ;; Represents a Scheme escape inside a :rewrite :with clause.
+  ;; Discriminated from ast-operation-expand by the token after =:
+  ;;   string or symbol after = → MLIR op (ast-operation-expand)
+  ;;   list after =            → Scheme expression (ast-scheme-binding-expand)
+  ;;
+  ;; Examples:
+  ;;   (%s = (when (pred? %r) (set-attr! %r "x" 1)))
+  ;;   (_ = (log-debug "created"))
+  ;;
+  (define-record-type (ast-scheme-binding-expand make-ast-scheme-binding-expand ast-scheme-binding-expand?)
+    (fields
+      (mutable var)    ;; Phase 1 (parse): syntax — %var, list of %vars, _ or void (discard)
+      (mutable expr))) ;; Phase 1 (parse): syntax — the raw Scheme expression (list form)
 )

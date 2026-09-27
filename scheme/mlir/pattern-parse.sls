@@ -315,17 +315,30 @@
   ;;
   (define (parse-rewrite-operation op-stx)
     (syntax-case op-stx (=)
-      ;; Pattern: (result-part = op-name . rest) or ((results ...) = op-name . rest)
+      ;; Scheme binding: (%var = (scheme-expr)) or (_ = (expr))
+      ;; Discriminator: token after = is a LIST (not string or symbol).
+      [(result-var = scheme-expr)
+       (let ([rhs (syntax->datum #'scheme-expr)])
+         (and (pair? rhs)                       ; RHS is a compound expression
+              (not (string? (syntax->datum #'result-var)))))  ; LHS is not a string
+       (make-ast-scheme-binding-expand #'result-var #'scheme-expr)]
+
+      ;; Multi-result MLIR op: ((%v1 %v2 ...) = "op.name" . rest)
+      ;; Discriminator: result-part is a LIST of %identifiers.
+      [((result-var ...) = op-name . rest)
+       (pair? (syntax->datum #'(result-var ...)))
+       (parse-rewrite-rest #'(result-var ...) #'op-name #'rest)]
+
+      ;; Standard single-result MLIR op: (%var = "op.name" . rest)
       [(result-part = op-name . rest)
        (parse-rewrite-rest #'result-part #'op-name #'rest)]
 
-      ;; Pattern: (op-name . rest) - no result
-      ;; Validation will check if op-name is valid string/symbol
+      ;; No result variable: ("op.name" . rest)
       [(op-name . rest)
        (parse-rewrite-rest #'() #'op-name #'rest)]
 
       [_ (syntax-violation 'parse-rewrite-operation
-           "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ...)"
+           "Invalid operation syntax (expected: [result =] \"op.name\" (operands) ... or %var = (scheme-expr))"
            op-stx)]))
 
   ;;-----------------------------------------------------------------------

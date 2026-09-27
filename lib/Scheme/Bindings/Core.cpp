@@ -7,6 +7,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Attributes.h"
@@ -237,6 +238,35 @@ uint64_t mlir_build_op(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
   return reinterpret_cast<uint64_t>(rewriter->create(state));
 }
 
+// Like mlir_build_op but takes a plain OpBuilder* (e.g. from mlir_builder_at_block_end).
+// Used for ops inside region blocks where a fresh OpBuilder is used instead of the rewriter.
+uint64_t mlir_build_op_in_block(uint64_t builder_ptr, uint64_t loc_op_ptr,
+                                  const char* op_name,
+                                  ptr operands_list, ptr result_types_list) {
+  if (!builder_ptr || !loc_op_ptr) return 0;
+  auto* builder = reinterpret_cast<mlir::OpBuilder*>(builder_ptr);
+  auto* loc_op  = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type>  resultTypes;
+
+  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_in_block: bad operands"); return 0; }
+    uint64_t v = Sunsigned64_value(Scar(cur));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+  }
+  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_in_block: bad result types"); return 0; }
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
+  }
+
+  mlir::OperationState state(loc_op->getLoc(), op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  return reinterpret_cast<uint64_t>(builder->create(state));
+}
+
 // Set rewriter insertion point to immediately before op.
 void mlir_set_insertion_point_before(uint64_t rewriter_ptr, uint64_t op_ptr) {
   if (!rewriter_ptr || !op_ptr) return;
@@ -265,6 +295,8 @@ uint64_t mlir_op_get_region(uint64_t op_ptr, int region_idx) {
 uint64_t mlir_region_create_block(uint64_t rewriter_ptr, uint64_t region_ptr,
                                    ptr arg_types_list) {
   if (!rewriter_ptr || !region_ptr) return 0;
+  // Must use RewriterBase::createBlock (not OpBuilder::createBlock) so the
+  // conversion framework receives proper block-creation notifications.
   auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
   auto* region   = reinterpret_cast<mlir::Region*>(region_ptr);
   mlir::Location loc = region->getParentOp()->getLoc();
@@ -288,6 +320,7 @@ uint64_t mlir_block_get_argument(uint64_t block_ptr, int idx) {
 }
 
 // Get the shape::ShapeType from an MLIRContext.
+// replaceOp/eraseOp are on RewriterBase, not OpBuilder — these must use RewriterBase*.
 int mlir_replace_op(uint64_t rewriter_ptr, uint64_t old_op_ptr, uint64_t new_value_ptr) {
   if (!rewriter_ptr) { mlir_log_error("mlir_replace_op: no rewriter"); return 0; }
   auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
@@ -387,6 +420,38 @@ int mlir_operation_has_attr(uint64_t op_ptr, const char* attr_name) {
 }
 
 
+// Create a block in a region with given arg types.
+// Does NOT change any rewriter's insertion point.
+uint64_t mlir_new_block(uint64_t region_ptr, ptr arg_types_list) {
+  if (!region_ptr) return 0;
+  auto* region = reinterpret_cast<mlir::Region*>(region_ptr);
+  auto* block = new mlir::Block();
+  region->push_back(block);
+  mlir::Location loc = region->getParentOp()->getLoc();
+  for (ptr cur = static_cast<ptr>(arg_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    block->addArgument(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)), loc);
+  }
+  return reinterpret_cast<uint64_t>(block);
+}
+
+// Create a heap-allocated OpBuilder positioned at the end of a block.
+// Independent of any ConversionPatternRewriter — does not affect its insertion point.
+// Caller must destroy with mlir_destroy_builder.
+uint64_t mlir_builder_at_block_end(uint64_t block_ptr) {
+  if (!block_ptr) return 0;
+  auto* block = reinterpret_cast<mlir::Block*>(block_ptr);
+  auto* builder = new mlir::OpBuilder(block, block->end());
+  return reinterpret_cast<uint64_t>(builder);
+}
+
+// Destroy a builder created by mlir_builder_at_block_end.
+void mlir_destroy_builder(uint64_t builder_ptr) {
+  if (!builder_ptr) return;
+  delete reinterpret_cast<mlir::OpBuilder*>(builder_ptr);
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -418,6 +483,10 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_op_get_region", (void*)::mlir_op_get_region);
   Sregister_symbol("mlir_region_create_block", (void*)::mlir_region_create_block);
   Sregister_symbol("mlir_block_get_argument", (void*)::mlir_block_get_argument);
+  Sregister_symbol("mlir_new_block", (void*)::mlir_new_block);
+  Sregister_symbol("mlir_builder_at_block_end", (void*)::mlir_builder_at_block_end);
+  Sregister_symbol("mlir_destroy_builder", (void*)::mlir_destroy_builder);
+  Sregister_symbol("mlir_build_op_in_block", (void*)::mlir_build_op_in_block);
   Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
   Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);

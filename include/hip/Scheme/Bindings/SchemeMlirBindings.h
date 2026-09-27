@@ -31,6 +31,15 @@ namespace hipsr {
 // Register all MLIR foreign functions accessible from Scheme
 void registerMlirForeignFunctions();
 
+// Per-module registration functions — implemented in the corresponding .cpp files
+void registerConversionBindings();
+void registerCoreBindings();
+void registerHipsrBindings();
+void registerOnnxBindings();
+void registerShapeBindings();
+void registerTensorBindings();
+void registerLoggingBindings();
+
 // MLIR C++ to Scheme conversions - wrap MLIR objects as GC-safe Scheme integers
 ptr makeSchemeOperation(mlir::Operation* op);
 ptr makeSchemeValue(mlir::Value val);
