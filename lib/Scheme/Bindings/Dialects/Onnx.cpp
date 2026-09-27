@@ -41,6 +41,16 @@ DEFINE_POPULATE_PATTERNS(mlir_populate_nonzero_conversion_patterns,    populateN
 
 extern "C" {
 
+// onnx.Return → func.return conversion (belongs with ONNX patterns, not func dialect)
+void mlir_populate_return_conversion_patterns(
+    uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
+  if (!converter_ptr || !patterns_ptr || !ctx_ptr) return;
+  mlir::hipsr::populateReturnConversionPatterns(
+    *reinterpret_cast<mlir::TypeConverter*>(converter_ptr),
+    *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr),
+    reinterpret_cast<mlir::MLIRContext*>(ctx_ptr));
+}
+
 void mlir_populate_constant_conversion_patterns(
     uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t /*ctx_ptr*/) {
   if (!converter_ptr || !patterns_ptr) return;
@@ -65,6 +75,7 @@ namespace mlir {
 namespace hipsr {
 
 void registerOnnxBindings() {
+  Sregister_symbol("mlir_populate_return_conversion_patterns",             (void*)::mlir_populate_return_conversion_patterns);
   Sregister_symbol("mlir_conversion_target_add_illegal_onnx",             (void*)::mlir_conversion_target_add_illegal_onnx);
   Sregister_symbol("mlir_populate_matmul_conversion_patterns",            (void*)::mlir_populate_matmul_conversion_patterns);
   Sregister_symbol("mlir_populate_expand_conversion_patterns",            (void*)::mlir_populate_expand_conversion_patterns);
