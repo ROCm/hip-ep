@@ -140,6 +140,7 @@
 
     ;; Builder — explicit rewriter-based op construction
     mlir-build-op
+    mlir-build-op-with-regions
     mlir-set-insertion-point-before
     mlir-set-insertion-point-to-block-end
     mlir-op-get-region
@@ -148,7 +149,8 @@
     mlir-new-block              ; create block without moving rewriter IP
     mlir-builder-at-block-end  ; fresh OpBuilder at block end (independent of rewriter)
     mlir-destroy-builder        ; destroy builder from mlir-builder-at-block-end
-    mlir-build-op-in-block     ; like mlir-build-op but takes OpBuilder* (for region bodies)
+    mlir-build-op-in-block              ; like mlir-build-op but takes OpBuilder*
+    mlir-build-op-in-block-with-regions ; like above, pre-allocates regions
     mlir-get-shape-shape-type
     mlir-get-shape-size-type
     mlir-get-shape-witness-type
@@ -602,6 +604,12 @@
     (foreign-procedure "mlir_build_op"
                        (uptr uptr string scheme-object scheme-object) uptr))
 
+  ;;; @brief Like mlir-build-op but pre-allocates num-regions empty regions.
+  ;;; Required for ops that verify region count at creation (e.g. shape.assuming).
+  (define mlir-build-op-with-regions
+    (foreign-procedure "mlir_build_op_with_regions"
+                       (uptr uptr string scheme-object scheme-object int) uptr))
+
   ;;; @brief Set rewriter insertion point to immediately before an operation.
   (define mlir-set-insertion-point-before
     (foreign-procedure "mlir_set_insertion_point_before" (uptr uptr) void))
@@ -643,6 +651,10 @@
   ;;; Use for ops inside region blocks where a fresh OpBuilder is the builder.
   (define mlir-build-op-in-block
     (foreign-procedure "mlir_build_op_in_block" (uptr uptr string scheme-object scheme-object) uptr))
+
+  ;;; @brief Like mlir-build-op-in-block but pre-allocates num-regions empty regions.
+  (define mlir-build-op-in-block-with-regions
+    (foreign-procedure "mlir_build_op_in_block_with_regions" (uptr uptr string scheme-object scheme-object int) uptr))
 
   ;;; @brief Get the shape::ShapeType from an MLIRContext.
   (define mlir-get-shape-shape-type

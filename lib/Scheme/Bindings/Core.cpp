@@ -240,6 +240,49 @@ uint64_t mlir_build_op(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
   return reinterpret_cast<uint64_t>(rewriter->create(state));
 }
 
+// Like mlir_build_op but pre-allocates num_regions empty regions in the OperationState.
+// Required for ops that verify they have exactly N regions at creation time
+// (e.g. shape.assuming, scf.if) when those regions are populated afterwards via :regions.
+uint64_t mlir_build_op_with_regions(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
+                                    const char* op_name,
+                                    ptr operands_list, ptr result_types_list,
+                                    int num_regions) {
+  if (!rewriter_ptr || !loc_op_ptr) return 0;
+  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
+  auto* loc_op   = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type>  resultTypes;
+
+  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_with_regions: bad operands list"); return 0; }
+    uint64_t v = Sunsigned64_value(Scar(cur));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+  }
+  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_with_regions: bad result types list"); return 0; }
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
+  }
+
+  rewriter->setInsertionPoint(loc_op);
+
+  mlir::OperationState state(loc_op->getLoc(), op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  for (int i = 0; i < num_regions; ++i)
+    state.addRegion();
+
+  // hipsr.placeholder also needs its placeholder_type attribute
+  if (std::string_view(op_name) == "hipsr.placeholder") {
+    state.addAttribute("placeholder_type",
+        mlir::hipsr::PlaceholderTypeAttr::get(loc_op->getContext(),
+                                               mlir::hipsr::PlaceholderType::Normal));
+  }
+
+  return reinterpret_cast<uint64_t>(rewriter->create(state));
+}
+
 // Like mlir_build_op but takes a plain OpBuilder* (e.g. from mlir_builder_at_block_end).
 // Used for ops inside region blocks where a fresh OpBuilder is used instead of the rewriter.
 uint64_t mlir_build_op_in_block(uint64_t builder_ptr, uint64_t loc_op_ptr,
@@ -266,6 +309,38 @@ uint64_t mlir_build_op_in_block(uint64_t builder_ptr, uint64_t loc_op_ptr,
   mlir::OperationState state(loc_op->getLoc(), op_name);
   state.addOperands(operands);
   state.addTypes(resultTypes);
+  return reinterpret_cast<uint64_t>(builder->create(state));
+}
+
+// Like mlir_build_op_in_block but pre-allocates num_regions empty regions.
+uint64_t mlir_build_op_in_block_with_regions(uint64_t builder_ptr, uint64_t loc_op_ptr,
+                                               const char* op_name,
+                                               ptr operands_list, ptr result_types_list,
+                                               int num_regions) {
+  if (!builder_ptr || !loc_op_ptr) return 0;
+  auto* builder = reinterpret_cast<mlir::OpBuilder*>(builder_ptr);
+  auto* loc_op  = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type>  resultTypes;
+
+  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_in_block_with_regions: bad operands"); return 0; }
+    uint64_t v = Sunsigned64_value(Scar(cur));
+    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
+  }
+  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) { mlir_log_error("mlir_build_op_in_block_with_regions: bad result types"); return 0; }
+    uint64_t t = Sunsigned64_value(Scar(cur));
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
+  }
+
+  mlir::OperationState state(loc_op->getLoc(), op_name);
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  for (int i = 0; i < num_regions; ++i)
+    state.addRegion();
+
   return reinterpret_cast<uint64_t>(builder->create(state));
 }
 
@@ -488,6 +563,7 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_operation_get_loc", (void*)::mlir_operation_get_loc);
   Sregister_symbol("mlir_operation_get_block_argument", (void*)::mlir_operation_get_block_argument);
   Sregister_symbol("mlir_build_op", (void*)::mlir_build_op);
+  Sregister_symbol("mlir_build_op_with_regions", (void*)::mlir_build_op_with_regions);
   Sregister_symbol("mlir_set_insertion_point_before", (void*)::mlir_set_insertion_point_before);
   Sregister_symbol("mlir_set_insertion_point_to_block_end", (void*)::mlir_set_insertion_point_to_block_end);
   Sregister_symbol("mlir_op_get_region", (void*)::mlir_op_get_region);
@@ -497,6 +573,7 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_builder_at_block_end", (void*)::mlir_builder_at_block_end);
   Sregister_symbol("mlir_destroy_builder", (void*)::mlir_destroy_builder);
   Sregister_symbol("mlir_build_op_in_block", (void*)::mlir_build_op_in_block);
+  Sregister_symbol("mlir_build_op_in_block_with_regions", (void*)::mlir_build_op_in_block_with_regions);
   Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
   Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
