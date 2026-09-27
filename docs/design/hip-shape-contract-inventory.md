@@ -53,6 +53,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `conv_transpose` | `semantic` | N from input, C=weights[1]*group, ONNX transpose formula | shared |
 | `cos` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `cumsum` | `same_shape` | Result shape equals `x` | shared named-source base |
+| `dequantize_linear` | `same_shape` | Logical result shape equals `input` | shared named-source base |
 | `div` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `equal` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `erf` | `same_shape` | Result shape equals `x` | shared named-source base |
@@ -84,7 +85,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `miopen.softmax` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `mod` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `mul` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
-| `multi_head_attention` | `semantic` | Default runtime: separate rank-3 fp16 Q/K/V; output exactly query shape; no optional inputs/outputs | shared infer/reify/verifier; GQA forms routed before default |
+| `multi_head_attention` | `semantic` | Primary output follows validated separate/packed Q/K/V layout; optional cache capacity and logical QK extents use explicit destinations | shared primary infer/reify/verifier + verified optional-outs reify |
 | `neg` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `nonzero` | `payload` | Capacity from input numel; true count produced at runtime | audited payload policy |
 | `not` | `same_shape` | Result shape equals `input` | shared named-source base |
@@ -92,7 +93,16 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `or` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 | `pad` | `payload` | Dense carrier pads use exact affine input extents; runtime pads use synchronized converter readback and outs reify | affine refinement complete |
 | `pool` | `outs_authoritative` | Existing converter destination remains authoritative until the pooling semantic/runtime split | audited outs-authoritative |
+| `qadd` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
+| `qconv` | `semantic` | N from input, C from weights, ONNX spatial convolution formula | destination-based reify + shared verifier |
+| `qgemm` | `semantic` | Transpose-aware M/N from A/B; optional C validates only | shared infer/reify/verifier |
+| `qlpnormalization` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `qmatmul` | `semantic` | Transpose-aware broadcasted batch + M from A + N from B | shared infer/reify/verifier |
 | `qmoe` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `qmoe_amd` | `same_shape` | Result shape equals `hidden_states` | shared named-source base |
+| `qmul` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
+| `qsigmoid` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `quantize_linear` | `same_shape` | Logical result shape equals `input` | shared named-source base |
 | `range` | `payload` | Length depends on start/limit/delta payload values | audited payload policy |
 | `reciprocal` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `reduce_l2` | `reduction` | ONNX axes/keepdims/noop reduction shape | shared |
@@ -103,6 +113,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `reduce_sum` | `reduction` | ONNX axes/keepdims/noop reduction shape | shared |
 | `resize` | `semantic` | N/C from input; static spatial extents from imported output template because sizes/scales are not carried | shared infer/reify/verifier |
 | `rms_norm` | `same_shape` | Result shape equals `input` | shared named-source base |
+| `rocmlir` | `outs_authoritative` | Backend dispatch destination owns output metadata | audited outs-authoritative |
 | `rope` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `round` | `same_shape` | Result shape equals `x` | shared named-source base |
 | `scatter_elements` | `same_shape` | Result shape equals `data` | shared named-source base |
@@ -117,6 +128,7 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `softplus` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `sqrt` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `sub` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
+| `swish` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `tanh` | `same_shape` | Result shape equals `input` | shared named-source base |
 | `tile` | `payload` | Each extent is inputDim multiplied by a constant or synchronized per-entry runtime repeat | audited payload policy |
 | `top_k` | `payload` | Selected axis extent comes from K payload | audited payload policy |
@@ -124,6 +136,11 @@ does not claim that every handwritten reifier is free of destination fallback.
 | `where` | `broadcast` | NumPy right-aligned broadcast over declared inputs | shared |
 
 ## Contract meanings
+
+QuantizeLinear and DequantizeLinear preserve logical tensor extents; packed
+storage does not change their same-shape contract. MultiHeadAttention's
+backend-neutral shape rules are separate from the narrower default-runtime
+restrictions enforced by LLVM lowering.
 
 - `same_shape`: result shape equals one named input; converter/reify/verifier use that source.
 - `broadcast`: shared NumPy broadcast rule.
