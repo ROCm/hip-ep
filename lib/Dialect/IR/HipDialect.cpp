@@ -750,9 +750,10 @@ LogicalResult QConvOp::verify() {
   return verifyHipOpShape(*this, [&] {
     return inferConvShape(
         detail::getShapeOf(getInput()), detail::getShapeOf(getWeights()),
-        detail::getI64Array(getKernelShape()), detail::getI64Array(getStrides()),
-        detail::getI64Array(getPads()), detail::getI64Array(getDilations()),
-        getGroup(), [&] { return emitOpError(); });
+        detail::getI64Array(getKernelShape()),
+        detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+        detail::getI64Array(getDilations()), getGroup(),
+        [&] { return emitOpError(); });
   });
 }
 
