@@ -116,12 +116,17 @@
   ;;   then one per result variable).
   ;;
   ;;   Single-result example — (%c = "hipsr.cast" (%x %y) -> !t):
-  ;;     (%c . (%c (let* ([new-op (mlir-build-op rw loc "hipsr.cast" ...)]) (mlir-operation-get-result new-op 0))))
+  ;;     (%c . (let* ([new-op (mlir-build-op rw loc "hipsr.cast" ...)]) (mlir-operation-get-result new-op 0)))
   ;;
   ;;   Multi-result example — ((%a %b) = "hipsr.foo" (%x) -> (!t1 !t2)):
-  ;;     (%multi-tmp-0 . (%multi-tmp-0 (let* ([new-op (mlir-build-op rw loc "hipsr.foo" ...)]) new-op)))
-  ;;     (%a           . (%a           (mlir-operation-get-result %multi-tmp-0 0)))
-  ;;     (%b           . (%b           (mlir-operation-get-result %multi-tmp-0 1)))
+  ;;     (%multi-tmp-0 . (let* ([new-op (mlir-build-op rw loc "hipsr.foo" ...)]) new-op))
+  ;;     (%a           . (mlir-operation-get-result %multi-tmp-0 0))
+  ;;     (%b           . (mlir-operation-get-result %multi-tmp-0 1))
+  ;;
+  ;;   pair->binding-form converts each (var . expr) pair to a #'(var expr) syntax form
+  ;;   for use as a let* binding. Defined as a named function (not an anonymous lambda)
+  ;;   so its with-syntax is compiled in isolation without triggering ChezScheme's
+  ;;   compile-time forward-reference check across the library body.
   ;;
   ;; last-var — the result-var of the final pair in op-bindings.  For a single-
   ;;   result rewrite that is the op's lone result; for a multi-result rewrite it
@@ -153,10 +158,17 @@
   ;;   (let* ((var0 binding0) ...)
   ;;     (if #f #f))
 
-  (define (generate-rewrite-code op-bindings pattern-type rw op)
+  ;; Helper: combine a (var . expr) pair from op-bindings into a let* binding form.
+  ;; Defined as a named function (not a lambda) so with-syntax is compiled in isolation,
+  ;; avoiding ChezScheme's compile-time forward-reference issue.
+  (define (pair->binding-form p)
+    (with-syntax ([v (car p)] [e (cdr p)])
+      #'(v e)))
+
+    (define (generate-rewrite-code op-bindings pattern-type rw op)
     (if (null? op-bindings)
         #'#t
-        (let* ([bindings (map cdr op-bindings)]
+        (let* ([bindings (map pair->binding-form op-bindings)]
                [last-var (car (car (reverse op-bindings)))])
           (case pattern-type
             [(conversion)
@@ -313,27 +325,27 @@
                                   (with-syntax ([(t ...) (syntax->list result-types-raw)])
                                     #'(list t ...)))]
                  [op-binding
-                  (with-syntax ([var op-tmp] [name op-name]
+                  (with-syntax ([name op-name]
                                 [(operand ...) operands]
                                 [types types-code]
                                 [b-id builder] [loc-id loc-op]
                                 [regions-emit region-code])
                     (if (null? regions)
-                        #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
-                                 regions-emit
-                                 new-op))
+                        #'(let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
+                             regions-emit
+                             new-op)
                         (with-syntax ([nregions (length regions)])
-                          #'(var (let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
-                                   regions-emit
-                                   new-op)))))]
+                          #'(let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
+                               regions-emit
+                               new-op))))]
                  [result-pairs
                   (let loop ([vs result-vars] [i 0] [racc '()])
                     (if (null? vs)
                         (reverse racc)
                         (loop (cdr vs) (+ i 1)
                               (cons (cons (car vs)
-                                          (with-syntax ([v (car vs)] [tmp op-tmp] [i-val i])
-                                            #'(v (mlir-operation-get-result tmp i-val))))
+                                          (with-syntax ([tmp op-tmp] [i-val i])
+                                            #'(mlir-operation-get-result tmp i-val)))
                                     racc))))])
             (cons (cons op-tmp op-binding) result-pairs))
           ;; Single-result
@@ -346,23 +358,21 @@
                                    (with-syntax ([t result-types-raw]) #'(list t)))])
             (list (cons result-var
                         (if (null? attrs)
-                            (with-syntax ([var result-var]
-                                          [name op-name]
+                            (with-syntax ([name op-name]
                                           [(operand ...) operands]
                                           [types result-types]
                                           [b-id builder]
                                           [loc-id loc-op]
                                           [regions-emit region-code])
                               (if (null? regions)
-                                  #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
-                                           regions-emit
-                                           (mlir-operation-get-result new-op 0)))
+                                  #'(let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
+                                       regions-emit
+                                       (mlir-operation-get-result new-op 0))
                                   (with-syntax ([nregions (length regions)])
-                                    #'(var (let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
-                                             regions-emit
-                                             (mlir-operation-get-result new-op 0))))))
-                            (with-syntax ([var result-var]
-                                          [name op-name]
+                                    #'(let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
+                                         regions-emit
+                                         (mlir-operation-get-result new-op 0)))))
+                            (with-syntax ([name op-name]
                                           [(operand ...) operands]
                                           [types result-types]
                                           [b-id builder]
@@ -370,15 +380,15 @@
                                           [(attr-setter ...) (map generate-attr-setter attrs)]
                                           [regions-emit region-code])
                               (if (null? regions)
-                                  #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
-                                           attr-setter ...
-                                           regions-emit
-                                           (mlir-operation-get-result new-op 0)))
+                                  #'(let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
+                                       attr-setter ...
+                                       regions-emit
+                                       (mlir-operation-get-result new-op 0))
                                   (with-syntax ([nregions (length regions)])
-                                    #'(var (let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
-                                             attr-setter ...
-                                             regions-emit
-                                             (mlir-operation-get-result new-op 0)))))))))))))
+                                    #'(let* ([new-op (mlir-build-op-in-block-with-regions b-id loc-id name (list operand ...) types nregions)])
+                                         attr-setter ...
+                                         regions-emit
+                                         (mlir-operation-get-result new-op 0))))))))))))
 
   (define (generate-scheme-binding binding-rec idx)
     (let* ([var  (ast-scheme-binding-expand-var  binding-rec)]
@@ -391,9 +401,7 @@
                 (datum->syntax #'here
                   (string->symbol (string-append "%scheme-discard-" (number->string idx))))
                 var)])
-      (cons result-var
-            (with-syntax ([v result-var] [e expr])
-              #'(v e)))))
+      (cons result-var expr)))
 
   ;; Returns a LIST of (var . binding) pairs.
   ;; Single-result → list of one pair.
@@ -429,19 +437,19 @@
                                    (with-syntax ([(t ...) (syntax->list result-types-raw)])
                                      #'(list t ...)))]
                  [op-binding
-                  (with-syntax ([var op-tmp] [name op-name]
+                  (with-syntax ([name op-name]
                                 [(operand ...) operands]
                                 [types types-code]
                                 [rw-id rw] [loc-id loc-op]
                                 [regions-emit region-code])
                     (if (null? regions)
-                        #'(var (let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
-                                 regions-emit
-                                 new-op))
+                        #'(let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
+                             regions-emit
+                             new-op)
                         (with-syntax ([nregions (length regions)])
-                          #'(var (let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
-                                   regions-emit
-                                   new-op)))))]   ; bind the op itself (not get-result)
+                          #'(let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
+                               regions-emit
+                               new-op))))]
                  [result-pairs
                   (let loop ([vs result-vars] [i 0] [racc '()])
                     (if (null? vs)
@@ -449,8 +457,8 @@
                         (loop (cdr vs) (+ i 1)
                               (cons (cons (car vs)
                                           ;; cdr must be the full let* binding form (var expr)
-                                          (with-syntax ([v (car vs)] [tmp op-tmp] [i-val i])
-                                            #'(v (mlir-operation-get-result tmp i-val))))
+                                          (with-syntax ([tmp op-tmp] [i-val i])
+                                            #'(mlir-operation-get-result tmp i-val)))
                                     racc))))])
             (cons (cons op-tmp op-binding) result-pairs))
           ;; Single-result (existing path, wrapped in list)
@@ -464,23 +472,21 @@
                                    (with-syntax ([t result-types-raw]) #'(list t)))]
                  [binding
                   (if (null? attrs)
-                      (with-syntax ([var result-var]
-                                    [name op-name]
+                      (with-syntax ([name op-name]
                                     [(operand ...) operands]
                                     [types result-types]
                                     [rw-id rw]
                                     [loc-id loc-op]
                                     [regions-emit region-code])
                         (if (null? regions)
-                            #'(var (let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
-                                     regions-emit
-                                     (mlir-operation-get-result new-op 0)))
+                            #'(let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
+                                 regions-emit
+                                 (mlir-operation-get-result new-op 0))
                             (with-syntax ([nregions (length regions)])
-                              #'(var (let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
-                                       regions-emit
-                                       (mlir-operation-get-result new-op 0))))))
-                      (with-syntax ([var result-var]
-                                    [name op-name]
+                              #'(let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
+                                   regions-emit
+                                   (mlir-operation-get-result new-op 0)))))
+                      (with-syntax ([name op-name]
                                     [(operand ...) operands]
                                     [types result-types]
                                     [rw-id rw]
@@ -488,15 +494,15 @@
                                     [(attr-setter ...) (map generate-attr-setter attrs)]
                                     [regions-emit region-code])
                         (if (null? regions)
-                            #'(var (let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
-                                     attr-setter ...
-                                     regions-emit
-                                     (mlir-operation-get-result new-op 0)))
+                            #'(let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
+                                 attr-setter ...
+                                 regions-emit
+                                 (mlir-operation-get-result new-op 0))
                             (with-syntax ([nregions (length regions)])
-                              #'(var (let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
-                                       attr-setter ...
-                                       regions-emit
-                                       (mlir-operation-get-result new-op 0)))))))])
+                              #'(let* ([new-op (mlir-build-op-with-regions rw-id loc-id name (list operand ...) types nregions)])
+                                   attr-setter ...
+                                   regions-emit
+                                   (mlir-operation-get-result new-op 0))))))])
             (list (cons result-var binding))))))
 
   ;;=======================================================================
