@@ -10,7 +10,7 @@
 #include <vector>
 
 // Include Chez Scheme types (ptr, iptr, uptr) via wrapper
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeWrapper.h"
+#include "hip/Scheme/Bindings/SchemeWrapper.h"
 
 namespace mlir {
 class Operation;

@@ -38,8 +38,11 @@ ExternalProject_Add(ChezScheme
 )
 
 ExternalProject_Get_Property(ChezScheme SOURCE_DIR BINARY_DIR)
+set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}" PARENT_SCOPE)
+set(ChezScheme_BINARY_DIR "${BINARY_DIR}" PARENT_SCOPE)
 set(ChezScheme_SOURCE_DIR "${SOURCE_DIR}")
 set(ChezScheme_BINARY_DIR "${BINARY_DIR}")
+set(CHEZ_MACHINE "${CHEZ_MACHINE}" PARENT_SCOPE)
 
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
@@ -69,51 +72,6 @@ add_custom_target(ChezBootHeaders DEPENDS
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootPetite.h
   ${CMAKE_CURRENT_BINARY_DIR}/ChezBootScheme.h
 )
-add_library(HipsrSchemeRuntime
-  Bindings/ChezSchemeInterpreter.cpp
-  Bindings/MainModule.cpp
-  Bindings/Core.cpp
-  Bindings/Logging.cpp
-  Bindings/Conversion.cpp
-  Bindings/Dialects/Tensor.cpp
-  Bindings/Dialects/Shape.cpp
-  Bindings/Dialects/Func.cpp
-  Bindings/Dialects/Hipsr.cpp
-  Bindings/Dialects/Onnx.cpp
-)
 
-target_include_directories(HipsrSchemeRuntime
-  PUBLIC
-    ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
-  PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_BINARY_DIR}
-    ${ChezScheme_SOURCE_DIR}/boot/pb
-)
-
-# Define paths for Scheme library directories (source .sls files and binary .so files)
-target_compile_definitions(HipsrSchemeRuntime PRIVATE
-  SCHEME_LIBRARIES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/libraries"
-  SCHEME_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/libraries"
-  RIME_DIR="${CMAKE_SOURCE_DIR}/third_party/rime"
-)
-
-add_dependencies(HipsrSchemeRuntime ChezScheme ChezBootHeaders)
-
-target_link_libraries(HipsrSchemeRuntime
-  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/boot/${CHEZ_MACHINE}/libkernel.a
-  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/lz4/lib/liblz4.a
-  ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}/zlib/libz.a
-  MLIRPass
-  MLIRSupport
-  MLIRIR
-  HipsrDialectIR
-  ${CMAKE_DL_LIBS}
-  m
-  pthread
-  ncurses
-  util
-)
-
-# DO NOT compile .sls files - use them as source
-# Scheme libraries will be loaded directly from source by the runtime
+# Export boot header paths for use by Bindings
+set(ChezBootHeaders_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}" PARENT_SCOPE)

@@ -11,7 +11,7 @@
 #include <functional>
 
 // Include ChezSchemeInterpreter.h for SchemeLogLevel definition
-#include "hip/Dialect/Hipsr/Scheme/Bindings/ChezSchemeInterpreter.h"
+#include "hip/Scheme/Interpreter/ChezSchemeInterpreter.h"
 
 // C type for Scheme FFI - must be at global scope for extern "C" functions
 typedef void* SchemeValue;

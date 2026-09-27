@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeMlirBindings.h"
+#include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"

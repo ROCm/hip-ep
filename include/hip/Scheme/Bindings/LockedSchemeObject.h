@@ -7,7 +7,7 @@
 #define LIB_DIALECT_HIPSR_SCHEME_LOCKED_SCHEME_OBJECT_H
 
 // Include Chez Scheme types via wrapper
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeWrapper.h"
+#include "hip/Scheme/Bindings/SchemeWrapper.h"
 
 namespace mlir {
 namespace hipsr {

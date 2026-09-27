@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeMlirBindings.h"
+#include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "scheme-logging-bindings"

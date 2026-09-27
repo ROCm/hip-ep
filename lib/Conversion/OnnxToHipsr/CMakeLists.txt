@@ -48,7 +48,7 @@ target_link_libraries(OnnxToHipsr PUBLIC
 # Enable runtime compilation: source .sls → binary .so in build dir
 # CMAKE_CURRENT_SOURCE_DIR points to lib/Conversion/OnnxToHipsr
 get_filename_component(SCHEME_SOURCE_DIR
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../Dialect/Hipsr/Scheme/libraries"
+  "${CMAKE_SOURCE_DIR}/scheme"
   ABSOLUTE)
 get_filename_component(RIME_SOURCE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/rime"

@@ -14,6 +14,28 @@
           (for (mlir ffi) expand))
 
   ;;=======================================================================
+  ;; Call graph
+  ;;=======================================================================
+  ;;
+  ;; generate-pattern-matchAndRewrite
+  ;; ├── generate-root-result-setters  (set! %varN (mlir-operation-get-result op N)) per root result
+  ;; │   └── find-root-op
+  ;; ├── generate-rewrite-bindings     one (var . binding) per :rewrite op
+  ;; │   └── generate-one-rewrite-binding
+  ;; │       └── generate-region-code  for each :regions clause
+  ;; │           └── generate-one-region
+  ;; │               ├── generate-rewrite-bindings  ◄─ recursive (block-ops)
+  ;; │               └── generate-rewrite-code 'region  ◄─ recursive
+  ;; ├── collect-all-variables
+  ;; ├── generate-check-code           (and check₀ check₁ …) for :match
+  ;; │   └── action->check-code
+  ;; ├── generate-rewrite-code 'conversion/'rewrite  final let* + replaceOp/return
+  ;; └── generate-then-let-bindings    ((var expr) …) for :then-let
+  ;;
+  ;; generate-debug-ast / generate-debug-codegen  (debug path, not on hot path)
+  ;; └── record->alist
+  ;;
+  ;;=======================================================================
   ;; Entry points (called from pattern-macro.sls waterfall)
   ;;=======================================================================
 
@@ -93,30 +115,49 @@
   ;;   NOTE: only the first result of each op is captured; multi-result ops
   ;;   are not yet supported.
   ;;
-  ;; pattern-type — 'conversion: last result replaces the matched op via
-  ;;                mlir-replace-op, returns #t.
-  ;;                'rewrite: last result is returned directly.
+  ;; pattern-type — three cases:
+  ;;   'conversion — last result replaces the matched op (mlir-replace-op), returns #t
+  ;;   'rewrite    — last result is returned directly
+  ;;   'region     — bindings emitted for side effect only (region body ops);
+  ;;                 no return value needed since the block terminator handles control flow
+  ;;
+  ;; IP is set once to before op before the let*, so individual bindings do not
+  ;; need to reset it. For 'region, the caller has already set IP to block end;
+  ;; we don't call mlir-set-insertion-point-before here.
   ;;
   ;; Generated shape ('conversion):
-  ;;   (let* ((var0 binding0) (var1 binding1) ...)
-  ;;     (mlir-replace-op rw op var-last)
-  ;;     #t)
+  ;;   (begin
+  ;;     (mlir-set-insertion-point-before rw op)
+  ;;     (let* ((var0 binding0) (var1 binding1) ...)
+  ;;       (mlir-replace-op rw op var-last)
+  ;;       #t))
 
   (define (generate-rewrite-code op-bindings pattern-type rw op)
     (if (null? op-bindings)
         #'#t
         (let* ([bindings (map cdr op-bindings)]
                [last-var (car (car (reverse op-bindings)))])
-          (if (eq? pattern-type 'conversion)
-              (with-syntax ([(binding ...) bindings]
-                            [result last-var])
-                #`(let* (binding ...)
-                    (mlir-replace-op #,rw #,op result)
-                    #t))
-              (with-syntax ([(binding ...) bindings]
-                            [result last-var])
-                #'(let* (binding ...)
-                    result))))))
+          (case pattern-type
+            [(conversion)
+             (with-syntax ([(binding ...) bindings]
+                           [result last-var])
+               #`(begin
+                   (mlir-set-insertion-point-before #,rw #,op)
+                   (let* (binding ...)
+                     (mlir-replace-op #,rw #,op result)
+                     #t)))]
+            [(rewrite)
+             (with-syntax ([(binding ...) bindings]
+                           [result last-var])
+               #`(begin
+                   (mlir-set-insertion-point-before #,rw #,op)
+                   (let* (binding ...)
+                     result)))]
+            [(region)
+             ;; IP already at block end; emit bindings for side effect only.
+             (with-syntax ([(binding ...) bindings])
+               #'(let* (binding ...)
+                   (if #f #f)))]))))
 
   ;;=======================================================================
   ;; :then-let bindings
@@ -219,7 +260,11 @@
            [operands    (filter (lambda (s)
                                   (not (char=? (string-ref (symbol->string (syntax->datum s)) 0) #\!)))
                                 all-operands)]
-           [result-types (ast-operation-expand-result-types op-rec)]
+           [result-types-raw (ast-operation-expand-result-types op-rec)]
+           ;; () in the -> clause means zero results; otherwise a single type identifier
+           [result-types (if (null? (syntax->datum result-types-raw))
+                             #''()
+                             (with-syntax ([t result-types-raw]) #'(list t)))]
            [attrs       (syntax->list (ast-operation-expand-attributes op-rec))]
            [regions-raw (ast-operation-expand-regions op-rec)]
            [regions     (cond [(null? regions-raw) '()]
@@ -235,8 +280,7 @@
                               [rw-id rw]
                               [loc-id loc-op]
                               [regions-emit region-code])
-                  #'(var (let* ([_ (mlir-set-insertion-point-before rw-id loc-id)]
-                                [new-op (mlir-build-op rw-id loc-id name (list operand ...) (list types))])
+                  #'(var (let* ([new-op (mlir-build-op rw-id loc-id name (list operand ...) types)])
                            regions-emit
                            (mlir-operation-get-result new-op 0))))
                 (with-syntax ([var result-var]
@@ -288,14 +332,9 @@
                         (cons (with-syntax ([v (car vars)] [idx i])
                                 #'(v (mlir-block-get-argument block idx)))
                               acc))))]
-           [nested-code
-            (if (null? block-ops)
-                #'(begin)
-                (with-syntax ([(emit ...)
-                               (map (lambda (nested-op)
-                                      (generate-nested-op-emit rw loc-op nested-op))
-                                    block-ops)])
-                  #'(begin emit ...)))])
+           ;; Recurse through the same pipeline: bindings → rewrite-code ('region)
+           [block-op-bindings (generate-rewrite-bindings block-ops rw loc-op)]
+           [nested-code       (generate-rewrite-code block-op-bindings 'region rw loc-op)])
       (with-syntax ([ri region-idx]
                     [rw-id rw]
                     [loc-id loc-op]
@@ -306,24 +345,6 @@
                  [block  (mlir-region-create-block rw-id region (list arg-type ...))]
                  arg-binding ...)
             nested))))
-
-  (define (generate-nested-op-emit rw loc-op nested-op-rec)
-    (let* ([op-name (syntax->datum (ast-operation-expand-op-name nested-op-rec))]
-           [all-operands (syntax->list (ast-operation-expand-operands nested-op-rec))]
-           [operands (filter (lambda (s)
-                               (not (char=? (string-ref (symbol->string (syntax->datum s)) 0) #\!)))
-                             all-operands)]
-           [result-types (ast-operation-expand-result-types nested-op-rec)]
-           [result-list-code (if (null? (syntax->datum result-types))
-                                 #''()
-                                 (with-syntax ([types result-types])
-                                   #'(list types)))])
-      (with-syntax ([name op-name]
-                    [(operand ...) operands]
-                    [rw-id rw]
-                    [loc-id loc-op]
-                    [result-list result-list-code])
-        #'(mlir-build-op rw-id loc-id name (list operand ...) result-list))))
 
   ;;=======================================================================
   ;; Attribute setter

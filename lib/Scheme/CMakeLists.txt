@@ -3,6 +3,5 @@
 # ** Licensed under the MIT License.
 ##
 
-add_subdirectory(IR)
-add_subdirectory(Transforms)
-add_subdirectory(Pipelines)
+add_subdirectory(Interpreter)
+add_subdirectory(Bindings)

@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeMlirBindings.h"
+#include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/Support/raw_ostream.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"

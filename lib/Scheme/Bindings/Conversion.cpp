@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Scheme/Bindings/SchemeMlirBindings.h"
+#include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "mlir/CAPI/IR.h"
@@ -11,7 +11,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "llvm/Support/raw_ostream.h"
-#include "hip/Dialect/Hipsr/Scheme/Bindings/LockedSchemeObject.h"
+#include "hip/Scheme/Bindings/LockedSchemeObject.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
