@@ -78,6 +78,14 @@
       (define (attrs-kw? x)(eq? (syntax->datum x) ':attrs))
       (define (index-kw? x)(eq? (syntax->datum x) ':index))
 
+      ;; Accept both 'hipsr.placeholder and "hipsr.placeholder" as op names
+      (define (op-name? x)
+        (let ([d (syntax->datum x)])
+          (or (string? d) (symbol? d))))
+      (define (op-name->str x)
+        (let ([d (syntax->datum x)])
+          (if (string? d) d (symbol->string d))))
+
       ;; Generate attr-setter code for one attr form.
       ;; (name val)       → (mlir-operation-set-attr       new-op "name" val)
       ;; (name val :index)→ (mlir-operation-set-index-attr new-op "name" val)
@@ -116,12 +124,12 @@
             [(and form
                   (= (length form) 8)
                   (eq-sym?  (list-ref form 1))
-                  (string?  (syntax->datum (list-ref form 2)))
+                  (op-name? (list-ref form 2))
                   (attrs-kw? (list-ref form 4))
                   (arrow?   (list-ref form 6)))
              (emit-single-result
                (list-ref form 0)
-               (syntax->datum (list-ref form 2))
+               (op-name->str (list-ref form 2))
                (value-operands (list-ref form 3))
                (list-ref form 7)
                (map make-attr-setter (syntax->list (list-ref form 5))))]
@@ -131,11 +139,11 @@
             [(and form
                   (= (length form) 6)
                   (eq-sym? (list-ref form 1))
-                  (string? (syntax->datum (list-ref form 2)))
+                  (op-name? (list-ref form 2))
                   (arrow? (list-ref form 4)))
              (emit-single-result
                (list-ref form 0)
-               (syntax->datum (list-ref form 2))
+               (op-name->str (list-ref form 2))
                (value-operands (list-ref form 3))
                (list-ref form 5)
                '())]
@@ -146,11 +154,11 @@
             [(and form
                   (= (length form) 6)
                   (eq-sym? (list-ref form 1))
-                  (string? (syntax->datum (list-ref form 2)))
+                  (op-name? (list-ref form 2))
                   (arrow? (list-ref form 4))
                   (list? (syntax->list (list-ref form 0))))
              (let* ([rvars    (syntax->list (list-ref form 0))]
-                    [op-name  (syntax->datum (list-ref form 2))]
+                    [op-name  (op-name->str (list-ref form 2))]
                     [vals     (value-operands (list-ref form 3))]
                     [rtypes   (syntax->list (list-ref form 5))]
                     [tmp      (datum->syntax stx
