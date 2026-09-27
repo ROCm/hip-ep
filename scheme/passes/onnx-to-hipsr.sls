@@ -140,7 +140,26 @@
             (populate-gather-patterns   type-converter patterns ctx)
             (populate-expand-patterns   type-converter patterns ctx)
             (populate-constant-patterns type-converter patterns ctx)
-            ;; C++ patterns — hipsr.compute body required (not yet expressible in Scheme)
+            ;; C++ patterns — remain in C++ pending DSL extensions:
+            ;;
+            ;; onnx.Shape / onnx.Reshape / onnx.Unsqueeze:
+            ;;   Require hipsr.compute body region with tensor dialect ops
+            ;;   (tensor.dim, tensor.collapse_shape, tensor.expand_shape,
+            ;;    tensor.from_elements, arith.constant, arith.index_cast,
+            ;;    hipsr.compute_yield). The reassociation attribute for
+            ;;   collapse/expand is a nested i64 array not yet settable
+            ;;   from Scheme FFI.
+            ;;
+            ;; onnx.Slice:
+            ;;   Needs mlir::m_Constant pattern to classify each window
+            ;;   operand as compile-time constant vs runtime host tensor.
+            ;;   No equivalent Scheme FFI exists yet.
+            ;;
+            ;; onnx.NonZero:
+            ;;   Three-op chain requiring a Barrier placeholder with an
+            ;;   inline shape region (arith + tensor + shape ops) and a
+            ;;   hipsr.compute body (tensor.extract_slice with dynamic
+            ;;   offsets). Both inline regions need new DSL capabilities.
             (mlir-populate-shape-conversion-patterns     type-converter patterns ctx)
             (mlir-populate-reshape-conversion-patterns   type-converter patterns ctx)
             (mlir-populate-unsqueeze-conversion-patterns type-converter patterns ctx)

@@ -9,38 +9,39 @@
 ;; onnx.Expand → hipsr.expand
 ;;
 ;; Creates a Barrier placeholder with ins=(input, shape) then hipsr.expand.
-;; The shape region (barrier layout: ctx, input-tensor, shape-tensor) is
-;; filled by hipsr-populate-shape-region.
+;; The placeholder must be Barrier because the shape is computed at runtime
+;; from the shape operand (a host tensor). The shape region is filled by
+;; hipsr-populate-shape-region.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
 (library (patterns expand)
-  (export populate-expand-patterns)
-  (import (rnrs (6))
+  (export populate-expand-patterns
+          onnx-expand->hipsr)
+  (import (except (rnrs (6)) =)
           (mlir ffi)
-          (mlir hipsr))
+          (mlir hipsr)
+          (mlir pattern-macro))
 
-  (define (onnx-expand->hipsr op operands-ref rewriter type-converter)
-    (let* ((input   (value-array-ref-at operands-ref 0))
-           (shape   (value-array-ref-at operands-ref 1))
-           (ctx     (mlir-get-hipsr-context-arg op))
-           (out-type (mlir-value-get-type (mlir-operation-get-result op 0)))
-           (out-dev  (mlir-tensor-type-in-device-space! out-type)))
-      ;; Barrier placeholder with ins=(input, shape)
-      (mlir-set-insertion-point-before rewriter op)
-      (let* ((ph-op  (mlir-build-op rewriter op "hipsr.placeholder"
-                        (list ctx input shape out-dev) (list out-dev)))
-             (ph-val (mlir-operation-get-result ph-op 0)))
-        ;; Upgrade placeholder_type to Barrier
-        (mlir-placeholder-set-barrier-type ph-op)
-        ;; hipsr.expand
-        (mlir-set-insertion-point-before rewriter op)
-        (let* ((e-op (mlir-build-op rewriter op "hipsr.expand"
-                        (list ctx input shape ph-val out-dev) (list out-dev))))
-          (mlir-replace-op rewriter op (mlir-operation-get-result e-op 0))
-          #t))))
+  (define-conversion-pattern (onnx-expand->hipsr op operands-ref rewriter type-converter)
+    :match
+        %output = onnx.Expand (%input %shape-operand)
+    :then-let
+        ([%ctx        (mlir-get-hipsr-context-arg op)]
+         [!out-type   (mlir-value-get-type %output)]
+         [!out-device (mlir-tensor-type-in-device-space! !out-type)])
+    :rewrite %output :with
+        ;; Barrier placeholder: ins=(input, shape), type set after creation.
+        (%placeholder = (let* ([ph-op (mlir-build-op rewriter op "hipsr.placeholder"
+                                          (list %ctx %input %shape-operand !out-device)
+                                          (list !out-device))])
+                          (mlir-placeholder-set-barrier-type ph-op)
+                          (mlir-operation-get-result ph-op 0)))
+        (%result = "hipsr.expand" (%ctx %input %shape-operand %placeholder !out-device)
+                   -> !out-device))
 
   (define (populate-expand-patterns type-converter patterns ctx)
+    (mlir-log-info "Registering onnx.Expand pattern")
     (mlir-register-conversion-pattern patterns "onnx.Expand"
                                       onnx-expand->hipsr type-converter))
 
