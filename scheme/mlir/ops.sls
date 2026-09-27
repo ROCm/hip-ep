@@ -73,10 +73,15 @@
       ;;
       ;; Uses datum comparison for = and -> rather than free-identifier=?
       ;; so the macro works regardless of the using context's imports.
-      (define (arrow? x)   (eq? (syntax->datum x) '->))
-      (define (eq-sym? x)  (eq? (syntax->datum x) '=))
-      (define (attrs-kw? x)(eq? (syntax->datum x) ':attrs))
-      (define (index-kw? x)(eq? (syntax->datum x) ':index))
+      ;; Datum comparison for keywords: robust across library boundaries since
+      ;; with-mlir-ops users don't need to import (mlir pattern-keywords).
+      (define (arrow? x)        (eq? (syntax->datum x) '->))
+      (define (eq-sym? x)       (eq? (syntax->datum x) '=))
+      (define (attrs-kw? x)     (eq? (syntax->datum x) ':attrs))
+      (define (regions-kw? x)   (eq? (syntax->datum x) ':regions))
+      (define (index-kw? x)     (eq? (syntax->datum x) ':index))
+      (define (i32-array-kw? x) (eq? (syntax->datum x) ':i32-array))
+      (define (colon-kw? x)     (eq? (syntax->datum x) ':))
 
       ;; Accept both 'hipsr.placeholder and "hipsr.placeholder" as op names
       (define (op-name? x)
@@ -87,100 +92,216 @@
           (if (string? d) d (symbol->string d))))
 
       ;; Generate attr-setter code for one attr form.
-      ;; (name val)       → (mlir-operation-set-attr       new-op "name" val)
-      ;; (name val :index)→ (mlir-operation-set-index-attr new-op "name" val)
+      ;; (name val)           → mlir-operation-set-attr
+      ;; (name val :index)    → mlir-operation-set-index-attr
+      ;; (name val :i32-array)→ mlir-operation-set-dense-i32-array
       (define (make-attr-setter attr-stx)
         (let ([af (syntax->list attr-stx)])
           (let* ([name-raw (syntax->datum (list-ref af 0))]
                  [name-str (if (string? name-raw) name-raw (symbol->string name-raw))]
                  [val      (list-ref af 1)])
-            (if (and (= (length af) 3) (index-kw? (list-ref af 2)))
-                (with-syntax ([n name-str] [v val])
-                  #'(mlir-operation-set-index-attr new-op n v))
-                (with-syntax ([n name-str] [v val])
-                  #'(mlir-operation-set-attr new-op n v))))))
+            (cond
+              [(and (= (length af) 3) (index-kw? (list-ref af 2)))
+               (with-syntax ([n name-str] [v val])
+                 #'(mlir-operation-set-index-attr new-op n v))]
+              [(and (= (length af) 3) (i32-array-kw? (list-ref af 2)))
+               (with-syntax ([n name-str] [v val])
+                 #'(mlir-operation-set-dense-i32-array new-op n v))]
+              [else
+               (with-syntax ([n name-str] [v val])
+                 #'(mlir-operation-set-attr new-op n v))]))))
 
-      ;; Emit let*/get-result code, inserting attr-setters between build and get-result.
-      (define (emit-single-result %var op-name vals result-type attr-setters)
-        (let ([zero-result? (null? (syntax->datum result-type))])
-          (if zero-result?
-              (with-syntax ([var %var] [(v ...) vals] [n op-name]
-                            [(setter ...) attr-setters])
-                (list (cons #'var
-                            #'(let ([new-op ((current-mlir-build-fn) n (list v ...) '())])
-                                setter ... new-op))))
-              (with-syntax ([var %var] [(v ...) vals] [n op-name] [rt result-type]
-                            [(setter ...) attr-setters])
-                (list (cons #'var
-                            #'(let ([new-op ((current-mlir-build-fn) n (list v ...) (list rt))])
-                                setter ...
-                                (mlir-operation-get-result new-op 0))))))))
+      ;;-------------------------------------------------------------------
+      ;; Region helpers
+      ;;-------------------------------------------------------------------
 
+      ;; Parse one block form: (^bb0 ((arg : !type) ...) body-op ...)
+      ;; Returns (arg-vars arg-types body-ops) as three lists of syntax.
+      (define (parse-block-form blk-stx)
+        (let* ([items    (syntax->list blk-stx)]
+               [arg-list (syntax->list (list-ref items 1))]  ; ((a : !t) ...)
+               [body-ops (cddr items)])                       ; body-op ...
+          (let-values ([(arg-vars arg-types)
+                        (let loop ([al arg-list] [vs '()] [ts '()])
+                          (if (null? al)
+                              (values (reverse vs) (reverse ts))
+                              (let* ([entry (syntax->list (car al))]
+                                     ;; entry = (var : !type)
+                                     [v (list-ref entry 0)]
+                                     [t (list-ref entry 2)])
+                                (loop (cdr al) (cons v vs) (cons t ts)))))])
+            (list arg-vars arg-types body-ops))))
+
+      ;; Emit the code that fills one pre-allocated region of new-op.
+      ;; region-idx — integer index.
+      ;; blk-stx    — the (^bb0 (...) body ...) form.
+      ;; Returns a syntax expression (begin ...) suitable as a statement.
+      (define (emit-one-region region-idx blk-stx idx)
+        (let* ([parsed    (parse-block-form blk-stx)]
+               [arg-vars  (list-ref parsed 0)]
+               [arg-types (list-ref parsed 1)]
+               [body-ops  (list-ref parsed 2)]
+               ;; Generate body via recursive with-mlir-ops call
+               [body-stx  (with-syntax ([(body ...) body-ops])
+                             #'(with-mlir-ops body ...))]
+               [n-args    (length arg-vars)]
+               [arg-bind-pairs
+                (let loop ([vs arg-vars] [i 0] [acc '()])
+                  (if (null? vs)
+                      (reverse acc)
+                      (loop (cdr vs) (+ i 1)
+                            (cons (cons (car vs)
+                                        #`(mlir-block-get-argument block #,i))
+                                  acc))))])
+          (with-syntax ([ri   region-idx]
+                        [(at ...) arg-types]
+                        [(arg-binding ...) (map make-binding
+                                                (map car arg-bind-pairs)
+                                                (map cdr arg-bind-pairs))]
+                        [body body-stx])
+            ;; new-op is in scope from the enclosing let in emit-op.
+            ;; Use new-op as the location source for mlir-build-op-in-block.
+            #'(let* ([region (mlir-op-get-region new-op ri)]
+                     [block  (mlir-new-block region (list at ...))]
+                     arg-binding ...)
+                (let ([b (mlir-builder-at-block-end block)])
+                  (with-current-block-builder (b new-op)
+                    body)
+                  (mlir-destroy-builder b))))))
+
+      ;; Emit region-fill code for all blocks in a :regions clause.
+      ;; regions-stx — the list form after :regions: ((^bb0 ...) ...)
+      ;; Returns (nregions . region-stmts-list).
+      (define (emit-regions regions-stx idx)
+        (let* ([blocks (syntax->list regions-stx)]
+               [n      (length blocks)]
+               [stmts  (let loop ([bs blocks] [i 0] [acc '()])
+                         (if (null? bs)
+                             (reverse acc)
+                             (loop (cdr bs) (+ i 1)
+                                   (cons (emit-one-region i (car bs) idx) acc))))])
+          (cons n stmts)))
+
+      ;;-------------------------------------------------------------------
+      ;; Op form scanner: find :attrs and :regions positions
+      ;;-------------------------------------------------------------------
+
+      ;; Scan a form list for :attrs and :regions keyword positions.
+      ;; Returns an alist: ((attrs . idx-or-#f) (regions . idx-or-#f) (arrow . idx) (result . idx))
+      (define (scan-form form)
+        (let loop ([i 0] [attrs-idx #f] [regions-idx #f] [arrow-idx #f])
+          (if (>= i (length form))
+              `((attrs . ,attrs-idx) (regions . ,regions-idx) (arrow . ,arrow-idx))
+              (let ([x (list-ref form i)])
+                (cond
+                  [(attrs-kw? x)   (loop (+ i 1) i       regions-idx arrow-idx)]
+                  [(regions-kw? x) (loop (+ i 1) attrs-idx i          arrow-idx)]
+                  [(arrow? x)      (loop (+ i 1) attrs-idx regions-idx i)]
+                  [else            (loop (+ i 1) attrs-idx regions-idx arrow-idx)])))))
+
+      ;;-------------------------------------------------------------------
+      ;; Emit helpers: build op with optional attrs and regions
+      ;;-------------------------------------------------------------------
+
+      ;; Core emitter: given all parts, emit the (var binding) pair(s).
+      ;; result-type — syntax for the type, or #f for zero-result.
+      ;; attr-setters — list of setter syntax forms.
+      ;; region-info  — #f or (nregions . stmts-list).
+      (define (emit-op %var op-name vals result-type attr-setters region-info)
+        (let* ([zero-result? (or (not result-type)
+                                 (null? (syntax->datum result-type)))]
+               [nregions     (if region-info (car region-info) 0)]
+               [region-stmts (if region-info (cdr region-info) '())])
+          (with-syntax ([var %var]
+                        [(v ...) vals]
+                        [n op-name]
+                        [(setter ...) attr-setters]
+                        [(region-stmt ...) region-stmts])
+            (if zero-result?
+                ;; zero-result: bind var to the op itself
+                (if (> nregions 0)
+                    (with-syntax ([nr nregions])
+                      (list (cons #'var
+                                  #'(let ([new-op ((current-mlir-build-with-regions-fn) n (list v ...) '() nr)])
+                                      setter ...
+                                      region-stmt ...
+                                      new-op))))
+                    (list (cons #'var
+                                #'(let ([new-op ((current-mlir-build-fn) n (list v ...) '())])
+                                    setter ... new-op))))
+                ;; single result: bind var to result 0
+                (if (> nregions 0)
+                    (with-syntax ([nr nregions] [rt result-type])
+                      (list (cons #'var
+                                  #'(let ([new-op ((current-mlir-build-with-regions-fn) n (list v ...) (list rt) nr)])
+                                      setter ...
+                                      region-stmt ...
+                                      (mlir-operation-get-result new-op 0)))))
+                    (with-syntax ([rt result-type])
+                      (list (cons #'var
+                                  #'(let ([new-op ((current-mlir-build-fn) n (list v ...) (list rt))])
+                                      setter ...
+                                      (mlir-operation-get-result new-op 0))))))))))
+
+      ;; process-op: parse one form and return a flat list of (var . expr) pairs.
+      ;;
+      ;; Recognized forms (var may be a list for multi-result):
+      ;;   var = op-name (ops) -> type
+      ;;   var = op-name (ops) :attrs ((n v q?) ...) -> type
+      ;;   var = op-name (ops) :regions ((^bb0 ...) ...) -> type
+      ;;   var = op-name (ops) :attrs (...) :regions (...) -> type
+      ;;   var = expr                          (scheme escape)
       (define (process-op op-stx idx)
         (let ([form (syntax->list op-stx)])
           (cond
-            ;; Single-result MLIR op with :attrs:
-            ;;   (%var = "op" (ops) :attrs ((name val ...) ...) -> result-type)  length=8
-            [(and form
-                  (= (length form) 8)
-                  (eq-sym?  (list-ref form 1))
-                  (op-name? (list-ref form 2))
-                  (attrs-kw? (list-ref form 4))
-                  (arrow?   (list-ref form 6)))
-             (emit-single-result
-               (list-ref form 0)
-               (op-name->str (list-ref form 2))
-               (value-operands (list-ref form 3))
-               (list-ref form 7)
-               (map make-attr-setter (syntax->list (list-ref form 5))))]
-
-            ;; Single-result MLIR op (no attrs):
-            ;;   (%var = "op.name" (operands...) -> result-type)   length=6
-            [(and form
-                  (= (length form) 6)
-                  (eq-sym? (list-ref form 1))
-                  (op-name? (list-ref form 2))
-                  (arrow? (list-ref form 4)))
-             (emit-single-result
-               (list-ref form 0)
-               (op-name->str (list-ref form 2))
-               (value-operands (list-ref form 3))
-               (list-ref form 5)
-               '())]
-
-            ;; Multi-result MLIR op:
-            ;;   ((%a %b) = "op.name" (operands...) -> (t1 t2 ...))   length=6,
-            ;;   but first element is itself a list
-            [(and form
-                  (= (length form) 6)
-                  (eq-sym? (list-ref form 1))
-                  (op-name? (list-ref form 2))
-                  (arrow? (list-ref form 4))
-                  (list? (syntax->list (list-ref form 0))))
-             (let* ([rvars    (syntax->list (list-ref form 0))]
-                    [op-name  (op-name->str (list-ref form 2))]
-                    [vals     (value-operands (list-ref form 3))]
-                    [rtypes   (syntax->list (list-ref form 5))]
-                    [tmp      (datum->syntax stx
-                                (string->symbol
-                                  (string-append "%op-tmp-" (number->string idx))))])
-               (with-syntax ([(v ...) vals] [n op-name]
-                             [(rt ...) rtypes] [t tmp])
-                 (cons (cons #'t
-                             #'((current-mlir-build-fn) n (list v ...) (list rt ...)))
-                       (let loop ([vs rvars] [i 0] [acc '()])
-                         (if (null? vs)
-                             (reverse acc)
-                             (loop (cdr vs) (+ i 1)
-                                   (cons (cons (car vs)
-                                               #`(mlir-operation-get-result t #,i))
-                                         acc)))))))]
-
-            ;; Scheme escape: (%var = expr)   length=3
+            ;; Scheme escape: (var = expr) — length 3, no op-name at position 2
             [(and form
                   (= (length form) 3)
                   (eq-sym? (list-ref form 1)))
              (list (cons (list-ref form 0) (list-ref form 2)))]
+
+            ;; MLIR op: var = op-name (ops) [modifiers] -> type
+            [(and form
+                  (>= (length form) 6)
+                  (eq-sym? (list-ref form 1))
+                  (op-name? (list-ref form 2)))
+             (let* ([%var      (list-ref form 0)]
+                    [op-name   (op-name->str (list-ref form 2))]
+                    [operands  (value-operands (list-ref form 3))]
+                    [scan      (scan-form form)]
+                    [attrs-pos (cdr (assq 'attrs   scan))]
+                    [regs-pos  (cdr (assq 'regions scan))]
+                    [arrow-pos (cdr (assq 'arrow   scan))]
+                    [result-type (list-ref form (+ arrow-pos 1))]
+                    [attr-setters
+                     (if attrs-pos
+                         (map make-attr-setter (syntax->list (list-ref form (+ attrs-pos 1))))
+                         '())]
+                    [region-info
+                     (if regs-pos
+                         (emit-regions (list-ref form (+ regs-pos 1)) idx)
+                         #f)]
+                    [multi-vars (and (list? (syntax->list %var))
+                                     (syntax->list %var))])
+               (if multi-vars
+                   ;; Multi-result: tmp binding + N result extractions
+                   (let* ([rtypes (syntax->list result-type)]
+                          [tmp    (datum->syntax stx
+                                    (string->symbol (string-append "%op-tmp-" (number->string idx))))])
+                     (with-syntax ([(v ...) operands] [n op-name]
+                                   [(rt ...) rtypes] [t tmp]
+                                   [(setter ...) attr-setters])
+                       (cons (cons #'t
+                                   #'((current-mlir-build-fn) n (list v ...) (list rt ...)))
+                             (let loop ([vs multi-vars] [i 0] [acc '()])
+                               (if (null? vs)
+                                   (reverse acc)
+                                   (loop (cdr vs) (+ i 1)
+                                         (cons (cons (car vs)
+                                                     #`(mlir-operation-get-result t #,i))
+                                               acc)))))))
+                   ;; Single-result (or zero-result)
+                   (emit-op %var op-name operands result-type attr-setters region-info)))]
 
             [else
              (syntax-violation 'with-mlir-ops "invalid op form" op-stx)])))
