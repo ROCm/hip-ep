@@ -5,9 +5,9 @@
           generate-debug-codegen
           make-unbound-value)
   (import (rnrs)
-          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier?)
+          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier? parameterize)
           (rename (rime loop) (:with :rime-with))
-          (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor identifier?) expand)
+          (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor identifier? parameterize) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
           (for (mlir pattern-analyze) expand)
@@ -27,6 +27,7 @@
   ;; │           └── generate-one-region
   ;; │               ├── generate-rewrite-bindings  ◄─ recursive (block-ops)
   ;; │               └── generate-rewrite-code 'region  ◄─ recursive
+  ;; │                   (block builder bound via parameterize → current-block-builder)
   ;; ├── collect-all-variables
   ;; ├── generate-check-code           (and check₀ check₁ …) for :match
   ;; │   └── action->check-code
@@ -547,10 +548,13 @@
                     [nested nested-code])
         #'(let* ([region (mlir-op-get-region new-op ri)]
                  [block  (mlir-new-block region (list arg-type ...))]
-                 ;; Fresh OpBuilder at block end — independent of rw, no IP side-effect
+                 ;; Fresh OpBuilder at block end — independent of rw, no IP side-effect.
+                 ;; Bound into current-block-builder so :scheme escapes can access it
+                 ;; via (current-block-builder) without needing to know the gensym name.
                  [b      (mlir-builder-at-block-end block)]
                  arg-binding ...)
-            nested
+            (parameterize ([current-block-builder b])
+              nested)
             (mlir-destroy-builder b)))))
 
   ;;=======================================================================
@@ -558,13 +562,16 @@
   ;;=======================================================================
 
   (define (generate-attr-setter attr-stx)
-    ;; Use datum comparison for :index — avoids free-identifier=? hygiene issues
-    ;; since the user's :index and the literal :index are from different phases.
+    ;; Datum comparison for qualifiers avoids free-identifier=? hygiene issues.
     (syntax-case attr-stx ()
       [(attr-name value qualifier)
        (eq? (syntax->datum #'qualifier) ':index)
        (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
          #'(mlir-operation-set-index-attr new-op name-str value))]
+      [(attr-name value qualifier)
+       (eq? (syntax->datum #'qualifier) ':i32-array)
+       (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
+         #'(mlir-operation-set-dense-i32-array new-op name-str value))]
       [(attr-name value)
        (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
          #'(mlir-operation-set-attr new-op name-str value))]))

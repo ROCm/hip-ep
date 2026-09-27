@@ -70,6 +70,7 @@
     mlir-operation-get-integer-attr
     mlir-operation-get-integer-array-attr
     mlir-operation-set-dense-i64-array
+    mlir-operation-set-dense-i32-array
     mlir-placeholder-set-barrier-type
     mlir-operation-copy-attr
     mlir-type-is-device-tensor
@@ -172,6 +173,7 @@
 
     ;; Resource management
     with-raii
+    current-block-builder
     with-type-converter
     with-conversion-target
     with-rewrite-pattern-set
@@ -713,6 +715,9 @@
   (define mlir-operation-set-dense-i64-array
     (foreign-procedure "mlir_operation_set_dense_i64_array" (uptr string scheme-object) void))
 
+  (define mlir-operation-set-dense-i32-array
+    (foreign-procedure "mlir_operation_set_dense_i32_array" (uptr string scheme-object) void))
+
   ;;; @brief Change a hipsr.placeholder's placeholder_type attribute to Barrier.
   (define mlir-placeholder-set-barrier-type
     (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
@@ -835,6 +840,11 @@
   ;;; @syntax (with-raii ((var ctor dtor) ...) body ...)
   ;;; Each resource is created by ctor, bound to var, and destroyed by (dtor var)
   ;;; on exit — whether normal, exception, or continuation escape.
+  ;;; Dynamic parameter holding the current block's fresh OpBuilder*.
+  ;;; Set automatically by :regions codegen via parameterize.
+  ;;; :scheme escapes inside a region block call (current-block-builder) to get it.
+  (define current-block-builder (make-parameter #f))
+
   (define-syntax with-raii
     (syntax-rules ()
       [(_ () body ...)

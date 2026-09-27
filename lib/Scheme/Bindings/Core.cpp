@@ -488,6 +488,17 @@ void mlir_operation_set_dense_i64_array(uint64_t op_ptr, const char* attr_name, 
   op->setAttr(attr_name, mlir::DenseI64ArrayAttr::get(op->getContext(), values));
 }
 
+void mlir_operation_set_dense_i32_array(uint64_t op_ptr, const char* attr_name, ptr values_list) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  llvm::SmallVector<int32_t> values;
+  for (ptr cur = static_cast<ptr>(values_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    values.push_back(static_cast<int32_t>(Sinteger_value(Scar(cur))));
+  }
+  op->setAttr(attr_name, mlir::DenseI32ArrayAttr::get(op->getContext(), values));
+}
+
 // Change a hipsr.placeholder's placeholder_type attribute to Barrier.
 void mlir_operation_copy_attr(uint64_t dst_op_ptr, const char* dst_name,
                                uint64_t src_op_ptr, const char* src_name) {
@@ -602,6 +613,7 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_operation_get_integer_attr", (void*)::mlir_operation_get_integer_attr);
   Sregister_symbol("mlir_operation_get_integer_array_attr", (void*)::mlir_operation_get_integer_array_attr);
   Sregister_symbol("mlir_operation_set_dense_i64_array", (void*)::mlir_operation_set_dense_i64_array);
+  Sregister_symbol("mlir_operation_set_dense_i32_array", (void*)::mlir_operation_set_dense_i32_array);
   Sregister_symbol("mlir_operation_copy_attr", (void*)::mlir_operation_copy_attr);
   Sregister_symbol("mlir_operation_has_attr", (void*)::mlir_operation_has_attr);
   Sregister_symbol("mlir_get_index_type", (void*)::mlir_get_index_type);
