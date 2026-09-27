@@ -549,6 +549,172 @@ extern "C" int hip_qmoe_bucket_tokens(
   return static_cast<int>(err);
 }
 
+// ---------------------------------------------------------------------------
+// Device-side row tiles for the grouped expert GEMM. Experts with
+// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
+// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
+// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// ---------------------------------------------------------------------------
+__global__ void qmoe_build_row_tiles_kernel(
+    const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
+    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
+    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
+    int32_t* __restrict__ num_big) {
+  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+  for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
+    const int c = expert_counts[e];
+    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
+    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int s = 0, b = 0;
+    for (int e = 0; e < num_experts; e++) {
+      const int ns = tile_base[e], nb = tile_base[num_experts + e];
+      tile_base[e] = s;
+      tile_base[num_experts + e] = b;
+      s += ns;
+      b += nb;
+    }
+    *num_small = s;
+    *num_big = b;
+  }
+  __syncthreads();
+  for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
+    const int c = expert_counts[e];
+    if (c <= 0) continue;
+    const bool small = c <= split_rows;
+    const int rows = small ? rows_small : rows_big;
+    int32_t* out = (small ? tiles_small : tiles_big) +
+                   3 * tile_base[(small ? 0 : num_experts) + e];
+    for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
+      out[0] = e;
+      out[1] = r0;
+      out[2] = min(rows, c - r0);
+    }
+  }
+}
+
+extern "C" int hip_qmoe_build_row_tiles(
+    void* stream, const void* expert_counts, int64_t num_experts,
+    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
+    void* num_small, void* tiles_big, void* num_big) {
+  if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
+    return -1;
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
+                     s, static_cast<const int32_t*>(expert_counts),
+                     static_cast<int>(num_experts), static_cast<int>(split_rows),
+                     static_cast<int>(rows_small), static_cast<int>(rows_big),
+                     static_cast<int32_t*>(tiles_small),
+                     static_cast<int32_t*>(num_small),
+                     static_cast<int32_t*>(tiles_big),
+                     static_cast<int32_t*>(num_big));
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+// ---------------------------------------------------------------------------
+// Weighted top-k combine over expert-sorted rows, replacing the per-expert
+// scatter_add sequence with one launch. Each token adds its experts'
+// contributions in ascending expert id with the same fp16 rounding after every
+// add as scatter_add run expert by expert into a zeroed output, so the result
+// is bit-identical to that sequence.
+// ---------------------------------------------------------------------------
+__global__ void qmoe_invert_pairs_kernel(
+    const int32_t* __restrict__ sorted_pair_ids,
+    const int32_t* __restrict__ total_rows, int32_t* __restrict__ pair_rows,
+    int max_rows) {
+  const int r = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (r >= max_rows || r >= *total_rows) return;
+  pair_rows[sorted_pair_ids[r]] = r;
+}
+
+__global__ void qmoe_combine_topk_kernel(
+    __half* __restrict__ output, const __half* __restrict__ expert_out,
+    const int32_t* __restrict__ expert_indices,
+    const __half* __restrict__ expert_weights,
+    const int32_t* __restrict__ pair_rows, int k, int width,
+    int num_experts) {
+  const int t = static_cast<int>(blockIdx.y);
+  const int col = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (col >= width) return;
+
+  int ex[kMaxK], row[kMaxK];
+  float wt[kMaxK];
+  int n = 0;
+  for (int s = 0; s < k; s++) {
+    const int pair = t * k + s;
+    const int e = expert_indices[pair];
+    const int r = pair_rows[pair];
+    if (e < 0 || e >= num_experts || r < 0) continue;
+    int i = n++;
+    for (; i > 0 && ex[i - 1] > e; i--) {
+      ex[i] = ex[i - 1];
+      row[i] = row[i - 1];
+      wt[i] = wt[i - 1];
+    }
+    ex[i] = e;
+    row[i] = r;
+    wt[i] = static_cast<float>(expert_weights[pair]);
+  }
+
+  __half acc = static_cast<__half>(0.0f);
+  for (int i = 0; i < n; i++) {
+    const float w = wt[i];
+    const float val =
+        static_cast<float>(expert_out[static_cast<int64_t>(row[i]) * width + col]);
+    const float out = static_cast<float>(acc);
+    acc = static_cast<__half>(out + w * val);
+  }
+  output[static_cast<int64_t>(t) * width + col] = acc;
+}
+
+extern "C" int hip_qmoe_combine_topk(
+    void* stream, void* output, const void* expert_out,
+    const void* expert_indices, const void* expert_weights,
+    const void* sorted_pair_ids, const void* expert_offsets, void* pair_rows,
+    int64_t num_tokens, int64_t num_experts, int64_t k, int64_t width,
+    int64_t element_size_bytes) {
+  if (num_tokens <= 0 || width <= 0) return 0;
+  if (element_size_bytes != 2 || k <= 0 || k > kMaxK || num_experts <= 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_combine_topk: unsupported (elem=%lld "
+            "k=%lld experts=%lld)\n",
+            (long long)element_size_bytes, (long long)k,
+            (long long)num_experts);
+    return -1;
+  }
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int pairs = static_cast<int>(num_tokens * k);
+  hipError_t err =
+      hipMemsetAsync(pair_rows, 0xFF, static_cast<size_t>(pairs) * sizeof(int32_t), s);
+  if (err != hipSuccess) return static_cast<int>(err);
+  hipLaunchKernelGGL(qmoe_invert_pairs_kernel, dim3((pairs + kBlock - 1) / kBlock),
+                     dim3(kBlock), 0, s,
+                     static_cast<const int32_t*>(sorted_pair_ids),
+                     static_cast<const int32_t*>(expert_offsets) + num_experts,
+                     static_cast<int32_t*>(pair_rows), pairs);
+  hipLaunchKernelGGL(qmoe_combine_topk_kernel,
+                     dim3(static_cast<unsigned>((width + kBlock - 1) / kBlock),
+                          static_cast<unsigned>(num_tokens)),
+                     dim3(kBlock), 0, s, static_cast<__half*>(output),
+                     static_cast<const __half*>(expert_out),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const __half*>(expert_weights),
+                     static_cast<const int32_t*>(pair_rows), static_cast<int>(k),
+                     static_cast<int>(width), static_cast<int>(num_experts));
+  err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_combine_topk failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 // ===========================================================================
 // Fused decode QMoE: 4 kernels per layer (fc1, swiglu, fc2, reduce).
 // Eliminates the bucket_tokens + D2H + hipStreamSynchronize + host expert
