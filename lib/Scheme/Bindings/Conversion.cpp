@@ -21,16 +21,6 @@
 
 // Forward declarations from Logging.cpp
 extern "C" {
-void mlir_log_trace(const char* msg);
-void mlir_log_debug(const char* msg);
-void mlir_log_info(const char* msg);
-void mlir_log_warning(const char* msg);
-void mlir_log_error(const char* msg);
-void mlir_log_fatal(const char* msg);
-}
-
-
-extern "C" {
 
 namespace {
 

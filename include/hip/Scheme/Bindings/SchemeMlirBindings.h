@@ -3,10 +3,22 @@
  * Licensed under the MIT License.
  */
 
-#ifndef LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
-#define LIB_DIALECT_HIPSR_SCHEME_SCHEMEMLIR_BINDINGS_H
+#ifndef HIP_SCHEME_BINDINGS_SCHEMEMLIR_BINDINGS_H
+#define HIP_SCHEME_BINDINGS_SCHEMEMLIR_BINDINGS_H
 
 #include "hip/Scheme/Interpreter/ChezSchemeInterpreter.h"
+
+// Logging functions (defined in Logging.cpp).
+// Declared here so any Bindings/*.cpp file can call them without
+// repeating extern "C" forward declarations inline.
+extern "C" {
+void mlir_log_trace(const char* msg);
+void mlir_log_debug(const char* msg);
+void mlir_log_info(const char* msg);
+void mlir_log_warning(const char* msg);
+void mlir_log_error(const char* msg);
+void mlir_log_fatal(const char* msg);
+} // extern "C"
 
 namespace mlir {
 class Operation;

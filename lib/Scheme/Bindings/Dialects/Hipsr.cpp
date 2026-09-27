@@ -17,11 +17,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 
-extern "C" {
-void mlir_log_debug(const char* msg);
-void mlir_log_error(const char* msg);
-}
-
 #define DEBUG_TYPE "scheme-hipsr-bindings"
 
 // Note: scheme.h included via SchemeMlirBindings.h -> ChezSchemeInterpreter.h

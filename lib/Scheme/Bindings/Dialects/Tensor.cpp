@@ -11,10 +11,6 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 
-extern "C" {
-void mlir_log_error(const char* msg);
-}
-
 #define DEBUG_TYPE "scheme-tensor-bindings"
 
 // Note: scheme.h included via SchemeMlirBindings.h -> ChezSchemeInterpreter.h
