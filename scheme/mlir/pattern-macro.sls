@@ -8,6 +8,7 @@
           make-unbound-value)
   (import (except (rnrs) =)
           (mlir pattern-keywords)  ;; Import keywords at run time for re-export
+          (mlir ffi)               ;; with-current-mlir-builder etc. used in generated code
           (for (mlir pattern-keywords) expand)  ;; Also at expand time
           (for (mlir pattern-ast) expand)  ;; For AST predicates
           (for (mlir pattern-parse) expand)

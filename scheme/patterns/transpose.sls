@@ -25,25 +25,20 @@
           (mlir pattern-macro))
 
   ;; Build the permuted output shape inside a region block.
-  ;; b = OpBuilder* at block end (block-builder-0 in caller).
+  ;; Uses (current-mlir-build-fn) — must be called inside with-current-block-builder.
   ;; Returns the output !shape.shape value.
-  (define (build-permuted-shape! b loc perm input-shape shape-type size-type)
+  (define (build-permuted-shape! loc perm input-shape shape-type size-type)
     (let* ([extents
             (map (lambda (p)
-                   ;; shape.const_size p : index
-                   (let* ([sz-op (mlir-build-op-in-block b loc "shape.const_size"
-                                   '() (list size-type))])
+                   (let* ([sz-op ((current-mlir-build-fn) "shape.const_size" '() (list size-type))])
                      (mlir-operation-set-attr sz-op "value" p)
-                     ;; shape.get_extent input_shape, sz_p : size
-                     (let* ([ext-op (mlir-build-op-in-block b loc "shape.get_extent"
+                     (let* ([ext-op ((current-mlir-build-fn) "shape.get_extent"
                                       (list input-shape
                                             (mlir-operation-get-result sz-op 0))
                                       (list size-type))])
                        (mlir-operation-get-result ext-op 0))))
                  perm)]
-           ;; shape.from_extents ext_0, ext_1, ... : shape
-           [out-op (mlir-build-op-in-block b loc "shape.from_extents"
-                     extents (list shape-type))])
+           [out-op ((current-mlir-build-fn) "shape.from_extents" extents (list shape-type))])
       (mlir-operation-get-result out-op 0)))
 
   (define-conversion-pattern (onnx-transpose->hipsr op operands-ref rewriter type-converter)
@@ -66,13 +61,12 @@
     :rewrite %output :with
         (%placeholder = "hipsr.placeholder" (%ctx %input !out-device)
                         :regions ((^bb0 ((%is : !shape-type))
-                                    ;; :scheme — permute extents using block-builder-0
                                     (%out-shape = (build-permuted-shape!
-                                                    block-builder-0 op perm %is !shape-type !size-type))
+                                                    op perm %is !shape-type !size-type))
                                     (%yield = "hipsr.shape_yield" (%out-shape) -> ())))
                         -> !out-device)
-        ;; :scheme — create transpose op and set perm attribute
-        (%result = (let* ([new-op (mlir-build-op rewriter op "hipsr.transpose"
+        ;; :scheme — create transpose op and set perm attribute via (current-mlir-build-fn)
+        (%result = (let* ([new-op ((current-mlir-build-fn) "hipsr.transpose"
                                     (list %ctx %input %placeholder !out-device)
                                     (list !out-device))])
                      (mlir-operation-set-dense-i64-array new-op "perm" perm)

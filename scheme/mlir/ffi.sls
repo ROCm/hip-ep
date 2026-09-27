@@ -171,6 +171,12 @@
     ;; Pattern registration (for Scheme-defined patterns)
     mlir-register-conversion-pattern
 
+    ;; Dynamic builder context — shared by pattern-codegen and with-mlir-ops
+    current-mlir-build-fn
+    current-mlir-build-with-regions-fn
+    with-current-mlir-builder
+    with-current-block-builder
+
     ;; Resource management
     with-raii
     current-block-builder
@@ -836,12 +842,51 @@
   ;; Resource Management
   ;;===--------------------------------------------------------------------===;;
 
-  ;;; @brief RAII-style resource management via dynamic-wind
-  ;;; @syntax (with-raii ((var ctor dtor) ...) body ...)
-  ;;; Each resource is created by ctor, bound to var, and destroyed by (dtor var)
-  ;;; on exit — whether normal, exception, or continuation escape.
+  ;;===--------------------------------------------------------------------===;;
+  ;; Dynamic builder context
+  ;;===--------------------------------------------------------------------===;;
+  ;;
+  ;; Shared by pattern-codegen (:rewrite :with) and with-mlir-ops.
+  ;; Install with with-current-mlir-builder (top-level rewrite, RewriterBase*)
+  ;; or with-current-block-builder (region body, fresh OpBuilder*).
+  ;;
+  ;; current-mlir-build-fn:              (name operands types) → op-ptr
+  ;; current-mlir-build-with-regions-fn: (name operands types n) → op-ptr
+
+  (define current-mlir-build-fn              (make-parameter #f))
+  (define current-mlir-build-with-regions-fn (make-parameter #f))
+
+  (define-syntax with-current-mlir-builder
+    (syntax-rules ()
+      [(_ (rw loc) body ...)
+       (let ([rw_ rw] [loc_ loc])
+         (parameterize ([current-mlir-build-fn
+                          (lambda (name ops types)
+                            (mlir-build-op rw_ loc_ name ops types))]
+                        [current-mlir-build-with-regions-fn
+                          (lambda (name ops types n)
+                            (mlir-build-op-with-regions rw_ loc_ name ops types n))])
+           body ...))]))
+
+  (define-syntax with-current-block-builder
+    (syntax-rules ()
+      [(_ (builder loc) body ...)
+       (let ([b_ builder] [loc_ loc])
+         (parameterize ([current-mlir-build-fn
+                          (lambda (name ops types)
+                            (mlir-build-op-in-block b_ loc_ name ops types))]
+                        [current-mlir-build-with-regions-fn
+                          (lambda (name ops types n)
+                            (mlir-build-op-in-block-with-regions b_ loc_ name ops types n))]
+                        [current-block-builder b_])  ; backward compat for (current-block-builder)
+           body ...))]))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Resource management
+  ;;===--------------------------------------------------------------------===;;
+
   ;;; Dynamic parameter holding the current block's fresh OpBuilder*.
-  ;;; Set automatically by :regions codegen via parameterize.
+  ;;; Set automatically by with-current-block-builder.
   ;;; :scheme escapes inside a region block call (current-block-builder) to get it.
   (define current-block-builder (make-parameter #f))
 

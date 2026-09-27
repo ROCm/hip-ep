@@ -30,54 +30,18 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (mlir ops)
-  (export current-mlir-builder
-          current-mlir-loc
-          current-mlir-build-fn
+  ;; with-current-mlir-builder, with-current-block-builder and
+  ;; current-mlir-build-fn are now in (mlir ffi); re-exported here.
+  (export current-mlir-build-fn
           with-current-mlir-builder
           with-current-block-builder
           with-mlir-ops)
 
   (import (rnrs (6))
-          (only (chezscheme) make-parameter parameterize
-                             syntax->list syntax->datum datum->syntax)
+          (only (chezscheme) syntax->list syntax->datum datum->syntax)
           (rename (rime loop) (:with :rime-with))
           (for (rename (rime loop) (:with :rime-with)) expand)
           (mlir ffi))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Dynamic builder context
-  ;;===--------------------------------------------------------------------===;;
-
-  (define current-mlir-builder  (make-parameter #f))
-  (define current-mlir-loc      (make-parameter #f))
-  ;; Holds a 3-arg function (name operands types) -> op-ptr,
-  ;; capturing the right builder and C++ call for the current context.
-  (define current-mlir-build-fn (make-parameter #f))
-
-  (define-syntax with-current-mlir-builder
-    (syntax-rules ()
-      [(_ (rw loc) body ...)
-       (let ([rw_ rw] [loc_ loc])
-         (parameterize ([current-mlir-builder  rw_]
-                        [current-mlir-loc      loc_]
-                        [current-mlir-build-fn
-                         (lambda (name operands types)
-                           (mlir-build-op rw_ loc_ name operands types))])
-           body ...))]))
-
-  ;; Like with-current-mlir-builder but for region block bodies where the
-  ;; builder is an OpBuilder* (from mlir-builder-at-block-end) rather than
-  ;; a RewriterBase*.
-  (define-syntax with-current-block-builder
-    (syntax-rules ()
-      [(_ (builder loc) body ...)
-       (let ([b_ builder] [loc_ loc])
-         (parameterize ([current-mlir-builder  b_]
-                        [current-mlir-loc      loc_]
-                        [current-mlir-build-fn
-                         (lambda (name operands types)
-                           (mlir-build-op-in-block b_ loc_ name operands types))])
-           body ...))]))
 
   ;;===--------------------------------------------------------------------===;;
   ;; with-mlir-ops
