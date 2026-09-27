@@ -360,6 +360,14 @@ void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) 
   cppOp->setAttr(attr_name, attr);
 }
 
+void mlir_operation_set_index_attr(uint64_t op_ptr, const char* attr_name, int64_t value) {
+  if (!op_ptr) return;
+  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op_ptr);
+  mlir::IntegerAttr attr = mlir::IntegerAttr::get(
+      mlir::IndexType::get(cppOp->getContext()), value);
+  cppOp->setAttr(attr_name, attr);
+}
+
 // Read a single integer attribute; returns default_val if absent.
 int64_t mlir_operation_get_integer_attr(uint64_t op_ptr, const char* attr_name, int64_t default_val) {
   if (!op_ptr) return default_val;
@@ -491,7 +499,8 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
   Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
   Sregister_symbol("mlir_op_erase", (void*)::mlir_op_erase);
-  Sregister_symbol("mlir_operation_set_attr", (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_set_attr",       (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_set_index_attr", (void*)::mlir_operation_set_index_attr);
   Sregister_symbol("mlir_operation_get_integer_attr", (void*)::mlir_operation_get_integer_attr);
   Sregister_symbol("mlir_operation_get_integer_array_attr", (void*)::mlir_operation_get_integer_array_attr);
   Sregister_symbol("mlir_operation_set_dense_i64_array", (void*)::mlir_operation_set_dense_i64_array);

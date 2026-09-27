@@ -66,6 +66,7 @@
 
     ;; Operation attributes and mutation
     mlir-operation-set-attr
+    mlir-operation-set-index-attr
     mlir-operation-get-integer-attr
     mlir-operation-get-integer-array-attr
     mlir-operation-set-dense-i64-array
@@ -150,6 +151,7 @@
     mlir-build-op-in-block     ; like mlir-build-op but takes OpBuilder* (for region bodies)
     mlir-get-shape-shape-type
     mlir-get-shape-size-type
+    mlir-get-shape-witness-type
     mlir-operation-get-result           ; get result value from op at index
 
     ;; Pattern rewriting
@@ -650,9 +652,17 @@
   (define mlir-get-shape-size-type
     (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
 
-  ;;; @brief Set an integer attribute on an operation
+  ;;; @brief Get the shape::WitnessType from an MLIRContext.
+  (define mlir-get-shape-witness-type
+    (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
+
+  ;;; @brief Set an integer attribute on an operation (i64 typed)
   (define mlir-operation-set-attr
     (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
+
+  ;;; @brief Set an index-typed integer attribute on an operation
+  (define mlir-operation-set-index-attr
+    (foreign-procedure "mlir_operation_set_index_attr" (uptr string iptr) void))
 
   ;;; @brief Read a single i64 integer attribute; returns default if absent.
   (define mlir-operation-get-integer-attr

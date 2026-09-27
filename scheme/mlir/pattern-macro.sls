@@ -4,6 +4,7 @@
           :match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
+          :index
           make-unbound-value)
   (import (except (rnrs) =)
           (mlir pattern-keywords)  ;; Import keywords at run time for re-export

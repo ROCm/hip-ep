@@ -11,7 +11,8 @@
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
           (for (mlir pattern-analyze) expand)
-          (for (mlir ffi) expand))
+          (for (mlir ffi) expand)
+          (for (only (mlir pattern-keywords) :index) expand))
 
   ;;=======================================================================
   ;; Call graph
@@ -108,29 +109,51 @@
   ;;
   ;; generate-rewrite-code
   ;;
-  ;; op-bindings — one entry per operation in the :rewrite ... :with clause.
-  ;;   Each entry is (result-var . let-binding) where result-var is the %name
-  ;;   before = and let-binding is the generated code that calls mlir-build-op
-  ;;   and evaluates to its result 0.
-  ;;   NOTE: only the first result of each op is captured; multi-result ops
-  ;;   are not yet supported.
+  ;; op-bindings — a flat list of (result-var . let-binding) pairs produced by
+  ;;   generate-rewrite-bindings.  Single-result ops contribute one pair;
+  ;;   multi-result ops contribute N+1 pairs (a tmp binding for the op itself,
+  ;;   then one per result variable).
+  ;;
+  ;;   Single-result example — (%c = "hipsr.cast" (%x %y) -> !t):
+  ;;     (%c . (%c (let* ([new-op (mlir-build-op rw loc "hipsr.cast" ...)]) (mlir-operation-get-result new-op 0))))
+  ;;
+  ;;   Multi-result example — ((%a %b) = "hipsr.foo" (%x) -> (!t1 !t2)):
+  ;;     (%multi-tmp-0 . (%multi-tmp-0 (let* ([new-op (mlir-build-op rw loc "hipsr.foo" ...)]) new-op)))
+  ;;     (%a           . (%a           (mlir-operation-get-result %multi-tmp-0 0)))
+  ;;     (%b           . (%b           (mlir-operation-get-result %multi-tmp-0 1)))
+  ;;
+  ;; last-var — the result-var of the final pair in op-bindings.  For a single-
+  ;;   result rewrite that is the op's lone result; for a multi-result rewrite it
+  ;;   is the last named result variable (e.g. %b above).  Used as the replacement
+  ;;   value for 'conversion patterns.
   ;;
   ;; pattern-type — three cases:
-  ;;   'conversion — last result replaces the matched op (mlir-replace-op), returns #t
-  ;;   'rewrite    — last result is returned directly
-  ;;   'region     — bindings emitted for side effect only (region body ops);
-  ;;                 no return value needed since the block terminator handles control flow
-  ;;
-  ;; IP is set once to before op before the let*, so individual bindings do not
-  ;; need to reset it. For 'region, the caller has already set IP to block end;
-  ;; we don't call mlir-set-insertion-point-before here.
+  ;;   'conversion — set IP before op, build all ops in let*, replace matched op
+  ;;                 with last-var via mlir-replace-op, return #t
+  ;;   'rewrite    — set IP before op, build all ops in let*, return last-var directly
+  ;;   'region     — IP already at block end (set by caller); build ops for side
+  ;;                 effect only; return unspecified (if #f #f)
   ;;
   ;; Generated shape ('conversion):
   ;;   (begin
   ;;     (mlir-set-insertion-point-before rw op)
-  ;;     (let* ((var0 binding0) (var1 binding1) ...)
-  ;;       (mlir-replace-op rw op var-last)
+  ;;     (let* ((%p  (let* ([new-op (mlir-build-op ...)]) (mlir-operation-get-result new-op 0)))
+  ;;            (%c  (let* ([new-op (mlir-build-op ...)]) (mlir-operation-get-result new-op 0))))
+  ;;       (mlir-replace-op rw op %c)
   ;;       #t))
+  ;;
+  ;; Generated shape ('conversion, multi-result last op):
+  ;;   (begin
+  ;;     (mlir-set-insertion-point-before rw op)
+  ;;     (let* ((%multi-tmp-0 (let* ([new-op (mlir-build-op ...)]) new-op))
+  ;;            (%a           (mlir-operation-get-result %multi-tmp-0 0))
+  ;;            (%b           (mlir-operation-get-result %multi-tmp-0 1)))
+  ;;       (mlir-replace-op rw op %b)
+  ;;       #t))
+  ;;
+  ;; Generated shape ('region):
+  ;;   (let* ((var0 binding0) ...)
+  ;;     (if #f #f))
 
   (define (generate-rewrite-code op-bindings pattern-type rw op)
     (if (null? op-bindings)
@@ -265,33 +288,75 @@
           :append pairs))
 
   ;; Like generate-one-rewrite-binding but generates mlir-build-op-in-block calls.
+  ;; Handles single-result and multi-result ops.
   (define (generate-one-rewrite-binding-in-block op-rec idx builder loc-op)
     (let* ([result-var-raw (ast-operation-expand-result-var op-rec)]
-           [is-empty? (null? (if (identifier? result-var-raw)
-                                 (list result-var-raw)
-                                 (syntax->datum result-var-raw)))]
-           [result-var (if is-empty?
-                           (datum->syntax #'here
-                             (string->symbol (string-append "%block-tmp-" (number->string idx))))
-                           result-var-raw)]
+           [is-multi?  (pair? (syntax->datum result-var-raw))]
+           [is-empty?  (and (not is-multi?)
+                            (null? (if (identifier? result-var-raw)
+                                       (list result-var-raw)
+                                       (syntax->datum result-var-raw))))]
            [op-name     (syntax->datum (ast-operation-expand-op-name op-rec))]
            [all-operands (syntax->list (ast-operation-expand-operands op-rec))]
            [operands    (filter (lambda (s)
                                   (not (char=? (string-ref (symbol->string (syntax->datum s)) 0) #\!)))
                                 all-operands)]
            [result-types-raw (ast-operation-expand-result-types op-rec)]
-           [result-types (if (null? (syntax->datum result-types-raw))
-                              #''()
-                              (with-syntax ([t result-types-raw]) #'(list t)))])
-      (list (cons result-var
-                  (with-syntax ([var result-var]
-                                [name op-name]
+           [attrs       (syntax->list (ast-operation-expand-attributes op-rec))])
+      (if is-multi?
+          ;; Multi-result: bind op tmp, extract each result
+          (let* ([result-vars (syntax->list result-var-raw)]
+                 [op-tmp      (datum->syntax #'here
+                                (string->symbol (string-append "%block-multi-tmp-" (number->string idx))))]
+                 [types-code  (if (null? (syntax->datum result-types-raw))
+                                  #''()
+                                  (with-syntax ([(t ...) (syntax->list result-types-raw)])
+                                    #'(list t ...)))]
+                 [op-binding
+                  (with-syntax ([var op-tmp] [name op-name]
                                 [(operand ...) operands]
-                                [types result-types]
-                                [b-id builder]
-                                [loc-id loc-op])
+                                [types types-code]
+                                [b-id builder] [loc-id loc-op])
                     #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
-                             (mlir-operation-get-result new-op 0))))))))
+                             new-op)))]
+                 [result-pairs
+                  (let loop ([vs result-vars] [i 0] [racc '()])
+                    (if (null? vs)
+                        (reverse racc)
+                        (loop (cdr vs) (+ i 1)
+                              (cons (cons (car vs)
+                                          (with-syntax ([v (car vs)] [tmp op-tmp] [i-val i])
+                                            #'(v (mlir-operation-get-result tmp i-val))))
+                                    racc))))])
+            (cons (cons op-tmp op-binding) result-pairs))
+          ;; Single-result
+          (let* ([result-var (if is-empty?
+                                 (datum->syntax #'here
+                                   (string->symbol (string-append "%block-tmp-" (number->string idx))))
+                                 result-var-raw)]
+                 [result-types (if (null? (syntax->datum result-types-raw))
+                                   #''()
+                                   (with-syntax ([t result-types-raw]) #'(list t)))])
+            (list (cons result-var
+                        (if (null? attrs)
+                            (with-syntax ([var result-var]
+                                          [name op-name]
+                                          [(operand ...) operands]
+                                          [types result-types]
+                                          [b-id builder]
+                                          [loc-id loc-op])
+                              #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
+                                       (mlir-operation-get-result new-op 0))))
+                            (with-syntax ([var result-var]
+                                          [name op-name]
+                                          [(operand ...) operands]
+                                          [types result-types]
+                                          [b-id builder]
+                                          [loc-id loc-op]
+                                          [(attr-setter ...) (map generate-attr-setter attrs)])
+                              #'(var (let* ([new-op (mlir-build-op-in-block b-id loc-id name (list operand ...) types)])
+                                       attr-setter ...
+                                       (mlir-operation-get-result new-op 0)))))))))))
 
   (define (generate-scheme-binding binding-rec idx)
     (let* ([var  (ast-scheme-binding-expand-var  binding-rec)]
@@ -338,8 +403,9 @@
                  ;; result types for multi-result are a list: (t1 t2 ...)
                  [types-code   (if (null? (syntax->datum result-types-raw))
                                    #''()
-                                   (with-syntax ([ts result-types-raw])
-                                     #'(map (lambda (t) t) (syntax->list #'ts))))]
+                                   ;; Expand the type list at macro-expansion time
+                                   (with-syntax ([(t ...) (syntax->list result-types-raw)])
+                                     #'(list t ...)))]
                  [op-binding
                   (with-syntax ([var op-tmp] [name op-name]
                                 [(operand ...) operands]
@@ -355,8 +421,9 @@
                         (reverse racc)
                         (loop (cdr vs) (+ i 1)
                               (cons (cons (car vs)
-                                          (with-syntax ([tmp op-tmp] [i-val i])
-                                            #'(mlir-operation-get-result tmp i-val)))
+                                          ;; cdr must be the full let* binding form (var expr)
+                                          (with-syntax ([v (car vs)] [tmp op-tmp] [i-val i])
+                                            #'(v (mlir-operation-get-result tmp i-val))))
                                     racc))))])
             (cons (cons op-tmp op-binding) result-pairs))
           ;; Single-result (existing path, wrapped in list)
@@ -456,7 +523,13 @@
   ;;=======================================================================
 
   (define (generate-attr-setter attr-stx)
+    ;; Use datum comparison for :index — avoids free-identifier=? hygiene issues
+    ;; since the user's :index and the literal :index are from different phases.
     (syntax-case attr-stx ()
+      [(attr-name value qualifier)
+       (eq? (syntax->datum #'qualifier) ':index)
+       (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
+         #'(mlir-operation-set-index-attr new-op name-str value))]
       [(attr-name value)
        (with-syntax ([name-str (symbol->string (syntax->datum #'attr-name))])
          #'(mlir-operation-set-attr new-op name-str value))]))

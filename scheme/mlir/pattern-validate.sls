@@ -212,9 +212,13 @@
   (define (validate-operation-result-var op)
     (let ([result (ast-operation-expand-result-var op)])
       (unless (or (identifier? result)
-                  (null? (syntax->datum result)))
-        (syntax-violation 'validate-operation "Operation result must be identifier or ()"
-                         result))))
+                  (null? (syntax->datum result))
+                  ;; Multi-result: a proper list of %var identifiers
+                  (and (pair? (syntax->datum result))
+                       (for-all identifier? (syntax->list result))))
+        (syntax-violation 'validate-operation
+                          "Operation result must be identifier, (), or list of identifiers"
+                          result))))
 
   (define (validate-and-normalize-operation-name op)
     (let* ([op-name-stx (ast-operation-expand-op-name op)]

@@ -2,7 +2,8 @@
 (library (mlir pattern-keywords)
   (export :match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
-          = : -> :region :regions)
+          = : -> :region :regions
+          :index)
   (import (except (rnrs) =))
 
   ;; Define keywords as syntax (for cross-library hygiene)
@@ -21,4 +22,5 @@
   (define-syntax -> (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :region (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :regions (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :index   (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
 )
