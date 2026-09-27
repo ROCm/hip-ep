@@ -32,6 +32,7 @@
 (library (mlir ops)
   (export current-mlir-builder
           current-mlir-loc
+          current-mlir-build-fn
           with-current-mlir-builder
           with-current-block-builder
           with-mlir-ops)
@@ -108,35 +109,72 @@
       ;;
       ;; Uses datum comparison for = and -> rather than free-identifier=?
       ;; so the macro works regardless of the using context's imports.
-      (define (arrow? x) (eq? (syntax->datum x) '->))
-      (define (eq-sym? x) (eq? (syntax->datum x) '=))
+      (define (arrow? x)   (eq? (syntax->datum x) '->))
+      (define (eq-sym? x)  (eq? (syntax->datum x) '=))
+      (define (attrs-kw? x)(eq? (syntax->datum x) ':attrs))
+      (define (index-kw? x)(eq? (syntax->datum x) ':index))
+
+      ;; Generate attr-setter code for one attr form.
+      ;; (name val)       → (mlir-operation-set-attr       new-op "name" val)
+      ;; (name val :index)→ (mlir-operation-set-index-attr new-op "name" val)
+      (define (make-attr-setter attr-stx)
+        (let ([af (syntax->list attr-stx)])
+          (let* ([name-raw (syntax->datum (list-ref af 0))]
+                 [name-str (if (string? name-raw) name-raw (symbol->string name-raw))]
+                 [val      (list-ref af 1)])
+            (if (and (= (length af) 3) (index-kw? (list-ref af 2)))
+                (with-syntax ([n name-str] [v val])
+                  #'(mlir-operation-set-index-attr new-op n v))
+                (with-syntax ([n name-str] [v val])
+                  #'(mlir-operation-set-attr new-op n v))))))
+
+      ;; Emit let*/get-result code, inserting attr-setters between build and get-result.
+      (define (emit-single-result %var op-name vals result-type attr-setters)
+        (let ([zero-result? (null? (syntax->datum result-type))])
+          (if zero-result?
+              (with-syntax ([var %var] [(v ...) vals] [n op-name]
+                            [(setter ...) attr-setters])
+                (list (cons #'var
+                            #'(let ([new-op ((current-mlir-build-fn) n (list v ...) '())])
+                                setter ... new-op))))
+              (with-syntax ([var %var] [(v ...) vals] [n op-name] [rt result-type]
+                            [(setter ...) attr-setters])
+                (list (cons #'var
+                            #'(let ([new-op ((current-mlir-build-fn) n (list v ...) (list rt))])
+                                setter ...
+                                (mlir-operation-get-result new-op 0))))))))
 
       (define (process-op op-stx idx)
         (let ([form (syntax->list op-stx)])
           (cond
-            ;; Single-result MLIR op:
+            ;; Single-result MLIR op with :attrs:
+            ;;   (%var = "op" (ops) :attrs ((name val ...) ...) -> result-type)  length=8
+            [(and form
+                  (= (length form) 8)
+                  (eq-sym?  (list-ref form 1))
+                  (string?  (syntax->datum (list-ref form 2)))
+                  (attrs-kw? (list-ref form 4))
+                  (arrow?   (list-ref form 6)))
+             (emit-single-result
+               (list-ref form 0)
+               (syntax->datum (list-ref form 2))
+               (value-operands (list-ref form 3))
+               (list-ref form 7)
+               (map make-attr-setter (syntax->list (list-ref form 5))))]
+
+            ;; Single-result MLIR op (no attrs):
             ;;   (%var = "op.name" (operands...) -> result-type)   length=6
             [(and form
                   (= (length form) 6)
                   (eq-sym? (list-ref form 1))
                   (string? (syntax->datum (list-ref form 2)))
                   (arrow? (list-ref form 4)))
-             (let* ([%var        (list-ref form 0)]
-                    [op-name     (syntax->datum (list-ref form 2))]
-                    [vals        (value-operands (list-ref form 3))]
-                    [result-type (list-ref form 5)]
-                    [zero-result? (null? (syntax->datum result-type))])
-               (if zero-result?
-                   ;; Zero results (e.g. terminators): build for side effect
-                   (with-syntax ([var %var] [(v ...) vals] [n op-name])
-                     (list (cons #'var
-                                 #'((current-mlir-build-fn) n (list v ...) '()))))
-                   ;; Single result: build and get result 0
-                   (with-syntax ([var %var] [(v ...) vals] [n op-name] [rt result-type])
-                     (list (cons #'var
-                                 #'(mlir-operation-get-result
-                                     ((current-mlir-build-fn) n (list v ...) (list rt))
-                                     0))))))]
+             (emit-single-result
+               (list-ref form 0)
+               (syntax->datum (list-ref form 2))
+               (value-operands (list-ref form 3))
+               (list-ref form 5)
+               '())]
 
             ;; Multi-result MLIR op:
             ;;   ((%a %b) = "op.name" (operands...) -> (t1 t2 ...))   length=6,
