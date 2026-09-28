@@ -140,10 +140,11 @@
     mlir-populate-constant-conversion-patterns
     mlir-populate-return-conversion-patterns
 
-    ;; Builder — explicit rewriter-based op construction
+    ;; Builder — unified op creation
+    mlir-create-op               ; (builder loc name ops types [nregions]) → op
+    mlir-set-insertion-point-before
     mlir-build-op
     mlir-build-op-with-regions
-    mlir-set-insertion-point-before
     mlir-set-insertion-point-to-block-end
     mlir-op-get-region
     mlir-region-create-block
@@ -628,6 +629,13 @@
     (foreign-procedure "mlir_build_op_with_regions"
                        (uptr uptr string scheme-object scheme-object int) uptr))
 
+  ;;; @brief Unified op creator: takes any OpBuilder* (including RewriterBase* via inheritance).
+  ;;; Insertion point must already be set. nregions pre-allocates empty region slots.
+  (define mlir-create-op%
+    (foreign-procedure "mlir_create_op" (uptr uptr string scheme-object scheme-object int) uptr))
+  (define (mlir-create-op builder loc name ops types . rest)
+    (mlir-create-op% builder loc name ops types (if (pair? rest) (car rest) 0)))
+
   ;;; @brief Set rewriter insertion point to immediately before an operation.
   (define mlir-set-insertion-point-before
     (foreign-procedure "mlir_set_insertion_point_before" (uptr uptr) void))
@@ -872,9 +880,7 @@
                                  (mlir-build-op rw_ loc_ name ops types)
                                  (mlir-build-op-with-regions rw_ loc_ name ops types n))))])
            (parameterize ([current-loc loc_]
-                          [current-builder
-                            (lambda (l name ops types . rest)
-                              (apply build-fn name ops types rest))]
+                          [current-builder     build-fn]
                           [current-mlir-build-fn build-fn])
              body ...)))]))
 
@@ -888,9 +894,7 @@
                                  (mlir-build-op-in-block b_ loc_ name ops types)
                                  (mlir-build-op-in-block-with-regions b_ loc_ name ops types n))))])
            (parameterize ([current-loc loc_]
-                          [current-builder
-                            (lambda (l name ops types . rest)
-                              (apply build-fn name ops types rest))]
+                          [current-builder       build-fn]
                           [current-mlir-build-fn build-fn]
                           [current-block-builder b_])  ; backward compat
              body ...)))]))
