@@ -233,6 +233,7 @@ class TestSwiGluFusion:
         [
             (np.float16, [2, 17], 3e-3, 3e-3),
             (np.float32, [2, 17], 1e-5, 1e-5),
+            (np.float32, [2, 16], 1e-5, 1e-5),
             (np.float16, [1, 1, INTERMEDIATE], 3e-3, 3e-3),
         ],
     )
