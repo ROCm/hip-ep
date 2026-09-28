@@ -29,7 +29,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
 | Swish | Custom HIP kernel; `com.microsoft` QuickGelu is this formula with alpha default 1.702 |
-| SwiGLU graph pattern (`Mul(Mul(X, Sigmoid(X)), Gate)`) | Fused custom HIP kernel when operands/results have identical f16/f32/bf16/f64 tensor types and intermediates are single-use |
+| SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64 and the intermediates are single-use |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
