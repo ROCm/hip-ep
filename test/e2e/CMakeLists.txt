@@ -60,6 +60,47 @@ endforeach()
 list(LENGTH MLIR_E2E_TESTS num_tests)
 message(STATUS "Configured ${num_tests} E2E test(s)")
 
+#=============================================================================
+# hipsr pipeline
+#=============================================================================
+# Named models compiled with HIPDNN_EP_HIPSR=1. convert-onnx-to-hipsr does not
+# cover the rest of the globbed E2E models.
+#
+# HIPDNN_EP_STRICT=1 makes the compiler abort on a pass failure instead of
+# writing an artifact that would fall back to CPU: without it a broken pipeline
+# still produces a passing execute step.
+set(hipsr_e2e_models test_hipsr_matmul_model)
+
+foreach(test_name ${hipsr_e2e_models})
+    set(test_file "${CMAKE_CURRENT_SOURCE_DIR}/../lit/e2e/${test_name}.mlir")
+    set(test_dir "${CMAKE_CURRENT_BINARY_DIR}/hipsr_${test_name}")
+    file(MAKE_DIRECTORY "${test_dir}")
+    set(dll_output "${test_dir}/${test_name}.dll")
+
+    add_test(NAME E2E_Compile_hipsr_${test_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+            HIPDNN_EP_HIPSR=1
+            HIPDNN_EP_STRICT=1
+            $<TARGET_FILE:hip-compiler>
+                "${test_file}"
+                -o "${dll_output}"
+                --mode NATIVE
+        WORKING_DIRECTORY "${test_dir}"
+    )
+
+    add_test(NAME E2E_Execute_hipsr_${test_name}
+        COMMAND $<TARGET_FILE:hip-test>
+            "${dll_output}"
+            --verbose
+            --validate
+        WORKING_DIRECTORY "${test_dir}"
+    )
+
+    set_tests_properties(E2E_Execute_hipsr_${test_name} PROPERTIES
+        DEPENDS E2E_Compile_hipsr_${test_name}
+    )
+endforeach()
+
 # Linux-only build-stage regression check for two ELF-init bugs that
 # actually shipped during the Linux port:
 #   1. DT_INIT_ARRAY missing  -> static ctors silently never run -> SIGFPE

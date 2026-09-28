@@ -103,6 +103,7 @@ target_link_libraries(hip_ep_sample_plugin PUBLIC
   MLIRIR
   MLIRSupport
   MLIRFuncDialect
+  MLIRTensorDialect
   # For sample_dialect.cpp: the minimal dialect's HIP->LLVM lowering interface
   # (ConvertToLLVMPatternInterface + LLVMTypeConverter + DialectConversion).
   MLIRLLVMDialect

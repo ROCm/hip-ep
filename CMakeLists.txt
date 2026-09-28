@@ -230,6 +230,9 @@ if(BUILD_HIP_UNIT_TESTS)
 
   # MLIR dialect/pass unit tests (plain main; GPU-free injected-I/O coverage).
   add_subdirectory(test/unit)
+
+  # Kernel compile-time guards (GPU-free; device-kernel arch-gating invariants).
+  add_subdirectory(lib/Runtime/Kernels/test/lds_barrier_arch_gate)
 endif()
 
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can

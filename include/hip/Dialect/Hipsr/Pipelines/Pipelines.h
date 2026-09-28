@@ -13,6 +13,11 @@ namespace mlir {
 namespace hipsr {
 
 struct HipsrPipelineOptions : public PassPipelineOptions<HipsrPipelineOptions> {
+  Option<std::string> constantsFile{
+      *this, "constants-file",
+      llvm::cl::desc("Constants-file name written through the injected "
+                     "FileSystem (default: constants.bin)"),
+      llvm::cl::init("constants.bin")};
 };
 
 void buildHipsrPipeline(OpPassManager &pm,

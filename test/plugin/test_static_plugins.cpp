@@ -39,6 +39,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -259,12 +260,16 @@ int main() {
             ->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.constant_offsets");
     size_t carriers = 0;
     carrierModule->walk([&](mlir::hip::ConstantOp) { ++carriers; });
+    const std::array<float, 2> expectedWeight = {101.0f, 102.0f};
+    std::vector<char> expectedCarrierBytes(sizeof(expectedWeight));
+    std::memcpy(expectedCarrierBytes.data(), expectedWeight.data(),
+                sizeof(expectedWeight));
     check(sizes && sizes.asArrayRef().size() == 1 &&
-              sizes.asArrayRef()[0] == 2 && offsets &&
-              offsets.asArrayRef().size() == 1 &&
+              sizes.asArrayRef()[0] ==
+                  static_cast<int64_t>(sizeof(expectedWeight)) &&
+              offsets && offsets.asArrayRef().size() == 1 &&
               offsets.asArrayRef()[0] == 0 &&
-              carrierFs.files["model.constants.bin"] ==
-                  std::vector<char>({101, 102}) &&
+              carrierFs.files["model.constants.bin"] == expectedCarrierBytes &&
               carriers == 0,
           "AfterConvert sample carrier is externalized with exact artifact");
   }

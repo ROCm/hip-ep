@@ -62,10 +62,15 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
  * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
  * reordering is legal.
  *
- * gfx12 retired s_barrier for the s_barrier_signal/s_barrier_wait pair, so the
- * asm does not assemble there and the arch falls back to __syncthreads(). */
+ * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
+ * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
+ * pair, and later architectures likewise lack it, so the inline asm fails to
+ * assemble there. Emit the asm only on the families that provide it and let
+ * every other target -- current or future -- fall back to __syncthreads(),
+ * which is always correct (a strictly stronger full-workgroup fence); it only
+ * reintroduces the redundant per-K-step L0 flush the raw asm skips. */
 #if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    !defined(__GFX12__)
+    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
 #define HIPDNN_LDS_BARRIER()                                                    \
     __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
 #else
@@ -186,21 +191,29 @@ void GemmFp16U4Impl(
     } else {
         const int n_tiles  = gridDim.x;
         const int m_tiles  = gridDim.y;
-        const int block_id = blockIdx.y * n_tiles + blockIdx.x;
-        const int sw          = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
-        const int main_cols   = (n_tiles / sw) * sw;
-        const int main_blocks = main_cols * m_tiles;
         int by, bx;
-        if (block_id < main_blocks) {
-            const int super = block_id / (sw * m_tiles);
-            const int rem   = block_id % (sw * m_tiles);
-            by = rem / sw;
-            bx = super * sw + rem % sw;
+        if (swizzle_n <= 1) {
+            // Direct mapping is used by ragged grouped WMMA: its launcher can
+            // then reject blockIdx.y tiles beyond each expert's row count before
+            // entering the expensive K loop.
+            by = static_cast<int>(blockIdx.y);
+            bx = static_cast<int>(blockIdx.x);
         } else {
-            const int tail_id   = block_id - main_blocks;
-            const int tail_cols = n_tiles - main_cols;
-            by = tail_id / tail_cols;
-            bx = main_cols + (tail_id % tail_cols);
+            const int block_id = blockIdx.y * n_tiles + blockIdx.x;
+            const int sw          = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
+            const int main_cols   = (n_tiles / sw) * sw;
+            const int main_blocks = main_cols * m_tiles;
+            if (block_id < main_blocks) {
+                const int super = block_id / (sw * m_tiles);
+                const int rem   = block_id % (sw * m_tiles);
+                by = rem / sw;
+                bx = super * sw + rem % sw;
+            } else {
+                const int tail_id   = block_id - main_blocks;
+                const int tail_cols = n_tiles - main_cols;
+                by = tail_id / tail_cols;
+                bx = main_cols + (tail_id % tail_cols);
+            }
         }
         row0 = by * BM_T;
         col0 = bx * BN_T;

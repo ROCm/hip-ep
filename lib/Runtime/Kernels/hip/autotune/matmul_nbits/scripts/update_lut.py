@@ -632,7 +632,7 @@ def cmd_compile(args) -> int:
         dst = LUT_DIR / f"{args.arch}.fb"
         shutil.copy(produced[0], dst)
     # Only the .fb is checked in; the build turns it into the linkable
-    # kMatmulNbitsLutData[] symbol at compile time via cmake/embed_fb.cmake
+    # kMatmulNbitsLutBlobs[] symbol at compile time via cmake/embed_fb.cmake
     # (pure CMake, no Python), so nothing is generated here.
     print(f"[compile] -> {dst} ({dst.stat().st_size} bytes)")
     return 0

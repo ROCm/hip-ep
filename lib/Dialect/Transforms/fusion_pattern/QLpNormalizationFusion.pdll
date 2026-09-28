@@ -1,0 +1,66 @@
+//===- QLpNormalizationFusion.pdll ----------------------------------------===//
+//
+// PDLL pattern for HIP-level QDQ LpNormalization fusion (UINT16 L2 / RMS).
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// constraints used below. Not compilable on its own.
+//
+// The matched middle op is hip.rms_norm, not an LpNormalization: nothing of
+// that name survives to this layer. LpNormalizationConversion decomposes
+// `onnx.LpNormalization` during pre-lowering, and for precisely the case this
+// pattern wants -- p=2 over a trailing axis of static extent -- its fast path
+// emits a SimplifiedLayerNormalization that later becomes hip.rms_norm.
+//
+// IsHipL2EquivalentRmsNorm is what makes that safe, and it tests the math
+// rather than the provenance: with epsilon 0 and a scale of 1/sqrt(N), an RMS
+// norm *is* an L2 norm. See its comment for the identity.
+//
+// Input and output scales stay separate attributes: LoRA/ORC almost never
+// share them, so requantization is part of the fused op.
+//===----------------------------------------------------------------------===//
+
+Pattern HipQLpNormalization with benefit(10) {
+  let dq = op<hip.dequantize_linear>(ctx: Value, input: Value,
+                                     input_scale: Value,
+                                     input_tail: ValueRange);
+  // Four operands exactly: hip.rms_norm carries its scale as an operand and
+  // has no optional ones, so the init needs no ValueRange to find.
+  let rms = op<hip.rms_norm>(ctx, dq.0, rms_scale: Value, rms_init: Value);
+  let q = op<hip.quantize_linear>(ctx, rms.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  IsHipQdqQuantizedWidth(dq, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(dq);
+  IsHipQdqQuantizedWidth(q, attr<"[16]">);
+  IsHipQdqUnsignedQuantized(q);
+  IsHipL2EquivalentRmsNorm(rms);
+  // todo: per-axis scale not support yet
+  IsHipSplatScale(input_scale);
+  IsHipSplatScale(output_scale);
+  HasExtractableQdqZeropoint(dq);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(output_type, rms_init);
+  HasSingleUseResult(rms);
+
+  rewrite q with {
+    let input_scale_attr = ExtractHipSplatScale(input_scale);
+    let output_scale_attr = ExtractHipSplatScale(output_scale);
+    let input_zp_attr = ExtractHipQdqZeropoint(dq, attr<"0 : i64">);
+    let output_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    let init = BuildInit(output_type, rms_init);
+    // axis and p are pinned rather than carried over: the constraint already
+    // established the trailing axis and the p=2 identity, and hip.rms_norm
+    // has no p of its own to copy.
+    let qlp = op<hip.qlpnormalization>(ctx, input, init) {
+      input_scale = input_scale_attr,
+      input_zp = input_zp_attr,
+      output_scale = output_scale_attr,
+      output_zp = output_zp_attr,
+      axis = attr<"-1 : i64">,
+      p = attr<"2 : i64">
+    } -> (output_type);
+    replace q with qlp;
+  };
+}

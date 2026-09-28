@@ -1,0 +1,72 @@
+//===- HipFusionTransformPatterns.pdll -----------------------------------===//
+//
+// Aggregate entry point for the HIP-to-HIP rewrite patterns driven by
+// hip-fusion-transform.
+//
+// Scope: any rewrite rooted at a `hip.*` op -- one-to-many, many-to-one or
+// many-to-many. A match may reach through a non-hip op when that op is part
+// of the chain convert-onnx-to-hip produced, as the Q/DQ round-trip patterns
+// do for the reshape-class `tensor` ops; the root stays a `hip.*` op.
+//
+// mlir-pdll compiles one input file at a time, and collecting every pattern
+// into a single PDL module also puts them in one RewritePatternSet, so they
+// share a fixpoint and can trigger each other.
+//
+// PDLL has no include guards, so the native helpers are declared once here
+// and each pattern file - which carries only its Pattern definitions - is
+// included exactly once. Every name below must also be registered in
+// `registerNativeHelpers` (fusion_pattern/hip_fusion_transform.hpp); a
+// declared but unregistered helper aborts when the pattern runs.
+//
+// Adding a pattern: write `<Name>.pdll` next to this file holding only
+// `Pattern` definitions, then add one `#include` at the bottom.
+//===----------------------------------------------------------------------===//
+
+// Legality is decided by result-free constraints and the values are produced
+// by rewrites. Returning a result from a constraint shared by two patterns
+// rooted at the same op makes the PDL module fail to lower ("operand does not
+// dominate this use"), so nothing below may move back into the match section.
+
+// Op-agnostic: reusable by any pattern here. BuildInit produces a
+// replacement's DPS init, sizing each dynamic dim from shapeSource; its
+// preconditions sit in CanBuildInit because a native rewrite cannot decline.
+Constraint HasSingleUseResult(op: Op);
+Constraint CanBuildInit(resultType: Type, shapeSource: Value);
+Rewrite BuildInit(resultType: Type, shapeSource: Value) -> Value;
+Constraint HasHipIntAttrEqual(op: Op, name: Attr, expected: Attr,
+                              absentValue: Attr);
+Rewrite ExtractHipIntAttr(op: Op, name: Attr, defaultValue: Attr) -> Attr;
+Rewrite ExtractHipFloatAttr(op: Op, name: Attr, defaultValue: Attr) -> Attr;
+
+// Q/DQ quantization parameters.
+Constraint IsHipSplatScale(val: Value);
+Constraint HasExtractableQdqZeropoint(op: Op);
+Constraint IsHipQdqQuantizedWidth(op: Op, widths: Attr);
+Constraint IsHipQdqUnsignedQuantized(op: Op);
+Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
+                                       packedInt4: Attr);
+Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
+
+// Compute-op geometry.
+Constraint IsHipFusableQConvGeometry(conv: Op);
+Constraint IsHipL2EquivalentRmsNorm(rms: Op);
+Rewrite ExtractHipSplatScale(val: Value) -> Attr;
+Rewrite ExtractHipQdqZeropoint(op: Op, absentValue: Attr) -> Attr;
+Rewrite ExtractHipQdqValueBits(dq: Op) -> Attr;
+
+// Q/DQ round-trip elimination. Unlike the group above these do not build a
+// fused `hip.q*` op; they drop a matching Q/DQ pair and rebuild the op it
+// surrounded over the quantized tensor.
+Constraint HasMatchingHipQdqParams(dq: Op, q: Op);
+Constraint IsHipQdqIdentityRoundTrip(dq: Op, q: Op);
+Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
+Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
+
+#include "QAddFusion.pdll"
+#include "QMulFusion.pdll"
+#include "QMatMulFusion.pdll"
+#include "QGemmFusion.pdll"
+#include "QConvFusion.pdll"
+#include "QSigmoidFusion.pdll"
+#include "QLpNormalizationFusion.pdll"
+#include "QdqRoundTrip.pdll"

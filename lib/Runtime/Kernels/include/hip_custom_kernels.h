@@ -180,39 +180,34 @@ HIP_KERNEL_API int hip_qelementwise(
  * Quantized batched matmul (Q(DQ(A) @ DQ(B)))
  * =========================================================================
  *
- * A: [batch_count x M x K], B: [K x N] when b_batch_stride == 0 or
- * [batch_count x K x N] when b_batch_stride == K*N, Y: [batch_count x M x N].
- * All row-major and contiguous.
+ * A: [batch x M x K], B: [K x N] (or batched when b_batch_stride == K*N),
+ * Y: [batch x M x N]. trans_a / trans_b swap the trailing two extents in
+ * memory; M, N, K stay logical. Y is never transposed.
  *
- * trans_a / trans_b swap the trailing two extents of the corresponding operand
- * in memory -- A stored as [batch_count x K x M], B as [N x K] -- while M, N, K
- * stay the logical extents and b_batch_stride stays K*N. Only the load stride
- * changes; Y is never transposed.
+ * A/Y: 8- or 16-bit. B: INT8/UINT8 storage. b_bits is 8, or 4 when two values
+ * share a byte (low nibble first over flattened row-major).
  *
- * Supported hip_dtype, independently per edge:
- *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
- *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8
- *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ * B_scales NULL: per tensor; M_scale = s_a*s_b/s_y and scalar b_zp.
+ * B_scales set: per column, f32[N] + B_zero_points[N]; use
+ * AY_ratio * B_scales[n] with AY_ratio = s_a/s_y.
  *
- * workspace / workspace_bytes: optional split-K scratch. The tiled grid has no
- * K dimension, so a shape with little output parallelism (a low-rank M=128,
- * N=32 projection launches two blocks) leaves most of the device idle. Given
- * scratch, such a shape is instead reduced in parallel k slices and requantized
- * by a second pass. Pass NULL, or fewer bytes than hip_qmatmul_workspace_bytes
- * asks for, to stay on the single-pass kernel; the result is identical either
- * way, since the slices are combined with exact integer atomics.
+ * workspace: optional split-K scratch. NULL or undersized stays single-pass;
+ * query size with hip_qmatmul_workspace_bytes. Results match either way.
  */
 HIP_KERNEL_API int hip_qmatmul(
     void* stream,
     const void* A,
     const void* B,
     void* Y,
+    const void* B_scales,
+    const void* B_zero_points,
     int64_t M, int64_t N, int64_t K,
     int64_t batch_count,
     int64_t b_batch_stride,
     int trans_a, int trans_b,
     int a_dtype, int b_dtype, int y_dtype,
-    float M_scale,
+    int b_bits,
+    float M_scale, float AY_ratio,
     int64_t a_zp, int64_t b_zp, int64_t y_zp,
     void* workspace,
     size_t workspace_bytes);
@@ -222,6 +217,63 @@ HIP_KERNEL_API int hip_qmatmul(
  * than deriving it from the extents. */
 HIP_KERNEL_API size_t hip_qmatmul_workspace_bytes(
     int64_t M, int64_t N, int64_t K, int64_t batch_count);
+
+/* =========================================================================
+ * Quantized Gemm (Q(alpha * DQ(A)' @ DQ(B)' + beta * DQ(C)))
+ * =========================================================================
+ *
+ * op(A): [M, K], op(B): [K, N], Y: [M, N], all row-major and contiguous.
+ * trans_a / trans_b swap the stored extents of the corresponding operand --
+ * A stored as [K, M], B as [N, K] -- while M, N and K stay the logical ones.
+ * Only the load stride changes; Y is never transposed.
+ *
+ *   acc[m, n] = sum over k of (A[m, k] - a_zp) * (B[k, n] - b_zp[n])
+ *   Y[m, n]   = saturate(round(M_ab * b_scale[n] * acc[m, n]
+ *                              + M_c * (C[m, n] - c_zp))
+ *                        + y_zp)
+ *
+ * M_ab and M_c are folded by the caller, so the kernel never divides. A
+ * per-output-channel B is the one factor that cannot fold: B_scales and
+ * B_zero_points are then device arrays of one value per N, supplied together.
+ * When both are NULL, b_zp applies to every column and b_scale is already
+ * inside M_ab.
+ *
+ * `B` and `B_zero_points` keep an 8-bit element type and their LOGICAL element
+ * counts, but at b_bits == 4 each byte holds TWO values, low nibble first over
+ * the flattened row-major sequence -- the ONNX INT4/UINT4 convention shared
+ * with hip_qconv. b_dtype decides how a nibble widens.
+ *
+ * `C` is nullable and, when present, is unidirectionally broadcast to [M, N]
+ * from [c_dim0, c_dim1]: an extent of 1 repeats along that axis.
+ *
+ * Supported hip_dtype, independently per edge:
+ *   a: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ *   b: HIP_DTYPE_INT8, HIP_DTYPE_UINT8 (storage, b_bits 4 or 8)
+ *   c: the `a` set plus HIP_DTYPE_INT32
+ *   y: HIP_DTYPE_INT8, HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16
+ */
+HIP_KERNEL_API int hip_qgemm(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* C,
+    const void* B_scales,
+    const void* B_zero_points,
+    void* Y,
+    int64_t M, int64_t N, int64_t K,
+    int trans_a, int trans_b,
+    int a_dtype, int b_dtype, int c_dtype, int y_dtype,
+    int b_bits,
+    int64_t c_dim0, int64_t c_dim1,
+    float M_ab, float M_c,
+    int64_t a_zp, int64_t b_zp, int64_t c_zp, int64_t y_zp,
+    void* workspace,
+    size_t workspace_bytes);
+
+/* Scratch hip_qgemm wants for this shape, or 0 when the shape does not call
+ * for a grid-level k split. */
+HIP_KERNEL_API size_t hip_qgemm_workspace_bytes(
+    int64_t M, int64_t N, int64_t K);
 
 /* =========================================================================
  * Quantized 1x1 convolution, W4A16 (Q(Conv(DQ(x), DQ(w))))
@@ -2092,25 +2144,63 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* Hands the session's matmul_autotune_mode option ("lookup" resolves the
+ * offline LUT, "online" always sweeps; null when absent) to the autotune.
+ * Precedence is HIPDNN_MATMUL_AUTOTUNE_MODE > provider_mode > lookup. The mode
+ * is process-wide and latched by the first call, so a later session gets the
+ * one in force; calling this at all is optional. */
+HIP_KERNEL_API void hip_matmul_nbits_autotune_set_mode(const char* provider_mode);
+
+/* Ragged expert-batch int4 WMMA for QMoE prefill.
+ *
+ * A/output store the expert slices back-to-back in routing order, so slice e
+ * starts at row expert_row_offsets[e] and holds expert_counts[e] valid rows.
+ * That keeps the buffers at valid_rows rows instead of num_experts*max_m.
+ * B/scales are contiguous expert-major tensors. One launch covers every expert
+ * and skips empty/invalid row tiles on device; max_m is only the host-side
+ * upper bound on any single expert_counts entry and sizes grid.y. The tile
+ * comes from the shape alone: wide-N (FC1) takes 32x64, while dense or long-K
+ * slices take 64x64 where K and N divide it. valid_rows is the sum of
+ * expert_counts and lets the selector account for ragged density.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* expert_counts,
+    const void* expert_row_offsets,
+    void* output,
+    int64_t max_m,
+    int64_t valid_rows,
+    int64_t num_experts,
+    int64_t N,
+    int64_t K,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
  * GEMV, replacing the dequant-ALU-bound fp path. Requires bits==4, K%32==0.
- *   A          : fp16 activation [K]  (batch==M==1, row-major)
+ * M > 1 blocks rows so the packed weight is read (and unpacked) once for the
+ * whole tile, which is what a speculative verify pass needs.
+ *   A          : fp16 activations [M, K]  (batch==1, row-major)
  *   B          : packed int4 weights  [N, K/2]
  *   scales     : fp16 [N, ceil(K/block_size)]
  *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
  *                nullptr for the symmetric (default zp=8) path
- *   out        : fp16 [N]
- *   a_qb_scratch    : >= K bytes (int8), caller/session-owned
- *   a_scale_scratch : >= ceil(K/block_size) floats, caller/session-owned
+ *   out        : fp16 [M, N]
+ *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
+ *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
  * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     void* stream,
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
@@ -2286,6 +2376,17 @@ HIP_KERNEL_API int hip_qlpnormalization_prepare_params(
     void* rms_scale,
     int64_t norm_num_elements,
     float norm_scale,
+    void* input_scale_device,
+    float input_scale,
+    void* output_scale_device,
+    float output_scale,
+    void* input_zp_device,
+    uint16_t input_zp,
+    void* output_zp_device,
+    uint16_t output_zp);
+
+HIP_KERNEL_API int hip_qsigmoid_prepare_params(
+    void* stream,
     void* input_scale_device,
     float input_scale,
     void* output_scale_device,
@@ -2633,6 +2734,9 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
  *   correction_bias - GPU [num_experts] (nullable iff use_correction_bias==0)
  *   expert_indices  - GPU [num_tokens, k] int32 (output)
  *   expert_weights  - GPU [num_tokens, k] (output, same type as hidden_states)
+ *   decode_logits_scratch - GPU [num_experts] fp32 scratch for the parallel
+ *                           num_tokens==1 path; nullable to force the generic
+ *                           one-block route kernel
  */
 HIP_KERNEL_API int hip_qmoe_amd_route(
     void* stream,
@@ -2641,6 +2745,7 @@ HIP_KERNEL_API int hip_qmoe_amd_route(
     const void* correction_bias,
     void* expert_indices,
     void* expert_weights,
+    void* decode_logits_scratch,
     int64_t num_tokens,
     int64_t hidden_size,
     int64_t num_experts,
@@ -2684,6 +2789,10 @@ HIP_KERNEL_API int hip_qmoe_amd_relu2(
  *   expert_counts    - GPU [num_experts] int32 (output)
  *   expert_offsets   - GPU [num_experts + 1] int32 (output, exclusive scan)
  *   sorted_token_ids - GPU [num_tokens * k] int32 (output)
+ *   sorted_pair_ids  - GPU [num_tokens * k] int32 (output, nullable): the
+ *                      routing slot (token * k + slot) each sorted row came
+ *                      from, so consumers that scatter back to slot-major
+ *                      order need no search over the token's k entries
  *   sorted_weights   - GPU [num_tokens * k] fp16 (output)
  */
 HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
@@ -2693,10 +2802,45 @@ HIP_KERNEL_API int hip_qmoe_amd_bucket_tokens(
     void* expert_counts,
     void* expert_offsets,
     void* sorted_token_ids,
+    void* sorted_pair_ids,
     void* sorted_weights,
     int64_t num_tokens,
     int64_t num_experts,
     int64_t k,
+    int64_t element_size_bytes);
+
+/* Fully device-side expert-grouped QMoE prefill via ragged WMMA.
+ * packed_latent/packed_act hold the expert slices back-to-back in
+ * expert-sorted order (valid_rows = sum of counts), so a row's position in
+ * that order is its packed row, and sorted_pair_ids[row] carries the routing
+ * slot it came from. sorted_* are [num_tokens*k] scratch filled by the
+ * bucketing pass. packed_latent is reused for the FC2 output.
+ */
+HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
+    void* stream,
+    const void* latent,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights,
+    const void* fc1_scales,
+    const void* fc2_weights,
+    const void* fc2_scales,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_pair_ids,
+    void* sorted_weights,
+    void* packed_latent,
+    void* packed_act,
+    void* slot_scratch,
+    void* acc,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t latent_size,
+    int64_t moe_intermediate_size,
+    int64_t k,
+    int64_t expert_weight_bits,
+    int64_t block_size,
     int64_t element_size_bytes);
 
 /* Fully fused routed branch for com.amd QMoE decode (num_tokens == 1).
@@ -2872,16 +3016,20 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
-// Chunked-parallel gated-delta prefill kernel (single launch, processes the
-// whole sequence). Returns >0 (=1) when it declines the launch (caller must
+// Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
+// processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
-// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
-// supported; other rules/layouts/oversized smem are declined.
+// The gated and gated_delta rules with scalar log-decay
+// (decay_per_key_dim==0) are supported; other rules/layouts/oversized smem are
+// declined. beta may be null for gated and is required for gated_delta.
+// Gated keeps the chunk scan and output in fp32; gated_delta uses the WMMA
+// path and may round-trip S/Q/K through fp16.
 // scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
 // path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
-// Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or
-// under-sized the launcher declines (returns 1) and the caller falls back to
-// the per-token loop.
+// Size it with hip_linear_attention_prefill_scratch_bytes() below, passing the
+// same update_rule: the two rules need different layouts, so a mismatch makes
+// the launcher decline its own arena. When null or under-sized the launcher
+// declines (returns 1) and the caller falls back to the per-token loop.
 HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
@@ -2906,11 +3054,14 @@ HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* scratch,
     size_t scratch_bytes);
 
-// Device-scratch bytes the chunk-parallel prefill needs for a given shape.
-// Returns 0 for shapes/params the parallel path will decline. The runtime
-// wrapper uses this to grow RuntimeState::la_scratch before the launch.
+// Device-scratch bytes the chunk-parallel prefill needs for a given shape and
+// update rule. Returns 0 for shapes/params the parallel path will decline. The
+// runtime wrapper uses this to grow RuntimeState::la_scratch before the launch.
+// The rule is required because the two supported rules run different kernels:
+// gated holds the recurrent state in fp32 and needs no W tile, gated_delta
+// holds it in fp16 on the matrix cores and does.
 HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
-    int B, int seq_len, int Hkv, int dk, int dv);
+    int B, int seq_len, int Hkv, int dk, int dv, int64_t update_rule);
 
 // Max memref rank honoured by the strided memref.copy fast path
 // (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined

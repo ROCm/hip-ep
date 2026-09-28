@@ -124,6 +124,11 @@ extern "C" int hip_gather(
           (long long)outer_size, (long long)axis_size, (long long)inner_size,
           grid_size, kBlockSize);
 
+  // HIP holds an error in the last-error slot until something reads it, so
+  // without this the check below can report an error left behind by an
+  // unrelated earlier API call as this kernel's launch failure.
+  (void)hipGetLastError();
+
   switch (element_size_bytes) {
     case 2:
       launch_gather<uint16_t>(grid_size, kBlockSize, hip_stream, data, indices,

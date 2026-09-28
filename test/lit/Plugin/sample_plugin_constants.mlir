@@ -15,10 +15,10 @@
 // ORDER: IR Dump After ExternalizeConstantsPass
 // ORDER: module attributes
 // ORDER-SAME: hipdnn.constant_offsets = array<i64: 0, 64, 128>
-// ORDER-SAME: hipdnn.constant_sizes = array<i64: 2, 4, 2>
+// ORDER-SAME: hipdnn.constant_sizes = array<i64: 2, 4, 8>
 // ORDER-DAG: memref.global "private" @hip_ext_constant_imported_weight_0{{.*}}hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 2 : i64}
 // ORDER-DAG: memref.global "private" @hip_ext_constant_1{{.*}}hip.external_data = {index = 1 : i64, offset = 64 : i64, size = 4 : i64}
-// ORDER-DAG: memref.global "private" @hip_ext_constant_sample_plugin_weight_2{{.*}}hip.external_data = {index = 2 : i64, offset = 128 : i64, size = 2 : i64}
+// ORDER-DAG: memref.global "private" @hip_ext_constant_sample_plugin_weight_2{{.*}}hip.external_data = {index = 2 : i64, offset = 128 : i64, size = 8 : i64}
 
 // LATE: error: hip.constant survived past hip-externalize-constants
 

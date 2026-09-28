@@ -409,6 +409,11 @@ $LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/model.onnx -i gen_inputs -d 2
 
 # L2-norm compare EP vs CPU outputs
 $LOCAL_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
+
+# Load the model through the EP and exit before inference, with extra EP options.
+# An init-only config claims no node, so CPU fallback has to be allowed.
+$LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/model.onnx --no-run \
+  --allow-cpu-fallback --provider-options config_file=/path/to/only_init_config.json
 ```
 
 **Key flags:**
@@ -421,6 +426,9 @@ $LOCAL_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
 | `-i <dir>` | Load inputs from directory instead of random |
 | `-f <name>:<val>` | Resolve a symbolic input dim at runtime (repeatable/comma-separated); EP still compiles the dynamic graph, unmatched symbolic dims default to 1 |
 | `-L dir1,dir2` | L2-norm comparison of two output directories |
+| `--provider-options <k>=<v>` | Extra EP provider options (repeatable/comma-separated); overrides environment defaults, `--mlir-dump-dir` still wins for `dump_dir` |
+| `--no-run` | Create the session (EP init, compilation, dumps) and exit without running inference |
+| `--allow-cpu-fallback` | Do not set `session.disable_cpu_ep_fallback`; needed for EP configurations that intentionally claim no node |
 
 ### Latency Benchmarking with onnxruntime_perf_test
 

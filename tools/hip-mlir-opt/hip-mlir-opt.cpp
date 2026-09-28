@@ -88,12 +88,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::pdl::PDLDialect>();
   registry.insert<mlir::pdl_interp::PDLInterpDialect>();
   registry.insert<mlir::ub::UBDialect>();
-  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
-  mlir::registerConvertFuncToLLVMInterface(registry);
-  mlir::registerConvertMemRefToLLVMInterface(registry);
-  mlir::arith::registerConvertArithToLLVMInterface(registry);
-  mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
-  mlir::index::registerConvertIndexToLLVMInterface(registry);
+  hip::compiler::registerConvertToLLVMInterfaces(registry);
   // `onnx` is claimed further down, once --onnx-dialect is parsed.
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

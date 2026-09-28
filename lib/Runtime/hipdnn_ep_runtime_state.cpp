@@ -12,6 +12,7 @@
 
 #if defined(HIPDNN_EP_REAL_RUNTIME)
 #include "gqa_autotune.h"
+#include "hip_custom_kernels.h"
 #endif
 
 #include "model_metadata_generated.h"
@@ -86,6 +87,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // lookup-only GQA.
   (*out_state)->gqa_autotune_policy = hip_gqa_autotune_create(
       hipdnn_ep_runtime_get_provider_option(*out_state, "gqa_autotune_mode"));
+
+  // No policy object to hold: MatMulNBits latches its mode process-wide.
+  hip_matmul_nbits_autotune_set_mode(hipdnn_ep_runtime_get_provider_option(
+      *out_state, "matmul_autotune_mode"));
 #endif
 
   if (!metadata_blob || blob_size == 0) {
@@ -209,6 +214,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->conv_scratch_size = 0;
   state->qlpnormalization_scratch = nullptr;
   state->qlpnormalization_scratch_size = 0;
+  state->qsigmoid_scratch = nullptr;
+  state->qsigmoid_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
   state->la_scratch = nullptr;
@@ -763,6 +770,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the QDQ LpNormalization intermediates and scalar parameters.
   if (state->qlpnormalization_scratch) {
     HIP_CLEANUP(hipFree(state->qlpnormalization_scratch));
+  }
+
+  if (state->qsigmoid_scratch) {
+    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
   }
 
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
@@ -1560,6 +1571,47 @@ int hipdnn_ep_state_ensure_qlpnormalization_scratch(RuntimeState *state,
     return -1;
   }
   state->qlpnormalization_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_qsigmoid_scratch(RuntimeState *state) {
+  return state ? state->qsigmoid_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_qsigmoid_scratch(RuntimeState *state,
+                                            size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->qsigmoid_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->qsigmoid_scratch_size > 0) {
+    size_t grown =
+        state->qsigmoid_scratch_size + state->qsigmoid_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->qsigmoid_scratch) {
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->qsigmoid_scratch));
+    state->qsigmoid_scratch = nullptr;
+    state->qsigmoid_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->qsigmoid_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_qsigmoid_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->qsigmoid_scratch_size = alloc_size;
   return 0;
 }
 

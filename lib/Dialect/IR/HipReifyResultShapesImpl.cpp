@@ -326,6 +326,50 @@ GemmOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// QGemmOp
+//
+// Same 2D rule as GemmOp, over the quantized operand names:
+//   M = transA ? A.shape[1] : A.shape[0]
+//   N = transB ? B.shape[0] : B.shape[1]
+// Optional `$C` is broadcast against `[M, N]` and does not contribute
+// extents. transA/transB are integer attributes (0/1).
+//
+// Before:
+//   %y = hip.qgemm(%ctx) ins(%a, %b : tensor<?x256xi8>, tensor<?x256xi8>)
+//                        outs(%out : tensor<?x?xi8>)
+//                        {transB = 1, ...} : tensor<?x?xi8>
+// After (reified result shape):
+//   dim 0 (M) -> %dM = tensor.dim %a, %c0
+//   dim 1 (N) -> %dN = tensor.dim %b, %c0
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+QGemmOp::reifyResultShapes(OpBuilder &b,
+                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  ArrayRef<int64_t> aShape = getShapeOf(getA());
+  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  if (aShape.size() != 2 || bShape.size() != 2)
+    return failure();
+
+  Location loc = getLoc();
+  Value A = getA();
+  Value B = getB();
+  bool transA = getTransA() != 0;
+  bool transB = getTransB() != 0;
+
+  size_t mDim = transA ? 1 : 0;
+  size_t nDim = transB ? 0 : 1;
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(2);
+  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[mDim], A, mDim));
+  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, bShape[nDim], B, nDim));
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Shape-changing ops with bespoke per-input-dim reify:
 //   transpose, gather, gather_nd
 //

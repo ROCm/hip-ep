@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "error_check_macros.h"
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -36,6 +37,8 @@
 //   3. routed branch -> acc                                     [latent]
 //        decode (num_tokens == 1): hip_qmoe_amd_decode_fused, three launches
 //          that index the expert weights on the device
+//        prefill on an arch with WMMA: hip_qmoe_amd_prefill_grouped_wmma,
+//          GPU bucketing feeding one ragged expert-batched GEMM per FC
 //        otherwise: hip_qmoe_amd_bucket_tokens -> count readback -> per
 //          active expert gather(h) -> fc1 -> relu2 -> fc2 -> weighted
 //          scatter_add
@@ -179,32 +182,49 @@ int wrap_qmoe_amd(
   // full hipStreamSynchronize plus a 5-launch chain per active expert on every
   // decode step, which at this op's k is ~110 launches per layer.
   //
+  // Prefill buckets the routing pairs on the device and runs one ragged
+  // expert-batched GEMM per FC. That GEMM is built on the WMMA matrix
+  // intrinsics, which wave64 parts do not have, so they keep the per-expert
+  // host dispatch loop below.
+  //
   // Declared here rather than at the branch below because every `goto cleanup`
   // in between would otherwise jump into its scope.
-  const bool use_decode_fused =
-      num_tokens == 1 && hip_qmoe_amd_decode_fused_supported(
-                             latent_size, moe_intermediate_size, block_size,
-                             expert_weight_bits, elem_size) != 0;
+  const bool fused_supported =
+      hip_qmoe_amd_decode_fused_supported(latent_size, moe_intermediate_size,
+                                          block_size, expert_weight_bits,
+                                          elem_size) != 0;
+  const bool use_decode_fused = fused_supported && num_tokens == 1;
+  const bool use_prefill_grouped =
+      fused_supported && num_tokens > 1 && !hipdnn_device_is_wave64();
 
   // Per-session grow-on-demand scratch (own qmoe_amd_scratch field --
   // independent from com.microsoft QMoE's qmoe_scratch). 64-byte aligned
   // sub-buffers, offsets recomputed per call.
   auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
   // The general path uses the fc1/fc2 buffers for one active expert's rows
-  // (at most num_tokens); the decode fast path reuses them as the [k, ...]
-  // per-slot scratch. Size them for whichever is larger.
-  int64_t fc_rows = num_tokens > k ? num_tokens : k;
+  // (at most num_tokens); the fused/grouped paths use [num_tokens * k, ...]
+  // slot scratch for FC1/FC2 intermediates. The grouped WMMA path packs its
+  // expert slices back-to-back in routing order, so it fits the same
+  // num_tokens * k rows rather than a num_experts * num_tokens grid.
+  const int64_t fc_rows = (use_decode_fused || use_prefill_grouped)
+                              ? (num_tokens * k)
+                              : (num_tokens > k ? num_tokens : k);
+  const int64_t gather_rows =
+      use_prefill_grouped ? (num_tokens * k) : num_tokens;
   size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
   size_t sz_h_buf = align_up_64(num_tokens * latent_size * elem_size);
   size_t sz_acc_buf = align_up_64(num_tokens * latent_size * elem_size);
-  size_t sz_gather_buf = align_up_64(num_tokens * latent_size * elem_size);
+  size_t sz_gather_buf = align_up_64(gather_rows * latent_size * elem_size);
   size_t sz_fc1_buf = align_up_64(fc_rows * moe_intermediate_size * elem_size);
   size_t sz_fc2_buf = align_up_64(fc_rows * latent_size * elem_size);
   size_t sz_expert_counts = align_up_64(num_experts * sizeof(int32_t));
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
+  // Only the grouped prefill path scatters back to slot-major order.
+  size_t sz_sorted_pair_ids =
+      use_prefill_grouped ? align_up_64(num_tokens * k * sizeof(int32_t)) : 0;
   size_t sz_y_buf = align_up_64(num_tokens * hidden_size * elem_size);
   size_t sz_shared_buf =
       align_up_64(num_tokens * shared_intermediate_size * elem_size);
@@ -220,7 +240,8 @@ int wrap_qmoe_amd(
   size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
   size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t off_y_buf = off_sorted_weights + sz_sorted_weights;
+  size_t off_sorted_pair_ids = off_sorted_weights + sz_sorted_weights;
+  size_t off_y_buf = off_sorted_pair_ids + sz_sorted_pair_ids;
   size_t off_shared_buf = off_y_buf + sz_y_buf;
   size_t total_scratch = off_shared_buf + sz_shared_buf;
 
@@ -245,6 +266,10 @@ int wrap_qmoe_amd(
   int32_t *d_sorted_token_ids =
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
+  int32_t *d_sorted_pair_ids =
+      sz_sorted_pair_ids
+          ? reinterpret_cast<int32_t *>(scratch_base + off_sorted_pair_ids)
+          : nullptr;
   void *d_y_buf = scratch_base + off_y_buf;
   void *d_shared_buf = scratch_base + off_shared_buf;
 
@@ -256,9 +281,10 @@ int wrap_qmoe_amd(
                     (long long)k);
   HIP_CHECK(hip_qmoe_amd_route(
       stream, hidden_states, router_weight, correction_bias, d_expert_indices,
-      d_expert_weights, num_tokens, hidden_size, num_experts, k,
-      normalize_routing_weights, use_correction_bias, routed_scaling_factor,
-      elem_size));
+      d_expert_weights,
+      use_decode_fused ? static_cast<void *>(d_expert_counts) : nullptr,
+      num_tokens, hidden_size, num_experts, k, normalize_routing_weights,
+      use_correction_bias, routed_scaling_factor, elem_size));
 
   // 2. fc1_latent_proj: hidden_size -> latent_size (dense batch matmul).
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: fc1_latent_proj [%lld x %lld] -> "
@@ -273,8 +299,8 @@ int wrap_qmoe_amd(
                              /*pre_unpacked_zp_u8=*/nullptr,
                              /*pre_unpacked_zp_fp16=*/nullptr));
 
-  // 3. Routed branch: fused per-slot chain for decode, bucketed per-expert
-  //    dispatch otherwise (see use_decode_fused above).
+  // 3. Routed branch: decode slot-fused, prefill expert-grouped, or the
+  //    legacy host per-expert dispatch loop.
   if (use_decode_fused) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: fused decode routed branch "
                       "(k=%lld)\n",
@@ -286,6 +312,20 @@ int wrap_qmoe_amd(
         fc2_experts_scales, /*act_scratch=*/d_fc1_buf,
         /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, latent_size,
         moe_intermediate_size, k, expert_weight_bits, block_size, elem_size));
+  } else if (use_prefill_grouped) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: prefill grouped WMMA branch "
+                      "(tokens=%lld experts=%lld k=%lld)\n",
+                      (long long)num_tokens, (long long)num_experts,
+                      (long long)k);
+    HIP_CHECK(hip_qmoe_amd_prefill_grouped_wmma(
+        stream, d_h_buf, d_expert_indices, d_expert_weights,
+        fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
+        fc2_experts_scales, d_expert_counts, d_expert_offsets,
+        d_sorted_token_ids, d_sorted_pair_ids, d_sorted_weights,
+        /*packed_latent=*/d_gather_buf, /*packed_act=*/d_fc1_buf,
+        /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, num_tokens, num_experts,
+        latent_size, moe_intermediate_size, k, expert_weight_bits, block_size,
+        elem_size));
   } else {
     HIP_CHECK(hipMemsetAsync(d_acc_buf, 0, num_tokens * latent_size * elem_size,
                              hip_stream));
@@ -294,8 +334,8 @@ int wrap_qmoe_amd(
     // to drive the host-side per-expert dispatch loop below.
     HIP_CHECK(hip_qmoe_amd_bucket_tokens(
         stream, d_expert_indices, d_expert_weights, d_expert_counts,
-        d_expert_offsets, d_sorted_token_ids, d_sorted_weights, num_tokens,
-        num_experts, k, elem_size));
+        d_expert_offsets, d_sorted_token_ids, /*sorted_pair_ids=*/nullptr,
+        d_sorted_weights, num_tokens, num_experts, k, elem_size));
 
     size_t total_host = align_up_64(num_experts * sizeof(int32_t));
     if (hipdnn_ep_state_ensure_qmoe_amd_host_scratch(state, total_host) != 0) {

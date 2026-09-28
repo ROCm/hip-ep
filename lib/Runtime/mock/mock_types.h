@@ -66,6 +66,7 @@ extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
 extern "C" hipError_t hipHostGetDevicePointer(void **devPtr, void *hstPtr,
                                               unsigned int flags);
 extern "C" const char *hipGetErrorString(hipError_t error);
+extern "C" hipError_t hipGetLastError();
 extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle);
 extern "C" hipblasStatus_t hipblasLtDestroy(hipblasLtHandle_t handle);
 

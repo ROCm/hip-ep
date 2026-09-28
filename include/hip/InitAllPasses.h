@@ -16,10 +16,17 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Onnx/IR/OnnxDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
@@ -27,6 +34,7 @@
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -37,10 +45,12 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Shape/Transforms/Passes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Transforms/Passes.h"
@@ -68,21 +78,46 @@ public:
 };
 } // namespace detail
 
+/// Which dialect claims the `onnx` namespace.
+enum class OnnxDialectKind { Stub, Modeled };
+
+inline void registerConvertToLLVMInterfaces(mlir::DialectRegistry &registry) {
+  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
+  mlir::registerConvertFuncToLLVMInterface(registry);
+  mlir::registerConvertMemRefToLLVMInterface(registry);
+  mlir::arith::registerConvertArithToLLVMInterface(registry);
+  mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
+  mlir::index::registerConvertIndexToLLVMInterface(registry);
+}
+
 /// Register all required dialects into a DialectRegistry.
-inline void registerAllDialects(mlir::DialectRegistry &registry) {
+inline void
+registerAllDialects(mlir::DialectRegistry &registry,
+                    OnnxDialectKind onnxDialect = OnnxDialectKind::Stub) {
   registry.insert<mlir::BuiltinDialect>();
+  registry.insert<mlir::affine::AffineDialect>();
   registry.insert<mlir::arith::ArithDialect>();
+  registry.insert<mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::func::FuncDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
   registry.insert<mlir::scf::SCFDialect>();
+  registry.insert<mlir::shape::ShapeDialect>();
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::linalg::LinalgDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
+  registry.insert<mlir::ub::UBDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
-  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
-  registry.insert<detail::OnnxStubDialect>();
+
+  registerConvertToLLVMInterfaces(registry);
+
+  if (onnxDialect == OnnxDialectKind::Modeled) {
+    registry.insert<mlir::onnx::OnnxDialect>();
+  } else {
+    registry.insert<detail::OnnxStubDialect>();
+  }
+
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The built-in pipeline omits ownership-based buffer deallocation, but the
   // pass remains available to custom pipelines and characterization tests.
@@ -109,9 +144,11 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
 /// when no plugin contributes a dialect. Callers (e.g. CompilerDriver) invoke
 /// `dispatchPluginRegistrationsOnce()` before this; the accessor is
 /// also defensively idempotent.
-inline void loadAllDialects(mlir::MLIRContext &context) {
+inline void
+loadAllDialects(mlir::MLIRContext &context,
+                OnnxDialectKind onnxDialect = OnnxDialectKind::Stub) {
   mlir::DialectRegistry registry;
-  registerAllDialects(registry);
+  registerAllDialects(registry, onnxDialect);
   for (auto registerFn : pluginDialectRegistrations())
     registerFn(registry);
   context.appendDialectRegistry(registry);

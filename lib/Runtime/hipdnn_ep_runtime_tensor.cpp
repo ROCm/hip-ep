@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <unordered_map>
 #include <vector>
 
@@ -24,13 +25,22 @@ static constexpr size_t kDefaultElementSize = 4;
 //   Compute = time for main_graph GPU kernel dispatches
 //   D2H  = time for all device-to-host async copies + stream sync
 //
-// Phase boundaries are detected by tracking the first call to each function
-// type in the per-inference sequence:
-//   prepare_input(0)  -> H2D start
-//   prepare_output(0) -> H2D end / compute start
-//   finalize_output(0)-> compute end / D2H start
-//   stream_sync()     -> D2H end, then log results
-
+// Phase boundaries are derived from the calls the generated main_graph
+// actually makes (see GenerateInterface.cpp), which under the output-allocator
+// ABI is only prepare_input and stream_sync:
+//   prepare_input(0)   -> H2D start
+//   prepare_input(last) -> H2D end / compute start
+//   finalize_output(first) -> compute end / D2H start, when the legacy
+//                             host-output path runs at all
+//   stream_sync()      -> D2H end, then log results
+//
+// Every span must have both of its events recorded before it is queried:
+// hipEventElapsedTime on an unrecorded event returns
+// hipErrorInvalidResourceHandle, and HIP holds that error in the last-error
+// slot until something reads it -- which means the next custom kernel's
+// post-launch hipGetLastError() reports it as its own launch failure. The
+// *_recorded flags below make the "both events recorded" invariant explicit
+// rather than implied by which callbacks happen to fire.
 struct PerfState {
   hipEvent_t h2d_start = nullptr;
   hipEvent_t h2d_end = nullptr;
@@ -42,6 +52,8 @@ struct PerfState {
   size_t d2h_count = 0;
   unsigned inference_num = 0;
   bool initialized = false;
+  bool h2d_end_recorded = false;
+  bool d2h_start_recorded = false;
 };
 static PerfState g_perf;
 
@@ -81,6 +93,53 @@ static void perf_ensure_events() {
     return;
   }
   g_perf.initialized = true;
+}
+
+// Resolve the three phase spans of the inference that just drained.
+//
+// Both callers go through here because the HIP last-error slot must be left
+// clean: an error stays there until it is read, so a failed event query would
+// otherwise surface as a bogus "launch failed" from the next kernel that
+// checks after its launch. Any error already pending on entry belongs to the
+// inference that just ran, so it is reported here instead of being silently
+// overwritten by the queries below.
+static void perf_resolve_spans(float *h2d_ms, float *compute_ms,
+                               float *d2h_ms) {
+  hipError_t pending = hipGetLastError();
+  if (pending != hipSuccess)
+    fprintf(stderr,
+            "[PERF] WARNING: HIP error pending at inference boundary: "
+            "%s\n",
+            hipGetErrorString(pending));
+
+  struct Span {
+    const char *name;
+    hipEvent_t start;
+    hipEvent_t end;
+    float *out;
+    bool *warned; // warn once per span: a broken span fails every inference
+  };
+
+  static bool warnedH2D = false, warnedCompute = false, warnedD2H = false;
+  for (const Span &span :
+       {Span{"H2D", g_perf.h2d_start, g_perf.h2d_end, h2d_ms, &warnedH2D},
+        Span{"Compute", g_perf.h2d_end, g_perf.d2h_start, compute_ms,
+             &warnedCompute},
+        Span{"D2H", g_perf.d2h_start, g_perf.d2h_end, d2h_ms, &warnedD2H}}) {
+    // hipEventElapsedTime leaves the output untouched on failure.
+    *span.out = 0.0f;
+    hipError_t err = hipEventElapsedTime(span.out, span.start, span.end);
+    if (err == hipSuccess)
+      continue;
+    if (!*span.warned) {
+      *span.warned = true;
+      fprintf(stderr,
+              "[PERF] WARNING: %s span unavailable (%s); it will read "
+              "0.00 ms\n",
+              span.name, hipGetErrorString(err));
+    }
+    (void)hipGetLastError();
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -413,9 +472,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     if (g_perf.initialized && g_perf.inference_num > 0) {
       (void)hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
       float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-      (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-      (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-      (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+      perf_resolve_spans(&h2d_ms, &compute_ms, &d2h_ms);
       const float total_ms = h2d_ms + compute_ms + d2h_ms;
       RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB | "
                        "D2H %zut/%.1fMB | Total %.2fms\n",
@@ -432,6 +489,8 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     g_perf.h2d_count = 0;
     g_perf.d2h_bytes = 0;
     g_perf.d2h_count = 0;
+    g_perf.h2d_end_recorded = false;
+    g_perf.d2h_start_recorded = false;
     (void)hipEventRecord(g_perf.h2d_start,
                          static_cast<hipStream_t>(state->stream));
     op_profile_reset(static_cast<OpProfileState *>(state->op_profile));
@@ -464,6 +523,18 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   out_buffer->is_pooled = false;
   out_buffer->is_aliased = alias_caller_buffer;
 
+  // PERF: close the H2D window after every input (last one wins). The
+  // generated main_graph gives us no end-of-marshalling hook -- the same
+  // reason the flush above piggy-backs on prepare_input(0) -- so re-recording
+  // is how the event ends up after the last H2D copy. Re-recording is cheap
+  // and, unlike gating on "is this the last input?", it cannot leave the event
+  // unrecorded and make the H2D/Compute queries fail.
+  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
+    (void)hipEventRecord(g_perf.h2d_end,
+                         static_cast<hipStream_t>(state->stream));
+    g_perf.h2d_end_recorded = true;
+  }
+
   check_gcnarch("AFTER prepare_input");
   return HIPDNN_EP_SUCCESS;
 }
@@ -491,9 +562,13 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   // PERF: record D2H start on first output finalize (after all compute).
   // We always record, even on the alias fast path, so the [PERF] D2H window
   // is well-defined; aliased outputs just don't add bytes to the accumulator.
-  if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
+  // Gating on the flag rather than on d2h_count keeps "first finalize" honest
+  // when every output takes the alias fast path and never bumps the counter.
+  if (hipdnn_ep_perf_enabled() && !g_perf.d2h_start_recorded &&
+      g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_start,
                          static_cast<hipStream_t>(state->stream));
+    g_perf.d2h_start_recorded = true;
   }
 
   // D2H transfer (async -- sync happens once after all outputs).
@@ -550,10 +625,24 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
-  // PERF: record D2H end event (after all D2H copies queued)
+  // PERF: close any window the callbacks above left open, then record D2H end
+  // (after all D2H copies queued). Under the output-allocator ABI the
+  // generated graph calls only prepare_input and stream_sync -- outputs are
+  // runtime-owned, so finalize_output never runs and would otherwise leave
+  // d2h_start unrecorded, collapsing the Compute and D2H spans into failed
+  // queries. Recording here makes Compute span the whole kernel sequence and
+  // D2H degenerate (~0), which is the truth when nothing is copied back.
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
-    (void)hipEventRecord(g_perf.d2h_end,
-                         static_cast<hipStream_t>(state->stream));
+    hipStream_t stream = static_cast<hipStream_t>(state->stream);
+    if (!g_perf.h2d_end_recorded) {
+      (void)hipEventRecord(g_perf.h2d_end, stream);
+      g_perf.h2d_end_recorded = true;
+    }
+    if (!g_perf.d2h_start_recorded) {
+      (void)hipEventRecord(g_perf.d2h_start, stream);
+      g_perf.d2h_start_recorded = true;
+    }
+    (void)hipEventRecord(g_perf.d2h_end, stream);
   }
 
   if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
@@ -565,12 +654,12 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
   // PERF: compute and log timing breakdown
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-    (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-    (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-    (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+    perf_resolve_spans(&h2d_ms, &compute_ms, &d2h_ms);
     float total_ms = h2d_ms + compute_ms + d2h_ms;
 
-    g_perf.inference_num++;
+    // inference_num is owned by the window-opening side (prepare_input), so
+    // this line and the one-line flush of the same inference agree instead of
+    // reporting two numbers two apart.
     fprintf(stderr,
             "[PERF] inference #%u:\n"
             "  H2D:     %zu tensors, %zu bytes (%.1f MB), %.2f ms\n"

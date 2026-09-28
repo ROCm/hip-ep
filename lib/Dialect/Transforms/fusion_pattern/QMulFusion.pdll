@@ -1,0 +1,65 @@
+//===- QMulFusion.pdll ----------------------------------------------------===//
+//
+// HIP-to-HIP fusion of a dequantize/mul/quantize chain into hip.qmul.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Pattern HipQMul with benefit(10) {
+  // Same chain shape as QAddFusion.pdll, which explains the single `ctx`
+  // binding and the trailing ValueRange that absorbs the optional zero point.
+  let dq_lhs = op<hip.dequantize_linear>(ctx: Value, lhs: Value,
+                                         lhs_scale: Value,
+                                         lhs_tail: ValueRange);
+  let dq_rhs = op<hip.dequantize_linear>(ctx, rhs: Value, rhs_scale: Value,
+                                         rhs_tail: ValueRange);
+
+  let mul = op<hip.mul>(ctx, dq_lhs.0, dq_rhs.0, mul_init: Value);
+
+  let q = op<hip.quantize_linear>(ctx, mul.0, output_scale: Value,
+                                  output_tail: ValueRange)
+      -> (output_type: Type);
+
+  // Fusability only. Every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero), because
+  // hip.qmul carries them as scalar attributes.
+  // todo: per-axis scale not support yet
+  IsHipSplatScale(lhs_scale);
+  IsHipSplatScale(rhs_scale);
+  IsHipSplatScale(output_scale);
+  HasExtractableQdqZeropoint(dq_lhs);
+  HasExtractableQdqZeropoint(dq_rhs);
+  HasExtractableQdqZeropoint(q);
+  // hip.mul's init already carries the fused result's shape, so it is the
+  // shape source for hip.qmul's own init.
+  CanBuildInit(output_type, mul_init);
+  // A second consumer of the float product would keep the dequantize/mul chain
+  // alive beside hip.qmul, so the graph would compute the product twice. The
+  // dequantize results are deliberately not constrained: a shared dequantize
+  // feeding several elementwise ops still fuses, it just survives for its
+  // other users.
+  HasSingleUseResult(mul);
+
+  // The two operand scales stay separate; the HipToLLVM lowering collapses
+  // them into the single coefficient the kernel consumes.
+  rewrite q with {
+    let lhs_scale_attr = ExtractHipSplatScale(lhs_scale);
+    let rhs_scale_attr = ExtractHipSplatScale(rhs_scale);
+    let output_scale_attr = ExtractHipSplatScale(output_scale);
+    let lhs_zp_attr = ExtractHipQdqZeropoint(dq_lhs, attr<"0 : i64">);
+    let rhs_zp_attr = ExtractHipQdqZeropoint(dq_rhs, attr<"0 : i64">);
+    let output_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+
+    let init = BuildInit(output_type, mul_init);
+    let qmul = op<hip.qmul>(ctx, lhs, rhs, init) {
+      lhs_scale = lhs_scale_attr,
+      rhs_scale = rhs_scale_attr,
+      output_scale = output_scale_attr,
+      lhs_zp = lhs_zp_attr,
+      rhs_zp = rhs_zp_attr,
+      output_zp = output_zp_attr
+    } -> (output_type);
+    replace q with qmul;
+  };
+}

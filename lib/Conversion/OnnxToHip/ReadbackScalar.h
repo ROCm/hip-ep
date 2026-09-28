@@ -93,6 +93,20 @@ inline mlir::Value readbackShapeEntryToHost(mlir::OpBuilder &b,
   if (mlir::DenseElementsAttr dense = getConstantDense(shape))
     if (idx < dense.getNumElements())
       return materializeConstScalar(b, loc, dense, elemTy, idx);
+
+  // ReshapeShapeFold may already have a host tensor.from_elements of
+  // tensor.dim values. Peel tensor.cast and forward that SSA so the extent
+  // is not copied to the device and read back.
+  mlir::Value shapeSource = shape;
+  while (auto castOp = shapeSource.getDefiningOp<mlir::tensor::CastOp>())
+    shapeSource = castOp.getSource();
+  if (auto fromElements =
+          shapeSource.getDefiningOp<mlir::tensor::FromElementsOp>()) {
+    auto elements = fromElements.getElements();
+    if (idx >= 0 && idx < static_cast<int64_t>(elements.size()))
+      return elements[idx];
+  }
+
   llvm::SmallVector<mlir::OpFoldResult> offsets{b.getIndexAttr(idx)};
   llvm::SmallVector<mlir::OpFoldResult> sizes{b.getIndexAttr(1)};
   llvm::SmallVector<mlir::OpFoldResult> strides{b.getIndexAttr(1)};

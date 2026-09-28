@@ -119,21 +119,24 @@ token. Fuzzy and Fallback still answer if some caller does hand one a wide M.
 ## Embedding
 
 Only `lut/<arch>.fb` ships. `lib/Runtime/Kernels/CMakeLists.txt` turns it into
-the `kMatmulNbitsLutData[]` symbol linked into `custom_kernels_<arch>` using
+the `kMatmulNbitsLutBlobs[]` symbol linked into `custom_kernels_<arch>` using
 pure CMake (`file(READ ... HEX)`) — no Python, and no generated `.cpp` is
 committed (the compiled array is exactly the `.fb`'s bytes, ~40 KB; the source
 text is not). This is per-arch, not in `runtime.bc` the way the GQA table is, so
 each DLL carries exactly the table it can use. flatbuffers is header-only for
 reading, so this adds an include path and no link dependency.
 
-An arch with no measured `.fb` still builds — CMake falls back to
-`tools/empty_lut_data.cpp`, the loader finds no table, and every shape falls
-through to the sweep. Adding an arch is a table addition (a `.fb`), never a
-build break.
+An arch with no measured `.fb` still builds — `_emit_lut_registry` emits an
+empty registry (`kMatmulNbitsLutBlobs` with count 0), the loader finds no table,
+and every shape falls through to the sweep. Adding an arch is a table addition (a
+`.fb`), never a build break.
 
 `HIPDNN_MATMUL_LUT_LOG=1` logs load status, per-lookup tier hits, and misses.
 `HIPDNN_MATMUL_AUTOTUNE_MODE=online` bypasses the table and runs the in-kernel
-autotune sweep instead (default `lookup` uses the table).
+autotune sweep instead (default `lookup` uses the table); the
+`matmul_autotune_mode` provider option selects the same thing at lower
+precedence, and the mode is latched process-wide by whichever session resolves
+it first.
 `HIPDNN_MATMUL_AUTOTUNE_LOG=1` logs the in-kernel tuner's decisions — every
 candidate's timing, the winning config's full geometry, LUT hits, and the
 cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only covers

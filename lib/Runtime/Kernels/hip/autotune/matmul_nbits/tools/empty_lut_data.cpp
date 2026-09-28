@@ -14,5 +14,6 @@
  */
 #include <cstddef>
 
-extern "C" const unsigned char kMatmulNbitsLutData[1] = {0};
-extern "C" const size_t kMatmulNbitsLutData_size = 0;
+extern "C" const unsigned char* const kMatmulNbitsLutBlobs[1] = {nullptr};
+extern "C" const size_t kMatmulNbitsLutBlobSizes[1] = {0};
+extern "C" const size_t kMatmulNbitsLutBlobCount = 0;

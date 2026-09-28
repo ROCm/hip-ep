@@ -28,12 +28,18 @@
 
 // Example `make direct` has no CMake FlatBuffers LUT. Empty resolve()
 // lets the kernel link and fall back to its runtime sweep.
+//
+// HIPDNN_LUT_LINKED_EXTERNALLY is defined by the `lut` build (see Makefile)
+// when the real matmul_nbits_autotune.cpp + a hex-embedded lut/<arch>.fb are
+// linked in instead, so this stub must not also define these symbols.
+#ifndef HIPDNN_LUT_LINKED_EXTERNALLY
 namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
+#endif
 
 #include <iostream>
 #include <fstream>

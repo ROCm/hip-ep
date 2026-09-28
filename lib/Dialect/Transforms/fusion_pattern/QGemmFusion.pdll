@@ -1,0 +1,333 @@
+//===- QGemmFusion.pdll ---------------------------------------------------===//
+//
+// HIP-to-HIP fusion of a dequantize/gemm/quantize chain into hip.qgemm.
+//
+// Included by HipFusionTransformPatterns.pdll, which declares the native
+// helpers used below. Not compilable on its own.
+//
+// Two independent binary choices each need their own pattern, because a PDLL
+// operand list matches an exact arity and a rewrite cannot branch:
+//
+//   * The bias C is optional. Omitting it is what makes `beta` and the C
+//     quantization attributes irrelevant, so those stay unset there.
+//   * B may be quantized per tensor or per output feature. Per tensor folds
+//     into the B_scale / B_zero_point attributes; per feature stays in the
+//     B_scales / B_zero_points operands, one value per N.
+//
+// That is four patterns, and the per-feature two carry a LOWER benefit so
+// that a per-axis weight whose scales happen to be splat still takes the
+// per-tensor path, where the coefficient folds to a scalar instead of costing
+// a load per output.
+//
+// Both weight widths share one pattern per bias form: hip.qgemm spells the
+// width as the plain integer B_bits, which a rewrite can compute, rather than
+// as a unit marker that only an `op<>` literal could carry.
+//
+// hip.qgemm has more than one optional operand group, so it needs
+// AttrSizedOperandSegments, and PDL does not synthesize the segment sizes the
+// way an ODS builder would. Each rewrite writes them out; the entries follow
+// the operand declaration order ctx, A, B, B_scales, B_zero_points, C, Y.
+//===----------------------------------------------------------------------===//
+
+// ===== Per-tensor B, with bias =====
+Pattern HipQGemm with benefit(10) {
+  // hip.dequantize_linear x3 -> hip.gemm -> hip.quantize_linear.
+  //
+  // !hip.context is operand 0 of every hip op, so binding `ctx` once ties the
+  // whole chain to a single context.
+  //
+  // The trailing ValueRange absorbs the operands past the scale: the zero
+  // point is optional, so the DPS init lands at a different index depending on
+  // whether it is present. Which is which is resolved by the native helpers
+  // through the ODS accessors.
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scale: Value,
+                                       b_tail: ValueRange);
+  let dq_c = op<hip.dequantize_linear>(ctx, c: Value, c_scale: Value,
+                                       c_tail: ValueRange);
+
+  // A16W8, A8W8 and their 4-bit-weight variants. The bound on A is that the
+  // kernel splits only A into byte planes, so a 16-bit A stays exact while a
+  // 16-bit B would have no path through it. A 4-bit B is 8-bit STORAGE holding
+  // two nibbles per byte, so it passes the same check and is told apart by
+  // ExtractHipQdqValueBits below. The bias is read straight out of memory and
+  // may additionally be the int32 an ONNX quantizer emits at
+  // c_scale = a_scale * b_scale.
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
+  IsHipQdqQuantizedWidth(dq_c, attr<"[8, 16, 32]">);
+
+  // Five operands: hip.gemm is DPS and its C is present here, so the init
+  // trails both.
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, dq_c.0, gemm_init: Value);
+
+  let q = op<hip.quantize_linear>(ctx, gemm.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  // Fusability only. Every scale must be a per-tensor splat constant and every
+  // zero point must be readable (or absent, which means zero), because this
+  // form of hip.qgemm carries them as scalar attributes.
+  // todo: per-axis scale not support yet
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(b_scale);
+  IsHipSplatScale(c_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(dq_b);
+  HasExtractableQdqZeropoint(dq_c);
+  HasExtractableQdqZeropoint(q);
+  // hip.gemm's init already carries the fused result's shape, so it is the
+  // shape source for hip.qgemm's own init.
+  CanBuildInit(y_type, gemm_init);
+  // A second consumer of the float product would keep the dequantize/gemm
+  // chain alive beside hip.qgemm, so the graph would compute the product
+  // twice. The dequantize results are deliberately not constrained: a shared
+  // dequantize feeding several ops still fuses, it just survives for its
+  // other users.
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let b_scale_attr = ExtractHipSplatScale(b_scale);
+    let c_scale_attr = ExtractHipSplatScale(c_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let b_zp_attr = ExtractHipQdqZeropoint(dq_b, attr<"0 : i64">);
+    let c_zp_attr = ExtractHipQdqZeropoint(dq_c, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    let b_bits_attr = ExtractHipQdqValueBits(dq_b);
+
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let beta_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, gemm_init);
+    let qgemm = op<hip.qgemm>(ctx, a, b, c, init) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 1, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zp_attr,
+      B_bits = b_bits_attr,
+      C_scale = c_scale_attr,
+      C_zero_point = c_zp_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      alpha = alpha_attr,
+      beta = beta_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace q with qgemm;
+  };
+}
+
+// ===== Per-tensor B, bias-free =====
+//
+// The pattern above with C dropped: four operands on hip.gemm instead of five,
+// and beta / C_scale / C_zero_point left unset rather than carrying a value
+// the fused op would ignore.
+Pattern HipQGemmNoBias with benefit(10) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scale: Value,
+                                       b_tail: ValueRange);
+
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
+
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
+
+  let q = op<hip.quantize_linear>(ctx, gemm.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  // todo: per-axis scale not support yet
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(b_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(dq_b);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(y_type, gemm_init);
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let b_scale_attr = ExtractHipSplatScale(b_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let b_zp_attr = ExtractHipQdqZeropoint(dq_b, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    let b_bits_attr = ExtractHipQdqValueBits(dq_b);
+
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, gemm_init);
+    let qgemm = op<hip.qgemm>(ctx, a, b, init) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 0, 0, 0, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      B_scale = b_scale_attr,
+      B_zero_point = b_zp_attr,
+      B_bits = b_bits_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      alpha = alpha_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace q with qgemm;
+  };
+}
+
+// ===== Per-output-feature B, with bias =====
+//
+// Unlike the per-tensor patterns, the weight scale and zero point hold one
+// value per N and arrive as external constants whose bytes are not in the IR,
+// so there is nothing to fold -- the kernel has to index them by N.
+Pattern HipQGemmPerChannelWeight with benefit(9) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  // Five operands pin the zero point as present, because without it the DPS
+  // init would occupy that slot and the op would be four operands wide. The
+  // per-feature form passes the weight scale and zero point straight through
+  // to hip.qgemm; `b_init` is bound only to make the arity exact.
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scales: Value,
+                                       b_zero_points: Value, b_init: Value);
+  let dq_c = op<hip.dequantize_linear>(ctx, c: Value, c_scale: Value,
+                                       c_tail: ValueRange);
+
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_c, attr<"[8, 16, 32]">);
+
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, dq_c.0, gemm_init: Value);
+  // transB is what decides whether N is B's last axis or the one before it, so
+  // the weight's quantized axis only means something relative to its consumer.
+  // B's width is checked there too, which is why there is no separate width
+  // constraint on dq_b here.
+  IsHipPerChannelQuantizedWeight(dq_b, gemm);
+
+  let q = op<hip.quantize_linear>(ctx, gemm.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  // Activation, bias and result quantization must be per-tensor for their
+  // scales to fold into single coefficients; the weight side is deliberately
+  // exempt.
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(c_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(dq_c);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(y_type, gemm_init);
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let c_scale_attr = ExtractHipSplatScale(c_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let c_zp_attr = ExtractHipQdqZeropoint(dq_c, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    let b_bits_attr = ExtractHipQdqValueBits(dq_b);
+
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let beta_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"beta\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, gemm_init);
+    // B_scale / B_zero_point stay unset: the operands replace them, and their
+    // identity defaults are what keep the folded coefficient free of B.
+    let qgemm = op<hip.qgemm>(ctx, a, b, b_scales, b_zero_points, c, init) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 1, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      B_bits = b_bits_attr,
+      C_scale = c_scale_attr,
+      C_zero_point = c_zp_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      alpha = alpha_attr,
+      beta = beta_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace q with qgemm;
+  };
+}
+
+// ===== Per-output-feature B, bias-free =====
+Pattern HipQGemmNoBiasPerChannelWeight with benefit(9) {
+  let dq_a = op<hip.dequantize_linear>(ctx: Value, a: Value, a_scale: Value,
+                                       a_tail: ValueRange);
+  let dq_b = op<hip.dequantize_linear>(ctx, b: Value, b_scales: Value,
+                                       b_zero_points: Value, b_init: Value);
+
+  IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+
+  let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
+  IsHipPerChannelQuantizedWeight(dq_b, gemm);
+
+  let q = op<hip.quantize_linear>(ctx, gemm.0, y_scale: Value,
+                                  y_tail: ValueRange)
+      -> (y_type: Type);
+  IsHipQdqQuantizedWidth(q, attr<"[8, 16]">);
+
+  IsHipSplatScale(a_scale);
+  IsHipSplatScale(y_scale);
+  HasExtractableQdqZeropoint(dq_a);
+  HasExtractableQdqZeropoint(q);
+  CanBuildInit(y_type, gemm_init);
+  HasSingleUseResult(gemm);
+
+  rewrite q with {
+    let a_scale_attr = ExtractHipSplatScale(a_scale);
+    let y_scale_attr = ExtractHipSplatScale(y_scale);
+    let a_zp_attr = ExtractHipQdqZeropoint(dq_a, attr<"0 : i64">);
+    let y_zp_attr = ExtractHipQdqZeropoint(q, attr<"0 : i64">);
+    let b_bits_attr = ExtractHipQdqValueBits(dq_b);
+
+    let alpha_attr =
+        ExtractHipFloatAttr(gemm, attr<"\"alpha\"">, attr<"1.0 : f32">);
+    let trans_a_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transA\"">, attr<"0 : i64">);
+    let trans_b_attr =
+        ExtractHipIntAttr(gemm, attr<"\"transB\"">, attr<"0 : i64">);
+
+    let init = BuildInit(y_type, gemm_init);
+    let qgemm = op<hip.qgemm>(ctx, a, b, b_scales, b_zero_points, init) {
+      operandSegmentSizes = attr<"array<i32: 1, 1, 1, 1, 1, 0, 1>">,
+      A_scale = a_scale_attr,
+      A_zero_point = a_zp_attr,
+      B_bits = b_bits_attr,
+      Y_scale = y_scale_attr,
+      Y_zero_point = y_zp_attr,
+      alpha = alpha_attr,
+      transA = trans_a_attr,
+      transB = trans_b_attr
+    } -> (y_type);
+    replace q with qgemm;
+  };
+}

@@ -61,8 +61,12 @@ std::vector<char> readAt(const std::filesystem::path &file, int64_t offset,
 // Verifies an in-memory constants file `blob` against the ops (in walk order)
 // and their expected bytes, driven by the offset/size stamped on each op: the
 // data at each stamped offset must be that constant's bytes, sizes must match,
-// offsets must be 64-aligned / monotonic / non-overlapping, gap and trailing
-// bytes zero, and the total length the aligned end of the last constant.
+// offsets must be 64-aligned / monotonic / non-overlapping, gap bytes zero,
+// and the total length exactly the end of the last constant.
+//
+// The file stops at that end rather than padding to the next 64-byte boundary
+// because the runtime sizes its VRAM blob from the metadata as
+// max(offset + size) and copies the whole file into it.
 void verifyLayout(const std::vector<char> &blob,
                   const std::vector<mlir::hipsr::ConstantOp> &ops,
                   const std::vector<std::vector<char>> &expected,
@@ -116,10 +120,9 @@ void verifyLayout(const std::vector<char> &blob,
   check(len, label + ": each stamped size == data length");
   check(layout, label + ": offsets 64-aligned, monotonic, non-overlapping");
   check(bytes, label + ": data at each stamped offset matches");
-  check(gaps, label + ": gap and trailing bytes are zero");
-  check(static_cast<int64_t>(blob.size()) ==
-            llvm::alignTo(lastOffset + lastSize, 64),
-        label + ": blob length == aligned total");
+  check(gaps, label + ": gap bytes are zero");
+  check(static_cast<int64_t>(blob.size()) == lastOffset + lastSize,
+        label + ": blob length == end of last constant");
 }
 
 class CapturingFileSystem : public morphizen::FileSystem {
@@ -220,14 +223,11 @@ void testInlineValueBytesWritten() {
   check(c && c.getSizeAttr() && c.getSizeAttr().getInt() == 4,
         "inline: size == 4");
 
-  // The blob is padded up to the 64-byte aligned total, so 4 data bytes at the
-  // start followed by zeros.
   const std::vector<char> &blob = fs.files["constants.bin"];
-  check(blob.size() == 64, "inline: blob padded to 64");
-  check(blob.size() == 64 && static_cast<uint8_t>(blob[0]) == 10 &&
-            static_cast<uint8_t>(blob[3]) == 40 &&
-            static_cast<uint8_t>(blob[4]) == 0,
-        "inline: blob bytes match dense value, rest zero");
+  check(blob.size() == 4, "inline: blob is exactly the constant");
+  check(blob.size() == 4 && static_cast<uint8_t>(blob[0]) == 10 &&
+            static_cast<uint8_t>(blob[3]) == 40,
+        "inline: blob bytes match dense value");
 }
 
 void testMemResourceBytesWritten() {
@@ -249,8 +249,8 @@ void testMemResourceBytesWritten() {
   }
 
   const std::vector<char> &blob = fs.files["constants.bin"];
-  check(blob.size() == 64, "mem resource: blob padded to 64");
-  check(blob.size() == 64 && static_cast<uint8_t>(blob[0]) == 50 &&
+  check(blob.size() == 3, "mem resource: blob is exactly the constant");
+  check(blob.size() == 3 && static_cast<uint8_t>(blob[0]) == 50 &&
             static_cast<uint8_t>(blob[2]) == 70,
         "mem resource: blob bytes copied from the pointed-at memory");
 }
@@ -280,17 +280,16 @@ void testFileResourceBytesStreamed() {
   check(ok, "file resource: pass succeeds");
 
   const std::vector<char> &blob = fs.files["constants.bin"];
-  check(blob.size() == 64, "file resource: blob padded to 64");
-  check(blob.size() == 64 && static_cast<uint8_t>(blob[0]) == 1 &&
+  check(blob.size() == 5, "file resource: blob is exactly the constant");
+  check(blob.size() == 5 && static_cast<uint8_t>(blob[0]) == 1 &&
             static_cast<uint8_t>(blob[4]) == 5,
         "file resource: blob bytes streamed from file");
 
   std::filesystem::remove(path);
 }
 
-// Two constants: the second is padded to the next 64-byte boundary, and the
-// blob is padded up to the aligned total. Checks alignment + gap/trailing
-// zeros.
+// Two constants: the second starts on the next 64-byte boundary, leaving a gap
+// after the first. Checks alignment + gap zeros.
 void testCumulativeAlignmentAndPadding() {
   Harness h;
   CapturingFileSystem fs;
@@ -502,11 +501,11 @@ void testOffsetDrivenReadBack() {
   check(layoutOk, "readback: offsets 64-aligned, monotonic, non-overlapping");
   check(bytesOk, "readback: bytes at each stamped offset match source data");
 
-  // Total file length is the aligned end of the last constant (derived, not
+  // Total file length is the end of the last constant (derived, not
   // hardcoded).
   auto fileLen = static_cast<int64_t>(fs::file_size(constantsFile, ec));
-  check(!ec && fileLen == llvm::alignTo(lastOffset + lastSize, 64),
-        "readback: constants-file length == aligned total");
+  check(!ec && fileLen == lastOffset + lastSize,
+        "readback: constants-file length == end of last constant");
 
   fs::remove_all(dir, ec);
 }

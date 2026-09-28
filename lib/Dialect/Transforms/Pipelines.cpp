@@ -129,6 +129,9 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
+  // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
+  pm.addPass(mlir::hip::createHipFusionTransformPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing
