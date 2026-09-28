@@ -18,6 +18,24 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# hip-ep never wants MLIR's ROCm runner: it links the rock tuning libraries
+# directly and uses neither rocmlir-tuning-driver nor the perf scripts. Left
+# on, it breaks the configure outright -- rocMLIR then adds
+# mlir/utils/performance, which hard-errors unless the amd_arch_db target
+# exists, and that only mlir/test defines (disabled below, since its
+# common_utils imports pip pybind11 at configure time). MLIR's own
+# ExecutionEngine also errors out looking for rocm_agent_enumerator.
+#
+# Set here, ahead of every add_subdirectory below, and with FORCE: rocMLIR's
+# top-level CMakeLists turns this on via a plain `set(... CACHE ...)`, which is
+# a no-op only if the entry already exists. That makes the failure depend
+# purely on which subproject reaches the cache entry first -- an external-LLVM
+# build (CI) breaks while an embedded one, where MLIR seeds it OFF, quietly
+# works. Claiming the entry up front removes the ordering from the picture.
+if(ENABLE_ROCMLIRTRITON)
+  set(MLIR_ENABLE_ROCM_RUNNER OFF CACHE BOOL "" FORCE)
+endif()
+
 # Local patches applied to the fetched rocmlirTriton checkout, each temporary
 # until upstreamed and the rocmlirtriton pin is bumped:
 #   - rocmlirTriton-use-external-LLVM.patch: skip its in-tree LLVM build when
