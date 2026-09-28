@@ -172,7 +172,9 @@
     mlir-register-conversion-pattern
 
     ;; Dynamic builder context — shared by pattern-codegen and with-mlir-ops
-    current-mlir-build-fn
+    current-builder           ; callable (loc name ops types [nregions]) → op
+    current-loc               ; Operation* used as location source
+    current-mlir-build-fn     ; callable (name ops types [nregions]) → op (legacy, wraps current-builder)
     with-current-mlir-builder
     with-current-block-builder
 
@@ -849,35 +851,49 @@
   ;; Install with with-current-mlir-builder (top-level rewrite, RewriterBase*)
   ;; or with-current-block-builder (region body, fresh OpBuilder*).
   ;;
-  ;; current-mlir-build-fn: (name operands types [nregions]) → op-ptr
-  ;; nregions defaults to 0; pass it to pre-allocate region slots.
+  ;; current-builder: callable (loc name ops types [nregions]) → op
+  ;; current-loc:     Operation* used as location source for created ops
+  ;;
+  ;; Both are set together by with-current-mlir-builder and with-current-block-builder.
+  ;; current-mlir-build-fn is the old (name ops types [nregions]) → op parameter kept
+  ;; for backward compat with with-mlir-ops; it wraps current-builder + current-loc.
 
+  (define current-builder     (make-parameter #f))
+  (define current-loc         (make-parameter #f))
   (define current-mlir-build-fn (make-parameter #f))
 
   (define-syntax with-current-mlir-builder
     (syntax-rules ()
       [(_ (rw loc) body ...)
        (let ([rw_ rw] [loc_ loc])
-         (parameterize ([current-mlir-build-fn
-                          (lambda (name ops types . rest)
-                            (let ([n (if (pair? rest) (car rest) 0)])
-                              (if (zero? n)
-                                  (mlir-build-op rw_ loc_ name ops types)
-                                  (mlir-build-op-with-regions rw_ loc_ name ops types n))))])
-           body ...))]))
+         (let ([build-fn (lambda (name ops types . rest)
+                           (let ([n (if (pair? rest) (car rest) 0)])
+                             (if (zero? n)
+                                 (mlir-build-op rw_ loc_ name ops types)
+                                 (mlir-build-op-with-regions rw_ loc_ name ops types n))))])
+           (parameterize ([current-loc loc_]
+                          [current-builder
+                            (lambda (l name ops types . rest)
+                              (apply build-fn name ops types rest))]
+                          [current-mlir-build-fn build-fn])
+             body ...)))]))
 
   (define-syntax with-current-block-builder
     (syntax-rules ()
       [(_ (builder loc) body ...)
        (let ([b_ builder] [loc_ loc])
-         (parameterize ([current-mlir-build-fn
-                          (lambda (name ops types . rest)
-                            (let ([n (if (pair? rest) (car rest) 0)])
-                              (if (zero? n)
-                                  (mlir-build-op-in-block b_ loc_ name ops types)
-                                  (mlir-build-op-in-block-with-regions b_ loc_ name ops types n))))]
-                        [current-block-builder b_])  ; backward compat for (current-block-builder)
-           body ...))]))
+         (let ([build-fn (lambda (name ops types . rest)
+                           (let ([n (if (pair? rest) (car rest) 0)])
+                             (if (zero? n)
+                                 (mlir-build-op-in-block b_ loc_ name ops types)
+                                 (mlir-build-op-in-block-with-regions b_ loc_ name ops types n))))])
+           (parameterize ([current-loc loc_]
+                          [current-builder
+                            (lambda (l name ops types . rest)
+                              (apply build-fn name ops types rest))]
+                          [current-mlir-build-fn build-fn]
+                          [current-block-builder b_])  ; backward compat
+             body ...)))]))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Resource management
@@ -888,33 +904,31 @@
   ;;; :scheme escapes inside a region block call (current-block-builder) to get it.
   (define current-block-builder (make-parameter #f))
 
+  ;; Single-resource RAII: (with-raii (var ctor dtor) body ...)
   (define-syntax with-raii
     (syntax-rules ()
-      [(_ () body ...)
-       (begin body ...)]
-      [(_ ((val ctor dtor) rest ...) body ...)
-       (let ([val ctor])
-         (dynamic-wind
-           void
-           (lambda () (with-raii (rest ...) body ...))
-           (lambda () (dtor val))))]))
+      [(_ (var ctor dtor) body ...)
+       (let ([var ctor])
+         (dynamic-wind void
+           (lambda () body ...)
+           (lambda () (dtor var))))]))
 
   (define-syntax with-type-converter
     (syntax-rules ()
       [(_ (var) body ...)
-       (with-raii ((var (mlir-create-type-converter) mlir-destroy-type-converter))
+       (with-raii (var (mlir-create-type-converter) mlir-destroy-type-converter)
          body ...)]))
 
   (define-syntax with-conversion-target
     (syntax-rules ()
       [(_ (var ctx) body ...)
-       (with-raii ((var (mlir-create-conversion-target ctx) mlir-destroy-conversion-target))
+       (with-raii (var (mlir-create-conversion-target ctx) mlir-destroy-conversion-target)
          body ...)]))
 
   (define-syntax with-rewrite-pattern-set
     (syntax-rules ()
       [(_ (var ctx) body ...)
-       (with-raii ((var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set))
+       (with-raii (var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set)
          body ...)]))
 
 ) ;; end library (mlir ffi)
