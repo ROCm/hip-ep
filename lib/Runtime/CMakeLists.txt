@@ -123,9 +123,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
     endif()
 
-    find_package(hip QUIET)
+    find_package(hip CONFIG QUIET)
     if(NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
-        find_package(hipblaslt QUIET)
+        find_package(hipblaslt CONFIG QUIET)
     endif()
 
     if(DEFINED THEROCK_DIST)
