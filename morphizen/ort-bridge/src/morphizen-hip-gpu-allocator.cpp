@@ -153,13 +153,24 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   // stop aliasing p_cpu_ = p_device_ and instead route Zero / CopyDeviceToCpu
   // / CopyCpuToDevice through the HIP runtime. Tracked separately because
   // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
+  //
+  // NonCoherent (coarse-grained) rather than Coherent (fine-grained): the GPU
+  // cannot cache fine-grained memory, so every tensor handed out would be read
+  // past L2 on every access. Coarse-grained memory is host/device coherent at
+  // kernel-completion and synchronization boundaries only, which is all this
+  // EP needs -- the host never touches a buffer while GPU work on it is in
+  // flight (inference_compute ends in hipdnn_ep_stream_sync, and the
+  // HOST_ACCESSIBLE branch of CopyTensorsImpl below syncs before its memcpy).
+  // A future host access that races in-flight GPU work would read stale data
+  // instead of being saved by the memory type.
   void *ptr = nullptr;
-  hipError_t err = hipHostMalloc(&ptr, alloc_size,
-                                 hipHostMallocMapped | hipHostMallocCoherent);
+  hipError_t err = hipHostMalloc(
+      &ptr, alloc_size, hipHostMallocMapped | hipHostMallocNonCoherent);
   if (err != hipSuccess) {
-    LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
-               << alloc_size << " bytes (device " << self->device_id_
-               << "): " << hipGetErrorString(err);
+    LOG(ERROR)
+        << "[MorphiZen HIP] hipHostMalloc(Mapped|NonCoherent) failed for "
+        << alloc_size << " bytes (device " << self->device_id_
+        << "): " << hipGetErrorString(err);
     return nullptr;
   }
   {
@@ -373,7 +384,7 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
       // stream, but is necessary, not a performance bug:
       //
       //   * src_mem_type == HOST_ACCESSIBLE means the source buffer is our
-      //     hipHostMalloc(Mapped|Coherent) memory, which the GPU may have
+      //     hipHostMalloc(Mapped|NonCoherent) memory, which the GPU may have
       //     written to via an earlier hipMemcpyAsync H2D / kernel that was
       //     queued on `hip_stream`. Since that write is async, the host
       //     memcpy here would otherwise race the in-flight GPU write and
