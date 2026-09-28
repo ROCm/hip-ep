@@ -13,7 +13,7 @@
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
 
-#ifdef HIP_EP_HAS_ROCMLIR
+#ifdef ENABLE_ROCMLIRTRITON
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
@@ -69,7 +69,7 @@ bool hipsrPipelineRequested() {
 // honours HIPDNN_EP_ROCMLIR=0 as off, so a run can be forced back onto the
 // library path without unsetting the variable.
 bool rocMlirPipelineRequested() {
-#ifdef HIP_EP_HAS_ROCMLIR
+#ifdef ENABLE_ROCMLIRTRITON
   return hip_env_is_on("HIPDNN_EP_ROCMLIR");
 #else
   return false;
@@ -361,7 +361,7 @@ bool CompilerDriver::runMLIRPasses(
 
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
   } else if (rocMlirPipelineRequested()) {
-#ifdef HIP_EP_HAS_ROCMLIR
+#ifdef ENABLE_ROCMLIRTRITON
     // rocMLIR sits between the ONNX->HIP head and its tail: fuse-rocmlir
     // needs tensor-level HIP IR, and each kernel's compiled binary has to be
     // embedded in its hip.rocmlir dispatch before the tail bufferizes that op

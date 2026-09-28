@@ -10,6 +10,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/debug_log.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -32,7 +33,6 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 
-#include <cstdlib>
 #include <memory>
 
 namespace mlir {
@@ -140,9 +140,13 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
 } // namespace
 
 std::string resolveRocMlirArch() {
-  if (const char *env = std::getenv("ROCK_ARCH"))
-    if (env[0] != '\0')
-      return env;
+  // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
+  // called from CompilerDriver, and std::getenv there cannot see env vars set
+  // by the host process -- a ROCK_ARCH override would be silently dropped and
+  // every kernel built for the fallback arch below.
+  std::string arch = hip_get_env("ROCK_ARCH");
+  if (!arch.empty())
+    return arch;
   return "gfx1151";
 }
 
@@ -173,26 +177,19 @@ bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
   return extractCompiledKernel(kernelModule, out);
 }
 
-bool runRocMlirOnKernel(ModuleOp kernelModule, StringRef arch,
-                        bool stopAfterHighLevel, CompiledKernel &out) {
-  // 1. High-level pipeline: tosa -> rock.gemm.
-  {
-    PassManager pm(kernelModule.getContext());
-    pm.setNesting(PassManager::Nesting::Implicit);
-    rock::buildHighlevelPipeline(pm);
-    if (failed(pm.run(kernelModule)))
-      return false;
-  }
+bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
+  PassManager pm(kernelModule.getContext());
+  pm.setNesting(PassManager::Nesting::Implicit);
+  rock::buildHighlevelPipeline(pm);
+  return succeeded(pm.run(kernelModule));
+}
 
-  if (stopAfterHighLevel) {
-    llvm::raw_string_ostream os(out.highLevelMlir);
-    kernelModule.print(os);
-    return true;
-  }
-
-  // 2. Affix a perfConfig to the gemm op (the `perf_config` string attr).
-  //    Take the first entry enumerated from the tuning search space;
-  //    autotuning callers substitute their own compileOne instead.
+bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
+                                     CompiledKernel &out) {
+  // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
+  // the first entry enumerated from the tuning search space; autotuning
+  // callers substitute their own compileOne instead, which is why this is not
+  // folded into the backend call.
   llvm::SmallString<1024> perfConfig; // ROCMLIR_TUNING_PARAM_STRING_BUFSZ
   std::unique_ptr<rock::TuningParamSet> space(rock::createTunableParamSpace(
       kernelModule, rock::TuningParamSetKind::Full));
@@ -205,8 +202,21 @@ bool runRocMlirOnKernel(ModuleOp kernelModule, StringRef arch,
   if (!rock::tuningSetStr(kernelModule, perfConfig))
     return false;
 
-  // 3-4. Run the backend and extract the binary + launch geometry.
   return compileRocMlirBackend(kernelModule, arch, perfConfig, out);
+}
+
+bool runRocMlirOnKernel(ModuleOp kernelModule, StringRef arch,
+                        bool stopAfterHighLevel, CompiledKernel &out) {
+  if (!runRocMlirHighLevelPipeline(kernelModule))
+    return false;
+
+  if (stopAfterHighLevel) {
+    llvm::raw_string_ostream os(out.highLevelMlir);
+    kernelModule.print(os);
+    return true;
+  }
+
+  return compileRocMlirDefaultPerfConfig(kernelModule, arch, out);
 }
 
 SmallVector<std::string> collectRocMlirKernelNames(ModuleOp module) {
@@ -241,11 +251,19 @@ compileAndEmbedRocMlirKernels(ModuleOp module, ModuleOp tosaModule,
                    << "' (" << (index + 1) << " of " << kernelNames.size()
                    << ")\n";
 
+    // tosa -> rock happens here, not inside compileOne: the tuning entry
+    // points a custom compileOne uses (createTunableParamSpace, tuningSetStr)
+    // only see anything once the kernel is in rock form. Handing the callback
+    // raw tosa instead gave --autotune an empty search space.
+    if (!runRocMlirHighLevelPipeline(*single))
+      return module.emitError()
+             << "rocMLIR high-level pipeline failed for kernel '" << name
+             << "'";
+
     CompiledKernel &out = compiledByKernel[name];
     bool ok = options.compileOne
                   ? options.compileOne(*single, name, out)
-                  : runRocMlirOnKernel(*single, options.arch,
-                                       /*stopAfterHighLevel=*/false, out);
+                  : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
     if (!ok)
       return module.emitError()
              << "rocMLIR failed to compile kernel '" << name << "'";

@@ -615,6 +615,8 @@ int main(int argc, char **argv) {
   embedOpts.logPrefix = "[hip-rocmlir-compiler]";
   // --autotune replaces the default "first perfConfig" choice with a
   // benchmarked winner. It needs a real HIP device, so it stays in the tool.
+  // `single` arrives already lowered to rock form, which is what
+  // autotuneKernel's tuning-space query needs.
 #if HIP_ROCMLIR_AUTOTUNE
   auto autotuneOne = [&](mlir::ModuleOp single, llvm::StringRef name,
                          mlir::hip::CompiledKernel &out) {

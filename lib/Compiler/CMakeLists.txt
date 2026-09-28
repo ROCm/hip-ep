@@ -40,7 +40,9 @@ if(ENABLE_ROCMLIRTRITON)
     MLIRFuncInlinerExtension
     "${_rocmlir_link_closure}"
   )
-  target_compile_definitions(LibHipCompiler PUBLIC HIP_EP_HAS_ROCMLIR=1)
+  # Same name as the CMake option deliberately: one flag for the whole
+  # feature, rather than a separate macro that can drift out of sync with it.
+  target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
 endif()
 
 # When hipBLASLt is disabled, the model link must not add -lhipblaslt

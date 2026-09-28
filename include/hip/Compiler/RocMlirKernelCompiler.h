@@ -14,8 +14,8 @@
 // kernel_binary that failed at hipModuleLoadData. It lives here so both the
 // offline tool and the EP's in-process CompilerDriver run the same code.
 //
-// Only built when ENABLE_ROCMLIRTRITON is on; consumers gate on
-// HIP_EP_HAS_ROCMLIR.
+// Only built when ENABLE_ROCMLIRTRITON is on, which is also the macro
+// consumers gate on.
 
 #ifndef HIP_COMPILER_ROCMLIRKERNELCOMPILER_H
 #define HIP_COMPILER_ROCMLIRKERNELCOMPILER_H
@@ -43,8 +43,9 @@ struct CompiledKernel {
   std::string highLevelMlir;
 };
 
-// Compile one single-kernel tosa module. Lets a caller substitute its own
-// strategy -- hip-rocmlir-compiler passes an autotuning implementation.
+// Compile one single-kernel module, already lowered to rock form by
+// runRocMlirHighLevelPipeline. Lets a caller substitute its own strategy --
+// hip-rocmlir-compiler passes an autotuning implementation.
 using RocMlirKernelCompileFn =
     llvm::function_ref<bool(ModuleOp, StringRef, CompiledKernel &)>;
 
@@ -71,6 +72,17 @@ void registerRocMlirDialects(MLIRContext &context);
 // funcs, so `main_graph` and its hip.* ops cannot come along. Returns null on
 // failure.
 OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
+
+// tosa -> rock over a module holding exactly one `rock.kernel` func.
+// compileAndEmbedRocMlirKernels runs this before it hands a kernel to
+// `compileOne`, so a callback never has to.
+bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
+
+// Pick the first perfConfig out of the tuning search space and compile with
+// it. Expects `kernelModule` to already be in rock form. This is what a caller
+// gets when it supplies no `compileOne`.
+bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
+                                     CompiledKernel &out);
 
 // High-level + backend pipelines over a module holding exactly one
 // `rock.kernel` func. With `stopAfterHighLevel` it stops after tosa -> rock
