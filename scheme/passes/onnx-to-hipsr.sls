@@ -39,7 +39,7 @@
     (let ((operands (loop :for i :from 0 :below (value-array-ref-size operands-ref)
                          :collect (value-array-ref-at operands-ref i))))
       (mlir-set-insertion-point-before rewriter op)
-      (mlir-build-op rewriter op "func.return" operands '())
+      (mlir-build-operation-op rewriter op "func.return" operands '())
       (mlir-erase-op rewriter op)
       #t))
 

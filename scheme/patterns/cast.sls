@@ -35,8 +35,8 @@
          [!shape-type    (mlir-get-shape-shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %input !output-device)
-                        :regions ((^bb0 ((%shape-in : !shape-type))
-                                   (%yield = hipsr.shape_yield (%shape-in) -> ())))
+                        (^bb0 ((%shape-in : !shape-type))
+                              (hipsr.shape_yield (%shape-in)))
                         -> !output-device)
         (%cast = hipsr.cast (%ctx %input %placeholder !output-device)
                  -> !output-device))

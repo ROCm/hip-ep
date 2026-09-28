@@ -23,27 +23,27 @@
           (mlir pattern-macro))
 
   ;; Build the gather output shape inside a region block.
-  ;; Uses (current-mlir-build-fn) — must be called inside with-current-block-builder.
+  ;; Uses mlir-build-operation — must be called inside with-current-block-builder.
   ;; Shape logic:
   ;;   leading, _ = split_at(data_shape, axis)
   ;;   _, trailing = split_at(data_shape, axis+1)
   ;;   result = concat(concat(leading, indices_shape), trailing)
   (define (build-gather-shape! axis data-shape idx-shape shape-type size-type)
     (let* ([mk-sz (lambda (n)
-                    (let ([op ((current-mlir-build-fn) "shape.const_size" '() (list size-type))])
+                    (let ([op (mlir-build-operation "shape.const_size" '() (list size-type))])
                       (mlir-operation-set-attr op "value" n)
                       (mlir-operation-get-result op 0)))]
            [sz1    (mk-sz axis)]
-           [sp1    ((current-mlir-build-fn) "shape.split_at"
+           [sp1    (mlir-build-operation "shape.split_at"
                      (list data-shape sz1) (list shape-type shape-type))]
            [leading  (mlir-operation-get-result sp1 0)]
            [sz2    (mk-sz (+ axis 1))]
-           [sp2    ((current-mlir-build-fn) "shape.split_at"
+           [sp2    (mlir-build-operation "shape.split_at"
                      (list data-shape sz2) (list shape-type shape-type))]
            [trailing (mlir-operation-get-result sp2 1)]
-           [gathered ((current-mlir-build-fn) "shape.concat"
+           [gathered (mlir-build-operation "shape.concat"
                        (list leading idx-shape) (list shape-type))]
-           [result   ((current-mlir-build-fn) "shape.concat"
+           [result   (mlir-build-operation "shape.concat"
                        (list gathered trailing) (list shape-type))])
       result))
 
@@ -65,13 +65,13 @@
         ;; Guard check via scheme escape — return #f to signal match failure
         (_ = (if (not ok?) (error 'onnx-gather->hipsr "host data not supported") 'ok))
         (%placeholder = "hipsr.placeholder" (%ctx %data %indices !out-device)
-                        :regions ((^bb0 ((%ds : !shape-type) (%is : !shape-type))
-                                    (%result-shape = (build-gather-shape!
-                                                       axis %ds %is !shape-type !size-type))
-                                    (%yield = "hipsr.shape_yield" (%result-shape) -> ())))
+                        (^bb0 ((%ds : !shape-type) (%is : !shape-type))
+                              (%result-shape = (build-gather-shape!
+                                                 axis %ds %is !shape-type !size-type))
+                              ("hipsr.shape_yield" (%result-shape)))
                         -> !out-device)
-        ;; :scheme — create gather op and set axis attribute via (current-mlir-build-fn)
-        (%result = (let* ([new-op ((current-mlir-build-fn) "hipsr.gather"
+        ;; :scheme — create gather op and set axis attribute via mlir-build-operation
+        (%result = (let* ([new-op (mlir-build-operation "hipsr.gather"
                                     (list %ctx %data %indices %placeholder !out-device)
                                     (list !out-device))])
                      (mlir-operation-set-attr new-op "axis" axis)

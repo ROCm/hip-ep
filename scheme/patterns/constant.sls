@@ -35,14 +35,14 @@
               ;; Rank-0 scalar: arith.constant keeps the raw (unencoded) result type
               (begin
                 (mlir-set-insertion-point-before rewriter op)
-                (let* ((c-op (mlir-build-op rewriter op "arith.constant" '() (list out-type))))
+                (let* ((c-op (mlir-build-operation-op rewriter op "arith.constant" '() (list out-type))))
                   (mlir-operation-copy-attr c-op "value" op "value")
                   (mlir-replace-op rewriter op (mlir-operation-get-result c-op 0))
                   #t))
               ;; Rank > 0: hipsr.constant with device result type
               (begin
                 (mlir-set-insertion-point-before rewriter op)
-                (let* ((c-op (mlir-build-op rewriter op "hipsr.constant" '() (list out-dev))))
+                (let* ((c-op (mlir-build-operation-op rewriter op "hipsr.constant" '() (list out-dev))))
                   (mlir-operation-copy-attr c-op "value" op "value")
                   (mlir-replace-op rewriter op (mlir-operation-get-result c-op 0))
                   #t))))))

@@ -143,8 +143,8 @@
     ;; Builder — unified op creation
     mlir-create-op               ; (builder loc name ops types [nregions]) → op
     mlir-set-insertion-point-before
-    mlir-build-op
-    mlir-build-op-with-regions
+    mlir-build-operation-op
+    mlir-build-operation-op-with-regions
     mlir-set-insertion-point-to-block-end
     mlir-op-get-region
     mlir-region-create-block
@@ -152,8 +152,8 @@
     mlir-new-block              ; create block without moving rewriter IP
     mlir-builder-at-block-end  ; fresh OpBuilder at block end (independent of rewriter)
     mlir-destroy-builder        ; destroy builder from mlir-builder-at-block-end
-    mlir-build-op-in-block              ; like mlir-build-op but takes OpBuilder*
-    mlir-build-op-in-block-with-regions ; like above, pre-allocates regions
+    mlir-build-operation-op-in-block              ; like mlir-build-operation-op but takes OpBuilder*
+    mlir-build-operation-op-in-block-with-regions ; like above, pre-allocates regions
     mlir-get-shape-shape-type
     mlir-get-shape-size-type
     mlir-get-shape-witness-type
@@ -173,15 +173,17 @@
     mlir-register-conversion-pattern
 
     ;; Dynamic builder context — shared by pattern-codegen and with-mlir-ops
-    current-builder           ; callable (loc name ops types [nregions]) → op
-    current-loc               ; Operation* used as location source
-    current-mlir-build-fn     ; callable (name ops types [nregions]) → op (legacy, wraps current-builder)
-    with-current-mlir-builder
-    with-current-block-builder
+    current-rewriter            ; raw RewriterBase* (set inside with-rewrite-builder)
+    current-block-builder       ; raw OpBuilder*    (set inside with-block-builder)
+    current-loc                 ; Operation* used as location source
+    mlir-build-operation        ; (name operands types [nregions]) → op
+    with-rewrite-builder        ; (rw loc) body — install rewriter as current builder
+    with-current-block-builder  ; (b  loc) body — install block builder (no RAII)
+    with-block-builder          ; (var block loc) body — RAII: create/install/destroy
+    with-op-location            ; loc body — rebind location only
 
     ;; Resource management
     with-raii
-    current-block-builder
     with-type-converter
     with-conversion-target
     with-rewrite-pattern-set
@@ -619,13 +621,13 @@
   ;;; @param operands Scheme list of Value* uptrs
   ;;; @param result-types Scheme list of Type* uptrs
   ;;; @return Created Operation* as uptr
-  (define mlir-build-op
+  (define mlir-build-operation-op
     (foreign-procedure "mlir_build_op"
                        (uptr uptr string scheme-object scheme-object) uptr))
 
-  ;;; @brief Like mlir-build-op but pre-allocates num-regions empty regions.
+  ;;; @brief Like mlir-build-operation-op but pre-allocates num-regions empty regions.
   ;;; Required for ops that verify region count at creation (e.g. shape.assuming).
-  (define mlir-build-op-with-regions
+  (define mlir-build-operation-op-with-regions
     (foreign-procedure "mlir_build_op_with_regions"
                        (uptr uptr string scheme-object scheme-object int) uptr))
 
@@ -673,13 +675,13 @@
   (define mlir-destroy-builder
     (foreign-procedure "mlir_destroy_builder" (uptr) void))
 
-  ;;; @brief Like mlir-build-op but uses a plain OpBuilder* (from mlir-builder-at-block-end).
+  ;;; @brief Like mlir-build-operation-op but uses a plain OpBuilder* (from mlir-builder-at-block-end).
   ;;; Use for ops inside region blocks where a fresh OpBuilder is the builder.
-  (define mlir-build-op-in-block
+  (define mlir-build-operation-op-in-block
     (foreign-procedure "mlir_build_op_in_block" (uptr uptr string scheme-object scheme-object) uptr))
 
-  ;;; @brief Like mlir-build-op-in-block but pre-allocates num-regions empty regions.
-  (define mlir-build-op-in-block-with-regions
+  ;;; @brief Like mlir-build-operation-op-in-block but pre-allocates num-regions empty regions.
+  (define mlir-build-operation-op-in-block-with-regions
     (foreign-procedure "mlir_build_op_in_block_with_regions" (uptr uptr string scheme-object scheme-object int) uptr))
 
   ;;; @brief Get the shape::ShapeType from an MLIRContext.
@@ -856,57 +858,82 @@
   ;;===--------------------------------------------------------------------===;;
   ;;
   ;; Shared by pattern-codegen (:rewrite :with) and with-mlir-ops.
-  ;; Install with with-current-mlir-builder (top-level rewrite, RewriterBase*)
-  ;; or with-current-block-builder (region body, fresh OpBuilder*).
   ;;
-  ;; current-builder: callable (loc name ops types [nregions]) → op
-  ;; current-loc:     Operation* used as location source for created ops
+  ;; Two distinct builder kinds, each using different C++ call paths:
+  ;;   current-rewriter      — RewriterBase* for top-level rewrite ops
+  ;;   current-block-builder — OpBuilder*    for ops inside region blocks
   ;;
-  ;; Both are set together by with-current-mlir-builder and with-current-block-builder.
-  ;; current-mlir-build-fn is the old (name ops types [nregions]) → op parameter kept
-  ;; for backward compat with with-mlir-ops; it wraps current-builder + current-loc.
+  ;; Exactly one is non-#f at any time. current-loc holds the Operation*
+  ;; used as the location source for created ops.
+  ;;
+  ;; mlir-build-operation dispatches to the appropriate C function based on
+  ;; which parameter is set; callers never touch the raw pointers directly.
 
-  (define current-builder     (make-parameter #f))
-  (define current-loc         (make-parameter #f))
-  (define current-mlir-build-fn (make-parameter #f))
+  (define current-rewriter      (make-parameter #f))
+  (define current-block-builder (make-parameter #f))
+  (define current-loc           (make-parameter #f))
 
-  (define-syntax with-current-mlir-builder
+  (define (mlir-build-operation name operands types . rest)
+    (let ([nregions (if (pair? rest) (car rest) 0)]
+          [loc      (current-loc)])
+      (cond
+        [(current-rewriter) =>
+         (lambda (rw)
+           (if (zero? nregions)
+               (mlir-build-operation-op rw loc name operands types)
+               (mlir-build-operation-op-with-regions rw loc name operands types nregions)))]
+        [(current-block-builder) =>
+         (lambda (b)
+           (if (zero? nregions)
+               (mlir-build-operation-op-in-block b loc name operands types)
+               (mlir-build-operation-op-in-block-with-regions b loc name operands types nregions)))]
+        [else (error 'mlir-build-operation "no current builder installed")])))
+
+  ;; Install a RewriterBase* as the current builder for the duration of body.
+  (define-syntax with-rewrite-builder
     (syntax-rules ()
       [(_ (rw loc) body ...)
-       (let ([rw_ rw] [loc_ loc])
-         (let ([build-fn (lambda (name ops types . rest)
-                           (let ([n (if (pair? rest) (car rest) 0)])
-                             (if (zero? n)
-                                 (mlir-build-op rw_ loc_ name ops types)
-                                 (mlir-build-op-with-regions rw_ loc_ name ops types n))))])
-           (parameterize ([current-loc loc_]
-                          [current-builder     build-fn]
-                          [current-mlir-build-fn build-fn])
-             body ...)))]))
+       (parameterize ([current-rewriter      rw]
+                      [current-block-builder #f]
+                      [current-loc           loc])
+         body ...)]))
 
+
+  ;; Install an OpBuilder* as the current builder (no RAII — caller owns lifetime).
   (define-syntax with-current-block-builder
     (syntax-rules ()
       [(_ (builder loc) body ...)
-       (let ([b_ builder] [loc_ loc])
-         (let ([build-fn (lambda (name ops types . rest)
-                           (let ([n (if (pair? rest) (car rest) 0)])
-                             (if (zero? n)
-                                 (mlir-build-op-in-block b_ loc_ name ops types)
-                                 (mlir-build-op-in-block-with-regions b_ loc_ name ops types n))))])
-           (parameterize ([current-loc loc_]
-                          [current-builder       build-fn]
-                          [current-mlir-build-fn build-fn]
-                          [current-block-builder b_])  ; backward compat
-             body ...)))]))
+       (parameterize ([current-block-builder builder]
+                      [current-rewriter      #f]
+                      [current-loc           loc])
+         body ...)]))
+
+  ;; RAII block builder: creates OpBuilder* at block end, installs it,
+  ;; runs body, then destroys the builder even if body raises an exception.
+  (define-syntax with-block-builder
+    (syntax-rules ()
+      [(_ (builder-var block loc) body ...)
+       (let ([builder-var (mlir-builder-at-block-end block)])
+         (dynamic-wind
+           (lambda () #f)
+           (lambda ()
+             (parameterize ([current-block-builder builder-var]
+                            [current-rewriter      #f]
+                            [current-loc           loc])
+               body ...))
+           (lambda () (mlir-destroy-builder builder-var))))]))
+
+  ;; Rebind the location source without changing the builder.
+  ;; Useful when nested ops should be attributed to a different operation.
+  (define-syntax with-op-location
+    (syntax-rules ()
+      [(_ loc body ...)
+       (parameterize ([current-loc loc])
+         body ...)]))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Resource management
   ;;===--------------------------------------------------------------------===;;
-
-  ;;; Dynamic parameter holding the current block's fresh OpBuilder*.
-  ;;; Set automatically by with-current-block-builder.
-  ;;; :scheme escapes inside a region block call (current-block-builder) to get it.
-  (define current-block-builder (make-parameter #f))
 
   ;; Single-resource RAII: (with-raii (var ctor dtor) body ...)
   (define-syntax with-raii

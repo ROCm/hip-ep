@@ -31,8 +31,8 @@
     :rewrite %output :with
         ;; placeholder ins = (%data) only: scatter output has data's shape
         (%placeholder = hipsr.placeholder (%ctx %data !output-device)
-                        :regions ((^bb0 ((%data-shape : !shape-type))
-                                    (%yield = hipsr.shape_yield (%data-shape) -> ())))
+                        (^bb0 ((%data-shape : !shape-type))
+                              (hipsr.shape_yield (%data-shape)))
                         -> !output-device)
         (%result = hipsr.scatter_nd (%ctx %data %indices %updates %placeholder !output-device)
                    -> !output-device))

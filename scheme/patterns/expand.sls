@@ -32,7 +32,7 @@
          [!out-device (mlir-tensor-type-in-device-space! !out-type)])
     :rewrite %output :with
         ;; Barrier placeholder: ins=(input, shape), type set after creation.
-        (%placeholder = (let* ([ph-op ((current-mlir-build-fn) "hipsr.placeholder"
+        (%placeholder = (let* ([ph-op (mlir-build-operation "hipsr.placeholder"
                                           (list %ctx %input %shape-operand !out-device)
                                           (list !out-device))])
                           (mlir-placeholder-set-barrier-type ph-op)

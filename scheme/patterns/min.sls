@@ -36,9 +36,9 @@
          [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = "hipsr.placeholder" (%ctx %lhs %rhs !out-device)
-                        :regions ((^bb0 ((%ls : !shape-type) (%rs : !shape-type))
-                                    (%broadcast = "shape.broadcast" (%ls %rs) -> !shape-type)
-                                    (%yield     = "hipsr.shape_yield" (%broadcast) -> ())))
+                        (^bb0 ((%ls : !shape-type) (%rs : !shape-type))
+                              (%broadcast = "shape.broadcast" (%ls %rs) -> !shape-type)
+                              ("hipsr.shape_yield" (%broadcast)))
                         -> !out-device)
         (%result = "hipsr.min" (%ctx %lhs %rhs %placeholder !out-device) -> !out-device))
 
@@ -48,11 +48,11 @@
 
   (define (make-binary-min! rewriter loc-op ctx lhs rhs out-type)
     (mlir-set-insertion-point-before rewriter loc-op)
-    (let* ([ph (mlir-build-op rewriter loc-op "hipsr.placeholder"
+    (let* ([ph (mlir-build-operation-op rewriter loc-op "hipsr.placeholder"
                   (list ctx lhs rhs out-type) (list out-type))])
       (mlir-set-insertion-point-before rewriter loc-op)
       (mlir-operation-get-result
-        (mlir-build-op rewriter loc-op "hipsr.min"
+        (mlir-build-operation-op rewriter loc-op "hipsr.min"
           (list ctx lhs rhs (mlir-operation-get-result ph 0) out-type)
           (list out-type))
         0)))

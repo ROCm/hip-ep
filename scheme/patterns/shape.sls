@@ -9,7 +9,7 @@
 ;; onnx.Shape → hipsr.placeholder + hipsr.compute (host output)
 ;;
 ;; Extracts tensor dimension sizes [start, end) as i64 scalars.
-;; Uses (current-block-builder) — bound via parameterize by :regions codegen —
+;; Uses mlir-build-operation inside with-op-location to target a specific op as location.
 ;; so :scheme escapes in region bodies access the OpBuilder without gensyms.
 ;;
 ;;===----------------------------------------------------------------------===;;
@@ -46,33 +46,33 @@
     :rewrite %output :with
         ;; Placeholder: shape region yields const shape [num-dims]
         (%placeholder = hipsr.placeholder (%ctx %input !out-host)
-                        :attrs ((operandSegmentSizes (list 1 1 1) :i32-array))
-                        :regions ((^bb0 ((%s : !shape-type))
-                                     (%_ = (with-current-block-builder ((current-block-builder) op)
-                                             (with-mlir-ops
-                                               (%cN = shape.const_size ()
-                                                    :attrs ((value num-dims :index)) -> !size-type)
-                                               (%r  = shape.from_extents (%cN) -> !shape-type)
-                                               (%y  = hipsr.shape_yield  (%r)  -> ()))))))
+                        (operandSegmentSizes = (list 1 1 1) :i32-array)
+                        (^bb0 ((%s : !shape-type))
+                              (%_ = (with-op-location op
+                                      (with-mlir-ops
+                                        (%cN = shape.const_size ()
+                                             (value = num-dims :index) -> !size-type)
+                                        (%r  = shape.from_extents (%cN) -> !shape-type)
+                                        (hipsr.shape_yield (%r))))))
                         -> !out-host)
         ;; Compute body: for each axis [start, end), emit dim + cast; then from_elements + yield
         (%result = hipsr.compute (%ctx %input %placeholder !out-host)
-                   :attrs ((operandSegmentSizes (list 1 1 1) :i32-array))
-                   :regions ((^bb0 ((%c : !ctx-type) (%in : !input-type) (%dest : !out-host))
-                                (%_ = (with-current-block-builder ((current-block-builder) op)
-                                        (with-mlir-ops
-                                          (%dim-vals = (loop :for axis :from start :below end
-                                                        :collect (with-mlir-ops
-                                                                   (%ci = arith.constant ()
-                                                                        :attrs ((value axis :index))
-                                                                        -> !index-type)
-                                                                   (%d  = tensor.dim  (%in %ci) -> !index-type)
-                                                                   (%i  = arith.index_cast (%d) -> !i64-type))))
-                                          ;; tensor.from_elements has a dynamic operand list
-                                          (%r  = (mlir-operation-get-result
-                                                   ((current-mlir-build-fn)
-                                                    "tensor.from_elements" %dim-vals (list !out-host)) 0))
-                                          (%y  = hipsr.compute_yield (%r) -> ()))))))
+                   (operandSegmentSizes = (list 1 1 1) :i32-array)
+                   (^bb0 ((%c : !ctx-type) (%in : !input-type) (%dest : !out-host))
+                         (%_ = (with-op-location op
+                                 (with-mlir-ops
+                                   (%dim-vals = (loop :for axis :from start :below end
+                                                 :collect (with-mlir-ops
+                                                            (%ci = arith.constant ()
+                                                                 (value = axis :index)
+                                                                 -> !index-type)
+                                                            (%d  = tensor.dim  (%in %ci) -> !index-type)
+                                                            (%i  = arith.index_cast (%d) -> !i64-type))))
+                                   ;; tensor.from_elements has a dynamic operand list
+                                   (%r  = (mlir-operation-get-result
+                                            (mlir-build-operation
+                                             "tensor.from_elements" %dim-vals (list !out-host)) 0))
+                                   (hipsr.compute_yield (%r))))))
                    -> !out-host))
 
   (define (populate-shape-patterns type-converter patterns ctx)

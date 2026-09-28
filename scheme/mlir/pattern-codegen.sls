@@ -24,7 +24,7 @@
   ;; ├── collect-all-variables
   ;; ├── generate-check-code           (and check₀ check₁ …) for :match
   ;; │   └── action->check-code
-  ;; ├── generate-rewrite-code (raw-body)  wraps with-current-mlir-builder + with-mlir-ops
+  ;; ├── generate-rewrite-code (raw-body)  wraps with-rewrite-builder + with-mlir-ops
   ;; │   :rewrite :with body forwarded verbatim to with-mlir-ops; no AST round-trip
   ;; └── generate-then-let-bindings    ((var expr) …) for :then-let
   ;;
@@ -110,26 +110,26 @@
   ;; rw / op      — syntax identifiers for the rewriter and matched operation
   ;;
   ;; Generated shape ('conversion):
-  ;;   (with-current-mlir-builder (rw op)
+  ;;   (with-rewrite-builder (rw op)
   ;;     (let ([result (with-mlir-ops form ...)])
   ;;       (mlir-replace-op rw op result)
   ;;       #t))
   ;;
   ;; with-mlir-ops handles op-forms, :attrs, :regions, and :scheme escapes.
-  ;; with-current-mlir-builder installs current-mlir-build-fn so all ops
-  ;; dispatch through mlir-build-op rw loc.
+  ;; with-rewrite-builder installs current-rewriter and current-loc so mlir-build-operation
+  ;; dispatch through mlir-build-operation-op rw loc.
   (define (generate-rewrite-code raw-body pattern-type rw op)
     (if (null? raw-body)
         #'#t
         (with-syntax ([(form ...) raw-body])
           (case pattern-type
             [(conversion)
-             #`(with-current-mlir-builder (#,rw #,op)
+             #`(with-rewrite-builder (#,rw #,op)
                  (let ([result (with-mlir-ops form ...)])
                    (mlir-replace-op #,rw #,op result)
                    #t))]
             [(rewrite)
-             #`(with-current-mlir-builder (#,rw #,op)
+             #`(with-rewrite-builder (#,rw #,op)
                  (let ([result (with-mlir-ops form ...)])
                    (mlir-replace-op #,rw #,op result)
                    #t))]))))
