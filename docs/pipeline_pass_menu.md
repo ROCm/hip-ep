@@ -128,7 +128,7 @@ Options use MLIR's pipeline-option syntax:
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
-| `hip-hoist-alloc-size-arith` | func.func | Hoist pure size arithmetic above the earliest used alloc (PoolAllocs precondition). |
+| `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
 | `hip-lower-allocs` | func.func | Replace `memref.alloc`/`dealloc` with `hip.alloc`/`hip.free`. |
 | `hip-relax-multi-dyn-expand-shape` | func.func | Rewrite multi-dynamic-per-group `memref.expand_shape` → `reinterpret_cast` before strided-metadata expansion. |
@@ -164,7 +164,7 @@ override (so a hand-listed pipeline omitting them will trip the
 | `generate-interface` | Requires a `CompilationOptionsT` (not a no-arg pass). Emitted by `hip-to-llvm-pipeline`. |
 | `compile-hipdnn-graphs` | Requires a live runtime handle. Only present on the handle-bearing pipeline overload. |
 | `expand-strided-metadata` | MLIR utility pass added directly inside `hip-to-llvm-pipeline`. |
-| `lower-affine` | Added directly inside `hip-to-llvm-pipeline` (lowers `affine.apply` from strided-metadata expansion). |
+| `lower-affine` | Added directly before buffer-reuse normalization in `onnx-to-hip-pipeline`, and after strided-metadata expansion in `hip-to-llvm-pipeline`. |
 | `convert-linalg-to-loops` | Added directly inside the ONNX→HIP tail. |
 
 ---
@@ -199,6 +199,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-loop-body-to-out-params
   func.func(hip-use-output-allocator)  (slot 4.5)
   func.func(hip-fix-loop-accumulator-offset)
+  lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
   func.func(hip-optimize-memrefs)
@@ -206,6 +207,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
   func.func(cse)
+  func.func(canonicalize)
   func.func(hip-hoist-alloc-size-arith)
   func.func(hip-pool-allocs)
   «slot: AfterPoolAllocs»
