@@ -76,6 +76,69 @@ __global__ void swigluKernel(const T *__restrict__ gate,
     output[idx] = computeSwiglu<T>(gate[idx], up[idx]);
 }
 
+// 16 bytes per thread: 8 halves or 4 floats. Scalar half loads on a decode
+// SwiGLU (a few dozen KiB) never fill the memory pipe. The math stays per
+// element so the fp16 rounding matches the scalar kernel.
+template <typename T, int V> union SwigluVec {
+  static_assert(sizeof(T) * V == sizeof(uint4),
+                "SwigluVec covers one 16-byte load");
+  uint4 raw;
+  T elements[V];
+};
+
+template <typename T, int V>
+__global__ void swigluVecKernel(const T *__restrict__ gate,
+                                const T *__restrict__ up,
+                                T *__restrict__ output, int64_t numVectors) {
+  int64_t vecIdx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (vecIdx >= numVectors)
+    return;
+
+  const int64_t base = vecIdx * V;
+  SwigluVec<T, V> gateVec, upVec, outVec;
+  gateVec.raw = *reinterpret_cast<const uint4 *>(gate + base);
+  upVec.raw = *reinterpret_cast<const uint4 *>(up + base);
+#pragma unroll
+  for (int i = 0; i < V; ++i)
+    outVec.elements[i] =
+        computeSwiglu<T>(gateVec.elements[i], upVec.elements[i]);
+  *reinterpret_cast<uint4 *>(output + base) = outVec.raw;
+}
+
+static bool swigluAligned16(const void *gate, const void *up,
+                            const void *output) {
+  constexpr uintptr_t kAlign = sizeof(uint4);
+  auto aligned = [](const void *ptr) {
+    return reinterpret_cast<uintptr_t>(ptr) % kAlign == 0;
+  };
+  return aligned(gate) && aligned(up) && aligned(output);
+}
+
+// Vector path when the buffers are 16-byte aligned and the length fills whole
+// vectors. A length that does not is computed entirely by the scalar kernel.
+template <typename T, int V>
+static void launchSwiglu(hipStream_t hipStream, const void *gate,
+                         const void *up, void *output, int64_t numElements) {
+  constexpr int kBlockSize = 256;
+  if (numElements % V == 0 && swigluAligned16(gate, up, output)) {
+    const int64_t numVectors = numElements / V;
+    const int grid =
+        static_cast<int>((numVectors + kBlockSize - 1) / kBlockSize);
+    hipLaunchKernelGGL((swigluVecKernel<T, V>), dim3(grid), dim3(kBlockSize), 0,
+                       hipStream, static_cast<const T *>(gate),
+                       static_cast<const T *>(up), static_cast<T *>(output),
+                       numVectors);
+    return;
+  }
+
+  const int grid =
+      static_cast<int>((numElements + kBlockSize - 1) / kBlockSize);
+  hipLaunchKernelGGL(swigluKernel<T>, dim3(grid), dim3(kBlockSize), 0,
+                     hipStream, static_cast<const T *>(gate),
+                     static_cast<const T *>(up), static_cast<T *>(output),
+                     numElements);
+}
+
 extern "C" int hip_swiglu(void *stream, const void *gate, const void *up,
                           void *output, int64_t numElements, int hipDtype) {
   if (numElements <= 0)
@@ -89,16 +152,10 @@ extern "C" int hip_swiglu(void *stream, const void *gate, const void *up,
   (void)hipGetLastError();
   switch (hipDtype) {
   case HIP_DTYPE_FLOAT16:
-    hipLaunchKernelGGL(swigluKernel<__half>, dim3(gridSize), dim3(kBlockSize),
-                       0, hipStream, static_cast<const __half *>(gate),
-                       static_cast<const __half *>(up),
-                       static_cast<__half *>(output), numElements);
+    launchSwiglu<__half, 8>(hipStream, gate, up, output, numElements);
     break;
   case HIP_DTYPE_FLOAT32:
-    hipLaunchKernelGGL(swigluKernel<float>, dim3(gridSize), dim3(kBlockSize), 0,
-                       hipStream, static_cast<const float *>(gate),
-                       static_cast<const float *>(up),
-                       static_cast<float *>(output), numElements);
+    launchSwiglu<float, 4>(hipStream, gate, up, output, numElements);
     break;
   case HIP_DTYPE_BFLOAT16:
     hipLaunchKernelGGL(swigluKernel<__hip_bfloat16>, dim3(gridSize),
