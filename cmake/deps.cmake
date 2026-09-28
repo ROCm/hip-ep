@@ -676,6 +676,15 @@ else()
   if(NOT DEFINED HIP_PLATFORM)
     set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
   endif()
+  # Claim the hip:: imported targets here, in top-level scope, before any
+  # subdirectory gets to them. hip-targets.cmake creates them non-GLOBAL, so a
+  # find_package(hip) buried in a subdirectory leaves them invisible to the
+  # top-level CMakeLists -- and the compiler-rt fix-up at the end of it has to
+  # see them to do anything. Later find_package(hip) calls then hit
+  # hip-targets.cmake's "all expected targets already defined" early return and
+  # share these. QUIET, not REQUIRED: a missing HIP is still the business of the
+  # subdirectories that actually need it.
+  find_package(hip CONFIG QUIET)
 endif()
 
 add_subdirectory(morphizen)
