@@ -5,6 +5,7 @@
 
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Compiler/RocMlirArtifactTarget.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 #include "hip/Dialect/IR/HipDialect.h"
@@ -81,6 +82,18 @@ OnnxDialectKind onnxDialectKind() {
                                   : OnnxDialectKind::Stub;
 }
 } // namespace
+
+std::string rocMlirArtifactTarget() {
+#ifdef ENABLE_ROCMLIRTRITON
+  // Mirror the dispatch order in compileImpl: HIPDNN_EP_PIPELINE and
+  // HIPDNN_EP_HIPSR take precedence, so the rocMLIR arm (and its HSACO) is
+  // not reached under either.
+  if (hip_get_env("HIPDNN_EP_PIPELINE").empty() && !hipsrPipelineRequested() &&
+      rocMlirPipelineRequested())
+    return mlir::hip::resolveRocMlirArch();
+#endif
+  return "";
+}
 
 bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const std::string &output_path,
