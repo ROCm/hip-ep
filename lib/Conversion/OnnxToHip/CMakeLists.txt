@@ -121,6 +121,7 @@ add_library(OnnxToHip STATIC
   PReluConversion.cpp
   LRNConversion.cpp
   TriluConversion.cpp
+  SwiGluFusion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
   HardSigmoidConversion.cpp

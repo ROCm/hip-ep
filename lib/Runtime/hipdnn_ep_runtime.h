@@ -1350,6 +1350,11 @@ int wrap_swish(RuntimeState *state, void *input, void *output,
 int wrap_pow(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type, double exponent);
 
+// Fused SwiGLU wrapper: output = gate * sigmoid(gate) * up.
+// All buffers have identical shape and data type.
+int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
+                int64_t num_elements, int64_t data_type);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects

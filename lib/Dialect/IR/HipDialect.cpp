@@ -1866,6 +1866,20 @@ void PowOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SwigluOp: ins(gate, up), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwigluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SwigluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 
