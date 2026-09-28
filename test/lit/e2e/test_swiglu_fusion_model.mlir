@@ -9,7 +9,7 @@
 // exactly 32 Sigmoid and 64 Mul nodes for these chains and nothing else.
 //
 // Verifies the complete hipdnn-pipeline:
-// 1. convert-onnx-to-hip: SwiGluFusion collapses Sigmoid/Mul/Mul into one
+// 1. convert-onnx-to-hip: SwiGluConversion collapses Sigmoid/Mul/Mul into one
 //    hip.swiglu, so no sigmoid or elementwise-multiply kernel is left.
 // 2. canonicalize / memory-pooling: pool the output buffer into one allocation
 // 3. convert-hip-to-llvm: hip.swiglu -> wrap_swiglu

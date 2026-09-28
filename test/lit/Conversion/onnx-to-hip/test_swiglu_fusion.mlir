@@ -7,7 +7,7 @@
 //
 //   s = Sigmoid(gate); a = Mul(gate, s); y = Mul(a, up)
 //
-// SwiGluFusion collapses that into one hip.swiglu. Both multiplies are
+// SwiGluConversion collapses that into one hip.swiglu. Both multiplies are
 // commutative, so every operand ordering has to match, and the temporaries
 // must be single-use or the fusion would change what the graph computes.
 
