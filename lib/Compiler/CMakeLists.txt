@@ -15,6 +15,55 @@ add_library(LibHipCompiler STATIC
   StaticPlugins.cpp
 )
 
+# rocMLIR kernel compilation. Attached here rather than to
+# hip-rocmlir-compiler so that everything linking LibHipCompiler -- including
+# hipgpu.dll, which picks it up transitively through morphizen-core-static --
+# can compile rock.kernel funcs in process. Without it the EP can outline
+# kernels but never fills in hip.rocmlir's kernel_binary, and every dispatch
+# fails at hipModuleLoadData.
+if(ENABLE_ROCMLIRTRITON)
+  target_sources(LibHipCompiler PRIVATE RocMlirKernelCompiler.cpp)
+  # rocMLIR/Triton's per-library static archives have circular dependencies,
+  # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
+  # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
+  # automatically and do not support the feature.
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
+  else()
+    set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
+  endif()
+  target_link_libraries(LibHipCompiler PUBLIC
+    HipToTosa
+    # rocMLIR/Triton reference this MLIR extension (registerInlinerExtension)
+    # but it is a leaf target not pulled in transitively by the rock/triton
+    # closure.
+    MLIRFuncInlinerExtension
+    # CompilerDriver's rocMLIR arm calls createDuplicateFunctionEliminationPass.
+    # It resolves transitively today, but through the rocMLIR closure -- name
+    # it so a standard MLIR dependency does not hinge on that.
+    MLIRFuncTransforms
+    "${_rocmlir_link_closure}"
+  )
+  # Same name as the CMake option deliberately: one flag for the whole
+  # feature, rather than a separate macro that can drift out of sync with it.
+  target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
+
+  # resolveRocMlirArch asks the live GPU which chip to build for. Without this
+  # it can only guess, and a code object for the wrong chip fails at module
+  # load. Same gate the rest of the EP uses for HIP host APIs.
+  if(HIPDNN_EP_LINK_HIP_HOST)
+    find_package(hip CONFIG REQUIRED)
+    target_link_libraries(LibHipCompiler PRIVATE hip::host)
+    target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+  endif()
+  # Last resort when there is no device to ask: whatever this build targets.
+  if(HIP_ARCHITECTURES)
+    list(GET HIP_ARCHITECTURES 0 _rocmlir_default_arch)
+    target_compile_definitions(LibHipCompiler PRIVATE
+      "HIPDNN_ROCMLIR_DEFAULT_ARCH=\"${_rocmlir_default_arch}\"")
+  endif()
+endif()
+
 # When hipBLASLt is disabled, the model link must not add -lhipblaslt
 # (CompilerDriver gates that behind this define).
 if(HIPDNN_EP_DISABLE_VENDOR_BLAS)

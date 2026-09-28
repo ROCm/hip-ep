@@ -16,6 +16,7 @@
 
 // Component headers
 #include "InferenceState.h"
+#include "hip/Compiler/RocMlirArtifactTarget.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 #include "hip/init_config_abi.h"
 
@@ -283,6 +284,24 @@ customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
             << (kind == customop::ArtifactKind::NATIVE ? "native (Plugin)"
                                                        : "LLVM IR (JIT)");
   return kind;
+}
+
+// The cache / EPContext identity is derived from the graph only, so a cached
+// artifact is reused regardless of GPU or HIPDNN_EP_ROCMLIR. One that embeds
+// rocMLIR code objects for another chip would load and then fail at the first
+// dispatch, and one built with the opposite HIPDNN_EP_ROCMLIR setting silently
+// ignores the switch. Refuse both instead of running a stale artifact.
+void check_rocmlir_arch(const std::string &recorded) {
+  const std::string current = hip::compiler::rocMlirArtifactTarget();
+  if (recorded == current)
+    return;
+  auto describe = [](const std::string &arch) {
+    return arch.empty() ? std::string("rocMLIR off") : "rocMLIR for " + arch;
+  };
+  LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
+             << ", but this session requests " << describe(current)
+             << " (HIPDNN_EP_ROCMLIR / ROCK_ARCH / active GPU). Delete the "
+                "model cache or EPContext model and recompile.";
 }
 } // anonymous namespace
 
@@ -653,6 +672,7 @@ MlirCustomOp::MlirCustomOp(
 
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
+  check_rocmlir_arch(metadata_.rocmlir_arch());
   // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);

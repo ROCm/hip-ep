@@ -88,6 +88,15 @@ void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                 const OnnxToHipPipelineOptions &options,
                                 morphizen::FileSystem *fs = nullptr);
 
+/// Build the head of the ONNX-to-HIP pipeline: everything up to and including
+/// the OnnxToHip conversion. Split out from the tail so a caller can insert
+/// work between the two -- the rocMLIR path outlines kernels and compiles them
+/// there, which has to happen on tensor-level HIP IR before the tail
+/// bufferizes. \p handle, when non-null, inserts the hipDNN graph passes.
+void buildOnnxToHipPipelineHead(OpPassManager &pm,
+                                hipdnnHandle_t handle = nullptr,
+                                CompiledGraphMap output_graphs = {});
+
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
 /// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
