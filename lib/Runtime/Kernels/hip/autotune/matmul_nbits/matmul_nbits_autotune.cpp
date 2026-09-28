@@ -414,11 +414,11 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
       if (logOn())
         fprintf(stderr,
                 "[matmul-lut] %s phase=%d M=%d N=%d K=%d gs=%d zp=%d -> "
-                "point M=%u N=%u K=%u d=%.3f\n",
+                "point M=%u N=%u K=%u cfg=%u d=%.3f\n",
                 exact ? "exact" : "nearest", static_cast<int>(phase), request.m,
                 request.n, request.k, request.group_size,
                 static_cast<int>(request.has_zp), p.m, p.n, p.k,
-                result.distance);
+                p.config, result.distance);
       return result;
     }
   }
