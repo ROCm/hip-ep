@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- SwiGluFusion.cpp - Fuse exported SwiGLU graphs --------------------===//
+//===- SwiGluConversion.cpp - Convert exported SwiGLU graphs -------------===//
 //
 // Llama-family exports spell SwiGLU as:
 //
@@ -117,8 +117,8 @@ struct SwiGluToHip : public RewritePattern {
 
 } // namespace
 
-void populateSwiGluFusionPatterns(RewritePatternSet &patterns,
-                                  MLIRContext *ctx) {
+void populateSwiGluConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx) {
   patterns.add<SwiGluToHip>(ctx);
 }
 

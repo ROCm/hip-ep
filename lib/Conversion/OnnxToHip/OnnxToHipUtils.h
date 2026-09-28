@@ -477,8 +477,8 @@ void populateTriluConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateSwishConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
-void populateSwiGluFusionPatterns(RewritePatternSet &patterns,
-                                  MLIRContext *ctx);
+void populateSwiGluConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateClipConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populatePoolConversionPatterns(RewritePatternSet &patterns,

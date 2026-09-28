@@ -339,7 +339,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populatePReluConversionPatterns(patterns, ctx);
   populateLRNConversionPatterns(patterns, ctx);
   populateTriluConversionPatterns(patterns, ctx);
-  populateSwiGluFusionPatterns(patterns, ctx);
+  populateSwiGluConversionPatterns(patterns, ctx);
   populateSwishConversionPatterns(patterns, ctx);
   populateClipConversionPatterns(patterns, ctx);
   populatePoolConversionPatterns(patterns, ctx);
