@@ -2364,6 +2364,39 @@ def Hip_SwishOp : Hip_DpsOp<"swish"> {
   }];
 }
 
+def Hip_SwigluOp : Hip_DpsOp<"swiglu"> {
+  let summary = "Fused SwiGLU activation";
+  let description = [{
+    Applies the gated activation element-wise:
+
+      output = (gate * sigmoid(gate)) * up
+
+    The operands and output must have identical shapes; this operation does
+    not perform broadcasting. The fused runtime kernel supports f16, f32,
+    bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
+                                      memref<3x4xf16, 1>)
+                       outs(%output : memref<3x4xf16, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$up,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
                                  /*autoReify=*/1,
