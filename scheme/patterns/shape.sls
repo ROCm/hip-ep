@@ -46,7 +46,7 @@
     :rewrite %output :with
         ;; Placeholder: shape region yields const shape [num-dims]
         (%placeholder = hipsr.placeholder (%ctx %input !out-host)
-                        :attrs (operandSegmentSizes (list 1 1 1) :i32-array)
+                        :attrs ((operandSegmentSizes (list 1 1 1) :i32-array))
                         :regions ((^bb0 ((%s : !shape-type))
                                      (%_ = (with-current-block-builder ((current-block-builder) op)
                                              (with-mlir-ops
@@ -57,7 +57,7 @@
                         -> !out-host)
         ;; Compute body: for each axis [start, end), emit dim + cast; then from_elements + yield
         (%result = hipsr.compute (%ctx %input %placeholder !out-host)
-                   :attrs (operandSegmentSizes (list 1 1 1) :i32-array)
+                   :attrs ((operandSegmentSizes (list 1 1 1) :i32-array))
                    :regions ((^bb0 ((%c : !ctx-type) (%in : !input-type) (%dest : !out-host))
                                 (%_ = (with-current-block-builder ((current-block-builder) op)
                                         (with-mlir-ops

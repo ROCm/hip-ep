@@ -266,34 +266,23 @@
            "Expected [:then-let (...)] :rewrite root :with rewrite-ops..." rest-stx)]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-rewrite-ops-recursive - Collect rewrite operations
+  ;; parse-rewrite-ops-recursive - Collect rewrite operations as raw syntax
   ;;-----------------------------------------------------------------------
-  ;; Syntax: Each rewrite operation is wrapped in parentheses.
-  ;;
-  ;; Multiple operations:
-  ;;   :rewrite %root :with
-  ;;     (%x = temp.op (%a) -> !t1)
-  ;;     (%y = new.op (%x %b) -> !t1)
-  ;;
-  ;; Single operation:
-  ;;   :rewrite %root :with (new.op (%a %b) -> !t)
-  ;;
-  ;; Each operation is parsed by parse-rewrite-operation, which handles:
-  ;;   - Result variable: [result =] or [(result-list) =]
-  ;;   - Operands: (operand ...)
-  ;;   - Optional sections: [:regions ...] [:attrs ...] [-> result-types]
+  ;; The :rewrite :with body is the surface syntax of with-mlir-ops.
+  ;; Rather than converting to AST records (which duplicates with-mlir-ops),
+  ;; collect each op-form as a raw syntax object.  with-mlir-ops processes
+  ;; them at macro-expansion time in the consumer.
   ;;
   (define (parse-rewrite-ops-recursive rest-stx acc-ops ast)
-    (syntax-case rest-stx (=)
+    (syntax-case rest-stx ()
       ;; End of operations
       [()
        (ast-pattern-expand-rewrite-set! ast (reverse acc-ops))
        ast]
 
-      ;; Parse one operation, continue with rest
+      ;; Collect one raw op-form, continue with rest
       [(op-syntax . rest)
-       (let ([rewrite-op (parse-rewrite-operation #'op-syntax)])
-         (parse-rewrite-ops-recursive #'rest (cons rewrite-op acc-ops) ast))]
+       (parse-rewrite-ops-recursive #'rest (cons #'op-syntax acc-ops) ast)]
 
       [_ (syntax-violation 'parse-rewrite-ops-recursive
            "Invalid rewrite operation syntax" rest-stx)]))

@@ -287,7 +287,7 @@
                (if multi-vars
                    ;; Multi-result: tmp binding + N result extractions
                    (let* ([rtypes (syntax->list result-type)]
-                          [tmp    (datum->syntax stx
+                          [tmp    (datum->syntax #'with-mlir-ops
                                     (string->symbol (string-append "%op-tmp-" (number->string idx))))])
                      (with-syntax ([(v ...) operands] [n op-name]
                                    [(rt ...) rtypes] [t tmp]

@@ -45,11 +45,8 @@
     ;; Cache: root-op-index, root-result-idx, root-op-name for codegen
     (validate-and-cache-root-var ast-rec)
 
-    ;; Validate rewrite operations — ast-scheme-binding-expand items pass through unchanged
-    (for-each (lambda (item)
-                (when (ast-operation-expand? item)
-                  (validate-operation item)))
-              (ast-pattern-expand-rewrite ast-rec))
+    ;; :rewrite :with body is kept as raw syntax and forwarded to with-mlir-ops;
+    ;; structural validation happens at macro-expansion time in the consumer.
 
     ;; Rule: Where binding variables must be identifiers
     (validate-then-let-bindings ast-rec)
