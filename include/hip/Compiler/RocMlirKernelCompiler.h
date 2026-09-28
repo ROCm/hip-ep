@@ -78,9 +78,12 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
 // from `module`, not copied -- they are dead there once their binaries are
 // embedded -- so this costs nothing beyond the kernels themselves. Outlined
 // kernels are IsolatedFromAbove and carry `rock.arch` on the func, so nothing
-// from the enclosing module needs to come with them. Returns an empty module
-// when there are no kernels, null on failure.
-OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module);
+// from the enclosing module needs to come with them. \p arch, when non-empty,
+// replaces the fixed `rock.arch` fuse-rocmlir wrote, so the tuning passes see
+// the chip the backend is targeting. Returns an empty module when there are
+// no kernels, null on failure.
+OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
+                                                     StringRef arch = {});
 
 // Split one func back out of the module returned above into its own
 // single-func module, which is the shape the rock pipelines want. Another

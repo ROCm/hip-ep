@@ -38,11 +38,30 @@ if(ENABLE_ROCMLIRTRITON)
     # but it is a leaf target not pulled in transitively by the rock/triton
     # closure.
     MLIRFuncInlinerExtension
+    # CompilerDriver's rocMLIR arm calls createDuplicateFunctionEliminationPass.
+    # It resolves transitively today, but through the rocMLIR closure -- name
+    # it so a standard MLIR dependency does not hinge on that.
+    MLIRFuncTransforms
     "${_rocmlir_link_closure}"
   )
   # Same name as the CMake option deliberately: one flag for the whole
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
+
+  # resolveRocMlirArch asks the live GPU which chip to build for. Without this
+  # it can only guess, and a code object for the wrong chip fails at module
+  # load. Same gate the rest of the EP uses for HIP host APIs.
+  if(HIPDNN_EP_LINK_HIP_HOST)
+    find_package(hip CONFIG REQUIRED)
+    target_link_libraries(LibHipCompiler PRIVATE hip::host)
+    target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+  endif()
+  # Last resort when there is no device to ask: whatever this build targets.
+  if(HIP_ARCHITECTURES)
+    list(GET HIP_ARCHITECTURES 0 _rocmlir_default_arch)
+    target_compile_definitions(LibHipCompiler PRIVATE
+      "HIPDNN_ROCMLIR_DEFAULT_ARCH=\"${_rocmlir_default_arch}\"")
+  endif()
 endif()
 
 # When hipBLASLt is disabled, the model link must not add -lhipblaslt

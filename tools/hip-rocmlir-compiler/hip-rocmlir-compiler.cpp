@@ -571,7 +571,7 @@ int main(int argc, char **argv) {
     llvm::SmallVector<std::string> kernelNames =
         mlir::hip::collectRocMlirKernelNames(*module);
     mlir::OwningOpRef<mlir::ModuleOp> tosaKernels =
-        mlir::hip::takeRocMlirKernelsAsTosaModule(*module);
+        mlir::hip::takeRocMlirKernelsAsTosaModule(*module, arch);
     if (!tosaKernels) {
       llvm::errs() << "error: hip->tosa conversion failed\n";
       return 1;

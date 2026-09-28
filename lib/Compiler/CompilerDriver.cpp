@@ -375,7 +375,20 @@ bool CompilerDriver::runMLIRPasses(
 
     {
       mlir::PassManager headPm(module.getContext());
-      mlir::hip::buildOnnxToHipPipelineHead(headPm);
+      // Same handle plumbing as the default arm below. rocMLIR only claims
+      // the subgraphs fuse-rocmlir anchors on; everything else still wants
+      // the hipDNN graph passes, and CompilerAPI needs the compiled graphs to
+      // register. Dropping them here would silently move the rest of the
+      // model off hipDNN the moment HIPDNN_EP_ROCMLIR was set.
+      if (hipdnnHandle_) {
+        compiledGraphs_ =
+            std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+        mlir::hip::buildOnnxToHipPipelineHead(
+            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_),
+            compiledGraphs_);
+      } else {
+        mlir::hip::buildOnnxToHipPipelineHead(headPm);
+      }
       // rocMLIR has no transposed-convolution anchor, so split
       // conv_transpose into plain convolutions before anything tries to
       // outline a kernel around it.

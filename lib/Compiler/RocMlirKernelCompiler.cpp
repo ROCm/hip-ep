@@ -33,6 +33,10 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+#include <hip/hip_runtime.h>
+#endif
+
 #include <memory>
 
 namespace mlir {
@@ -142,12 +146,35 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
 std::string resolveRocMlirArch() {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
   // called from CompilerDriver, and std::getenv there cannot see env vars set
-  // by the host process -- a ROCK_ARCH override would be silently dropped and
-  // every kernel built for the fallback arch below.
+  // by the host process -- a ROCK_ARCH override would be silently dropped.
   std::string arch = hip_get_env("ROCK_ARCH");
   if (!arch.empty())
     return arch;
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Ask the GPU we are about to run on. Guessing here is not a harmless
+  // default: a code object built for the wrong chip loads with "no kernel
+  // image is available for execution on the device" at the first dispatch.
+  // Mirrors LlvmIrJit::detectCustomKernelArch.
+  hipDeviceProp_t prop{};
+  if (hipGetDeviceProperties(&prop, 0) == hipSuccess) {
+    std::string deviceArch = prop.gcnArchName;
+    // Empty gcnArchName has been seen on some Windows TheRock builds.
+    if (!deviceArch.empty()) {
+      if (auto colon = deviceArch.find(':'); colon != std::string::npos)
+        deviceArch.resize(colon); // "gfx1100:xnack-" -> "gfx1100"
+      return deviceArch;
+    }
+  }
+#endif
+
+  // Whatever this build was configured for (HIP_ARCHITECTURES), which at
+  // least matches the kernels shipped beside it.
+#ifdef HIPDNN_ROCMLIR_DEFAULT_ARCH
+  return HIPDNN_ROCMLIR_DEFAULT_ARCH;
+#else
   return "gfx1151";
+#endif
 }
 
 void registerRocMlirDialects(MLIRContext &context) {
@@ -167,7 +194,8 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module) {
   return tosaModule;
 }
 
-OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module) {
+OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
+                                                     StringRef arch) {
   OpBuilder builder(module.getContext());
   OwningOpRef<ModuleOp> kernels = ModuleOp::create(builder.getUnknownLoc());
 
@@ -179,6 +207,12 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module) {
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
+    // fuse-rocmlir stamps a fixed rock.arch, and the rock tuning passes read
+    // it from the func. Point it at the arch we are actually compiling for,
+    // or the tuning parameters get chosen for a different chip than the
+    // backend emits code for.
+    if (!arch.empty())
+      func->setAttr("rock.arch", builder.getStringAttr(arch));
     func->remove();
     kernels->getBody()->push_back(func);
   }
@@ -290,7 +324,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // it. Handing the IR over whole was unavoidable when rocMLIR sat behind a
   // dlopen boundary; it is built in-tree now, so the kernels can simply be
   // re-parented.
-  OwningOpRef<ModuleOp> kernels = takeRocMlirKernelsAsTosaModule(module);
+  OwningOpRef<ModuleOp> kernels =
+      takeRocMlirKernelsAsTosaModule(module, options.arch);
   if (!kernels)
     return module.emitError() << "hip->tosa conversion failed";
 
