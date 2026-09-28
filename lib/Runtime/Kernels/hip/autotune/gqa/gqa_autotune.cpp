@@ -718,10 +718,11 @@ void hip_gqa_autotune_resolve_decode(void *policy,
         if (logOn()) {
           char buf[192];
           snprintf(buf, sizeof(buf),
-                   "[gqa-lut] decode %s H=%d G=%d d=%d skv=%d -> wmma=%d "
-                   "splits=%d bkv=%d d=%.3f",
+                   "[gqa-lut] decode %s H=%d G=%d d=%d skv=%d -> cfg=%u "
+                   "wmma=%d splits=%d bkv=%d d=%.3f",
                    exact ? "exact" : "nearest", req->num_heads,
-                   req->kv_num_heads, req->head_dim, eff, cfg.use_wmma,
+                   req->kv_num_heads, req->head_dim, eff,
+                   static_cast<unsigned>(p.config), cfg.use_wmma,
                    cfg.splits, cfg.bkv, out->distance);
           if (logLineFirstSeen(buf))
             fprintf(stderr, "%s\n", buf);
@@ -818,10 +819,11 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
         if (logOn()) {
           char buf[192];
           snprintf(buf, sizeof(buf),
-                   "[gqa-lut] prefill %s H=%d G=%d d=%d sq=%d skv=%d d=%.3f",
+                   "[gqa-lut] prefill %s H=%d G=%d d=%d sq=%d skv=%d cfg=%u "
+                   "d=%.3f",
                    exact ? "exact" : "nearest", req->num_heads,
                    req->kv_num_heads, req->head_dim, req->seq_q, req->seq_kv,
-                   out->distance);
+                   static_cast<unsigned>(p.config), out->distance);
           if (logLineFirstSeen(buf))
             fprintf(stderr, "%s\n", buf);
         }

@@ -553,6 +553,10 @@ add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Linked into hipgpu.dll; do not dllexport. ORT only looks up the plugin EP
+# entry points. JIT resolves these by address; native model DLLs link their
+# own copy of this lib.
+target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 
 # Install the import/static lib so NATIVE model DLLs can link it on a deploy
 # host that only has the packaged tree (no build dir). CompilerDriver bakes the
