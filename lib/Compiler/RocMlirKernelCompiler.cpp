@@ -362,6 +362,9 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
              << "rocMLIR failed to compile kernel '" << name << "'";
   }
 
+  if (options.finishCompiles && !options.finishCompiles(compiledByKernel))
+    return module.emitError() << "rocMLIR deferred kernel compiles failed";
+
   // Stamp the compiled artifact onto each `hip.rocmlir` dispatch
   // (kernel_binary + grid_size + block_size). The kernel funcs themselves are
   // already gone from `module` -- they were moved out above -- which is what
@@ -375,7 +378,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   WalkResult walked = module.walk([&](RocMlirOp op) {
     StringRef callee = op.getKernel();
     auto it = compiledByKernel.find(callee);
-    if (it == compiledByKernel.end()) {
+    if (it == compiledByKernel.end() || it->second.binary.empty()) {
       op.emitError() << "no compiled kernel for '" << callee << "'";
       return WalkResult::interrupt();
     }

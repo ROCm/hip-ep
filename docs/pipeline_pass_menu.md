@@ -98,12 +98,24 @@ Options use MLIR's pipeline-option syntax:
 `onnx-to-hip-pipeline{skip-constant-data=true}`.
 
 `hip-rocmlir-compiler` defaults to quick autotune: it enumerates the rocMLIR
-quick space, compiles and benchmarks each applicable candidate on the current
-HIP device, and embeds the fastest binary. `--autotune[=quick|full|exhaustive]`
-overrides that space. Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value other
-than `0`) to skip the GPU search and affix the first enumerated perfConfig.
-Per-config timing and the selected perfConfig string are printed only with
-`--verbose`.
+quick space, compiles every applicable candidate, benchmarks them on the
+current HIP device, and embeds the fastest binary. Every search config in the
+model is compiled in one pool (default: one job per hardware thread;
+`HIP_ROCMLIR_COMPILE_JOBS` overrides the width). GPU benchmarking stays serial,
+and it starts only after that pool finishes, so candidate timings do not
+overlap and a slow config does not stall the next kernel's compiles. Within
+one compile, the first kernel for a rocMLIR problem key (`getTuningProblemStr`,
+plus the selected space) is searched; later kernels with that key compile only
+the winning perfConfig, together in a second pool, and are not benchmarked
+again. The compiled binary is not reused, because each outlined kernel has its
+own symbol. `--autotune[=quick|full|exhaustive]`
+overrides the search space. Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
+other than `0`) to skip the GPU search and affix the first enumerated
+perfConfig. The log names the space (`quick`, `full`, or `exhaustive`) and the
+number of configs in each pool. At the end it prints three wall times:
+perfConfig compile (pool wait, summed across the two pools), serial GPU
+benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and
+the selected perfConfig string are printed only with `--verbose`.
 
 > These pipeline names reproduce the same flow the EP / `hip-compiler`
 > front-end runs, so composing them is the way to match the default compile
