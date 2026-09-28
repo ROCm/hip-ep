@@ -218,30 +218,18 @@
                         [(setter ...) attr-setters]
                         [(region-stmt ...) region-stmts])
             (if zero-result?
-                ;; zero-result: bind var to the op itself
-                (if (> nregions 0)
-                    (with-syntax ([nr nregions])
-                      (list (cons #'var
-                                  #'(let ([new-op ((current-mlir-build-with-regions-fn) n (list v ...) '() nr)])
-                                      setter ...
-                                      region-stmt ...
-                                      new-op))))
-                    (list (cons #'var
-                                #'(let ([new-op ((current-mlir-build-fn) n (list v ...) '())])
-                                    setter ... new-op))))
-                ;; single result: bind var to result 0
-                (if (> nregions 0)
-                    (with-syntax ([nr nregions] [rt result-type])
-                      (list (cons #'var
-                                  #'(let ([new-op ((current-mlir-build-with-regions-fn) n (list v ...) (list rt) nr)])
-                                      setter ...
-                                      region-stmt ...
-                                      (mlir-operation-get-result new-op 0)))))
-                    (with-syntax ([rt result-type])
-                      (list (cons #'var
-                                  #'(let ([new-op ((current-mlir-build-fn) n (list v ...) (list rt))])
-                                      setter ...
-                                      (mlir-operation-get-result new-op 0))))))))))
+                (with-syntax ([nr nregions])
+                  (list (cons #'var
+                              #'(let ([new-op ((current-mlir-build-fn) n (list v ...) '() nr)])
+                                  setter ...
+                                  region-stmt ...
+                                  new-op))))
+                (with-syntax ([nr nregions] [rt result-type])
+                  (list (cons #'var
+                              #'(let ([new-op ((current-mlir-build-fn) n (list v ...) (list rt) nr)])
+                                  setter ...
+                                  region-stmt ...
+                                  (mlir-operation-get-result new-op 0)))))))))
 
       ;; process-op: parse one form and return a flat list of (var . expr) pairs.
       ;;
