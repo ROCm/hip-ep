@@ -130,7 +130,9 @@
                    #t))]
             [(rewrite)
              #`(with-current-mlir-builder (#,rw #,op)
-                 (with-mlir-ops form ...))]))))
+                 (let ([result (with-mlir-ops form ...)])
+                   (mlir-replace-op #,rw #,op result)
+                   #t))]))))
 
     ;;=======================================================================
   ;; :then-let bindings
