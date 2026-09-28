@@ -545,25 +545,21 @@ int main(int argc, char **argv) {
   if (!dumpHipPath.empty())
     dumpModule(*module, "hip", dumpHipPath);
 
-  // Stage 2: on a CLONE, run the hip->tosa conversion (front of
-  // buildRocMlirPipeline, minus its terminal hipEpAddHighLevelPipeline -- that
-  // runs in the .so), then compile the `rock.kernel` funcs through the
-  // in-tree rocMLIR pipeline. The clone is discarded; we only want the
-  // compiled binary + launch geometry back.
-  mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
-      mlir::hip::buildRocMlirTosaClone(*module);
-  if (!tosaModule) {
-    llvm::errs() << "error: hip->tosa conversion failed\n";
-    return 1;
-  }
-
-  // Dumped before the non-kernel funcs are dropped below, so the dump shows the
-  // whole module rather than just the kernels that cross into the .so. Note
-  // this is the *canonicalized* TOSA: `tpm` ran the canonicalizer above, so
-  // dead ops that `hip-mlir-opt --convert-hip-to-tosa` alone would print (the
-  // orphaned `tensor.empty` feeding a dropped DPS `outs`, for one) are gone.
-  if (!dumpTosaPath.empty())
+  // --dump-tosa shows the hip->tosa conversion applied to the whole module,
+  // non-kernel funcs included, which needs a clone of everything. That is
+  // debug-only cost: the compile path below converts one kernel at a time and
+  // never copies the model. Note this is the *canonicalized* TOSA, so dead ops
+  // that `hip-mlir-opt --convert-hip-to-tosa` alone would print (the orphaned
+  // `tensor.empty` feeding a dropped DPS `outs`, for one) are gone.
+  if (!dumpTosaPath.empty()) {
+    mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
+        mlir::hip::buildRocMlirTosaClone(*module);
+    if (!tosaModule) {
+      llvm::errs() << "error: hip->tosa conversion failed\n";
+      return 1;
+    }
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
+  }
 
   const std::string arch = mlir::hip::resolveRocMlirArch();
 
@@ -573,13 +569,20 @@ int main(int argc, char **argv) {
   // contains one tunable kernel.
   if (dumpHighLevel) {
     llvm::SmallVector<std::string> kernelNames =
-        mlir::hip::collectRocMlirKernelNames(*tosaModule);
+        mlir::hip::collectRocMlirKernelNames(*module);
+    mlir::OwningOpRef<mlir::ModuleOp> tosaKernels =
+        mlir::hip::takeRocMlirKernelsAsTosaModule(*module);
+    if (!tosaKernels) {
+      llvm::errs() << "error: hip->tosa conversion failed\n";
+      return 1;
+    }
     for (const std::string &name : kernelNames) {
-      mlir::OwningOpRef<mlir::ModuleOp> single = tosaModule->clone();
-      for (auto func :
-           llvm::make_early_inc_range(single->getOps<mlir::func::FuncOp>()))
-        if (func.getSymName() != name)
-          func.erase();
+      mlir::OwningOpRef<mlir::ModuleOp> single =
+          mlir::hip::takeRocMlirKernelModule(*tosaKernels, name);
+      if (!single) {
+        llvm::errs() << "error: no tosa kernel named '" << name << "'\n";
+        return 1;
+      }
 
       mlir::hip::CompiledKernel kernel;
       if (!mlir::hip::runRocMlirOnKernel(*single, arch,
@@ -630,8 +633,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 #endif
-  if (mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(
-          *module, *tosaModule, embedOpts)))
+  if (mlir::failed(
+          mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts)))
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant

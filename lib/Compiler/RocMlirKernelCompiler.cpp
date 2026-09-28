@@ -167,6 +167,55 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module) {
   return tosaModule;
 }
 
+OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module) {
+  OpBuilder builder(module.getContext());
+  OwningOpRef<ModuleOp> kernels = ModuleOp::create(builder.getUnknownLoc());
+
+  // Unlink and re-parent rather than clone. Each kernel is dead in `module`
+  // from here on -- its body ships as an embedded binary and the symbol goes
+  // away -- so there is nothing to preserve, and an outlined kernel is
+  // IsolatedFromAbove, so no enclosing SSA value or module attribute has to
+  // travel with it (rock.arch rides on the func, put there by fuse-rocmlir).
+  for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
+    if (!func->hasAttr("rock.kernel"))
+      continue;
+    func->remove();
+    kernels->getBody()->push_back(func);
+  }
+  if (kernels->getBody()->empty())
+    return kernels;
+
+  // One pass-manager run for every kernel at once. Per-kernel runs would be
+  // simpler but measurably slower: the canonicalizer rebuilds its pattern set
+  // from every loaded dialect each time it is constructed, and with the rock
+  // and triton dialects registered that fixed cost dominates the actual work
+  // on a single outlined kernel.
+  PassManager pm(kernels->getContext());
+  pm.addNestedPass<func::FuncOp>(createConvertHipToTosaPass());
+  pm.addPass(createCanonicalizerPass());
+  if (failed(pm.run(*kernels)))
+    return nullptr;
+  return kernels;
+}
+
+OwningOpRef<ModuleOp> takeRocMlirKernelModule(ModuleOp kernelsModule,
+                                              StringRef kernelName) {
+  func::FuncOp kernel;
+  for (auto func : kernelsModule.getOps<func::FuncOp>())
+    if (func.getSymName() == kernelName) {
+      kernel = func;
+      break;
+    }
+  if (!kernel)
+    return nullptr;
+
+  OpBuilder builder(kernelsModule.getContext());
+  OwningOpRef<ModuleOp> single = ModuleOp::create(builder.getUnknownLoc());
+  kernel->remove();
+  single->getBody()->push_back(kernel);
+  return single;
+}
+
 bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
                            StringRef perfConfig, CompiledKernel &out) {
   PassManager pm(kernelModule.getContext());
@@ -228,28 +277,37 @@ SmallVector<std::string> collectRocMlirKernelNames(ModuleOp module) {
 }
 
 LogicalResult
-compileAndEmbedRocMlirKernels(ModuleOp module, ModuleOp tosaModule,
+compileAndEmbedRocMlirKernels(ModuleOp module,
                               const RocMlirEmbedOptions &options) {
-  SmallVector<std::string> kernelNames = collectRocMlirKernelNames(tosaModule);
+  SmallVector<std::string> kernelNames = collectRocMlirKernelNames(module);
   if (kernelNames.empty())
     return success();
 
+  // Lift the kernels out of `module` and convert them all to tosa in one go.
+  // This used to clone the whole module for the conversion and then clone it
+  // again per kernel, so a graph with N kernels made N+1 deep copies of the
+  // entire model and converted `main_graph` to tosa every time only to erase
+  // it. Handing the IR over whole was unavoidable when rocMLIR sat behind a
+  // dlopen boundary; it is built in-tree now, so the kernels can simply be
+  // re-parented.
+  OwningOpRef<ModuleOp> kernels = takeRocMlirKernelsAsTosaModule(module);
+  if (!kernels)
+    return module.emitError() << "hip->tosa conversion failed";
+
   // The tuning and backend entry points are module-scoped and assume a single
-  // anchor op per module, so a graph with several outlined kernels has to be
-  // compiled one kernel at a time. Each single-kernel module keeps the
-  // original module-level attributes; only the sibling kernel funcs are
-  // dropped.
+  // anchor op per module, so the kernels still have to be compiled one at a
+  // time -- but splitting one off is now just a re-parent, with no pass run
+  // and nothing copied.
   llvm::StringMap<CompiledKernel> compiledByKernel;
   for (auto [index, name] : llvm::enumerate(kernelNames)) {
-    OwningOpRef<ModuleOp> single = tosaModule.clone();
-    for (auto func : llvm::make_early_inc_range(single->getOps<func::FuncOp>()))
-      if (func.getSymName() != name)
-        func.erase();
-
     if (options.log && kernelNames.size() > 1)
       *options.log << options.logPrefix << " compiling kernel '" << name
                    << "' (" << (index + 1) << " of " << kernelNames.size()
                    << ")\n";
+
+    OwningOpRef<ModuleOp> single = takeRocMlirKernelModule(*kernels, name);
+    if (!single)
+      return module.emitError() << "no tosa kernel named '" << name << "'";
 
     // tosa -> rock happens here, not inside compileOne: the tuning entry
     // points a custom compileOne uses (createTunableParamSpace, tuningSetStr)
@@ -270,18 +328,13 @@ compileAndEmbedRocMlirKernels(ModuleOp module, ModuleOp tosaModule,
   }
 
   // Stamp the compiled artifact onto each `hip.rocmlir` dispatch
-  // (kernel_binary + grid_size + block_size), then delete the now-compiled
-  // `rock.kernel` funcs: their body lives in the embedded binary and the
-  // symbol is no longer needed. Each dispatch names its kernel func, so give
-  // it that kernel's binary and geometry; the hip.rocmlir -> wrap_rocmlir
-  // lowering reads both per op.
+  // (kernel_binary + grid_size + block_size). The kernel funcs themselves are
+  // already gone from `module` -- they were moved out above -- which is what
+  // used to be a separate erase pass here. Each dispatch names its kernel
+  // func, so give it that kernel's binary and geometry; the hip.rocmlir ->
+  // wrap_rocmlir lowering reads both per op.
   MLIRContext *context = module.getContext();
   auto i64 = IntegerType::get(context, 64);
-
-  SmallVector<func::FuncOp> kernelFuncs;
-  for (auto func : module.getOps<func::FuncOp>())
-    if (func->hasAttr("rock.kernel"))
-      kernelFuncs.push_back(func);
 
   size_t totalBytes = 0;
   WalkResult walked = module.walk([&](RocMlirOp op) {
@@ -302,9 +355,6 @@ compileAndEmbedRocMlirKernels(ModuleOp module, ModuleOp tosaModule,
   if (walked.wasInterrupted())
     return failure();
 
-  for (auto func : kernelFuncs)
-    func.erase();
-
   if (options.log) {
     for (const std::string &name : kernelNames) {
       const CompiledKernel &kernel = compiledByKernel[name];
@@ -314,7 +364,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module, ModuleOp tosaModule,
                    << " block_size=" << kernel.blockSize << "\n";
     }
     *options.log << options.logPrefix << " embedded " << totalBytes
-                 << "-byte binary; deleted " << kernelFuncs.size()
+                 << "-byte binary; deleted " << kernelNames.size()
                  << " kernel func(s)\n";
   }
   return success();

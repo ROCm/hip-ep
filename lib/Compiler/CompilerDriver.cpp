@@ -391,21 +391,14 @@ bool CompilerDriver::runMLIRPasses(
       }
     }
 
-    mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
-        mlir::hip::buildRocMlirTosaClone(module);
-    if (!tosaModule) {
-      error_message = "hip->tosa conversion failed";
-      return false;
-    }
-
     mlir::hip::RocMlirEmbedOptions embedOpts;
     embedOpts.arch = mlir::hip::resolveRocMlirArch();
     if (hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE")) {
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
-    if (mlir::failed(mlir::hip::compileAndEmbedRocMlirKernels(
-            module, *tosaModule, embedOpts))) {
+    if (mlir::failed(
+            mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
       error_message = "rocMLIR kernel compilation failed";
       return false;
     }

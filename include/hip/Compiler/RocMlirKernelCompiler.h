@@ -67,11 +67,26 @@ std::string resolveRocMlirArch();
 // Safe to call more than once on the same context.
 void registerRocMlirDialects(MLIRContext &context);
 
-// hip -> tosa on a clone of `module`: the front of buildRocMlirPipeline. The
-// clone exists because rocMLIR's high-level pipeline asserts on non-kernel
-// funcs, so `main_graph` and its hip.* ops cannot come along. Returns null on
-// failure.
+// hip -> tosa on a clone of the whole `module`, non-kernel funcs included.
+// Only for debugging (hip-rocmlir-compiler's --dump-tosa): it deep-copies the
+// entire model, which on a large graph is expensive enough that the compile
+// path deliberately avoids it. Returns null on failure.
 OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
+
+// Move every `rock.kernel` func out of `module` into one fresh module and
+// lower them hip -> tosa in a single pass-manager run. The funcs are unlinked
+// from `module`, not copied -- they are dead there once their binaries are
+// embedded -- so this costs nothing beyond the kernels themselves. Outlined
+// kernels are IsolatedFromAbove and carry `rock.arch` on the func, so nothing
+// from the enclosing module needs to come with them. Returns an empty module
+// when there are no kernels, null on failure.
+OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module);
+
+// Split one func back out of the module returned above into its own
+// single-func module, which is the shape the rock pipelines want. Another
+// re-parent: no pass runs, nothing copied. Returns null if not found.
+OwningOpRef<ModuleOp> takeRocMlirKernelModule(ModuleOp kernelsModule,
+                                              StringRef kernelName);
 
 // tosa -> rock over a module holding exactly one `rock.kernel` func.
 // compileAndEmbedRocMlirKernels runs this before it hands a kernel to
@@ -97,15 +112,14 @@ bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
 // Names of the `rock.kernel` funcs in `module`, in declaration order.
 SmallVector<std::string> collectRocMlirKernelNames(ModuleOp module);
 
-// Compile every `rock.kernel` func in `tosaModule` and stamp the binary and
-// launch geometry onto the matching `hip.rocmlir` dispatches in `module`, then
-// erase the compiled kernel funcs from `module`. `tosaModule` must be the
-// result of buildRocMlirTosaClone(module).
+// Compile every `rock.kernel` func in `module` and stamp the binary and launch
+// geometry onto the matching `hip.rocmlir` dispatches. On return the kernel
+// funcs are gone from `module`: each one is consumed in place of being cloned
+// and then erased.
 //
 // A module with no kernels succeeds and changes nothing -- fuse-rocmlir
 // declining every anchor is the ordinary library-path outcome, not an error.
 LogicalResult compileAndEmbedRocMlirKernels(ModuleOp module,
-                                            ModuleOp tosaModule,
                                             const RocMlirEmbedOptions &options);
 
 } // namespace hip
