@@ -124,6 +124,10 @@ endif()
 
 
 
+# The shared EP links static archives. PIC must stay on even when protobuf
+# is not fetched; it used to be implied by the protobuf configure below.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "PIC for archives linked into the shared EP")
+
 # protobuf is required only by the optional ONNX backend and ONNX schema
 # support. The default EP does not fetch or link it. The pin stays in
 # deps.txt so an ONNX configure can still resolve the same revision.
@@ -139,8 +143,6 @@ if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
   set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
   set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
   set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
-  # Enable -fPIC for protobuf static lib to link into shared library on Linux
-  set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "enable PIC for protobuf")
   if(NOT Protobuf_FOUND)
     find_package(Protobuf CONFIG QUIET)
   endif()

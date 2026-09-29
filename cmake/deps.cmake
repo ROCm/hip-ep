@@ -367,6 +367,12 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
      "onnxruntime;;${onnxruntime_VERSION}\n")
 set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
+# libhipgpu.so whole-archive-links static libraries (HipCInterface,
+# flatbuffers, the MorphiZen archives). Those objects must be built PIC.
+# This used to be set only while fetching protobuf, which made the default
+# shared-library link depend on that fetch.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
+
 # protobuf (+ bundled abseil) is only needed by the optional ONNX backend and
 # ONNX schema support. The default hipgpu.dll build does not fetch or link it.
 # An unset cache variable is false, matching option() defaults inside morphizen.
@@ -383,7 +389,6 @@ if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
     set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(protobuf_INSTALL ON CACHE BOOL "" FORCE)
     set(CMAKE_CXX_STANDARD 17)
-    set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
     # SYSTEM marks protobuf's (and bundled abseil's) include dirs as system
     # headers so their C4100/C4127/etc. warnings don't trip /W4 /WX.
     FetchContent_Declare(Protobuf
