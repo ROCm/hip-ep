@@ -86,7 +86,7 @@ func.func @swiglu_dynamic_bf16(%ctx: !hip.context,
 // tensor.dim of the inner product. Those queries are not value uses. The
 // fused op retargets them to the gate, which has the same type.
 // CHECK-LABEL: func.func @swiglu_dim_of_intermediate
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[GATE:.*]]: tensor<?x?x14336xf16>
+// CHECK-SAME: (%[[CTX:arg[0-9]+]]: !hip.context, %[[GATE:arg[0-9]+]]: tensor<?x?x14336xf16>,
 // CHECK-NOT: hip.sigmoid
 // CHECK-NOT: hip.mul
 // CHECK: tensor.dim %[[GATE]]
