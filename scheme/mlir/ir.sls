@@ -71,7 +71,7 @@
     mlir-log-fatal
 
     ;; Builder — explicit rewriter-based op construction
-    mlir-build-op
+    mlir-build-operation-op
     mlir-set-insertion-point-before
     mlir-set-insertion-point-to-block-end
     mlir-op-get-region
@@ -228,7 +228,7 @@
 
   ;;; Create an op at the current rewriter insertion point.
   ;;; operands and result-types are Scheme lists of uptr values.
-  (define mlir-build-op
+  (define mlir-build-operation-op
     (foreign-procedure "mlir_build_op"
                        (uptr uptr string scheme-object scheme-object) uptr))
 

@@ -12,9 +12,11 @@
 ;;   - Rank > 0 dense inline value → hipsr.constant with copied `value` attr
 ;;   - Rank 0 scalar → arith.constant with copied `value` attr
 ;;
-;; NOT handled (returns #f, pattern fails):
-;;   - External data (absent `value`, present `location`) — these models require
-;;     file-mapped DenseResourceElementsAttr construction not yet available in Scheme.
+;; NOT handled here (returns #f, defers to the C++ fallback registered in the pass):
+;;   - External data (absent `value`, present `location`/`offset`/`size`) —
+;;     DenseResourceElementsAttr construction from memory-mapped or file data
+;;     is not available in Scheme FFI. The pass registers
+;;     mlir-populate-constant-conversion-patterns as a fallback for these cases.
 ;;
 ;;===----------------------------------------------------------------------===;;
 

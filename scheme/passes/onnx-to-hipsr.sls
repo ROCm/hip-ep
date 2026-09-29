@@ -141,6 +141,10 @@
             (populate-gather-patterns   type-converter patterns ctx)
             (populate-expand-patterns   type-converter patterns ctx)
             (populate-constant-patterns type-converter patterns ctx)
+            ;; C++ fallback for onnx.Constant with external data (location/offset/size).
+            ;; The Scheme pattern returns #f for those cases; the C++ pattern handles
+            ;; them by building a DenseResourceElementsAttr from the mapped data.
+            (mlir-populate-constant-conversion-patterns type-converter patterns ctx)
             ;; C++ patterns — remain in C++ pending DSL extensions:
             ;;
             ;; onnx.Shape / onnx.Reshape / onnx.Unsqueeze:
