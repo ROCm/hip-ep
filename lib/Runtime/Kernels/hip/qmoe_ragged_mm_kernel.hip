@@ -244,7 +244,7 @@ __host__ __device__ __forceinline__ int select_ragged_task_kind(
 }
 
 template <RaggedQueuePolicy Policy>
-constexpr uint32_t queue_chunk_size() {
+__host__ __device__ __forceinline__ uint32_t queue_chunk_size() {
   if constexpr (Policy == RaggedQueuePolicy::kChunk2) {
     return 2;
   } else if constexpr (Policy == RaggedQueuePolicy::kChunk4) {
@@ -494,7 +494,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
       static_cast<uint32_t>(group_count_shared) *
       static_cast<uint32_t>(n_tiles);
 
-  constexpr uint32_t kQueueChunk = queue_chunk_size<QueuePolicy>();
+  const uint32_t kQueueChunk = queue_chunk_size<QueuePolicy>();
   uint32_t chunk_offset = kQueueChunk;
   uint32_t grid_stride_task = static_cast<uint32_t>(blockIdx.x);
 
