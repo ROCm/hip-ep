@@ -25,6 +25,7 @@
 #include "mlir/Support/LLVM.h"
 
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -49,6 +50,12 @@ struct CompiledKernel {
 using RocMlirKernelCompileFn =
     llvm::function_ref<bool(ModuleOp, StringRef, CompiledKernel &)>;
 
+// Runs once after every kernel went through `compileOne` and before any
+// binary is stamped. A `compileOne` may queue work and leave its entry empty;
+// this fills those entries in, e.g. from one model-wide compile pool.
+using RocMlirFinishCompilesFn =
+    llvm::function_ref<bool(llvm::StringMap<CompiledKernel> &)>;
+
 struct RocMlirEmbedOptions {
   std::string arch;
   // Per-kernel progress. Null keeps the compile silent, which is what the EP
@@ -57,6 +64,8 @@ struct RocMlirEmbedOptions {
   StringRef logPrefix = "[rocmlir]";
   // Empty means runRocMlirOnKernel.
   RocMlirKernelCompileFn compileOne = RocMlirKernelCompileFn();
+  // Empty means every kernel is complete when `compileOne` returns.
+  RocMlirFinishCompilesFn finishCompiles = RocMlirFinishCompilesFn();
 };
 
 // ROCK_ARCH wins, else a default the rock backend can parse.
