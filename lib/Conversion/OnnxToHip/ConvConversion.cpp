@@ -9,12 +9,13 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Conv -> hip.conv. Rank-4 input lowers directly to a 2D conv. Rank-3
-/// (1D) input is reshaped to rank-4 with a unit H dimension (NCL -> NC1L) via
-/// tensor.expand_shape, run through the same hip.conv, then collapsed back to
-/// NCL via tensor.collapse_shape. Both expand/collapse lower to zero-cost
-/// metadata ops (no data movement), so 1D conv reuses the 2D MIOpen path
-/// instead of a dedicated op/kernel. The `group` attribute is preserved
+/// onnx.Conv -> hip.conv. Rank-4 (2D, NCHW) and rank-5 (3D, NCDHW) inputs
+/// lower directly; the custom kernel takes a spatial rank of 1, 2, or 3.
+/// Rank-3 (1D) input is reshaped to rank-4 with a unit H dimension (NCL ->
+/// NC1L) via tensor.expand_shape, run through the same hip.conv, then
+/// collapsed back to NCL via tensor.collapse_shape. Both expand/collapse lower
+/// to zero-cost metadata ops (no data movement), so 1D conv reuses the 2D
+/// kernel instead of a dedicated op. The `group` attribute is preserved
 /// through the 1D reshape (grouped/depthwise 1D convs -> grouped/depthwise 2D
 /// convs), and dynamic result dims (batch, channels, and spatial extents) are
 /// sized at runtime from the conv input + attributes.
@@ -48,15 +49,17 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
-  // Only rank-3 (1D conv) and rank-4 (2D conv) are supported. Rank-5 (3D conv)
-  // has no runtime path today — leave it to whatever other pattern (if any)
-  // claims it.
+  // Rank 3 (1D), 4 (2D) and 5 (3D). A higher-benefit pattern (patch-embed
+  // GEMM) still wins when it matches. Anything else, including rank 6+, stays
+  // unconverted.
   const int64_t inputRank = inputType.getRank();
-  if (inputRank != 3 && inputRank != 4)
+  if (inputRank < 3 || inputRank > 5)
     return rewriter.notifyMatchFailure(
-        op, "ConvToHip only supports rank-3 (1D) and rank-4 (2D) Conv");
+        op, "ConvToHip only supports rank-3 (1D), rank-4 (2D) and rank-5 (3D) "
+            "Conv");
   const bool is1D = (inputRank == 3);
-  const int64_t spatialDims = inputRank - 2; // 1 for NCL, 2 for NCHW
+  const int64_t spatialDims =
+      inputRank - 2; // 1 for NCL, 2 for NCHW, 3 for NCDHW
 
   // Extract attributes from onnx.Conv
   llvm::SmallVector<int64_t> kernelShape;
@@ -102,8 +105,9 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
   // The rank-3 (1D) case is handled by reshaping to a rank-4 (2D) conv with a
   // unit H dimension and collapsing the result back. `conv2dResultType` is the
-  // type fed to hip.conv; for 1D it is the NC1L' rank-4 type, for 2D it is the
-  // original result type. For 1D, `is1D` drives the destination reshape below.
+  // type fed to hip.conv; for 1D it is the NC1L' rank-4 type, and for 2D/3D
+  // it is the original result type. For 1D, `is1D` drives the destination
+  // reshape below.
   mlir::RankedTensorType conv2dResultType = resultType;
 
   // NCL <-> NC1L reassociation: identity on N and C, split/merge the trailing
@@ -173,6 +177,18 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     mlir::Value oneC = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
     resultDynSize[dimIdx] =
         mlir::arith::AddIOp::create(rewriter, loc, divd, oneC);
+  }
+
+  if (!is1D) {
+    // hip.conv requires input, weights, and output to share a rank. The 1D
+    // path establishes that by expanding every operand; 2D and 3D must
+    // already agree.
+    auto weightsType =
+        mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
+    if (!weightsType || weightsType.getRank() != inputRank ||
+        resultType.getRank() != inputRank)
+      return rewriter.notifyMatchFailure(
+          op, "conv input, weights, and result ranks must match");
   }
 
   if (is1D) {
@@ -288,7 +304,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(bias);
   operands.push_back(init);
 
-  // Build attributes (always 2D form by this point).
+  // Build attributes. The 1D rewrite has promoted them to the unit-H 2D form;
+  // rank-4 and rank-5 keep the spatial rank of the original op.
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("kernel_shape",
                                         rewriter.getI64ArrayAttr(kernelShape)));
