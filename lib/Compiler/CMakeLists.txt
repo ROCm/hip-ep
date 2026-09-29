@@ -61,6 +61,7 @@ if(ENABLE_ROCMLIRTRITON)
     target_compile_definitions(LibHipCompiler PRIVATE
       $<TARGET_PROPERTY:hip::host,INTERFACE_COMPILE_DEFINITIONS>)
     target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+    target_link_libraries(LibHipCompiler PRIVATE ${CMAKE_DL_LIBS})
     # Real library name for the on-demand load, not a literal: Windows ships a
     # version-suffixed amdhip64_<major>.dll. Unknown means no device query.
     set(_hip_runtime_name "")
