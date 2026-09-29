@@ -1,0 +1,35 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// MIGraphX problem-cache table.
+//
+// One row is one compiled solution. `problem` and `solution` keep the cache
+// value as text: a rocMLIR key or perfConfig string is stored as itself, and
+// any other JSON value is stored as canonical JSON. The device columns are the
+// cache bucket the row was tuned in.
+//
+// hip-rocmlir-compiler reads rows whose solution is a gemm:/attn: perfConfig.
+// An identical problem string is used as stored, including a gemm key. A conv
+// miss uses the nearest feasible conv row. Other operators stay in the table
+// so a later dump can round-trip them.
+
+namespace hipdnn_ep.problem_cache;
+
+table ProblemCacheEntry {
+  device_name: string;
+  gfx_name: string;
+  cu_count: uint64;
+  wavefront_size: uint64;
+  name: string;
+  problem: string;
+  solution: string;
+}
+
+table ProblemCache {
+  schema_version: uint32 = 1;
+  entries: [ProblemCacheEntry];
+}
+
+root_type ProblemCache;
+file_identifier "MXPC";
+file_extension "mxpc";
