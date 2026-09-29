@@ -93,8 +93,6 @@
 
     ;; More type helpers (from ffi.sls)
     mlir-type-set-memory-space
-    mlir-type-is-device-tensor
-    mlir-tensor-type-in-host-space
 
     ;; More builder ops
     mlir-build-operation-op-with-regions
@@ -110,12 +108,10 @@
     mlir-get-index-type
     mlir-get-i64-type
     mlir-get-i1-type
-    mlir-get-hipsr-context-type
 
     ;; More attr helpers
     mlir-operation-set-index-attr
     mlir-operation-set-dense-i32-array
-    mlir-placeholder-set-barrier-type
 
     ;; Dynamic builder context
     current-rewriter
@@ -355,11 +351,6 @@
   (define mlir-type-set-memory-space
     (foreign-procedure "mlir_type_set_memory_space" (uptr int) uptr))
 
-  (define mlir-type-is-device-tensor
-    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
-
-  (define mlir-tensor-type-in-host-space
-    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
 
   ;; ── More builder ops ─────────────────────────────────────────────────────
 
@@ -403,8 +394,6 @@
   (define mlir-get-i1-type
     (foreign-procedure "mlir_get_i1_type" (uptr) uptr))
 
-  (define mlir-get-hipsr-context-type
-    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
 
   ;; ── More attr helpers ────────────────────────────────────────────────────
 
@@ -414,8 +403,6 @@
   (define mlir-operation-set-dense-i32-array
     (foreign-procedure "mlir_operation_set_dense_i32_array" (uptr string scheme-object) void))
 
-  (define mlir-placeholder-set-barrier-type
-    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
 
   ;; ── Dynamic builder context ──────────────────────────────────────────────

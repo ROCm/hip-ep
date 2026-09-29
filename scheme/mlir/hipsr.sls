@@ -31,9 +31,16 @@
 
     ;; Op ancestry predicates (pure)
     hipsr-has-compute-ancestor?
-    hipsr-has-placeholder-ancestor?)
+    hipsr-has-placeholder-ancestor?
+
+    ;; HipSR-specific type queries and op mutation (FFI bindings)
+    mlir-type-is-device-tensor          ; 1 if RankedTensorType with device space
+    mlir-tensor-type-in-host-space      ; clone type with host memory-space encoding
+    mlir-get-hipsr-context-type         ; hipsr::ContextType from MLIRContext
+    mlir-placeholder-set-barrier-type)  ; change placeholder_type attr to Barrier
 
   (import (rnrs (6))
+          (only (chezscheme) foreign-procedure)
           (mlir ir)
           (mlir dialects conversion))
 
@@ -134,5 +141,21 @@
       (lambda (op)
         (or (hipsr-has-compute-ancestor? op)
             (hipsr-has-placeholder-ancestor? op)))))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; HipSR-specific FFI bindings
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-type-is-device-tensor
+    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
+
+  (define mlir-tensor-type-in-host-space
+    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
+
+  (define mlir-get-hipsr-context-type
+    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
+
+  (define mlir-placeholder-set-barrier-type
+    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
 ) ;; end library (mlir hipsr)
