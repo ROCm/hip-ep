@@ -19,21 +19,6 @@
 namespace mlir {
 namespace hip {
 
-/// Static grouping information for `hip.readback_control`. Sources are
-/// flattened in operand-major order; `resultOffsets[i]` is the first i64 result
-/// produced for source `i`, and the final entry equals `totalCount`.
-struct ReadbackControlLayout {
-  SmallVector<int64_t> sourceLengths;
-  SmallVector<int64_t> resultOffsets;
-  int64_t totalCount = 0;
-};
-
-/// Validate rank-0/rank-1 statically-sized i32/i64 source types and compute the
-/// operand-major result grouping used by conversion, verification, and
-/// lowering. At least one source is required.
-FailureOr<ReadbackControlLayout>
-getReadbackControlLayout(TypeRange sourceTypes);
-
 /// Parse the payload of a rank-0 or rank-1 dense integer tensor into signed
 /// i64 values. `expectedRank` may restrict callers to scalar or vector form.
 /// This is the dialect-layer parsing core shared by inline constant matching
@@ -87,7 +72,6 @@ bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
 /// Element-type checks are intentionally not handled here: dtype-changing
 /// ops (cast, equal, less, not, and) keep their own element-type checks in
 /// their op-local verifiers.
-/// Verify one DPS destination against a pure `infer*` shape rule.
 LogicalResult
 verifyHipOpShape(Operation *op,
                  function_ref<FailureOr<SmallVector<int64_t>>()> inferShape,
