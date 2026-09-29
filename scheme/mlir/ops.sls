@@ -30,6 +30,9 @@
 ;;   (^label ((arg : !type) ...) body ...) — region block
 ;;
 ;; Operands prefixed with ! are types filtered from the value operand list.
+;; ,@list splices a dynamic list into the operand position:
+;;   (%r = tensor.from_elements (,@%dim-vals) -> !type)
+;;   (%r = some.op (v1 ,@%extra v2) -> !type)
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -231,7 +234,7 @@
                [new-op-id (datum->syntax #'with-mlir-ops 'new-op)]
                [tmp       (datum->syntax #'with-mlir-ops
                             (string->symbol (string-append "%op-tmp-" (number->string index))))])
-          (with-syntax ([(operand ...) operands] [name op-name]
+          (with-syntax ([operands-expr operands] [name op-name]
                         [(result-type ...) result-types] [tmp-var tmp]
                         [new-op new-op-id]
                         [(setter ...) (map (lambda (fn) (fn new-op-id)) attr-setter-fns)]
@@ -239,7 +242,7 @@
                         [nregions nregions])
             (cons (cons #'tmp-var
                         #'(let ([new-op (mlir-build-operation name
-                                         (list operand ...) (list result-type ...) nregions)])
+                                         operands-expr (list result-type ...) nregions)])
                             setter ...
                             region-fill-stmt ...
                             new-op))
@@ -309,10 +312,43 @@
         (let ([datum (syntax->datum x)])
           (if (string? datum) datum (symbol->string datum))))
 
-      ;; Return only the value operands from a mixed operand+type list.
+      ;; Build a runtime expression for the operand list from (operands ...).
+      ;; Operands prefixed with ! are filtered (they are types, not values).
+      ;; ,@list splices a dynamic list: (v1 ,@%more v2) → (append (list v1) %more (list v2))
+      ;; All-static result: #'(list v1 v2 ...)
+      ;; Any splice present: #'(append (list v1) %splice (list v2) ...)
       (define (value-operands operands-stx)
-        (filter (lambda (x) (not (type-id? x)))
-                (syntax->list operands-stx)))
+        (define (splice? x)
+          (let ([d (syntax->datum x)])
+            (and (pair? d) (eq? (car d) 'unquote-splicing))))
+        (let ([items (filter (lambda (x) (not (type-id? x)))
+                             (syntax->list operands-stx))])
+          (if (for-all (lambda (x) (not (splice? x))) items)
+              ;; All static — simple (list ...)
+              (with-syntax ([(v ...) items]) #'(list v ...))
+              ;; Mixed — build with append, grouping static runs
+              (let loop ([rest items] [static-run '()] [chunks '()])
+                (cond
+                  [(null? rest)
+                   (let ([final-chunks
+                          (if (null? static-run)
+                              (reverse chunks)
+                              (reverse (cons (with-syntax ([(v ...) (reverse static-run)])
+                                              #'(list v ...))
+                                            chunks)))])
+                     (with-syntax ([(chunk ...) final-chunks])
+                       #'(append chunk ...)))]
+                  [(splice? (car rest))
+                   (let* ([splice-expr (cadr (syntax->list (car rest)))]
+                          [chunks+     (if (null? static-run)
+                                          (cons splice-expr chunks)
+                                          (cons splice-expr
+                                                (cons (with-syntax ([(v ...) (reverse static-run)])
+                                                        #'(list v ...))
+                                                      chunks)))])
+                     (loop (cdr rest) '() chunks+))]
+                  [else
+                   (loop (cdr rest) (cons (car rest) static-run) chunks)])))))
 
       ;; True when identifier starts with ! (type convention, not a value).
       (define (type-id? x)

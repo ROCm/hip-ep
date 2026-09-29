@@ -20,6 +20,7 @@
           (only (chezscheme) format)
           (mlir ffi)
           (mlir hipsr)
+          (mlir ops)
           (mlir pattern-macro))
 
   ;;===--------------------------------------------------------------------===;;
@@ -47,15 +48,16 @@
   ;;===--------------------------------------------------------------------===;;
 
   (define (make-binary-min! rewriter loc-op ctx lhs rhs out-type)
-    (mlir-set-insertion-point-before rewriter loc-op)
-    (let* ([ph (mlir-build-operation-op rewriter loc-op "hipsr.placeholder"
-                  (list ctx lhs rhs out-type) (list out-type))])
+    (let ([!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context loc-op))])
       (mlir-set-insertion-point-before rewriter loc-op)
-      (mlir-operation-get-result
-        (mlir-build-operation-op rewriter loc-op "hipsr.min"
-          (list ctx lhs rhs (mlir-operation-get-result ph 0) out-type)
-          (list out-type))
-        0)))
+      (with-rewrite-builder (rewriter loc-op)
+        (with-mlir-ops
+          (%ph = hipsr.placeholder (ctx lhs rhs)
+                 (^bb0 ((%ls : !shape-type) (%rs : !shape-type))
+                       (%bc = shape.broadcast (%ls %rs) -> !shape-type)
+                       (hipsr.shape_yield (%bc)))
+                 -> out-type)
+          (%r = hipsr.min (ctx lhs rhs %ph) -> out-type)))))
 
   (define (onnx-min-general->hipsr op operands-ref rewriter type-converter)
     (let ([n (value-array-ref-size operands-ref)])
