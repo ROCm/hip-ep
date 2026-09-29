@@ -3,7 +3,9 @@
 # ** Licensed under the MIT License.
 ##
 
-add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
+add_executable(hip-rocmlir-compiler
+  hip-rocmlir-compiler.cpp
+)
 
 add_dependencies(hip-rocmlir-compiler
   HipDialectIncGen
@@ -32,6 +34,7 @@ else()
 endif()
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
+  HipSchemasLib
   LibHipCompiler
   HipDialectIR
   HipsrDialectIR
