@@ -2041,6 +2041,46 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   }];
 }
 
+def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Index of the maximum element along an axis";
+  let description = [{
+    Implements ONNX ArgMax: along `axis`, write the index of the maximum
+    element into `output`. `keepdims = 0` drops the reduced axis;
+    `keepdims = 1` leaves it as size 1. `select_last_index = 0` keeps the
+    first occurrence; `select_last_index = 1` keeps the last.
+
+    Output element type is integer (i64 for the ONNX importer). The input
+    element type is preserved on `data` and compared as that type, including
+    integers.
+
+    Example:
+    ```mlir
+    hip.arg_max(%ctx)
+        ins(%data : tensor<?x?xi32>)
+        outs(%indices : tensor<?xi64>)
+        {axis = 1 : i64, keepdims = 0 : i64, select_last_index = 0 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$select_last_index
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,

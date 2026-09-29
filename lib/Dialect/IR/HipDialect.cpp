@@ -1348,6 +1348,21 @@ void TopKOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ArgMaxOp: ins(data), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, data, output); the DPS init is the trailing output.
+MutableOperandRange ArgMaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ArgMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 
