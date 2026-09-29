@@ -5,11 +5,11 @@
 
 #pragma once
 #include "morphizen/_sanity_check.hpp"
-#include <morphizen/morphizen_gsl.h>
-#include <morphizen/my_ort.h>
 #include "morphizen/messages.hpp"
 #include "morphizen/pass.hpp"
 #include <memory>
+#include <morphizen/morphizen_gsl.h>
+#include <morphizen/my_ort.h>
 namespace morphizen {
 class AnchorPoint {
 public:

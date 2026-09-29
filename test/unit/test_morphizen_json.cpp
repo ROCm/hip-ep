@@ -24,7 +24,8 @@ void require(bool condition, const char *expression, int line) {
   }
 }
 
-#define REQUIRE(condition) require(static_cast<bool>(condition), #condition, __LINE__)
+#define REQUIRE(condition)                                                     \
+  require(static_cast<bool>(condition), #condition, __LINE__)
 
 } // namespace
 
@@ -57,8 +58,8 @@ int main() {
   REQUIRE(round_trip.passes().size() == 2);
   REQUIRE(round_trip.target() == "mlir-target");
   REQUIRE(round_trip.provider_options().at("log_level") == "info");
-  REQUIRE(round_trip.targets()[0].provider_options().at("pass.init.enable_dump") ==
-          "0");
+  REQUIRE(round_trip.targets()[0].provider_options().at(
+              "pass.init.enable_dump") == "0");
 
   const char *overlay = R"json({
     "passes": [{"name": "extra", "plugin": "extra-plugin"}],
@@ -89,8 +90,7 @@ int main() {
   auto *output = metadata.add_outputs();
   output->set_name("y");
   output->add_shape(4);
-  auto again =
-      mlir_metadata::Metadata::FromJsonString(metadata.ToJsonString());
+  auto again = mlir_metadata::Metadata::FromJsonString(metadata.ToJsonString());
   REQUIRE(again.artifact_filename() == "model.bc");
   REQUIRE(again.artifact_format() == "bc");
   REQUIRE(again.inputs().size() == 1);

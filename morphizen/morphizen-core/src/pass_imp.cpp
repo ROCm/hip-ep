@@ -322,7 +322,8 @@ std::map<std::string, std::string> Pass::get_all_provider_options() const {
 }
 
 void Pass::add_subgraph_device_count(const std::string &device, int count) {
-  context_->context_proto.mutable_device_subgraph_count()->insert({device, count});
+  context_->context_proto.mutable_device_subgraph_count()->insert(
+      {device, count});
 }
 
 const PassProto &Pass::get_pass_proto() const { return pass_proto_; }

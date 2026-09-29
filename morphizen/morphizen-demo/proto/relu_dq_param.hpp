@@ -21,18 +21,23 @@ struct ReluDqParamProto {
   std::string *mutable_sample_string() { return &sample_string_; }
   void set_sample_int(int value) { sample_int_ = value; }
   void add_sample_ints(int value) { sample_ints_.Add(value); }
-  void add_sample_strings(const std::string &value) { sample_strings_.Add(value); }
+  void add_sample_strings(const std::string &value) {
+    sample_strings_.Add(value);
+  }
   void set_ep_context_file_name(std::string value) {
     ep_context_file_name_ = std::move(value);
   }
   void set_ep_context_file_size(int value) { ep_context_file_size_ = value; }
-  const std::string &ep_context_file_name() const { return ep_context_file_name_; }
+  const std::string &ep_context_file_name() const {
+    return ep_context_file_name_;
+  }
   int ep_context_file_size() const { return ep_context_file_size_; }
 
   morphizen::json::Json ToJson() const {
     morphizen::json::Json::Object object;
     if (!sample_string_.empty()) {
-      object.emplace("sample_string", morphizen::json::Json::str(sample_string_));
+      object.emplace("sample_string",
+                     morphizen::json::Json::str(sample_string_));
     }
     if (sample_int_ != 0) {
       object.emplace("sample_int", morphizen::json::Json::integer(sample_int_));
@@ -42,14 +47,16 @@ struct ReluDqParamProto {
       for (const auto &value : sample_strings_) {
         values.push_back(morphizen::json::Json::str(value));
       }
-      object.emplace("sample_strings", morphizen::json::Json::array(std::move(values)));
+      object.emplace("sample_strings",
+                     morphizen::json::Json::array(std::move(values)));
     }
     if (!sample_ints_.empty()) {
       morphizen::json::Json::Array values;
       for (int value : sample_ints_) {
         values.push_back(morphizen::json::Json::integer(value));
       }
-      object.emplace("sample_ints", morphizen::json::Json::array(std::move(values)));
+      object.emplace("sample_ints",
+                     morphizen::json::Json::array(std::move(values)));
     }
     if (!ep_context_file_name_.empty()) {
       object.emplace("ep_context_file_name",

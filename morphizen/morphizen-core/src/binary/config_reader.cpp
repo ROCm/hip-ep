@@ -47,7 +47,8 @@ static json::Json parse_json_file(const std::string &file_path) {
   try {
     return json::parse(json_content);
   } catch (const json::ParseError &error) {
-    std::string error_message = "Failed to parse JSON: " + std::string(error.what());
+    std::string error_message =
+        "Failed to parse JSON: " + std::string(error.what());
     MY_LOG(1) << error_message;
     throw std::runtime_error(error_message);
   }

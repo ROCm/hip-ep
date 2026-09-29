@@ -94,7 +94,9 @@ struct PatternGraphOutputProto {
   std::optional<std::string> graph_output_name_;
   const PatternCallNodeArgProto &node_arg() const { return node_arg_; }
   PatternCallNodeArgProto *mutable_node_arg() { return &node_arg_; }
-  bool has_graph_output_index() const { return graph_output_index_.has_value(); }
+  bool has_graph_output_index() const {
+    return graph_output_index_.has_value();
+  }
   uint64_t graph_output_index() const {
     return graph_output_index_ ? *graph_output_index_ : 0;
   }
@@ -274,7 +276,8 @@ inline json::Json PatternCallNodeProto::ToJson() const {
     object.emplace("args", json::Json::array(std::move(args)));
   }
   if (!optional_args.empty()) {
-    object.emplace("optional_args", json::Json::array(std::move(optional_args)));
+    object.emplace("optional_args",
+                   json::Json::array(std::move(optional_args)));
   }
   return json::Json::object(std::move(object));
 }
@@ -304,8 +307,8 @@ inline json::Json PatternNodeOutputArgProto::ToJson() const {
   json::Json::Object object;
   object.emplace("call_node", call_node_.ToJson());
   if (output_arg_index_ != 0) {
-    object.emplace("output_arg_index",
-                   json::Json::integer(static_cast<int64_t>(output_arg_index_)));
+    object.emplace("output_arg_index", json::Json::integer(static_cast<int64_t>(
+                                           output_arg_index_)));
   }
   return json::Json::object(std::move(object));
 }
@@ -325,8 +328,9 @@ inline json::Json PatternGraphOutputProto::ToJson() const {
   json::Json::Object object;
   object.emplace("node_arg", node_arg_.ToJson());
   if (graph_output_index_) {
-    object.emplace("graph_output_index",
-                   json::Json::integer(static_cast<int64_t>(*graph_output_index_)));
+    object.emplace(
+        "graph_output_index",
+        json::Json::integer(static_cast<int64_t>(*graph_output_index_)));
   }
   if (graph_output_name_) {
     object.emplace("graph_output_name", json::Json::str(*graph_output_name_));
@@ -339,7 +343,8 @@ PatternGraphOutputProto::FromJson(const json::Json &json) {
   if (const json::Json *field = json::object_field(json, "node_arg")) {
     value.node_arg_ = PatternCallNodeArgProto::FromJson(*field);
   }
-  if (const json::Json *field = json::object_field(json, "graph_output_index")) {
+  if (const json::Json *field =
+          json::object_field(json, "graph_output_index")) {
     value.graph_output_index_ = static_cast<uint64_t>(field->as_int());
   }
   if (const json::Json *field = json::object_field(json, "graph_output_name")) {
@@ -395,7 +400,8 @@ inline PatternProto PatternProto::FromJson(const json::Json &json) {
                  json::object_field(json, "graph_input")) {
     value.type_case_ = kGraphInput;
     value.graph_input_ = PatternGraphInputProto::FromJson(*graph_input);
-  } else if (const json::Json *constant = json::object_field(json, "constant")) {
+  } else if (const json::Json *constant =
+                 json::object_field(json, "constant")) {
     value.type_case_ = kConstant;
     value.constant_ = PatternConstantProto::FromJson(*constant);
   } else if (const json::Json *call_node =
@@ -405,7 +411,8 @@ inline PatternProto PatternProto::FromJson(const json::Json &json) {
   } else if (const json::Json *node_output_arg =
                  json::object_field(json, "node_output_arg")) {
     value.type_case_ = kNodeOutputArg;
-    value.node_output_arg_ = PatternNodeOutputArgProto::FromJson(*node_output_arg);
+    value.node_output_arg_ =
+        PatternNodeOutputArgProto::FromJson(*node_output_arg);
   } else if (const json::Json *graph_output =
                  json::object_field(json, "graph_output")) {
     value.type_case_ = kGraphOutput;

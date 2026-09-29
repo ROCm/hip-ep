@@ -415,10 +415,12 @@ private:
         ++index_;
       }
     }
-    if (index_ < text_.size() && (text_[index_] == 'e' || text_[index_] == 'E')) {
+    if (index_ < text_.size() &&
+        (text_[index_] == 'e' || text_[index_] == 'E')) {
       is_float = true;
       ++index_;
-      if (index_ < text_.size() && (text_[index_] == '+' || text_[index_] == '-')) {
+      if (index_ < text_.size() &&
+          (text_[index_] == '+' || text_[index_] == '-')) {
         ++index_;
       }
       if (index_ >= text_.size() ||

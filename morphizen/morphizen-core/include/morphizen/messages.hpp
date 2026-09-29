@@ -41,7 +41,8 @@ inline void put_bool(json::Json::Object &object, const char *key, bool value) {
     object.emplace(key, json::Json::boolean(true));
   }
 }
-inline void put_int(json::Json::Object &object, const char *key, int64_t value) {
+inline void put_int(json::Json::Object &object, const char *key,
+                    int64_t value) {
   if (value != 0) {
     object.emplace(key, json::Json::integer(value));
   }
@@ -165,7 +166,8 @@ inline std::map<std::string, int32_t> read_int_map(const json::Json *field) {
   }
   return values;
 }
-inline json::Json string_map_json(const std::map<std::string, std::string> &values) {
+inline json::Json
+string_map_json(const std::map<std::string, std::string> &values) {
   json::Json::Object object;
   for (const auto &entry : values) {
     object.emplace(entry.first, json::Json::str(entry.second));
@@ -219,7 +221,9 @@ struct AllVersionInfoProto {
   const ProtoList<VersionInfoProto> &version_infos() const {
     return version_infos_;
   }
-  ProtoList<VersionInfoProto> *mutable_version_infos() { return &version_infos_; }
+  ProtoList<VersionInfoProto> *mutable_version_infos() {
+    return &version_infos_;
+  }
   VersionInfoProto *add_version_infos() { return version_infos_.Add(); }
 
   json::Json ToJson() const {
@@ -267,7 +271,9 @@ struct PassProto {
   void set_disabled(bool value) { disabled_ = value; }
   const ProtoList<std::string> &args() const { return args_; }
   void add_args(const std::string &value) { args_.Add(value); }
-  bool has_pass_generic_param() const { return pass_generic_param_.has_value(); }
+  bool has_pass_generic_param() const {
+    return pass_generic_param_.has_value();
+  }
   const json::Json &pass_generic_param() const {
     if (!pass_generic_param_) {
       static const json::Json empty = json::Json::object();
@@ -302,10 +308,12 @@ struct PassProto {
     value.plugin_ = read_string(json::object_field(json, "plugin"));
     value.args_ = read_string_list(json::object_field(json, "args"));
     value.enable_log_ = read_bool(json::object_field(json, "enable_log"));
-    value.log_verbosity_ = read_int32(json::object_field(json, "log_verbosity"));
+    value.log_verbosity_ =
+        read_int32(json::object_field(json, "log_verbosity"));
     value.enable_gc_ = read_bool(json::object_field(json, "enable_gc"));
     value.disabled_ = read_bool(json::object_field(json, "disabled"));
-    if (const json::Json *field = json::object_field(json, "pass_generic_param")) {
+    if (const json::Json *field =
+            json::object_field(json, "pass_generic_param")) {
       value.pass_generic_param_ = *field;
     }
     return value;
@@ -459,7 +467,9 @@ struct MetaDefProto {
   ProtoList<std::string> *mutable_constant_initializers() {
     return &constant_initializers_;
   }
-  int constant_initializers_size() const { return constant_initializers_.size(); }
+  int constant_initializers_size() const {
+    return constant_initializers_.size();
+  }
   void add_constant_initializers(const std::string &value) {
     constant_initializers_.Add(value);
   }
@@ -797,7 +807,8 @@ struct AnchorPointAttributeProto {
     } else if (const json::Json *transpose_attr =
                    json::object_field(json, "transpose_attr")) {
       value.kind_ = Kind::Transpose;
-      value.transpose_attr_ = AnchorPointTransposeOpAttr::FromJson(*transpose_attr);
+      value.transpose_attr_ =
+          AnchorPointTransposeOpAttr::FromJson(*transpose_attr);
     } else if (const json::Json *pad_attr =
                    json::object_field(json, "pad_attr")) {
       value.kind_ = Kind::Pad;
@@ -962,7 +973,9 @@ struct MemUsageProto {
   int64_t current_memory_in_bytes() const { return current_memory_in_bytes_; }
   const std::string &peak_memory() const { return peak_memory_; }
   const std::string &current_memory() const { return current_memory_; }
-  void set_peak_memory_in_bytes(int64_t value) { peak_memory_in_bytes_ = value; }
+  void set_peak_memory_in_bytes(int64_t value) {
+    peak_memory_in_bytes_ = value;
+  }
   void set_current_memory_in_bytes(int64_t value) {
     current_memory_in_bytes_ = value;
   }
@@ -1232,7 +1245,8 @@ struct ContextProto {
         *value.cpu_usage_.Add() = CPUUsageProto::FromJson(item);
       }
     }
-    if (const json::Json *field = json::object_field(json, "subgraph_metadefs")) {
+    if (const json::Json *field =
+            json::object_field(json, "subgraph_metadefs")) {
       for (const auto &entry : field->as_object()) {
         value.subgraph_metadefs_.emplace(entry.first,
                                          SubgraphProto::FromJson(entry.second));

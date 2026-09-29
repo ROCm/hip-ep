@@ -57,16 +57,23 @@ struct EPRegistrationProto {
 
 struct E2ETestSessionOptionsProto {
   std::map<std::string, std::string> session_configs_;
-  std::variant<std::monostate, CPUEPParamProto, MorphiZenEPParamProto, V2ParamProto>
+  std::variant<std::monostate, CPUEPParamProto, MorphiZenEPParamProto,
+               V2ParamProto>
       ep_param_;
   morphizen::ProtoList<E2ETestSessionProto> session_;
 
   const std::map<std::string, std::string> &session_configs() const {
     return session_configs_;
   }
-  bool has_v2_param() const { return std::holds_alternative<V2ParamProto>(ep_param_); }
-  const V2ParamProto &v2_param() const { return std::get<V2ParamProto>(ep_param_); }
-  const morphizen::ProtoList<E2ETestSessionProto> &session() const { return session_; }
+  bool has_v2_param() const {
+    return std::holds_alternative<V2ParamProto>(ep_param_);
+  }
+  const V2ParamProto &v2_param() const {
+    return std::get<V2ParamProto>(ep_param_);
+  }
+  const morphizen::ProtoList<E2ETestSessionProto> &session() const {
+    return session_;
+  }
   std::string DebugString() const { return {}; }
 };
 
@@ -80,7 +87,8 @@ struct E2ETestEnvProto {
   const morphizen::ProtoList<EPRegistrationProto> &registration() const {
     return registration_;
   }
-  const morphizen::ProtoList<E2ETestSessionOptionsProto> &session_options() const {
+  const morphizen::ProtoList<E2ETestSessionOptionsProto> &
+  session_options() const {
     return session_options_;
   }
   std::string DebugString() const { return {}; }
@@ -142,7 +150,8 @@ struct MorphizenE2ETestsProto {
         if (const morphizen::json::Json *options =
                 morphizen::json::object_field(*env, "session_options")) {
           for (const auto &opt_json : options->as_array()) {
-            *config.env_.session_options_.Add() = read_session_options(opt_json);
+            *config.env_.session_options_.Add() =
+                read_session_options(opt_json);
           }
         }
       }
@@ -152,7 +161,8 @@ struct MorphizenE2ETestsProto {
   }
 
 private:
-  static std::map<std::string, std::string> read_map(const morphizen::json::Json &json) {
+  static std::map<std::string, std::string>
+  read_map(const morphizen::json::Json &json) {
     std::map<std::string, std::string> values;
     if (!json.is_object()) {
       return values;
@@ -188,12 +198,14 @@ private:
             morphizen::json::object_field(json, "session_count")) {
       session.session_count_ = field->as_int();
     }
-    if (const morphizen::json::Json *field = morphizen::json::object_field(json, "run")) {
+    if (const morphizen::json::Json *field =
+            morphizen::json::object_field(json, "run")) {
       session.run_ = read_run(*field);
     }
     return session;
   }
-  static E2ETestSessionOptionsProto read_session_options(const morphizen::json::Json &json) {
+  static E2ETestSessionOptionsProto
+  read_session_options(const morphizen::json::Json &json) {
     E2ETestSessionOptionsProto options;
     if (const morphizen::json::Json *field =
             morphizen::json::object_field(json, "session_configs")) {
@@ -219,7 +231,8 @@ private:
       }
       options.ep_param_ = std::move(param);
     }
-    if (const morphizen::json::Json *field = morphizen::json::object_field(json, "session")) {
+    if (const morphizen::json::Json *field =
+            morphizen::json::object_field(json, "session")) {
       for (const auto &item : field->as_array()) {
         *options.session_.Add() = read_session(item);
       }

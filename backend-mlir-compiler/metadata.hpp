@@ -1,5 +1,7 @@
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 #pragma once
 
@@ -76,9 +78,9 @@ struct Metadata {
   std::string ToJsonString() const { return morphizen::json::dump(ToJson()); }
 };
 
-inline morphizen::json::Json tensor_json(const std::string &name, int rank,
-                                        int elem_type,
-                                        const morphizen::ProtoList<int64_t> &shape) {
+inline morphizen::json::Json
+tensor_json(const std::string &name, int rank, int elem_type,
+            const morphizen::ProtoList<int64_t> &shape) {
   morphizen::json::Json::Object object;
   if (!name.empty()) {
     object.emplace("name", morphizen::json::Json::str(name));
@@ -102,17 +104,20 @@ inline morphizen::json::Json tensor_json(const std::string &name, int rank,
 inline void read_tensor(const morphizen::json::Json &json, std::string &name,
                         int32_t &rank, int32_t &elem_type,
                         morphizen::ProtoList<int64_t> &shape) {
-  if (const morphizen::json::Json *field = morphizen::json::object_field(json, "name")) {
+  if (const morphizen::json::Json *field =
+          morphizen::json::object_field(json, "name")) {
     name = field->as_string();
   }
-  if (const morphizen::json::Json *field = morphizen::json::object_field(json, "rank")) {
+  if (const morphizen::json::Json *field =
+          morphizen::json::object_field(json, "rank")) {
     rank = field->as_int32();
   }
   if (const morphizen::json::Json *field =
           morphizen::json::object_field(json, "elem_type")) {
     elem_type = field->as_int32();
   }
-  if (const morphizen::json::Json *field = morphizen::json::object_field(json, "shape")) {
+  if (const morphizen::json::Json *field =
+          morphizen::json::object_field(json, "shape")) {
     for (const auto &dim : field->as_array()) {
       shape.Add(dim.as_int());
     }
@@ -139,10 +144,12 @@ inline Output Output::FromJson(const morphizen::json::Json &json) {
 inline morphizen::json::Json Metadata::ToJson() const {
   morphizen::json::Json::Object object;
   if (!artifact_filename_.empty()) {
-    object.emplace("artifact_filename", morphizen::json::Json::str(artifact_filename_));
+    object.emplace("artifact_filename",
+                   morphizen::json::Json::str(artifact_filename_));
   }
   if (!artifact_format_.empty()) {
-    object.emplace("artifact_format", morphizen::json::Json::str(artifact_format_));
+    object.emplace("artifact_format",
+                   morphizen::json::Json::str(artifact_format_));
   }
   if (!inputs_.empty()) {
     morphizen::json::Json::Array inputs;
@@ -170,12 +177,14 @@ inline Metadata Metadata::FromJson(const morphizen::json::Json &json) {
           morphizen::json::object_field(json, "artifact_format")) {
     value.artifact_format_ = field->as_string();
   }
-  if (const morphizen::json::Json *field = morphizen::json::object_field(json, "inputs")) {
+  if (const morphizen::json::Json *field =
+          morphizen::json::object_field(json, "inputs")) {
     for (const auto &item : field->as_array()) {
       *value.inputs_.Add() = Input::FromJson(item);
     }
   }
-  if (const morphizen::json::Json *field = morphizen::json::object_field(json, "outputs")) {
+  if (const morphizen::json::Json *field =
+          morphizen::json::object_field(json, "outputs")) {
     for (const auto &item : field->as_array()) {
       *value.outputs_.Add() = Output::FromJson(item);
     }

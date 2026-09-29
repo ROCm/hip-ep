@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <set>
 
-#include <glog/logging.h>
 #include "morphizen/env_config.hpp"
 #include "morphizen/pass_context.hpp"
 #include "morphizen/util.hpp"
@@ -15,6 +14,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <glog/logging.h>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>

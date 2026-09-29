@@ -321,8 +321,7 @@ PatternBuilderHelper::build_arg(PatternBuilder *self,
 }
 
 std::vector<std::shared_ptr<Pattern>> PatternBuilderHelper::build_args(
-    PatternBuilder *self,
-    const ProtoList<PatternCallNodeArgProto> &args) {
+    PatternBuilder *self, const ProtoList<PatternCallNodeArgProto> &args) {
   auto ret = std::vector<std::shared_ptr<Pattern>>{};
   ret.reserve(args.size());
   for (auto &arg : args) {
