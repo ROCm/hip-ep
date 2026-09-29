@@ -6,7 +6,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; (mlir ddr ops) — expression-level MLIR operation builder
+;; (mlir ddr rewrite) — expression-level MLIR operation builder
 ;;
 ;; Provides two forms:
 ;;
@@ -37,7 +37,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (mlir ddr ops)
+(library (mlir ddr rewrite)
   (export with-mlir-ops)
 
   (import (except (rnrs (6)) =)
@@ -365,4 +365,4 @@
       (main)))
 
 
-) ;; end library (mlir ddr ops)
+) ;; end library (mlir ddr rewrite)

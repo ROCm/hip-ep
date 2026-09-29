@@ -12,7 +12,7 @@
           (for (mlir ddr ast) expand)
           (for (mlir ddr analyze) expand)
           (for (mlir core ir) expand)
-          (for (only (mlir ddr ops) with-mlir-ops) expand))
+          (for (only (mlir ddr rewrite) with-mlir-ops) expand))
 
   ;;=======================================================================
   ;; Call graph

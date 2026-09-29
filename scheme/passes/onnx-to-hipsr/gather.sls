@@ -20,7 +20,7 @@
           (mlir core ir)
           (mlir dialects conversion)
           (mlir dialects hipsr)
-          (mlir ddr ops)
+          (mlir ddr rewrite)
           (mlir ddr))
 
   ;; Build the gather output shape inside a region block using the DSL.

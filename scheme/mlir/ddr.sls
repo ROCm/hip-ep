@@ -9,7 +9,7 @@
   (import (except (rnrs) =)
           (mlir ddr keywords)  ;; Import keywords at run time for re-export
           (mlir core ir)               ;; with-rewrite-builder etc. used in generated code
-          (mlir ddr ops)               ;; with-mlir-ops used in generated :rewrite bodies
+          (mlir ddr rewrite)               ;; with-mlir-ops used in generated :rewrite bodies
           (for (mlir ddr keywords) expand)  ;; Also at expand time
           (for (mlir ddr ast) expand)  ;; For AST predicates
           (for (mlir ddr parse) expand)

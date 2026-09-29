@@ -21,7 +21,7 @@
           (mlir core ir)
           (mlir dialects conversion)
           (mlir dialects hipsr)
-          (mlir ddr ops)
+          (mlir ddr rewrite)
           (rename (rime loop) (:with :rime-with))
           (mlir ddr))
 
