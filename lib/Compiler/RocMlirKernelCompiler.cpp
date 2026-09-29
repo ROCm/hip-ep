@@ -42,9 +42,17 @@
 // macro surface into a TU full of MLIR/LLVM headers. Same pattern as the
 // GetEnvironmentVariableA declaration in include/hip/debug_log.h.
 extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *);
-extern "C" __declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
+extern "C" __declspec(dllimport) void *__stdcall LoadLibraryExA(const char *,
+                                                                void *,
+                                                                unsigned long);
 extern "C" __declspec(dllimport) void *__stdcall GetProcAddress(void *,
                                                                 const char *);
+// From libloaderapi.h. System32 plus the "default" set (the application
+// directory and anything added via AddDllDirectory) -- deliberately not the
+// process working directory or PATH, which any user can point at a DLL of their
+// choosing.
+#define HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#define HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS 0x00001000
 #else
 #include <dlfcn.h>
 #endif
@@ -156,12 +164,16 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
 // Resolve hipGetDeviceProperties at call time instead of linking hip::host.
-// This library is linked into hip-compiler and hip-rocmlir-compiler, which only
-// ever compile -- a load-time import of the HIP runtime stops them from
-// starting at all on a machine with no GPU driver, and reports nothing useful
-// when it happens: the loader fails before main, so a caller sees an empty
-// error. CI runners are exactly such machines. Inside the EP the runtime is
-// already loaded and GetModuleHandle/RTLD_NOLOAD finds it for free.
+// This library is also linked into hip-compiler, which only ever compiles -- a
+// load-time import of the HIP runtime stops it from starting at all on a
+// machine with no GPU driver, and reports nothing useful when it happens: the
+// loader fails before main, so a caller sees an empty error. CI runners are
+// exactly such machines. Inside the EP the runtime is already loaded and
+// GetModuleHandle/RTLD_NOLOAD finds it for free.
+//
+// hip-rocmlir-compiler is not the concern here: it links hip::host itself for
+// its autotuning mode, which genuinely needs a device, so it keeps its own
+// load-time dependency by design.
 using HipGetDevicePropsFn = hipError_t (*)(hipDeviceProp_t *, int);
 
 #define HIPDNN_STRINGIFY_(x) #x
@@ -176,7 +188,14 @@ HipGetDevicePropsFn loadHipGetDeviceProperties() {
 #ifdef _WIN32
   void *mod = GetModuleHandleA(HIPDNN_HIP_RUNTIME_LIB);
   if (!mod)
-    mod = LoadLibraryA(HIPDNN_HIP_RUNTIME_LIB);
+    // Restricted search rather than plain LoadLibrary: the name is unqualified,
+    // and the default order would also consult the working directory and PATH.
+    // A HIP runtime reachable only through PATH is therefore not found here,
+    // and the caller falls back to the build's architecture -- the safe
+    // direction.
+    mod = LoadLibraryExA(HIPDNN_HIP_RUNTIME_LIB, nullptr,
+                         HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                             HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 #else
   void *mod = dlopen(HIPDNN_HIP_RUNTIME_LIB, RTLD_LAZY | RTLD_NOLOAD);
   if (!mod)

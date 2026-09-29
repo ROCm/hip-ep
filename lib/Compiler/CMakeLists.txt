@@ -53,12 +53,14 @@ if(ENABLE_ROCMLIRTRITON)
   # load. Same gate the rest of the EP uses for HIP host APIs.
   #
   # Headers only -- deliberately NOT linking hip::host. This library also ends
-  # up in hip-compiler and hip-rocmlir-compiler, which only compile, and a
-  # load-time import of the HIP runtime makes those tools unable to start at all
-  # where no GPU driver is installed. resolveRocMlirArch loads the runtime on
-  # demand instead and falls back to the build's target architecture, so pass it
-  # the real library name rather than hardcoding a versioned one (Windows ships
-  # amdhip64_<major>.dll). Without a name the device query is compiled out.
+  # up in hip-compiler, which only compiles, and a load-time import of the HIP
+  # runtime makes it unable to start at all where no GPU driver is installed.
+  # (hip-rocmlir-compiler links hip::host itself for autotuning, which needs a
+  # real device; that dependency is intended and stays.) resolveRocMlirArch loads
+  # the runtime on demand instead and falls back to the build's target
+  # architecture, so pass it the real library name rather than hardcoding a
+  # versioned one (Windows ships amdhip64_<major>.dll). Without a name the device
+  # query is compiled out.
   if(HIPDNN_EP_LINK_HIP_HOST)
     find_package(hip CONFIG REQUIRED)
     target_include_directories(LibHipCompiler SYSTEM PRIVATE
