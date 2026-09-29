@@ -12,7 +12,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (onnx-to-hipsr scatter-nd)
+(library (passes onnx-to-hipsr scatter-nd)
   (export populate-scatter-nd-patterns
           onnx-scatter-nd->hipsr)
   (import (except (rnrs (6)) =)

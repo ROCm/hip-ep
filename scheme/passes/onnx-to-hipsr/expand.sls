@@ -15,7 +15,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (onnx-to-hipsr expand)
+(library (passes onnx-to-hipsr expand)
   (export populate-expand-patterns
           onnx-expand->hipsr)
   (import (except (rnrs (6)) =)

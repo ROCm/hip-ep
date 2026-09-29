@@ -20,7 +20,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (onnx-to-hipsr constant)
+(library (passes onnx-to-hipsr constant)
   (export populate-constant-patterns)
   (import (rnrs (6))
           (mlir ir)

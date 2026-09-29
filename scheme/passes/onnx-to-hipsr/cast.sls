@@ -10,7 +10,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (onnx-to-hipsr cast)
+(library (passes onnx-to-hipsr cast)
   (export populate-cast-patterns
           onnx-cast->hipsr)
   (import (except (rnrs (6)) =)
