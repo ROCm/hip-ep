@@ -22,6 +22,7 @@ namespace morphizen {
 struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
                      const OrtLogger &default_logger);
+  ~MorphiZenEpFactory();
 
   static const char *ORT_API_CALL
   GetNameImpl(const OrtEpFactory *this_ptr) noexcept;
@@ -137,6 +138,11 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;
+
+  // GPU descriptor synthesized from the HIP runtime when ORT's platform device
+  // discovery reports no AMD GPU (see GetSupportedDevicesImpl). Owned here
+  // because the OrtEpDevice registered from it only borrows the pointer.
+  OrtHardwareDevice *runtime_discovered_gpu_device_{nullptr};
 #endif
 };
 } // namespace morphizen
