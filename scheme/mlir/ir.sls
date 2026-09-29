@@ -411,6 +411,9 @@
   (define current-block-builder (make-parameter #f))
   (define current-loc           (make-parameter #f))
 
+  ;; Dispatch to the active builder context.
+  ;; Requires either current-rewriter or current-block-builder to be non-#f;
+  ;; raises an error if neither is set (i.e., called outside a builder scope).
   (define (mlir-build-operation name operands types . rest)
     (let ([nregions (if (pair? rest) (car rest) 0)]
           [loc      (current-loc)])

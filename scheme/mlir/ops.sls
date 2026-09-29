@@ -51,6 +51,9 @@
   ;; with-mlir-ops
   ;;===--------------------------------------------------------------------===;;
 
+  ;; NOTE: the = symbol in op-forms must be the DSL = from (mlir pattern-keywords),
+  ;; not the R6RS numeric =. Libraries using (except (rnrs) =) satisfy this;
+  ;; others must import (only (mlir pattern-keywords) =) explicitly.
   (define-syntax with-mlir-ops
     (lambda (stx)
 

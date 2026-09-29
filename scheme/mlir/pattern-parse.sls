@@ -171,7 +171,8 @@
 
       ;; Match operation WITHOUT :where guard
       [(result = op-name (operand ...)  . rest)
-       ;;(identifier? #'result)
+       ;; Guard removed: multi-result patterns use a list for result, not an identifier.
+       ;; The multi-result clause above catches ((%a %b) = ...) first.
        (let* ([operands (parse-operands #'(operand ...))]
               [match-op (make-ast-match-expand #'result #'op-name operands #f)])
          (parse-match-ops-recursive #'rest (cons match-op acc-ops) ast))]

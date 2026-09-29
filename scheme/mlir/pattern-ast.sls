@@ -84,7 +84,7 @@
   ;; ast-pattern-expand (ROOT)
   ;; ├── match: list of ast-match-expand
   ;; │   └── operands: list of ast-operand
-  ;; ├── where: list of ast-then-let-binding-expand
+  ;; ├── then-let: list of ast-then-let-binding-expand
   ;; └── rewrite: list of ast-operation-expand
   ;;     └── regions: list of ast-region-expand
   ;;         └── blocks: list of ast-block-expand
@@ -104,7 +104,7 @@
   ;;
   ;; Contains:
   ;;   - match: list of ast-match-expand (operations to match)
-  ;;   - where: list of ast-then-let-binding-expand (computed bindings)
+  ;;   - then-let: list of ast-then-let-binding-expand (computed bindings)
   ;;   - rewrite: list of ast-operation-expand (operations to construct)
   ;;
   (define-record-type (ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?)
@@ -319,7 +319,7 @@
 
       (mutable expr)))         ;; Phase 1 (parse): syntax expression - Scheme expression to evaluate
                                ;; Example: #'(compute-type !old-type)
-                               ;; Currently unused (rewrite not implemented)
+                               ;; Not used by codegen; with-mlir-ops parses the raw rewrite syntax directly.
 
   ;;-----------------------------------------------------------------------
   ;; REWRITE-OPERATION-LEVEL RECORD: ast-operation-expand (child of ast-pattern-expand)
@@ -359,16 +359,16 @@
       (mutable regions)        ;; Phase 1 (parse): list of ast-region-expand - nested regions
                                ;; Example: control flow ops like scf.if have regions
                                ;; Contains: list of ast-region-expand records
-                               ;; Currently unused (region construction not implemented)
+                               ;; Not used by codegen; with-mlir-ops parses the raw rewrite syntax directly.
 
       (mutable attributes)     ;; Phase 1 (parse): syntax list - attribute expressions
                                ;; Example: #'(("to" !t3)) for typed attribute
-                               ;; Currently unused (attribute construction not implemented)
+                               ;; Not used by codegen; with-mlir-ops parses the raw rewrite syntax directly.
 
       (mutable result-types))) ;; Phase 1 (parse): syntax - result type expression(s)
                                ;; Example: #'!t3 for single result type
                                ;; Example: #'(!t1 !t2) for multiple result types
-                               ;; Currently unused (rewrite not implemented)
+                               ;; Not used by codegen; with-mlir-ops parses the raw rewrite syntax directly.
 
   ;;-----------------------------------------------------------------------
   ;; REGION-LEVEL RECORD: ast-region-expand (child of ast-operation-expand)

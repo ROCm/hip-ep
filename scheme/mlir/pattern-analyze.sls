@@ -28,12 +28,8 @@
     ;; Phase 2 validation guarantees: root variable exists as a result in some match operation
     (let* ([match-vec (ast-pattern-expand-match ast-rec)]
            [root-var (ast-pattern-expand-root-var ast-rec)]
-           [root-op-idx (find-root-operation match-vec root-var)]
+           [root-op-idx (ast-pattern-expand-root-op-index ast-rec)]
            [root-op (vector-ref match-vec root-op-idx)])
-
-      ;; Extract root operation name
-      (ast-pattern-expand-root-op-name-set! ast-rec
-        (ast-match-expand-op-name root-op))
 
       ;; Build match actions starting from root operation
       (let* ([bindings-and-actions (build-bindings-and-actions ast-rec match-vec root-op-idx root-var)]
@@ -88,12 +84,8 @@
                   :rime-with is-result := (binding-entry-is-result? entry)
                   :rime-with is-bound := (binding-entry-bound? entry)
                   :do (cond
-                        ;; Case 1: is-bound AND is-result → check equality
-                        [(and is-bound is-result)
-                         (set! acc (cons (action:check-eq op-idx operand-idx operand-var) acc))]
-
-                        ;; Case 2: is-bound AND NOT is-result → check equality
-                        [(and is-bound (not is-result))
+                        ;; Case 1+2: already bound → check equality (result or free variable)
+                        [is-bound
                          (set! acc (cons (action:check-eq op-idx operand-idx operand-var) acc))]
 
                         ;; Case 3: NOT is-bound AND is-result → bind first, then recurse to producer
@@ -243,15 +235,6 @@
                                :for var :in result-vars
                                :when (bound-identifier=? var root-var)
                                :break #t)))
-
-  (define (find-result-index match-op target-var)
-    ;; Find which result index target-var occupies in match-op
-    (let ([result-vars (ast-match-expand-result-var match-op)])
-      (loop :initially := #f
-            :for var :in result-vars
-            :for idx :from 0
-            :when (bound-identifier=? var target-var)
-            :break idx)))
 
   (define (find-operation-by-result match-vec result-var)
     (loop :initially := #f

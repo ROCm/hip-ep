@@ -117,18 +117,13 @@
   ;;
   ;; with-mlir-ops handles op-forms, :attrs, :regions, and :scheme escapes.
   ;; with-rewrite-builder installs current-rewriter and current-loc so mlir-build-operation
-  ;; dispatch through mlir-build-operation-op rw loc.
+  ;; dispatches through mlir-build-operation-op / mlir-build-operation-op-in-block.
   (define (generate-rewrite-code raw-body pattern-type rw op)
     (if (null? raw-body)
         #'#t
         (with-syntax ([(form ...) raw-body])
           (case pattern-type
-            [(conversion)
-             #`(with-rewrite-builder (#,rw #,op)
-                 (let ([result (with-mlir-ops form ...)])
-                   (mlir-replace-op #,rw #,op result)
-                   #t))]
-            [(rewrite)
+            [(conversion rewrite)
              #`(with-rewrite-builder (#,rw #,op)
                  (let ([result (with-mlir-ops form ...)])
                    (mlir-replace-op #,rw #,op result)
