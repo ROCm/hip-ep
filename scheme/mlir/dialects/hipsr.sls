@@ -42,7 +42,7 @@
   (import (rnrs (6))
           (only (chezscheme) foreign-procedure)
           (mlir core ir)
-          (mlir dialects conversion))
+          (mlir core conversion))
 
   ;;===--------------------------------------------------------------------===;;
   ;; HipSR-specific FFI bindings

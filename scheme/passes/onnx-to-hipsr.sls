@@ -19,7 +19,7 @@
   (export run-pass)
   (import (rnrs (6))
           (mlir core ir)
-          (mlir dialects conversion)
+          (mlir core conversion)
           (mlir dialects hipsr)
           (mlir dialects onnx)
           (mlir dialects func)

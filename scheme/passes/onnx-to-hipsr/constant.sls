@@ -24,7 +24,7 @@
   (export populate-constant-patterns)
   (import (rnrs (6))
           (mlir core ir)
-          (mlir dialects conversion)
+          (mlir core conversion)
           (mlir dialects hipsr))
 
   (define (onnx-constant->hipsr op operands-ref rewriter type-converter)

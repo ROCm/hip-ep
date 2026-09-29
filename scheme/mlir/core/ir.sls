@@ -88,7 +88,7 @@
     mlir-op-erase
     mlir-notify-match-failure
 
-    ;; Generic RAII (type-specific RAII macros are in (mlir dialects conversion))
+    ;; Generic RAII (type-specific RAII macros are in (mlir core conversion))
     with-raii
 
     mlir-type-set-memory-space

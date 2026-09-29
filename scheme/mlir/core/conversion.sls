@@ -6,7 +6,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; (mlir dialects conversion) — MLIR Dialect Conversion Framework
+;; (mlir core conversion) — MLIR Dialect Conversion Framework
 ;;
 ;; Mirrors mlir/Transforms/DialectConversion.h: TypeConverter, ConversionTarget,
 ;; RewritePatternSet, applyFullConversion, and Scheme-pattern registration.
@@ -17,7 +17,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (mlir dialects conversion)
+(library (mlir core conversion)
 
   (export
     ;; TypeConverter lifecycle
@@ -158,4 +158,4 @@
        (with-raii (var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set)
          body ...)]))
 
-) ;; end library (mlir dialects conversion)
+) ;; end library (mlir core conversion)
