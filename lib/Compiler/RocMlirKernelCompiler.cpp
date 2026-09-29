@@ -34,7 +34,20 @@
 #include "llvm/ADT/StringMap.h"
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
+// Headers only -- see loadHipGetDeviceProperties below for why the HIP runtime
+// is resolved at call time rather than linked.
 #include <hip/hip_runtime.h>
+#ifdef _WIN32
+// Declared here rather than including <windows.h>, which would drag a large
+// macro surface into a TU full of MLIR/LLVM headers. Same pattern as the
+// GetEnvironmentVariableA declaration in include/hip/debug_log.h.
+extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *);
+extern "C" __declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
+extern "C" __declspec(dllimport) void *__stdcall GetProcAddress(void *,
+                                                                const char *);
+#else
+#include <dlfcn.h>
+#endif
 #endif
 
 #include <memory>
@@ -141,6 +154,44 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   return count == 1 && !out.binary.empty();
 }
 
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
+// Resolve hipGetDeviceProperties at call time instead of linking hip::host.
+// This library is linked into hip-compiler and hip-rocmlir-compiler, which only
+// ever compile -- a load-time import of the HIP runtime stops them from
+// starting at all on a machine with no GPU driver, and reports nothing useful
+// when it happens: the loader fails before main, so a caller sees an empty
+// error. CI runners are exactly such machines. Inside the EP the runtime is
+// already loaded and GetModuleHandle/RTLD_NOLOAD finds it for free.
+using HipGetDevicePropsFn = hipError_t (*)(hipDeviceProp_t *, int);
+
+#define HIPDNN_STRINGIFY_(x) #x
+#define HIPDNN_STRINGIFY(x) HIPDNN_STRINGIFY_(x)
+
+HipGetDevicePropsFn loadHipGetDeviceProperties() {
+  // Stringified through the macro on purpose: the header #defines
+  // hipGetDeviceProperties to a versioned export name
+  // (hipGetDevicePropertiesR0600), and that is the symbol the runtime actually
+  // exports. Going through the macro keeps the two in sync across HIP versions.
+  static const char *kSymbol = HIPDNN_STRINGIFY(hipGetDeviceProperties);
+#ifdef _WIN32
+  void *mod = GetModuleHandleA(HIPDNN_HIP_RUNTIME_LIB);
+  if (!mod)
+    mod = LoadLibraryA(HIPDNN_HIP_RUNTIME_LIB);
+#else
+  void *mod = dlopen(HIPDNN_HIP_RUNTIME_LIB, RTLD_LAZY | RTLD_NOLOAD);
+  if (!mod)
+    mod = dlopen(HIPDNN_HIP_RUNTIME_LIB, RTLD_LAZY);
+#endif
+  if (!mod)
+    return nullptr;
+#ifdef _WIN32
+  return reinterpret_cast<HipGetDevicePropsFn>(GetProcAddress(mod, kSymbol));
+#else
+  return reinterpret_cast<HipGetDevicePropsFn>(dlsym(mod, kSymbol));
+#endif
+}
+#endif
+
 } // namespace
 
 std::string resolveRocMlirArch() {
@@ -151,13 +202,15 @@ std::string resolveRocMlirArch() {
   if (!arch.empty())
     return arch;
 
-#ifdef HIPDNN_EP_LINK_HIP_HOST
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
   // Ask the GPU we are about to run on. Guessing here is not a harmless
   // default: a code object built for the wrong chip loads with "no kernel
   // image is available for execution on the device" at the first dispatch.
-  // Mirrors LlvmIrJit::detectCustomKernelArch.
+  // Mirrors LlvmIrJit::detectCustomKernelArch. A machine with no HIP runtime
+  // (or no device) just falls through to the build's target below.
+  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
   hipDeviceProp_t prop{};
-  if (hipGetDeviceProperties(&prop, 0) == hipSuccess) {
+  if (getProps && getProps(&prop, 0) == hipSuccess) {
     std::string deviceArch = prop.gcnArchName;
     // Empty gcnArchName has been seen on some Windows TheRock builds.
     if (!deviceArch.empty()) {

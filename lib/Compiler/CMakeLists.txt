@@ -51,10 +51,41 @@ if(ENABLE_ROCMLIRTRITON)
   # resolveRocMlirArch asks the live GPU which chip to build for. Without this
   # it can only guess, and a code object for the wrong chip fails at module
   # load. Same gate the rest of the EP uses for HIP host APIs.
+  #
+  # Headers only -- deliberately NOT linking hip::host. This library also ends
+  # up in hip-compiler and hip-rocmlir-compiler, which only compile, and a
+  # load-time import of the HIP runtime makes those tools unable to start at all
+  # where no GPU driver is installed. resolveRocMlirArch loads the runtime on
+  # demand instead and falls back to the build's target architecture, so pass it
+  # the real library name rather than hardcoding a versioned one (Windows ships
+  # amdhip64_<major>.dll). Without a name the device query is compiled out.
   if(HIPDNN_EP_LINK_HIP_HOST)
     find_package(hip CONFIG REQUIRED)
-    target_link_libraries(LibHipCompiler PRIVATE hip::host)
+    target_include_directories(LibHipCompiler SYSTEM PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_INCLUDE_DIRECTORIES>)
+    # Definitions as well as includes: the HIP headers #error out unless
+    # __HIP_PLATFORM_AMD__ is set, and hip::host is what normally supplies it.
+    target_compile_definitions(LibHipCompiler PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_COMPILE_DEFINITIONS>)
     target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+    set(_hip_runtime_name "")
+    if(TARGET hip::amdhip64)
+      get_target_property(_hip_runtime_cfgs hip::amdhip64 IMPORTED_CONFIGURATIONS)
+      foreach(_cfg IN LISTS _hip_runtime_cfgs)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION_${_cfg})
+        if(_hip_runtime_loc)
+          get_filename_component(_hip_runtime_name "${_hip_runtime_loc}" NAME)
+          break()
+        endif()
+      endforeach()
+    endif()
+    if(_hip_runtime_name)
+      target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_HIP_RUNTIME_LIB=\"${_hip_runtime_name}\"")
+    else()
+      message(STATUS "[onnx-hipdnn-ep] HIP runtime library name unknown; "
+                     "rocMLIR arch will come from HIP_ARCHITECTURES")
+    endif()
   endif()
   # Last resort when there is no device to ask: whatever this build targets.
   if(HIP_ARCHITECTURES)
