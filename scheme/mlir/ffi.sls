@@ -174,6 +174,7 @@
     mlir-register-conversion-pattern
 
     ;; Dynamic builder context — shared by pattern-codegen and with-mlir-ops
+    mlir-build-operation        ; (name operands types [nregions]) → op via current-builder
     current-rewriter            ; raw RewriterBase* (set inside with-rewrite-builder)
     current-block-builder       ; raw OpBuilder*    (set inside with-block-builder)
     current-loc                 ; Operation* used as location source
