@@ -14,8 +14,8 @@ namespace {
 // hip.resize -> wrap_resize runtime call
 //===----------------------------------------------------------------------===//
 //
-// The runtime kernel is unchanged.  It takes a copied prefix (N, C) and a
-// trailing window of spatial_rank axes (1..3).  planHipResizeLaunch chooses
+// The kernel takes a copied prefix (N, C) and a trailing window of
+// spatial_rank axes (1..3).  planHipResizeLaunch chooses
 // that split from which extents change:
 //
 //   NCHW  1x3x16x16 -> 1x3x32x32 : N, C,     spatial_rank=2, (H, W)

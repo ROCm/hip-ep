@@ -4252,11 +4252,9 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
   return p;
 }
 
-// tosa.resize is 4-D NHWC with exactly two spatial axes. This lowering only
-// matches channels-first rank 4: leading two extents unchanged, trailing pair
-// resampled, with a transpose on each side. A channels-last hip.resize stays
-// on the runtime kernel, which receives it as prefix N, C=1, and window
-// (H, W, C).
+// hip.resize is (N, C, D_1..D_k) with the spatial axes trailing; tosa.resize is
+// 4-D NHWC with exactly two spatial axes, so only the k == 2 case maps and it
+// needs a transpose on each side.
 //
 // Nearest is declined rather than lowered. TOSA's NEAREST_NEIGHBOR breaks a tie
 // upward, hip.resize carries ONNX's round_prefer_floor, which breaks it
