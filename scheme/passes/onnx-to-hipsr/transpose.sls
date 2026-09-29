@@ -16,7 +16,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns transpose)
+(library (onnx-to-hipsr transpose)
   (export populate-transpose-patterns)
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)

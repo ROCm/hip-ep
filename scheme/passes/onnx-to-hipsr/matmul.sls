@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns matmul)
+(library (onnx-to-hipsr matmul)
   (export populate-matmul-patterns
           onnx-matmul->hipsr)
   (import (except (rnrs (6)) =)

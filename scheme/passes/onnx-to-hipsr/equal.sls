@@ -12,7 +12,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns equal)
+(library (onnx-to-hipsr equal)
   (export populate-equal-patterns
           onnx-equal->hipsr)
   (import (except (rnrs (6)) =)

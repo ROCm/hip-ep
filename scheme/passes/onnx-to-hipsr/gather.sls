@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns gather)
+(library (onnx-to-hipsr gather)
   (export populate-gather-patterns)
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)

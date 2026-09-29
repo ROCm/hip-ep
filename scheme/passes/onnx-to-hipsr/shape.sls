@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns shape)
+(library (onnx-to-hipsr shape)
   (export populate-shape-patterns
           onnx-shape->hipsr)
   (import (except (rnrs (6)) =)

@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (patterns min)
+(library (onnx-to-hipsr min)
   (export populate-min-patterns)
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)
