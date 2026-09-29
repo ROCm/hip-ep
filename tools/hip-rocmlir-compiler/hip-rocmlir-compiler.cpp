@@ -61,6 +61,8 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ThreadPool.h"
@@ -68,6 +70,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "CrashHandler.h"
+#include "nearest_conv_tune.h"
 
 #if HIP_ROCMLIR_AUTOTUNE
 #include <hip/hip_runtime.h>
@@ -82,6 +85,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -186,6 +190,11 @@ struct AutotuneOptions {
   mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
   unsigned warmupRuns = 5;
   unsigned measuredRuns = 20;
+  // Local MXPC problem cache. Empty leaves the quick search unchanged.
+  std::string problemCachePath;
+  // JSON dump of this compile's problem -> winning perfConfig pairs.
+  // Empty skips the dump. The file is the input of problem_cache_to_fb.py.
+  std::string problemCacheDumpPath;
 };
 
 #if HIP_ROCMLIR_AUTOTUNE
@@ -458,6 +467,32 @@ static llvm::StringSet<> &searchesInFlight() {
   return keys;
 }
 
+// perfConfigs from the problem cache that failed to compile for this problem.
+// The next lookup skips them and takes the next nearest tile.
+static llvm::StringMap<std::vector<std::string>> &rejectedPerfConfigs() {
+  static llvm::StringMap<std::vector<std::string>> rejected;
+  return rejected;
+}
+
+static const std::vector<mlir::hip::ProblemCacheConvEntry> &
+problemCacheConvEntries(llvm::StringRef path) {
+  static std::string loadedPath;
+  static std::vector<mlir::hip::ProblemCacheConvEntry> entries;
+  if (loadedPath == path)
+    return entries;
+  entries.clear();
+  std::string error;
+  if (!mlir::hip::loadProblemCacheConvEntries(path.str(), entries, error)) {
+    llvm::errs() << "warning: " << error << "\n";
+    entries.clear();
+  } else {
+    llvm::errs() << "[hip-rocmlir-compiler] nearest-tune loaded "
+                 << entries.size() << " entries from " << path << "\n";
+  }
+  loadedPath = path.str();
+  return entries;
+}
+
 static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
                            llvm::StringRef kernelName,
                            const AutotuneOptions &options,
@@ -487,32 +522,62 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
   // the second pool. A problem already queued in this compile waits for that
   // same pool once the search has been benchmarked. A later compile failure
   // drops the entry and searches, so a config that won for a different
-  // epilogue cannot fail this kernel.
+  // epilogue cannot fail this kernel. A local problem cache fills a miss
+  // with the nearest legal conv tile. A tile that fails to compile is skipped
+  // and the next nearest is tried. When none remain, the search runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (mlir::succeeded(mlir::rock::getTuningProblemStr(module, problem))) {
     cacheKey = autotuneCacheKey(options.kind, problem);
-    auto cached = autotuneWinnerCache().find(cacheKey);
-    if (cached != autotuneWinnerCache().end()) {
-      if (deferCacheHits) {
-        DeferredCacheHit hit;
-        hit.kernelName = kernelName.str();
-        hit.rockModule = std::move(rockModule);
-        hit.perfConfig = cached->getValue();
-        hit.cacheKey = std::move(cacheKey);
-        deferredCacheHits().push_back(std::move(hit));
-        return true;
+    bool retryNearest = true;
+    while (retryNearest) {
+      retryNearest = false;
+      auto cached = autotuneWinnerCache().find(cacheKey);
+      if (cached == autotuneWinnerCache().end() &&
+          !options.problemCachePath.empty()) {
+        if (auto hit = mlir::hip::findNearestConvTune(
+                std::string_view(problem.data(), problem.size()),
+                problemCacheConvEntries(options.problemCachePath),
+                rejectedPerfConfigs()[cacheKey])) {
+          llvm::errs() << "[hip-rocmlir-compiler] nearest-tune "
+                       << (hit->exact ? "exact" : "nearest") << " d="
+                       << llvm::format("%.3f", hit->distance) << " matched "
+                       << hit->matchedProblem << " -> " << hit->solution
+                       << "\n";
+          autotuneWinnerCache()[cacheKey] = std::move(hit->solution);
+        }
+        cached = autotuneWinnerCache().find(cacheKey);
       }
-      const auto compileStart = std::chrono::steady_clock::now();
-      bool ok =
-          compilePerfConfig(rockModule, arch, cached->getValue(), winner);
-      compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
-      if (ok)
-        return true;
-      llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                   << kernelName << "'; searching the "
-                   << tuningKindName(options.kind) << " space\n";
-      autotuneWinnerCache().erase(cached);
+      if (cached != autotuneWinnerCache().end()) {
+        if (deferCacheHits) {
+          DeferredCacheHit hit;
+          hit.kernelName = kernelName.str();
+          hit.rockModule = std::move(rockModule);
+          hit.perfConfig = cached->getValue();
+          hit.cacheKey = std::move(cacheKey);
+          deferredCacheHits().push_back(std::move(hit));
+          return true;
+        }
+        const auto compileStart = std::chrono::steady_clock::now();
+        bool ok =
+            compilePerfConfig(rockModule, arch, cached->getValue(), winner);
+        compilePhaseTimes.perfConfigCompileMs +=
+            millisecondsSince(compileStart);
+        if (ok)
+          return true;
+        std::string failed = cached->getValue();
+        llvm::errs() << "warning: cached perfConfig failed to compile for '"
+                     << kernelName << "'";
+        if (!options.problemCachePath.empty())
+          llvm::errs() << "; trying the next problem-cache tile\n";
+        else
+          llvm::errs() << "; searching the " << tuningKindName(options.kind)
+                       << " space\n";
+        rejectedPerfConfigs()[cacheKey].push_back(std::move(failed));
+        autotuneWinnerCache().erase(cached);
+        if (!options.problemCachePath.empty())
+          retryNearest = true;
+      }
     }
     if (deferCacheHits && searchesInFlight().count(cacheKey)) {
       PendingWinnerCompile pending;
@@ -802,8 +867,13 @@ static bool compileDeferredCacheHits(
       continue;
     }
     llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                 << hit.kernelName << "'; searching the "
-                 << tuningKindName(options.kind) << " space\n";
+                 << hit.kernelName << "'";
+    if (!options.problemCachePath.empty())
+      llvm::errs() << "; trying the next problem-cache tile\n";
+    else
+      llvm::errs() << "; searching the " << tuningKindName(options.kind)
+                   << " space\n";
+    rejectedPerfConfigs()[hit.cacheKey].push_back(hit.perfConfig);
     autotuneWinnerCache().erase(hit.cacheKey);
     mlir::MLIRContext context(rocmlirAutotuneRegistry(),
                               mlir::MLIRContext::Threading::DISABLED);
@@ -818,6 +888,86 @@ static bool compileDeferredCacheHits(
       return false;
     compiledByKernel[hit.kernelName] = std::move(winner);
   }
+  return true;
+}
+
+// The in-process winner key is "<kind>\n<problem>". The dump stores the
+// problem text getTuningProblemStr produced, which is what a later
+// --problem-cache lookup compares.
+static llvm::StringRef problemOfCacheKey(llvm::StringRef cacheKey) {
+  auto split = cacheKey.split('\n');
+  if (split.first == "quick" || split.first == "full" ||
+      split.first == "exhaustive")
+    return split.second;
+  return cacheKey;
+}
+
+// Device-keyed JSON, same shape as MIGRAPHX_PROBLEM_CACHE, so
+// problem_cache_to_fb.py can turn it into an MXPC table. One row per unique
+// rocMLIR problem in this compile. The solution is the perfConfig that
+// compiled, including a nearest-cache tile that was accepted.
+static bool dumpProblemCache(llvm::StringRef path) {
+  hipDeviceProp_t properties{};
+  int device = 0;
+  if (!reportHipError(hipGetDevice(&device), "hipGetDevice") ||
+      !reportHipError(hipGetDeviceProperties(&properties, device),
+                      "hipGetDeviceProperties"))
+    return false;
+
+  llvm::StringRef deviceArch(properties.gcnArchName);
+  llvm::StringRef gfxName = deviceArch.split(':').first;
+
+  std::vector<std::pair<std::string, std::string>> pairs;
+  pairs.reserve(autotuneWinnerCache().size());
+  for (const auto &entry : autotuneWinnerCache()) {
+    llvm::StringRef problem = problemOfCacheKey(entry.getKey());
+    if (problem.empty() || entry.getValue().empty())
+      continue;
+    pairs.emplace_back(problem.str(), entry.getValue());
+  }
+  std::sort(pairs.begin(), pairs.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  llvm::json::Array entries;
+  for (const auto &pair : pairs) {
+    llvm::json::Object key;
+    key["name"] = "hip::rocmlir";
+    key["problem"] = pair.first;
+    llvm::json::Array row;
+    row.push_back(std::move(key));
+    row.push_back(pair.second);
+    entries.push_back(std::move(row));
+  }
+
+  llvm::json::Object deviceObj;
+  deviceObj["device_name"] = deviceArch.str();
+  deviceObj["gfx_name"] = gfxName.str();
+  deviceObj["cu_count"] = static_cast<int64_t>(properties.multiProcessorCount);
+  deviceObj["wavefront_size"] = static_cast<int64_t>(properties.warpSize);
+
+  llvm::json::Array bucket;
+  bucket.push_back(std::move(deviceObj));
+  bucket.push_back(std::move(entries));
+  llvm::json::Array root;
+  root.push_back(std::move(bucket));
+
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "error: cannot open '" << path
+                 << "' to dump problem cache: " << ec.message() << "\n";
+    return false;
+  }
+  os << llvm::formatv("{0:2}", llvm::json::Value(std::move(root))) << "\n";
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "error: failed writing problem cache to " << path << ": "
+                 << os.error().message() << "\n";
+    os.clear_error();
+    return false;
+  }
+  llvm::errs() << "[hip-rocmlir-compiler] wrote " << pairs.size()
+               << " problem-cache pairs to " << path << "\n";
   return true;
 }
 #endif
@@ -896,6 +1046,10 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
+    } else if (arg == "--problem-cache" && i + 1 < argc) {
+      autotune.problemCachePath = argv[++i];
+    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
+      autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -906,10 +1060,21 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
+  if (autotune.problemCachePath.empty()) {
+    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
+      autotune.problemCachePath = env;
+  }
   if (skipBenchmarking())
     autotune.enabled = false;
+  if (!autotune.problemCachePath.empty() && !autotune.enabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!autotune.problemCacheDumpPath.empty() && !autotune.enabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotune.enabled) {
+  if ((autotuneFlagSeen && autotune.enabled) ||
+      !autotune.problemCacheDumpPath.empty()) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
@@ -935,6 +1100,20 @@ int main(int argc, char **argv) {
         << "                       Warmup launches per candidate (default: "
            "5).\n"
         << "  --autotune-runs <n> Timed launches per candidate (default: 20).\n"
+        << "  --problem-cache <file.mxpc>\n"
+        << "                       Before searching, use this problem-cache\n"
+        << "                       FlatBuffer. An identical problem string is\n"
+        << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
+           "CACHE\n"
+        << "                       sets the same path. A conv miss requires\n"
+        << "                       matching arch, dtype, -F, layouts, stride,\n"
+        << "                       dilation, and fusions, then the nearest\n"
+        << "                       M/N/K tile (weights 1) that fits. A tile\n"
+        << "                       that fails to compile is skipped for the\n"
+        << "                       next nearest; otherwise the search runs.\n"
+        << "  --dump-problem-cache <file.json>\n"
+        << "                       After autotune, write each problem key and\n"
+        << "                       winning perfConfig.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
@@ -1146,6 +1325,14 @@ int main(int argc, char **argv) {
   if (mlir::failed(
           mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts)))
     return 1;
+
+#if HIP_ROCMLIR_AUTOTUNE
+  // Winners are final once every kernel has compiled, including a search that
+  // replaced a tile the problem cache could not compile.
+  if (!autotune.problemCacheDumpPath.empty() &&
+      !dumpProblemCache(autotune.problemCacheDumpPath))
+    return 1;
+#endif
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-
