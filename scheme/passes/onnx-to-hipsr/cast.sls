@@ -14,7 +14,6 @@
   (export populate-cast-patterns
           onnx-cast->hipsr)
   (import (except (rnrs (6)) =)
-          (only (chezscheme) format)
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
@@ -47,9 +46,6 @@
   ;;===--------------------------------------------------------------------===;;
 
   (define (populate-cast-patterns type-converter patterns ctx)
-    (mlir-log-info "Registering onnx.Cast pattern")
-    (mlir-log-info (string-append "onnx-cast->hipsr is a procedure? " (if (procedure? onnx-cast->hipsr) "yes" "no")))
-    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr type-converter)
-    (mlir-log-info "onnx.Cast pattern registered successfully"))
+    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr type-converter))
 
-) ;; end library (patterns cast)
+) ;; end library (onnx-to-hipsr cast)

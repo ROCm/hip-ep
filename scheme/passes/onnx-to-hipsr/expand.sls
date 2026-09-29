@@ -62,4 +62,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Expand"
                                       onnx-expand->hipsr type-converter))
 
-) ;; end library (patterns expand)
+) ;; end library (onnx-to-hipsr expand)

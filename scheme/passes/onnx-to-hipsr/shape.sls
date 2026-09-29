@@ -120,4 +120,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Shape"
                                       onnx-shape->hipsr type-converter))
 
-) ;; end library (patterns shape)
+) ;; end library (onnx-to-hipsr shape)

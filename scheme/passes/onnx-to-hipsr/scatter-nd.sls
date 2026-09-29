@@ -42,4 +42,4 @@
     (mlir-register-conversion-pattern patterns "onnx.ScatterND"
                                       onnx-scatter-nd->hipsr type-converter))
 
-) ;; end library (patterns scatter-nd)
+) ;; end library (onnx-to-hipsr scatter-nd)

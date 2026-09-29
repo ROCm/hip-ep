@@ -42,4 +42,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Equal"
                                       onnx-equal->hipsr type-converter))
 
-) ;; end library (patterns equal)
+) ;; end library (onnx-to-hipsr equal)

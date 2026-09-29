@@ -33,6 +33,11 @@
     hipsr-has-compute-ancestor?
     hipsr-has-placeholder-ancestor?
 
+    ;; Onnx/HipSR conversion-target convenience wrappers
+    mlir-conversion-target-add-illegal-onnx
+    mlir-conversion-target-add-legal-hipsr
+    mlir-conversion-target-mark-unknown-ops-nested-legal
+
     ;; HipSR-specific type queries and op mutation (FFI bindings)
     mlir-type-is-device-tensor          ; 1 if RankedTensorType with device space
     mlir-tensor-type-in-host-space      ; clone type with host memory-space encoding
@@ -40,7 +45,7 @@
     mlir-placeholder-set-barrier-type)  ; change placeholder_type attr to Barrier
 
   (import (rnrs (6))
-          (only (chezscheme) foreign-procedure)
+          (only (chezscheme) foreign-procedure define-ftype ftype-ref make-ftype-pointer foreign-ref)
           (mlir ir)
           (mlir dialects conversion))
 
@@ -141,6 +146,20 @@
       (lambda (op)
         (or (hipsr-has-compute-ancestor? op)
             (hipsr-has-placeholder-ancestor? op)))))
+
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Onnx/HipSR conversion-target convenience wrappers
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-conversion-target-add-illegal-onnx
+    (foreign-procedure "mlir_conversion_target_add_illegal_onnx" (uptr) void))
+
+  (define mlir-conversion-target-add-legal-hipsr
+    (foreign-procedure "mlir_conversion_target_add_legal_hipsr" (uptr) void))
+
+  (define mlir-conversion-target-mark-unknown-ops-nested-legal
+    (foreign-procedure "mlir_conversion_target_mark_unknown_ops_nested_legal" (uptr) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; HipSR-specific FFI bindings

@@ -17,7 +17,6 @@
 (library (passes onnx-to-hipsr gather)
   (export populate-gather-patterns)
   (import (except (rnrs (6)) =)
-          (only (chezscheme) format)
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
@@ -92,4 +91,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Gather"
                                       onnx-gather->hipsr type-converter))
 
-) ;; end library (patterns gather)
+) ;; end library (onnx-to-hipsr gather)

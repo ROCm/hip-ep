@@ -48,9 +48,6 @@
     ;; ConversionTarget configuration — dialect-specific
     ;; TODO: move add-illegal-onnx to (mlir onnx patterns)
     ;; TODO: move add-legal-hipsr, mark-unknown-ops-nested-legal to (mlir hipsr ir)
-    mlir-conversion-target-add-illegal-onnx
-    mlir-conversion-target-add-legal-hipsr
-    mlir-conversion-target-mark-unknown-ops-nested-legal
 
     ;; RewritePatternSet lifecycle
     mlir-create-rewrite-pattern-set
@@ -154,16 +151,6 @@
   (define mlir-conversion-target-add-dynamically-legal-func
     (foreign-procedure "mlir_conversion_target_add_dynamically_legal_func"
                        (uptr uptr) void))
-
-  ;; Dialect-specific convenience wrappers (to be relocated)
-  (define mlir-conversion-target-add-illegal-onnx
-    (foreign-procedure "mlir_conversion_target_add_illegal_onnx" (uptr) void))
-
-  (define mlir-conversion-target-add-legal-hipsr
-    (foreign-procedure "mlir_conversion_target_add_legal_hipsr" (uptr) void))
-
-  (define mlir-conversion-target-mark-unknown-ops-nested-legal
-    (foreign-procedure "mlir_conversion_target_mark_unknown_ops_nested_legal" (uptr) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; RewritePatternSet

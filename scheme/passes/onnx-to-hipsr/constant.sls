@@ -54,4 +54,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Constant"
                                       onnx-constant->hipsr type-converter))
 
-) ;; end library (patterns constant)
+) ;; end library (onnx-to-hipsr constant)

@@ -17,7 +17,6 @@
 (library (passes onnx-to-hipsr min)
   (export populate-min-patterns)
   (import (except (rnrs (6)) =)
-          (only (chezscheme) format)
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
@@ -88,4 +87,4 @@
     ;; Scheme fallback for N=1 (identity) and N>2 (chain)
     (mlir-register-conversion-pattern patterns "onnx.Min" onnx-min-general->hipsr type-converter))
 
-) ;; end library (patterns min)
+) ;; end library (onnx-to-hipsr min)

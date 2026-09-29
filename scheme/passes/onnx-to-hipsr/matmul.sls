@@ -86,4 +86,4 @@
     (mlir-register-conversion-pattern patterns "onnx.MatMul"
                                       onnx-matmul->hipsr type-converter))
 
-) ;; end library (patterns matmul)
+) ;; end library (onnx-to-hipsr matmul)

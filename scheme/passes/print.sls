@@ -45,8 +45,8 @@
 (define (format-operands op num-operands)
   (loop :initially := ""
         :for i :from 0 :to (- num-operands 1)
-        :with operand := (mlir-operation-get-operand op i)
-        :join-string operand :seperator ", "
+        :with operand := (mlir-operation-get-operand-value op i)
+        :join-string operand :separator ", "
         :finally (if (zero? num-operands)
                      :return-value
                      (format " | Operands[~a]: ~a" num-operands :return-value))))
@@ -58,7 +58,7 @@
   (loop :initially := ""
         :for i :from 0 :to (- num-results 1)
         :with result := (mlir-operation-get-result op i)
-        :join-string result :seperator ", "
+        :join-string result :separator ", "
         :finally (if (zero? num-results)
                      :return-value
                      (format " | Results[~a]: ~a" num-results :return-value))))

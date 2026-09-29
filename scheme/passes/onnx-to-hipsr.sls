@@ -11,7 +11,7 @@
 ;; Equivalent to lib/Conversion/OnnxToHipsr/OnnxToHipsr.cpp
 ;;
 ;; Orchestrates the dialect conversion using MLIR framework primitives.
-;; The C++ FFI layer provides primitives and reusable helpers, while this
+;; The `(mlir ir)` library provides primitives and reusable helpers, while this
 ;; Scheme code implements the high-level conversion logic.
 ;;===----------------------------------------------------------------------===;;
 
@@ -36,6 +36,8 @@
   ;; Populate return-conversion patterns in Scheme.
   ;; onnx.Return → func.return, forwarding the (already type-converted) operands.
   ;; onnx.Return has 0 results so we erase it after inserting func.return.
+  ;; onnx.Return → func.return.  Uses mlir-build-operation-op directly (not the
+  ;; context-aware dispatcher) because rewriter and loc are passed explicitly here.
   (define (onnx-return->func-return op operands-ref rewriter type-converter)
     (let ((operands (loop :for i :from 0 :below (value-array-ref-size operands-ref)
                          :collect (value-array-ref-at operands-ref i))))

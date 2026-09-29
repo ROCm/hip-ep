@@ -91,7 +91,6 @@
     ;; Generic RAII (type-specific RAII macros are in (mlir dialects conversion))
     with-raii
 
-    ;; More type helpers (from ffi.sls)
     mlir-type-set-memory-space
 
     ;; More builder ops
@@ -123,8 +122,6 @@
     with-block-builder
     with-op-location
 
-    value-array-ref-size
-    value-array-ref-at
     )
 
   (import (chezscheme))
@@ -352,7 +349,6 @@
     (foreign-procedure "mlir_type_set_memory_space" (uptr int) uptr))
 
 
-  ;; ── More builder ops ─────────────────────────────────────────────────────
 
   (define mlir-build-operation-op-with-regions
     (foreign-procedure "mlir_build_op_with_regions"
@@ -380,7 +376,6 @@
   (define (mlir-create-op builder loc name ops types . rest)
     (mlir-create-op% builder loc name ops types (if (pair? rest) (car rest) 0)))
 
-  ;; ── More type getters ────────────────────────────────────────────────────
 
   (define mlir-get-shape-witness-type
     (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
@@ -395,7 +390,6 @@
     (foreign-procedure "mlir_get_i1_type" (uptr) uptr))
 
 
-  ;; ── More attr helpers ────────────────────────────────────────────────────
 
   (define mlir-operation-set-index-attr
     (foreign-procedure "mlir_operation_set_index_attr" (uptr string iptr) void))

@@ -10,6 +10,7 @@
 ;;
 ;; Provides two forms:
 ;;
+;;   (with-rewrite-builder (rw loc) body ...)
 ;;     Installs rw (RewriterBase*) and loc (Operation* for location/IP)
 ;;     as dynamic context for the duration of body.
 ;;

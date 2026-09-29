@@ -19,7 +19,6 @@
 (library (passes onnx-to-hipsr transpose)
   (export populate-transpose-patterns)
   (import (except (rnrs (6)) =)
-          (only (chezscheme) format)
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
@@ -77,4 +76,4 @@
     (mlir-register-conversion-pattern patterns "onnx.Transpose"
                                       onnx-transpose->hipsr type-converter))
 
-) ;; end library (patterns transpose)
+) ;; end library (onnx-to-hipsr transpose)
