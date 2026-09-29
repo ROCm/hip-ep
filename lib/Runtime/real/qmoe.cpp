@@ -297,9 +297,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, input, d_sorted_token_ids, d_row_groups, d_row_group_count,
-        d_fc1_queue_head, fc1_weights, fc1_scales,
-        fc1_pre_zp_u8, fc1_bias, d_fc1_buf, routed_rows, num_experts,
-        fusion_inter, hidden_size, block_size, elem_size));
+        d_fc1_queue_head, fc1_weights, fc1_scales, fc1_pre_zp_u8, fc1_bias,
+        d_fc1_buf, routed_rows, num_experts, fusion_inter, hidden_size,
+        block_size, elem_size));
 
     HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
                               inter_size, activation_alpha, activation_beta,
@@ -312,8 +312,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         hidden_size, inter_size, block_size, elem_size));
 
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
-        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
-        d_expert_weights, output, num_tokens, hidden_size, k, elem_size));
+        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
+        output, num_tokens, hidden_size, k, elem_size));
     return 0;
   }
 
