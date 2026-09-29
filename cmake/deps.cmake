@@ -18,20 +18,11 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
-# hip-ep never wants MLIR's ROCm runner: it links the rock tuning libraries
-# directly and uses neither rocmlir-tuning-driver nor the perf scripts. Left
-# on, it breaks the configure outright -- rocMLIR then adds
-# mlir/utils/performance, which hard-errors unless the amd_arch_db target
-# exists, and that only mlir/test defines (disabled below, since its
-# common_utils imports pip pybind11 at configure time). MLIR's own
-# ExecutionEngine also errors out looking for rocm_agent_enumerator.
-#
-# Set here, ahead of every add_subdirectory below, and with FORCE: rocMLIR's
-# top-level CMakeLists turns this on via a plain `set(... CACHE ...)`, which is
-# a no-op only if the entry already exists. That makes the failure depend
-# purely on which subproject reaches the cache entry first -- an external-LLVM
-# build (CI) breaks while an embedded one, where MLIR seeds it OFF, quietly
-# works. Claiming the entry up front removes the ordering from the picture.
+# hip-ep uses none of the ROCm runner, and leaving it on breaks the configure:
+# rocMLIR then adds mlir/utils/performance, which needs amd_arch_db from the
+# mlir/test tree disabled below. FORCE, ahead of every add_subdirectory, because
+# rocMLIR sets this with a plain `set(... CACHE ...)` -- a no-op only if the
+# entry exists, so without this the outcome depends on subproject order.
 if(ENABLE_ROCMLIRTRITON)
   set(MLIR_ENABLE_ROCM_RUNNER OFF CACHE BOOL "" FORCE)
 endif()
@@ -676,14 +667,10 @@ else()
   if(NOT DEFINED HIP_PLATFORM)
     set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
   endif()
-  # Claim the hip:: imported targets here, in top-level scope, before any
-  # subdirectory gets to them. hip-targets.cmake creates them non-GLOBAL, so a
-  # find_package(hip) buried in a subdirectory leaves them invisible to the
-  # top-level CMakeLists -- and the compiler-rt fix-up at the end of it has to
-  # see them to do anything. Later find_package(hip) calls then hit
-  # hip-targets.cmake's "all expected targets already defined" early return and
-  # share these. QUIET, not REQUIRED: a missing HIP is still the business of the
-  # subdirectories that actually need it.
+  # Claim the hip:: targets in top-level scope first: hip-targets.cmake creates
+  # them non-GLOBAL, so a subdirectory find_package(hip) would hide them from
+  # the compiler-rt fix-up at the end of the top-level CMakeLists. Later calls
+  # reuse these via hip-targets.cmake's already-defined early return.
   find_package(hip CONFIG QUIET)
 endif()
 

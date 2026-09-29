@@ -48,19 +48,10 @@ if(ENABLE_ROCMLIRTRITON)
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
 
-  # resolveRocMlirArch asks the live GPU which chip to build for. Without this
-  # it can only guess, and a code object for the wrong chip fails at module
-  # load. Same gate the rest of the EP uses for HIP host APIs.
-  #
-  # Headers only -- deliberately NOT linking hip::host. This library also ends
-  # up in hip-compiler, which only compiles, and a load-time import of the HIP
-  # runtime makes it unable to start at all where no GPU driver is installed.
-  # (hip-rocmlir-compiler links hip::host itself for autotuning, which needs a
-  # real device; that dependency is intended and stays.) resolveRocMlirArch loads
-  # the runtime on demand instead and falls back to the build's target
-  # architecture, so pass it the real library name rather than hardcoding a
-  # versioned one (Windows ships amdhip64_<major>.dll). Without a name the device
-  # query is compiled out.
+  # resolveRocMlirArch asks the live GPU which chip to build for; a code object
+  # for the wrong chip fails at module load. Headers only, no hip::host link:
+  # hip-compiler links this library but only compiles, and a load-time HIP
+  # import stops it starting where no driver is installed.
   if(HIPDNN_EP_LINK_HIP_HOST)
     find_package(hip CONFIG REQUIRED)
     target_include_directories(LibHipCompiler SYSTEM PRIVATE
@@ -70,6 +61,8 @@ if(ENABLE_ROCMLIRTRITON)
     target_compile_definitions(LibHipCompiler PRIVATE
       $<TARGET_PROPERTY:hip::host,INTERFACE_COMPILE_DEFINITIONS>)
     target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+    # Real library name for the on-demand load, not a literal: Windows ships a
+    # version-suffixed amdhip64_<major>.dll. Unknown means no device query.
     set(_hip_runtime_name "")
     if(TARGET hip::amdhip64)
       get_target_property(_hip_runtime_cfgs hip::amdhip64 IMPORTED_CONFIGURATIONS)

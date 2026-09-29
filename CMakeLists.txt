@@ -265,21 +265,11 @@ foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect
   endif()
 endforeach()
 
-# Drop a compiler-rt builtins library that does not exist from the hip:: import
-# targets. TheRock's hip-config-amd.cmake asks CMAKE_CXX_COMPILER for its
-# builtins path (`-print-libgcc-file-name --rtlib=compiler-rt`) and appends the
-# answer to hip::host and hip::device unconditionally -- but that flag reports
-# where the library *would* be, without checking it is there. Point the build at
-# a clang whose prefix ships no compiler-rt (the cached CI LLVM prefix is built
-# with LLVM_ENABLE_PROJECTS="clang;mlir;lld") and every consumer of hip::host,
-# hipgpu.dll included, inherits a link dependency on a file that was never
-# built. Ninja then refuses to start: "missing and no known rule to make it".
-#
-# Only paths matching clang_rt *and* absent on disk are dropped, so a prefix
-# that does ship compiler-rt keeps using it. Run here, after every
-# add_subdirectory, so it does not matter which one called find_package(hip)
-# first; link interfaces are read at generate time, so amending the property
-# this late still takes effect.
+# hip-config-amd.cmake appends `clang-cl -print-libgcc-file-name`'s answer to
+# hip::host/device without checking the file exists, so a prefix built without
+# compiler-rt leaves every consumer depending on a library ninja cannot make.
+# Drop only absent clang_rt paths, and do it after every add_subdirectory, since
+# hip-config re-appends on each find_package(hip).
 foreach(_hip_target hip::host hip::device)
   if(NOT TARGET ${_hip_target})
     continue()

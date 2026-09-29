@@ -38,19 +38,16 @@
 // is resolved at call time rather than linked.
 #include <hip/hip_runtime.h>
 #ifdef _WIN32
-// Declared here rather than including <windows.h>, which would drag a large
-// macro surface into a TU full of MLIR/LLVM headers. Same pattern as the
-// GetEnvironmentVariableA declaration in include/hip/debug_log.h.
+// Declared rather than including <windows.h>, whose macros collide with the
+// MLIR/LLVM headers here. Same pattern as include/hip/debug_log.h.
 extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *);
 extern "C" __declspec(dllimport) void *__stdcall LoadLibraryExA(const char *,
                                                                 void *,
                                                                 unsigned long);
 extern "C" __declspec(dllimport) void *__stdcall GetProcAddress(void *,
                                                                 const char *);
-// From libloaderapi.h. System32 plus the "default" set (the application
-// directory and anything added via AddDllDirectory) -- deliberately not the
-// process working directory or PATH, which any user can point at a DLL of their
-// choosing.
+// From libloaderapi.h. System32 plus the application/AddDllDirectory set;
+// notably excludes the working directory and PATH, which users can write to.
 #define HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
 #define HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS 0x00001000
 #else
@@ -163,36 +160,24 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
 }
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
-// Resolve hipGetDeviceProperties at call time instead of linking hip::host.
-// This library is also linked into hip-compiler, which only ever compiles -- a
-// load-time import of the HIP runtime stops it from starting at all on a
-// machine with no GPU driver, and reports nothing useful when it happens: the
-// loader fails before main, so a caller sees an empty error. CI runners are
-// exactly such machines. Inside the EP the runtime is already loaded and
-// GetModuleHandle/RTLD_NOLOAD finds it for free.
-//
-// hip-rocmlir-compiler is not the concern here: it links hip::host itself for
-// its autotuning mode, which genuinely needs a device, so it keeps its own
-// load-time dependency by design.
+// Resolved at call time, not linked: hip-compiler links this library but only
+// compiles, and a load-time HIP import stops it starting where no driver is
+// installed. (hip-rocmlir-compiler links HIP itself for autotuning, by design.)
 using HipGetDevicePropsFn = hipError_t (*)(hipDeviceProp_t *, int);
 
 #define HIPDNN_STRINGIFY_(x) #x
 #define HIPDNN_STRINGIFY(x) HIPDNN_STRINGIFY_(x)
 
 HipGetDevicePropsFn loadHipGetDeviceProperties() {
-  // Stringified through the macro on purpose: the header #defines
-  // hipGetDeviceProperties to a versioned export name
-  // (hipGetDevicePropertiesR0600), and that is the symbol the runtime actually
-  // exports. Going through the macro keeps the two in sync across HIP versions.
+  // Stringified through the macro: the header #defines this to the versioned
+  // export (hipGetDevicePropertiesR0600), which is what the runtime exports.
   static const char *kSymbol = HIPDNN_STRINGIFY(hipGetDeviceProperties);
 #ifdef _WIN32
   void *mod = GetModuleHandleA(HIPDNN_HIP_RUNTIME_LIB);
   if (!mod)
-    // Restricted search rather than plain LoadLibrary: the name is unqualified,
-    // and the default order would also consult the working directory and PATH.
-    // A HIP runtime reachable only through PATH is therefore not found here,
-    // and the caller falls back to the build's architecture -- the safe
-    // direction.
+    // Restricted search: the name is unqualified, and the default order would
+    // also trust the working directory and PATH. A runtime reachable only via
+    // PATH is missed, and the caller falls back to the build's architecture.
     mod = LoadLibraryExA(HIPDNN_HIP_RUNTIME_LIB, nullptr,
                          HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 |
                              HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
