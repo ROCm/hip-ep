@@ -256,9 +256,9 @@ else()
 endif()
 
 # ===========================================================================
-# EP deps: morphizen build setup, ONNX Runtime, protobuf, then
-# add_subdirectory(morphizen). protobuf/ORT are resolved before the
-# subdirectory so morphizen reuses the same targets.
+# EP deps: morphizen build setup, ONNX Runtime, then
+# add_subdirectory(morphizen). protobuf is fetched only when an ONNX option
+# is enabled, and only before the subdirectory so morphizen reuses it.
 # ===========================================================================
 
 function(morphizen_add_version_info)
@@ -367,56 +367,50 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
      "onnxruntime;;${onnxruntime_VERSION}\n")
 set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
-# protobuf (+ bundled abseil). Name "Protobuf" matches morphizen's
-# FetchContent_Declare so the first-populated wins and morphizen reuses it.
-# CMAKE_CXX_STANDARD=17 is required (abseil pins its installed options.h ABI
-# from a configure-time _MSVC_LANG probe; C++14 default -> CopyToEncodedBuffer
-# link error). See windows-build.yml "Build protobuf from source".
-find_package(Protobuf CONFIG QUIET)
-if(NOT Protobuf_FOUND AND NOT TARGET protobuf::libprotobuf)
-  message(STATUS "protobuf not found; building from source (${DEP_HASH_protobuf})")
-  set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
-  set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-  set(protobuf_INSTALL ON CACHE BOOL "" FORCE)
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
-  # SYSTEM marks protobuf's (and bundled abseil's) include dirs as system
-  # headers so their C4100/C4127/etc. warnings don't trip morphizen-core's
-  # /W4 /WX. Mirrors morphizen's own protobuf FetchContent_Declare.
-  FetchContent_Declare(Protobuf
-    SYSTEM
-    GIT_REPOSITORY ${DEP_URL_protobuf}
-    GIT_TAG ${DEP_HASH_protobuf}
-    GIT_SHALLOW TRUE
-    GIT_SUBMODULES_RECURSE TRUE
-    EXCLUDE_FROM_ALL)
-  FetchContent_MakeAvailable(Protobuf)
-  # morphizen/unit-test/.../proto.cmake calls find_package(Protobuf CONFIG
-  # REQUIRED). FetchContent exposes protobuf:: targets but does not always
-  # populate Protobuf_DIR for a nested CONFIG-mode find.
-  if(TARGET protobuf::libprotobuf)
-    if(EXISTS "${Protobuf_BINARY_DIR}/protobuf-config.cmake")
-      set(Protobuf_DIR "${Protobuf_BINARY_DIR}" CACHE PATH
-          "Protobuf package config (FetchContent)" FORCE)
-    elseif(EXISTS "${Protobuf_BINARY_DIR}/cmake/protobuf-config.cmake")
-      set(Protobuf_DIR "${Protobuf_BINARY_DIR}/cmake" CACHE PATH
-          "Protobuf package config (FetchContent)" FORCE)
+# protobuf (+ bundled abseil) is only needed by the optional ONNX backend and
+# ONNX schema support. The default hipgpu.dll build does not fetch or link it.
+# An unset cache variable is false, matching option() defaults inside morphizen.
+# Name "Protobuf" matches morphizen's FetchContent_Declare so the first-populated
+# wins. CMAKE_CXX_STANDARD=17 is required (abseil pins its installed options.h
+# ABI from a configure-time _MSVC_LANG probe).
+if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  find_package(Protobuf CONFIG QUIET)
+  if(NOT Protobuf_FOUND AND NOT TARGET protobuf::libprotobuf)
+    message(STATUS "protobuf not found; building from source (${DEP_HASH_protobuf})")
+    set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(protobuf_INSTALL ON CACHE BOOL "" FORCE)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
+    # SYSTEM marks protobuf's (and bundled abseil's) include dirs as system
+    # headers so their C4100/C4127/etc. warnings don't trip /W4 /WX.
+    FetchContent_Declare(Protobuf
+      SYSTEM
+      GIT_REPOSITORY ${DEP_URL_protobuf}
+      GIT_TAG ${DEP_HASH_protobuf}
+      GIT_SHALLOW TRUE
+      GIT_SUBMODULES_RECURSE TRUE
+      EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(Protobuf)
+    if(TARGET protobuf::libprotobuf)
+      if(EXISTS "${Protobuf_BINARY_DIR}/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      elseif(EXISTS "${Protobuf_BINARY_DIR}/cmake/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}/cmake" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      endif()
     endif()
   endif()
 endif()
 
 # Add morphizen subdirectory.
 #
-# GCC -Wconversion on protobuf >=22 *.pb.h accessors is suppressed at the
-# root by marking the generated-header BINARY_DIR as SYSTEM in
-# morphizen-{core-static,pattern}; the SYSTEM propagation handles all
-# transitive consumers, so no parent-side -Werror override is needed.
-# onnx-ir-imp still needs a per-target `-Wno-error=conversion` because
-# its .pb.h surface comes from external `onnx_proto` whose
-# INTERFACE_INCLUDE_DIRECTORIES we don't control (upstream onnx fix is a
-# follow-up).
+# onnx-ir-imp (optional ONNX backend) still needs a per-target
+# `-Wno-error=conversion` because its .pb.h surface comes from external
+# `onnx_proto` whose INTERFACE_INCLUDE_DIRECTORIES we don't control.
 #
 # Cross-wire BUILD_MOCK_RUNTIME (this project) <-> morphizen's HIP GPU
 # allocator option so the same build invocation does the right thing on

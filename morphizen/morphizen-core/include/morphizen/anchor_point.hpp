@@ -7,13 +7,7 @@
 #include "morphizen/_sanity_check.hpp"
 #include <morphizen/morphizen_gsl.h>
 #include <morphizen/my_ort.h>
-#ifdef _WIN32
-#pragma warning(push, 0)
-#endif
-#include "morphizen/anchor_point.pb.h"
-#ifdef _WIN32
-#pragma warning(pop)
-#endif
+#include "morphizen/messages.hpp"
 #include "morphizen/pass.hpp"
 #include <memory>
 namespace morphizen {

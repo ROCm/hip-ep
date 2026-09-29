@@ -124,39 +124,42 @@ endif()
 
 
 
-if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
-  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf by default, /MD")
-elseif(${CMAKE_MSVC_RUNTIME_LIBRARY} MATCHES ".*DLL.*")
-  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf, /MD")
-else()
-  set(protobuf_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static msvc runtime for protobuf, /MT")
-endif()
-set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
-set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
-set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
-set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
-# Enable -fPIC for protobuf static lib to link into shared library on Linux
-set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "enable PIC for protobuf")
-## it is error-prone to use MODULE mode to find protobuf,
-## Protobuf_USE_STATIC_LIBS must be defined.
-if(NOT Protobuf_FOUND)
-  find_package(Protobuf CONFIG QUIET)
-endif()
-if(TARGET protobuf::libprotobuf)
-  get_target_property(TMP protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
-  message(STATUS "found protobuf at ${TMP}")
-else()
-  message(STATUS "cannot find_package(Protobuf), fetch it from ${DEP_URL_protobuf}")
-  FetchContent_Declare(
-    Protobuf
-    URL ${DEP_URL_protobuf}
-    URL_HASH SHA1=${DEP_SHA1_protobuf}
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    CMAKE_ARGS
-    EXCLUDE_FROM_ALL
-    SYSTEM  # Treat protobuf headers as system headers to suppress warnings
-    OVERRIDE_FIND_PACKAGE)
-  find_package(Protobuf REQUIRED)
+# protobuf is required only by the optional ONNX backend and ONNX schema
+# support. The default EP does not fetch or link it. The pin stays in
+# deps.txt so an ONNX configure can still resolve the same revision.
+if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf by default, /MD")
+  elseif(${CMAKE_MSVC_RUNTIME_LIBRARY} MATCHES ".*DLL.*")
+    set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf, /MD")
+  else()
+    set(protobuf_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static msvc runtime for protobuf, /MT")
+  endif()
+  set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
+  set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
+  set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
+  set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
+  # Enable -fPIC for protobuf static lib to link into shared library on Linux
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "enable PIC for protobuf")
+  if(NOT Protobuf_FOUND)
+    find_package(Protobuf CONFIG QUIET)
+  endif()
+  if(TARGET protobuf::libprotobuf)
+    get_target_property(TMP protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "found protobuf at ${TMP}")
+  else()
+    message(STATUS "cannot find_package(Protobuf), fetch it from ${DEP_URL_protobuf}")
+    FetchContent_Declare(
+      Protobuf
+      URL ${DEP_URL_protobuf}
+      URL_HASH SHA1=${DEP_SHA1_protobuf}
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      CMAKE_ARGS
+      EXCLUDE_FROM_ALL
+      SYSTEM  # Treat protobuf headers as system headers to suppress warnings
+      OVERRIDE_FIND_PACKAGE)
+    find_package(Protobuf REQUIRED)
+  endif()
 endif()
 
 ## in order to build it, we need to run some python scripts to

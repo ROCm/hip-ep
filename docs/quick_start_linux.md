@@ -16,11 +16,14 @@ way regardless of which entry path you chose.
   linux-gpu-test-package` lands the binaries under
   `<workspace>/prebuilt/<run-id>/`; no rebuild needed.
 
-All C++ dependencies (LLVM/MLIR/LLD, protobuf, flatbuffers, ONNX Runtime) and
-the TheRock ROCm SDK are resolved automatically by `cmake/deps.cmake`: LLVM is
-built from source, so the host needs no system LLVM. The cold from-source LLVM
-build is the long pole (multi-hour); it lands under `<workspace>/build/` and is
-reused across rebuilds.
+All C++ dependencies (LLVM/MLIR/LLD, flatbuffers, ONNX Runtime) and the TheRock
+ROCm SDK are resolved automatically by `cmake/deps.cmake`: LLVM is built from
+source, so the host needs no system LLVM. The default `hipgpu` build does not
+fetch or link protobuf; the ONNX backend and ONNX schema options still do.
+EP-context JSON uses protobuf field names, and caches written by the previous
+protobuf printer must be regenerated. The cold from-source LLVM build is the
+long pole (multi-hour); it lands under `<workspace>/build/` and is reused
+across rebuilds.
 
 See [quick_start.md](quick_start.md) for the Windows flow. If your target is an
 **AMD Instinct MI350X** (`gfx950`, CDNA4), read this guide first and then

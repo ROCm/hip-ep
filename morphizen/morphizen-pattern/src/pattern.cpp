@@ -10,7 +10,7 @@
 #pragma warning(disable : 4946)
 #endif
 
-#include "morphizen/pattern.pb.h"
+#include "pattern_messages.hpp"
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <bitset>
 #include <glog/logging.h>
-#include <google/protobuf/util/json_util.h>
 #include <memory>
 #include <numeric>
 
@@ -160,10 +159,7 @@ std::string Pattern::to_binary() const {
   std::reverse(root_pattern_proto.mutable_patterns()->begin(),
                root_pattern_proto.mutable_patterns()->end());
 
-  auto ret = std::string();
-  CHECK(root_pattern_proto.SerializeToString(&ret))
-      << "cannot serialized to string";
-  return ret;
+  return json::dump(root_pattern_proto.ToJson());
 }
 std::string Pattern::to_json() const {
   RootPatternProto root_pattern_proto;
@@ -171,14 +167,7 @@ std::string Pattern::to_json() const {
   patter_proto->set_is_root(true);
   std::reverse(root_pattern_proto.mutable_patterns()->begin(),
                root_pattern_proto.mutable_patterns()->end());
-  std::string ret;
-  google::protobuf::util::JsonPrintOptions options;
-  options.add_whitespace = true;
-  // options.always_print_primitive_fields = true;
-  auto status = google::protobuf::util::MessageToJsonString(root_pattern_proto,
-                                                            &ret, options);
-  CHECK(status.ok()) << "cannot serialized to json";
-  return ret;
+  return json::dump(root_pattern_proto.ToJson(), true);
 }
 std::vector<std::string> Pattern::get_ops_list_name() const {
   std::vector<std::string> ret;
@@ -252,8 +241,7 @@ struct PatternBuilderHelper {
 
   static std::vector<std::shared_ptr<Pattern>>
   build_args(PatternBuilder *self,
-             const google::protobuf::RepeatedPtrField<
-                 morphizen::PatternCallNodeArgProto> &args);
+             const ProtoList<PatternCallNodeArgProto> &args);
 };
 
 std::shared_ptr<Pattern>
@@ -334,8 +322,7 @@ PatternBuilderHelper::build_arg(PatternBuilder *self,
 
 std::vector<std::shared_ptr<Pattern>> PatternBuilderHelper::build_args(
     PatternBuilder *self,
-    const google::protobuf::RepeatedPtrField<morphizen::PatternCallNodeArgProto>
-        &args) {
+    const ProtoList<PatternCallNodeArgProto> &args) {
   auto ret = std::vector<std::shared_ptr<Pattern>>{};
   ret.reserve(args.size());
   for (auto &arg : args) {
@@ -350,9 +337,9 @@ PatternBuilder::PatternBuilder()
 std::shared_ptr<Pattern>
 PatternBuilder::create_by_json(const std::string &pattern_json) {
   RootPatternProto pattern_proto;
-  auto status =
-      google::protobuf::util::JsonStringToMessage(pattern_json, &pattern_proto);
-  if (!status.ok()) {
+  try {
+    pattern_proto = RootPatternProto::FromJsonString(pattern_json);
+  } catch (const json::ParseError &) {
     LOG(WARNING) << "cannot parse json string:" << pattern_json;
     return nullptr;
   }
@@ -373,8 +360,11 @@ PatternBuilder::create_by_json(const std::string &pattern_json) {
 std::shared_ptr<Pattern> PatternBuilder::create_from_binary(const char *data,
                                                             size_t size) {
   RootPatternProto pattern_proto;
-  auto ok = pattern_proto.ParseFromArray(data, (int)size);
-  CHECK(ok) << "cannot parse  protobuf data";
+  try {
+    pattern_proto = RootPatternProto::FromJsonString(std::string(data, size));
+  } catch (const json::ParseError &error) {
+    CHECK(false) << "cannot parse pattern json: " << error.what();
+  }
   auto ret = std::shared_ptr<Pattern>{};
   auto last = std::shared_ptr<Pattern>{};
   for (auto &p : pattern_proto.patterns()) {

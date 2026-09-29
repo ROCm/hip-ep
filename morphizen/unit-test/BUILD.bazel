@@ -49,34 +49,6 @@ cc_library(
     deps = ["//morphizen-core:morphizen-core-static"],
 )
 
-# Proto for e2e test configuration.
-# CMake generates into ${CMAKE_CURRENT_BINARY_DIR}/e2e_config_proto/ so that
-# sources can use #include "e2e_config_proto/test_case_config.pb.h".
-# We replicate that with a genrule targeting the e2e_config_proto/ subdir.
-genrule(
-    name = "gen_test_case_config_proto",
-    srcs = ["morphizen-e2e-test/test_case_config.proto"],
-    outs = [
-        "e2e_config_proto/test_case_config.pb.cc",
-        "e2e_config_proto/test_case_config.pb.h",
-    ],
-    cmd = "$(location @protobuf//:protoc)" +
-          " --cpp_out=$(@D)/e2e_config_proto" +
-          " -I $$(dirname $(location morphizen-e2e-test/test_case_config.proto))" +
-          " $(location morphizen-e2e-test/test_case_config.proto)",
-    tools = ["@protobuf//:protoc"],
-)
-
-cc_library(
-    name = "test_case_config_cc_proto",
-    srcs = [":e2e_config_proto/test_case_config.pb.cc"],
-    hdrs = [":e2e_config_proto/test_case_config.pb.h"],
-    # includes = ["."] makes the package's bazel-out dir a search path so
-    # #include "e2e_config_proto/test_case_config.pb.h" resolves correctly.
-    includes = ["."],
-    deps = ["@protobuf//:protobuf"],
-)
-
 # Replicate CMake's tgt_sample_src_tar custom target (test_data.cmake).
 # TarFileTest.ReadFrom opens CMAKE_CURRENT_BINARY_PATH/"sample.src.tar"
 # = "unit-test/data/sample.src.tar" relative to the runfiles root.
@@ -242,7 +214,6 @@ cc_test(
     ],
     shard_count = 4,
     deps = [
-        ":test_case_config_cc_proto",
         "//morphizen-core:morphizen-core-static",
         # cc_import: copies EP DLL next to test binary (Windows PATH search), no link dep.
         # Mirrors GHE's //vaip-core:onnxruntime_vitisai_ep_runtime pattern.
@@ -255,7 +226,6 @@ cc_test(
         "@onnxruntime//:onnxruntime",
         "@googletest//:gtest_main",
         "@glog",
-        "@protobuf//:protobuf",
         # Provides BAZEL_CURRENT_REPOSITORY and the C++ runfiles library used
         # in test_environment.hpp to resolve pt_resnet50.onnx via Rlocation.
         "@bazel_tools//tools/cpp/runfiles",

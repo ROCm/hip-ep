@@ -17,7 +17,7 @@
 #pragma warning(disable : 4946)
 #endif
 
-#include "morphizen/pattern.pb.h"
+#include "pattern_messages.hpp"
 
 #ifdef _MSC_VER
 #pragma warning(pop)

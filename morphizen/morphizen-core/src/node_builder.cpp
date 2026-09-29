@@ -8,6 +8,7 @@
 #include "morphizen/tensor_proto.hpp"
 #include "morphizen/util.hpp"
 #include <glog/logging.h>
+#include <set>
 #include <morphizen/my_ort.h>
 
 DEF_ENV_PARAM(DEBUG_NODE_BUILDER, "0")

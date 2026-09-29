@@ -88,7 +88,6 @@ endif()
 target_link_libraries(${LIB_NAME} PRIVATE
   morphizen::morphizen-core-static
   glog::glog
-  mlir_compilation_proto  # Shared protobuf metadata library
   ${bitcode_jit_llvm_libs}  # LLVM ORC stack for LlvmIrJit
   # LlvmIrJit reads the plugin registry (pluginBitcodeBuffers / pluginLibraries)
   # to add plugin bitcode + libraries to the JITDylib on the default JIT path.
@@ -113,7 +112,7 @@ endif()
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}/..  # metadata.hpp
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
 )

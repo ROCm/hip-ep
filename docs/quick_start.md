@@ -538,9 +538,12 @@ mismatch linker errors.
 ## Updating the C++ Dependencies
 
 Dependency versions are pinned in [`cmake/deps.txt`](../cmake/deps.txt) -- the
-single source of truth for LLVM/MLIR/LLD, protobuf, flatbuffers, ONNX Runtime
-and TheRock. To move to a newer version, edit the relevant line there; the next
-configure picks it up (rebuilding from source, or re-resolving from your prefix).
+single source of truth for LLVM/MLIR/LLD, flatbuffers, ONNX Runtime, TheRock,
+and the protobuf pin used only when `morphizen_ENABLE_ONNX_BACKEND` or
+`morphizen_ENABLE_ONNX_SCHEMA_SUPPORT` is on. The default `hipgpu` build does
+not fetch or link protobuf. To move to a newer version, edit the relevant line
+there; the next configure picks it up (rebuilding from source, or re-resolving
+from your prefix).
 
 ## Troubleshooting
 
