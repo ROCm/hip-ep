@@ -65,14 +65,22 @@ if(ENABLE_ROCMLIRTRITON)
     # version-suffixed amdhip64_<major>.dll. Unknown means no device query.
     set(_hip_runtime_name "")
     if(TARGET hip::amdhip64)
+      set(_hip_runtime_loc "")
       get_target_property(_hip_runtime_cfgs hip::amdhip64 IMPORTED_CONFIGURATIONS)
       foreach(_cfg IN LISTS _hip_runtime_cfgs)
         get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION_${_cfg})
         if(_hip_runtime_loc)
-          get_filename_component(_hip_runtime_name "${_hip_runtime_loc}" NAME)
           break()
         endif()
       endforeach()
+      # IMPORTED_CONFIGURATIONS is optional, and a package that sets only the
+      # unqualified location would otherwise lose the device query entirely.
+      if(NOT _hip_runtime_loc)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION)
+      endif()
+      if(_hip_runtime_loc)
+        get_filename_component(_hip_runtime_name "${_hip_runtime_loc}" NAME)
+      endif()
     endif()
     if(_hip_runtime_name)
       target_compile_definitions(LibHipCompiler PRIVATE
