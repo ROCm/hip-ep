@@ -101,4 +101,45 @@ module {
     // CHECK-SAME: outs(%[[INIT]] : tensor<?x3x32x32xf16>)
     return %y : tensor<?x3x32x32xf16>
   }
+
+  // Test 5: empty roi/scales tensors (tensor<0xf32>) stand in for none.
+  // sizes supplies the output shape; the converter reads it from the result type.
+  func.func @test_resize_empty_roi(%arg0: tensor<1x512x6x6xf16>,
+                                    %roi: tensor<0xf32>,
+                                    %scales: tensor<0xf32>,
+                                    %sizes: tensor<4xi64>)
+      -> tensor<1x512x12x12xf16> {
+    // CHECK-LABEL: func.func @test_resize_empty_roi
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x512x6x6xf16>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<1x512x12x12xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 1
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x512x12x12xf16>
+  }
+
+  // Test 6: pytorch_half_pixel is its own coord id (3), not an alias of
+  // half_pixel. An output axis of length 1 samples input coordinate 0.
+  func.func @test_resize_pytorch_half_pixel(%arg0: tensor<1x3x16x16xf16>,
+                                             %scales: tensor<4xf32>)
+      -> tensor<1x3x32x32xf16> {
+    // CHECK-LABEL: func.func @test_resize_pytorch_half_pixel
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear",
+         coordinate_transformation_mode = "pytorch_half_pixel"}
+        : (tensor<1x3x16x16xf16>, none, tensor<4xf32>)
+        -> tensor<1x3x32x32xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 3
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x3x32x32xf16>
+  }
 }
