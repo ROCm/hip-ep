@@ -6,7 +6,7 @@
 // covers:
 //   * variadic ONNX operands (X, NoValue roi, scales, NoValue sizes)
 //   * rejection / pass-through of attribute defaults
-//   * a static axis is resampled when its extents differ, including NHWC
+//   * channels-last rank 4, packed as prefix N and window (H, W, C)
 //   * single Variadic input form (only X — no extra operands at all)
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s

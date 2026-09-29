@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "../ResizeLayout.h"
 #include "HipToLLVMUtils.h"
 
 namespace mlir {
@@ -13,19 +14,25 @@ namespace {
 // hip.resize -> wrap_resize runtime call
 //===----------------------------------------------------------------------===//
 //
-// One input extent and one output extent per axis, up to kMaxRank.  The
-// kernel resamples an axis whose extents differ and copies an axis whose
-// extents match, so the dimension order is the layout.  Slots past `rank`
-// are 1 and ignored.  Dynamic dims are read from the memref descriptor.
+// The runtime kernel is unchanged.  It takes a copied prefix (N, C) and a
+// trailing window of spatial_rank axes (1..3).  planHipResizeLaunch chooses
+// that split from which extents change:
+//
+//   NCHW  1x3x16x16 -> 1x3x32x32 : N, C,     spatial_rank=2, (H, W)
+//   NHWC  1x16x16x3 -> 1x32x32x3 : N, C=1,   spatial_rank=3, (H, W, C)
+//
+// An empty prefix slot is the constant 1, so it does not add a tensor axis.
+// A window axis whose extents match is copied.  Dynamic prefix dims are read
+// from the memref descriptor.
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
-//               data_type, rank,
-//               in0..4, out0..4,
+//               data_type,
+//               spatial_rank,
+//               N, C,
+//               in0..2, out0..2,
 //               mode, coord_transform, nearest_mode)
 //   -> i32
-
-constexpr int64_t kMaxRank = 5;
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -46,9 +53,12 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    int64_t rank = inputType.getRank();
-    if (rank < 1 || rank > kMaxRank || outputType.getRank() != rank)
-      return rewriter.notifyMatchFailure(op, "expected rank in [1, 5]");
+    std::optional<HipResizeLaunch> launch =
+        planHipResizeLaunch(inputType, outputType);
+    if (!launch)
+      return rewriter.notifyMatchFailure(
+          op, "expected a copied prefix of at most 2 axes and a trailing "
+              "window of 1..3 axes");
 
     int64_t dataType = getHipdnnDataType(inputType.getElementType());
     if (dataType < 0 || (dataType > 2 && dataType != 6))
@@ -63,25 +73,29 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
 
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutput();
+    Value one = createI64(1);
 
-    SmallVector<Value, kMaxRank> inLens;
-    SmallVector<Value, kMaxRank> outLens;
-    for (int64_t i : llvm::seq<int64_t>(kMaxRank)) {
-      if (i < rank) {
-        inLens.push_back(
-            getMemRefDimSize(inputType, i, inputDesc, rewriter, loc));
-        outLens.push_back(
-            getMemRefDimSize(outputType, i, outputDesc, rewriter, loc));
-      } else {
-        inLens.push_back(createI64(1));
-        outLens.push_back(createI64(1));
-      }
+    Value N = launch->prefixCount > 0
+                  ? getMemRefDimSize(inputType, 0, inputDesc, rewriter, loc)
+                  : one;
+    Value C = launch->prefixCount > 1
+                  ? getMemRefDimSize(inputType, 1, inputDesc, rewriter, loc)
+                  : one;
+
+    SmallVector<Value, 3> inSpatial(3, one);
+    SmallVector<Value, 3> outSpatial(3, one);
+    for (int64_t i : llvm::seq<int64_t>(launch->spatialRank)) {
+      int64_t axis = launch->prefixCount + i;
+      inSpatial[i] =
+          getMemRefDimSize(inputType, axis, inputDesc, rewriter, loc);
+      outSpatial[i] =
+          getMemRefDimSize(outputType, axis, outputDesc, rewriter, loc);
     }
 
     Value mode = createI64(op.getMode());
     Value coord = createI64(op.getCoordTransform());
     Value nearest = createI64(op.getNearestMode());
-    Value rankV = createI64(rank);
+    Value spatialRankV = createI64(launch->spatialRank);
     Value dataTypeV = createI64(dataType);
 
     SmallVector<Type, 16> paramTypes;
@@ -99,11 +113,15 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     addPtr(inputPtr);
     addPtr(outputPtr);
     addI64(dataTypeV);
-    addI64(rankV);
-    for (Value extent : inLens)
-      addI64(extent);
-    for (Value extent : outLens)
-      addI64(extent);
+    addI64(spatialRankV);
+    addI64(N);
+    addI64(C);
+    addI64(inSpatial[0]);
+    addI64(inSpatial[1]);
+    addI64(inSpatial[2]);
+    addI64(outSpatial[0]);
+    addI64(outSpatial[1]);
+    addI64(outSpatial[2]);
     addI64(mode);
     addI64(coord);
     addI64(nearest);

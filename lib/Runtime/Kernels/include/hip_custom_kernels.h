@@ -1492,18 +1492,17 @@ HIP_KERNEL_API int hip_pool(
 
 
  /* =========================================================================
- * Resize (per-axis)
+ * Resize (1D / 2D / 3D spatial)
  * =========================================================================
  *
- * Row-major resize over `rank` axes (1..5).  Extents are one slot per axis;
- * slots at index >= rank must be 1 and are ignored.  An axis whose input
- * and output extents match is copied.  An axis whose extents differ is
- * resampled, with scale = out_dim / in_dim.
+ * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
+ * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
+ * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
+ * pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
  *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
- *  nearest_mode:       0 = round_prefer_floor, 1 = round_prefer_ceil,
- *                      2 = floor, 3 = ceil (only used when mode=nearest)
+ *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
  * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
@@ -1514,9 +1513,10 @@ HIP_KERNEL_API int hip_resize(
     const void* input,
     void* output,
     int hip_dtype,
-    int rank,
-    int64_t in_d0, int64_t in_d1, int64_t in_d2, int64_t in_d3, int64_t in_d4,
-    int64_t out_d0, int64_t out_d1, int64_t out_d2, int64_t out_d3, int64_t out_d4,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
     int mode,
     int coord_transform,
     int nearest_mode);

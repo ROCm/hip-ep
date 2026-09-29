@@ -4,7 +4,7 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.resize lowers to llvm.call @wrap_resize with signature
-// (state, input, output, data_type, rank, in0..4, out0..4,
+// (state, input, output, data_type, spatial_rank, N, C, in0..2, out0..2,
 //  mode, coord_transform, nearest_mode) -> i32.
 // ============================================================================
 
@@ -24,7 +24,7 @@ module {
     return
   }
 
-  // Test 2: rank-3 resize. The single resized axis is the last one.
+  // Test 2: 1D resize (rank-3, spatial_rank=1).
   func.func @resize_1d_static_f32(
       %ctx: !hip.context,
       %x: memref<1x3x32xf32, 1>,
@@ -52,8 +52,8 @@ module {
     return
   }
 
-  // Test 4: channels-last. Extents of every axis are passed; the kernel
-  // resamples the axes whose sizes differ.
+  // Test 4: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
+  // The channel extent is unchanged, so that window axis is copied.
   func.func @resize_nhwc_static_f32(
       %ctx: !hip.context,
       %x: memref<1x16x16x3xf32, 1>,

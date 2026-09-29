@@ -1301,20 +1301,18 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
               int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
               int64_t count_include_pad, int64_t p);
 // Resize wrapper (uses custom HIP kernel).
-// One input extent and one output extent per axis, up to 5.  `rank` is the
-// tensor rank; slots at index >= rank must be 1 and are ignored.  An axis
-// whose extents match is copied; an axis whose extents differ is resampled.
-// `mode` (0=nearest, 1=linear), `coord_transform` (0=half_pixel,
-// 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor, 1=round_prefer_ceil, 2=floor, 3=ceil) are
-// pre-resolved at compile time from the ONNX string attributes.
-// data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+// Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
+// pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
+// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
+// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
+// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
-                int64_t data_type, int64_t rank, int64_t in0, int64_t in1,
-                int64_t in2, int64_t in3, int64_t in4, int64_t out0,
-                int64_t out1, int64_t out2, int64_t out3, int64_t out4,
-                int64_t mode, int64_t coord_transform, int64_t nearest_mode);
+                int64_t data_type, int64_t spatial_rank, int64_t N, int64_t C,
+                int64_t in0, int64_t in1, int64_t in2, int64_t out0,
+                int64_t out1, int64_t out2, int64_t mode,
+                int64_t coord_transform, int64_t nearest_mode);
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;

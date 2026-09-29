@@ -14,17 +14,16 @@
 #include <cmath>
 
 // =============================================================================
-// Resize, one extent pair per axis
+// Resize (1D / 2D / 3D spatial)
 // =============================================================================
 //
-// One thread per output element.  The buffer is row-major over `rank` axes
-// (at most kMaxResizeRank).  An axis whose input and output extents match is
-// copied through.  An axis whose extents differ is mapped back into the input
-// with coordinate_transformation_mode, then either nearest-sampled (mode=0)
-// or included in the N-linear corner product (mode=1).  Scale on a resized
-// axis is `out_dim / in_dim`.
-
-constexpr int kMaxResizeRank = 5;
+// One thread per output element.  Output is laid out row-major over
+// (N, C, O_1, O_2, O_3) where unused trailing axes are size 1.  Each
+// thread maps its (o_i) coords back to the input domain via the configured
+// coordinate_transformation_mode, then either picks the nearest input
+// sample (mode=0) or N-linearly interpolates over the surrounding 2^k
+// samples (mode=1).  (N, C) prefix is pass-through, scale is recovered as
+// `in_dim / out_dim` per axis.
 
 namespace {
 
@@ -94,171 +93,160 @@ __device__ inline int nearest_round(float x, int nearest_mode) {
   }
 }
 
-__device__ inline int64_t clamp_axis(int64_t index, int64_t extent) {
-  if (extent <= 0)
-    return 0;
-  if (index < 0)
-    return 0;
-  if (index >= extent)
-    return extent - 1;
-  return index;
-}
-
-// Row-major coordinate of `tid` over the first `rank` output extents.
-__device__ inline void decode_output_index(int64_t tid, int rank,
-                                           const int64_t* out_lens,
-                                           int64_t* coord) {
-  for (int axis = 0; axis < rank; ++axis) {
-    int64_t stride = 1;
-    for (int inner = axis + 1; inner < rank; ++inner)
-      stride *= out_lens[inner];
-    int64_t index = stride > 0 ? tid / stride : 0;
-    coord[axis] = index;
-    tid -= index * stride;
-  }
-}
-
-__device__ inline int64_t flat_offset(int rank, const int64_t* lens,
-                                      const int64_t* index) {
-  int64_t offset = 0;
-  int64_t stride = 1;
-  for (int axis = rank - 1; axis >= 0; --axis) {
-    offset += index[axis] * stride;
-    stride *= lens[axis];
-  }
-  return offset;
-}
-
 template <typename T>
 __global__ void resize_nearest_kernel(const T* __restrict__ input,
                                       T* __restrict__ output,
-                                      int rank,
+                                      int spatial_rank,
+                                      int64_t N, int64_t C,
                                       int64_t in0, int64_t in1, int64_t in2,
-                                      int64_t in3, int64_t in4,
                                       int64_t out0, int64_t out1, int64_t out2,
-                                      int64_t out3, int64_t out4,
                                       int coord_transform,
                                       int nearest_mode,
                                       int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
 
-  const int64_t in_lens[kMaxResizeRank] = {in0, in1, in2, in3, in4};
-  const int64_t out_lens[kMaxResizeRank] = {out0, out1, out2, out3, out4};
-  int64_t coord[kMaxResizeRank];
-  int64_t index[kMaxResizeRank];
-  decode_output_index(tid, rank, out_lens, coord);
+  int64_t plane = out0 * out1 * out2;
+  int64_t channel_stride = plane;
+  int64_t batch_stride = C * channel_stride;
+  int64_t n = tid / batch_stride;
+  int64_t rem = tid - n * batch_stride;
+  int64_t c = rem / channel_stride;
+  rem -= c * channel_stride;
+  int64_t o0 = rem / (out1 * out2);
+  int64_t r1 = rem - o0 * (out1 * out2);
+  int64_t o1 = r1 / out2;
+  int64_t o2 = r1 - o1 * out2;
 
-  for (int axis = 0; axis < rank; ++axis) {
-    if (in_lens[axis] == out_lens[axis] || in_lens[axis] <= 0) {
-      index[axis] = clamp_axis(coord[axis], in_lens[axis]);
-      continue;
-    }
-    float x = coord_to_input(static_cast<int>(coord[axis]),
-                             static_cast<int>(out_lens[axis]),
-                             static_cast<int>(in_lens[axis]),
-                             coord_transform);
-    index[axis] = clamp_axis(nearest_round(x, nearest_mode), in_lens[axis]);
-  }
-  output[tid] = input[flat_offset(rank, in_lens, index)];
+  // Map each axis (skipping unused) — for spatial_rank<3 the unused axis
+  // has out_dim=in_dim=1 and o_i=0, so the coord trivially resolves to 0.
+  float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
+                            static_cast<int>(in0), coord_transform);
+  float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
+                            static_cast<int>(in1), coord_transform);
+  float x2 = coord_to_input(static_cast<int>(o2), static_cast<int>(out2),
+                            static_cast<int>(in2), coord_transform);
+
+  int i0 = nearest_round(x0, nearest_mode);
+  int i1 = nearest_round(x1, nearest_mode);
+  int i2 = nearest_round(x2, nearest_mode);
+  if (i0 < 0) i0 = 0;
+  if (i0 >= in0) i0 = static_cast<int>(in0 - 1);
+  if (i1 < 0) i1 = 0;
+  if (i1 >= in1) i1 = static_cast<int>(in1 - 1);
+  if (i2 < 0) i2 = 0;
+  if (i2 >= in2) i2 = static_cast<int>(in2 - 1);
+
+  int64_t base_in = (n * C + c) * (in0 * in1 * in2);
+  int64_t in_off = static_cast<int64_t>(i0) * in1 * in2 +
+                   static_cast<int64_t>(i1) * in2 + static_cast<int64_t>(i2);
+  output[tid] = input[base_in + in_off];
+}
+
+template <typename T>
+__device__ inline float fetch(const T* base, int64_t i0, int64_t i1, int64_t i2,
+                              int64_t in0, int64_t in1, int64_t in2) {
+  if (i0 < 0) i0 = 0;
+  if (i0 >= in0) i0 = in0 - 1;
+  if (i1 < 0) i1 = 0;
+  if (i1 >= in1) i1 = in1 - 1;
+  if (i2 < 0) i2 = 0;
+  if (i2 >= in2) i2 = in2 - 1;
+  return to_float<T>(base[i0 * in1 * in2 + i1 * in2 + i2]);
 }
 
 template <typename T>
 __global__ void resize_linear_kernel(const T* __restrict__ input,
                                      T* __restrict__ output,
-                                     int rank,
+                                     int spatial_rank,
+                                     int64_t N, int64_t C,
                                      int64_t in0, int64_t in1, int64_t in2,
-                                     int64_t in3, int64_t in4,
                                      int64_t out0, int64_t out1, int64_t out2,
-                                     int64_t out3, int64_t out4,
                                      int coord_transform,
                                      int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
 
-  const int64_t in_lens[kMaxResizeRank] = {in0, in1, in2, in3, in4};
-  const int64_t out_lens[kMaxResizeRank] = {out0, out1, out2, out3, out4};
-  int64_t coord[kMaxResizeRank];
-  decode_output_index(tid, rank, out_lens, coord);
+  int64_t plane = out0 * out1 * out2;
+  int64_t channel_stride = plane;
+  int64_t batch_stride = C * channel_stride;
+  int64_t n = tid / batch_stride;
+  int64_t rem = tid - n * batch_stride;
+  int64_t c = rem / channel_stride;
+  rem -= c * channel_stride;
+  int64_t o0 = rem / (out1 * out2);
+  int64_t r1 = rem - o0 * (out1 * out2);
+  int64_t o1 = r1 / out2;
+  int64_t o2 = r1 - o1 * out2;
 
-  // Pass-through axes stay at the output coordinate.  Only axes whose
-  // extents differ enter the 2^k corner product.
-  int64_t lo[kMaxResizeRank];
-  float frac[kMaxResizeRank];
-  int active[kMaxResizeRank];
-  int n_active = 0;
-  for (int axis = 0; axis < rank; ++axis) {
-    if (in_lens[axis] == out_lens[axis] || in_lens[axis] <= 0) {
-      lo[axis] = clamp_axis(coord[axis], in_lens[axis]);
-      frac[axis] = 0.0f;
-      continue;
-    }
-    float x = coord_to_input(static_cast<int>(coord[axis]),
-                             static_cast<int>(out_lens[axis]),
-                             static_cast<int>(in_lens[axis]),
-                             coord_transform);
-    float flo = floorf(x);
-    lo[axis] = static_cast<int64_t>(flo);
-    frac[axis] = x - flo;
-    active[n_active++] = axis;
-  }
+  float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
+                            static_cast<int>(in0), coord_transform);
+  float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
+                            static_cast<int>(in1), coord_transform);
+  float x2 = coord_to_input(static_cast<int>(o2), static_cast<int>(out2),
+                            static_cast<int>(in2), coord_transform);
 
-  float acc = 0.0f;
-  const int corners = 1 << n_active;
-  for (int mask = 0; mask < corners; ++mask) {
-    float weight = 1.0f;
-    int64_t index[kMaxResizeRank];
-    for (int axis = 0; axis < rank; ++axis)
-      index[axis] = lo[axis];
-    for (int bit = 0; bit < n_active; ++bit) {
-      int axis = active[bit];
-      if (mask & (1 << bit)) {
-        weight *= frac[axis];
-        index[axis] = lo[axis] + 1;
-      } else {
-        weight *= 1.0f - frac[axis];
-      }
-    }
-    if (weight == 0.0f)
-      continue;
-    for (int axis = 0; axis < rank; ++axis)
-      index[axis] = clamp_axis(index[axis], in_lens[axis]);
-    acc += weight * to_float<T>(input[flat_offset(rank, in_lens, index)]);
-  }
-  output[tid] = from_float<T>(acc);
+  int64_t lo0 = static_cast<int64_t>(floorf(x0));
+  int64_t lo1 = static_cast<int64_t>(floorf(x1));
+  int64_t lo2 = static_cast<int64_t>(floorf(x2));
+  float t0 = x0 - static_cast<float>(lo0);
+  float t1 = x1 - static_cast<float>(lo1);
+  float t2 = x2 - static_cast<float>(lo2);
+  // For axes that aren't actually being resized (in_dim == 1 or
+  // spatial_rank < 3), the contribution collapses to a single sample.
+
+  const T* base = input + (n * C + c) * (in0 * in1 * in2);
+
+  // 8-corner trilinear (degenerates correctly when any axis is size 1).
+  float c000 = fetch(base, lo0,     lo1,     lo2,     in0, in1, in2);
+  float c001 = fetch(base, lo0,     lo1,     lo2 + 1, in0, in1, in2);
+  float c010 = fetch(base, lo0,     lo1 + 1, lo2,     in0, in1, in2);
+  float c011 = fetch(base, lo0,     lo1 + 1, lo2 + 1, in0, in1, in2);
+  float c100 = fetch(base, lo0 + 1, lo1,     lo2,     in0, in1, in2);
+  float c101 = fetch(base, lo0 + 1, lo1,     lo2 + 1, in0, in1, in2);
+  float c110 = fetch(base, lo0 + 1, lo1 + 1, lo2,     in0, in1, in2);
+  float c111 = fetch(base, lo0 + 1, lo1 + 1, lo2 + 1, in0, in1, in2);
+
+  // Reduce along axis 2 (innermost).
+  float c00 = c000 * (1.0f - t2) + c001 * t2;
+  float c01 = c010 * (1.0f - t2) + c011 * t2;
+  float c10 = c100 * (1.0f - t2) + c101 * t2;
+  float c11 = c110 * (1.0f - t2) + c111 * t2;
+  // Reduce along axis 1.
+  float c0 = c00 * (1.0f - t1) + c01 * t1;
+  float c1 = c10 * (1.0f - t1) + c11 * t1;
+  // Reduce along axis 0.
+  float v = c0 * (1.0f - t0) + c1 * t0;
+
+  output[tid] = from_float<T>(v);
 }
 
 template <typename T>
 static int launch(hipStream_t stream, const void* input, void* output,
-                  int rank,
-                  int64_t in0, int64_t in1, int64_t in2, int64_t in3, int64_t in4,
-                  int64_t out0, int64_t out1, int64_t out2, int64_t out3,
-                  int64_t out4,
+                  int spatial_rank, int64_t N, int64_t C,
+                  int64_t in0, int64_t in1, int64_t in2,
+                  int64_t out0, int64_t out1, int64_t out2,
                   int mode, int coord_transform, int nearest_mode) {
-  const int64_t out_lens[kMaxResizeRank] = {out0, out1, out2, out3, out4};
-  int64_t total = 1;
-  for (int axis = 0; axis < rank; ++axis)
-    total *= out_lens[axis];
+  int64_t total = N * C * out0 * out1 * out2;
   if (total <= 0) return 0;
   int block = 256;
   int64_t grid = (total + block - 1) / block;
 
-  (void)hipGetLastError();
   if (mode == 0) {
     hipLaunchKernelGGL(resize_nearest_kernel<T>,
                        dim3(static_cast<unsigned>(grid)), dim3(block),
                        0, stream,
                        static_cast<const T*>(input), static_cast<T*>(output),
-                       rank, in0, in1, in2, in3, in4,
-                       out0, out1, out2, out3, out4,
+                       spatial_rank, N, C, in0, in1, in2,
+                       out0, out1, out2,
                        coord_transform, nearest_mode, total);
   } else {
     hipLaunchKernelGGL(resize_linear_kernel<T>,
                        dim3(static_cast<unsigned>(grid)), dim3(block),
                        0, stream,
                        static_cast<const T*>(input), static_cast<T*>(output),
-                       rank, in0, in1, in2, in3, in4,
-                       out0, out1, out2, out3, out4,
+                       spatial_rank, N, C, in0, in1, in2,
+                       out0, out1, out2,
                        coord_transform, total);
   }
 
@@ -276,17 +264,17 @@ extern "C" int hip_resize(void* stream,
                           const void* input,
                           void* output,
                           int hip_dtype,
-                          int rank,
+                          int spatial_rank,
+                          int64_t N, int64_t C,
                           int64_t in_d0, int64_t in_d1, int64_t in_d2,
-                          int64_t in_d3, int64_t in_d4,
                           int64_t out_d0, int64_t out_d1, int64_t out_d2,
-                          int64_t out_d3, int64_t out_d4,
                           int mode,
                           int coord_transform,
                           int nearest_mode) {
-  if (rank < 1 || rank > kMaxResizeRank) {
+  if (spatial_rank < 1 || spatial_rank > 3) {
     fprintf(stderr,
-            "[custom_kernels] hip_resize: unsupported rank=%d\n", rank);
+            "[custom_kernels] hip_resize: unsupported spatial_rank=%d\n",
+            spatial_rank);
     return -1;
   }
   if (mode != 0 && mode != 1) {
@@ -297,36 +285,30 @@ extern "C" int hip_resize(void* stream,
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_resize: dtype=%d rank=%d "
-      "in=[%lld,%lld,%lld,%lld,%lld] out=[%lld,%lld,%lld,%lld,%lld] "
-      "mode=%d ct=%d nearest=%d\n",
-      hip_dtype, rank,
+      "[custom_kernels] hip_resize: dtype=%d spatial_rank=%d N=%lld C=%lld "
+      "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] mode=%d ct=%d nearest=%d\n",
+      hip_dtype, spatial_rank, (long long)N, (long long)C,
       (long long)in_d0, (long long)in_d1, (long long)in_d2,
-      (long long)in_d3, (long long)in_d4,
       (long long)out_d0, (long long)out_d1, (long long)out_d2,
-      (long long)out_d3, (long long)out_d4,
       mode, coord_transform, nearest_mode);
 
   switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
-      return launch<float>(hip_stream, input, output, rank,
-                           in_d0, in_d1, in_d2, in_d3, in_d4,
-                           out_d0, out_d1, out_d2, out_d3, out_d4,
+      return launch<float>(hip_stream, input, output, spatial_rank, N, C,
+                           in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
                            mode, coord_transform, nearest_mode);
     case HIP_DTYPE_FLOAT16:
-      return launch<__half>(hip_stream, input, output, rank,
-                            in_d0, in_d1, in_d2, in_d3, in_d4,
-                            out_d0, out_d1, out_d2, out_d3, out_d4,
+      return launch<__half>(hip_stream, input, output, spatial_rank, N, C,
+                            in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
                             mode, coord_transform, nearest_mode);
     case HIP_DTYPE_BFLOAT16:
-      return launch<hip_bfloat16>(hip_stream, input, output, rank,
-                                  in_d0, in_d1, in_d2, in_d3, in_d4,
-                                  out_d0, out_d1, out_d2, out_d3, out_d4,
+      return launch<hip_bfloat16>(hip_stream, input, output, spatial_rank,
+                                  N, C, in_d0, in_d1, in_d2,
+                                  out_d0, out_d1, out_d2,
                                   mode, coord_transform, nearest_mode);
     case HIP_DTYPE_FLOAT64:
-      return launch<double>(hip_stream, input, output, rank,
-                            in_d0, in_d1, in_d2, in_d3, in_d4,
-                            out_d0, out_d1, out_d2, out_d3, out_d4,
+      return launch<double>(hip_stream, input, output, spatial_rank, N, C,
+                            in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
                             mode, coord_transform, nearest_mode);
     default:
       fprintf(stderr,
