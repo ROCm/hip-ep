@@ -493,8 +493,8 @@ FailureOr<SmallVector<int64_t>> inferTileShape(ArrayRef<int64_t> inputShape,
                                                ArrayRef<int64_t> repeats);
 
 /// Mixed form for constant repeats. Dynamic input dims produce exact index SSA;
-/// payload-dynamic repeats return failure so the caller can use bulk readback
-/// (converter) or outs-lift (reify).
+/// payload-dynamic repeats return failure so the caller can use synchronized
+/// scalar readback (converter) or outs-lift (reify).
 LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
                              Value repeats,
                              std::optional<ArrayRef<int64_t>> staticRepeats,
