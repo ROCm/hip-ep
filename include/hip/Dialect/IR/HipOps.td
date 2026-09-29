@@ -4632,10 +4632,11 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
-    upsample-and-downsample patterns.  Resamples the trailing spatial axes of
-    an `(N, C, D_1, ..., D_k)` input onto an `(N, C, O_1, ..., O_k)` output
-    grid.  The leading two dims (N, C) must be unchanged at runtime — i.e.
-    we only resize spatial axes.
+    upsample-and-downsample patterns.  Each axis is independent: an axis whose
+    input and output extents differ is resampled, and an axis whose extents
+    match is copied through.  The tensor's dimension order is the layout, so
+    both channels-first `(N, C, H, W)` and channels-last `(N, H, W, C)` are
+    expressed by which extents change.  Rank is 3, 4, or 5.
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
@@ -4646,7 +4647,7 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
       * nearest_mode in {"round_prefer_floor"}      — encoded as i64
         - 0 = round_prefer_floor (only used when mode=nearest)
 
-    Per-axis scale is recovered at runtime from the input/output spatial
+    Per-axis scale is recovered at runtime from that axis's input and output
     extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
     appear as operands here — they were resolved at compile time into the
     output type that the upstream importer produced.

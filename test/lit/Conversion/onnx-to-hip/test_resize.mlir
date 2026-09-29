@@ -6,7 +6,7 @@
 // covers:
 //   * variadic ONNX operands (X, NoValue roi, scales, NoValue sizes)
 //   * rejection / pass-through of attribute defaults
-//   * (N, C) pass-through invariant
+//   * a static axis is resampled when its extents differ, including NHWC
 //   * single Variadic input form (only X — no extra operands at all)
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -100,5 +100,23 @@ module {
     // CHECK: hip.resize(%[[CTX]]) ins(%[[X]] : tensor<?x3x16x16xf16>)
     // CHECK-SAME: outs(%[[INIT]] : tensor<?x3x32x32xf16>)
     return %y : tensor<?x3x32x32xf16>
+  }
+
+  // Test 5: channels-last. Axes 1 and 2 change; batch and channel stay.
+  func.func @test_resize_nhwc(%arg0: tensor<1x16x16x3xf32>,
+                              %scales: tensor<4xf32>)
+      -> tensor<1x32x32x3xf32> {
+    // CHECK-LABEL: func.func @test_resize_nhwc
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x16x16x3xf32>, none, tensor<4xf32>)
+        -> tensor<1x32x32x3xf32>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: mode = 1
+    // CHECK-SAME: coord_transform = 0
+    return %y : tensor<1x32x32x3xf32>
   }
 }

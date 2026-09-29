@@ -13,21 +13,19 @@ namespace {
 // hip.resize -> wrap_resize runtime call
 //===----------------------------------------------------------------------===//
 //
-// Generic 1D / 2D / 3D spatial resize.  spatial_rank is derived from the
-// input rank (= 2 + spatial_rank).  All shape-derived scalar args come from
-// the memref descriptors so dynamic N (and C) is honored.  Output spatial
-// dims are required static at the conversion (see ResizeConversion.cpp), so
-// they fold to constants here; the runtime kernel reads in_dim and out_dim
-// per axis and computes per-axis scale internally.
+// One input extent and one output extent per axis, up to kMaxRank.  The
+// kernel resamples an axis whose extents differ and copies an axis whose
+// extents match, so the dimension order is the layout.  Slots past `rank`
+// are 1 and ignored.  Dynamic dims are read from the memref descriptor.
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
-//               data_type,
-//               spatial_rank,
-//               N, C,
-//               in0..2, out0..2,
+//               data_type, rank,
+//               in0..4, out0..4,
 //               mode, coord_transform, nearest_mode)
 //   -> i32
+
+constexpr int64_t kMaxRank = 5;
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -49,9 +47,8 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
     int64_t rank = inputType.getRank();
-    if (rank < 3 || rank > 5)
-      return rewriter.notifyMatchFailure(op, "expected rank in [3, 5]");
-    int64_t spatialRank = rank - 2;
+    if (rank < 1 || rank > kMaxRank || outputType.getRank() != rank)
+      return rewriter.notifyMatchFailure(op, "expected rank in [1, 5]");
 
     int64_t dataType = getHipdnnDataType(inputType.getElementType());
     if (dataType < 0 || (dataType > 2 && dataType != 6))
@@ -67,22 +64,24 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutput();
 
-    Value N = getMemRefDimSize(inputType, 0, inputDesc, rewriter, loc);
-    Value C = getMemRefDimSize(inputType, 1, inputDesc, rewriter, loc);
-
-    SmallVector<Value, 3> inSpatial(3, createI64(1));
-    SmallVector<Value, 3> outSpatial(3, createI64(1));
-    for (int64_t i : llvm::seq<int64_t>(spatialRank)) {
-      inSpatial[i] =
-          getMemRefDimSize(inputType, 2 + i, inputDesc, rewriter, loc);
-      outSpatial[i] =
-          getMemRefDimSize(outputType, 2 + i, outputDesc, rewriter, loc);
+    SmallVector<Value, kMaxRank> inLens;
+    SmallVector<Value, kMaxRank> outLens;
+    for (int64_t i : llvm::seq<int64_t>(kMaxRank)) {
+      if (i < rank) {
+        inLens.push_back(
+            getMemRefDimSize(inputType, i, inputDesc, rewriter, loc));
+        outLens.push_back(
+            getMemRefDimSize(outputType, i, outputDesc, rewriter, loc));
+      } else {
+        inLens.push_back(createI64(1));
+        outLens.push_back(createI64(1));
+      }
     }
 
     Value mode = createI64(op.getMode());
     Value coord = createI64(op.getCoordTransform());
     Value nearest = createI64(op.getNearestMode());
-    Value spatialRankV = createI64(spatialRank);
+    Value rankV = createI64(rank);
     Value dataTypeV = createI64(dataType);
 
     SmallVector<Type, 16> paramTypes;
@@ -100,15 +99,11 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     addPtr(inputPtr);
     addPtr(outputPtr);
     addI64(dataTypeV);
-    addI64(spatialRankV);
-    addI64(N);
-    addI64(C);
-    addI64(inSpatial[0]);
-    addI64(inSpatial[1]);
-    addI64(inSpatial[2]);
-    addI64(outSpatial[0]);
-    addI64(outSpatial[1]);
-    addI64(outSpatial[2]);
+    addI64(rankV);
+    for (Value extent : inLens)
+      addI64(extent);
+    for (Value extent : outLens)
+      addI64(extent);
     addI64(mode);
     addI64(coord);
     addI64(nearest);

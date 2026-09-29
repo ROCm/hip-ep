@@ -12,7 +12,7 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// onnx.Resize -> hip.resize (native, spatial-only resampling)
+// onnx.Resize -> hip.resize (per-axis resampling)
 //===----------------------------------------------------------------------===//
 //
 // ONNX Resize is a multi-dimensional resampler whose full attribute surface
@@ -26,10 +26,12 @@ namespace {
 //   * antialias = 0, exclude_outside = 0             (defaults)
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent / NoValue                   (no tf_crop_and_resize)
-//   * scale on the leading two axes (N, C) must be 1 — i.e. resampling
-//     happens only on trailing spatial axes, which is the universal
-//     contract for image/volume CNNs and is what onnx-mlir's importer
-//     produces for typical exports.
+//   * rank in [3, 5], input and output ranks equal
+//
+// Which axes are resampled is not a layout.  A static axis whose input and
+// output extents differ is resampled; an axis whose extents match is copied.
+// Channels-first `1x3x16x16 -> 1x3x32x32` and channels-last
+// `1x16x16x3 -> 1x32x32x3` are the same op.
 //
 // The actual `scales` / `sizes` operand is NOT passed through to runtime —
 // the upstream importer has already used it to compute the static result
@@ -38,8 +40,8 @@ namespace {
 // Compile-time work:
 //   * decode the three string attributes into i64 enums baked onto the
 //     hip.resize op
-//   * verify the (N, C) axes are pass-through (input & output extents
-//     match)
+//   * reject a dynamic output extent, except the leading two axes when
+//     they are also dynamic on the input (those are copied through)
 //
 // Before:
 //   %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
@@ -104,18 +106,15 @@ struct ResizeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Resize runtime supports only matching float types");
 
-    // (N, C) must be pass-through.  If both extents are static and differ,
-    // bail.  Dynamic on either side is OK as long as both are dynamic
-    // (tensor.dim of input feeds tensor.empty for the output).
-    for (int64_t i : llvm::seq<int64_t>(2)) {
-      bool inDyn = inputType.isDynamicDim(i);
-      bool outDyn = outputType.isDynamicDim(i);
-      if (!inDyn && !outDyn &&
-          inputType.getDimSize(i) != outputType.getDimSize(i))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: only spatial-axis resampling supported "
-                "(N, C must match between input and output)");
-    }
+    // A static axis is resampled when its extents differ and copied when
+    // they match.  That decision is made in the kernel from the extents,
+    // so a channels-last tensor needs no transpose here.
+    //
+    // A dynamic output extent has no size in the result type.  The leading
+    // two axes may still be dynamic when the input axis is dynamic too:
+    // tensor.dim of the input sizes the output, which makes that axis
+    // pass-through.  Any other dynamic output dim is rejected because a
+    // resized extent has to be static.
 
     // ===== Decode string attrs to enum-like i64 values =====================
 
@@ -185,11 +184,11 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     // ===== Build DPS init =================================================
     //
-    // Output shape: leading (N, C) inherit from the input (their dynamic
-    // status is required to match by the check above).  Trailing spatial
-    // dims must be static — at runtime the kernel reads them off the
-    // output memref descriptor; if they were dynamic we'd need arith ops
-    // for the per-axis output extents, left out of scope.
+    // Static extents, changed or not, are read off the output type.  A
+    // dynamic output dim is only legal for the leading two axes, and only
+    // by copying the input extent via tensor.dim — that axis is then
+    // pass-through.  A resized axis has to be static: its output extent is
+    // not carried as a runtime sizes operand.
     for (int64_t i : llvm::seq<int64_t>(spatialRank)) {
       if (outputType.isDynamicDim(2 + i))
         return rewriter.notifyMatchFailure(
