@@ -43,8 +43,12 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace mlir {
 namespace hip {
@@ -96,6 +100,15 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
+  // LUT lookup, consulted before the in-process winner cache and the tuning
+  // space. Arguments are the live device gfx name, the rocMLIR problem
+  // string, and perfConfigs that already failed to compile for this problem.
+  // Empty leaves the search unchanged. The tool installs the shipped
+  // lut/<arch>.fb plus --problem-cache here.
+  std::function<std::optional<std::string>(
+      StringRef deviceArch, StringRef problem,
+      const std::vector<std::string> &rejected)>
+      problemCacheLookup;
 };
 
 // Wall times accumulated by one autotuner. perfConfig compiles for the whole
@@ -131,6 +144,11 @@ public:
   void installInto(RocMlirEmbedOptions &opts);
 
   const AutotunePhaseTimes &phaseTimes() const;
+
+  // Problem string and the perfConfig that compiled for it. The tuning-space
+  // name is not part of the problem string. Used by --dump-problem-cache.
+  void collectWinners(
+      std::vector<std::pair<std::string, std::string>> &out) const;
 
 private:
   struct Impl;

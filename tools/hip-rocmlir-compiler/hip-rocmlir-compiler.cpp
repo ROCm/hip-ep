@@ -62,6 +62,8 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ThreadPool.h"
@@ -69,6 +71,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "CrashHandler.h"
+#include "nearest_conv_tune.h"
 
 #include <algorithm>
 #include <chrono>
@@ -81,6 +84,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
@@ -150,6 +154,176 @@ static void dumpModule(mlir::ModuleOp mod, llvm::StringRef label,
                << path << "\n";
 }
 
+// Generated from tools/problem-cache/lut/*.fb. One blob per checked-in arch.
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+
+static const std::vector<mlir::hip::ProblemCacheLut> &shippedProblemCaches() {
+  static const std::vector<mlir::hip::ProblemCacheLut> luts = [] {
+    std::vector<mlir::hip::ProblemCacheLut> loaded;
+    loaded.reserve(kRocmlirProblemCacheBlobCount);
+    for (size_t i = 0; i < kRocmlirProblemCacheBlobCount; ++i) {
+      mlir::hip::ProblemCacheLut lut;
+      std::string error;
+      if (!mlir::hip::loadProblemCacheLut(kRocmlirProblemCacheBlobs[i],
+                                          kRocmlirProblemCacheBlobSizes[i], lut,
+                                          error)) {
+        llvm::errs() << "warning: shipped problem cache: " << error << "\n";
+        continue;
+      }
+      llvm::errs() << "[hip-rocmlir-compiler] shipped problem cache "
+                   << lut.entries.size() << " entries for "
+                   << (lut.gpuArch.empty() ? "any arch" : lut.gpuArch) << "\n";
+      loaded.push_back(std::move(lut));
+    }
+    return loaded;
+  }();
+  return luts;
+}
+
+static const mlir::hip::ProblemCacheLut &
+problemCacheLut(llvm::StringRef path) {
+  static std::string loadedPath;
+  static mlir::hip::ProblemCacheLut lut;
+  if (loadedPath == path)
+    return lut;
+  lut = {};
+  std::string error;
+  if (!mlir::hip::loadProblemCacheLut(path.str(), lut, error)) {
+    llvm::errs() << "warning: " << error << "\n";
+    lut = {};
+  } else {
+    llvm::errs() << "[hip-rocmlir-compiler] nearest-tune loaded "
+                 << lut.entries.size() << " entries from " << path << "\n";
+  }
+  loadedPath = path.str();
+  return lut;
+}
+
+static void logProblemCacheHit(const mlir::hip::NearestConvTuneHit &hit) {
+  llvm::errs() << "[hip-rocmlir-compiler] nearest-tune "
+               << (hit.exact ? "exact" : "nearest") << " d="
+               << llvm::format("%.3f", hit.distance) << " matched "
+               << hit.matchedProblem << " -> " << hit.solution << "\n";
+}
+
+// Shipped lut/<arch>.fb first, then --problem-cache / HIP_ROCMLIR_PROBLEM_CACHE.
+// A table whose gpu_arch is a different device is skipped. Within a table an
+// identical problem string is used as stored; a miss is the nearest legal
+// tile of the same kernel kind.
+static std::optional<std::string>
+lookupProblemCache(llvm::StringRef deviceArch, llvm::StringRef problem,
+                   const std::vector<std::string> &rejected,
+                   llvm::StringRef extraPath) {
+  const auto search = [&](const mlir::hip::ProblemCacheLut &lut)
+      -> std::optional<std::string> {
+    if ((!lut.gpuArch.empty() && lut.gpuArch != deviceArch) ||
+        lut.entries.empty())
+      return std::nullopt;
+    std::optional<mlir::hip::NearestConvTuneHit> hit =
+        mlir::hip::findNearestConvTune(
+            std::string_view(problem.data(), problem.size()), lut.entries,
+            rejected, lut.weightM, lut.weightN, lut.weightK);
+    if (!hit)
+      return std::nullopt;
+    logProblemCacheHit(*hit);
+    return std::move(hit->solution);
+  };
+  for (const mlir::hip::ProblemCacheLut &lut : shippedProblemCaches()) {
+    if (std::optional<std::string> solution = search(lut))
+      return solution;
+  }
+  if (!extraPath.empty()) {
+    const mlir::hip::ProblemCacheLut &lut = problemCacheLut(extraPath);
+    if (!lut.gpuArch.empty() && lut.gpuArch != deviceArch) {
+      static bool warned = false;
+      if (!warned) {
+        llvm::errs() << "warning: problem cache is for " << lut.gpuArch
+                     << ", device is " << deviceArch << "; ignoring it\n";
+        warned = true;
+      }
+    } else if (std::optional<std::string> solution = search(lut)) {
+      return solution;
+    }
+  }
+  return std::nullopt;
+}
+
+// JSON in the problem_cache_to_fb.py shape. One point per unique rocMLIR
+// problem in this compile. The config is the perfConfig that compiled,
+// including a nearest-cache tile that was accepted.
+static bool dumpProblemCache(const mlir::hip::RocMlirAutotuner &autotuner,
+                             llvm::StringRef path) {
+  llvm::StringRef gfxName =
+      llvm::StringRef(mlir::hip::resolveRocMlirArch()).split(':').first;
+
+  std::vector<std::pair<std::string, std::string>> pairs;
+  autotuner.collectWinners(pairs);
+  std::sort(pairs.begin(), pairs.end(),
+            [](const auto &a, const auto &b) { return a.first < b.first; });
+
+  llvm::json::Array configs;
+  llvm::StringMap<int64_t> configIndex;
+  llvm::json::Array points;
+  for (const auto &pair : pairs) {
+    int64_t index = 0;
+    auto existing = configIndex.find(pair.second);
+    if (existing == configIndex.end()) {
+      index = static_cast<int64_t>(configs.size());
+      configIndex[pair.second] = index;
+      llvm::json::Object config;
+      config["perf_config"] = pair.second;
+      configs.push_back(std::move(config));
+    } else {
+      index = existing->second;
+    }
+    int64_t gemmM = 0, gemmN = 0, gemmK = 0;
+    mlir::hip::implicitGemmDims(pair.first, gemmM, gemmN, gemmK);
+    llvm::json::Object point;
+    point["problem"] = pair.first;
+    point["config"] = index;
+    point["m"] = gemmM;
+    point["n"] = gemmN;
+    point["k"] = gemmK;
+    points.push_back(std::move(point));
+  }
+
+  llvm::json::Object root;
+  root["schema_version"] = static_cast<int64_t>(1);
+  root["gpu_arch"] = gfxName.str();
+  root["rocm_version"] = static_cast<int64_t>(0);
+  root["kernel_abi"] = "rocmlir-conv-v1";
+  root["model_key"] = "";
+  root["weight_m"] = 1.0;
+  root["weight_n"] = 1.0;
+  root["weight_k"] = 1.0;
+  const size_t nConfigs = configs.size();
+  const size_t nPoints = points.size();
+  root["configs"] = std::move(configs);
+  root["points"] = std::move(points);
+  root["fallbacks"] = llvm::json::Array();
+
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "error: cannot open '" << path
+                 << "' to dump problem cache: " << ec.message() << "\n";
+    return false;
+  }
+  os << llvm::formatv("{0:2}", llvm::json::Value(std::move(root))) << "\n";
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "error: failed writing problem cache to " << path << ": "
+                 << os.error().message() << "\n";
+    os.clear_error();
+    return false;
+  }
+  llvm::errs() << "[hip-rocmlir-compiler] wrote " << nPoints << " LUT points ("
+               << nConfigs << " configs) to " << path << "\n";
+  return true;
+}
+
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-rocmlir-compiler");
 
@@ -159,6 +333,8 @@ int main(int argc, char **argv) {
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
   bool autotuneFlagSeen = false;
+  std::string problemCachePath;
+  std::string problemCacheDumpPath;
   // On unless HIP_ROCMLIR_SKIP_BENCHMARKING says otherwise: benchmarking is
   // the reason this tool exists, unlike the EP, which opts in.
   bool autotuneEnabled = true;
@@ -203,6 +379,10 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
+    } else if (arg == "--problem-cache" && i + 1 < argc) {
+      problemCachePath = argv[++i];
+    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
+      problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -213,10 +393,21 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
+  if (problemCachePath.empty()) {
+    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
+      problemCachePath = env;
+  }
   if (skipBenchmarking())
     autotuneEnabled = false;
+  if (!problemCachePath.empty() && !autotuneEnabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!problemCacheDumpPath.empty() && !autotuneEnabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotuneEnabled) {
+  if ((autotuneFlagSeen && autotuneEnabled) ||
+      !problemCacheDumpPath.empty()) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
@@ -259,6 +450,21 @@ int main(int argc, char **argv) {
         << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
            "the\n"
         << "                       differences being searched for.\n"
+        << "  --problem-cache <file.fb>\n"
+        << "                       Extra LUT, checked after the shipped\n"
+        << "                       tools/problem-cache/lut/<arch>.fb and\n"
+        << "                       before the in-process winner cache and the\n"
+        << "                       tuning space. An identical problem string\n"
+        << "                       is compiled as stored. HIP_ROCMLIR_PROBLEM_"
+           "CACHE\n"
+        << "                       sets the same path. A miss takes the\n"
+        << "                       nearest legal tile of the same kernel kind.\n"
+        << "                       A tile that fails to compile is skipped;\n"
+        << "                       otherwise the search runs.\n"
+        << "  --dump-problem-cache <file.json>\n"
+        << "                       After autotune, write the LUT JSON\n"
+        << "                       (configs, points, fallbacks). Compile it\n"
+        << "                       to a .fb with problem_cache_to_fb.py.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
@@ -451,6 +657,15 @@ int main(int argc, char **argv) {
   std::optional<mlir::hip::RocMlirAutotuner> autotuner;
 #if HIP_ROCMLIR_AUTOTUNE
   if (autotuneEnabled) {
+    if (kRocmlirProblemCacheBlobCount != 0 || !problemCachePath.empty()) {
+      autotune.problemCacheLookup =
+          [problemCachePath](llvm::StringRef deviceArch,
+                             llvm::StringRef problem,
+                             const std::vector<std::string> &rejected) {
+            return lookupProblemCache(deviceArch, problem, rejected,
+                                      problemCachePath);
+          };
+    }
     autotuner.emplace(arch, autotune);
     if (!autotuner->isUsable()) {
       llvm::errs() << "error: autotune could not reach a HIP device\n";
@@ -479,6 +694,13 @@ int main(int argc, char **argv) {
   }
   if (!embedOk)
     return 1;
+#if HIP_ROCMLIR_AUTOTUNE
+  // Winners are final once every kernel has compiled, including a search that
+  // replaced a tile the problem cache could not compile.
+  if (autotuner && !problemCacheDumpPath.empty() &&
+      !dumpProblemCache(*autotuner, problemCacheDumpPath))
+    return 1;
+#endif
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-

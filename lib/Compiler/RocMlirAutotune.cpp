@@ -462,10 +462,16 @@ private:
 // so concurrent sessions cannot consume each other's queues.
 struct RocMlirAutotuner::Impl {
   std::string arch;
+  // Live device gfx name, without a target-id suffix. The problem-cache
+  // callback uses it to skip a table built for a different GPU.
+  std::string deviceArch;
   AutotuneOptions options;
   rock::TuningParamSetKind kind;
   AutotunePhaseTimes times;
   bool usable = false;
+  // perfConfigs from the problem cache that failed to compile for a key.
+  // The next lookup skips them and takes the next nearest tile.
+  llvm::StringMap<std::vector<std::string>> rejectedPerfConfigs;
 
   // Winners for this compile, same role as MIGraphX's problem cache. The first
   // kernel with a given problem key is searched; every other kernel with that
@@ -648,10 +654,11 @@ bool RocMlirAutotuner::Impl::checkDevice() {
                    "hipGetDeviceProperties"))
     return false;
   StringRef requestedArch = StringRef(arch).split(':').first;
-  StringRef deviceArch = StringRef(properties.gcnArchName).split(':').first;
-  if (requestedArch != deviceArch)
+  StringRef liveArch = StringRef(properties.gcnArchName).split(':').first;
+  deviceArch = liveArch.str();
+  if (requestedArch != liveArch)
     llvm::errs() << "warning: autotuning for " << requestedArch << " on device "
-                 << deviceArch << "; compiled candidates may not load\n";
+                 << liveArch << "; compiled candidates may not load\n";
   return true;
 }
 
@@ -853,35 +860,61 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   }
   ensureDialectsLoaded();
 
-  // Look up before building the search space. A known winner is compiled in
-  // the second pool. A problem already queued in this compile waits for that
-  // same pool once the search has been benchmarked. A later compile failure
-  // drops the entry and searches, so a config that won for a different
-  // epilogue cannot fail this kernel.
+  // Look up before building the search space. Order is the problem-cache
+  // callback (shipped lut, then --problem-cache), then this compile's winner
+  // cache, then the selected tuning space. A known winner is compiled in the
+  // second pool. A problem already queued in this compile waits for that pool
+  // once the search has been benchmarked. A tile that fails to compile is
+  // skipped and the next nearest row is tried. When none remain, the search
+  // runs, so a config that won for a different epilogue cannot fail this
+  // kernel.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (succeeded(rock::getTuningProblemStr(module, problem))) {
     cacheKey = cacheKeyFor(problem);
-    auto cached = winnerCache.find(cacheKey);
-    if (cached != winnerCache.end()) {
+    const bool cacheActive = static_cast<bool>(options.problemCacheLookup);
+    bool retryNearest = true;
+    while (retryNearest) {
+      retryNearest = false;
+      std::string chosen;
+      if (cacheActive) {
+        if (std::optional<std::string> fromLut = options.problemCacheLookup(
+                deviceArch, problem, rejectedPerfConfigs[cacheKey]))
+          chosen = std::move(*fromLut);
+      }
+      if (chosen.empty()) {
+        auto cached = winnerCache.find(cacheKey);
+        if (cached != winnerCache.end())
+          chosen = cached->getValue();
+      }
+      if (chosen.empty())
+        break;
+      winnerCache[cacheKey] = chosen;
       if (deferCacheHits) {
         DeferredCacheHit hit;
         hit.kernelName = kernelName.str();
         hit.rockModule = std::move(rockModule);
-        hit.perfConfig = cached->getValue();
+        hit.perfConfig = std::move(chosen);
         hit.cacheKey = std::move(cacheKey);
         cacheHits.push_back(std::move(hit));
         return true;
       }
       const auto compileStart = std::chrono::steady_clock::now();
-      bool ok = compilePerfConfig(rockModule, arch, cached->getValue(), out);
+      bool ok = compilePerfConfig(rockModule, arch, chosen, out);
       times.perfConfigCompileMs += millisecondsSince(compileStart);
       if (ok)
         return true;
       llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                   << kernelName << "'; searching the "
-                   << autotuneSpaceName(options.space) << " space\n";
-      winnerCache.erase(cached);
+                   << kernelName << "'";
+      if (cacheActive)
+        llvm::errs() << "; trying the next problem-cache tile\n";
+      else
+        llvm::errs() << "; searching the " << autotuneSpaceName(options.space)
+                     << " space\n";
+      rejectedPerfConfigs[cacheKey].push_back(std::move(chosen));
+      winnerCache.erase(cacheKey);
+      if (cacheActive)
+        retryNearest = true;
     }
     if (deferCacheHits && searchesInFlight.count(cacheKey)) {
       PendingWinnerCompile pending;
@@ -1067,8 +1100,8 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
       continue;
     }
     llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                 << hit.kernelName << "'; searching the "
-                 << autotuneSpaceName(options.space) << " space\n";
+                 << hit.kernelName << "'\n";
+    rejectedPerfConfigs[hit.cacheKey].push_back(hit.perfConfig);
     winnerCache.erase(hit.cacheKey);
     MLIRContext context(autotuneRegistry(), MLIRContext::Threading::DISABLED);
     context.loadAllAvailableDialects();
@@ -1096,6 +1129,23 @@ bool RocMlirAutotuner::isUsable() const { return impl->usable; }
 
 const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
+}
+
+void RocMlirAutotuner::collectWinners(
+    std::vector<std::pair<std::string, std::string>> &out) const {
+  out.clear();
+  out.reserve(impl->winnerCache.size());
+  for (const auto &entry : impl->winnerCache) {
+    StringRef key = entry.getKey();
+    auto split = key.split('\n');
+    StringRef problem = split.second;
+    if (split.first != "quick" && split.first != "full" &&
+        split.first != "exhaustive")
+      problem = key;
+    if (problem.empty() || entry.getValue().empty())
+      continue;
+    out.emplace_back(problem.str(), entry.getValue());
+  }
 }
 
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &opts) {
@@ -1130,6 +1180,8 @@ bool RocMlirAutotuner::isUsable() const { return false; }
 const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
 }
+void RocMlirAutotuner::collectWinners(
+    std::vector<std::pair<std::string, std::string>> &) const {}
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &) {}
 
 #endif

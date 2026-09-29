@@ -109,9 +109,25 @@ plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
-overrides the search space. Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
+overrides the search space. Before that search the compiler consults the
+shipped `tools/problem-cache/lut/<arch>.fb` tables, then
+`--problem-cache <file.fb>` (or `HIP_ROCMLIR_PROBLEM_CACHE`). A table whose
+`gpu_arch` is a different device is skipped. An identical problem string is
+compiled as stored. A miss takes the nearest `gemm:`/`attn:` tile of the same
+kernel kind (conv, gemm, attention, or gemm-elementwise-gemm): the fusion
+suffix, including `-supportsSplitK`, must match, then one weighted log2
+distance is taken over that kind's axes. The weights come from the table and
+default to `1, 1, 1`. A borrowed tile must fit this problem. A tile that fails
+to compile is skipped and the next nearest row is tried. When no legal row
+remains, the quick search runs.
+`--dump-problem-cache <file.json>` writes those same problem keys and the
+winning perfConfig after autotune, one row per unique kernel, in the
+device-keyed JSON.
+The operator name on each row is `hip::rocmlir`. The flag requires autotune;
+`HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
+Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
 other than `0`) to skip the GPU search and affix the first enumerated
-perfConfig. The log names the space (`quick`, `full`, or `exhaustive`) and the
+perfConfig. The problem cache is not consulted in that mode. The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
 benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and
