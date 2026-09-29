@@ -115,8 +115,8 @@ module {
 
     // CHECK-NOT: onnx.Resize
     // CHECK: hip.resize
-    // CHECK-SAME: mode = 1
     // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 1
     return %y : tensor<1x32x32x3xf32>
   }
 }
