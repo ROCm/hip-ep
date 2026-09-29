@@ -14,9 +14,16 @@
 //   Before:
 //     %s = hip.sigmoid(%ctx) ins(%gate : t) outs(%e0 : t) : t
 //     %a = hip.mul(%ctx) ins(%gate, %s : t, t) outs(%e1 : t) -> t
+//     %d0 = tensor.dim %a, %c0 : t
 //     %y = hip.mul(%ctx) ins(%a, %up : t, t) outs(%e2 : t) -> t
 //   After:
+//     %d0 = tensor.dim %gate, %c0 : t
 //     %y = hip.swiglu(%ctx) ins(%gate, %up : t, t) outs(%e2 : t) : t
+//
+// A dynamic export sizes the outer init with tensor.dim of the inner
+// product. That query does not read activation values, and the pattern
+// already requires the inner product's type to equal the gate's, so the
+// query is retargeted to the gate and does not keep the intermediate alive.
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,12 +31,34 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace hip {
 namespace fusion_transform {
 namespace {
+
+// True when every use is either `consumer` or a tensor.dim. tensor.dim only
+// reads the type, which this pattern requires to match the gate.
+bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
+  mlir::Operation *seen = nullptr;
+  for (mlir::OpOperand &use : value.getUses()) {
+    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
+      continue;
+    if (seen)
+      return false;
+    seen = use.getOwner();
+  }
+  return seen == consumer;
+}
+
+void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
+                          mlir::Value to) {
+  rewriter.replaceUsesWithIf(from, to, [](mlir::OpOperand &operand) {
+    return mlir::isa<mlir::tensor::DimOp>(operand.getOwner());
+  });
+}
 
 struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -70,9 +99,10 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
       return rewriter.notifyMatchFailure(outer,
                                          "SwiGLU ops must share a context");
 
-    if (!sigmoid->getResult(0).hasOneUse() || !silu->getResult(0).hasOneUse())
+    if (!hasSingleValueUse(sigmoid->getResult(0), silu) ||
+        !hasSingleValueUse(silu->getResult(0), outer))
       return rewriter.notifyMatchFailure(
-          outer, "SwiGLU intermediates must have one use");
+          outer, "SwiGLU intermediates must have one value use");
 
     auto asTensor = [](mlir::Value value) {
       return mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
@@ -95,6 +125,10 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
 
     mlir::Value siluInit = silu.getOutput();
     mlir::Value sigmoidInit = sigmoid.getY();
+    mlir::Value siluResult = silu->getResult(0);
+    mlir::Value sigmoidResult = sigmoid->getResult(0);
+    retargetShapeQueries(rewriter, siluResult, gate);
+    retargetShapeQueries(rewriter, sigmoidResult, gate);
     mlir::hip::SwigluOp swiglu = mlir::hip::SwigluOp::create(
         rewriter, outer.getLoc(), resultType, outer.getCtx(), gate, up,
         outer.getOutput());
