@@ -94,3 +94,24 @@ add_test(NAME QLpNormalizationRefUnit
 set_target_properties(test-qlpnormalization-ref PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# Problem-cache lookup. GPU-free: the test builds an MXPC buffer in memory
+# and checks exact string hits, nearest conv tiles, and dtype mismatches.
+add_executable(test-nearest-conv-tune
+  test_nearest_conv_tune.cpp
+  ${CMAKE_SOURCE_DIR}/tools/problem-cache/nearest_conv_tune.cpp
+)
+
+target_compile_features(test-nearest-conv-tune PRIVATE cxx_std_17)
+
+target_include_directories(test-nearest-conv-tune PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/problem-cache
+)
+
+target_link_libraries(test-nearest-conv-tune PRIVATE HipSchemasLib)
+
+add_test(NAME NearestConvTuneUnit COMMAND test-nearest-conv-tune)
+
+set_target_properties(test-nearest-conv-tune PROPERTIES
+  FOLDER "mlir/Test/Dialect/Hipsr"
+)

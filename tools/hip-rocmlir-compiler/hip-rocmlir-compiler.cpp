@@ -195,6 +195,10 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
+    } else if (arg == "--problem-cache" && i + 1 < argc) {
+      autotune.problemCachePath = argv[++i];
+    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
+      autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -205,10 +209,21 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
+  if (autotune.problemCachePath.empty()) {
+    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
+      autotune.problemCachePath = env;
+  }
   if (skipBenchmarking())
     autotuneEnabled = false;
+  if (!autotune.problemCachePath.empty() && !autotuneEnabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotuneEnabled) {
+  if ((autotuneFlagSeen && autotuneEnabled) ||
+      !autotune.problemCacheDumpPath.empty()) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
@@ -240,6 +255,20 @@ int main(int argc, char **argv) {
         << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
            "the\n"
         << "                       differences being searched for.\n"
+        << "  --problem-cache <file.mxpc>\n"
+        << "                       Before searching, use this problem-cache\n"
+        << "                       FlatBuffer. An identical problem string is\n"
+        << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
+           "CACHE\n"
+        << "                       sets the same path. A conv miss requires\n"
+        << "                       matching arch, dtype, -F, layouts, stride,\n"
+        << "                       dilation, and fusions, then the nearest\n"
+        << "                       M/N/K tile (weights 1) that fits. A tile\n"
+        << "                       that fails to compile is skipped for the\n"
+        << "                       next nearest; otherwise the search runs.\n"
+        << "  --dump-problem-cache <file.json>\n"
+        << "                       After autotune, write each problem key and\n"
+        << "                       winning perfConfig.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
@@ -456,6 +485,9 @@ int main(int argc, char **argv) {
     compilePhaseTimes.perfConfigCompileMs +=
         autotuner->phaseTimes().perfConfigCompileMs;
     compilePhaseTimes.benchmarkMs += autotuner->phaseTimes().benchmarkMs;
+    if (!autotune.problemCacheDumpPath.empty() &&
+        !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
+      return 1;
   }
   if (!embedOk)
     return 1;
