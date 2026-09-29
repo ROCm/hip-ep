@@ -82,6 +82,39 @@ func.func @swiglu_dynamic_bf16(%ctx: !hip.context,
 
 // -----
 
+// Dynamic export: convert-onnx-to-hip sizes the outer mul's init with
+// tensor.dim of the inner product. Those queries are not value uses. The
+// fused op retargets them to the gate, which has the same type.
+// CHECK-LABEL: func.func @swiglu_dim_of_intermediate
+// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[GATE:.*]]: tensor<?x?x14336xf16>
+// CHECK-NOT: hip.sigmoid
+// CHECK-NOT: hip.mul
+// CHECK: tensor.dim %[[GATE]]
+// CHECK: hip.swiglu(%[[CTX]]) ins(%[[GATE]], %{{.*}} : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+func.func @swiglu_dim_of_intermediate(%ctx: !hip.context,
+                                      %gate: tensor<?x?x14336xf16>,
+                                      %up: tensor<?x?x14336xf16>)
+    -> tensor<?x?x14336xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %gate, %c0 : tensor<?x?x14336xf16>
+  %d1 = tensor.dim %gate, %c1 : tensor<?x?x14336xf16>
+  %e0 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %s = hip.sigmoid(%ctx) ins(%gate : tensor<?x?x14336xf16>)
+       outs(%e0 : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %a = hip.mul(%ctx) ins(%gate, %s : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e1 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  %d2 = tensor.dim %a, %c0 : tensor<?x?x14336xf16>
+  %d3 = tensor.dim %a, %c1 : tensor<?x?x14336xf16>
+  %e2 = tensor.empty(%d2, %d3) : tensor<?x?x14336xf16>
+  %y = hip.mul(%ctx) ins(%a, %up : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e2 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  return %y : tensor<?x?x14336xf16>
+}
+
+// -----
+
 // `gate` feeding another consumer does not block the fusion: the fused op
 // re-reads it exactly like the primitive chain did.
 // CHECK-LABEL: func.func @swiglu_gate_reused

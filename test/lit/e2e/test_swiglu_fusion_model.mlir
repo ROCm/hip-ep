@@ -7,6 +7,10 @@
 // elementwise nodes over the MLP intermediate width. Reproduced from
 // Llama-3.1-8B (32 layers, intermediate 14336, fp16), whose export ships
 // exactly 32 Sigmoid and 64 Mul nodes for these chains and nothing else.
+// Batch and sequence are dynamic, matching that export. Conversion then
+// sizes the outer mul with tensor.dim of the inner product, and
+// hip-fusion-transform runs before canonicalize, so the fusion has to
+// accept those shape queries itself.
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip lowers Sigmoid and Mul one-to-one, then
@@ -26,16 +30,16 @@
 // CHECK-DAG: llvm.func @inference_get_metadata_json
 // CHECK-NOT: llvm.func @wrap_elementwise
 module {
-  func.func @main_graph(%gate: tensor<2x14336xf16> {onnx.name = "gate"},
-                        %up: tensor<2x14336xf16> {onnx.name = "up"})
-      -> (tensor<2x14336xf16> {onnx.name = "y"}) {
+  func.func @main_graph(%gate: tensor<?x?x14336xf16> {onnx.name = "gate"},
+                        %up: tensor<?x?x14336xf16> {onnx.name = "up"})
+      -> (tensor<?x?x14336xf16> {onnx.name = "y"}) {
     %s = "onnx.Sigmoid"(%gate) {onnx_node_name = "act_fn.Sigmoid"}
-        : (tensor<2x14336xf16>) -> tensor<2x14336xf16>
+        : (tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
     %a = "onnx.Mul"(%gate, %s) {onnx_node_name = "act_fn.Mul"}
-        : (tensor<2x14336xf16>, tensor<2x14336xf16>) -> tensor<2x14336xf16>
+        : (tensor<?x?x14336xf16>, tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
     %y = "onnx.Mul"(%a, %up) {onnx_node_name = "mlp.Mul"}
-        : (tensor<2x14336xf16>, tensor<2x14336xf16>) -> tensor<2x14336xf16>
-    "onnx.Return"(%y) : (tensor<2x14336xf16>) -> ()
+        : (tensor<?x?x14336xf16>, tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+    "onnx.Return"(%y) : (tensor<?x?x14336xf16>) -> ()
   }
   "onnx.EntryPoint"() {func = @main_graph} : () -> ()
 }

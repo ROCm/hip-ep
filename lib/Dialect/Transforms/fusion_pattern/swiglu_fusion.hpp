@@ -12,7 +12,9 @@
 //
 // into one hip.swiglu. Both multiplies are commutative. The pattern declines
 // unless the tensors are identical and the sigmoid and inner product each
-// have a single use, because hip.swiglu is a flat elementwise kernel.
+// have a single value use, because hip.swiglu is a flat elementwise kernel.
+// A tensor.dim of either intermediate is not a value use: it is retargeted
+// to the gate, which has the same type.
 //
 // Before/After IR: swiglu_fusion.cpp.
 //===----------------------------------------------------------------------===//
