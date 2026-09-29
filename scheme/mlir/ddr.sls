@@ -1,5 +1,5 @@
 #!r6rs
-(library (mlir pattern-macro)
+(library (mlir ddr)
   (export define-conversion-pattern
           :match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
@@ -7,16 +7,16 @@
           :index
           make-unbound-value)
   (import (except (rnrs) =)
-          (mlir pattern-keywords)  ;; Import keywords at run time for re-export
+          (mlir ddr keywords)  ;; Import keywords at run time for re-export
           (mlir ir)               ;; with-rewrite-builder etc. used in generated code
           (mlir ops)               ;; with-mlir-ops used in generated :rewrite bodies
-          (for (mlir pattern-keywords) expand)  ;; Also at expand time
-          (for (mlir pattern-ast) expand)  ;; For AST predicates
-          (for (mlir pattern-parse) expand)
-          (for (mlir pattern-validate) expand)
-          (for (mlir pattern-analyze) expand)
-          (for (mlir pattern-codegen) expand)
-          (for (only (mlir pattern-codegen) make-unbound-value) expand))
+          (for (mlir ddr keywords) expand)  ;; Also at expand time
+          (for (mlir ddr ast) expand)  ;; For AST predicates
+          (for (mlir ddr parse) expand)
+          (for (mlir ddr validate) expand)
+          (for (mlir ddr analyze) expand)
+          (for (mlir ddr codegen) expand)
+          (for (only (mlir ddr codegen) make-unbound-value) expand))
 
   ;; Main macro: orchestrate 4 phases (waterfall style)
   ;; Phase 1: Parse -> AST

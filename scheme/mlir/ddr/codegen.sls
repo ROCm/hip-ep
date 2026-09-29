@@ -1,5 +1,5 @@
 #!r6rs
-(library (mlir pattern-codegen)
+(library (mlir ddr codegen)
   (export generate-debug-ast
           generate-pattern-matchAndRewrite
           generate-debug-codegen
@@ -9,8 +9,8 @@
           (rename (rime loop) (:with :rime-with))
           (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor identifier?) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
-          (for (mlir pattern-ast) expand)
-          (for (mlir pattern-analyze) expand)
+          (for (mlir ddr ast) expand)
+          (for (mlir ddr analyze) expand)
           (for (mlir ir) expand)
           (for (only (mlir ops) with-mlir-ops) expand))
 

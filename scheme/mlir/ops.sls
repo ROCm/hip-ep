@@ -44,7 +44,7 @@
           (only (chezscheme) syntax->list syntax->datum datum->syntax parameterize)
           (rename (rime loop) (:with :rime-with))
           (for (rename (rime loop) (:with :rime-with)) expand)
-          (for (only (mlir pattern-keywords) = : -> :index :region) expand)
+          (for (only (mlir ddr keywords) = : -> :index :region) expand)
           (mlir ir)
           (for (only (mlir ir) mlir-build-operation) expand))
 
@@ -52,9 +52,9 @@
   ;; with-mlir-ops
   ;;===--------------------------------------------------------------------===;;
 
-  ;; NOTE: the = symbol in op-forms must be the DSL = from (mlir pattern-keywords),
+  ;; NOTE: the = symbol in op-forms must be the DSL = from (mlir ddr keywords),
   ;; not the R6RS numeric =. Libraries using (except (rnrs) =) satisfy this;
-  ;; others must import (only (mlir pattern-keywords) =) explicitly.
+  ;; others must import (only (mlir ddr keywords) =) explicitly.
   (define-syntax with-mlir-ops
     (lambda (stx)
 

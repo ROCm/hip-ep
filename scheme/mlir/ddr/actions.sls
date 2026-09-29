@@ -1,5 +1,5 @@
 #!r6rs
-(library (mlir pattern-actions)
+(library (mlir ddr actions)
   (export action:set-current-op
           action:check-op
           action:bind-operand

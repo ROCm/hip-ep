@@ -17,7 +17,7 @@
 ;;
 ;;=======================================================================
 
-(library (mlir pattern-ast)
+(library (mlir ddr ast)
   (export ast-pattern-expand make-ast-pattern-expand ast-pattern-expand?
           ast-pattern-expand-pattern-type ast-pattern-expand-pattern-type-set!
           ast-pattern-expand-function-name ast-pattern-expand-function-name-set!

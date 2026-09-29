@@ -21,7 +21,7 @@
           (mlir dialects conversion)
           (mlir hipsr)
           (mlir ops)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Binary case — DSL with inline broadcast shape region (identical to equal)

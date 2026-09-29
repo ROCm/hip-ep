@@ -1,10 +1,10 @@
 #!r6rs
-(library (mlir pattern-validate)
+(library (mlir ddr validate)
   (export validate-ast)
   (import (rnrs)
           (for (only (chezscheme) syntax->list) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
-          (for (mlir pattern-ast) expand))
+          (for (mlir ddr ast) expand))
 
   ;;=======================================================================
   ;; Phase 2: Validation - validate syntax and semantics, normalize fields

@@ -21,7 +21,7 @@
           (mlir dialects conversion)
           (mlir hipsr)
           (mlir ops)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;; Build the gather output shape inside a region block using the DSL.
   ;; Shape logic:

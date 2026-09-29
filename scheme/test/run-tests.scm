@@ -13,12 +13,12 @@
         (cons "../../../../third_party/rime" (string-append build-dir "/rime"))))
 
 (import (except (chezscheme) =)
-        (mlir pattern-macro)
+        (mlir ddr)
         (rename (rime loop) (:with :rime-with))
         (test test-helpers))
 
 ;; Import pattern-macro into interaction-environment so eval can use it
-(eval (quote (import (mlir pattern-macro))) (interaction-environment))
+(eval (quote (import (mlir ddr))) (interaction-environment))
 
 ;;===----------------------------------------------------------------------===;;
 ;; Phase Configuration  

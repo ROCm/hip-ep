@@ -11,7 +11,7 @@
           run-phase-tests
           show-pattern-output)
   (import (chezscheme)
-          (except (mlir pattern-macro) =)  ; Exclude = to avoid conflict
+          (except (mlir ddr) =)  ; Exclude = to avoid conflict
           (rename (rime loop) (:with :rime-with)))
 
   ;;=======================================================================

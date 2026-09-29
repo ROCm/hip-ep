@@ -60,12 +60,12 @@
 ;;
 ;;=======================================================================
 
-(library (mlir pattern-parse)
+(library (mlir ddr parse)
   (export parse-to-ast)
   (import (except (rnrs) =)
           (for (only (chezscheme) syntax->list) expand)
-          (for (mlir pattern-keywords) expand)
-          (for (mlir pattern-ast) expand))
+          (for (mlir ddr keywords) expand)
+          (for (mlir ddr ast) expand))
 
   ;;=======================================================================
   ;; SECTION 1: Entry Points

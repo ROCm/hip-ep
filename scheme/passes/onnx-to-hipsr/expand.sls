@@ -22,7 +22,7 @@
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;; The shape adaptor value may be wrapped in a builtin.unrealized_conversion_cast
   ;; by the dialect conversion framework when it maps tensor<Nxi64> → device space.

@@ -19,7 +19,7 @@
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   (define-conversion-pattern (onnx-equal->hipsr op operands-ref rewriter type-converter)
     :match

@@ -117,8 +117,8 @@ $SCHEME -b petite.boot -b scheme.boot -b "$OUTPUT_BOOT" --script - <<'TESTEOF'
 
 ;; Check if pattern-macro exports are available
 (guard (ex [else (printf "Error: ~a~n" ex) (exit 1)])
-  (eval '(import (mlir pattern-macro)))
-  (printf "Successfully imported (mlir pattern-macro)~n")
+  (eval '(import (mlir ddr)))
+  (printf "Successfully imported (mlir ddr)~n")
 
   (eval '(import (mlir ffi)))
   (printf "Successfully imported (mlir ffi)~n")

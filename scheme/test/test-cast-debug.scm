@@ -1,7 +1,7 @@
 #!r6rs
 (import (rnrs (6))
         (patterns cast)
-        (mlir pattern-macro))
+        (mlir ddr))
 
 ;; Print the generated code to see what is wrong
 (define-conversion-pattern test-cast

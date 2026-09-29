@@ -6,11 +6,11 @@
 (library-directories '("." "libraries" "../../../../third_party/rime"))
 
 (import (except (chezscheme) =)
-        (mlir pattern-macro)
+        (mlir ddr)
         (test test-helpers))
 
 ;; Import pattern-macro into interaction-environment
-(eval '(import (mlir pattern-macro)) (interaction-environment))
+(eval '(import (mlir ddr)) (interaction-environment))
 
 (define (show-test test-name phase)
   (let* ([test-bodies (load-test-bodies)]

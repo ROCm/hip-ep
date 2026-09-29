@@ -1,6 +1,6 @@
 #!r6rs
 (import (rnrs (6))
-        (mlir pattern-macro))
+        (mlir ddr))
 
 ;; Simple pattern to see generated code
 (define-conversion-pattern test-pattern

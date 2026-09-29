@@ -23,7 +23,7 @@
           (mlir hipsr)
           (mlir ops)
           (rename (rime loop) (:with :rime-with))
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;; MLIR uses kDynamic = std::numeric_limits<int64_t>::min() for unknown dims.
   (define (dynamic-dim? d) (< d 0))

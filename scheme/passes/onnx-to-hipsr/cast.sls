@@ -17,7 +17,7 @@
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Cast Pattern - MLIR-like Syntax with :where Clause

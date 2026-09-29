@@ -22,7 +22,7 @@
           (mlir ir)
           (mlir dialects conversion)
           (mlir hipsr)
-          (mlir pattern-macro))
+          (mlir ddr))
 
   ;; Build the permuted output shape inside a region block.
   ;; Uses mlir-build-operation — must be called inside with-current-block-builder.

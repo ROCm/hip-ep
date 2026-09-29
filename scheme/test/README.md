@@ -82,7 +82,7 @@ No code, no macros - just data!
 ```
 
 This works because:
-1. `test-helpers.sls` imports `(mlir pattern-macro)` → loads the library
+1. `test-helpers.sls` imports `(mlir ddr)` → loads the library
 2. `interaction-environment` includes all imported libraries
 3. `eval` expands macros in that environment
 

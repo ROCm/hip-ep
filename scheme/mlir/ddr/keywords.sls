@@ -1,5 +1,5 @@
 #!r6rs
-(library (mlir pattern-keywords)
+(library (mlir ddr keywords)
   (export :match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
