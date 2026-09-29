@@ -112,6 +112,7 @@
 
     ;; Dialect conversion framework — generic configuration
     mlir-type-converter-add-conversion
+    mlir-type-converter-add-tensor-widening-materialization
     mlir-type-converter-is-legal-type
     mlir-type-converter-is-legal
     mlir-type-converter-is-signature-legal
@@ -176,7 +177,6 @@
     current-rewriter            ; raw RewriterBase* (set inside with-rewrite-builder)
     current-block-builder       ; raw OpBuilder*    (set inside with-block-builder)
     current-loc                 ; Operation* used as location source
-    mlir-build-operation        ; (name operands types [nregions]) → op
     with-rewrite-builder        ; (rw loc) body — install rewriter as current builder
     with-current-block-builder  ; (b  loc) body — install block builder (no RAII)
     with-block-builder          ; (var block loc) body — RAII: create/install/destroy
@@ -425,6 +425,14 @@
   ;;; @note Returns #f from callback means "not handled"; return a Type* uptr to convert
   (define mlir-type-converter-add-conversion
     (foreign-procedure "mlir_type_converter_add_conversion" (uptr scheme-object) void))
+
+  ;;; @brief Add a source materialization that bridges more-specific to less-specific
+  ;;; ranked tensor types by inserting tensor.cast. Resolves unrealized conversion
+  ;;; casts created when a pattern produces a value with a sharper type than the
+  ;;; type converter inferred from the declared op result type.
+  ;;; @param converter-ptr TypeConverter* as uptr
+  (define mlir-type-converter-add-tensor-widening-materialization
+    (foreign-procedure "mlir_type_converter_add_tensor_widening_materialization" (uptr) void))
 
   ;;; @brief Check if a single type is legal according to a TypeConverter
   ;;; @param converter-ptr TypeConverter* as uptr

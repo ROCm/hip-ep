@@ -13,6 +13,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "hip/Scheme/Bindings/LockedSchemeObject.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
@@ -78,7 +79,7 @@ void mlir_register_conversion_pattern(ptr patterns_ptr,
   auto *typeConverter = reinterpret_cast<mlir::TypeConverter*>(type_converter_ptr);
   ptr schemeCallback = static_cast<ptr>(callback);
 
-  mlir_log_debug((std::string("Registering Scheme pattern for ") + op_name).c_str());
+  mlir_log_info((std::string("Registering Scheme pattern for ") + op_name).c_str());
 
   // Add pattern to the pattern set
   patterns->add<SchemeConversionPattern>(
@@ -94,7 +95,7 @@ void mlir_register_conversion_pattern(ptr patterns_ptr,
 uint64_t mlir_create_type_converter() {
   mlir::TypeConverter* tc = new mlir::TypeConverter();
   uint64_t result = reinterpret_cast<uint64_t>(tc);
-  mlir_log_debug((std::string("mlir_create_type_converter: created TypeConverter at ") +
+  mlir_log_info((std::string("mlir_create_type_converter: created TypeConverter at ") +
                   std::to_string(result) + " (ptr=" +
                   std::to_string(reinterpret_cast<uintptr_t>(tc)) + ")").c_str());
   return result;
@@ -103,7 +104,7 @@ uint64_t mlir_create_type_converter() {
 // Destroy a TypeConverter object
 void mlir_destroy_type_converter(uint64_t converter_ptr) {
   if (!converter_ptr) return;
-  mlir_log_debug((std::string("mlir_destroy_type_converter: destroying TypeConverter at ") +
+  mlir_log_info((std::string("mlir_destroy_type_converter: destroying TypeConverter at ") +
                   std::to_string(converter_ptr)).c_str());
   delete reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 }
@@ -248,26 +249,26 @@ void mlir_conversion_target_add_dynamically_legal_func(
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
   auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 
-  mlir_log_debug((std::string("mlir_conversion_target_add_dynamically_legal_func: IN converter_ptr=") +
+  mlir_log_info((std::string("mlir_conversion_target_add_dynamically_legal_func: IN converter_ptr=") +
                   std::to_string(converter_ptr) + " (as ptr=" +
                   std::to_string(reinterpret_cast<uintptr_t>(converter)) + ")").c_str());
 
   target->addDynamicallyLegalOp<mlir::func::FuncOp>([converter](mlir::func::FuncOp op) {
-    mlir_log_debug((std::string("FuncOp lambda: converter=") +
+    mlir_log_info((std::string("FuncOp lambda: converter=") +
                     std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
     return converter->isSignatureLegal(op.getFunctionType());
   });
   target->addDynamicallyLegalOp<mlir::func::ReturnOp>(
       [converter](mlir::func::ReturnOp op) {
-        mlir_log_debug((std::string("ReturnOp lambda: IN converter=") +
+        mlir_log_info((std::string("ReturnOp lambda: IN converter=") +
                         std::to_string(reinterpret_cast<uint64_t>(converter))).c_str());
         bool result = converter->isLegal(op);
-        mlir_log_debug((std::string("ReturnOp lambda: OUT result=") +
+        mlir_log_info((std::string("ReturnOp lambda: OUT result=") +
                         std::to_string(result)).c_str());
         return result;
       });
 
-  mlir_log_debug("mlir_conversion_target_add_dynamically_legal_func: lambdas registered");
+  mlir_log_info("mlir_conversion_target_add_dynamically_legal_func: lambdas registered");
 }
 
 // Mark unknown ops legal if nested inside ComputeOp or PlaceholderOp
@@ -287,7 +288,7 @@ void mlir_destroy_rewrite_pattern_set(uint64_t patterns_ptr) {
 // Returns 1 on success, 0 on failure
 // NOTE: This takes ownership of the patterns (moves them)
 int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_t patterns_ptr) {
-  mlir_log_debug((std::string("mlir_apply_full_conversion: IN module=") +
+  mlir_log_info((std::string("mlir_apply_full_conversion: IN module=") +
                   std::to_string(module_ptr) + " target=" + std::to_string(target_ptr) +
                   " patterns=" + std::to_string(patterns_ptr)).c_str());
 
@@ -299,13 +300,13 @@ int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
   auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
 
-  mlir_log_debug("mlir_apply_full_conversion: calling applyFullConversion");
+  mlir_log_info("mlir_apply_full_conversion: calling applyFullConversion");
   if (mlir::failed(mlir::applyFullConversion(module, *target, std::move(*patterns)))) {
-    mlir_log_debug("mlir_apply_full_conversion: FAILED");
+    mlir_log_info("mlir_apply_full_conversion: FAILED");
     return 0;
   }
 
-  mlir_log_debug("mlir_apply_full_conversion: SUCCESS");
+  mlir_log_info("mlir_apply_full_conversion: SUCCESS");
   return 1;
 }
 
@@ -320,6 +321,46 @@ void mlir_populate_func_type_conversion_pattern(
   auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
   mlir::populateFunctionOpInterfaceTypeConversionPattern<mlir::func::FuncOp>(
       *patterns, *converter);
+}
+
+// Add a source materialization to a TypeConverter that resolves unresolved
+// conversion casts between ranked tensor types by inserting tensor.cast.
+//
+// This handles cases where a conversion pattern replaces an op with a value
+// whose type is more specific than what the type converter produces for the
+// declared result type (e.g., tensor<?x32xf16, device> replacing a use that
+// expects tensor<?x?xf16, device>). Without this materialization, the
+// unrealized_conversion_cast left behind cannot be resolved and the full
+// conversion fails.
+//
+// Only inserts the cast when tensor::CastOp::areCastCompatible confirms the
+// types are structurally compatible (same rank and element type; dims may
+// differ in specificity).
+void mlir_type_converter_add_tensor_widening_materialization(
+    uint64_t converter_ptr) {
+  if (!converter_ptr)
+    return;
+  auto *converter = reinterpret_cast<mlir::TypeConverter *>(converter_ptr);
+  // Source materialization: when a conversion pattern replaces an op with a
+  // value whose type is more specific (e.g. tensor<?x32xfloat, device>) than
+  // what the type converter derives from the declared result type
+  // (e.g. tensor<?x?xfloat, device>), MLIR creates an unrealized_conversion_cast
+  // between them. This materialization resolves it by inserting a tensor.cast.
+  converter->addSourceMaterialization(
+      [](mlir::OpBuilder &builder, mlir::Type resultType,
+         mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+        if (inputs.size() != 1)
+          return nullptr;
+        mlir::Value input = inputs[0];
+        auto inputType =
+            mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+        auto outType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
+        if (!inputType || !outType)
+          return nullptr;
+        if (!mlir::tensor::CastOp::areCastCompatible(inputType, outType))
+          return nullptr;
+        return mlir::tensor::CastOp::create(builder, loc, resultType, input);
+      });
 }
 
 } // extern "C"
@@ -350,6 +391,8 @@ void registerConversionBindings() {
   Sregister_symbol("mlir_apply_full_conversion", (void*)::mlir_apply_full_conversion);
   Sregister_symbol("mlir_populate_func_type_conversion_pattern",
                    (void*)::mlir_populate_func_type_conversion_pattern);
+  Sregister_symbol("mlir_type_converter_add_tensor_widening_materialization",
+                   (void*)::mlir_type_converter_add_tensor_widening_materialization);
 }
 } // namespace hipsr
 } // namespace mlir

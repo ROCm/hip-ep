@@ -75,7 +75,14 @@
                  (> (mlir-type-get-rank type) 0)
                  (= 0 (mlir-type-get-encoding type)))
             (mlir-tensor-type-in-device-space! type)
-            #f))))
+            #f)))
+    ;; Source materialization: resolve unrealized casts between ranked tensor
+    ;; types that differ only in shape specificity (e.g. tensor<?x32> vs tensor<?x?>)
+    ;; by inserting tensor.cast. Needed when a conversion pattern infers a more
+    ;; specific result type than what the type converter derives from the declared
+    ;; ONNX result type. Without this, applyFullConversion fails with an unresolved
+    ;; materialization error.
+    (mlir-type-converter-add-tensor-widening-materialization type-converter))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Op Ancestry Predicates
@@ -112,6 +119,10 @@
     (mlir-conversion-target-add-legal-dialect target "hipsr")
     (mlir-conversion-target-add-legal-op target ctx "builtin.module")
     (mlir-conversion-target-add-legal-op target ctx "arith.constant")
+    ;; tensor.cast is emitted by the tensor-widening source materialization to
+    ;; bridge a more-specific inferred result type back to the declared-converted
+    ;; type when a C++ conversion pattern produces a sharper type than expected.
+    (mlir-conversion-target-add-legal-op target ctx "tensor.cast")
     (mlir-conversion-target-add-dynamically-legal-op target ctx "func.func"
       (lambda (op)
         (= 1 (mlir-type-converter-is-signature-legal type-converter op))))

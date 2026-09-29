@@ -238,10 +238,12 @@ void populateComputeBody(OpBuilder &builder, ComputeOp computeOp) {
 //===----------------------------------------------------------------------===//
 
 struct ReshapeToHipsr : public OpConversionPattern<onnx::ReshapeOp> {
-  // The converter goes unused: the result type depends on the target shape
-  // operand, which a type conversion never sees. Taken for a uniform setup.
-  ReshapeToHipsr(const TypeConverter &, MLIRContext *ctx)
-      : OpConversionPattern(ctx) {}
+  // The converter is stored so that source materializations it carries can
+  // resolve any unrealized_conversion_cast ops left when the pattern replaces
+  // an op with a value whose inferred type is more specific than what the
+  // converter derives from the declared ONNX result type.
+  ReshapeToHipsr(const TypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern(typeConverter, ctx) {}
 
   LogicalResult
   matchAndRewrite(onnx::ReshapeOp op, OpAdaptor adaptor,
