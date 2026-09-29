@@ -6,11 +6,11 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; HipSR-specific MLIR helpers — pure Scheme, built on (mlir ir) + (mlir dialects conversion) primitives.
+;; (mlir hipsr) — HipSR-specific dialect helpers.
 ;;
-;; This library encapsulates all knowledge of the HipSR and ONNX dialects:
-;; memory spaces, context conventions, conversion target configuration, and
-;; type conversion rules. Nothing here is dialect-agnostic.
+;; Encapsulates all knowledge of the HipSR and ONNX dialects:
+;; memory spaces, context conventions, conversion target configuration,
+;; type conversion rules, and hipsr-specific FFI bindings.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -33,21 +33,32 @@
     hipsr-has-compute-ancestor?
     hipsr-has-placeholder-ancestor?
 
-    ;; Onnx/HipSR conversion-target convenience wrappers
-    mlir-conversion-target-add-illegal-onnx
-    mlir-conversion-target-add-legal-hipsr
-    mlir-conversion-target-mark-unknown-ops-nested-legal
-
-    ;; HipSR-specific type queries and op mutation (FFI bindings)
+    ;; HipSR-specific type queries and op mutation
     mlir-type-is-device-tensor          ; 1 if RankedTensorType with device space
     mlir-tensor-type-in-host-space      ; clone type with host memory-space encoding
     mlir-get-hipsr-context-type         ; hipsr::ContextType from MLIRContext
     mlir-placeholder-set-barrier-type)  ; change placeholder_type attr to Barrier
 
   (import (rnrs (6))
-          (only (chezscheme) foreign-procedure define-ftype ftype-ref make-ftype-pointer foreign-ref)
+          (only (chezscheme) foreign-procedure)
           (mlir ir)
           (mlir dialects conversion))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; HipSR-specific FFI bindings
+  ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-type-is-device-tensor
+    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
+
+  (define mlir-tensor-type-in-host-space
+    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
+
+  (define mlir-get-hipsr-context-type
+    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
+
+  (define mlir-placeholder-set-barrier-type
+    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Memory Space
@@ -68,6 +79,23 @@
 
   (define (mlir-get-hipsr-context-arg op)
     (mlir-operation-get-block-argument op 0))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Op Ancestry Predicates
+  ;;===--------------------------------------------------------------------===;;
+
+  (define (has-ancestor-named? op name)
+    (let loop ((parent (mlir-operation-get-parent op)))
+      (cond
+        ((= 0 parent) #f)
+        ((string=? (mlir-operation-name parent) name) #t)
+        (else (loop (mlir-operation-get-parent parent))))))
+
+  (define (hipsr-has-compute-ancestor? op)
+    (has-ancestor-named? op "hipsr.compute"))
+
+  (define (hipsr-has-placeholder-ancestor? op)
+    (has-ancestor-named? op "hipsr.placeholder"))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Type Converter Configuration
@@ -91,28 +119,8 @@
             #f)))
     ;; Source materialization: resolve unrealized casts between ranked tensor
     ;; types that differ only in shape specificity (e.g. tensor<?x32> vs tensor<?x?>)
-    ;; by inserting tensor.cast. Needed when a conversion pattern infers a more
-    ;; specific result type than what the type converter derives from the declared
-    ;; ONNX result type. Without this, applyFullConversion fails with an unresolved
-    ;; materialization error.
+    ;; by inserting tensor.cast.
     (mlir-type-converter-add-tensor-widening-materialization type-converter))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Op Ancestry Predicates
-  ;;===--------------------------------------------------------------------===;;
-
-  (define (has-ancestor-named? op name)
-    (let loop ((parent (mlir-operation-get-parent op)))
-      (cond
-        ((= 0 parent) #f)
-        ((string=? (mlir-operation-name parent) name) #t)
-        (else (loop (mlir-operation-get-parent parent))))))
-
-  (define (hipsr-has-compute-ancestor? op)
-    (has-ancestor-named? op "hipsr.compute"))
-
-  (define (hipsr-has-placeholder-ancestor? op)
-    (has-ancestor-named? op "hipsr.placeholder"))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Conversion Target Configuration
@@ -132,9 +140,6 @@
     (mlir-conversion-target-add-legal-dialect target "hipsr")
     (mlir-conversion-target-add-legal-op target ctx "builtin.module")
     (mlir-conversion-target-add-legal-op target ctx "arith.constant")
-    ;; tensor.cast is emitted by the tensor-widening source materialization to
-    ;; bridge a more-specific inferred result type back to the declared-converted
-    ;; type when a C++ conversion pattern produces a sharper type than expected.
     (mlir-conversion-target-add-legal-op target ctx "tensor.cast")
     (mlir-conversion-target-add-dynamically-legal-op target ctx "func.func"
       (lambda (op)
@@ -146,35 +151,5 @@
       (lambda (op)
         (or (hipsr-has-compute-ancestor? op)
             (hipsr-has-placeholder-ancestor? op)))))
-
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Onnx/HipSR conversion-target convenience wrappers
-  ;;===--------------------------------------------------------------------===;;
-
-  (define mlir-conversion-target-add-illegal-onnx
-    (foreign-procedure "mlir_conversion_target_add_illegal_onnx" (uptr) void))
-
-  (define mlir-conversion-target-add-legal-hipsr
-    (foreign-procedure "mlir_conversion_target_add_legal_hipsr" (uptr) void))
-
-  (define mlir-conversion-target-mark-unknown-ops-nested-legal
-    (foreign-procedure "mlir_conversion_target_mark_unknown_ops_nested_legal" (uptr) void))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; HipSR-specific FFI bindings
-  ;;===--------------------------------------------------------------------===;;
-
-  (define mlir-type-is-device-tensor
-    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
-
-  (define mlir-tensor-type-in-host-space
-    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
-
-  (define mlir-get-hipsr-context-type
-    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
-
-  (define mlir-placeholder-set-barrier-type
-    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
 ) ;; end library (mlir hipsr)
