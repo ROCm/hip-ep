@@ -187,7 +187,7 @@ inferConvShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
 /// Mixed-shape form of `inferConvShape`. Validates through the static helper
 /// before materializing any dimension arithmetic. Dynamic spatial extents are
 /// safely narrowed from signed i128; `runtimeValid`, when requested, receives
-/// the combined range check consumed by `hip.conv`.
+/// the combined range predicate for those extents.
 FailureOr<SmallVector<OpFoldResult>>
 reifyConvResultShape(OpBuilder &b, Location loc, Value input, Value weights,
                      ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
