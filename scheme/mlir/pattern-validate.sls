@@ -115,8 +115,7 @@
   (define (validate-match-operations ast-rec)
     (normalize-match-operation-names ast-rec)
     (validate-match-identifiers-start-with-% ast-rec)
-    (validate-no-duplicate-result-variables ast-rec)
-    (validate-match-where-guards ast-rec))
+    (validate-no-duplicate-result-variables ast-rec))
 
   (define (normalize-match-operation-names ast-rec)
     (let ([match-vec (ast-pattern-expand-match ast-rec)])
@@ -157,16 +156,6 @@
                               (syntax-violation 'validate-no-duplicate-result-variables
                                 "Duplicate result variable" var))
                             (hashtable-set! seen-results var #t))))))
-
-  (define (validate-match-where-guards ast-rec)
-    ;; Validate :where guards in match operations
-    ;; Guards are arbitrary Scheme expressions stored as syntax objects
-    ;; Actual correctness validation happens at Scheme expansion time
-    ;; We just check the field is properly set (syntax object or #f)
-    (let ([match-vec (ast-pattern-expand-match ast-rec)])
-      (loop :for op-idx :from 0 :below (vector-length match-vec)
-            :rime-with match-op := (vector-ref match-vec op-idx)
-            :do (if #f #f))))  ;; No validation needed - parser ensures correct type
 
   (define (validate-and-cache-root-var ast-rec)
     ;; Rule: Root variable must appear as a result in at least one match operation
