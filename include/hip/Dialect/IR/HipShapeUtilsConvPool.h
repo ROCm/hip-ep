@@ -27,36 +27,12 @@ inferConvShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
 /// Mixed-shape form of `inferConvShape`. Validates through the static helper
 /// before materializing any dimension arithmetic. Dynamic spatial extents are
 /// safely narrowed from signed i128; `runtimeValid`, when requested, receives
-/// the combined range check consumed by `hip.conv`.
+/// the combined range predicate for those extents.
 FailureOr<SmallVector<OpFoldResult>>
 reifyConvResultShape(OpBuilder &b, Location loc, Value input, Value weights,
                      ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
                      ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
                      int64_t group,
-                     function_ref<InFlightDiagnostic()> emitError,
-                     Value *runtimeValid = nullptr);
-
-/// Compute an ONNX MaxPool/AveragePool/LpPool result shape for spatial rank
-/// 1..3. N/C pass through from the input; spatial extents use signed floor
-/// division. When `ceilMode` is 1, signed ceil division is followed by ONNX's
-/// trailing-window correction: decrement a positive output extent when its
-/// final window starts at or beyond `input + pad_begin`.
-FailureOr<SmallVector<int64_t>>
-inferPoolShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape,
-               ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
-               ArrayRef<int64_t> dilations, int64_t ceilMode,
-               function_ref<InFlightDiagnostic()> emitError);
-
-/// Mixed-shape form of `inferPoolShape`. The returned shape is shared by the
-/// values result and optional MaxPool indices result. Dynamic spatial
-/// arithmetic is materialized in signed i128, range-checked, safely narrowed
-/// to index, and combined into `runtimeValid` when that optional output is
-/// requested.
-FailureOr<SmallVector<OpFoldResult>>
-reifyPoolResultShape(OpBuilder &b, Location loc, Value input,
-                     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
-                     ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
-                     int64_t ceilMode,
                      function_ref<InFlightDiagnostic()> emitError,
                      Value *runtimeValid = nullptr);
 
@@ -85,16 +61,6 @@ reifyConvTransposeResultShape(OpBuilder &b, Location loc, Value input,
                               ArrayRef<int64_t> dilations,
                               ArrayRef<int64_t> outputPadding, int64_t group,
                               function_ref<InFlightDiagnostic()> emitError);
-
-/// GlobalPool shape: preserve N/C and replace every spatial extent with 1.
-FailureOr<SmallVector<int64_t>>
-inferGlobalPoolShape(ArrayRef<int64_t> inputShape,
-                     function_ref<InFlightDiagnostic()> emitError);
-
-/// Mixed-shape form of `inferGlobalPoolShape`.
-FailureOr<SmallVector<OpFoldResult>>
-reifyGlobalPoolResultShape(OpBuilder &b, Location loc, Value input,
-                           function_ref<InFlightDiagnostic()> emitError);
 
 /// Compute the supported spatial Resize result shape. The HIP op deliberately
 /// does not carry ONNX `sizes` or `scales`: N/C therefore come from `input`,
