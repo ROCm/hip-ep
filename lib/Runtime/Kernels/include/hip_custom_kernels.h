@@ -1914,6 +1914,31 @@ HIP_KERNEL_API int hip_instance_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * GroupNorm (com.microsoft)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
+ *
+ * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
+ * activation 1 applies SiLU after the affine transform.
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_group_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * RMS Normalization (ONNX RMSNormalization / SimplifiedLayerNormalization)
  * =========================================================================
  *

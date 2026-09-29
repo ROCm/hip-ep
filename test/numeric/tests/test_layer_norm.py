@@ -486,3 +486,85 @@ class TestInstanceNormalization:
         x = rng.uniform(-2, 2, input_shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
+def _make_group_norm_model(
+    input_shape: list[int],
+    groups: int,
+    *,
+    channels_last: int = 0,
+    activation: int = 0,
+    dtype=np.float32,
+    epsilon: float = 1e-5,
+):
+    """Build a com.microsoft.GroupNorm model. Channel axis is 1, or -1 when
+    channels_last is set."""
+    channels = input_shape[-1] if channels_last else input_shape[1]
+    tp = _TENSOR_PROTO[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
+    rng = np.random.default_rng(11)
+    gamma = numpy_helper.from_array(
+        rng.uniform(0.5, 1.5, [channels]).astype(dtype), name="gamma"
+    )
+    beta = numpy_helper.from_array(
+        rng.uniform(-0.5, 0.5, [channels]).astype(dtype), name="beta"
+    )
+    node = helper.make_node(
+        "GroupNorm",
+        ["X", "gamma", "beta"],
+        ["Y"],
+        domain="com.microsoft",
+        groups=groups,
+        epsilon=epsilon,
+        activation=activation,
+        channels_last=channels_last,
+    )
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    return make_model_from_nodes(
+        [node],
+        [X],
+        [Y],
+        initializers=[gamma, beta],
+        extra_opsets=[ms_opset],
+    )
+
+
+class TestGroupNorm:
+    """com.microsoft GroupNorm: per-group stats, optional SiLU."""
+
+    def test_group_norm_nchw_f32(self, model_runner):
+        shape = [1, 8, 4, 4]
+        model = _make_group_norm_model(shape, groups=4, activation=0)
+        rng = np.random.default_rng(12)
+        x = rng.uniform(-2, 2, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_group_norm_nchw_silu_f32(self, model_runner):
+        shape = [2, 8, 4, 4]
+        model = _make_group_norm_model(shape, groups=4, activation=1)
+        rng = np.random.default_rng(13)
+        x = rng.uniform(-2, 2, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_group_norm_nhwc_f32(self, model_runner):
+        shape = [1, 4, 4, 8]
+        model = _make_group_norm_model(
+            shape, groups=4, channels_last=1, activation=0
+        )
+        rng = np.random.default_rng(14)
+        x = rng.uniform(-2, 2, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_group_norm_nchw_silu_f16(self, model_runner):
+        shape = [1, 8, 4, 4]
+        model = _make_group_norm_model(
+            shape, groups=2, activation=1, dtype=np.float16
+        )
+        rng = np.random.default_rng(15)
+        x = rng.uniform(-2, 2, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)

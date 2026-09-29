@@ -1429,6 +1429,57 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "com.microsoft GroupNorm (per-group mean/var, optional SiLU)";
+  let description = [{
+    Group normalization from the `com.microsoft` contrib operator:
+
+      y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+
+    Channels are split into `groups` equal groups. Mean and variance are
+    computed over each (N, group) slice. `gamma` and `beta` are per-channel
+    and length C. `channels_last` 0 is NCHW (channel axis 1); 1 is NHWC
+    (channel axis rank-1). `activation` 0 is none; 1 applies SiLU after the
+    affine transform.
+
+    Example:
+    ```mlir
+    hip.group_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<1x8x4x4xf32, 1>, memref<8xf32, 1>, memref<8xf32, 1>)
+        outs(%output : memref<1x8x4x4xf32, 1>)
+        {activation = 1 : i64, channels_last = 0 : i64,
+         epsilon = 1.000000e-05 : f32, groups = 4 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$groups,
+    DefaultValuedAttr<I64Attr, "0">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$channels_last,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

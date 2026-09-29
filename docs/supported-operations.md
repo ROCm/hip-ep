@@ -80,6 +80,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |

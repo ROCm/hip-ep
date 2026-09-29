@@ -181,6 +181,7 @@ add_library(OnnxToHip STATIC
   ConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
+  GroupNormConversion.cpp
   RotaryEmbeddingConversion.cpp
   OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp

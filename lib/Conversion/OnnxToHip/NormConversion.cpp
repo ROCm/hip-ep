@@ -8,7 +8,7 @@
 //
 // All Norm-family operators live here so they share helpers and so the file
 // layout makes it obvious where to plug in future variants (BatchNorm,
-// GroupNorm, InstanceNorm, ...).
+// InstanceNorm, ...). com.microsoft GroupNorm lives in GroupNormConversion.cpp.
 //
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
