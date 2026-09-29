@@ -11,9 +11,9 @@
 ;; Mirrors mlir/Transforms/DialectConversion.h: TypeConverter, ConversionTarget,
 ;; RewritePatternSet, applyFullConversion, and Scheme-pattern registration.
 ;;
-;; Also includes populate helpers for func/return (dialect-agnostic utilities)
-;; and per-ONNX-op populate helpers (TODO: move to (mlir onnx patterns) when
-;; that module is created).
+;; Dialect-specific populate helpers live in:
+;;   (mlir dialects onnx)  — per-ONNX-op populate helpers
+;;   (mlir dialects func)  — func/return populate helpers
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -30,7 +30,6 @@
     mlir-type-converter-is-legal-type
     mlir-type-converter-is-legal
     mlir-type-converter-is-signature-legal
-    mlir-type-converter-add-device-memory-conversions
 
     ;; ConversionTarget lifecycle
     mlir-create-conversion-target
@@ -42,12 +41,6 @@
     mlir-conversion-target-add-legal-op
     mlir-conversion-target-add-dynamically-legal-op
     mlir-conversion-target-mark-unknown-ops-dynamically-legal
-    mlir-conversion-target-add-legal-common-ops
-    mlir-conversion-target-add-dynamically-legal-func
-
-    ;; ConversionTarget configuration — dialect-specific
-    ;; TODO: move add-illegal-onnx to (mlir onnx patterns)
-    ;; TODO: move add-legal-hipsr, mark-unknown-ops-nested-legal to (mlir hipsr ir)
 
     ;; RewritePatternSet lifecycle
     mlir-create-rewrite-pattern-set
@@ -59,34 +52,13 @@
     ;; Scheme-defined pattern registration
     mlir-register-conversion-pattern
 
-    ;; Populate helpers — generic MLIR utilities
-    mlir-populate-func-type-conversion-pattern
-    mlir-populate-return-conversion-patterns
-
-    ;; Populate helpers — per ONNX op
-    ;; TODO: move to (mlir onnx patterns) when that module is created
-    mlir-populate-cast-conversion-patterns
-    mlir-populate-matmul-conversion-patterns
-    mlir-populate-expand-conversion-patterns
-    mlir-populate-min-conversion-patterns
-    mlir-populate-shape-conversion-patterns
-    mlir-populate-reshape-conversion-patterns
-    mlir-populate-unsqueeze-conversion-patterns
-    mlir-populate-equal-conversion-patterns
-    mlir-populate-transpose-conversion-patterns
-    mlir-populate-gather-conversion-patterns
-    mlir-populate-slice-conversion-patterns
-    mlir-populate-scatter-nd-conversion-patterns
-    mlir-populate-nonzero-conversion-patterns
-    mlir-populate-constant-conversion-patterns
-
     ;; RAII macros (require conversion lifecycle functions above)
     with-type-converter
     with-conversion-target
     with-rewrite-pattern-set)
 
   (import (chezscheme)
-          (mlir ir))  ; for with-raii
+          (mlir core ir))  ; for with-raii
 
   ;;===--------------------------------------------------------------------===;;
   ;; TypeConverter
@@ -113,10 +85,6 @@
 
   (define mlir-type-converter-is-signature-legal
     (foreign-procedure "mlir_type_converter_is_signature_legal" (uptr uptr) int))
-
-  ;;; Registers identity + device-memory-space tensor conversions.
-  (define mlir-type-converter-add-device-memory-conversions
-    (foreign-procedure "mlir_type_converter_add_device_memory_conversions" (uptr) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; ConversionTarget
@@ -145,13 +113,6 @@
     (foreign-procedure "mlir_conversion_target_mark_unknown_ops_dynamically_legal"
                        (uptr scheme-object) void))
 
-  (define mlir-conversion-target-add-legal-common-ops
-    (foreign-procedure "mlir_conversion_target_add_legal_common_ops" (uptr) void))
-
-  (define mlir-conversion-target-add-dynamically-legal-func
-    (foreign-procedure "mlir_conversion_target_add_dynamically_legal_func"
-                       (uptr uptr) void))
-
   ;;===--------------------------------------------------------------------===;;
   ;; RewritePatternSet
   ;;===--------------------------------------------------------------------===;;
@@ -174,49 +135,6 @@
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
                        (uptr string scheme-object uptr) void))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Populate Helpers — generic
-  ;;===--------------------------------------------------------------------===;;
-
-  (define mlir-populate-func-type-conversion-pattern
-    (foreign-procedure "mlir_populate_func_type_conversion_pattern" (uptr uptr) void))
-
-  (define mlir-populate-return-conversion-patterns
-    (foreign-procedure "mlir_populate_return_conversion_patterns" (uptr uptr uptr) void))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Populate Helpers — per ONNX op (TODO: move to (mlir onnx patterns))
-  ;;===--------------------------------------------------------------------===;;
-
-  (define mlir-populate-cast-conversion-patterns
-    (foreign-procedure "mlir_populate_cast_conversion_patterns"    (uptr uptr uptr) void))
-  (define mlir-populate-matmul-conversion-patterns
-    (foreign-procedure "mlir_populate_matmul_conversion_patterns"  (uptr uptr uptr) void))
-  (define mlir-populate-expand-conversion-patterns
-    (foreign-procedure "mlir_populate_expand_conversion_patterns"  (uptr uptr uptr) void))
-  (define mlir-populate-min-conversion-patterns
-    (foreign-procedure "mlir_populate_min_conversion_patterns"     (uptr uptr uptr) void))
-  (define mlir-populate-shape-conversion-patterns
-    (foreign-procedure "mlir_populate_shape_conversion_patterns"   (uptr uptr uptr) void))
-  (define mlir-populate-reshape-conversion-patterns
-    (foreign-procedure "mlir_populate_reshape_conversion_patterns" (uptr uptr uptr) void))
-  (define mlir-populate-unsqueeze-conversion-patterns
-    (foreign-procedure "mlir_populate_unsqueeze_conversion_patterns" (uptr uptr uptr) void))
-  (define mlir-populate-equal-conversion-patterns
-    (foreign-procedure "mlir_populate_equal_conversion_patterns"   (uptr uptr uptr) void))
-  (define mlir-populate-transpose-conversion-patterns
-    (foreign-procedure "mlir_populate_transpose_conversion_patterns" (uptr uptr uptr) void))
-  (define mlir-populate-gather-conversion-patterns
-    (foreign-procedure "mlir_populate_gather_conversion_patterns"  (uptr uptr uptr) void))
-  (define mlir-populate-slice-conversion-patterns
-    (foreign-procedure "mlir_populate_slice_conversion_patterns"   (uptr uptr uptr) void))
-  (define mlir-populate-scatter-nd-conversion-patterns
-    (foreign-procedure "mlir_populate_scatter_nd_conversion_patterns" (uptr uptr uptr) void))
-  (define mlir-populate-nonzero-conversion-patterns
-    (foreign-procedure "mlir_populate_nonzero_conversion_patterns" (uptr uptr uptr) void))
-  (define mlir-populate-constant-conversion-patterns
-    (foreign-procedure "mlir_populate_constant_conversion_patterns" (uptr uptr uptr) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; RAII Macros

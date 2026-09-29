@@ -16,9 +16,9 @@
   (export populate-equal-patterns
           onnx-equal->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
+          (mlir dialects hipsr)
           (mlir ddr))
 
   (define-conversion-pattern (onnx-equal->hipsr op operands-ref rewriter type-converter)

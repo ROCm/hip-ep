@@ -6,7 +6,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; (mlir hipsr) — HipSR-specific dialect helpers.
+;; (mlir dialects hipsr) — HipSR-specific dialect helpers.
 ;;
 ;; Encapsulates all knowledge of the HipSR and ONNX dialects:
 ;; memory spaces, context conventions, conversion target configuration,
@@ -14,7 +14,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (mlir hipsr)
+(library (mlir dialects hipsr)
   (export
     ;; Memory space
     hipsr-device-memory-space
@@ -41,7 +41,7 @@
 
   (import (rnrs (6))
           (only (chezscheme) foreign-procedure)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion))
 
   ;;===--------------------------------------------------------------------===;;
@@ -152,4 +152,4 @@
         (or (hipsr-has-compute-ancestor? op)
             (hipsr-has-placeholder-ancestor? op)))))
 
-) ;; end library (mlir hipsr)
+) ;; end library (mlir dialects hipsr)

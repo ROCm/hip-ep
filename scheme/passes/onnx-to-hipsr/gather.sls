@@ -17,10 +17,10 @@
 (library (passes onnx-to-hipsr gather)
   (export populate-gather-patterns)
   (import (except (rnrs (6)) =)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
-          (mlir ops)
+          (mlir dialects hipsr)
+          (mlir ddr ops)
           (mlir ddr))
 
   ;; Build the gather output shape inside a region block using the DSL.

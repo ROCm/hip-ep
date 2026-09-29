@@ -14,9 +14,9 @@
   (export populate-cast-patterns
           onnx-cast->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
+          (mlir dialects hipsr)
           (mlir ddr))
 
   ;;===--------------------------------------------------------------------===;;

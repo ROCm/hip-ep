@@ -11,8 +11,8 @@
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir ddr ast) expand)
           (for (mlir ddr analyze) expand)
-          (for (mlir ir) expand)
-          (for (only (mlir ops) with-mlir-ops) expand))
+          (for (mlir core ir) expand)
+          (for (only (mlir ddr ops) with-mlir-ops) expand))
 
   ;;=======================================================================
   ;; Call graph

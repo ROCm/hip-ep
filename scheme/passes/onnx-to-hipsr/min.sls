@@ -17,10 +17,10 @@
 (library (passes onnx-to-hipsr min)
   (export populate-min-patterns)
   (import (except (rnrs (6)) =)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
-          (mlir ops)
+          (mlir dialects hipsr)
+          (mlir ddr ops)
           (mlir ddr))
 
   ;;===--------------------------------------------------------------------===;;

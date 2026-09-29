@@ -11,16 +11,18 @@
 ;; Equivalent to lib/Conversion/OnnxToHipsr/OnnxToHipsr.cpp
 ;;
 ;; Orchestrates the dialect conversion using MLIR framework primitives.
-;; The `(mlir ir)` library provides primitives and reusable helpers, while this
+;; The `(mlir core ir)` library provides primitives and reusable helpers, while this
 ;; Scheme code implements the high-level conversion logic.
 ;;===----------------------------------------------------------------------===;;
 
 (library (passes onnx-to-hipsr)
   (export run-pass)
   (import (rnrs (6))
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
+          (mlir dialects hipsr)
+          (mlir dialects onnx)
+          (mlir dialects func)
           (passes onnx-to-hipsr cast)
           (passes onnx-to-hipsr scatter-nd)
           (passes onnx-to-hipsr equal)

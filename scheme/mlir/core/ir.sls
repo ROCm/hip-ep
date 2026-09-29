@@ -6,17 +6,17 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; (mlir ir) — Core MLIR IR primitives
+;; (mlir core ir) — Core MLIR IR primitives
 ;;
 ;; Mirrors mlir/IR/ in the MLIR project: operations, values, types, blocks,
 ;; regions, the builder API, logging, and raw attribute access.
 ;;
 ;; All MLIR pointers are represented as exact integers via the `uptr` FFI type.
-;; See (mlir ir) for the full pointer-convention documentation.
+;; See (mlir core ir) for the full pointer-convention documentation.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (mlir ir)
+(library (mlir core ir)
 
   (export
     ;; ValueArrayRef accessors
@@ -454,4 +454,4 @@
       [(_ loc body ...)
        (parameterize ([current-loc loc]) body ...)]))
 
-) ;; end library (mlir ir)
+) ;; end library (mlir core ir)

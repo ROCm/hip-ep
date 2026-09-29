@@ -23,9 +23,9 @@
 (library (passes onnx-to-hipsr constant)
   (export populate-constant-patterns)
   (import (rnrs (6))
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr))
+          (mlir dialects hipsr))
 
   (define (onnx-constant->hipsr op operands-ref rewriter type-converter)
     ;; Fail fast if there is no inline value (external data path)

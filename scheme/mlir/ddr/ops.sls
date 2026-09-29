@@ -6,7 +6,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; (mlir ops) — expression-level MLIR operation builder
+;; (mlir ddr ops) — expression-level MLIR operation builder
 ;;
 ;; Provides two forms:
 ;;
@@ -37,7 +37,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 
-(library (mlir ops)
+(library (mlir ddr ops)
   (export with-mlir-ops)
 
   (import (except (rnrs (6)) =)
@@ -45,8 +45,8 @@
           (rename (rime loop) (:with :rime-with))
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (only (mlir ddr keywords) = : -> :index :region) expand)
-          (mlir ir)
-          (for (only (mlir ir) mlir-build-operation) expand))
+          (mlir core ir)
+          (for (only (mlir core ir) mlir-build-operation) expand))
 
   ;;===--------------------------------------------------------------------===;;
   ;; with-mlir-ops
@@ -365,4 +365,4 @@
       (main)))
 
 
-) ;; end library (mlir ops)
+) ;; end library (mlir ddr ops)

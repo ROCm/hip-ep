@@ -18,10 +18,10 @@
   (export populate-shape-patterns
           onnx-shape->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ir)
+          (mlir core ir)
           (mlir dialects conversion)
-          (mlir hipsr)
-          (mlir ops)
+          (mlir dialects hipsr)
+          (mlir ddr ops)
           (rename (rime loop) (:with :rime-with))
           (mlir ddr))
 
