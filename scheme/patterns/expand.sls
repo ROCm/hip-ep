@@ -23,21 +23,37 @@
           (mlir hipsr)
           (mlir pattern-macro))
 
+  ;; The shape adaptor value may be wrapped in a builtin.unrealized_conversion_cast
+  ;; by the dialect conversion framework when it maps tensor<Nxi64> → device space.
+  ;; But hipsr.expand and hipsr.placeholder (barrier) both require host-space shape
+  ;; operands. Unwrap the cast to obtain the actual hipsr.compute result (host space).
+  (define (unwrap-cast v)
+    (let ([def (mlir-value-get-defining-op v)])
+      (if (and (not (zero? def))
+               (string=? (mlir-operation-name def)
+                          "builtin.unrealized_conversion_cast"))
+          (mlir-operation-get-operand-value def 0)
+          v)))
+
   (define-conversion-pattern (onnx-expand->hipsr op operands-ref rewriter type-converter)
     :match
         %output = onnx.Expand (%input %shape-operand)
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (mlir-tensor-type-in-device-space! !out-type)])
+         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         ;; Unwrap any unrealized_conversion_cast to get the host-space shape value.
+         ;; The type converter wraps the tensor<Nxi64> shape in a cast to device space,
+         ;; but hipsr.expand and hipsr.placeholder (barrier) require the host-space value.
+         [%shape-host (unwrap-cast %shape-operand)])
     :rewrite %output :with
-        ;; Barrier placeholder: ins=(input, shape), type set after creation.
+        ;; Barrier placeholder: ins=(input, shape-host).
         (%placeholder = (let* ([ph-op (mlir-build-operation "hipsr.placeholder"
-                                          (list %ctx %input %shape-operand !out-device)
+                                          (list %ctx %input %shape-host)
                                           (list !out-device))])
                           (mlir-placeholder-set-barrier-type ph-op)
                           (mlir-operation-get-result ph-op 0)))
-        (%result = "hipsr.expand" (%ctx %input %shape-operand %placeholder !out-device)
+        (%result = "hipsr.expand" (%ctx %input %shape-host %placeholder !out-device)
                    -> !out-device))
 
   (define (populate-expand-patterns type-converter patterns ctx)
