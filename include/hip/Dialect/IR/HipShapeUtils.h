@@ -40,26 +40,19 @@ bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
 /// set the corresponding operand's last two dims are swapped before the
 /// contraction (compile-time fusion of `Transpose(perm=[..,r,r-2])`).
 ///
-/// Dynamic contraction dimensions are unknown-compatible and are checked for
-/// equality by the runtime. Two statically known unequal contraction extents
-/// are rejected. Batch dimensions use `OpTrait::util::getBroadcastedShape`.
+/// Dynamic contraction dimensions are compatible unknowns, not proven equal.
+/// Two statically known unequal contraction extents are rejected. Batch
+/// dimensions use `OpTrait::util::getBroadcastedShape`.
 /// On failure, emits a diagnostic through `emitError`.
 FailureOr<SmallVector<int64_t>>
 inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError,
                  int64_t transA = 0, int64_t transB = 0);
 
-/// Verify that MatMul's broadcasted batches are representable by one constant
-/// strided-batch offset per operand. A stride can only express "one matrix
-/// broadcast across every output batch" (stride 0) or "one matrix per output
-/// batch" (stride == matrix size), so an operand is rejected only when it
-/// provably needs something in between: a partial broadcast that pads some
-/// batch axes up to the output extent while carrying batches on others.
-///
-/// Dynamic batch layouts are accepted after all statically visible partial
-/// broadcasts are rejected. At runtime, each operand's matrix count must be 1
-/// or the output batch count; otherwise the runtime wrapper reports a
-/// recoverable error before BLAS dispatch.
+/// Check batch layouts against the single-stride representation. An operand
+/// cannot both broadcast a singleton axis and carry batches on another axis.
+/// Dynamic extents count as potentially non-singleton, so this check is
+/// conservative. It does not validate runtime extents.
 LogicalResult
 verifyStridedBatchMatmul(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                          function_ref<InFlightDiagnostic()> emitError);
