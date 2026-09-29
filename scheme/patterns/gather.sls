@@ -51,8 +51,9 @@
            [sp2      (mlir-build-operation "shape.split_at"
                        (list data-shape sz2) (list shape-type shape-type))]
            [trailing (mlir-operation-get-result sp2 1)]
-           [gathered (mlir-build-operation "shape.concat"
-                       (list leading idx-shape) (list shape-type))])
+           [gathered-op (mlir-build-operation "shape.concat"
+                          (list leading idx-shape) (list shape-type))]
+           [gathered    (mlir-operation-get-result gathered-op 0)])
       (mlir-operation-get-result
         (mlir-build-operation "shape.concat"
           (list gathered trailing) (list shape-type))

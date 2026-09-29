@@ -139,6 +139,10 @@
             (populate-min-patterns      type-converter patterns ctx)
             (populate-transpose-patterns type-converter patterns ctx)
             (populate-gather-patterns   type-converter patterns ctx)
+            ;; C++ fallback for onnx.Gather with host-memory data (scalar-read path).
+            ;; The Scheme pattern handles device data; host data returns #f and falls
+            ;; through to the C++ hipsr.compute conversion.
+            (mlir-populate-gather-conversion-patterns type-converter patterns ctx)
             (populate-expand-patterns   type-converter patterns ctx)
             (populate-constant-patterns type-converter patterns ctx)
             ;; C++ fallback for onnx.Constant with external data (location/offset/size).
