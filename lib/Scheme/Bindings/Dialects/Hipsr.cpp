@@ -117,10 +117,6 @@ namespace hipsr {
 
 void registerHipsrBindings() {
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)::mlir_populate_cast_conversion_patterns);
-  Sregister_symbol("mlir_erase_dead_novalue_ops", (void*)::mlir_erase_dead_novalue_ops);
-  Sregister_symbol("mlir_rewire_placeholder_inputs", (void*)::mlir_rewire_placeholder_inputs);
-  Sregister_symbol("mlir_conversion_target_add_legal_hipsr", (void*)::mlir_conversion_target_add_legal_hipsr);
-  Sregister_symbol("mlir_conversion_target_mark_unknown_ops_nested_legal", (void*)::mlir_conversion_target_mark_unknown_ops_nested_legal);
   Sregister_symbol("mlir_placeholder_set_barrier_type", (void*)::mlir_placeholder_set_barrier_type);
   Sregister_symbol("mlir_get_hipsr_context_type", (void*)::mlir_get_hipsr_context_type);
 }

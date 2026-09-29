@@ -390,7 +390,6 @@ void registerConversionBindings() {
   Sregister_symbol("mlir_register_conversion_pattern", (void*)::mlir_register_conversion_pattern);
   Sregister_symbol("mlir_create_type_converter", (void*)::mlir_create_type_converter);
   Sregister_symbol("mlir_destroy_type_converter", (void*)::mlir_destroy_type_converter);
-  Sregister_symbol("mlir_type_converter_add_device_memory_conversions", (void*)::mlir_type_converter_add_device_memory_conversions);
   Sregister_symbol("mlir_create_conversion_target", (void*)::mlir_create_conversion_target);
   Sregister_symbol("mlir_destroy_conversion_target", (void*)::mlir_destroy_conversion_target);
   Sregister_symbol("mlir_conversion_target_add_illegal_dialect", (void*)::mlir_conversion_target_add_illegal_dialect);
@@ -402,8 +401,6 @@ void registerConversionBindings() {
   Sregister_symbol("mlir_type_converter_is_legal_type", (void*)::mlir_type_converter_is_legal_type);
   Sregister_symbol("mlir_type_converter_is_legal", (void*)::mlir_type_converter_is_legal);
   Sregister_symbol("mlir_type_converter_is_signature_legal", (void*)::mlir_type_converter_is_signature_legal);
-  Sregister_symbol("mlir_conversion_target_add_legal_common_ops", (void*)::mlir_conversion_target_add_legal_common_ops);
-  Sregister_symbol("mlir_conversion_target_add_dynamically_legal_func", (void*)::mlir_conversion_target_add_dynamically_legal_func);
   Sregister_symbol("mlir_create_rewrite_pattern_set", (void*)::mlir_create_rewrite_pattern_set);
   Sregister_symbol("mlir_destroy_rewrite_pattern_set", (void*)::mlir_destroy_rewrite_pattern_set);
   Sregister_symbol("mlir_apply_full_conversion", (void*)::mlir_apply_full_conversion);

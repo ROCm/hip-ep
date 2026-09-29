@@ -76,7 +76,6 @@ namespace hipsr {
 
 void registerOnnxBindings() {
   Sregister_symbol("mlir_populate_return_conversion_patterns",             (void*)::mlir_populate_return_conversion_patterns);
-  Sregister_symbol("mlir_conversion_target_add_illegal_onnx",             (void*)::mlir_conversion_target_add_illegal_onnx);
   Sregister_symbol("mlir_populate_matmul_conversion_patterns",            (void*)::mlir_populate_matmul_conversion_patterns);
   Sregister_symbol("mlir_populate_expand_conversion_patterns",            (void*)::mlir_populate_expand_conversion_patterns);
   Sregister_symbol("mlir_populate_min_conversion_patterns",               (void*)::mlir_populate_min_conversion_patterns);

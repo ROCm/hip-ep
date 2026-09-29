@@ -19,6 +19,16 @@
 (library (mlir core ir)
 
   (export
+    ;; Logging (re-exported from (mlir core logging))
+    mlir-log-trace mlir-log-debug mlir-log-info
+    mlir-log-warning mlir-log-error mlir-log-fatal
+    ;; Shape dialect (re-exported from (mlir dialects shape))
+    mlir-get-shape-shape-type mlir-get-shape-size-type mlir-get-shape-witness-type
+
+    ;; Logging (re-exported from (mlir core logging))
+
+    ;; Shape dialect (re-exported from (mlir dialects shape))
+
     ;; ValueArrayRef accessors
     value-array-ref-size
     value-array-ref-at
@@ -63,12 +73,6 @@
     mlir-type-get-encoding
 
     ;; Logging
-    mlir-log-trace
-    mlir-log-debug
-    mlir-log-info
-    mlir-log-warning
-    mlir-log-error
-    mlir-log-fatal
 
     ;; Builder — explicit rewriter-based op construction
     mlir-build-operation-op
@@ -79,8 +83,6 @@
     mlir-block-get-argument
 
     ;; Shape dialect types (TODO: move to (mlir dialects shape) when it exists)
-    mlir-get-shape-shape-type
-    mlir-get-shape-size-type
 
     ;; Pattern rewriting
     mlir-replace-op
@@ -103,7 +105,6 @@
     mlir-create-op
 
     ;; More type getters
-    mlir-get-shape-witness-type
     mlir-get-index-type
     mlir-get-i64-type
     mlir-get-i1-type
@@ -124,7 +125,9 @@
 
     )
 
-  (import (chezscheme))
+  (import (chezscheme)
+          (mlir core logging)
+          (mlir dialects shape))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Foreign Type Definitions
@@ -248,12 +251,6 @@
   ;; Logging
   ;;===--------------------------------------------------------------------===;;
 
-  (define mlir-log-trace   (foreign-procedure "mlir_log_trace"   (string) void))
-  (define mlir-log-debug   (foreign-procedure "mlir_log_debug"   (string) void))
-  (define mlir-log-info    (foreign-procedure "mlir_log_info"    (string) void))
-  (define mlir-log-warning (foreign-procedure "mlir_log_warning" (string) void))
-  (define mlir-log-error   (foreign-procedure "mlir_log_error"   (string) void))
-  (define mlir-log-fatal   (foreign-procedure "mlir_log_fatal"   (string) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Builder — explicit rewriter-based op construction
@@ -288,12 +285,6 @@
   ;; Shape Dialect Types
   ;; TODO: move to (mlir dialects shape) when that module is created.
   ;;===--------------------------------------------------------------------===;;
-
-  (define mlir-get-shape-shape-type
-    (foreign-procedure "mlir_get_shape_shape_type" (uptr) uptr))
-
-  (define mlir-get-shape-size-type
-    (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Rewriting
@@ -376,9 +367,6 @@
   (define (mlir-create-op builder loc name ops types . rest)
     (mlir-create-op% builder loc name ops types (if (pair? rest) (car rest) 0)))
 
-
-  (define mlir-get-shape-witness-type
-    (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
 
   (define mlir-get-index-type
     (foreign-procedure "mlir_get_index_type" (uptr) uptr))

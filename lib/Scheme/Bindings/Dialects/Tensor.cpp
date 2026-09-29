@@ -151,7 +151,6 @@ void registerTensorBindings() {
   Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
-  Sregister_symbol("mlir_tensor_type_in_device_space", (void*)::mlir_tensor_type_in_device_space);
   Sregister_symbol("mlir_tensor_type_in_host_space",   (void*)::mlir_tensor_type_in_host_space);
   Sregister_symbol("mlir_type_get_encoding", (void*)::mlir_type_get_encoding);
   Sregister_symbol("mlir_type_is_device_tensor", (void*)::mlir_type_is_device_tensor);
