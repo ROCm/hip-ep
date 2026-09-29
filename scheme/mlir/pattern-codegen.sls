@@ -208,6 +208,11 @@
                                         #,operand-idx)
                            #,var))]
 
+        [(:check-where)
+         ;; Emit the guard expression directly — it runs after all operands of
+         ;; the enclosing match-op are bound and returns truthy to continue.
+         (cdr (assq 'expr (cdr action)))]
+
         [else
          (error 'action->check-code "Unknown action type" tag)])))
 

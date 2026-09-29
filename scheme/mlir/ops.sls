@@ -37,8 +37,7 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (mlir ops)
-  (export mlir-build-operation
-          with-mlir-ops)
+  (export with-mlir-ops)
 
   (import (except (rnrs (6)) =)
           (only (chezscheme) syntax->list syntax->datum datum->syntax parameterize)
@@ -359,5 +358,6 @@
                       (char=? #\! (string-ref str 0)))))))
 
       (main)))
+
 
 ) ;; end library (mlir ops)

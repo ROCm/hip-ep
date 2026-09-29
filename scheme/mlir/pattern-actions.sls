@@ -4,7 +4,8 @@
           action:check-op
           action:bind-operand
           action:bind-argument-operand
-          action:check-eq)
+          action:check-eq
+          action:check-where)
   (import (rnrs))
 
   ;; Action constructors with labeled fields using pairs
@@ -41,4 +42,10 @@
     (list ':check-eq
           (cons 'op-idx op-idx)
           (cons 'operand-idx operand-idx)
-          (cons 'var var))))
+          (cons 'var var)))
+
+  ;; :where guard — a raw Scheme expression evaluated after all operands of
+  ;; the enclosing match-op are bound.  Returns truthy to continue, falsy to fail.
+  (define (action:check-where expr)
+    (list ':check-where
+          (cons 'expr expr))))

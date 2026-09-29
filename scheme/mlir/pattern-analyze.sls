@@ -112,7 +112,13 @@
                          (if (and is-conversion? (= op-idx root-op-idx))
                              (set! acc (cons (action:bind-argument-operand operand-idx operand-var) acc))
                              (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc)))
-                         (binding-entry-bound?-set! entry #t)])))))
+                         (binding-entry-bound?-set! entry #t)]))
+
+            ;; Emit :where guard AFTER all results and operands of this op are bound.
+            ;; The guard expression may reference any variable bound up to this point.
+            (let ([where-expr (ast-match-expand-where-expr match-op)])
+              (when where-expr
+                (set! acc (cons (action:check-where where-expr) acc)))))))
 
       ;; Warn about unvisited operations
       (warn-unvisited-operations match-vec visited)
