@@ -72,8 +72,9 @@ The foundation represents compile-time extents in `RankedTensorType` and
 runtime extents as ordinary index SSA carried by `OpFoldResult`. It does not
 maintain a persistent inter-operation constraint set for facts such as “these
 two dynamic dimensions are equal.” Consequently, type-level verification treats
-dynamic extents as compatible unknowns, while runtime contracts check
-relationships that are not statically visible.
+dynamic extents as compatible unknowns. Accepting such a type does not prove a
+runtime relationship; each operation's lowering and runtime contract determine
+which relationships are checked during execution.
 
 This does not preclude symbolic reasoning. A future analysis may use MLIR's
 `ValueBoundsOpInterface` and external models over the same dimension SSA without
@@ -282,54 +283,30 @@ shape semantics.
 
 MatMul and Gemm accept a dynamic contraction K as unknown-compatible. Static
 equal K remains valid, while static unequal K is rejected by the pure shape
-rule before reification or conversion emits IR. HIP-to-LLVM passes both runtime
-extents independently (`MatMul`: A[-1]/B[-2]; `Gemm`: transpose-aware A/B K)
-to the wrappers. The wrappers compare them before descriptor creation, cache
-lookup, or dispatch and key caches only with the equal value.
-
-Runtime rejection is failure-contained. A K mismatch, negative/overflowing
-dimension, dynamically concealed partial batch broadcast, invalid output
-pointer, or checked output element/byte overflow records the shared recoverable
-error flag and skips BLAS work. When the exact nonempty output byte count is
-known and storage is valid, the wrapper queues an exact zero-fill so downstream
-consumers never observe uninitialized output. A zero-element output may have
-null storage and dispatches no BLAS work.
+rule before reification or conversion emits IR. The existing HIP-to-LLVM
+lowerings pass one K, taken from A after applying its transpose attribute.
+They do not pass B's K independently, so accepting a dynamic contraction must
+not be described as validating its equality at runtime. This shape layer does
+not change the wrapper ABI or add shared-error propagation.
 
 ### MatMul strided-batch representability
 
-The hipBLASLt MatMul lowering takes the batch count from the reified output
-shape and carries independent A/B batch strides, so either whole matrix may
-broadcast across the other's batches. One constant stride per operand can
-express exactly two layouts: stride 0 reuses a single matrix across every output
-batch, and a stride of the matrix size walks one matrix per output batch. An
-operand's matrix count must therefore be either 1 or the output's.
+One constant batch stride can express a single matrix reused for every batch
+or one matrix per batch. It cannot express a mixture of broadcast and varying
+batch axes within one operand.
 
 A partial per-axis broadcast falls strictly between the two — batch `[2, 1]`
 against an output batch of `[2, 3]` holds 2 matrices where the output needs 6.
-`verifyStridedBatchMatmul` rejects partial layouts visible in the static types.
-Dynamic extents can conceal the same layout, including across multiple batch
-axes, so those layouts are accepted statically and validated at runtime.
-Before flattening, lowering right-aligns A/B batch axes (using 1 for implicit
-leading axes) and requires per axis `A == B || A == 1 || B == 1`. It computes
-the exact reification broadcast choice `select(A == 1, B, A)` and requires the
-runtime output descriptor extent to equal it. The axis predicates are ANDed
-into `batch_axes_valid`.
+`verifyStridedBatchMatmul` checks this structural restriction from the types.
+Unknown extents count as possible non-unit extents; they are not assumed away.
+The check does not emit runtime axis comparisons.
 
-Lowering then multiplies every leading extent to form the output and
-per-operand matrix counts. It selects matrix-size stride only when an operand
-count equals the output count, otherwise stride zero. The runtime wrapper first
-requires `batch_axes_valid`, then requires each count to be exactly 1 or the
-output count, all before descriptor/cache creation or BLAS dispatch. The
-per-axis bit is necessary because incompatible batches such as `[2,3]` and
-`[3,2]` have the same flattened matrix count.
-
-`wrap_hipblasLtMatmul` carries `batch_axes_valid`, both contraction extents,
-both operand batch counts, and both strides. B's matrix stride is formed from
-B's own contraction extent, not A's. A false axis bit or invalid matrix count
-records the shared recoverable error before any BLAS work and zeroes a known
-nonempty output. HIP LLVM-IR and native model artifacts compiled against the
-former 11-argument MatMul ABI or the previous one-K Gemm ABI must be
-invalidated.
+The current lowering takes the batch count from A's leading dimensions. B uses
+stride zero when its leading-dimension product is at most one, and `K * N`
+otherwise. It does not carry independent A/B batch counts or an output-based
+batch count to the wrapper. Broader batch broadcasting and dynamic mismatch
+handling require separate lowering/runtime work; the shared shape rule alone
+does not establish those capabilities.
 
 ## `--hip-infer-shapes`
 
