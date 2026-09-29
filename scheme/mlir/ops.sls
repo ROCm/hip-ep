@@ -44,7 +44,8 @@
           (rename (rime loop) (:with :rime-with))
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (only (mlir pattern-keywords) = : -> :index :region) expand)
-          (mlir ffi))
+          (mlir ir)
+          (for (only (mlir ir) mlir-build-operation) expand))
 
   ;;===--------------------------------------------------------------------===;;
   ;; with-mlir-ops

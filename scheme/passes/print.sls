@@ -18,7 +18,7 @@
   (export run-pass)
   (import (rnrs (6))
           (only (chezscheme) format)  ; format is Chez-specific
-          (mlir ffi)
+          (mlir ir)
           (for (rime loop) expand))   ; Import only at compile time (expand phase)
 
 ;;===----------------------------------------------------------------------===;;

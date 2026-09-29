@@ -11,7 +11,7 @@
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (mlir pattern-ast) expand)
           (for (mlir pattern-analyze) expand)
-          (for (mlir ffi) expand)
+          (for (mlir ir) expand)
           (for (only (mlir ops) with-mlir-ops) expand))
 
   ;;=======================================================================

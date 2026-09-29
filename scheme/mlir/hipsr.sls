@@ -6,7 +6,7 @@
 ;;
 ;;===----------------------------------------------------------------------===;;
 ;;
-;; HipSR-specific MLIR helpers — pure Scheme, built on (mlir ffi) primitives.
+;; HipSR-specific MLIR helpers — pure Scheme, built on (mlir ir) + (mlir dialects conversion) primitives.
 ;;
 ;; This library encapsulates all knowledge of the HipSR and ONNX dialects:
 ;; memory spaces, context conventions, conversion target configuration, and
@@ -34,7 +34,8 @@
     hipsr-has-placeholder-ancestor?)
 
   (import (rnrs (6))
-          (mlir ffi))
+          (mlir ir)
+          (mlir dialects conversion))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Memory Space

@@ -12,7 +12,7 @@
 ;; regions, the builder API, logging, and raw attribute access.
 ;;
 ;; All MLIR pointers are represented as exact integers via the `uptr` FFI type.
-;; See (mlir ffi) for the full pointer-convention documentation.
+;; See (mlir ir) for the full pointer-convention documentation.
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -89,7 +89,47 @@
     mlir-notify-match-failure
 
     ;; Generic RAII (type-specific RAII macros are in (mlir dialects conversion))
-    with-raii)
+    with-raii
+
+    ;; More type helpers (from ffi.sls)
+    mlir-type-set-memory-space
+    mlir-type-is-device-tensor
+    mlir-tensor-type-in-host-space
+
+    ;; More builder ops
+    mlir-build-operation-op-with-regions
+    mlir-build-operation-op-in-block
+    mlir-build-operation-op-in-block-with-regions
+    mlir-builder-at-block-end
+    mlir-destroy-builder
+    mlir-new-block
+    mlir-create-op
+
+    ;; More type getters
+    mlir-get-shape-witness-type
+    mlir-get-index-type
+    mlir-get-i64-type
+    mlir-get-i1-type
+    mlir-get-hipsr-context-type
+
+    ;; More attr helpers
+    mlir-operation-set-index-attr
+    mlir-operation-set-dense-i32-array
+    mlir-placeholder-set-barrier-type
+
+    ;; Dynamic builder context
+    current-rewriter
+    current-block-builder
+    current-loc
+    mlir-build-operation
+    with-rewrite-builder
+    with-current-block-builder
+    with-block-builder
+    with-op-location
+
+    value-array-ref-size
+    value-array-ref-at
+    )
 
   (import (chezscheme))
 
@@ -300,15 +340,134 @@
   ;;; (with-raii ((var ctor dtor) ...) body ...)
   ;;; Each resource is created by ctor, bound to var, and destroyed by (dtor var)
   ;;; on exit — whether normal, exception, or continuation escape.
+  ;; Single-resource RAII: (with-raii (var ctor dtor) body ...)
   (define-syntax with-raii
     (syntax-rules ()
-      [(_ () body ...)
-       (begin body ...)]
-      [(_ ((val ctor dtor) rest ...) body ...)
-       (let ([val ctor])
+      [(_ (var ctor dtor) body ...)
+       (let ([var ctor])
+         (dynamic-wind void
+           (lambda () body ...)
+           (lambda () (dtor var))))]))
+
+
+  ;; ── Additional type helpers ──────────────────────────────────────────────
+
+  (define mlir-type-set-memory-space
+    (foreign-procedure "mlir_type_set_memory_space" (uptr int) uptr))
+
+  (define mlir-type-is-device-tensor
+    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
+
+  (define mlir-tensor-type-in-host-space
+    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
+
+  ;; ── More builder ops ─────────────────────────────────────────────────────
+
+  (define mlir-build-operation-op-with-regions
+    (foreign-procedure "mlir_build_op_with_regions"
+                       (uptr uptr string scheme-object scheme-object int) uptr))
+
+  (define mlir-build-operation-op-in-block
+    (foreign-procedure "mlir_build_op_in_block"
+                       (uptr uptr string scheme-object scheme-object) uptr))
+
+  (define mlir-build-operation-op-in-block-with-regions
+    (foreign-procedure "mlir_build_op_in_block_with_regions"
+                       (uptr uptr string scheme-object scheme-object int) uptr))
+
+  (define mlir-builder-at-block-end
+    (foreign-procedure "mlir_builder_at_block_end" (uptr) uptr))
+
+  (define mlir-destroy-builder
+    (foreign-procedure "mlir_destroy_builder" (uptr) void))
+
+  (define mlir-new-block
+    (foreign-procedure "mlir_new_block" (uptr scheme-object) uptr))
+
+  (define mlir-create-op%
+    (foreign-procedure "mlir_create_op" (uptr uptr string scheme-object scheme-object int) uptr))
+  (define (mlir-create-op builder loc name ops types . rest)
+    (mlir-create-op% builder loc name ops types (if (pair? rest) (car rest) 0)))
+
+  ;; ── More type getters ────────────────────────────────────────────────────
+
+  (define mlir-get-shape-witness-type
+    (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
+
+  (define mlir-get-index-type
+    (foreign-procedure "mlir_get_index_type" (uptr) uptr))
+
+  (define mlir-get-i64-type
+    (foreign-procedure "mlir_get_i64_type" (uptr) uptr))
+
+  (define mlir-get-i1-type
+    (foreign-procedure "mlir_get_i1_type" (uptr) uptr))
+
+  (define mlir-get-hipsr-context-type
+    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
+
+  ;; ── More attr helpers ────────────────────────────────────────────────────
+
+  (define mlir-operation-set-index-attr
+    (foreign-procedure "mlir_operation_set_index_attr" (uptr string iptr) void))
+
+  (define mlir-operation-set-dense-i32-array
+    (foreign-procedure "mlir_operation_set_dense_i32_array" (uptr string scheme-object) void))
+
+  (define mlir-placeholder-set-barrier-type
+    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
+
+
+  ;; ── Dynamic builder context ──────────────────────────────────────────────
+
+  (define current-rewriter      (make-parameter #f))
+  (define current-block-builder (make-parameter #f))
+  (define current-loc           (make-parameter #f))
+
+  (define (mlir-build-operation name operands types . rest)
+    (let ([nregions (if (pair? rest) (car rest) 0)]
+          [loc      (current-loc)])
+      (cond
+        [(current-rewriter) =>
+         (lambda (rw)
+           (if (zero? nregions)
+               (mlir-build-operation-op rw loc name operands types)
+               (mlir-build-operation-op-with-regions rw loc name operands types nregions)))]
+        [(current-block-builder) =>
+         (lambda (b)
+           (if (zero? nregions)
+               (mlir-build-operation-op-in-block b loc name operands types)
+               (mlir-build-operation-op-in-block-with-regions b loc name operands types nregions)))]
+        [else (error 'mlir-build-operation "no current builder installed")])))
+
+  (define-syntax with-rewrite-builder
+    (syntax-rules ()
+      [(_ (rw loc) body ...)
+       (parameterize ([current-rewriter rw] [current-block-builder #f] [current-loc loc])
+         body ...)]))
+
+  (define-syntax with-current-block-builder
+    (syntax-rules ()
+      [(_ (builder loc) body ...)
+       (parameterize ([current-block-builder builder] [current-rewriter #f] [current-loc loc])
+         body ...)]))
+
+  (define-syntax with-block-builder
+    (syntax-rules ()
+      [(_ (builder-var block loc) body ...)
+       (let ([builder-var (mlir-builder-at-block-end block)])
          (dynamic-wind
-           void
-           (lambda () (with-raii (rest ...) body ...))
-           (lambda () (dtor val))))]))
+           (lambda () #f)
+           (lambda ()
+             (parameterize ([current-block-builder builder-var]
+                            [current-rewriter #f]
+                            [current-loc loc])
+               body ...))
+           (lambda () (mlir-destroy-builder builder-var))))]))
+
+  (define-syntax with-op-location
+    (syntax-rules ()
+      [(_ loc body ...)
+       (parameterize ([current-loc loc]) body ...)]))
 
 ) ;; end library (mlir ir)

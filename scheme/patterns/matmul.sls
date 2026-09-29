@@ -18,7 +18,8 @@
   (export populate-matmul-patterns
           onnx-matmul->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr)
           (mlir pattern-macro))
 

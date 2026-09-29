@@ -16,7 +16,8 @@
   (export populate-equal-patterns
           onnx-equal->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr)
           (mlir pattern-macro))
 

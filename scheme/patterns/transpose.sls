@@ -20,7 +20,8 @@
   (export populate-transpose-patterns)
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr)
           (mlir pattern-macro))
 

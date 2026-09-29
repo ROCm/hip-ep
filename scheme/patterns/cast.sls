@@ -15,7 +15,8 @@
           onnx-cast->hipsr)
   (import (except (rnrs (6)) =)
           (only (chezscheme) format)
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr)
           (mlir pattern-macro))
 

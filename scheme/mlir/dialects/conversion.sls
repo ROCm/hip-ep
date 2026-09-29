@@ -26,6 +26,7 @@
 
     ;; TypeConverter configuration
     mlir-type-converter-add-conversion
+    mlir-type-converter-add-tensor-widening-materialization
     mlir-type-converter-is-legal-type
     mlir-type-converter-is-legal
     mlir-type-converter-is-signature-legal
@@ -99,6 +100,9 @@
 
   (define mlir-destroy-type-converter
     (foreign-procedure "mlir_destroy_type_converter" (uptr) void))
+
+  (define mlir-type-converter-add-tensor-widening-materialization
+    (foreign-procedure "mlir_type_converter_add_tensor_widening_materialization" (uptr) void))
 
   ;;; Add a Scheme type-conversion callback: (lambda (type-uptr) -> type-uptr or #f)
   (define mlir-type-converter-add-conversion
@@ -234,19 +238,19 @@
   (define-syntax with-type-converter
     (syntax-rules ()
       [(_ (var) body ...)
-       (with-raii ((var (mlir-create-type-converter) mlir-destroy-type-converter))
+       (with-raii (var (mlir-create-type-converter) mlir-destroy-type-converter)
          body ...)]))
 
   (define-syntax with-conversion-target
     (syntax-rules ()
       [(_ (var ctx) body ...)
-       (with-raii ((var (mlir-create-conversion-target ctx) mlir-destroy-conversion-target))
+       (with-raii (var (mlir-create-conversion-target ctx) mlir-destroy-conversion-target)
          body ...)]))
 
   (define-syntax with-rewrite-pattern-set
     (syntax-rules ()
       [(_ (var ctx) body ...)
-       (with-raii ((var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set))
+       (with-raii (var (mlir-create-rewrite-pattern-set ctx) mlir-destroy-rewrite-pattern-set)
          body ...)]))
 
 ) ;; end library (mlir dialects conversion)

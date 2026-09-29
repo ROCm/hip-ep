@@ -16,7 +16,8 @@
   (export populate-scatter-nd-patterns
           onnx-scatter-nd->hipsr)
   (import (except (rnrs (6)) =)
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr)
           (mlir pattern-macro))
 

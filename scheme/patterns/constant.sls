@@ -23,7 +23,8 @@
 (library (patterns constant)
   (export populate-constant-patterns)
   (import (rnrs (6))
-          (mlir ffi)
+          (mlir ir)
+          (mlir dialects conversion)
           (mlir hipsr))
 
   (define (onnx-constant->hipsr op operands-ref rewriter type-converter)
