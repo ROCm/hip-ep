@@ -56,15 +56,8 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType) {
     }
   }
 
-  int64_t prefixCount;
-  int64_t spatialRank;
-  if (firstResized == rank) {
-    prefixCount = std::min<int64_t>(2, rank - 1);
-    spatialRank = rank - prefixCount;
-  } else {
-    prefixCount = firstResized;
-    spatialRank = rank - firstResized;
-  }
+  int64_t prefixCount = std::min<int64_t>(2, firstResized);
+  int64_t spatialRank = rank - prefixCount;
   if (prefixCount > 2 || spatialRank < 1 || spatialRank > 3)
     return std::nullopt;
 
