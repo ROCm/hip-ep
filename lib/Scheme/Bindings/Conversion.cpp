@@ -346,7 +346,25 @@ void mlir_type_converter_add_tensor_widening_materialization(
   // what the type converter derives from the declared result type
   // (e.g. tensor<?x?xfloat, device>), MLIR creates an unrealized_conversion_cast
   // between them. This materialization resolves it by inserting a tensor.cast.
+  // Source materialization: widen a more specific tensor type back to a
+  // more general one (e.g. tensor<?x32xf16,device> → tensor<?x?xf16,device>).
   converter->addSourceMaterialization(
+      [](mlir::OpBuilder &builder, mlir::Type resultType,
+         mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
+        if (inputs.size() != 1)
+          return nullptr;
+        mlir::Value input = inputs[0];
+        auto inputType =
+            mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+        auto outType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
+        if (!inputType || !outType)
+          return nullptr;
+        if (!mlir::tensor::CastOp::areCastCompatible(inputType, outType))
+          return nullptr;
+        return mlir::tensor::CastOp::create(builder, loc, resultType, input);
+      });
+  // Target materialization: same direction for target-kind unrealized casts.
+  converter->addTargetMaterialization(
       [](mlir::OpBuilder &builder, mlir::Type resultType,
          mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
         if (inputs.size() != 1)
