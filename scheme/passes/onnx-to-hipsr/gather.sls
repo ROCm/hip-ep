@@ -41,7 +41,7 @@
   (define (build-gather-shape! axis data-shape idx-shape shape-type size-type)
     (define (mk-sz n)
       (let ([op (mlir-build-operation "shape.const_size" '() (list size-type))])
-        (mlir-operation-set-index-attr op "value" n)
+        (mlir-operation-set-attr op "value" n :index)
         (mlir-operation-get-result op 0)))
     (let* ([sz1      (mk-sz axis)]
            [sp1      (mlir-build-operation "shape.split_at"
@@ -89,7 +89,7 @@
                         -> !out-device)
         (%result = hipsr.gather (%ctx %data %indices %placeholder)
                    (operandSegmentSizes = (list 1 1 1 1) :i32-array)
-                   ("axis" = axis)
+                   ("axis" = axis :i64)
                    -> !out-device))
 
   (define (populate-gather-patterns type-converter patterns ctx)

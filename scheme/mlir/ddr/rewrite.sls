@@ -126,8 +126,10 @@
       ;; No re-parsing occurs later.
       ;;
       ;; Attr entries:
-      ;;   (name = val)         — set string attr
-      ;;   (name = val :index)  — set index attr
+      ;;   (name = val :i64)       — set i64 integer attr
+      ;;   (name = val :index)     — set index attr
+      ;;   (name = val :i32-array) — set dense i32 array attr
+      ;;   (name = val :i64-array) — set dense i64 array attr
       ;;
       ;; Region forms — two syntaxes:
       ;;   (^label ((arg : type) ...) body ...)
@@ -184,30 +186,21 @@
                (char=? #\^ (string-ref (symbol->string datum) 0)))))
 
       ;; Returns a closure (lambda (new-op-stx) → setter-syntax) for one attr form.
-      ;; Calling the closure with the Operation* syntax produces the setter expression.
-      ;; (name = val)            → mlir-operation-set-attr
-      ;; (name = val :index)     → mlir-operation-set-index-attr
-      ;; (name = val :i32-array) → mlir-operation-set-dense-i32-array
+      ;; All cases route through (mlir-operation-set-attr op name val type).
       (define (make-attr-setter attr-stx)
         (define (name->str x)
           (let ([datum (syntax->datum x)])
             (if (string? datum) datum (symbol->string datum))))
-        (syntax-case attr-stx (= :index :i32-array)
-          [(name = val :index)
-           (let ([name-str (name->str #'name)] [val-stx #'val])
-             (lambda (new-op-stx)
-               (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx])
-                 #'(mlir-operation-set-index-attr new-op n v))))]
-          [(name = val :i32-array)
-           (let ([name-str (name->str #'name)] [val-stx #'val])
-             (lambda (new-op-stx)
-               (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx])
-                 #'(mlir-operation-set-dense-i32-array new-op n v))))]
-          [(name = val)
-           (let ([name-str (name->str #'name)] [val-stx #'val])
-             (lambda (new-op-stx)
-               (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx])
-                 #'(mlir-operation-set-attr new-op n v))))]))
+        (define (make-setter name-str val-stx type-kw)
+          (lambda (new-op-stx)
+            (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx] [t type-kw])
+              #'(mlir-operation-set-attr new-op n v 't))))
+        (syntax-case attr-stx (=)
+          [(name = val type)
+           (make-setter (name->str #'name) #'val (syntax->datum #'type))]
+          [_ (syntax-violation 'with-mlir-ops
+               "attr form requires type keyword: (name = val :i64|:index|...)"
+               attr-stx)]))
 
       ;;-------------------------------------------------------------------
       ;; Code emitters

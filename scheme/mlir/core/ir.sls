@@ -57,7 +57,6 @@
     mlir-operation-set-attr
     mlir-operation-get-integer-attr
     mlir-operation-get-integer-array-attr
-    mlir-operation-set-dense-i64-array
     mlir-operation-copy-attr
     mlir-operation-has-attr
     mlir-operation-set-operand
@@ -112,8 +111,6 @@
     mlir-get-i1-type
 
     ;; More attr helpers
-    mlir-operation-set-index-attr
-    mlir-operation-set-dense-i32-array
 
     ;; Dynamic builder context
     current-rewriter
@@ -203,8 +200,16 @@
   ;; Attribute Access and Mutation
   ;;===--------------------------------------------------------------------===;;
 
-  (define mlir-operation-set-attr
+  (define %set-i64-attr
     (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
+
+  (define (mlir-operation-set-attr op name value type)
+    (case type
+      [(:i64)       (%set-i64-attr op name value)]
+      [(:index)     (%set-index-attr op name value)]
+      [(:i32-array) (%set-i32-array-attr op name value)]
+      [(:i64-array) (mlir-operation-set-dense-i64-array op name value)]
+      [else (error 'mlir-operation-set-attr "unknown attr type" type)]))
 
   (define mlir-operation-get-integer-attr
     (foreign-procedure "mlir_operation_get_integer_attr" (uptr string integer-64) integer-64))
@@ -400,10 +405,10 @@
 
 
 
-  (define mlir-operation-set-index-attr
+  (define %set-index-attr
     (foreign-procedure "mlir_operation_set_index_attr" (uptr string iptr) void))
 
-  (define mlir-operation-set-dense-i32-array
+  (define %set-i32-array-attr
     (foreign-procedure "mlir_operation_set_dense_i32_array" (uptr string scheme-object) void))
 
 

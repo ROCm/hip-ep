@@ -31,7 +31,7 @@
     (let* ([extents
             (map (lambda (p)
                    (let* ([sz-op (mlir-build-operation "shape.const_size" '() (list size-type))])
-                     (mlir-operation-set-attr sz-op "value" p)
+                     (mlir-operation-set-attr sz-op "value" p :index)
                      (let* ([ext-op (mlir-build-operation "shape.get_extent"
                                       (list input-shape
                                             (mlir-operation-get-result sz-op 0))
@@ -69,7 +69,7 @@
         (%result = (let* ([new-op (mlir-build-operation "hipsr.transpose"
                                     (list %ctx %input %placeholder !out-device)
                                     (list !out-device))])
-                     (mlir-operation-set-dense-i64-array new-op "perm" perm)
+                     (mlir-operation-set-attr new-op "perm" perm :i64-array)
                      (mlir-operation-get-result new-op 0))))
 
   (define (populate-transpose-patterns type-converter patterns ctx)
