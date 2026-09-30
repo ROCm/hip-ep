@@ -17,7 +17,6 @@
 #include <cstring>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
-#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 // Update rule enum values (must match compiler lowering in
 // LinearAttentionLowering.cpp)
@@ -118,14 +117,6 @@ extern "C" int wrap_linear_attention(
   void *hip_stream = hipdnn_ep_state_get_stream(state);
   if (!hip_stream) {
     fprintf(stderr, "[linear_attention] ERROR: failed to get HIP stream\n");
-    return -1;
-  }
-
-  hipblasLtHandle_t blaslt_handle =
-      (hipblasLtHandle_t)hipdnn_ep_state_get_hipblas_handle(state);
-  if (!blaslt_handle) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: failed to get hipBLASLt handle\n");
     return -1;
   }
 

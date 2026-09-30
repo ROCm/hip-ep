@@ -147,7 +147,7 @@ static constexpr float LOG2E = 1.4426950408889634f;
 //        (k = K + kv_input_chunk_length * (i / kv_num_heads_factor))
 //
 // Step 8: Score GEMM — S = K_exp^T * Q_trans * scale
-//   hipBLASLt batched GEMM over B*H heads:
+//   Batched GEMM over B*H heads:
 //     A = K_exp  [d, T]  col-major, transA=T -> op(A) = [T, d]
 //     B = Q_trans [d, S]  col-major, transB=N -> op(B) = [d, S]
 //     D = S      [T, S]  col-major
@@ -171,7 +171,7 @@ static constexpr float LOG2E = 1.4426950408889634f;
 //   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h lines 297-354
 //
 // Step 10: Value GEMM — O = V_exp * softmax(S)
-//   hipBLASLt batched GEMM over B*H heads:
+//   Batched GEMM over B*H heads:
 //     A = V_exp  [d, T]  col-major, transA=N -> op(A) = [d, T]
 //     B = S      [T, S]  col-major, transB=N -> op(B) = [T, S]
 //     D = O      [d, S]  col-major

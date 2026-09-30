@@ -432,8 +432,6 @@ private:
         {"hipStreamCreate", i32, {ptr}},
         {"hipStreamDestroy", i32, {ptr}},
         {"hipStreamSynchronize", i32, {ptr}},
-        {"hipblasLtCreate", i32, {ptr}},
-        {"hipblasLtDestroy", i32, {ptr}},
         {"hipdnn_ep_state_cleanup", i32, {ptr}},
         {"wrap_hipMalloc", i32, {ptr, i64}},
         {"wrap_hipFree", i32, {ptr}},
@@ -529,9 +527,8 @@ private:
     return success();
   }
 
-  /// hipdnn_ep_state_init_with_fs: alloc RuntimeState, init
-  /// HIP/MIOpen/hipBLASLt, parse metadata blob, read constants via FileSystem
-  /// and upload to GPU.
+  /// hipdnn_ep_state_init_with_fs: alloc RuntimeState, init HIP/MIOpen, parse
+  /// metadata blob, read constants via FileSystem and upload to GPU.
   ///
   /// Generated IR (no pool — from test_basic_interface.mlir):
   ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr,

@@ -15,7 +15,7 @@
 //
 // Kept in its own .cpp file (not hipdnn_ep_runtime_state.cpp) so the GPU-free
 // unit test can build it against the mock runtime types - nothing here touches
-// HIP/MIOpen/hipBLASLt. See test/runtime/.
+// HIP/MIOpen. See test/runtime/.
 //===----------------------------------------------------------------------===//
 
 #include "hipdnn_ep_runtime.h"

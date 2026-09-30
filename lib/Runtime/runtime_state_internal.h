@@ -31,7 +31,6 @@
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
   hipStream_t stream;
-  hipblasLtHandle_t hipblas_handle;
 
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
@@ -67,7 +66,8 @@ struct RuntimeState {
   size_t *buffer_offsets; // Offsets for static buffers in domain 0
   size_t num_buffers;     // Static buffer count in domain 0
 
-  // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
+  // Shared workspace for operator temp buffers (Gemm C-add scratch, GQA
+  // pipeline, ...).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
