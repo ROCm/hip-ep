@@ -23,7 +23,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
-| Gelu | Custom HIP kernel |
+| Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
 | Swish | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
