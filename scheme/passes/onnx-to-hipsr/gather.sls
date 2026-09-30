@@ -42,7 +42,7 @@
   (define (build-gather-shape! axis data-shape idx-shape shape-type size-type)
     (define (mk-sz n)
       (let ([op (mlir-build-operation "shape.const_size" '() (list size-type))])
-        (mlir-operation-set-attr! op "value" n ':index)
+        (mlir-operation-set-attribute! op "value" (make-mlir-attribute (mlir-operation-get-context op) ':index n))
         (mlir-operation-get-result op 0)))
     (let* ([sz1      (mk-sz axis)]
            [sp1      (mlir-build-operation "shape.split_at"

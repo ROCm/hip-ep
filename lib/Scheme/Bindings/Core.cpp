@@ -496,22 +496,67 @@ void mlir_op_erase(uint64_t op_ptr) {
 //===----------------------------------------------------------------------===//
 
 
+//===----------------------------------------------------------------------===//
+// Attribute constructors — return opaque Attribute* via getAsOpaquePointer().
+//===----------------------------------------------------------------------===//
+
+uint64_t mlir_make_attr_i64(uint64_t ctx_ptr, int64_t value) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64), value)
+          .getAsOpaquePointer());
+}
+
+uint64_t mlir_make_attr_index(uint64_t ctx_ptr, int64_t value) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::IntegerAttr::get(mlir::IndexType::get(ctx), value)
+          .getAsOpaquePointer());
+}
+
+uint64_t mlir_make_attr_i32_array(uint64_t ctx_ptr, ptr values) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  llvm::SmallVector<int32_t> vec;
+  for (ptr cur = static_cast<ptr>(values); cur != Snil; cur = Scdr(cur))
+    vec.push_back(static_cast<int32_t>(Sfixnum_value(Scar(cur))));
+  return reinterpret_cast<uint64_t>(
+      mlir::DenseI32ArrayAttr::get(ctx, vec).getAsOpaquePointer());
+}
+
+uint64_t mlir_make_attr_i64_array(uint64_t ctx_ptr, ptr values) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  llvm::SmallVector<int64_t> vec;
+  for (ptr cur = static_cast<ptr>(values); cur != Snil; cur = Scdr(cur))
+    vec.push_back(static_cast<int64_t>(Sfixnum_value(Scar(cur))));
+  return reinterpret_cast<uint64_t>(
+      mlir::DenseI64ArrayAttr::get(ctx, vec).getAsOpaquePointer());
+}
+
+//===----------------------------------------------------------------------===//
+// Uniform attribute get/set on operations.
+//===----------------------------------------------------------------------===//
+
+uint64_t mlir_operation_get_attribute(uint64_t op_ptr, const char* name) {
+  auto *op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto attr = op->getAttr(name);
+  if (!attr) return 0;
+  return reinterpret_cast<uint64_t>(attr.getAsOpaquePointer());
+}
+
+void mlir_operation_set_attribute(uint64_t op_ptr, const char* name, uint64_t attr_ptr) {
+  auto *op   = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto  attr = mlir::Attribute::getFromOpaquePointer(
+      reinterpret_cast<const void*>(attr_ptr));
+  op->setAttr(name, attr);
+}
+
 // Returns the string value of a StringAttr, or "" if absent or wrong type.
-// The returned pointer is owned by the attribute storage (valid while op lives).
 const char* mlir_operation_get_string_attr(uint64_t op_ptr, const char* attr_name) {
   if (!op_ptr) return "";
   auto *op = reinterpret_cast<mlir::Operation*>(op_ptr);
   auto attr = op->getAttrOfType<mlir::StringAttr>(attr_name);
   if (!attr) return "";
   return attr.getValue().data();
-}
-
-void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) {
-  if (!op) return;
-  mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
-  mlir::MLIRContext* ctx = cppOp->getContext();
-  mlir::IntegerAttr attr = mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64), value);
-  cppOp->setAttr(attr_name, attr);
 }
 
 void mlir_operation_set_index_attr(uint64_t op_ptr, const char* attr_name, int64_t value) {
@@ -688,8 +733,14 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_emit_warning", (void*)::mlir_emit_warning);
   Sregister_symbol("mlir_emit_remark",  (void*)::mlir_emit_remark);
   Sregister_symbol("mlir_op_erase", (void*)::mlir_op_erase);
-  Sregister_symbol("mlir_operation_get_string_attr", (void*)::mlir_operation_get_string_attr);
-  Sregister_symbol("mlir_operation_set_attr",        (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_make_attr_i64",              (void*)::mlir_make_attr_i64);
+  Sregister_symbol("mlir_make_attr_index",            (void*)::mlir_make_attr_index);
+  Sregister_symbol("mlir_make_attr_i32_array",        (void*)::mlir_make_attr_i32_array);
+  Sregister_symbol("mlir_make_attr_i64_array",        (void*)::mlir_make_attr_i64_array);
+  Sregister_symbol("mlir_operation_get_attribute",    (void*)::mlir_operation_get_attribute);
+  Sregister_symbol("mlir_operation_set_attribute",    (void*)::mlir_operation_set_attribute);
+  Sregister_symbol("mlir_operation_get_string_attr",  (void*)::mlir_operation_get_string_attr);
+  Sregister_symbol("mlir_operation_set_attr",         (void*)::mlir_operation_set_attr);
   Sregister_symbol("mlir_operation_set_index_attr", (void*)::mlir_operation_set_index_attr);
   Sregister_symbol("mlir_operation_get_integer_attr", (void*)::mlir_operation_get_integer_attr);
   Sregister_symbol("mlir_operation_get_integer_array_attr", (void*)::mlir_operation_get_integer_array_attr);

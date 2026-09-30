@@ -47,7 +47,11 @@
           (for (rename (rime loop) (:with :rime-with)) expand)
           (for (only (mlir ddr keywords) = : -> :index :region) expand)
           (mlir core ir)
-          (for (only (mlir core ir) mlir-build-operation with-block-builder) expand))
+          (mlir core attribute)
+          (for (only (mlir core ir) mlir-build-operation with-block-builder) expand)
+          (for (only (mlir core attribute) make-mlir-attribute) expand)
+          (for (only (mlir core operation) mlir-operation-get-context
+                                           mlir-operation-set-attribute!) expand))
 
   ;;===--------------------------------------------------------------------===;;
   ;; with-mlir-ops
@@ -186,7 +190,7 @@
                (char=? #\^ (string-ref (symbol->string datum) 0)))))
 
       ;; Returns a closure (lambda (new-op-stx) → setter-syntax) for one attr form.
-      ;; All cases route through (mlir-operation-set-attr op name val type).
+      ;; Generates (mlir-operation-set-attribute! op name (make-mlir-attribute ctx type val)).
       (define (make-attr-setter attr-stx)
         (define (name->str x)
           (let ([datum (syntax->datum x)])
@@ -195,10 +199,10 @@
           (lambda (new-op-stx)
             (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx]
                           [type-q type-quoted-stx])
-              #'(mlir-operation-set-attr! new-op n v type-q))))
+              #'(mlir-operation-set-attribute! new-op n
+                   (make-mlir-attribute (mlir-operation-get-context new-op) type-q v)))))
         (syntax-case attr-stx (=)
           [(name = val type)
-           ;; #''type = syntax for (quote :index) so :index is quoted in output
            (make-setter (name->str #'name) #'val #''type)]
           [_ (syntax-violation 'with-mlir-ops
                "attr form requires type keyword: (name = val :i64|:index|...)"

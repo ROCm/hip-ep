@@ -20,6 +20,7 @@
   (export populate-constant-patterns)
   (import (except (rnrs (6)) =)
           (mlir core ir)
+          (mlir core attribute)
           (mlir core conversion)
           (mlir dialects hipsr)
           (mlir ddr))
@@ -43,7 +44,8 @@
                     [c-op (mlir-build-operation
                             (if (zero? rank) "arith.constant" "hipsr.constant")
                             '() (list !result-type))])
-               (mlir-operation-copy-attr c-op "value" op "value")
+               (mlir-operation-set-attribute! c-op "value"
+                 (mlir-operation-get-attribute op "value"))
                (mlir-operation-get-result c-op 0))]
             ;; External data: ORT in-memory address or file-backed resource
             [(mlir-operation-has-attr? op "location")
