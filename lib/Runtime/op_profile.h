@@ -32,7 +32,7 @@ void op_profile_resolve_and_print(OpProfileState *ps);
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int markerIndex,
                             double cpuMs, int64_t bytes = 0,
-                            double cpuStartUs = 0.0);
+                            double cpuStartUs = 0.0, int startMarkerIndex = -1);
 // Add H2D/Compute/D2H pipeline spans (ms) for the most recently resolved
 // inference to the chrome trace's dedicated tracks. No-op unless tracing is on.
 void op_profile_add_io_spans(OpProfileState *ps, double h2dMs, int64_t h2dBytes,
@@ -81,6 +81,27 @@ void rgp_capture_fence(const char *opname);
 // throughput.
 void rgp_fence_note_run();
 
+// Family filter (HIPDNN_EP_PERF_OPS=name[,name...], which also turns PERF on).
+// Unset: every op is profiled with the single-marker differencing above. Set:
+// only the named ops are profiled, and each gets its own start+end marker
+// pair, because differencing against the previous profiled op would charge it
+// with every unprofiled op enqueued in between. Fewer markers means less
+// distortion of the family being measured; the other families go untimed.
+bool op_profile_filtered();
+bool op_profile_selected(const char *opname);
+
+// Host timeline (HIPDNN_EP_HOST_TIMELINE=<prefix>). Appends the host entry and
+// exit of every per-Compute stream sync to <prefix>.sync.<pid>.csv on the
+// op_profile_us_since_epoch axis. Paired with the EP's <prefix>.ep.<pid>.csv
+// (MlirCustomOp), it splits each Compute into launch phase and sync wait
+// without adding any sync. Independent of PERF. Rows are written in batches
+// and on runtime teardown: static destructors are not guaranteed to run in
+// the JIT'd runtime.
+bool host_timeline_enabled();
+void host_timeline_record_sync(const void *stream, double enterUs,
+                               double exitUs);
+void host_timeline_flush();
+
 // Absolute microseconds on the shared steady_clock axis. A plain time
 // conversion tied to no session: the trace axis is process-global, so all
 // sessions and inferences land on it without any captured baseline.
@@ -115,6 +136,7 @@ struct OpProfileScope {
   std::string name;
   std::string shape;
   int markerIndex;
+  int startMarkerIndex = -1; // filtered mode only (see op_profile_filtered)
   hipStream_t stream;
   int64_t bytes;
   double cpuTsUs = 0.0; // op start, absolute us on the shared trace axis
@@ -124,22 +146,30 @@ struct OpProfileScope {
                  hipStream_t s, int mkIdx, int64_t b = 0)
       : ps(p), name(std::move(n)), shape(std::move(sh)), markerIndex(mkIdx),
         stream(s), bytes(b) {
+    // Unfiltered: the epoch is recorded by the macro before this op's kernels
+    // are enqueued and the op's GPU time is derived from the marker recorded
+    // in the destructor -- no start event, no stream sync. Filtered: the
+    // previous marker may belong to an unprofiled op, so record our own start.
+    if (op_profile_filtered()) {
+      startMarkerIndex = op_profile_acquire_marker(ps);
+      (void)hipEventRecord(op_profile_get_marker_event(ps, startMarkerIndex),
+                           stream);
+    }
     cpuStart = std::chrono::steady_clock::now();
     cpuTsUs = op_profile_us_since_epoch(cpuStart);
-    // The epoch is recorded by the macro before this op's kernels are enqueued;
-    // the op's GPU time is derived from the marker recorded in the destructor.
-    // Nothing to enqueue here -- no start event, no stream sync.
   }
 
   ~OpProfileScope() {
     // Single fenceless marker at the end of the op; no stream sync. Per-op
-    // GPU duration = this marker minus the previous one (resolved at print).
+    // GPU duration = this marker minus the previous one (or minus our own
+    // start marker when filtered), resolved at print.
     (void)hipEventRecord(op_profile_get_marker_event(ps, markerIndex), stream);
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - cpuStart)
                     .count();
     if (ps)
-      op_profile_add_pending(ps, name, shape, markerIndex, ms, bytes, cpuTsUs);
+      op_profile_add_pending(ps, name, shape, markerIndex, ms, bytes, cpuTsUs,
+                             startMarkerIndex);
   }
 
   OpProfileScope(const OpProfileScope &) = delete;
@@ -161,7 +191,8 @@ struct OpProfileScope {
         hipdnn_ep_state_get_op_profile(state_arg));                            \
     auto *_stream =                                                            \
         static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state_arg));       \
-    if (_ps && _stream && op_profile_is_active(_ps)) {                         \
+    if (_ps && _stream && op_profile_is_active(_ps) &&                         \
+        op_profile_selected(opname)) {                                         \
       op_profile_ensure_epoch(_ps, _stream);                                   \
       int _mkIdx = op_profile_acquire_marker(_ps);                             \
       _opProf.emplace(_ps, opname, (shape_fn)(), _stream, _mkIdx,              \
@@ -175,6 +206,6 @@ struct OpProfileScope {
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
         hipdnn_ep_state_get_op_profile(state_arg));                            \
-    if (_ps)                                                                   \
+    if (_ps && op_profile_selected(opname))                                    \
       _opProfCpu.emplace(_ps, opname);                                         \
   }

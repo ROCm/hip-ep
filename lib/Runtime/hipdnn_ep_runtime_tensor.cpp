@@ -624,6 +624,10 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
 // Synchronize GPU stream once (called after all finalize_output calls).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
+  const bool timeline = host_timeline_enabled();
+  const double timelineEnterUs =
+      timeline ? op_profile_us_since_epoch(std::chrono::steady_clock::now())
+               : 0.0;
   // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG to keep the hot path
   // silent (fires once per Compute -> tens of thousands of lines on a
   // multi-token decode).
@@ -658,6 +662,10 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");
     return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
   }
+  if (timeline)
+    host_timeline_record_sync(
+        state->stream, timelineEnterUs,
+        op_profile_us_since_epoch(std::chrono::steady_clock::now()));
 
   // PERF: compute and log timing breakdown
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {

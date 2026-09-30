@@ -72,9 +72,9 @@ param(
   # measures a text-only prefill or does not run at all -- and the vision encoder
   # it leaves out is part of the number being compared.
   #
-  # -PromptFile reaches both metrics. The rest are ttft only and are rejected
-  # under -Metric tps below rather than dropped, because dropping them would
-  # quietly measure a different workload than the one asked for.
+  # -MaxTokens is ttft only (tps generates -Gen tokens) and is rejected under
+  # -Metric tps below rather than dropped, because dropping it would quietly
+  # measure a different workload than the one asked for.
   [ValidateSet('model_benchmark', 'vlm')]
   [string]$Driver,
   [string]$PromptFile,
@@ -98,12 +98,8 @@ $passThru = @{}
 foreach ($k in 'Driver', 'PromptFile', 'MaxTokens', 'MaxLength', 'ExecutionProvider') {
   if ($PSBoundParameters.ContainsKey($k)) { $passThru[$k] = $PSBoundParameters[$k] }
 }
-if ($Metric -eq 'tps') {
-  $ttftOnly = @($passThru.Keys | Where-Object { $_ -ne 'PromptFile' } | Sort-Object)
-  if ($ttftOnly) {
-    $verb = if ($ttftOnly.Count -gt 1) { 'apply' } else { 'applies' }
-    throw "-$($ttftOnly -join ', -') $verb to -Metric ttft only."
-  }
+if ($Metric -eq 'tps' -and $passThru.ContainsKey('MaxTokens')) {
+  throw '-MaxTokens applies to -Metric ttft only; tps generates -Gen tokens.'
 }
 
 $harnessLock = Enter-HarnessLock
@@ -131,6 +127,12 @@ foreach ($a in $Arms) {
   if ($armEnv) { $envKeys += $armEnv.PSObject.Properties.Name }
 }
 $envKeys = $envKeys | Sort-Object -Unique
+# Env: is process-wide, so without this the caller's shell keeps the last arm's
+# TEMP and loses any arm key it had set.
+$savedEnv = @{}
+foreach ($k in @($envKeys) + 'TEMP', 'TMP') {
+  $savedEnv[$k] = [Environment]::GetEnvironmentVariable($k)
+}
 
 $metricDir = if ($Metric -eq 'tps') { 'tps' } else { 'ttft' }
 if (-not $OutDir) { $OutDir = Join-Path $HarnessEnv.OutRoot $metricDir }
@@ -191,4 +193,7 @@ Write-Host ("  {0} {1} {2} --metric {3} --baseline {4}" -f
             (Join-Path $OutDir "${metricDir}_summary.csv"),
             $Metric, $Arms[0])
 
-} finally { Exit-HarnessLock $harnessLock }
+} finally {
+  Restore-HarnessEnv $savedEnv
+  Exit-HarnessLock $harnessLock
+}

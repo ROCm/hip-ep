@@ -878,6 +878,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     state->zp_unpack_cache = nullptr;
   }
 
+  host_timeline_flush();
+
   // Free op profiling state
   if (state->op_profile) {
     op_profile_destroy(static_cast<OpProfileState *>(state->op_profile));

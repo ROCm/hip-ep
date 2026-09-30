@@ -96,6 +96,9 @@ hipEvent_t op_profile_get_marker_event(OpProfileState *, int) {
   return nullptr;
 }
 void op_profile_add_pending(OpProfileState *, const std::string &,
-                            const std::string &, int, double, int64_t, double) {
-}
+                            const std::string &, int, double, int64_t, double,
+                            int) {}
 void op_profile_add_cpu(OpProfileState *, const std::string &, double) {}
+bool op_profile_filtered() { return false; }
+bool op_profile_selected(const char *) { return true; }
+void rgp_capture_fence(const char *) {}

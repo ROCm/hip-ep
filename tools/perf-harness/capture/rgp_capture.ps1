@@ -25,6 +25,11 @@
 ##
 ## Deliberately no HIPDNN_EP_PERF / HIPDNN_EP_DEBUG: CLAUDE.md forbids measuring
 ## throughput with either. SQTT already carries the timing.
+##
+## The EP runs with CI's environment: no HIPDNN_EP_AUTOTUNE or
+## HIPDNN_EP_MATMUL_CUSTOM_WMMA, which this script used to force on and which
+## CI never sets, so a capture showed kernels the measured build does not run.
+## -SetEnv 'K=V' opts a single capture into anything else and is undone after.
 
 [CmdletBinding(DefaultParameterSetName = 'Fence')]
 param(
@@ -76,6 +81,7 @@ param(
   # the per-process prefill autotune sweep and a cold first rep all land before
   # the fence can fire.
   [int]$ArmTimeoutSec = 600,
+  [string[]]$SetEnv = @(),                       # e.g. -SetEnv 'HIPDNN_EP_AUTOTUNE=1'
   [string]$OutDir
 )
 
@@ -128,7 +134,7 @@ if ($isVlm) {
   $PromptFile = (Resolve-Path $PromptFile).Path
 }
 
-Stop-HarnessProcesses -IncludePython:$isVlm
+Stop-HarnessProcesses
 Remove-Item $OutRgp, $benchOut, $benchErr, $panelLog -EA SilentlyContinue
 '' | Set-Content $benchErr
 
@@ -161,8 +167,8 @@ Start-Sleep 6
 
 Set-HarnessPath
 Clear-HarnessProfilingEnv
-$env:HIPDNN_EP_AUTOTUNE = '1'
-$env:HIPDNN_EP_MATMUL_CUSTOM_WMMA = '1'
+$savedEnv = Set-HarnessEnv $SetEnv
+try {
 if ($PSCmdlet.ParameterSetName -eq 'Fence') {
   $env:RGP_FENCE = $Op; $env:RGP_FENCE_SKIP = "$Skip"; $env:RGP_FENCE_MS = "$FenceMs"
   $env:RGP_FENCE_AFTER_INFERENCES = "$AfterInferences"
@@ -174,8 +180,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Fence') {
 if ($isVlm) {
   if (-not $MaxLength)  { $MaxLength  = $SeqLen + 128 }
   $exe   = $HarnessEnv.Python
-  $margs = @('-u', $HarnessEnv.VlmBench, '-m', $HarnessEnv.Model, '-i', $HarnessEnv.Image,
-             '--prompt_file', $PromptFile, '--max_tokens', "$MaxTokens",
+  $margs = @('-u', (Join-Path $HarnessEnv.Harness 'bench\vlm_driver.py'),
+             '--bin', $HarnessEnv.Bin, '--prompt-file', $PromptFile, $HarnessEnv.VlmBench,
+             '-m', $HarnessEnv.Model, '-i', $HarnessEnv.Image, '--max_tokens', "$MaxTokens",
              '--max_length', "$MaxLength", '-e', $ExecutionProvider,
              '-n', "$Reps", '-w', '0')
   $wd    = Split-Path -Parent $HarnessEnv.VlmBench
@@ -191,6 +198,7 @@ $bench = Start-Process -FilePath $exe `
   -ArgumentList $margs -WorkingDirectory $wd `
   -RedirectStandardOutput $benchOut -RedirectStandardError $benchErr `
   -PassThru -WindowStyle Hidden
+Register-HarnessDriver $bench
 Write-Host "model PID=$($bench.Id) launched"
 
 # In fence mode, watch stderr for the armed marker and trigger inside the idle
@@ -232,9 +240,12 @@ for ($i = 0; $i -lt 100; $i++) {
     $sz = $now
   }
 }
-Stop-HarnessProcesses -IncludePython:$isVlm
-Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS,
-            Env:RGP_FENCE_AFTER_INFERENCES -EA SilentlyContinue
+Stop-HarnessProcesses
+} finally {
+  Restore-HarnessEnv $savedEnv
+  Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS,
+              Env:RGP_FENCE_AFTER_INFERENCES -EA SilentlyContinue
+}
 
 if (-not (Test-Path $OutRgp)) {
   Write-Host "RESULT: $OutRgp NOT created"
@@ -267,7 +278,7 @@ if ($Counters) { $verifyArgs += '--require-spm' }
 if ($LASTEXITCODE -ne 0) { Write-Host '!! capture unusable; not decoding it'; exit 1 }
 
 Push-Location $HarnessEnv.Parser
-& $HarnessEnv.Python main.py $OutRgp $decBase 2>&1 | Out-Null
+$parseOut = & $HarnessEnv.Python main.py $OutRgp $decBase 2>&1
 Pop-Location
 
 $ops = "${decBase}_operators.csv"
@@ -281,6 +292,7 @@ if (Test-Path $ops) {
                  count, mean_us, total_us, pct_gpu, occ_pct, bound_class, avg_mem_gbps -AutoSize |
     Out-String -Width 400 | Write-Host
 } else {
-  Write-Host 'PARSE FAILED (no operators.csv)'
+  Write-Host 'PARSE FAILED (no operators.csv); parser said:'
+  $parseOut | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" }
   exit 1
 }

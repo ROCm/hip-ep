@@ -27,6 +27,8 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import re
+import statistics
 from dataclasses import dataclass, field
 
 
@@ -148,10 +150,34 @@ class ModelSpec:
         )
         lm_w = self.hidden * self.vocab
         lm_head = self.fp16(lm_w) if self.lm_head_fp16 else w(lm_w)
-        # Both K and V for every past position, read once per layer. fp16 cache.
-        kv = self.layers * kv_len * 2 * self.kv_heads * self.head_dim * 2
+        # K and V, fp16, read once per layer: every past position on a global
+        # layer, at most the window on a sliding one, each with its own head
+        # geometry -- the split headroom.py's prefill attention floor uses.
+        # Charging every layer the full context overstated gemma-4-26B's 2K
+        # KV read about 2x.
+        nfull = self.layers
+        if self.sliding_window:
+            nfull = min(self.full_attn_layers, self.layers)
+        win = min(kv_len, self.sliding_window)
+        kv = (
+            (
+                nfull * kv_len * self.full_kv * self.full_hd
+                + (self.layers - nfull) * win * self.kv_heads * self.head_dim
+            )
+            * 2
+            * 2
+        )
+        # Any FFN outside the expert loop: the shared MLP beside the experts, or
+        # on a dense preset (experts=0) the whole FFN, which the expert term
+        # carries as topk=1. Same rule as headroom.py's prefill floor.
+        dense = self.layers * (
+            w(self.hidden * 2 * self.dense_inter) + w(self.dense_inter * self.hidden)
+        )
+        if not self.experts:
+            dense, experts = dense + experts, 0.0
         return {
             "moe_experts": experts,
+            "dense_mlp": dense,
             "attn_proj": qkvo,
             "router": router,
             "lm_head": lm_head,
@@ -221,6 +247,198 @@ GEMM_FAMILIES = (
 # elementwise_gelu_f16 in each. softmax is kept as a second fallback for models
 # whose norm is fused away.
 LAYER_MARKERS = ("topk_routing", "skip_rms_norm", "softmax_f32_to_out")
+
+# EP op name (the OP_PROFILE / HIPDNN_EP_PERF_OPS name) -> the rgp_parser kernel
+# families its wrapper launches: exact names from the kernels each op's own .hip
+# file defines, plus prefixes for the templated variants. Only ops whose kernels
+# are unique to them are listed. `gemm` is deliberately absent: the hipBLASLt
+# family is launched by `matmul`, by `gemm`, and by decomposed attention inside
+# `gqa`, so its owner depends on the model. Assign it with --map once a run pins
+# it down. On gemma-4-26B decode a HIPDNN_EP_PERF_OPS=gqa,matmul,gemm run shows
+# only gqa (30 calls/step) in the decoder, so its 60 gemm/step are the
+# attention GEMMs: --map gqa+=gemm.
+OP_KERNEL_FAMILIES: dict[str, dict[str, tuple[str, ...]]] = {
+    "matmul_nbits": {
+        "exact": (
+            "dequant_u2_to_fp16",
+            "dequant_u3_to_fp16",
+            "dequant_u4_to_fp16",
+            "transpose2d_fp16",
+        ),
+        "prefix": ("matmul_nbits", "MatMulNBits"),
+    },
+    "qmoe": {
+        "exact": (
+            "topk_routing",
+            "bucket_tokens",
+            "gather_tokens",
+            "scatter_add",
+            "swiglu",
+            "add_bias",
+        ),
+        "prefix": ("qmoe_",),
+    },
+    "gqa": {
+        "exact": (
+            "add_attention_bias",
+            "bias_key_extent",
+            "causal_mask_kernel_impl",
+            "dequant_kv_i8_to_fp16",
+            "expand_kv",
+            "rope",
+            "softmax_f32_to_out",
+            "softmax_inplace",
+            "split_qkv",
+            "transpose_mid_dims",
+        ),
+        "prefix": ("gqa", "kv_cache_"),
+    },
+}
+
+
+def op_family_map(extra: list[str] | None = None) -> dict[str, dict[str, tuple]]:
+    """OP_KERNEL_FAMILIES plus --map overrides: 'op=fam,fam' replaces the op's
+    families, 'op+=fam' adds to them. Exact names; a trailing '*' is a prefix."""
+    out = {k: dict(v) for k, v in OP_KERNEL_FAMILIES.items()}
+    for spec in extra or []:
+        op, _, fams = spec.partition("=")
+        append = op.endswith("+")
+        op = op.rstrip("+").strip()
+        if not op or not fams:
+            raise SystemExit(
+                f"--map wants op=family[,family*] or op+=family, got {spec!r}"
+            )
+        names = [f.strip() for f in fams.split(",") if f.strip()]
+        exact = tuple(n for n in names if not n.endswith("*"))
+        prefix = tuple(n[:-1] for n in names if n.endswith("*"))
+        # A family belongs to one op; moving it must take it off its old owner.
+        for other, m in out.items():
+            if other != op:
+                m["exact"] = tuple(n for n in m["exact"] if n not in exact)
+        base = (
+            out.get(op, {"exact": (), "prefix": ()})
+            if append
+            else {"exact": (), "prefix": ()}
+        )
+        out[op] = {"exact": base["exact"] + exact, "prefix": base["prefix"] + prefix}
+    return out
+
+
+def op_for_family(family: str, fmap: dict[str, dict[str, tuple]]) -> str | None:
+    for op, m in fmap.items():
+        if family in m["exact"] or any(family.startswith(p) for p in m["prefix"]):
+            return op
+    return None
+
+
+def load_dispatches(path: str) -> list[dict]:
+    """Dispatch rows in time order, the parser's own artifact rows dropped."""
+    rows = [r for r in csv.DictReader(open(path)) if r.get("is_artifact") != "1"]
+    for r in rows:
+        r["t0"] = float(r["ts_us"])
+        r["t1"] = r["t0"] + float(r["dur_us"])
+    rows.sort(key=lambda r: r["t0"])
+    return rows
+
+
+def decode_step_windows(
+    rows: list[dict], layers: int = 0
+) -> tuple[list[tuple[int, int]], str, int]:
+    """Complete decode steps in a capture, as [start, end) row windows.
+
+    A VLM decode step runs on two queues: the embedding session's dispatches,
+    then the decoder's. A step therefore starts where the stream switches from
+    the decoder's (busiest) queue to another one, and only windows between two
+    such switches are complete. Time on the other queue belongs to the other
+    session; it is not the decoder's GPU idle, which is what summing every
+    gap_before_us in the window used to claim.
+
+    With `layers`, a window is kept only if its layer-marker count is within
+    10% of `layers`, so a stray dispatch on another queue mid-step cannot split
+    a step (half a step shows about half the markers). Not exact equality: the
+    gemma-4-26B decode step runs 29 topk_routing for 30 layers.
+    Returns (windows, decoder queue, windows rejected by that check). A
+    single-queue capture has no switches and returns no windows.
+    """
+    queues = collections.Counter(r.get("queue", "") for r in rows)
+    main_q = queues.most_common(1)[0][0] if queues else ""
+    if len(queues) < 2:
+        return [], main_q, 0
+    bounds = [
+        i
+        for i in range(1, len(rows))
+        if rows[i].get("queue") != main_q and rows[i - 1].get("queue") == main_q
+    ]
+    wins = list(zip(bounds, bounds[1:]))
+    if not layers:
+        return wins, main_q, 0
+    counts = collections.Counter(r["family"] for r in rows)
+    marker = next((f for f in LAYER_MARKERS if counts.get(f)), None)
+    if marker is None:
+        return wins, main_q, 0
+    tol = max(1, layers // 10)
+    kept = [
+        (s, e)
+        for s, e in wins
+        if abs(sum(1 for r in rows[s:e] if r["family"] == marker) - layers) <= tol
+    ]
+    return kept, main_q, len(wins) - len(kept)
+
+
+_PERF_BORDER = re.compile(r"^\[PERF\] =+\s*$")
+# Parent rows only: the op name sits two spaces in, shape rows four.
+_PERF_ROW = re.compile(
+    r"^\[PERF\]  (\S+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)%\s*$"
+)
+
+
+def perf_op_tables(path: str) -> list[dict[str, tuple[int, float]]]:
+    """Every per-Compute `[PERF] ===` op table in a log: {op: (calls, gpu_ms)}."""
+    tables: list[dict[str, tuple[int, float]]] = []
+    cur: dict[str, tuple[int, float]] | None = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if _PERF_BORDER.match(line):
+                if cur is None:
+                    cur = {}
+                else:
+                    tables.append(cur)
+                    cur = None
+                continue
+            if cur is not None:
+                m = _PERF_ROW.match(line)
+                if m:
+                    cur[m.group(1)] = (int(m.group(2)), float(m.group(3)))
+    return tables
+
+
+def decode_op_stats(
+    tables: list[dict[str, tuple[int, float]]], op: str, drop_top: float = 0.05
+) -> dict | None:
+    """Per-decode-step calls and GPU ms of `op`, from its per-Compute tables.
+
+    Prefill and decode Runs execute the same graph, so the call count cannot
+    separate them; the GPU time can -- a prefill Run is many times a decode
+    step. Tables outside [median/3, 3*median] go, then the slowest `drop_top`
+    (warmup, autotune), then any whose call count is not the mode.
+    """
+    vals = [t[op] for t in tables if op in t]
+    if not vals:
+        return None
+    med = statistics.median(v[1] for v in vals)
+    keep = [v for v in vals if med / 3 <= v[1] <= 3 * med]
+    keep.sort(key=lambda v: v[1])
+    keep = keep[: max(1, int(round(len(keep) * (1 - drop_top))))]
+    mode = collections.Counter(v[0] for v in keep).most_common(1)[0][0]
+    keep = [v for v in keep if v[0] == mode]
+    return {
+        "tables": len(vals),
+        "steps": len(keep),
+        "calls": mode,
+        "gpu_ms": statistics.median(v[1] for v in keep),
+    }
+
 
 # Buckets chosen to straddle the dispatch thresholds in matmul_nbits_kernel.hip
 # (row-major GEMV, col-major GEMV, WMMA), so a routing change shows up as a

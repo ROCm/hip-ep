@@ -34,7 +34,21 @@ Everything resolves from environment variables, with discovery fallbacks:
 | `HIPEP_PY` | Python interpreter. Default: `python` on `PATH` |
 | `HIPEP_OUT` | Output root. Default: `%TEMP%\hipep-perf` |
 | `HIPEP_PATH_EXTRA` | Extra `PATH` entries the EP needs (ROCm SDK runtime dirs), `;`-separated |
+| `HIPEP_VLM_BENCH` | `-Driver vlm` only: onnxruntime-genai's `vlm_benchmark.py` |
+| `HIPEP_IMAGE` | `-Driver vlm` only: the benchmark image |
+| `HIPEP_PROMPT_FILE` | Default `-PromptFile` (required on `-Driver vlm`) |
 | `RGP_DIR` | Radeon Developer Tool Suite folder. Only needed if `RadeonDeveloperPanelCLI.exe` is not on `PATH` |
+
+Every timed script runs the EP with **CI's environment**: it clears
+`HIPDNN_EP_AUTOTUNE` and `HIPDNN_EP_MATMUL_CUSTOM_WMMA` (CI sets neither; the
+harness used to force both on, so its captures showed kernels the measured
+build does not run) and the instrumentation variables below. `-SetEnv 'K=V'`
+opts one run into anything else and restores the previous value afterwards.
+
+`-Driver vlm` runs `vlm_benchmark.py` through `bench/vlm_driver.py`, which does
+what CI does: reads the prompt file and passes it in-process (a 16K prompt is
+past Windows' command-line limit, and `vlm_benchmark.py` has no
+`--prompt_file`), after loading `onnxruntime.dll` from `HIPEP_BIN`.
 
 ```powershell
 $env:HIPEP_BIN   = 'C:\work\gpu-test-package\bin'
@@ -45,6 +59,17 @@ pip install -r ..\rgp_parser\requirements.txt
 The capture scripts need a build containing the RGP capture fence
 (`rgp_capture_fence` in `lib/Runtime/op_profile.cpp`). It is inert unless
 `RGP_FENCE` is set, so a normal build carries it at no cost.
+
+### Instrumentation switches in the build
+
+All are latched on first read and cost one cached check when unset.
+
+| variable | what it does | throughput valid? |
+|---|---|---|
+| `HIPDNN_EP_HOST_TIMELINE=<prefix>` | Host timestamps per EP Compute (entry, after marshal, after `inference_compute`, exit) to `<prefix>.ep.<pid>.csv`, and per `hipdnn_ep_stream_sync` (entry, exit) to `<prefix>.sync.<pid>.csv`. One steady_clock axis, batched appends, **no sync added** | yes: +0.09 ms/token, 95% CI [−0.07, +0.25], on gemma4 26B 2K (7 interleaved rounds, one block reversed) |
+| `HIPDNN_EP_PERF_OPS=<op>[,<op>]` | The op profiler, limited to the named `OP_PROFILE` families, each call bracketed by its own start/end event pair. Implies `HIPDNN_EP_PERF` | **no** — only the family GPU ms |
+| `HIPDNN_EP_PERF=1` / `HIPDNN_EP_TRACE_FILE` | The full op profiler / chrome trace | **no** |
+| `RGP_FENCE*` | The capture fence (`rgp_capture.ps1` sets these) | n/a |
 
 ## The workflow
 
@@ -197,23 +222,125 @@ after a late fence. A first attempt at `-Gen 128 -Reps 2` stalled at 0.8 of
 82.5 MB and produced **no file at all**. `-Gen 3000` buys ~60 s of live process;
 lowering `-OpCount` shrinks what has to move.
 
-### 3. Attribute and rank
+### 3. Split the step on the host first
+
+A capture cannot tell you how much of a step is host overhead — see
+[SQTT stretches gaps](#sqtt-stretches-gaps-host-overhead-comes-from-the-host-timeline).
+The host timeline can, on the real build at full speed:
 
 ```powershell
-python .\analysis\decode_model.py ...\dec128_dispatches.csv `
-       --preset qwen3-30b-a3b --kv-len 144 --measured-ms 14.6
-
-# how the ranking moves with context -- the only term that changes is the KV read
-python .\analysis\headroom.py --decode --preset qwen3-30b-a3b `
-       --at 144:14.6:...\dec128_dispatches.csv `
-       --at 16512:16.4:...\dec16k_dispatches.csv
+# -SetEnv, not the shell: every timed script clears the instrumentation variables first.
+.\bench\bench_tps.ps1 -Driver vlm -Tag tl -PromptFile D:\prompts\2k.txt `
+    -SetEnv "HIPDNN_EP_HOST_TIMELINE=$env:HIPEP_OUT\tl\g26_2k"
+python .\analysis\host_timeline.py $env:HIPEP_OUT\tl\g26_2k --json $env:HIPEP_OUT\tl\g26_2k.json
 ```
 
-`decode_model.py` normalises by how many decode steps the window actually holds
-(`topk_routing` count over `layers`), because a capture rarely lands on exactly
-one. It also accepts `--trace` as a source: exact op attribution, but the
-profiler inflates the total, so pass `--measured-ms` and it rescales the shares
-onto the real number and says it did.
+Ops in the EP file are compiled-kernel instance addresses (one per session's
+fused graph), not names. It takes the decoder to be the one with the most total
+time, takes one step as consecutive decoder calls, and splits the median step:
+
+| component | meaning |
+|---|---|
+| `dec_marshal` | EP entry to `inference_compute` (input binding, output allocation) |
+| `dec_launch` | host time inside `inference_compute` before the sync is reached |
+| `dec_sync` | blocked in `hipStreamSynchronize` — GPU work the host waited for |
+| `dec_post` / `dec_tail` | after the sync / after compute to EP exit |
+| `other_ep`, `outside_ep` | other EP ops (embedding, vision) and everything outside the EP (sampling, genai) |
+
+`dec_sync` is the only part a faster kernel can shrink, so it caps every
+kernel-side gain below.
+
+### 4. Time the families that matter, in-model
+
+```powershell
+.\bench\bench_tps.ps1 -Driver vlm -Tag fam -PromptFile D:\prompts\2k.txt `
+    -PerfOps matmul_nbits,gqa
+```
+
+One process per op (their event pairs would otherwise perturb each other),
+logged to `tps_fam.perfops_<op>.log`, then summarised by `calibrate_sqtt.py`:
+per-step GPU ms and calls per step, from event pairs around each call. The run
+appends nothing to the TPS CSV, because its TPS is not valid.
+
+### 5. Calibrate the capture against it
+
+Take the capture on the same build and config, then:
+
+```powershell
+python .\analysis\calibrate_sqtt.py ...\dec_dispatches.csv `
+    --perf-log ...\tps_fam.perfops_matmul_nbits.log `
+    --perf-log ...\tps_fam.perfops_gqa.log `
+    --map gqa+=gemm --preset gemma4-26b-a4b --json calib.json
+```
+
+For each op, `factor = SQTT family ms / event ms` over the op's kernel families
+(`OP_KERNEL_FAMILIES` in `perfcommon.py`). Both sides over-state the
+uninstrumented time — SQTT stretches kernels, event pairs add marker packets
+and intra-op gaps — so `decode_model.py` divides by `max(1, factor)` and keeps
+the smaller. On gemma4 26B 2K: `matmul_nbits` 0.80 (events read ~10 µs per call
+high), `gqa` 1.10, `qmoe` 1.15. It refuses to report a factor unless
+SQTT dispatches per call come out a near-integer: a fractional count means the
+family map is wrong, the capture window is off, or the build differs. `gemm` is
+not in the default map because it is shared; on gemma4 decode it is `gqa`'s
+decomposed attention (proved by `-PerfOps gqa` matching SQTT only with it), and
+`--map gqa+=gemm` says so. Unmapped families are listed so none is silently
+dropped.
+
+A failed check prints the op's per-family counts. Some are genuine: on gemma4
+12b, hipBLASLt picks a split-K GEMM for some layers' attention and adds a
+`...PostGSU...` reduction kernel after it, so `gqa` averages 5.17 dispatches
+per call (`gemm` 2.17). Once you have found the extra kernel in the capture,
+`--accept gqa` records the override in the JSON instead of hiding it.
+
+### 6. Budget and rank
+
+```powershell
+python .\analysis\decode_model.py ...\dec_dispatches.csv --preset gemma4-26b-a4b `
+       --kv-len 2300 --calib calib.json --host-timeline $env:HIPEP_OUT\tl\g26_2k.json
+
+# how the ranking moves with context -- the only term that changes is the KV read
+python .\analysis\headroom.py --decode --preset gemma4-26b-a4b --calib calib.json `
+       --at 2300:21.5:...\dec2k_dispatches.csv   --host-timeline ...\g26_2k.json `
+       --at 16400:24.0:...\dec16k_dispatches.csv --host-timeline ...\g26_16k.json
+```
+
+With **both** `--calib` and `--host-timeline`, component times are the capture's
+kernel time with calibrated families divided by their factor, the step period
+comes from the host timeline, and the output gives recoverable ms and an upper
+bound on tok/s (recovery capped at `dec_sync`). It also checks a budget: the
+decoder's kernels must fit inside its measured compute (`dec_launch +
+dec_sync`). Calibrated kernels more than 5% over it mean some family is still
+inflated, so the output drops back to shares, `UNVALIDATED`, and says by how
+much. Measured on gemma4 at 2K, same build, env and prompt for all three runs:
+
+| model | decoder compute | calibrated kernels | result |
+|---|---|---|---|
+| 26B-A4B | 20.53 ms | 21.02 ms (+2.4%) | validated |
+| 12b | 44.28 ms | 52.84 ms (+19.3%) | shares only: `matmul_nbits` reads 41.8 ms by events *and* by SQTT, so both are inflated there and nothing here can say by how much |
+
+Two decode-floor terms were wrong before this and moved the 26B ranking:
+
+- **FFN kernels were filed as `attn_proj`.** SQTT has no shapes, and the FFN,
+  q/k/v/o and an int4 router all run `matmul_nbits` kernels once per layer.
+  They are now split by position (one GEMV before `gelu` and two after it are
+  the FFN; a GEMV followed directly by `softmax_row` is the router) into
+  `dense_mlp` and `router`. `dense_mlp`'s floor is the shared MLP beside the
+  experts (`dense_inter`), or a dense preset's whole FFN. On 26B `attn_proj`
+  went from 5.98 ms at 38% of floor, ranked first, to 3.70 ms at 62%.
+- **`kv_cache` charged every layer the full context.** Sliding layers read at
+  most the window and global layers have their own head geometry, as
+  `headroom.py`'s prefill floor already had it. The 26B 2K KV floor fell from
+  578 MB to 258 MB.
+
+Without both, it prints **shares only**, marked `UNVALIDATED (SQTT-relative)`
+and naming the missing input. It used to rescale the capture's split onto the
+measured ms/token; that charges SQTT's inflated gaps to the kernels, and it
+produced the wrong ranking — see [lessons](#sqtt-stretches-gaps-host-overhead-comes-from-the-host-timeline).
+
+A step is bounded by queue switches in the dispatch stream (a VLM decode step
+runs on more than one queue), checked against the layer-marker count, and
+kernels off the main queue land in `other_queue` rather than vanishing. Every
+ranked gain is an estimate; `bench/ab_interleaved.ps1 -Metric tps` decides.
 
 ### Quantisation is per-tensor, and it dominates the floor
 
@@ -233,9 +360,17 @@ Each of these is here because ignoring it produced a confident wrong answer.
 
 `HIPDNN_EP_PERF=1` costs about 4% on its own, which is larger than most changes
 worth shipping. SQTT is hardware thread tracing and perturbs far less, so it
-carries the timing. The harness clears `HIPDNN_EP_PERF`, `HIPDNN_EP_DEBUG` and
-`HIPDNN_EP_TRACE_FILE` before every run rather than trusting the shell to be
-clean.
+carries the kernel timing (but not the gaps — next section). The harness clears
+`HIPDNN_EP_PERF`, `HIPDNN_EP_PERF_OPS`, `HIPDNN_EP_DEBUG`,
+`HIPDNN_EP_TRACE_FILE` and `HIPDNN_EP_HOST_TIMELINE` before every run rather
+than trusting the shell to be clean.
+
+`HIPDNN_EP_PERF_OPS` is the profiler too. Its event pair around every selected
+call adds marker overhead and captures intra-op gaps, so an event-timed family
+can read *above* its SQTT time (gemma4 26B decode: `matmul_nbits` factor 0.80).
+Event times also moved ~3% between processes of the same build (11.2 vs 11.57
+ms per step), so neither number is exact; the budget check in
+`decode_model.py` is what says whether they are close enough.
 
 `HIPDNN_EP_TRACE_FILE` is the dangerous one. `hipdnn_ep_perf_enabled()` is true
 for it as well as for `HIPDNN_EP_PERF`, so it enables the profiler while
@@ -244,6 +379,43 @@ capture that wanted it. A 16K VLM baseline was reported as 17,587 ms for a
 whole round of analysis on that basis; the same binaries measure 14,455-14,610
 ms once the variable is gone, and re-setting it reproduces 17,545 ms on demand.
 Cross-check any suspicious baseline by re-running it in a fresh shell.
+
+### SQTT stretches gaps: host overhead comes from the host timeline
+
+Tracing slows the host far more than the GPU, so the idle between kernels in a
+capture is mostly the tracer. On gemma4 26B 2K decode, a CI-env capture spans
+27.9 ms per step (21.4 ms measured, x1.31) with 6.1 ms of it idle; the host
+timeline on the same build puts 0.84 ms outside the decoder session. Rescaling that capture onto the
+measured ms/token spread the phantom idle across the kernels in proportion,
+which ranked host overhead and the wrong kernels first. Only
+`host_timeline.py` sizes host time, and `decode_model.py` refuses absolute
+numbers without it.
+
+### A VLM decode step spans more than one queue
+
+The genai VLM path runs the embedding session on its own queue between decoder
+steps. Looking at the decoder queue alone, that time is a hole, and
+`decode_model.py` used to count it as GPU idle — more "overhead" to recover
+that was really another session's kernels. `decode_step_windows` now bounds
+steps where the stream switches queues, checks each against the layer-marker
+count (±10%: gemma4 26B runs 29 `topk_routing` in 30 layers), and puts the
+other queue's kernels in `other_queue`.
+
+### A standalone microbenchmark is a hypothesis, not a number
+
+Timing each gemma4 GEMV shape outside the model and swapping in the per-shape
+best predicted +4-8% decode throughput. The interleaved in-model A/B, with the
+model confirmed to run the new configs, measured 20.73 -> 20.85 ms/token (26B)
+and 44.20 -> 44.26 (12b): nothing. The standalone times had never been checked
+to add up to the model's in-model GEMV time. Check that with `-PerfOps` before
+extrapolating, and let `ab_interleaved.ps1` decide.
+
+### Capture the environment you measure
+
+The harness used to set `HIPDNN_EP_AUTOTUNE=1` and
+`HIPDNN_EP_MATMUL_CUSTOM_WMMA=1` for every capture. CI sets neither, so
+captures showed kernels and configs the benchmarked build never ran. Captures
+now inherit the CI environment; `-SetEnv` is the explicit opt-in.
 
 ### On an MoE model, synthetic ids are a different workload
 
@@ -378,6 +550,11 @@ A triple-launch of one interleaved A/B produced arms with `n=1` and a `nan` in t
 paired difference, on a machine whose 16K TTFT read 2018-2586 ms against a known
 1110 ms baseline. Each number is plausible on its own.
 
+The kill is scoped: `model_benchmark` and the RGP tools by name, and for
+Python drivers only process trees the harness itself started (recorded in
+`drivers.txt` under `$HIPEP_OUT` with their start time, so a recycled pid is
+never touched). It no longer kills every `python.exe` on the machine.
+
 `Enter-HarnessLock` in `common.ps1` now refuses to start a second run rather than
 corrupting both, and clears a lock whose owning pid is gone. It is held by the
 outermost script, so `ab_interleaved.ps1` driving `bench_ttft.ps1` stays one
@@ -406,7 +583,8 @@ measurement.
 | `capture/rgp_capture.ps1` | Take one capture — fence-positioned or auto-triggered, ± SPM — and decode it |
 | `capture/verify_rgp.py` | Fail a capture missing `SqttData`/`SpmCounterData` before anything reads it |
 | `bench/bench_ttft.ps1` | One clean TTFT run, appended to CSV |
-| `bench/bench_tps.ps1` | One clean decode-throughput run, CI-identical args |
+| `bench/bench_tps.ps1` | One clean decode-throughput run, CI-identical args; `-PerfOps` for in-model family GPU ms |
+| `bench/vlm_driver.py` | Run `vlm_benchmark.py` against `HIPEP_BIN` with a prompt file, as CI does |
 | `bench/ab_interleaved.ps1` | Interleaved, order-reversed A/B across DLL variants |
 | `bench/ab_summary.py` | Paired statistics over the rounds |
 | `analysis/perfcommon.py` | Model/device constants and dispatch-stream segmentation |
@@ -415,6 +593,8 @@ measurement.
 | `analysis/expert_blocks.py` | Per-M-bucket expert cost vs floor; which kernel each bucket used |
 | `analysis/prefill_model.py` | Two capture depths → whole-prefill composition |
 | `analysis/trace_ops.py` | Operator inventory and per-Run structure from an EP chrome trace |
+| `analysis/host_timeline.py` | Split a decode step on the host from `HIPDNN_EP_HOST_TIMELINE` |
+| `analysis/calibrate_sqtt.py` | Per-family SQTT/event factor, with a dispatches-per-call check |
 | `analysis/decode_model.py` | One decode step → per-component traffic vs its memory floor |
 | `analysis/headroom.py` | Rank candidates by recoverable seconds (`--decode` for per-token) |
 

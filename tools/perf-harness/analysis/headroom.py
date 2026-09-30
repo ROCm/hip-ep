@@ -90,42 +90,90 @@ def decode_main(argv) -> None:
         "--trace", action="store_true", help="sources are chrome traces, not CSVs"
     )
     ap.add_argument("--skip-runs", type=int, default=8)
+    ap.add_argument(
+        "--calib",
+        help="calibrate_sqtt.py --json output (dispatch CSV sources only)",
+    )
+    ap.add_argument(
+        "--host-timeline",
+        action="append",
+        default=[],
+        help="host_timeline.py --json (or run prefix), one per --at, in order",
+    )
     add_model_args(ap)
     args = ap.parse_args(argv)
     spec, dev = specs_from_args(args)
 
     import decode_model as dm
 
+    if args.calib and args.trace:
+        raise SystemExit("--calib applies to dispatch CSVs, not chrome traces")
+    if args.host_timeline and len(args.host_timeline) != len(args.at):
+        raise SystemExit(
+            "--host-timeline must be given once per --at, in the same order"
+        )
+    calib = dm.load_calib(args.calib) if args.calib else None
+    hosts = [dm.load_host_timeline(p) for p in args.host_timeline] or [None] * len(
+        args.at
+    )
+    # Same gate as decode_model.py: absolute component ms and recoverable ms
+    # only when every column has calibrated kernels and a real host timeline.
+    # Rescaling a capture's split onto the measured ms/token, which this used to
+    # do, charges SQTT's inflated idle gaps to the kernels.
+    validated = bool(calib) and all(hosts)
+    missing = [
+        n for n, v in (("--calib", calib), ("--host-timeline", all(hosts))) if not v
+    ]
+
     cols = []
-    for spec_str in args.at:
+    for spec_str, host in zip(args.at, hosts):
         parts = spec_str.split(":")
         if len(parts) < 2:
             raise SystemExit(f"--at wants KVLEN:MS[:SOURCE], got {spec_str!r}")
         kv, ms = int(parts[0]), float(parts[1])
         src = ":".join(parts[2:]) if len(parts) > 2 else None
+        times = None
         if src:
             if args.trace:
                 times, _n, _p = dm.from_trace(src, spec, args.skip_runs)
             else:
-                times, _n, _p = dm.from_dispatches(src, spec)
-            total = sum(times.values()) / 1000.0
-            # The measurement sets the magnitude; the source only sets the split
-            # (a trace's own total is inflated by the profiler, and a capture
-            # covers kernels only, not the gaps between them).
-            times = {k: v / 1000.0 * ms / total for k, v in times.items()}
-        else:
-            times = None
+                times, _n, _p = dm.from_dispatches(src, spec, calib=calib)
+            times = {k: v / 1000.0 for k, v in times.items() if k in dm.COMPONENT_ORDER}
+        if host:
+            ms = host["period"]
         cols.append((kv, ms, times))
+    # decode_model.py's budget gate, per column.
+    for (kv, _ms, times), host in zip(cols, hosts):
+        if validated and times and host:
+            over = (
+                100 * (sum(times.values()) - host["dec_compute"]) / host["dec_compute"]
+            )
+            if over > dm.BUDGET_TOL_PCT:
+                validated = False
+                missing.append(
+                    f"a budget that closes (kv={kv}: calibrated kernels exceed the"
+                    f" decoder compute by {over:.1f}%)"
+                )
+    if not validated:
+        for i, (kv, ms, times) in enumerate(cols):
+            if times:
+                total = sum(times.values())
+                cols[i] = (kv, ms, {k: 100 * v / total for k, v in times.items()})
 
     print(f"roofline {dev.bw_bytes_s / 1e9:.0f} GB/s   model {args.preset}")
-    print("weight traffic is context-independent; only kv_cache grows.\n")
+    print("weight traffic is context-independent; only kv_cache grows.")
+    if not validated:
+        print(f"*** {dm.UNVALIDATED}: missing {' and '.join(missing)}; component")
+        print("*** columns are shares of decoder kernel time, not ms.")
+    print()
 
     comps = dm.COMPONENT_ORDER
     header = f"{'component':<14}" + "".join(
         f"{'kv=' + str(kv):>22}" for kv, _ms, _t in cols
     )
     print(header)
-    print(f"{'':14}" + "".join(f"{'meas  floor  recov':>22}" for _ in cols))
+    sub = "meas  floor  recov" if validated else "share%  floor"
+    print(f"{'':14}" + "".join(f"{sub:>22}" for _ in cols))
     print("-" * len(header))
     totals = []
     for comp in comps:
@@ -138,10 +186,14 @@ def decode_main(argv) -> None:
                 row += f"{'-':>22}"
                 continue
             meas = times.get(comp, 0.0)
-            row += f"{meas:>8.2f}{fl:>7.2f}{max(0.0, meas - fl):>7.2f}"
+            if validated:
+                rec = max(0.0, meas - fl) if fl > 0 else 0.0
+                row += f"{meas:>8.2f}{fl:>7.2f}{rec:>7.2f}"
+            else:
+                row += f"{meas:>14.1f}{fl:>8.2f}"
         print(row)
     print("-" * len(header))
-    row = f"{'TOTAL':<14}"
+    row = f"{'TOTAL (step)':<14}"
     for kv, ms, times in cols:
         fl = spec.decode_bytes_total(kv) / dev.bw_bytes_s * 1000.0
         totals.append((kv, ms, fl))
@@ -152,22 +204,27 @@ def decode_main(argv) -> None:
     for kv, ms, fl in totals:
         print(f"{kv:>8}{1000 / ms:>11.1f}{1000 / fl:>13.1f}{100 * fl / ms:>11.0f}%")
 
-    print("\nranked by recoverable ms/token (at the longest context measured):")
     kv, ms, times = cols[-1]
-    if times:
+    if validated and times:
+        print("\nranked by recoverable ms/token (at the longest context measured;")
+        print("estimates -- confirm each with bench/ab_interleaved.ps1 -Metric tps):")
+        host = hosts[-1]
         byts = spec.decode_bytes(kv)
         byts["norm_other"] = 0.0
         rank = []
         for comp in comps:
             fl = byts.get(comp, 0.0) / dev.bw_bytes_s * 1000.0
             meas = times.get(comp, 0.0)
-            rank.append((comp, meas, fl, max(0.0, meas - fl)))
+            rank.append((comp, meas, fl, max(0.0, meas - fl) if fl > 0 else 0.0))
         for comp, meas, fl, rec in sorted(rank, key=lambda r: -r[3]):
             if rec <= 0.01:
                 continue
             pct = 100 * fl / meas if meas else 0
+            eff = min(rec, host["dec_sync"])
+            gain = 100 * (ms / (ms - eff) - 1)
             print(
                 f"  {comp:<14}{rec:>7.2f} ms   ({meas:.2f} -> {fl:.2f}, {pct:.0f}% of floor)"
+                f" -> up to +{gain:.1f}% tok/s"
             )
 
 

@@ -29,7 +29,14 @@
 #include <cstdlib>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <process.h> // _getpid
+#else
+#include <unistd.h> // getpid
+#endif
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -340,13 +347,91 @@ bool perf_enabled() {
   // HIPDNN_EP_TRACE_FILE. The trace case is load-bearing: without it a
   // trace-only run leaves perf=false here, so the per-op flush below never
   // runs and the chrome trace gets no per-op spans even though the runtime's
-  // OP_PROFILE scopes are collecting them.
+  // OP_PROFILE scopes are collecting them. HIPDNN_EP_PERF_OPS is the same
+  // case for the family-filtered profiler.
   static const bool enabled =
       hipdnn_ep::env_enabled("HIPDNN_EP_PERF") ||
-      !hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE").empty();
+      !hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE").empty() ||
+      !hipdnn_ep::env_string("HIPDNN_EP_PERF_OPS").empty();
   return enabled;
 #endif
 }
+
+// HIPDNN_EP_HOST_TIMELINE=<prefix>: per-Compute host timestamps (entry, after
+// input marshal, after inference_compute, exit) appended to
+// <prefix>.ep.<pid>.csv. Same steady_clock microsecond axis as the runtime's
+// <prefix>.sync.<pid>.csv (op_profile_us_since_epoch), so the two join into
+// launch phase vs. sync wait per Compute, and the gaps between Computes are
+// the host time outside the EP. No sync and no GPU work: a clock read per
+// phase and a buffered append every kBatch Computes.
+class HostTimeline {
+public:
+  struct Record {
+    const void *op;
+    double enterUs, afterMarshalUs, afterComputeUs, exitUs;
+  };
+
+  static HostTimeline &get() {
+    static HostTimeline tl;
+    return tl;
+  }
+
+  static double now_us() {
+    return std::chrono::duration<double, std::micro>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+
+  bool enabled() const { return !path_.empty(); }
+
+  void record(const Record &r) {
+    std::lock_guard<std::mutex> g(mu_);
+    buf_.push_back(r);
+    if (buf_.size() >= kBatch)
+      flush_locked();
+  }
+
+  ~HostTimeline() {
+    std::lock_guard<std::mutex> g(mu_);
+    flush_locked();
+  }
+
+private:
+  static constexpr size_t kBatch = 256;
+
+  HostTimeline() {
+    const std::string prefix = hipdnn_ep::env_string("HIPDNN_EP_HOST_TIMELINE");
+    if (prefix.empty())
+      return;
+#ifdef _WIN32
+    const long pid = static_cast<long>(_getpid());
+#else
+    const long pid = static_cast<long>(getpid());
+#endif
+    path_ = prefix + ".ep." + std::to_string(pid) + ".csv";
+    buf_.reserve(kBatch);
+  }
+
+  void flush_locked() {
+    if (buf_.empty())
+      return;
+    if (FILE *f = std::fopen(path_.c_str(), "a")) {
+      std::fseek(f, 0, SEEK_END);
+      if (std::ftell(f) == 0)
+        std::fprintf(f, "op,enter_us,after_marshal_us,after_compute_us,"
+                        "exit_us\n");
+      for (const Record &r : buf_)
+        std::fprintf(f, "%p,%.3f,%.3f,%.3f,%.3f\n", r.op, r.enterUs,
+                     r.afterMarshalUs, r.afterComputeUs, r.exitUs);
+      std::fclose(f);
+    }
+    buf_.clear();
+  }
+
+  std::string path_;
+  std::mutex mu_;
+  std::vector<Record> buf_;
+};
 
 struct PerfSample {
   double wall_ms;
@@ -722,6 +807,10 @@ MlirCustomOp::~MlirCustomOp() {
 void MlirCustomOp::compute_with_output_allocator(
     OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
+  HostTimeline &timeline = HostTimeline::get();
+  HostTimeline::Record tl{};
+  if (timeline.enabled())
+    tl = {this, HostTimeline::now_us(), 0.0, 0.0, 0.0};
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   // This dispatch emits its own PerfSample (§4 per-call distribution) and
@@ -738,6 +827,8 @@ void MlirCustomOp::compute_with_output_allocator(
 #endif
 
   auto inputs = marshal_input_tensors(context, input_index_map_);
+  if (timeline.enabled())
+    tl.afterMarshalUs = HostTimeline::now_us();
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   if (perf)
     t_after_in = EpPerfTimer::clock::now();
@@ -762,6 +853,8 @@ void MlirCustomOp::compute_with_output_allocator(
 #endif
 
   int ret = inference_state_->compute(&inputs.span);
+  if (timeline.enabled())
+    tl.afterComputeUs = HostTimeline::now_us();
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   if (perf)
@@ -822,6 +915,10 @@ void MlirCustomOp::compute_with_output_allocator(
   }
 #endif
 
+  if (timeline.enabled()) {
+    tl.exitUs = HostTimeline::now_us();
+    timeline.record(tl);
+  }
   MY_LOG(2) << "compute_with_output_allocator completed";
 }
 
