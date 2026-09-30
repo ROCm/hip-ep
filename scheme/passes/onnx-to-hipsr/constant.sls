@@ -36,11 +36,17 @@
          [!out-dev  (make-mlir-tensor-in-device-space !out-type)]
          [rank      (mlir-type-get-rank !out-type)])
     :rewrite %output :with
-        ;; Guard: no inline value → emit remark and defer to C++ fallback
-        (_ = (if (zero? (mlir-operation-has-attr op "value"))
-                 (begin (mlir-emit-remark! op "onnx-constant: no inline value, using fallback")
-                        #f)
-                 #t))
+        ;; Guard: only handle the inline value form here.
+        ;; External data (location/offset/size) defers to the C++ fallback.
+        ;; Broken (neither value nor location) also defers; C++ emits the diagnostic.
+        (_ = (cond
+               [(not (zero? (mlir-operation-has-attr op "value")))
+                #t]
+               [(not (zero? (mlir-operation-has-attr op "location")))
+                #f]  ; external data — C++ fallback handles it
+               [else
+                (begin (mlir-emit-error! op "onnx.Constant has neither value nor location")
+                       #f)]))
         ;; Rank 0 → arith.constant (host type); rank > 0 → hipsr.constant (device type)
         (%result = (let* ([!result-type (if (zero? rank) !out-type !out-dev)]
                           [c-op (mlir-build-operation
