@@ -132,16 +132,17 @@ int mlir_operation_use_empty(uint64_t op_ptr) {
   return op->use_empty() ? 1 : 0;
 }
 
-// Walk operation tree and call Scheme callback for each operation
+// Walk operation tree and call Scheme callback for each operation.
 // callback: Scheme procedure (lambda (op) ...)
 void mlir_operation_walk(uint64_t op, ptr callback) {
   if (!op) return;
   mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
-
-  cppOp->walk([callback](mlir::Operation* walkOp) {
+  mlir::hipsr::LockedSchemeObject locked(callback);  // pins callback for the walk duration
+  cppOp->walk([&locked](mlir::Operation* walkOp) {
     ptr schemeOp = Sunsigned64(reinterpret_cast<uint64_t>(walkOp));
-    Scall1(callback, schemeOp);
+    Scall1(locked.get(), schemeOp);
   });
+  // locked destructs here → Sunlock_object
 }
 
 

@@ -169,14 +169,13 @@ void mlir_conversion_target_add_dynamically_legal_op(
   if (!target_ptr || !ctx_ptr || !op_name) return;
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
-  Slock_object(callback);
-  // shared_ptr owns the GC lock: Sunlock_object fires when the lambda is destroyed.
-  auto lock_guard = std::shared_ptr<void>(callback, [](void* p) { Sunlock_object((ptr)p); });
+  // shared_ptr needed: std::function requires a copyable callable; LockedSchemeObject is non-copyable.
+  auto locked = std::make_shared<mlir::hipsr::LockedSchemeObject>(callback);
   target->addDynamicallyLegalOp(
       mlir::OperationName(op_name, ctx),
-      [callback, lock_guard](mlir::Operation* op) -> bool {
+      [locked](mlir::Operation* op) -> bool {
         ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
-        ptr result = Scall1(callback, op_arg);
+        ptr result = Scall1(locked->get(), op_arg);
         return result != Sfalse && result != Sfixnum(0);
       });
 }
@@ -184,12 +183,11 @@ void mlir_conversion_target_add_dynamically_legal_op(
 // Generic: mark unknown ops dynamically legal with a Scheme callback (op → bool)
 void mlir_conversion_target_mark_unknown_ops_dynamically_legal(uint64_t target_ptr, ptr callback) {
   if (!target_ptr) return;
-  Slock_object(callback);
-  auto lock_guard = std::shared_ptr<void>(callback, [](void* p) { Sunlock_object((ptr)p); });
+  auto locked = std::make_shared<mlir::hipsr::LockedSchemeObject>(callback);
   reinterpret_cast<mlir::ConversionTarget*>(target_ptr)
-      ->markUnknownOpDynamicallyLegal([callback, lock_guard](mlir::Operation* op) -> bool {
+      ->markUnknownOpDynamicallyLegal([locked](mlir::Operation* op) -> bool {
         ptr op_arg = Sunsigned64(reinterpret_cast<uint64_t>(op));
-        ptr result = Scall1(callback, op_arg);
+        ptr result = Scall1(locked->get(), op_arg);
         return result != Sfalse && result != Sfixnum(0);
       });
 }
@@ -200,11 +198,10 @@ void mlir_conversion_target_mark_unknown_ops_dynamically_legal(uint64_t target_p
 void mlir_type_converter_add_conversion(uint64_t converter_ptr, ptr callback) {
   if (!converter_ptr) return;
   auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
-  Slock_object(callback);
-  auto lock_guard = std::shared_ptr<void>(callback, [](void* p) { Sunlock_object((ptr)p); });
-  converter->addConversion([callback, lock_guard](mlir::Type type) -> std::optional<mlir::Type> {
+  auto locked = std::make_shared<mlir::hipsr::LockedSchemeObject>(callback);
+  converter->addConversion([locked](mlir::Type type) -> std::optional<mlir::Type> {
     ptr type_arg = Sunsigned64(reinterpret_cast<uint64_t>(type.getAsOpaquePointer()));
-    ptr result = Scall1(callback, type_arg);
+    ptr result = Scall1(locked->get(), type_arg);
     if (result == Sfalse) return std::nullopt;
     uint64_t result_val = Sunsigned64_value(result);
     if (result_val == 0) return std::nullopt;

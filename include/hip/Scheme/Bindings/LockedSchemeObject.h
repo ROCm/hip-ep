@@ -51,13 +51,23 @@ class LockedSchemeObject {
     }
   }
 
-  // Non-copyable
+  // Non-copyable — copying would require an additional Slock_object call,
+  // which is not what a moved-from owner semantics implies.
   LockedSchemeObject(const LockedSchemeObject&) = delete;
   LockedSchemeObject& operator=(const LockedSchemeObject&) = delete;
 
-  // Non-movable (moving would require updating lock count)
-  LockedSchemeObject(LockedSchemeObject&&) = delete;
-  LockedSchemeObject& operator=(LockedSchemeObject&&) = delete;
+  // Movable — transfers lock ownership; moved-from becomes a no-op on destruct.
+  LockedSchemeObject(LockedSchemeObject&& other) noexcept : obj_(other.obj_) {
+    other.obj_ = nullptr;
+  }
+  LockedSchemeObject& operator=(LockedSchemeObject&& other) noexcept {
+    if (this != &other) {
+      if (obj_ && obj_ != Sfalse) Sunlock_object(obj_);
+      obj_ = other.obj_;
+      other.obj_ = nullptr;
+    }
+    return *this;
+  }
 
   /// @brief Get the wrapped Scheme object
   /// @return The locked ptr
