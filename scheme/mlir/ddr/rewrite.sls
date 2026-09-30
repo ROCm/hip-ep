@@ -191,13 +191,15 @@
         (define (name->str x)
           (let ([datum (syntax->datum x)])
             (if (string? datum) datum (symbol->string datum))))
-        (define (make-setter name-str val-stx type-kw)
+        (define (make-setter name-str val-stx type-quoted-stx)
           (lambda (new-op-stx)
-            (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx] [t type-kw])
-              #'(mlir-operation-set-attr new-op n v 't))))
+            (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx]
+                          [type-q type-quoted-stx])
+              #'(mlir-operation-set-attr new-op n v type-q))))
         (syntax-case attr-stx (=)
           [(name = val type)
-           (make-setter (name->str #'name) #'val (syntax->datum #'type))]
+           ;; #''type = syntax for (quote :index) so :index is quoted in output
+           (make-setter (name->str #'name) #'val #''type)]
           [_ (syntax-violation 'with-mlir-ops
                "attr form requires type keyword: (name = val :i64|:index|...)"
                attr-stx)]))
