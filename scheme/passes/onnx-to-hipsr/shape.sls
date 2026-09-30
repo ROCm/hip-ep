@@ -91,7 +91,7 @@
          [start       (normalize-bound start-raw input-rank #f 0)]
          [end         (normalize-bound end-raw   input-rank #t  input-rank)]
          [num-dims    (- end start)]
-         [!shape-type (mlir-get-shape-shape-type ctx)]
+         [!shape-type (mlir-shape.shape-type ctx)]
          [!index-type (mlir-get-index-type       ctx)]
          [!i64-type   (mlir-get-i64-type         ctx)]
          [!ctx-type   (mlir-get-hipsr-context-type ctx)])

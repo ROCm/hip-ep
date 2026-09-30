@@ -14,16 +14,16 @@
 
 (library (mlir dialects shape)
   (export
-    mlir-get-shape-shape-type
-    mlir-get-shape-size-type
-    mlir-get-shape-witness-type)
+    mlir-shape.shape-type
+    mlir-shape.size-type
+    mlir-shape.witness-type)
   (import (chezscheme))
 
-  (define mlir-get-shape-shape-type
+  (define mlir-shape.shape-type
     (foreign-procedure "mlir_get_shape_shape_type" (uptr) uptr))
-  (define mlir-get-shape-size-type
+  (define mlir-shape.size-type
     (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
-  (define mlir-get-shape-witness-type
+  (define mlir-shape.witness-type
     (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
 
 ) ;; end library (mlir dialects shape)

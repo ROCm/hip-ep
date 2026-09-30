@@ -35,7 +35,7 @@
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
          [!out-device (make-mlir-tensor-in-device-space !out-type)]
-         [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))])
+         [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %lhs %rhs !out-device)
                         (^bb0 ((%ls : !shape-type) (%rs : !shape-type))
@@ -49,7 +49,7 @@
   ;;===--------------------------------------------------------------------===;;
 
   (define (make-binary-min! rewriter loc-op ctx lhs rhs out-type)
-    (let ([!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context loc-op))])
+    (let ([!shape-type (mlir-shape.shape-type (mlir-operation-get-context loc-op))])
       (mlir-set-insertion-point-before rewriter loc-op)
       (with-rewrite-builder (rewriter loc-op)
         (with-mlir-ops

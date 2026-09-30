@@ -68,8 +68,8 @@
          [!data-type  (mlir-value-get-type %data)]
          [!out-type   (mlir-value-get-type %output)]
          [!out-device (make-mlir-tensor-in-device-space !out-type)]
-         [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
-         [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
+         [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))]
+         [!size-type  (mlir-shape.size-type  (mlir-operation-get-context op))]
          [axis        (let ([a (mlir-operation-get-integer-attr op "axis" 0)])
                         (if (< a 0) (+ a (mlir-type-get-rank !data-type)) a))]
          ;; guard: only handle device data (eqv? avoids shadowed = keyword)

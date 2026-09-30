@@ -50,8 +50,8 @@
          [!in-type    (mlir-value-get-type %input)]
          [!out-type   (mlir-value-get-type %output)]
          [!out-device (make-mlir-tensor-in-device-space !out-type)]
-         [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
-         [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
+         [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))]
+         [!size-type  (mlir-shape.size-type  (mlir-operation-get-context op))]
          [perm        (let ([raw (mlir-operation-get-integer-array-attr op "perm")])
                         (if (null? raw)
                             ;; absent perm → reverse permutation

@@ -31,9 +31,9 @@
         ([%ctx           (mlir-get-hipsr-context-arg op)]
          [!output-type   (mlir-value-get-type %output)]
          [!output-device (make-mlir-tensor-in-device-space !output-type)]
-         [!shape-type    (mlir-get-shape-shape-type   (mlir-operation-get-context op))]
-         [!size-type     (mlir-get-shape-size-type    (mlir-operation-get-context op))]
-         [!witness-type  (mlir-get-shape-witness-type (mlir-operation-get-context op))]
+         [!shape-type    (mlir-shape.shape-type   (mlir-operation-get-context op))]
+         [!size-type     (mlir-shape.size-type    (mlir-operation-get-context op))]
+         [!witness-type  (mlir-shape.witness-type (mlir-operation-get-context op))]
          ;; Rank info from operand types (runtime)
          [a-rank         (mlir-type-get-rank (mlir-value-get-type %a))]
          [b-rank         (mlir-type-get-rank (mlir-value-get-type %b))]

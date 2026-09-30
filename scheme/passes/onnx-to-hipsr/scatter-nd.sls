@@ -29,7 +29,7 @@
         ([%ctx           (mlir-get-hipsr-context-arg op)]
          [!output-type   (mlir-value-get-type %output)]
          [!output-device (make-mlir-tensor-in-device-space !output-type)]
-         [!shape-type    (mlir-get-shape-shape-type (mlir-operation-get-context op))])
+         [!shape-type    (mlir-shape.shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         ;; placeholder ins = (%data) only: scatter output has data's shape
         (%placeholder = hipsr.placeholder (%ctx %data !output-device)
