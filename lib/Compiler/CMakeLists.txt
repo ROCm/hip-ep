@@ -48,13 +48,48 @@ if(ENABLE_ROCMLIRTRITON)
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
 
-  # resolveRocMlirArch asks the live GPU which chip to build for. Without this
-  # it can only guess, and a code object for the wrong chip fails at module
-  # load. Same gate the rest of the EP uses for HIP host APIs.
+  # resolveRocMlirArch asks the live GPU which chip to build for; a code object
+  # for the wrong chip fails at module load. Headers only, no hip::host link:
+  # hip-compiler links this library but only compiles, and a load-time HIP
+  # import stops it starting where no driver is installed.
   if(HIPDNN_EP_LINK_HIP_HOST)
     find_package(hip CONFIG REQUIRED)
-    target_link_libraries(LibHipCompiler PRIVATE hip::host)
+    target_include_directories(LibHipCompiler SYSTEM PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_INCLUDE_DIRECTORIES>)
+    # Definitions as well as includes: the HIP headers #error out unless
+    # __HIP_PLATFORM_AMD__ is set, and hip::host is what normally supplies it.
+    target_compile_definitions(LibHipCompiler PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_COMPILE_DEFINITIONS>)
     target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+    target_link_libraries(LibHipCompiler PRIVATE ${CMAKE_DL_LIBS})
+    # Real library name for the on-demand load, not a literal: Windows ships a
+    # version-suffixed amdhip64_<major>.dll. Unknown means no device query.
+    set(_hip_runtime_name "")
+    if(TARGET hip::amdhip64)
+      set(_hip_runtime_loc "")
+      get_target_property(_hip_runtime_cfgs hip::amdhip64 IMPORTED_CONFIGURATIONS)
+      foreach(_cfg IN LISTS _hip_runtime_cfgs)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION_${_cfg})
+        if(_hip_runtime_loc)
+          break()
+        endif()
+      endforeach()
+      # IMPORTED_CONFIGURATIONS is optional, and a package that sets only the
+      # unqualified location would otherwise lose the device query entirely.
+      if(NOT _hip_runtime_loc)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION)
+      endif()
+      if(_hip_runtime_loc)
+        get_filename_component(_hip_runtime_name "${_hip_runtime_loc}" NAME)
+      endif()
+    endif()
+    if(_hip_runtime_name)
+      target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_HIP_RUNTIME_LIB=\"${_hip_runtime_name}\"")
+    else()
+      message(STATUS "[onnx-hipdnn-ep] HIP runtime library name unknown; "
+                     "rocMLIR arch will come from HIP_ARCHITECTURES")
+    endif()
   endif()
   # Last resort when there is no device to ask: whatever this build targets.
   if(HIP_ARCHITECTURES)
