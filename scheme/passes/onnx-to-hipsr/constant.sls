@@ -22,33 +22,32 @@
 
 (library (passes onnx-to-hipsr constant)
   (export populate-constant-patterns)
-  (import (rnrs (6))
+  (import (except (rnrs (6)) =)
           (mlir core ir)
           (mlir core conversion)
-          (mlir dialects hipsr))
+          (mlir dialects hipsr)
+          (mlir ddr))
 
-  (define (onnx-constant->hipsr op operands-ref rewriter type-converter)
-    ;; Fail fast if there is no inline value (external data path)
-    (if (= 0 (mlir-operation-has-attr op "value"))
-        #f
-        (let* ((out-type  (mlir-value-get-type (mlir-operation-get-result op 0)))
-               (out-dev   (make-mlir-tensor-in-device-space out-type))
-               (rank      (mlir-type-get-rank out-type)))
-          (if (= rank 0)
-              ;; Rank-0 scalar: arith.constant keeps the raw (unencoded) result type
-              (begin
-                (mlir-set-insertion-point-before rewriter op)
-                (let* ((c-op (mlir-build-operation-op rewriter op "arith.constant" '() (list out-type))))
-                  (mlir-operation-copy-attr c-op "value" op "value")
-                  (mlir-replace-op rewriter op (mlir-operation-get-result c-op 0))
-                  #t))
-              ;; Rank > 0: hipsr.constant with device result type
-              (begin
-                (mlir-set-insertion-point-before rewriter op)
-                (let* ((c-op (mlir-build-operation-op rewriter op "hipsr.constant" '() (list out-dev))))
-                  (mlir-operation-copy-attr c-op "value" op "value")
-                  (mlir-replace-op rewriter op (mlir-operation-get-result c-op 0))
-                  #t))))))
+  (define-conversion-pattern (onnx-constant->hipsr op operands-ref rewriter type-converter)
+    :match
+        %output = onnx.Constant ()
+    :then-let
+        ([!out-type (mlir-value-get-type %output)]
+         [!out-dev  (make-mlir-tensor-in-device-space !out-type)]
+         [rank      (mlir-type-get-rank !out-type)])
+    :rewrite %output :with
+        ;; Guard: no inline value → emit remark and defer to C++ fallback
+        (_ = (if (zero? (mlir-operation-has-attr op "value"))
+                 (begin (mlir-emit-remark! op "onnx-constant: no inline value, using fallback")
+                        #f)
+                 #t))
+        ;; Rank 0 → arith.constant (host type); rank > 0 → hipsr.constant (device type)
+        (%result = (let* ([!result-type (if (= rank 0) !out-type !out-dev)]
+                          [c-op (mlir-build-operation
+                                  (if (= rank 0) "arith.constant" "hipsr.constant")
+                                  '() (list !result-type))])
+                     (mlir-operation-copy-attr c-op "value" op "value")
+                     (mlir-operation-get-result c-op 0))))
 
   (define (populate-constant-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
