@@ -332,9 +332,16 @@ def op_for_family(family: str, fmap: dict[str, dict[str, tuple]]) -> str | None:
 
 
 def load_dispatches(path: str) -> list[dict]:
-    """Dispatch rows in time order, the parser's own artifact rows dropped."""
-    rows = [r for r in csv.DictReader(open(path)) if r.get("is_artifact") != "1"]
+    """Dispatch rows in time order. The parser's artifact rows (no waves
+    attributed, so no trustworthy duration) are kept with zero duration and
+    r["artifact"] set: the dispatch still happened, so dropping it undercounts
+    layer markers (15 of 72 topk_routing on a gemma-4-26B 16K capture, which
+    failed every step window) and breaks the adjacency rules in decode_model."""
+    rows = list(csv.DictReader(open(path)))
     for r in rows:
+        r["artifact"] = r.get("is_artifact") == "1"
+        if r["artifact"]:
+            r["dur_us"] = "0"
         r["t0"] = float(r["ts_us"])
         r["t1"] = r["t0"] + float(r["dur_us"])
     rows.sort(key=lambda r: r["t0"])
@@ -396,7 +403,11 @@ def perf_op_tables(path: str) -> list[dict[str, tuple[int, float]]]:
     """Every per-Compute `[PERF] ===` op table in a log: {op: (calls, gpu_ms)}."""
     tables: list[dict[str, tuple[int, float]]] = []
     cur: dict[str, tuple[int, float]] | None = None
-    with open(path, encoding="utf-8", errors="replace") as f:
+    # Windows PowerShell 5.1's Tee-Object writes UTF-16; read as UTF-8 it
+    # matches nothing and the log looks like it has no tables.
+    with open(path, "rb") as f:
+        enc = "utf-16" if f.read(2) in (b"\xff\xfe", b"\xfe\xff") else "utf-8"
+    with open(path, encoding=enc, errors="replace") as f:
         for line in f:
             line = line.rstrip("\r\n")
             if _PERF_BORDER.match(line):

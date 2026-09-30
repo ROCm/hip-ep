@@ -292,6 +292,14 @@ A failed check prints the op's per-family counts. Some are genuine: on gemma4
 per call (`gemm` 2.17). Once you have found the extra kernel in the capture,
 `--accept gqa` records the override in the JSON instead of hiding it.
 
+The markers' own GPU cost can be subtracted rather than bounded. Give each
+`-PerfOps` run its own `-SetEnv HIPDNN_EP_HOST_TIMELINE=...`, add one
+`-PerfOps none` run (PERF mode on, no op selected) as the base, and pass
+`--base-timeline base.json --op-timeline matmul_nbits=mnb.json ...`. Because
+the decoder is GPU-bound, the rise in its launch + sync wait over the base is
+what the op's start/end pairs add; that is taken off the op's event time
+before the factor is formed, and both numbers go into the JSON.
+
 ### 6. Budget and rank
 
 ```powershell
