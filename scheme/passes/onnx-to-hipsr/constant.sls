@@ -69,8 +69,11 @@
          [!out-type   (mlir-value-get-type %output)]
          [$value-attr (constant-value-attr op ctx !out-type)])
     :rewrite %output :with
-        (_ = $value-attr)
-        (%result = arith.constant () ("value" = $value-attr) -> !out-type))
+        (%result = (and $value-attr
+                        (let* ([c-op (mlir-build-operation "arith.constant"
+                                        '() (list !out-type))])
+                          (mlir-operation-set-attribute! c-op "value" $value-attr)
+                          (mlir-operation-get-result c-op 0)))))
 
   ;; Pattern 2: ranked tensor → hipsr.constant (device result type)
   (define-conversion-pattern (onnx-constant-tensor->hipsr op operands-ref rewriter type-converter)
@@ -83,8 +86,11 @@
          [!out-dev    (make-mlir-tensor-in-device-space !out-type)]
          [$value-attr (constant-value-attr op ctx !out-dev)])
     :rewrite %output :with
-        (_ = $value-attr)
-        (%result = hipsr.constant () ("value" = $value-attr) -> !out-dev))
+        (%result = (and $value-attr
+                        (let* ([c-op (mlir-build-operation "hipsr.constant"
+                                        '() (list !out-dev))])
+                          (mlir-operation-set-attribute! c-op "value" $value-attr)
+                          (mlir-operation-get-result c-op 0)))))
 
   (define (populate-constant-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
