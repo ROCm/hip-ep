@@ -190,22 +190,29 @@
                (char=? #\^ (string-ref (symbol->string datum) 0)))))
 
       ;; Returns a closure (lambda (new-op-stx) → setter-syntax) for one attr form.
-      ;; Generates (mlir-operation-set-attribute! op name (make-mlir-attribute ctx type val)).
+      ;;
+      ;; Two forms:
+      ;;   (name = val type)  — construct attr via (make-mlir-attribute ctx type val)
+      ;;   (name = val)       — val is already an attr uptr; set directly
       (define (make-attr-setter attr-stx)
         (define (name->str x)
           (let ([datum (syntax->datum x)])
             (if (string? datum) datum (symbol->string datum))))
-        (define (make-setter name-str val-stx type-quoted-stx)
+        (define (make-typed-setter name-str val-stx type-quoted-stx)
           (lambda (new-op-stx)
             (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx]
                           [type-q type-quoted-stx])
               #'(mlir-operation-set-attribute! new-op n
                    (make-mlir-attribute (mlir-operation-get-context new-op) type-q v)))))
+        (define (make-direct-setter name-str val-stx)
+          (lambda (new-op-stx)
+            (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx])
+              #'(mlir-operation-set-attribute! new-op n v))))
         (syntax-case attr-stx (=)
-          [(name = val type)
-           (make-setter (name->str #'name) #'val #''type)]
+          [(name = val type)  (make-typed-setter  (name->str #'name) #'val #''type)]
+          [(name = val)       (make-direct-setter (name->str #'name) #'val)]
           [_ (syntax-violation 'with-mlir-ops
-               "attr form requires type keyword: (name = val :i64|:index|...)"
+               "attr modifier: (name = val :type) or (name = val) for pre-built attr"
                attr-stx)]))
 
       ;;-------------------------------------------------------------------

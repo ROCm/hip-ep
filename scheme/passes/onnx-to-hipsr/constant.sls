@@ -8,14 +8,11 @@
 ;;
 ;; onnx.Constant → hipsr.constant (or arith.constant for rank-0 scalars)
 ;;
-;; Mirrors C++ ConstantOpLowering exactly:
-;;   - Inline value (ElementsAttr) → rank-0: arith.constant, rank>0: hipsr.constant
-;;   - ORT in-memory ("*/_ORT_MEM_ADDR_/*"): zero-copy DenseResourceElementsAttr
-;;   - File-backed: memory-mapped DenseResourceElementsAttr
-;;   - Neither value nor location → emit error
-;;
-;; DenseResourceElementsAttr is constructed via make-mlir-attribute :dense-resource
-;; with (list result-type key data-addr data-size).
+;; Mirrors C++ ConstantOpLowering:
+;;   - Inline value   → rank-0: arith.constant, rank>0: hipsr.constant
+;;   - ORT in-memory  → hipsr.constant with DenseResourceElementsAttr (zero-copy)
+;;   - File-backed    → hipsr.constant with DenseResourceElementsAttr (mmap)
+;;   - Neither        → emit error, pattern failure
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -28,64 +25,58 @@
           (mlir dialects hipsr)
           (mlir ddr))
 
-  ;; Mirrors kOrtMemAddrTag in OnnxToHip.cpp.
   (define kOrtMemAddrTag "*/_ORT_MEM_ADDR_/*")
 
-  ;; Build a DenseResourceElementsAttr using make-mlir-attribute :dense-resource.
+  ;; Build a DenseResourceElementsAttr from external constant data.
+  ;; location: kOrtMemAddrTag → ORT zero-copy; otherwise an absolute file path.
   ;; Returns attr uptr or 0 on failure.
-  (define (build-dense-resource-attr ctx !result-type location offset size)
+  (define (build-dense-resource location offset size ctx !result-type)
     (if (string=? location kOrtMemAddrTag)
-        ;; ORT in-memory: offset IS the raw address; build key from it.
-        (let ([key (string-append "mem|0x" (number->string offset 16))])
-          (make-mlir-attribute ctx :dense-resource
-            (list !result-type key offset size)))
-        ;; File-backed: memory-map the file, get the buffer start address.
+        (make-mlir-attribute ctx :dense-resource
+          (list !result-type
+                (string-append "mem|0x" (number->string offset 16))
+                offset size))
         (let ([buf-addr (mlir-hipsr-load-file-map ctx location)])
           (if (zero? buf-addr)
               0
-              (let ([key (string-append "file|" location "|"
-                                        (number->string offset))])
-                (make-mlir-attribute ctx :dense-resource
-                  (list !result-type key (+ buf-addr offset) size)))))))
+              (make-mlir-attribute ctx :dense-resource
+                (list !result-type
+                      (string-append "file|" location "|" (number->string offset))
+                      (+ buf-addr offset) size))))))
 
   (define-conversion-pattern (onnx-constant->hipsr op operands-ref rewriter type-converter)
     :match
         %output = onnx.Constant ()
     :then-let
-        ([ctx       (mlir-operation-get-context op)]
-         [!out-type (mlir-value-get-type %output)]
-         [!out-dev  (make-mlir-tensor-in-device-space !out-type)]
-         [rank      (mlir-type-get-rank !out-type)])
+        ([ctx         (mlir-operation-get-context op)]
+         [!out-type   (mlir-value-get-type %output)]
+         [!out-dev    (make-mlir-tensor-in-device-space !out-type)]
+         [rank        (mlir-type-get-rank !out-type)]
+         ;; Compute the value attr up-front; #f means error already emitted.
+         [$value-attr (cond
+                        [(mlir-operation-has-attr? op "value")
+                         (mlir-operation-get-attribute op "value")]
+                        [(mlir-operation-has-attr? op "location")
+                         (let ([r (build-dense-resource
+                                    (mlir-operation-get-attr op "location" :string)
+                                    (mlir-operation-get-attr op "offset"   :i64 0)
+                                    (mlir-operation-get-attr op "size"     :i64 0)
+                                    ctx !out-dev)])
+                           (or (and (not (zero? r)) r)
+                               (begin (mlir-emit-error! op "onnx.Constant: cannot build resource")
+                                      #f)))]
+                        [else
+                         (begin (mlir-emit-error! op "onnx.Constant has neither value nor location")
+                                #f)])])
     :rewrite %output :with
-        (%result =
-          (cond
-            ;; Inline value: rank-0 → arith.constant, rank>0 → hipsr.constant
-            [(mlir-operation-has-attr? op "value")
-             (let* ([!result-type (if (zero? rank) !out-type !out-dev)]
-                    [c-op (mlir-build-operation
-                            (if (zero? rank) "arith.constant" "hipsr.constant")
-                            '() (list !result-type))])
-               (mlir-operation-set-attribute! c-op "value"
-                 (mlir-operation-get-attribute op "value"))
-               (mlir-operation-get-result c-op 0))]
-            ;; External data: build DenseResourceElementsAttr, then hipsr.constant
-            [(mlir-operation-has-attr? op "location")
-             (let* ([location   (mlir-operation-get-attr op "location" :string)]
-                    [offset     (mlir-operation-get-attr op "offset"   :i64 0)]
-                    [size       (mlir-operation-get-attr op "size"     :i64 0)]
-                    [value-attr (build-dense-resource-attr ctx !out-dev
-                                   location offset size)])
-               (if (zero? value-attr)
-                   (begin (mlir-emit-error! op "onnx.Constant: cannot build external resource")
-                          #f)
-                   (let* ([c-op (mlir-build-operation "hipsr.constant"
-                                   '() (list !out-dev))])
-                     (mlir-operation-set-attribute! c-op "value" value-attr)
-                     (mlir-operation-get-result c-op 0))))]
-            ;; Neither — mirrors C++ notifyMatchFailure
-            [else
-             (begin (mlir-emit-error! op "onnx.Constant has neither value nor location")
-                    #f)])))
+        ;; Guard: fail fast if no value attr was built.
+        (_ = $value-attr)
+        ;; rank-0 → arith.constant (host type); rank>0 → hipsr.constant (device type)
+        (%result = (let* ([!type (if (zero? rank) !out-type !out-dev)]
+                          [name  (if (zero? rank) "arith.constant" "hipsr.constant")]
+                          [c-op  (mlir-build-operation name '() (list !type))])
+                     (mlir-operation-set-attribute! c-op "value" $value-attr)
+                     (mlir-operation-get-result c-op 0))))
 
   (define (populate-constant-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
