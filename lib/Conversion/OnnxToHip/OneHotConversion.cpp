@@ -54,10 +54,12 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
       // The depth-axis extent is the runtime *value* of the `depth` scalar
       // (data-dependent), NOT any static dim of the `depth` tensor. It must be
       // read back to the host so tensor.empty sizes the output buffer to the
-      // real depth. A hardcoded 1, or a tensor.dim(depth, 0) (which yields the
-      // depth tensor's SHAPE, not its value), both make the axis extent 1: the
-      // scatter then drops every index >= 1 (`c >= oshape[axis]`) and any
-      // downstream pooling collapses to a single row.
+      // real depth. wrap_one_hot does not D2H depth again: the kernel uses
+      // output_shape[axis], which this alloc establishes. A hardcoded 1, or a
+      // tensor.dim(depth, 0) (which yields the depth tensor's SHAPE, not its
+      // value), both make the axis extent 1: the scatter then drops every
+      // index >= 1 (`c >= oshape[axis]`) and any downstream pooling collapses
+      // to a single row.
       //
       // Before:  %init = tensor.empty(%c1) : tensor<...x?x...>  // extent 1
       // (BUG) After:   %d  = hip.readback_scalar %ctx, %depth : i64

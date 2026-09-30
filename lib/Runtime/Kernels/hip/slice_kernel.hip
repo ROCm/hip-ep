@@ -10,22 +10,23 @@
  * kernel only services slices whose `starts` / `ends` / `axes` / `steps`
  * are NOT graph-constant, or that have negative steps.
  *
- * The host wrapper does the heavy lifting:
- *   - D2H of the index tensors (typically tiny: a few int64s).
- *   - Per-axis resolution of `start` / `step` per ONNX spec (negative
- *     indices, clamping, axes that default to [0..r-1] when absent,
- *     steps that default to 1).
- *   - Output shape is provided by the IR (the lowering requires static
- *     output shape).
+ * Index resolution lives on the device so wrap_slice does not D2H the
+ * (tiny) index tensors or hipStreamSynchronize the inference stream:
  *
- * Each kernel thread:
- *   1. Computes its output coordinate `(out_coord[0], ..., out_coord[r-1])`
- *      from its linear thread id via the output strides.
- *   2. For each dim d, computes `in_coord[d] = start[d] + out_coord[d] * step[d]`.
- *   3. Linearises `in_coord` via the input strides and copies the element.
+ *   Before: host memcpyAsync(D2H) starts/ends/axes/steps, stream sync,
+ *           ONNX clamp on the CPU, launch with host (start, step,
+ *           logical_extent) arrays.
+ *   After:  launch immediately. Thread 0 of each block reads the index
+ *           tensors, applies the ONNX-13+ negative-index + clamp rules
+ *           into shared memory, and every output thread uses those
+ *           resolved (start, step, logical_extent) triples.
  *
- * No bounds checks — the host wrapper is responsible for producing valid
- * (start, step, output_size) triples per axis.
+ * Each copy thread:
+ *   1. Computes its output coordinate from its linear thread id.
+ *   2. If any axis is past its logical extent, writes zero (over-allocated
+ *      tail from SliceToHip's compile-time upper bound).
+ *   3. Else in_coord[d] = start[d] + out_coord[d] * step[d], linearises
+ *      via input strides, and copies the element.
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  */
@@ -43,36 +44,114 @@ static constexpr int kSliceMaxRank = 8;
 struct SliceParams {
   int64_t input_strides[kSliceMaxRank];
   int64_t output_strides[kSliceMaxRank];
-  // logical_extent[d] = the actual per-axis slice output extent. For
-  // axes not touched by `axes`, equals the data dim. For touched axes,
-  // equals `(end-start) / step` (positive step) clamped to >= 0. When
-  // logical_extent[d] < the physical output dim (i.e. the IR-supplied
-  // output_shape's d-th dim), the host has OVER-ALLOCATED the output
-  // buffer because `SliceToHip` could not constant-fold the per-axis
-  // extent at compile time (typical for slices whose starts/ends are
-  // runtime Gather outputs inside an outlined loop body). The kernel
-  // iterates physical positions and fills the over-allocated tail with
-  // zeros so downstream consumers operating on the full physical extent
-  // see clean deterministic data instead of pool garbage.
-  int64_t logical_extent[kSliceMaxRank];
-  // start[d] and step[d] are signed; step may be negative when slicing
-  // with a reverse stride.
-  int64_t start_per_axis[kSliceMaxRank];
-  int64_t step_per_axis[kSliceMaxRank];
+  int64_t input_dims[kSliceMaxRank];
+  int64_t output_dims[kSliceMaxRank];
   int rank;
 };
+
+struct ResolvedSlice {
+  int64_t start_per_axis[kSliceMaxRank];
+  int64_t step_per_axis[kSliceMaxRank];
+  int64_t logical_extent[kSliceMaxRank];
+  int error;
+};
+
+__device__ __forceinline__ int64_t slice_clamp(int64_t v, int64_t lo,
+                                               int64_t hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// ONNX-13+ Slice: per-axis start/step plus the logical output extent used
+// to zero the over-allocated tail. Invalid axis / duplicate axis / step 0
+// / extent past the physical buffer set `out.error` and keep writing with
+// clamped values so the kernel cannot store out of bounds.
+__device__ void resolve_onnx_slice(const int64_t *__restrict__ starts,
+                                   const int64_t *__restrict__ ends,
+                                   const int64_t *axes, const int64_t *steps,
+                                   int64_t K, const SliceParams &p,
+                                   ResolvedSlice *out) {
+  out->error = 0;
+  bool axis_set[kSliceMaxRank] = {};
+  for (int d = 0; d < p.rank; ++d) {
+    out->start_per_axis[d] = 0;
+    out->step_per_axis[d] = 1;
+    out->logical_extent[d] = p.output_dims[d];
+  }
+  for (int64_t k = 0; k < K; ++k) {
+    int64_t axis = axes ? axes[k] : k;
+    if (axis < 0)
+      axis += p.rank;
+    if (axis < 0 || axis >= p.rank) {
+      out->error = -1;
+      continue;
+    }
+    if (axis_set[axis]) {
+      out->error = -1;
+      continue;
+    }
+    axis_set[axis] = true;
+
+    int64_t dim = p.input_dims[axis];
+    int64_t start = starts[k];
+    int64_t end = ends[k];
+    int64_t step = steps ? steps[k] : 1;
+    if (step == 0) {
+      out->error = -1;
+      continue;
+    }
+
+    if (start < 0)
+      start += dim;
+    if (end < 0)
+      end += dim;
+    if (step > 0) {
+      start = slice_clamp(start, 0, dim);
+      end = slice_clamp(end, 0, dim);
+    } else {
+      start = slice_clamp(start, 0, dim - 1);
+      end = slice_clamp(end, -1, dim - 1);
+    }
+
+    out->start_per_axis[axis] = start;
+    out->step_per_axis[axis] = step;
+
+    int64_t expected;
+    if (step > 0)
+      expected = (end - start + step - 1) / step;
+    else
+      expected = (end - start + step + 1) / step;
+    if (expected < 0)
+      expected = 0;
+    if (expected > p.output_dims[axis]) {
+      out->error = -1;
+      expected = p.output_dims[axis];
+    }
+    out->logical_extent[axis] = expected;
+  }
+}
 
 template <typename T>
 __global__ void hip_slice_kernel(const T *__restrict__ input,
                                  T *__restrict__ output, SliceParams p,
-                                 int64_t num_output_elements) {
+                                 const int64_t *__restrict__ starts,
+                                 const int64_t *__restrict__ ends,
+                                 const int64_t *axes, const int64_t *steps,
+                                 int64_t K, int64_t num_output_elements,
+                                 int *device_error_flag) {
+  __shared__ ResolvedSlice resolved;
+  if (threadIdx.x == 0)
+    resolve_onnx_slice(starts, ends, axes, steps, K, p, &resolved);
+  __syncthreads();
+
+  if (resolved.error && device_error_flag && threadIdx.x == 0 &&
+      blockIdx.x == 0)
+    *device_error_flag = -1;
+
   int64_t out_idx =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (out_idx >= num_output_elements)
     return;
 
-  // Decode physical coord, then check whether every axis is within its
-  // logical extent. Any over-allocated tail position writes zero.
   int64_t remaining = out_idx;
   int64_t coord[kSliceMaxRank];
   for (int d = 0; d < p.rank; ++d) {
@@ -83,7 +162,7 @@ __global__ void hip_slice_kernel(const T *__restrict__ input,
 
   bool in_logical = true;
   for (int d = 0; d < p.rank; ++d) {
-    if (coord[d] >= p.logical_extent[d]) {
+    if (coord[d] >= resolved.logical_extent[d]) {
       in_logical = false;
       break;
     }
@@ -95,7 +174,8 @@ __global__ void hip_slice_kernel(const T *__restrict__ input,
 
   int64_t in_offset = 0;
   for (int d = 0; d < p.rank; ++d) {
-    int64_t in_coord = p.start_per_axis[d] + coord[d] * p.step_per_axis[d];
+    int64_t in_coord =
+        resolved.start_per_axis[d] + coord[d] * resolved.step_per_axis[d];
     in_offset += in_coord * p.input_strides[d];
   }
 
@@ -114,14 +194,26 @@ static void compute_row_major_strides(const int64_t *shape, int rank,
 extern "C" int hip_slice(void *stream, const void *input, void *output,
                          const int64_t *input_shape_host,
                          const int64_t *output_shape_host,
-                         const int64_t *logical_extent_host,
-                         const int64_t *starts_per_axis_host,
-                         const int64_t *steps_per_axis_host, int rank,
-                         int hip_dtype) {
+                         const int64_t *starts_dev, const int64_t *ends_dev,
+                         const int64_t *axes_dev, const int64_t *steps_dev,
+                         int64_t starts_num_elements, int rank, int hip_dtype,
+                         void *device_error_flag) {
   if (rank <= 0 || rank > kSliceMaxRank) {
     fprintf(stderr,
             "[custom_kernels] hip_slice: rank=%d out of range [1, %d]\n", rank,
             kSliceMaxRank);
+    return -1;
+  }
+  if (!input || !output || !input_shape_host || !output_shape_host ||
+      !starts_dev || !ends_dev) {
+    fprintf(stderr, "[custom_kernels] hip_slice: null required pointer\n");
+    return -1;
+  }
+  if (starts_num_elements <= 0 || starts_num_elements > kSliceMaxRank) {
+    fprintf(stderr,
+            "[custom_kernels] hip_slice: starts_num_elements=%lld out of "
+            "range [1, %d]\n",
+            (long long)starts_num_elements, kSliceMaxRank);
     return -1;
   }
 
@@ -130,10 +222,8 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
   compute_row_major_strides(input_shape_host, rank, p.input_strides);
   compute_row_major_strides(output_shape_host, rank, p.output_strides);
   for (int d = 0; d < rank; ++d) {
-    p.start_per_axis[d] = starts_per_axis_host[d];
-    p.step_per_axis[d] = steps_per_axis_host[d];
-    p.logical_extent[d] =
-        logical_extent_host ? logical_extent_host[d] : output_shape_host[d];
+    p.input_dims[d] = input_shape_host[d];
+    p.output_dims[d] = output_shape_host[d];
   }
 
   int64_t num_output_elements = 1;
@@ -148,33 +238,47 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
       (num_output_elements + kBlockSize - 1) / kBlockSize);
 
   CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_slice: dtype=%d, rank=%d, "
-                           "num_out=%lld\n",
-                           hip_dtype, rank, (long long)num_output_elements);
+                           "K=%lld, num_out=%lld\n",
+                           hip_dtype, rank, (long long)starts_num_elements,
+                           (long long)num_output_elements);
 
+  (void)hipGetLastError();
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<__half>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(input),
-                       static_cast<__half *>(output), p, num_output_elements);
+                       static_cast<__half *>(output), p, starts_dev, ends_dev,
+                       axes_dev, steps_dev, starts_num_elements,
+                       num_output_elements,
+                       static_cast<int *>(device_error_flag));
     break;
   case HIP_DTYPE_FLOAT32:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<float>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const float *>(input),
-                       static_cast<float *>(output), p, num_output_elements);
+                       static_cast<float *>(output), p, starts_dev, ends_dev,
+                       axes_dev, steps_dev, starts_num_elements,
+                       num_output_elements,
+                       static_cast<int *>(device_error_flag));
     break;
   case HIP_DTYPE_INT32:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<int32_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int32_t *>(input),
-                       static_cast<int32_t *>(output), p, num_output_elements);
+                       static_cast<int32_t *>(output), p, starts_dev, ends_dev,
+                       axes_dev, steps_dev, starts_num_elements,
+                       num_output_elements,
+                       static_cast<int *>(device_error_flag));
     break;
   case HIP_DTYPE_INT64:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<int64_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int64_t *>(input),
-                       static_cast<int64_t *>(output), p, num_output_elements);
+                       static_cast<int64_t *>(output), p, starts_dev, ends_dev,
+                       axes_dev, steps_dev, starts_num_elements,
+                       num_output_elements,
+                       static_cast<int *>(device_error_flag));
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_slice: unsupported dtype=%d\n",
