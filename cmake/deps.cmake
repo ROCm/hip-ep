@@ -36,8 +36,6 @@ endif()
 #     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
 #     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
 #     tablegen collector or include-dir export.
-#   - rocmlirTriton-demote-gcc-warning-errors.patch: keep GCC's shadowing and
-#     null-dereference diagnostics visible without failing rocMLIR's strict build.
 #
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
@@ -54,8 +52,7 @@ endif()
 # applied and we skip; otherwise we (re)apply the series from a pristine tree.
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-demote-gcc-warning-errors.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
   get_filename_component(_p "${_p}" ABSOLUTE)
@@ -441,8 +438,28 @@ if(ENABLE_ROCMLIRTRITON)
   endif()
 
   set(ROCM_PATH "${THEROCK_DIST}")
+
+  # rocMLIR's mlir/CMakeLists.txt sets LLVM_ENABLE_WERROR before including
+  # HandleLLVMOptions, so every diagnostic in its tree is fatal, and it layers
+  # -Wshadow/-Wformat=2/-Wundef/-Wmissing-declarations on top of -Wall -Wextra.
+  # GCC flags patterns Clang does not (-Wmaybe-uninitialized has no Clang
+  # equivalent), so the clang-cl build is clean while GCC fails on rocMLIR's own
+  # sources. Relax the promotion for this vendored subtree; the warnings still
+  # print. Directory COMPILE_OPTIONS land after CMAKE_CXX_FLAGS -- where
+  # HandleLLVMOptions puts -Werror -- so -Wno-error wins.
+  #
+  # Restored right after add_subdirectory: add_subdirectory(morphizen) below
+  # relies on -Werror being live (hence onnx-ir-imp's own -Wno-error=conversion),
+  # and leaking this would silently disarm it for the whole project.
+  get_directory_property(_hipep_copts_before COMPILE_OPTIONS)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error>)
+  endif()
+
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
+
+  set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_hipep_copts_before}")
 
   # Curated rock/triton link closure. rocMLIR maintains this list for its fat
   # archive in mlir/tools/rocmlir-lib/librockcompiler_deps.cmake (set(__rocmlir_libs
