@@ -19,6 +19,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects shape)
           (mlir ddr))
 
   (define-conversion-pattern (onnx-equal->hipsr op operands-ref rewriter type-converter)

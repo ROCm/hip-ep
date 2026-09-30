@@ -20,6 +20,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects shape)
           (mlir ddr rewrite)
           (mlir ddr))
 

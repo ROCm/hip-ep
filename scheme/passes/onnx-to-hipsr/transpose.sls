@@ -22,6 +22,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects shape)
           (mlir ddr))
 
   ;; Build the permuted output shape inside a region block.

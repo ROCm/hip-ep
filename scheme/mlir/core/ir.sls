@@ -22,12 +22,6 @@
     ;; Logging (re-exported from (mlir core logging))
     mlir-log-trace mlir-log-debug mlir-log-info
     mlir-log-warning mlir-log-error mlir-log-fatal
-    ;; Shape dialect (re-exported from (mlir dialects shape))
-    mlir-get-shape-shape-type mlir-get-shape-size-type mlir-get-shape-witness-type
-
-    ;; Logging (re-exported from (mlir core logging))
-
-    ;; Shape dialect (re-exported from (mlir dialects shape))
 
     ;; ValueArrayRef accessors
     value-array-ref-size
@@ -291,11 +285,6 @@
   ;;; Get the i-th argument of a block as a Value* uptr.
   (define mlir-block-get-argument
     (foreign-procedure "mlir_block_get_argument" (uptr int) uptr))
-
-  ;;===--------------------------------------------------------------------===;;
-  ;; Shape Dialect Types
-  ;; TODO: move to (mlir dialects shape) when that module is created.
-  ;;===--------------------------------------------------------------------===;;
 
   ;;===--------------------------------------------------------------------===;;
   ;; Pattern Rewriting
