@@ -32,7 +32,11 @@ from onnx import TensorProto, helper, numpy_helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-SEQ_LENS = [1, 128]
+# 1 is decode and 128 is prefill, but the runtime picks its MoE strategy on token count
+# (hipdnn_ep_qmoe_fused_max_tokens), so the interesting widths are the ones either side of
+# that ceiling: 2..8 iterate the fused decode kernel, 9 and up bucket tokens by expert.
+# Speculative verify passes live entirely in the first band, which these bracket.
+SEQ_LENS = [1, 2, 5, 8, 9, 128]
 HIDDEN = 2880
 INTERMEDIATE = 5760
 NUM_EXPERTS = 32
