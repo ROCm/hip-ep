@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #define HIP_QELEMENTWISE_MAX_RANK 8
 #define HIP_QELEMENTWISE_ADD 0
@@ -65,6 +67,33 @@ __device__ inline T q_saturate(float v) {
       fminf(QElemBounds<T>::highest(), fmaxf(QElemBounds<T>::lowest(), v)));
 }
 
+// The one place the requantized arithmetic lives, so the contiguous fast path
+// below cannot drift from the generic ND path it shortcuts.
+template <typename T>
+__device__ inline T qelem_apply(T lhs_v, T rhs_v, int kind, float M_a, float M_b,
+                                int32_t lhs_zp, int32_t rhs_zp,
+                                int32_t output_zp) {
+  float da = static_cast<float>(lhs_v) - static_cast<float>(lhs_zp);
+  float db = static_cast<float>(rhs_v) - static_cast<float>(rhs_zp);
+  float acc = 0.f;
+  if (kind == HIP_QELEMENTWISE_ADD)
+    acc = M_a * da + M_b * db;
+  else if (kind == HIP_QELEMENTWISE_MUL)
+    // M_b is unused here: the host folded s_a * s_b / s_out into M_a, so the
+    // product of the integer differences takes a single rescale.
+    acc = M_a * (da * db);
+  return q_saturate<T>(rintf(acc) + static_cast<float>(output_zp));
+}
+
+// Four elements per thread is what lets the fast path issue the same width of
+// global access the neighbouring quantize/dequantize kernels already use.
+template <typename T> struct QElemVec4;
+template <> struct QElemVec4<int8_t> { using type = char4; };
+template <> struct QElemVec4<uint8_t> { using type = uchar4; };
+template <> struct QElemVec4<int16_t> { using type = short4; };
+template <> struct QElemVec4<uint16_t> { using type = ushort4; };
+template <> struct QElemVec4<int32_t> { using type = int4; };
+
 template <typename T>
 __global__ void qelementwise_nd_kernel(
     const T *__restrict__ lhs, const T *__restrict__ rhs, T *__restrict__ output,
@@ -85,16 +114,40 @@ __global__ void qelementwise_nd_kernel(
     rhs_idx += coord * rhs_stride.v[k];
   }
 
-  float da = static_cast<float>(lhs[lhs_idx]) - static_cast<float>(lhs_zp);
-  float db = static_cast<float>(rhs[rhs_idx]) - static_cast<float>(rhs_zp);
-  float acc = 0.f;
-  if (kind == HIP_QELEMENTWISE_ADD)
-    acc = M_a * da + M_b * db;
-  else if (kind == HIP_QELEMENTWISE_MUL)
-    // M_b is unused here: the host folded s_a * s_b / s_out into M_a, so the
-    // product of the integer differences takes a single rescale.
-    acc = M_a * (da * db);
-  output[idx] = q_saturate<T>(rintf(acc) + static_cast<float>(output_zp));
+  output[idx] = qelem_apply<T>(lhs[lhs_idx], rhs[rhs_idx], kind, M_a, M_b,
+                               lhs_zp, rhs_zp, output_zp);
+}
+
+// Neither input broadcasts, so lhs, rhs and output all share the output's dense
+// layout and the ND kernel's per-element rank-deep divide/modulo walk collapses
+// to the linear id. Threads below vec_count take four elements through a single
+// vector access; the handful past it mop up a total that is not a multiple of
+// four.
+template <typename T>
+__global__ void qelementwise_contig_kernel(
+    const T *__restrict__ lhs, const T *__restrict__ rhs, T *__restrict__ output,
+    int64_t total_elements, int64_t vec_count, int kind, float M_a, float M_b,
+    int32_t lhs_zp, int32_t rhs_zp, int32_t output_zp) {
+  using Vec = typename QElemVec4<T>::type;
+  const int64_t tid =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+  if (tid < vec_count) {
+    const Vec a = reinterpret_cast<const Vec *>(lhs)[tid];
+    const Vec b = reinterpret_cast<const Vec *>(rhs)[tid];
+    Vec o;
+    o.x = qelem_apply<T>(a.x, b.x, kind, M_a, M_b, lhs_zp, rhs_zp, output_zp);
+    o.y = qelem_apply<T>(a.y, b.y, kind, M_a, M_b, lhs_zp, rhs_zp, output_zp);
+    o.z = qelem_apply<T>(a.z, b.z, kind, M_a, M_b, lhs_zp, rhs_zp, output_zp);
+    o.w = qelem_apply<T>(a.w, b.w, kind, M_a, M_b, lhs_zp, rhs_zp, output_zp);
+    reinterpret_cast<Vec *>(output)[tid] = o;
+    return;
+  }
+
+  const int64_t idx = (vec_count << 2) + (tid - vec_count);
+  if (idx < total_elements)
+    output[idx] = qelem_apply<T>(lhs[idx], rhs[idx], kind, M_a, M_b, lhs_zp,
+                                 rhs_zp, output_zp);
 }
 
 static bool make_broadcast_layout(const int64_t *src_shape, int src_rank,
@@ -126,6 +179,45 @@ static bool make_broadcast_layout(const int64_t *src_shape, int src_rank,
   return true;
 }
 
+// make_broadcast_layout emits stride 0 for every axis of extent 1 and the
+// running dense stride otherwise, so matching the dense strides is the same as
+// saying the operand covers the output one-to-one. Axes the output itself has
+// collapsed to 1 are exempt: their coordinate is always 0, so whatever stride
+// they carry never reaches the address. Skipping them matters because the
+// model's activations are rank-3 with a leading batch of 1, which would
+// otherwise disqualify every tensor in the graph.
+static bool is_dense_layout(int out_rank, const QElemDimsND &out_shape,
+                            const QElemDimsND &stride) {
+  int64_t running = 1;
+  for (int k = out_rank - 1; k >= 0; --k) {
+    if (out_shape.v[k] != 1 && stride.v[k] != running)
+      return false;
+    running *= out_shape.v[k];
+  }
+  return true;
+}
+
+// Lets a run be pinned to the generic path so the fast path can be A/B'd in
+// one session, where thermal drift would otherwise swamp the difference.
+static bool qelementwise_contig_enabled() {
+  static const bool enabled = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QELEMENTWISE_CONTIG") == 0 && value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QELEMENTWISE_CONTIG"))
+      raw = value;
+#endif
+    return !(raw == "0" || raw == "off" || raw == "OFF");
+  }();
+  return enabled;
+}
+
 template <typename T>
 static int launch_qelementwise(hipStream_t stream, const void *lhs,
                                const void *rhs, void *output, int64_t total,
@@ -135,6 +227,30 @@ static int launch_qelementwise(hipStream_t stream, const void *lhs,
                                const QElemDimsND &lhs_stride,
                                const QElemDimsND &rhs_stride) {
   constexpr int kBlockSize = 256;
+
+  using Vec = typename QElemVec4<T>::type;
+  const bool dense = qelementwise_contig_enabled() &&
+                     is_dense_layout(out_rank, out_shape, lhs_stride) &&
+                     is_dense_layout(out_rank, out_shape, rhs_stride);
+  // A vector access that straddles its natural alignment faults, and nothing
+  // guarantees a tensor view starts on one, so the width has to be earned.
+  const bool aligned = (reinterpret_cast<uintptr_t>(lhs) % sizeof(Vec)) == 0 &&
+                       (reinterpret_cast<uintptr_t>(rhs) % sizeof(Vec)) == 0 &&
+                       (reinterpret_cast<uintptr_t>(output) % sizeof(Vec)) == 0;
+
+  if (dense && aligned) {
+    const int64_t vec_count = total >> 2;
+    const int64_t threads = vec_count + (total - (vec_count << 2));
+    int grid_size = static_cast<int>((threads + kBlockSize - 1) / kBlockSize);
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(qelementwise_contig_kernel<T>, dim3(grid_size),
+                       dim3(kBlockSize), 0, stream,
+                       static_cast<const T *>(lhs), static_cast<const T *>(rhs),
+                       static_cast<T *>(output), total, vec_count, kind, M_a,
+                       M_b, lhs_zp, rhs_zp, output_zp);
+    return 0;
+  }
+
   int grid_size = static_cast<int>((total + kBlockSize - 1) / kBlockSize);
   (void)hipGetLastError();
   hipLaunchKernelGGL(qelementwise_nd_kernel<T>, dim3(grid_size),
