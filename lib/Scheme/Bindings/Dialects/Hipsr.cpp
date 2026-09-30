@@ -58,60 +58,14 @@ uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
       mlir::hipsr::ContextType::get(ctx).getAsOpaquePointer());
 }
 
-// Mirrors kOrtMemAddrTag in OnnxToHip.cpp.
-static constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
-
-// Create hipsr.constant from ORT in-memory data (zero-copy).
-// addr_as_i64: raw memory address encoded as int64. size: byte count.
-// Returns result Value* as uptr, or 0 on failure.
-uint64_t mlir_build_hipsr_constant_from_ort_mem(
-    uint64_t rewriter_ptr, uint64_t loc_op_ptr, uint64_t result_type_ptr,
-    int64_t addr_as_i64, int64_t size) {
-  auto *rewriter  = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
-  auto *loc_op    = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
-  auto  baseType  = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(result_type_ptr));
-  auto  resultType = llvm::dyn_cast<mlir::RankedTensorType>(baseType);
-  if (!resultType) return 0;
-
-  rewriter->setInsertionPoint(loc_op);
-  std::string key = "mem|0x" + llvm::utohexstr(static_cast<uint64_t>(addr_as_i64), /*LowerCase=*/true);
-  llvm::ArrayRef<char> data = {
-      reinterpret_cast<const char*>(static_cast<uintptr_t>(addr_as_i64)),
-      static_cast<size_t>(size)};
-  auto value = mlir::DenseResourceElementsAttr::get(
-      resultType, key,
-      mlir::UnmanagedAsmResourceBlob::allocateInferAlign(data));
-  auto *newOp = rewriter->create<mlir::hipsr::ConstantOp>(
-      loc_op->getLoc(), resultType, value,
-      mlir::IntegerAttr(), mlir::IntegerAttr(), mlir::IntegerAttr());
-  return reinterpret_cast<uint64_t>(newOp->getResult(0).getAsOpaquePointer());
-}
-
-// Create hipsr.constant from a file-backed memory-mapped resource.
-// Returns result Value* as uptr, or 0 if the file cannot be memory-mapped.
-uint64_t mlir_build_hipsr_constant_from_file(
-    uint64_t rewriter_ptr, uint64_t loc_op_ptr, uint64_t result_type_ptr,
-    const char* location, int64_t offset, int64_t size) {
-  auto *rewriter  = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
-  auto *loc_op    = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
-  auto  baseType  = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(result_type_ptr));
-  auto  resultType = llvm::dyn_cast<mlir::RankedTensorType>(baseType);
-  if (!resultType) return 0;
-
-  auto *dialect = loc_op->getContext()->getLoadedDialect<mlir::hipsr::HipsrDialect>();
-  llvm::MemoryBuffer *buf = dialect->getOrLoadFileMap(location);
+// mlir_hipsr_load_file_map — HipSR-specific: memory-map a file via HipsrDialect.
+// Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
+uint64_t mlir_hipsr_load_file_map(uint64_t ctx_ptr, const char* path) {
+  auto *ctx     = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  auto *dialect = ctx->getLoadedDialect<mlir::hipsr::HipsrDialect>();
+  llvm::MemoryBuffer *buf = dialect->getOrLoadFileMap(path);
   if (!buf) return 0;
-
-  rewriter->setInsertionPoint(loc_op);
-  std::string key = (llvm::Twine("file|") + location + "|" + llvm::Twine(offset)).str();
-  llvm::ArrayRef<char> data = {buf->getBufferStart() + offset, static_cast<size_t>(size)};
-  auto value = mlir::DenseResourceElementsAttr::get(
-      resultType, key,
-      mlir::UnmanagedAsmResourceBlob::allocateInferAlign(data));
-  auto *newOp = rewriter->create<mlir::hipsr::ConstantOp>(
-      loc_op->getLoc(), resultType, value,
-      mlir::IntegerAttr(), mlir::IntegerAttr(), mlir::IntegerAttr());
-  return reinterpret_cast<uint64_t>(newOp->getResult(0).getAsOpaquePointer());
+  return reinterpret_cast<uint64_t>(buf->getBufferStart());
 }
 
 } // extern "C"
@@ -123,8 +77,7 @@ void registerHipsrBindings() {
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)::mlir_populate_cast_conversion_patterns);
   Sregister_symbol("mlir_placeholder_set_barrier_type", (void*)::mlir_placeholder_set_barrier_type);
   Sregister_symbol("mlir_get_hipsr_context_type", (void*)::mlir_get_hipsr_context_type);
-  Sregister_symbol("mlir_build_hipsr_constant_from_ort_mem",  (void*)::mlir_build_hipsr_constant_from_ort_mem);
-  Sregister_symbol("mlir_build_hipsr_constant_from_file",     (void*)::mlir_build_hipsr_constant_from_file);
+  Sregister_symbol("mlir_hipsr_load_file_map", (void*)::mlir_hipsr_load_file_map);
 }
 
 } // namespace hipsr

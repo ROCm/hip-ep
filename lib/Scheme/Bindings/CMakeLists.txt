@@ -12,6 +12,10 @@ add_library(HipsrSchemeRuntime
   ${CMAKE_CURRENT_SOURCE_DIR}/../Interpreter/ChezSchemeInterpreter.cpp
   MainModule.cpp
   Core.cpp
+  Core/Attribute.cpp
+  Core/Operation.cpp
+  Core/Value.cpp
+  Core/Builder.cpp
   Logging.cpp
   Conversion.cpp
   Dialects/Tensor.cpp

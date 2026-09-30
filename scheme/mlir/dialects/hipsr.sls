@@ -39,9 +39,8 @@
     mlir-get-hipsr-context-type         ; hipsr::ContextType from MLIRContext
     mlir-placeholder-set-barrier-type!  ; change placeholder_type attr to Barrier
 
-    ;; hipsr.constant builders for external data
-    mlir-build-hipsr-constant-from-ort-mem
-    mlir-build-hipsr-constant-from-file)
+    ;; HipSR file mapping for external constant data
+    mlir-hipsr-load-file-map)
 
   (import (rnrs (6))
           (only (chezscheme) foreign-procedure)
@@ -64,13 +63,10 @@
   (define mlir-placeholder-set-barrier-type!
     (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
-  (define mlir-build-hipsr-constant-from-ort-mem
-    (foreign-procedure "mlir_build_hipsr_constant_from_ort_mem"
-                       (uptr uptr uptr integer-64 integer-64) uptr))
-
-  (define mlir-build-hipsr-constant-from-file
-    (foreign-procedure "mlir_build_hipsr_constant_from_file"
-                       (uptr uptr uptr string integer-64 integer-64) uptr))
+  ;; Memory-map a file via HipsrDialect::getOrLoadFileMap.
+  ;; Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
+  (define mlir-hipsr-load-file-map
+    (foreign-procedure "mlir_hipsr_load_file_map" (uptr string) uptr))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Memory Space
