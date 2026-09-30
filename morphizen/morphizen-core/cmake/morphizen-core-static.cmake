@@ -17,7 +17,6 @@ if(morphizen_WITH_MORPHIZEN_CONFIG_FILE)
 endif()
 set(LIB_NAME morphizen-core-static)
 add_library(${LIB_NAME} STATIC
-  ${PROTO_SRCS} ${PROTO_HDRS}
   src/version_info.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/version_info.cpp
   include/morphizen/plugin.hpp
@@ -121,27 +120,9 @@ target_include_directories(${LIB_NAME}
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
 )
-# Generated protobuf headers (morphizen/{config,anchor_point,capability,
-# pass_context,version,model_compatibility}.pb.h) live under
-# ${CMAKE_CURRENT_BINARY_DIR}/morphizen/. Mark BINARY_DIR as SYSTEM so the
-# inline accessor methods (`Map::size()` returns size_t but accessor signature
-# is `int` on protobuf >=22) do NOT trigger -Wconversion in either:
-#   - morphizen-core's own private sources (config.cpp, pass_context_imp.cpp,
-#     model_compatibility.cpp) that include "morphizen/*.pb.h" directly, OR
-#   - PUBLIC consumers (ort-bridge, morphizen-graph, etc.) that inherit
-#     INTERFACE_SYSTEM_INCLUDE_DIRECTORIES via target_link_libraries.
-# This is the root-cause fix for the per-target -Wno-error=conversion patches
-# previously applied across morphizen-core / morphizen-pattern / and that had
-# to be supplemented by a parent-project FORCE override in onnx-hipdnn-ep
-# because transitive consumers (ort-bridge / morphizen-graph) weren't covered.
-# Generator-expression SYSTEM scope is restricted to BUILD_INTERFACE because
-# the installed layout puts .pb.h under <install>/include/morphizen/ next to
-# the public ABI headers, and we want -Wconversion to fire on those (they're
-# header-only, no .pb.cc to silence with /w).
-# Side note: BINARY_DIR also contains the configure_file output
-# `version_info_config.h` (consumed by src/version_info.cpp). SYSTEM-marking
-# it is accepted collateral — that file is generated `#define` macros only,
-# no code that -Wconversion could meaningfully flag.
+# BINARY_DIR holds generated headers (version_info_config.h,
+# config_json_binary.hpp). SYSTEM keeps those generated macros out of
+# -Wconversion.
 target_include_directories(${LIB_NAME}
   SYSTEM PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
@@ -153,7 +134,6 @@ target_include_directories(${LIB_NAME}
 # The target is provided by find_package(onnxruntime) from installed ONNX Runtime package.
 set(MorphiZen_DEPS
   onnxruntime::onnxruntime
-  protobuf::libprotobuf
   glog::glog
   morphizen::foundation
   Microsoft.GSL::GSL

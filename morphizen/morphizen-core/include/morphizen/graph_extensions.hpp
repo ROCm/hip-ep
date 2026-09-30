@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace morphizen {
-class MetaDefProto;
+struct MetaDefProto;
 struct TryFuseError;
 class IPass;
 struct NodeBuilder;

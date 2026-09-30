@@ -62,8 +62,8 @@
 #include <morphizen/my_ort.h>
 #include <unordered_map>
 namespace morphizen {
-class RootPatternProto;
-class PatternProto;
+struct RootPatternProto;
+struct PatternProto;
 /**
  * @class Binder
  * @brief Represents matched node inputs used in pattern matching.

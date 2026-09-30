@@ -4,7 +4,7 @@
  */
 #pragma once
 #include "./session.hpp"
-#include "e2e_config_proto/test_case_config.pb.h"
+#include "morphizen-e2e-test/e2e_messages.hpp"
 #include <memory>
 #define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>

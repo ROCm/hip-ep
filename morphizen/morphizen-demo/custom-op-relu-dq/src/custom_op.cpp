@@ -11,7 +11,6 @@
 #include <morphizen/morphizen.hpp>
 #include <morphizen/env_config.hpp>
 #include "./custom_op.hpp"
-#include "google/protobuf/util/json_util.h"
 #include <cstdlib>
 #include <filesystem>
 #include <thread>
@@ -27,11 +26,11 @@ namespace relu_dq {
 		: CustomOpImp(context, meta_def, model){
 		MY_LOG(1) << "MyCustomOp constructor: ";
 			auto relu_dq_json_str = get_meta_def_param();
-		auto status = google::protobuf::util::JsonStringToMessage(relu_dq_json_str,&relu_dq_proto_);
-		if(status.ok()) {
+		try {
+			relu_dq_proto_ = ReluDqParamProto::FromJsonString(relu_dq_json_str);
 			LOG(INFO) << "relu_dq_json_str: " << relu_dq_json_str;
-		} else {
-			LOG(FATAL) << "failed to parse relu_dq_json_str: " << status.ToString();
+		} catch (const morphizen::json::ParseError &error) {
+			LOG(FATAL) << "failed to parse relu_dq_json_str: " << error.what();
 			return;
 		}
 		std::string ep_context_data;

@@ -7,6 +7,7 @@
 #include "morphizen/graph.hpp"
 #include <algorithm>
 #include <glog/logging.h>
+#include <set>
 #include <unordered_set>
 #include <utility>
 namespace morphizen {

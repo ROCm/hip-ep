@@ -3,9 +3,6 @@
  * Licensed under the MIT License.
  */
 #include "./config.hpp"
-#include <google/protobuf/message.h>
-#include <google/protobuf/struct.pb.h>
-#include <google/protobuf/util/json_util.h>
 
 #include <filesystem>
 #include <fstream>
@@ -34,24 +31,19 @@ E2ETestConfig::create(const std::filesystem::path &config_path) {
   json_str.append(file_str.begin(), file_str.end());
   json_str.append(json_str_suffix);
 
-  // Parse the JSON string into the protobuf message
-  google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = true; // Ignore unknown fields
-
   MorphizenE2ETestsProto root;
-  auto status =
-      google::protobuf::util::JsonStringToMessage(json_str, &root, options);
-
-  if (!status.ok()) {
+  try {
+    root = MorphizenE2ETestsProto::FromJsonString(json_str);
+  } catch (const morphizen::json::ParseError &error) {
     // must not throw exception, make CI more stable. --gtest_list_tests can
     // return nothing.
     std::cerr << "Failed to parse JSON: " << json_str
-              << " Status : " << status.ToString() << std::endl;
+              << " Status : " << error.what() << std::endl;
     return {};
   }
   auto ret = std::vector<std::unique_ptr<E2ETestConfig>>();
 
-  for (const auto proto : root.test_configs()) {
+  for (const auto &proto : root.test_configs()) {
     ret.push_back(std::make_unique<E2ETestConfig>(proto));
   }
   return ret;

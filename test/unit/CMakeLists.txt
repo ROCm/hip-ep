@@ -94,3 +94,16 @@ add_test(NAME QLpNormalizationRefUnit
 set_target_properties(test-qlpnormalization-ref PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# JSON round-trip for ConfigProto (including MergeFrom) and MLIR metadata.
+add_executable(test-morphizen-json test_morphizen_json.cpp)
+target_compile_features(test-morphizen-json PRIVATE cxx_std_17)
+target_include_directories(test-morphizen-json PRIVATE
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-utils/include
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include
+  ${CMAKE_SOURCE_DIR}/backend-mlir-compiler
+)
+add_test(NAME MorphizenJsonUnit COMMAND test-morphizen-json)
+set_target_properties(test-morphizen-json PROPERTIES
+  FOLDER "mlir/Test/Dialect/Hipsr"
+)
