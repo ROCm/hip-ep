@@ -551,9 +551,7 @@ class TestGroupNorm:
 
     def test_group_norm_nhwc_f32(self, model_runner):
         shape = [1, 4, 4, 8]
-        model = _make_group_norm_model(
-            shape, groups=4, channels_last=1, activation=0
-        )
+        model = _make_group_norm_model(shape, groups=4, channels_last=1, activation=0)
         rng = np.random.default_rng(14)
         x = rng.uniform(-2, 2, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
@@ -561,9 +559,7 @@ class TestGroupNorm:
 
     def test_group_norm_nchw_silu_f16(self, model_runner):
         shape = [1, 8, 4, 4]
-        model = _make_group_norm_model(
-            shape, groups=2, activation=1, dtype=np.float16
-        )
+        model = _make_group_norm_model(shape, groups=2, activation=1, dtype=np.float16)
         rng = np.random.default_rng(15)
         x = rng.uniform(-2, 2, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
