@@ -120,7 +120,8 @@ static void printPhaseTimes() {
                << llvm::format("%.1f", compilePhaseTimes.benchmarkMs)
                << " ms\n";
   llvm::errs() << "[hip-rocmlir-compiler] HIP-to-LLVM: "
-               << llvm::format("%.1f", compilePhaseTimes.hipToLlvmMs) << " ms\n";
+               << llvm::format("%.1f", compilePhaseTimes.hipToLlvmMs)
+               << " ms\n";
 }
 
 #if HIP_ROCMLIR_AUTOTUNE
@@ -504,8 +505,7 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
         return true;
       }
       const auto compileStart = std::chrono::steady_clock::now();
-      bool ok =
-          compilePerfConfig(rockModule, arch, cached->getValue(), winner);
+      bool ok = compilePerfConfig(rockModule, arch, cached->getValue(), winner);
       compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
       if (ok)
         return true;
@@ -588,8 +588,8 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
     CompiledCandidate &candidate = candidates[index];
     if (!candidate.compiled) {
       if (options.verbose)
-        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1)
-                     << "/" << numConfigs << ": compile failed\n";
+        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                     << numConfigs << ": compile failed\n";
       continue;
     }
     ++compiled;
@@ -598,8 +598,8 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
     if (!benchmarkKernel(candidate.kernel, kernelName, options, buffers,
                          elapsed)) {
       if (options.verbose)
-        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1)
-                     << "/" << numConfigs << ": benchmark failed\n";
+        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
+                     << numConfigs << ": benchmark failed\n";
       continue;
     }
     ++benchmarked;
@@ -631,9 +631,10 @@ static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
 // Compile every queued search config in one pool, then benchmark each kernel
 // serially and record the winner. Duplicates queued while the search was in
 // flight become cache hits for the winner pool.
-static bool compileAndBenchmarkSearches(
-    llvm::StringRef arch, const AutotuneOptions &options,
-    llvm::StringMap<CompiledKernel> &compiledByKernel) {
+static bool
+compileAndBenchmarkSearches(llvm::StringRef arch,
+                            const AutotuneOptions &options,
+                            llvm::StringMap<CompiledKernel> &compiledByKernel) {
   std::vector<DeferredSearch> searches = std::move(deferredSearches());
   deferredSearches().clear();
   searchesInFlight().clear();
@@ -660,17 +661,15 @@ static bool compileAndBenchmarkSearches(
              ++candidateIndex) {
           pool.async([&, searchIndex, candidateIndex] {
             DeferredSearch &search = searches[searchIndex];
-            CompiledCandidate &candidate =
-                search.candidates[candidateIndex];
-            candidate.compiled = compilePerfConfig(
-                search.rockModule, arch, candidate.perfConfig,
-                candidate.kernel);
+            CompiledCandidate &candidate = search.candidates[candidateIndex];
+            candidate.compiled =
+                compilePerfConfig(search.rockModule, arch, candidate.perfConfig,
+                                  candidate.kernel);
           });
         }
       }
       pool.wait();
-      compilePhaseTimes.perfConfigCompileMs +=
-          millisecondsSince(compileStart);
+      compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
     }
 
     for (DeferredSearch &search : searches) {
@@ -680,7 +679,7 @@ static bool compileAndBenchmarkSearches(
       mlir::ParserConfig parserConfig(&context);
       mlir::OwningOpRef<mlir::ModuleOp> parsed =
           mlir::parseSourceString<mlir::ModuleOp>(search.rockModule,
-                                                   parserConfig);
+                                                  parserConfig);
       if (!parsed) {
         llvm::errs() << "error: failed to reparse rock module for '"
                      << search.kernelName << "'\n";
@@ -730,10 +729,9 @@ static bool compileAndBenchmarkSearches(
       compilePhaseTimes.benchmarkMs += millisecondsSince(benchmarkStart);
 
       if (bestConfig.empty()) {
-        llvm::errs()
-            << "error: autotune found no runnable perfConfig for '"
-            << search.kernelName << "' (compiled " << compiled
-            << ", benchmarked " << benchmarked << ")\n";
+        llvm::errs() << "error: autotune found no runnable perfConfig for '"
+                     << search.kernelName << "' (compiled " << compiled
+                     << ", benchmarked " << benchmarked << ")\n";
         return false;
       }
       if (!search.cacheKey.empty())
@@ -770,9 +768,9 @@ static bool compileAndBenchmarkSearches(
 // One pool for every kernel that reused a winner. Each task compiles that
 // kernel's own symbol; benchmarking already happened on the first kernel with
 // the key. A compile failure erases the winner and searches that kernel.
-static bool compileDeferredCacheHits(
-    llvm::StringRef arch, const AutotuneOptions &options,
-    llvm::StringMap<CompiledKernel> &compiledByKernel) {
+static bool
+compileDeferredCacheHits(llvm::StringRef arch, const AutotuneOptions &options,
+                         llvm::StringMap<CompiledKernel> &compiledByKernel) {
   std::vector<DeferredCacheHit> hits = std::move(deferredCacheHits());
   deferredCacheHits().clear();
   if (hits.empty())
@@ -787,9 +785,9 @@ static bool compileDeferredCacheHits(
     llvm::DefaultThreadPool pool(llvm::hardware_concurrency(jobs));
     for (unsigned index = 0; index < hits.size(); ++index) {
       pool.async([&, index] {
-        hits[index].compiled = compilePerfConfig(
-            hits[index].rockModule, arch, hits[index].perfConfig,
-            hits[index].kernel);
+        hits[index].compiled =
+            compilePerfConfig(hits[index].rockModule, arch,
+                              hits[index].perfConfig, hits[index].kernel);
       });
     }
     pool.wait();
@@ -955,7 +953,8 @@ int main(int argc, char **argv) {
            "the\n"
         << "  first enumerated perfConfig (same role as "
            "MIGRAPHX_SKIP_BENCHMARKING).\n"
-        << "  Set HIP_ROCMLIR_COMPILE_JOBS to how many perfConfig compiles run\n"
+        << "  Set HIP_ROCMLIR_COMPILE_JOBS to how many perfConfig compiles "
+           "run\n"
         << "  at once (default: one per hardware thread). Benchmarks stay\n"
         << "  serial.\n"
         << "  Every search config in the model is compiled in one pool, then\n"
