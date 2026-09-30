@@ -13,19 +13,26 @@ The runtime supports f16, f32, i32, i64 inputs.
 
 Real-model footprint: attention-mask position-id computation in
 Llama / Qwen graphs uses a single CumSum on int64 [1, S] along axis=1
-(exclusive=0, reverse=0).
+(exclusive=0, reverse=0). That shape collapses to one slice, so the runtime
+scans it with a block-cooperative kernel rather than the per-slice serial one it
+uses for vision shapes; cases below are chosen to cover both.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from onnx import helper, numpy_helper
+from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
-SEQ_LENS = [1, 128]
+# The runtime picks between a per-thread serial scan and a block-cooperative
+# tiled scan on the axis length, crossing over at 512. These straddle it: 511
+# stays serial, 513 is cooperative with a ragged final tile, and 2240 is a real
+# decode context length. Without them CI only ever sees the serial path, which
+# is how a single thread came to be scanning an entire 16 241-long mask.
+SEQ_LENS = [1, 128, 511, 513, 2240]
 
 
 def _make_cumsum_model(
@@ -34,11 +41,13 @@ def _make_cumsum_model(
     axis: int,
     exclusive: int = 0,
     reverse: int = 0,
+    axis_as_input: bool = False,
 ):
+    """CumSum's `axis` is a 0-D scalar tensor. As an initializer the compiler
+    hands it to the runtime on the host; as a graph input the runtime has to
+    read it back from the device."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
-    # CumSum's `axis` is a 0-D scalar tensor (initializer here).
-    axis_init = numpy_helper.from_array(np.array(axis, dtype=np.int64), name="axis")
     Y = helper.make_tensor_value_info("Y", tp, list(input_shape))
     attrs = {}
     if exclusive:
@@ -46,6 +55,10 @@ def _make_cumsum_model(
     if reverse:
         attrs["reverse"] = reverse
     node = helper.make_node("CumSum", ["X", "axis"], ["Y"], **attrs)
+    if axis_as_input:
+        A = helper.make_tensor_value_info("axis", TensorProto.INT64, [])
+        return make_model_from_nodes([node], [X, A], [Y])
+    axis_init = numpy_helper.from_array(np.array(axis, dtype=np.int64), name="axis")
     return make_model_from_nodes([node], [X], [Y], initializers=[axis_init])
 
 
@@ -80,9 +93,14 @@ class TestCumSum:
 
     @pytest.mark.parametrize("exclusive", [0, 1])
     @pytest.mark.parametrize("reverse", [0, 1])
-    def test_cumsum_flag_combinations(self, model_runner, exclusive, reverse):
-        """All four (exclusive, reverse) combinations on i64 [3, 6]."""
-        shape = [3, 6]
+    # [3, 6] is the serial scan; [1, 1000] is the cooperative one, where the
+    # exclusive shift and the reversed traversal both have to compose with the
+    # running carry between tiles rather than living in one thread's loop.
+    @pytest.mark.parametrize(
+        "shape", [[3, 6], [1, 1000]], ids=["serial", "cooperative"]
+    )
+    def test_cumsum_flag_combinations(self, model_runner, shape, exclusive, reverse):
+        """All four (exclusive, reverse) combinations on i64, both scan paths."""
         model = _make_cumsum_model(
             np.int64,
             shape,
@@ -104,4 +122,15 @@ class TestCumSum:
         rng = np.random.default_rng(503)
         x = rng.integers(0, 2, shape, dtype=np.int64)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("axis", [0, 1, -1])
+    def test_cumsum_runtime_axis(self, model_runner, axis):
+        """Axis fed as a graph input -- the runtime reads it from the device."""
+        shape = [3, 5]
+        model = _make_cumsum_model(np.int64, shape, axis, axis_as_input=True)
+        rng = np.random.default_rng(504)
+        x = rng.integers(-5, 5, shape, dtype=np.int64)
+        axis_a = np.array(axis, dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, axis_a])
         compare_outputs(actual, expected, atol=0)

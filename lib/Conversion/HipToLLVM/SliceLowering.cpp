@@ -9,19 +9,19 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// hip.slice(ctx, data, starts, ends, [axes], [steps], output)
+// hip.slice(ctx, data, starts, ends, [axes], [steps], [host_bounds], output)
 //   -> wrap_slice(state, data_ptr, starts_ptr, ends_ptr,
 //                 axes_ptr (or null), steps_ptr (or null), out_ptr,
 //                 data_shape_ptr, data_rank,
 //                 output_shape_ptr, output_rank,
 //                 starts_num_elements, axes_num_elements,
-//                 steps_num_elements, data_type)
+//                 steps_num_elements, data_type,
+//                 host_starts, host_ends, host_axes, host_steps)
 //
-// Today the runtime function is a no-op stub that only logs its parameters
-// (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
-// pipeline (bufferize -> hip-to-llvm -> generate-interface) functional even
-// when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
-// decompose pattern.
+// The trailing host_* pointers are stack arrays of the host-known control
+// values (`host_bounds` split into starts / ends, `host_axes`, `host_steps`),
+// or null for any the conversion could not resolve; the runtime reads back
+// only the operands whose host pointer is null.
 struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -101,24 +101,35 @@ struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
     Value outRank = createI64Const(outputType.getRank());
     Value dataTypeVal = createI64Const(hipDtype);
 
-    SmallVector<Type, 16> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, // state, data, starts, ends
-        ptrType, ptrType, ptrType,          // axes, steps, output
-        ptrType, i64Type,                   // data_shape, data_rank
-        ptrType, i64Type,                   // out_shape,  out_rank
-        i64Type, i64Type, i64Type,          // starts_num, axes_num,
-                                            // steps_num
-        i64Type};                           // data_type
+    ValueRange hostBounds = adaptor.getHostBounds();
+    size_t numHostBounds = hostBounds.size() / 2;
+    Value hostStarts =
+        emitHostI64Array(hostBounds.take_front(numHostBounds), rewriter, loc);
+    Value hostEnds =
+        emitHostI64Array(hostBounds.drop_front(numHostBounds), rewriter, loc);
+    Value hostAxes = emitHostI64Array(op.getHostAxesAttr(), rewriter, loc);
+    Value hostSteps = emitHostI64Array(op.getHostStepsAttr(), rewriter, loc);
+
+    SmallVector<Type, 19> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType,  // state, data, starts, ends
+        ptrType, ptrType, ptrType,           // axes, steps, output
+        ptrType, i64Type,                    // data_shape, data_rank
+        ptrType, i64Type,                    // out_shape,  out_rank
+        i64Type, i64Type, i64Type,           // starts_num, axes_num,
+                                             // steps_num
+        i64Type,                             // data_type
+        ptrType, ptrType, ptrType, ptrType}; // host starts/ends/axes/steps
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapSlice, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {statePtr, dataPtr,  startsPtr,  endsPtr,
-                                   axesPtr,  stepsPtr, outPtr,     dataShape,
-                                   dataRank, outShape, outRank,    startsNum,
-                                   axesNum,  stepsNum, dataTypeVal};
+    SmallVector<Value, 19> args = {statePtr, dataPtr,  startsPtr,   endsPtr,
+                                   axesPtr,  stepsPtr, outPtr,      dataShape,
+                                   dataRank, outShape, outRank,     startsNum,
+                                   axesNum,  stepsNum, dataTypeVal, hostStarts,
+                                   hostEnds, hostAxes, hostSteps};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

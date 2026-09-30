@@ -82,7 +82,8 @@ module {
   // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
   // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // The same amounts go to the runtime, which then skips its pads readback.
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) host_pads(%[[B0]], %[[B0]], %[[E0]], %[[B0]]) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
   // lowerOnnxConstants turns into a carrier. The pre-lowering PadShapeFold
@@ -104,7 +105,7 @@ module {
   // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: tensor.extract_slice
   // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) host_pads({{.*}}) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output dims with a non-constant `pads` (function arg): the
   // per-axis padding amounts are read on the HOST through a synchronized
@@ -129,4 +130,32 @@ module {
   // CHECK: arith.index_cast %{{.*}} : i64 to index
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
   // CHECK: hip.pad
+  // CHECK-NOT: host_pads
+  // CHECK-SAME: outs(
+
+  // The Gemma-4 mask Pad: `pads` is Concat(0, Shape(attn)[1] - Shape(ids)[1],
+  // 0, 0) and the constant value is -1. Everything resolves on the host, so
+  // neither the output extent nor the runtime needs a readback: the extent
+  // uses the resolved pad amounts, and all three control values are mirrored
+  // onto hip.pad.
+  func.func @pad_gemma_mask(%data: tensor<?x?xi64>, %ids: tensor<?x?xi64>,
+                            %attn: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    %zero = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+    %ids_len = "onnx.Shape"(%ids) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %attn_len = "onnx.Shape"(%attn) {start = 1 : si64, end = 2 : si64}
+        : (tensor<?x?xi64>) -> tensor<1xi64>
+    %past = "onnx.Sub"(%attn_len, %ids_len)
+        : (tensor<1xi64>, tensor<1xi64>) -> tensor<1xi64>
+    %pads = "onnx.Concat"(%zero, %past, %zero, %zero) {axis = 0 : si64}
+        : (tensor<1xi64>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>) -> tensor<4xi64>
+    %cval = "onnx.Constant"() {value = dense<-1> : tensor<i64>} : () -> tensor<i64>
+    %r = "onnx.Pad"(%data, %pads, %cval) {mode = "constant"}
+        : (tensor<?x?xi64>, tensor<4xi64>, tensor<i64>) -> tensor<?x?xi64>
+    return %r : tensor<?x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @pad_gemma_mask
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x?xi64>, tensor<4xi64>) cval({{.*}} : tensor<i64>) host_pads(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) outs({{.*}} : tensor<?x?xi64>) {host_constant_value = -1 : i64}
 }

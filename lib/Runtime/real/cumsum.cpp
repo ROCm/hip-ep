@@ -8,14 +8,17 @@
 //
 // Source: onnxruntime/core/providers/cuda/math/cumsum_impl.cu @ v1.22.2.
 //
-// The axis input is a GPU scalar; we D2H-read it once per call. The lowering
-// already passes data_shape as a host int64 array, so the outer/axis/inner
-// decomposition is done on the host without inspecting GPU tensors.
+// The axis input is a GPU scalar. When the compiler knew its value it passes
+// it as `host_axis`; otherwise (host_axis == INT64_MIN) we D2H-read it, which
+// costs a stream sync per call. The lowering already passes data_shape as a
+// host int64 array, so the outer/axis/inner decomposition is done on the host
+// without inspecting GPU tensors.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <hip/hip_runtime.h>
 
@@ -37,7 +40,7 @@ static int cumsum_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
-                int64_t exclusive, int64_t reverse) {
+                int64_t exclusive, int64_t reverse, int64_t host_axis) {
   OP_PROFILE(
       "cumsum",
       [&] {
@@ -74,11 +77,11 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   // ONNX CumSum-14: axis is a 0-D scalar (single element) of int32 or
-  // int64. The MLIR pipeline doesn't fold this constant for us, so we
-  // synchronously D2H-read it. This adds one stall per CumSum call --
-  // acceptable because the op typically occurs once or twice per graph.
+  // int64. Without a compile-time value we synchronously D2H-read it.
   int64_t axis_value = 0;
-  if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
+  if (host_axis != INT64_MIN) {
+    axis_value = host_axis;
+  } else if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
     int32_t a32 = 0;
     hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
                                     hipMemcpyDeviceToHost, hip_stream);

@@ -13,6 +13,7 @@ include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 
@@ -3969,13 +3970,16 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
     `exclusive` attribute (0 / 1) toggles inclusive vs exclusive accumulation,
     and `reverse` (0 / 1) reverses the accumulation direction along the axis.
 
+    `axis_value`, when present, is the compile-time value of `axis`; the
+    runtime then uses it instead of reading `axis` back from the device.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
     hip.cumsum(%ctx) ins(%x, %axis : memref<3x4xf32, 1>, memref<i64, 1>)
                      outs(%y : memref<3x4xf32, 1>)
-                     {exclusive = 0 : i64, reverse = 0 : i64}
+                     {axis_value = 1 : i64, exclusive = 0 : i64, reverse = 0 : i64}
     ```
   }];
 
@@ -3985,7 +3989,8 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
     Hip_TensorOrMemRef:$axis,
     Hip_TensorOrMemRef:$y,
     DefaultValuedAttr<I64Attr, "0">:$exclusive,
-    DefaultValuedAttr<I64Attr, "0">:$reverse
+    DefaultValuedAttr<I64Attr, "0">:$reverse,
+    OptionalAttr<I64Attr>:$axis_value
   );
 
   let assemblyFormat = [{
@@ -4016,6 +4021,12 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
 
+    Host-known control values let the runtime skip reading the device
+    operands back (a copy plus a stream sync per call). Each is independent:
+    `host_pads` (empty, or one `index` per `pads` entry) mirrors `pads`,
+    `host_axes` mirrors `axes`, and `host_constant_value` (typed as the data
+    element) mirrors `constant_value`.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -4023,6 +4034,7 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     hip.pad(%ctx) ins(%data, %pads : memref<3x2xf32, 1>, memref<4xi64, 1>)
                   cval(%cval : memref<f32, 1>)
                   axes(%axes : memref<2xi64, 1>)
+                  host_pads(%p0, %p1, %p2, %p3)
                   outs(%out : memref<3x4xf32, 1>) {mode = "constant"}
     ```
   }];
@@ -4033,14 +4045,20 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Hip_TensorOrMemRef:$pads,
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
+    Variadic<Index>:$host_pads,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$host_axes,
+    OptionalAttr<TypedAttrInterface>:$host_constant_value
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $data `,` $pads `:` type($data) `,` type($pads) `)`
     (`cval` `(` $constant_value^ `:` type($constant_value) `)`)?
     (`axes` `(` $axes^ `:` type($axes) `)`)?
+    (`host_pads` `(` $host_pads^ `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -4257,6 +4275,12 @@ def Hip_SliceOp : Hip_DpsOp<"slice",
     runtime call. This op exists only to give the fallback path a stable
     DPS-shaped representation to bufferize and lower from.
 
+    Host-known control values let the runtime skip reading the device
+    operands back (a copy plus a stream sync per call). Each is independent:
+    `host_bounds` is empty, or the `starts` entries followed by the `ends`
+    entries as `index` values; `host_axes` / `host_steps` mirror `axes` /
+    `steps`.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -4266,7 +4290,9 @@ def Hip_SliceOp : Hip_DpsOp<"slice",
                                                   memref<2xi64, 1>)
                     axes(%axes : memref<2xi64, 1>)
                     steps(%steps : memref<2xi64, 1>)
+                    host_bounds(%s0, %s1, %e0, %e1)
                     outs(%out : memref<3x2xf32, 1>)
+                    {host_axes = array<i64: 0, 1>, host_steps = array<i64: 1, 2>}
     ```
   }];
 
@@ -4277,14 +4303,20 @@ def Hip_SliceOp : Hip_DpsOp<"slice",
     Hip_TensorOrMemRef:$ends,
     Optional<Hip_TensorOrMemRef>:$axes,
     Optional<Hip_TensorOrMemRef>:$steps,
-    Hip_TensorOrMemRef:$output
+    Variadic<Index>:$host_bounds,
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$host_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$host_steps
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $data `,` $starts `,` $ends `:`
         type($data) `,` type($starts) `,` type($ends) `)`
     (`axes` `(` $axes^ `:` type($axes) `)`)?
     (`steps` `(` $steps^ `:` type($steps) `)`)?
+    (`host_bounds` `(` $host_bounds^ `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

@@ -294,6 +294,45 @@ inline Value extractOptionalMemRefPtr(Value memrefDesc,
   return result;
 }
 
+// Stack-allocates an i64 array holding \p values and returns its pointer, or a
+// null pointer when \p values is empty. Each value must already be i64 (an
+// `index` operand after type conversion, or an LLVM constant). Used to hand
+// host-known control values to a runtime wrapper in place of a device buffer
+// it would otherwise read back.
+inline Value emitHostI64Array(ValueRange values,
+                              ConversionPatternRewriter &rewriter,
+                              Location loc) {
+  Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+  if (values.empty())
+    return LLVM::ZeroOp::create(rewriter, loc, ptrType);
+  Type i64Type = rewriter.getI64Type();
+  Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                       rewriter.getI64IntegerAttr(1));
+  auto arrType = LLVM::LLVMArrayType::get(i64Type, values.size());
+  Value arr = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+  for (auto [i, v] : llvm::enumerate(values)) {
+    Value idx = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI32Type(),
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(i)));
+    Value elemPtr =
+        LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+    LLVM::StoreOp::create(rewriter, loc, v, elemPtr);
+  }
+  return arr;
+}
+
+// `emitHostI64Array` over compile-time values; null when \p attr is absent.
+inline Value emitHostI64Array(DenseI64ArrayAttr attr,
+                              ConversionPatternRewriter &rewriter,
+                              Location loc) {
+  SmallVector<Value> values;
+  if (attr)
+    for (int64_t v : attr.asArrayRef())
+      values.push_back(LLVM::ConstantOp::create(
+          rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(v)));
+  return emitHostI64Array(values, rewriter, loc);
+}
+
 // Returns the full LLVM memref descriptor wrapper for \p memrefDesc, exposing
 // allocatedPtr / alignedPtr / offset / sizes / strides via MemRefDescriptor's
 // accessors.  Use this when a runtime call needs to honor the slice (offset,

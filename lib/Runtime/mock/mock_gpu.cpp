@@ -5,6 +5,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2063,18 +2064,19 @@ int wrap_log(RuntimeState *state, void *input, void *output,
 int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
-                int64_t exclusive, int64_t reverse) {
+                int64_t exclusive, int64_t reverse, int64_t host_axis) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_cumsum\n");
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_cumsum(data_rank=%lld, num_elements=%lld, "
              "data_type=%s(%lld), axis_dtype=%s(%lld), exclusive=%lld, "
-             "reverse=%lld)\n",
+             "reverse=%lld, host_axis=%s)\n",
              (long long)data_rank, (long long)num_elements,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              hipdnn_ep_datatype_name(axis_dtype), (long long)axis_dtype,
-             (long long)exclusive, (long long)reverse);
+             (long long)exclusive, (long long)reverse,
+             host_axis == INT64_MIN ? "null" : "yes");
   return 0;
 }
 
@@ -2082,7 +2084,9 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
              void *axes, void *output, const int64_t *data_shape,
              int64_t data_rank, const int64_t *output_shape,
              int64_t output_rank, int64_t pads_num_elements,
-             int64_t axes_num_elements, int64_t data_type, int64_t mode_id) {
+             int64_t axes_num_elements, int64_t data_type, int64_t mode_id,
+             const int64_t *host_pads, const int64_t *host_axes,
+             const void *host_constant_value) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_pad\n");
     return -1;
@@ -2092,11 +2096,13 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
       (mode_id >= 0 && mode_id < 4) ? kPadModes[mode_id] : "unknown";
   MOCK_PRINT("[MOCK] wrap_pad(data_rank=%lld, output_rank=%lld, "
              "pads_num=%lld, axes_num=%lld, data_type=%s(%lld), mode=%s(%lld), "
-             "cval=%s)\n",
+             "cval=%s, host_pads=%s, host_axes=%s, host_cval=%s)\n",
              (long long)data_rank, (long long)output_rank,
              (long long)pads_num_elements, (long long)axes_num_elements,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
-             mode_name, (long long)mode_id, constant_value ? "yes" : "null");
+             mode_name, (long long)mode_id, constant_value ? "yes" : "null",
+             host_pads ? "yes" : "null", host_axes ? "yes" : "null",
+             host_constant_value ? "yes" : "null");
   return 0;
 }
 
@@ -2190,7 +2196,9 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t data_rank, const int64_t *output_shape,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+               int64_t data_type, const int64_t *host_starts,
+               const int64_t *host_ends, const int64_t *host_axes,
+               const int64_t *host_steps) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;
@@ -2203,12 +2211,14 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   (void)output_shape;
   MOCK_PRINT("[MOCK] wrap_slice(data_rank=%lld, output_rank=%lld, "
              "starts_n=%lld, axes_n=%lld (%s), steps_n=%lld (%s), "
-             "data_type=%s(%lld))\n",
+             "data_type=%s(%lld), host_bounds=%s, host_axes=%s, "
+             "host_steps=%s)\n",
              (long long)data_rank, (long long)output_rank,
              (long long)starts_num_elements, (long long)axes_num_elements,
              axes ? "yes" : "null", (long long)steps_num_elements,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
-             (long long)data_type);
+             (long long)data_type, host_starts && host_ends ? "yes" : "null",
+             host_axes ? "yes" : "null", host_steps ? "yes" : "null");
   return 0;
 }
 

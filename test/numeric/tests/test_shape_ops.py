@@ -234,26 +234,45 @@ def _make_pad_model(
     pads: list[int],
     mode: str,
     constant_value=None,
+    runtime_controls: bool = False,
 ):
-    """ONNX-18 Pad: data, pads, constant_value? (axes omitted)."""
+    """ONNX-18 Pad: data, pads, constant_value? (axes omitted).
+
+    Initializer pads/constant_value reach the runtime on the host. With
+    ``runtime_controls`` they are graph inputs instead, so the runtime has to
+    read them back from the device.
+    """
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
-    pads_init = numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
-    initializers = [pads_init]
+    graph_inputs = [X]
+    initializers = []
     input_names = ["X", "pads"]
 
-    if constant_value is not None:
-        cval_init = numpy_helper.from_array(
-            np.array(constant_value, dtype=dtype), name="constant_value"
+    if runtime_controls:
+        graph_inputs.append(
+            helper.make_tensor_value_info("pads", TensorProto.INT64, [len(pads)])
         )
-        initializers.append(cval_init)
+    else:
+        initializers.append(
+            numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
+        )
+
+    if constant_value is not None:
+        if runtime_controls:
+            graph_inputs.append(helper.make_tensor_value_info("constant_value", tp, []))
+        else:
+            initializers.append(
+                numpy_helper.from_array(
+                    np.array(constant_value, dtype=dtype), name="constant_value"
+                )
+            )
         input_names.append("constant_value")
 
     rank = len(input_shape)
     out_shape = [input_shape[i] + pads[i] + pads[i + rank] for i in range(rank)]
     Y = helper.make_tensor_value_info("Y", tp, out_shape)
     node = helper.make_node("Pad", input_names, ["Y"], mode=mode)
-    return make_model_from_nodes([node], [X], [Y], initializers=initializers)
+    return make_model_from_nodes([node], graph_inputs, [Y], initializers=initializers)
 
 
 class TestPad:
@@ -290,6 +309,33 @@ class TestPad:
         rng = np.random.default_rng(404)
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "dtype,shape,pads,cval",
+        [
+            (np.float16, [3, 4], [0, 1, 0, 1], 1.5),
+            (np.int64, [2, 3], [0, 2, 0, 0], -1),
+        ],
+    )
+    def test_pad_runtime_controls(self, model_runner, dtype, shape, pads, cval):
+        """Pads and constant value fed as graph inputs -- the runtime reads
+        both from the device."""
+        model = _make_pad_model(
+            dtype,
+            shape,
+            pads,
+            mode="constant",
+            constant_value=cval,
+            runtime_controls=True,
+        )
+        rng = np.random.default_rng(408)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-10, 10, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        feeds = [x, np.array(pads, dtype=np.int64), np.array(cval, dtype=dtype)]
+        actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
 

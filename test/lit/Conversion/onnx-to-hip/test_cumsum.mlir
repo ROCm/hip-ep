@@ -39,4 +39,16 @@ module {
   // CHECK: tensor.dim
   // CHECK: tensor.empty
   // CHECK: hip.cumsum(%[[CTX3]]) ins(%[[X3]], %[[AX3]] : tensor<?x?xf32>, tensor<i32>) outs({{.*}} : tensor<?x?xf32>)
+  // CHECK-NOT: axis_value
+
+  // A constant axis (Gemma-4's mask CumSums) is mirrored as `axis_value`, so
+  // the runtime needs no readback of the axis tensor.
+  func.func @cumsum_const_axis(%x: tensor<?x?xi64>) -> tensor<?x?xi64> {
+    %axis = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %r = "onnx.CumSum"(%x, %axis) : (tensor<?x?xi64>, tensor<i64>) -> tensor<?x?xi64>
+    return %r : tensor<?x?xi64>
+  }
+
+  // CHECK-LABEL: func.func @cumsum_const_axis
+  // CHECK: hip.cumsum({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xi64>, tensor<i64>) outs({{.*}} : tensor<?x?xi64>) {axis_value = 1 : i64
 }
