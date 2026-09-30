@@ -24,16 +24,44 @@ they do not measure the same thing:
   chrome trace  from HIPDNN_EP_TRACE_FILE. Exact op attribution (the EP names
                 the ops itself) but the profiler's per-inference stream sync
                 inflates the total. Structure yes, throughput no.
+
+Neither gives absolute time on its own. SQTT inflates kernels by a different
+factor per family and stretches idle gaps far more (one gemma-4-26B capture
+showed 2.8 ms of host gap per token against 0.73 ms real), so absolute ms,
+recoverable ms and tok/s gains are printed only with both:
+
+  --calib J          per-family SQTT factors from calibrate_sqtt.py; each
+                     family is divided by max(1, its factor).
+  --host-timeline P  the real per-token period and host split from
+                     host_timeline.py (JSON, or the HIPDNN_EP_HOST_TIMELINE
+                     prefix), in place of SQTT's gaps.
+
+Without them the report is composition only, marked UNVALIDATED. Either way a
+gain is an estimate until bench/ab_interleaved.ps1 has measured it.
+
+A VLM decode step spans two queues (embedding session, then decoder). Steps
+are cut where the stream switches queues, and the other queue's time is its
+own line rather than decoder idle.
 """
 
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
-import csv
+import json
+import os
 import sys
 
-from perfcommon import ModelSpec, add_model_args, specs_from_args
+from perfcommon import (
+    LAYER_MARKERS,
+    ModelSpec,
+    add_model_args,
+    decode_step_windows,
+    load_dispatches,
+    op_for_family,
+    specs_from_args,
+)
 
 # EP op name -> component. The op names come from the build under test; run
 # trace_ops.py on a trace to list them for a model this does not cover.
@@ -54,12 +82,16 @@ OP_COMPONENT = {
 # on the N dimension rather than lumped together.
 COMPONENT_ORDER = [
     "moe_experts",
+    "dense_mlp",
     "attn_proj",
     "lm_head",
     "router",
     "kv_cache",
     "norm_other",
 ]
+
+UNVALIDATED = "UNVALIDATED (SQTT-relative)"
+BUDGET_TOL_PCT = 5.0
 
 
 def classify_matmul(shape: str, spec: ModelSpec) -> str:
@@ -122,47 +154,158 @@ def from_trace(
     )
 
 
+def load_calib(path: str) -> dict:
+    """Per-op factors from calibrate_sqtt.py, and the family map they used."""
+    with open(path) as f:
+        d = json.load(f)
+    ops = d.get("ops", {})
+    raw = {op: v["factor"] for op, v in ops.items() if v.get("factor")}
+    return {
+        "path": path,
+        "raw": raw,
+        # SQTT and event time both over-state the uninstrumented kernel time
+        # (see calibrate_sqtt.py), so a factor below 1 keeps SQTT.
+        "factors": {op: max(1.0, f) for op, f in raw.items()},
+        "fmap": {
+            op: {
+                "exact": tuple(v.get("families", {}).get("exact", ())),
+                "prefix": tuple(v.get("families", {}).get("prefix", ())),
+            }
+            for op, v in ops.items()
+        },
+        "failed_check": [op for op, v in ops.items() if not v.get("check_ok", True)],
+    }
+
+
+def load_host_timeline(path: str) -> dict[str, float]:
+    """Median per-step host timeline in ms: a host_timeline.py --json file, or
+    the HIPDNN_EP_HOST_TIMELINE prefix of a run."""
+    if path.lower().endswith(".json"):
+        with open(path) as f:
+            summ = json.load(f)["summary"]
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import host_timeline as ht
+
+        steps = []
+        for _pid, ep, sy in ht.resolve_files(path):
+            steps += ht.steps_for_pid(ep, sy, 0.05)["steps"]
+        if not steps:
+            raise SystemExit(f"{path}: no host-timeline decode steps")
+        summ = ht.summarize(steps)
+    return {k: v["median_us"] / 1000.0 for k, v in summ.items()}
+
+
 def from_dispatches(
-    path: str, spec: ModelSpec, extra: dict | None = None
+    path: str, spec: ModelSpec, extra: dict | None = None, calib: dict | None = None
 ) -> tuple[dict[str, float], int, str]:
     """Per-component microseconds for ONE decode step, from an RGP dispatch CSV.
 
-    A capture window rarely lands on exactly one step -- the fence arms at the
-    start of a step and the buffer fills part-way into the next -- so totals are
-    normalised by how many steps the window actually holds. topk_routing runs
-    once per layer and nowhere else, so its count over `layers` measures that
-    directly, in fractions.
+    With two queues (VLM) the step is cut at queue switches and only complete
+    steps count; the other queue's kernels go to `other_queue`. With one queue
+    (text), a capture window rarely lands on exactly one step -- the fence arms
+    at the start of a step and the buffer fills part-way into the next -- so
+    totals are normalised by how many steps the window holds, counted by a
+    once-per-layer marker family.
+
+    With `calib`, each dispatch of a calibrated op is divided by that op's
+    factor; the rest stay SQTT-relative and extra['calibrated_share'] says how
+    much of the kernel time that is.
     """
-    rows = list(csv.DictReader(open(path)))
-    routing = sum(1 for r in rows if r.get("family", "") == "topk_routing")
-    if not routing:
-        raise SystemExit(
-            f"{path}: no topk_routing dispatches; cannot tell how many decode "
-            "steps this window holds"
-        )
-    steps = routing / spec.layers
+    rows = load_dispatches(path)
+    wins, main_q, rejected = decode_step_windows(rows, spec.layers)
+    if wins:
+        sel = [r for s, e in wins for r in rows[s:e]]
+        steps = float(len(wins))
+        how = f"{len(wins)} complete step(s) cut at queue switches"
+    else:
+        counts = collections.Counter(r.get("family", "") for r in rows)
+        marker = next((f for f in LAYER_MARKERS if counts.get(f)), None)
+        if marker is None:
+            raise SystemExit(
+                f"{path}: one queue and none of {', '.join(LAYER_MARKERS)}; "
+                "cannot tell how many decode steps this window holds"
+            )
+        sel = rows
+        steps = counts[marker] / spec.layers
+        how = f"window held {steps:.2f} decode steps by {marker} count"
+    dec = [r for r in sel if not wins or r.get("queue") == main_q]
     # Classify per (family, threads) group rather than per row, so the rule can
     # use how often a group runs. Within one step that is the only thing
     # separating the lm_head from a projection: both are one matmul kernel over
     # int4 or fp16 weights, but the lm_head runs once and a projection runs once
     # per layer. See classify_kernel for why the thread count cannot do it.
     per_group: dict[tuple[str, int], int] = collections.Counter()
-    for r in rows:
+    for r in dec:
         per_group[(r.get("family", ""), int(r.get("threads") or 0))] += 1
+    by_position = positional_components(dec, spec)
     out: dict[str, float] = collections.defaultdict(float)
-    for r in rows:
+    raw_us = cal_raw_us = 0.0
+    for i, r in enumerate(dec):
         fam = r.get("family", "")
         threads = int(r.get("threads") or 0)
         per_step = per_group[(fam, threads)] / steps
-        out[classify_kernel(fam, threads, spec, per_step)] += float(r["dur_us"])
+        dur = float(r["dur_us"])
+        raw_us += dur
+        comp = by_position.get(i) or classify_kernel(fam, threads, spec, per_step)
+        if calib:
+            op = op_for_family(fam, calib["fmap"])
+            if op in calib["factors"]:
+                cal_raw_us += dur
+                dur /= calib["factors"][op]
+            # The kernel name cannot say that a hipBLASLt gemm is attention;
+            # the calibration's op map can (calibrate_sqtt.py --map gqa+=gemm).
+            if op == "gqa":
+                comp = "kv_cache"
+        out[comp] += dur
+    for r in sel:
+        if wins and r.get("queue") != main_q:
+            out["other_queue"] += float(r["dur_us"])
     out = {k: v / steps for k, v in out.items()}
     if extra is not None:
-        extra.update(dispatch_stats(rows, steps))
-    return (
-        out,
-        len(rows),
-        f"RGP dispatch CSV (SQTT timing; window held {steps:.2f} decode steps)",
-    )
+        extra.update(
+            window_stats(rows, wins, main_q) if wins else dispatch_stats(rows, steps)
+        )
+        extra["rejected_windows"] = rejected
+        if calib:
+            extra["calibrated_share"] = cal_raw_us / raw_us if raw_us else 0.0
+    return out, len(sel), f"RGP dispatch CSV (SQTT timing; {how})"
+
+
+def window_stats(rows: list[dict], wins: list[tuple[int, int]], main_q: str) -> dict:
+    """Per-step SQTT span, busy (union over queues), other-queue and idle time."""
+    span = busy = other = 0.0
+    n = 0
+    bound: dict[str, float] = collections.defaultdict(float)
+    for s, e in wins:
+        w = rows[s:e]
+        span += rows[e]["t0"] - rows[s]["t0"]
+        cur0 = cur1 = None
+        for r in w:
+            if cur1 is None or r["t0"] > cur1:
+                if cur1 is not None:
+                    busy += cur1 - cur0
+                cur0, cur1 = r["t0"], r["t1"]
+            else:
+                cur1 = max(cur1, r["t1"])
+            if r.get("queue") != main_q:
+                other += float(r["dur_us"])
+            else:
+                bound[r.get("bound_class") or "(unclassified)"] += float(r["dur_us"])
+        busy += min(cur1, rows[e]["t0"]) - cur0
+        n += len(w)
+    k = len(wins)
+    tot = sum(bound.values())
+    return {
+        "steps": float(k),
+        "span_ms": span / k / 1000.0,
+        "busy_ms": busy / k / 1000.0,
+        "gap_ms": (span - busy) / k / 1000.0,
+        "other_queue_ms": other / k / 1000.0,
+        "artifact_ms": 0.0,
+        "n_dispatch": n / k,
+        "bound": {b: v / tot for b, v in bound.items()} if tot else {},
+    }
 
 
 # The fence drains the GPU and idles before arming, and RGP's own setup runs in
@@ -237,6 +380,43 @@ def shape_bytes(op: str, shape: str, calls: float, spec: ModelSpec) -> float:
     return 0.0
 
 
+def positional_components(dec: list[dict], spec: ModelSpec) -> dict[int, str]:
+    """Components of int4 GEMVs that only their position in the layer can name.
+
+    SQTT carries no shapes, and a q-projection, an FFN GEMV and an int4 router
+    all run the same matmul_nbits kernels once per layer, so classify_kernel
+    files them all as attn_proj. Around them the layer is unambiguous: a gelu
+    FFN runs gate GEMV, gelu, up GEMV, multiply, down GEMV, and an int4 router
+    GEMV is followed directly by its softmax. Filing the FFN as attention put
+    all of gemma-4-12b's FFN time against the q/k/v/o floor. Models without
+    these kernels (swiglu MoE) are left to classify_kernel.
+    """
+    ffn = "dense_mlp" if spec.dense_inter or not spec.experts else None
+    gemv = [
+        i
+        for i, r in enumerate(dec)
+        if "matmul_nbits" in r.get("family", "") and "quant_act" not in r["family"]
+    ]
+
+    def with_quant(g: int) -> list[int]:
+        # The activation-quantise kernel launched for a GEMV goes with it.
+        prev = dec[g - 1].get("family", "") if g else ""
+        return [g - 1, g] if "matmul_nbits_quant_act" in prev else [g]
+
+    out: dict[int, str] = {}
+    for i, r in enumerate(dec):
+        fam = r.get("family", "")
+        if ffn and "gelu" in fam:
+            k = bisect.bisect_left(gemv, i)
+            for g in gemv[max(0, k - 1) : k + 2]:
+                for j in with_quant(g):
+                    out[j] = ffn
+        elif "softmax_row" in fam and i and i - 1 in gemv:
+            for j in with_quant(i - 1):
+                out[j] = "router"
+    return out
+
+
 def classify_kernel(
     family: str, threads: int, spec: ModelSpec, per_step: float = 1e9
 ) -> str:
@@ -297,7 +477,18 @@ def main() -> None:
         "--measured-ms",
         type=float,
         default=None,
-        help="ms/token from bench_tps.ps1, to compare against the floor",
+        help="ms/token from bench_tps.ps1, to compare the whole step against "
+        "the floor (never used to rescale components)",
+    )
+    ap.add_argument(
+        "--calib",
+        help="calibrate_sqtt.py --json output: per-family SQTT factors "
+        "(dispatch CSV only)",
+    )
+    ap.add_argument(
+        "--host-timeline",
+        help="host_timeline.py --json output, or the HIPDNN_EP_HOST_TIMELINE "
+        "prefix of a run at the same prompt length",
     )
     ap.add_argument(
         "--detail",
@@ -307,6 +498,13 @@ def main() -> None:
     add_model_args(ap)
     args = ap.parse_args()
     spec, dev = specs_from_args(args)
+    if args.calib and args.trace:
+        raise SystemExit("--calib applies to a dispatch CSV, not a chrome trace")
+
+    calib = load_calib(args.calib) if args.calib else None
+    host = load_host_timeline(args.host_timeline) if args.host_timeline else None
+    validated = bool(calib and host)
+    missing = [n for n, v in (("--calib", calib), ("--host-timeline", host)) if not v]
 
     detail: dict = {} if args.detail else None
     stats: dict = {}
@@ -314,67 +512,147 @@ def main() -> None:
         times, n, provenance = from_trace(args.source, spec, args.skip_runs, detail)
         unit = f"mean of {n} steady-state decode Runs"
     else:
-        times, n, provenance = from_dispatches(args.source, spec, stats)
+        times, n, provenance = from_dispatches(args.source, spec, stats, calib)
         unit = f"{stats['n_dispatch']:.0f} dispatches per step ({n} captured)"
 
     byts = spec.decode_bytes(args.kv_len)
     byts["norm_other"] = 0.0  # activations only; not a weight-traffic component
 
-    measured_total = sum(times.values()) / 1000.0
+    # Decoder kernels only. The other queue (VLM embedding session) is serial
+    # with the decoder and is reported on its own line.
+    kernel_ms = sum(times.get(c, 0.0) for c in COMPONENT_ORDER) / 1000.0
+    other_ms = times.get("other_queue", 0.0) / 1000.0
     floor_total = sum(byts.values()) / dev.bw_bytes_s * 1000.0
-
-    # Both sources over-report, for different reasons: the trace carries the
-    # profiler's per-inference stream sync, and a capture pays SQTT plus SPM
-    # counter collection on every dispatch. Either way the kernel times sum to
-    # more than the step really takes, and comparing that sum against the
-    # measured ms/token would invent negative overhead. Both are trustworthy
-    # for how the step divides up and neither for how long it is, so rescale
-    # the shares onto the measurement and say so. Without --measured-ms there
-    # is nothing to rescale onto and the absolute ms stay inflated.
-    rescaled = False
-    factor = 1.0
-    if args.measured_ms and measured_total > 0:
-        factor = args.measured_ms / measured_total
-        raw_total = measured_total
-        times = {k: v * factor for k, v in times.items()}
-        measured_total = args.measured_ms
-        rescaled = True
+    # The decoder's GPU work fits inside its measured compute, so calibrated
+    # kernels well past it mean the calibration did not remove the inflation
+    # (gemma-4-12b: 19% over, with event and SQTT agreeing on matmul_nbits).
+    # Absolute numbers built on that would carry the error into every gain.
+    over_pct = None
+    if validated:
+        over_pct = 100 * (kernel_ms - host["dec_compute"]) / host["dec_compute"]
+        validated = over_pct <= BUDGET_TOL_PCT
 
     print(f"source     : {args.source}")
     print(f"provenance : {provenance}")
     print(f"window     : {unit}")
     print(f"model      : {args.preset}  kv_len={args.kv_len}")
     print(f"roofline   : {dev.bw_bytes_s / 1e9:.0f} GB/s")
-    if rescaled:
-        src = "trace" if args.trace else "capture"
+    if calib:
+        share = stats.get("calibrated_share", 0.0)
         print(
-            f"rescaled   : {src} shares x{factor:.3f} onto the measured "
-            f"{args.measured_ms:.2f} ms/token ({src} total was {raw_total:.2f} ms)"
+            f"calibrated : {', '.join(f'{o} /{f:.3f}' for o, f in calib['factors'].items())}"
+            f" ({100 * share:.0f}% of SQTT kernel time; the rest stays SQTT-relative)"
+        )
+        kept = [o for o, f in calib["raw"].items() if f < 1.0]
+        if kept:
+            print(
+                f"             {', '.join(f'{o} {calib["raw"][o]:.3f}' for o in kept)}"
+                " < 1: event pairs over-state more than SQTT there, so SQTT is kept"
+            )
+        if calib["failed_check"]:
+            print(
+                f"  WARNING: {', '.join(calib['failed_check'])} failed the "
+                "dispatches/call check in calibrate_sqtt.py; factors suspect"
+            )
+    if host:
+        print(
+            f"host       : period {host['period']:.2f} ms"
+            f" ({1000 / host['period']:.2f} tok/s), decoder compute"
+            f" {host['dec_compute']:.2f} ms (launch {host['dec_launch']:.2f}"
+            f" + sync wait {host['dec_sync']:.2f})"
+        )
+    if not validated:
+        why = (
+            f"missing {' and '.join(missing)}"
+            if missing
+            else f"calibrated kernels {kernel_ms:.2f} ms exceed the decoder compute"
+            f" {host['dec_compute']:.2f} ms by {over_pct:.1f}% (tolerance"
+            f" {BUDGET_TOL_PCT:g}%): some family is still inflated in both the capture"
+            " and the event run, or the runs differ in build, env or prompt"
+        )
+        print(f"\n*** {UNVALIDATED}: {why}.")
+        print(
+            "*** Composition only. SQTT inflates kernels non-uniformly and idle"
+            " gaps far more, so no absolute ms, recoverable ms or gains are shown."
         )
     print()
 
-    head = f"{'component':<14}{'MB':>9}{'floor_ms':>10}{'meas_ms':>9}{'%floor':>8}{'share':>8}{'recover':>9}"
-    print(head)
-    print("-" * len(head))
     rows = []
-    for comp in COMPONENT_ORDER:
-        ms = times.get(comp, 0.0) / 1000.0
-        mb = byts.get(comp, 0.0) / 1e6
-        fl = byts.get(comp, 0.0) / dev.bw_bytes_s * 1000.0
-        pct = 100 * fl / ms if ms > 0 else 0.0
-        share = 100 * ms / measured_total if measured_total else 0.0
-        recover = max(0.0, ms - fl)
-        rows.append((comp, mb, fl, ms, pct, share, recover))
-        print(
-            f"{comp:<14}{mb:>9.1f}{fl:>10.2f}{ms:>9.2f}"
-            f"{pct:>7.0f}%{share:>7.1f}%{recover:>9.2f}"
+    if validated:
+        period = host["period"]
+        head = (
+            f"{'component':<14}{'MB':>9}{'floor_ms':>10}{'ms':>8}{'%floor':>8}"
+            f"{'%period':>9}{'recover':>9}{'tok/s +%':>10}"
         )
-    print("-" * len(head))
-    print(
-        f"{'TOTAL':<14}{sum(byts.values()) / 1e6:>9.1f}{floor_total:>10.2f}"
-        f"{measured_total:>9.2f}{100 * floor_total / measured_total:>7.0f}%"
-        f"{100:>7.1f}%{max(0.0, measured_total - floor_total):>9.2f}"
-    )
+        print(head)
+        print("-" * len(head))
+        for comp in COMPONENT_ORDER:
+            ms = times.get(comp, 0.0) / 1000.0
+            mb = byts.get(comp, 0.0) / 1e6
+            fl = byts.get(comp, 0.0) / dev.bw_bytes_s * 1000.0
+            pct = 100 * fl / ms if ms > 0 and fl > 0 else 0.0
+            # No floor, no recoverable claim: an activation-only component
+            # (norm_other) would otherwise read as 100% recoverable.
+            rec = max(0.0, ms - fl) if fl > 0 else 0.0
+            # A GPU-bound step shrinks by the GPU time saved only until the
+            # launch phase binds: at most the sync wait.
+            eff = min(rec, host["dec_sync"])
+            gain = 100 * (period / (period - eff) - 1) if eff > 0 else 0.0
+            rows.append((comp, mb, fl, ms, pct, rec, eff, gain))
+            print(
+                f"{comp:<14}{mb:>9.1f}{fl:>10.2f}{ms:>8.2f}"
+                + (f"{pct:>7.0f}%" if fl > 0 else f"{'-':>8}")
+                + f"{100 * ms / period:>8.1f}%"
+                + (f"{rec:>9.2f}{gain:>9.1f}%" if fl > 0 else f"{'-':>9}{'-':>10}")
+            )
+        print("-" * len(head))
+        print(
+            f"{'kernels':<14}{sum(byts.values()) / 1e6:>9.1f}{floor_total:>10.2f}"
+            f"{kernel_ms:>8.2f}{100 * floor_total / kernel_ms:>7.0f}%"
+            f"{100 * kernel_ms / period:>8.1f}%"
+        )
+        resid = host["dec_compute"] - kernel_ms
+        print(
+            f"\nstep budget (ms): period {period:.2f} = decoder compute"
+            f" {host['dec_compute']:.2f} + host outside it"
+            f" {period - host['dec_compute']:.2f}"
+        )
+        print(
+            f"  decoder compute {host['dec_compute']:.2f} - calibrated kernels"
+            f" {kernel_ms:.2f} = {resid:.2f} GPU idle inside the compute"
+            " (plus calibration error)"
+        )
+        if resid < 0:
+            print(
+                f"  kernels exceed the decoder compute by {over_pct:.1f}% (within the"
+                f" {BUDGET_TOL_PCT:g}% tolerance). Every calibrated number is an upper"
+                " bound (event markers; SQTT stretch on uncalibrated families), so"
+                " component ms read high by about this much."
+            )
+        if other_ms:
+            print(
+                f"  other queue (SQTT-relative, uncalibrated): {other_ms:.2f} ms;"
+                f" host timeline says other EP Computes take {host['other_ep']:.2f} ms"
+            )
+    else:
+        head = f"{'component':<14}{'MB':>9}{'floor_ms':>10}{'share':>8}"
+        print(head)
+        print("-" * len(head))
+        for comp in COMPONENT_ORDER:
+            ms = times.get(comp, 0.0) / 1000.0
+            mb = byts.get(comp, 0.0) / 1e6
+            fl = byts.get(comp, 0.0) / dev.bw_bytes_s * 1000.0
+            share = 100 * ms / kernel_ms if kernel_ms else 0.0
+            print(f"{comp:<14}{mb:>9.1f}{fl:>10.2f}{share:>7.1f}%")
+        print("-" * len(head))
+        print(
+            f"{'TOTAL':<14}{sum(byts.values()) / 1e6:>9.1f}{floor_total:>10.2f}"
+            f"{100:>7.1f}%   (share of decoder kernel time, {UNVALIDATED})"
+        )
+        if other_ms:
+            print(
+                f"other queue: {100 * other_ms / kernel_ms:.1f}% of decoder kernel time"
+            )
 
     if args.measured_ms:
         print(
@@ -389,67 +667,68 @@ def main() -> None:
         # underneath it the q/o projections and the 96 tiny k/v projections run
         # at completely different rates and want different fixes, so each
         # (op, shape) gets its own floor from the bytes its own shape implies.
-        print("\nper-op detail (each row against its own floor):")
-        head2 = f"  {'component':<12}{'op':<14}{'shape':<26}{'calls':>6}{'MB':>8}{'ms':>8}{'GB/s':>8}{'%floor':>8}"
+        # Trace times carry the profiler's syncs, so only the split is shown.
+        print(f"\nper-op detail ({UNVALIDATED}: trace timing is profiler-inflated):")
+        tot_us = sum(us for _calls, us in detail.values()) or 1.0
+        head2 = f"  {'component':<12}{'op':<14}{'shape':<26}{'calls':>6}{'MB':>8}{'share':>8}"
         print(head2)
         print("  " + "-" * (len(head2) - 2))
         for (comp, op, shape), (calls, us) in sorted(
             detail.items(), key=lambda kv: -kv[1][1]
         ):
-            ms = us / 1000.0 * (factor if rescaled else 1.0)
-            mb = shape_bytes(op, shape, calls, spec) / 1e6
-            if ms <= 0:
+            if us <= 0:
                 continue
-            gbs = mb / 1e3 / (ms / 1e3) if ms else 0
-            fl = mb * 1e6 / dev.bw_bytes_s * 1000.0
-            pct = 100 * fl / ms if ms else 0
-            if mb == 0:
-                print(
-                    f"  {comp:<12}{op:<14}{shape:<26}{calls:>6.0f}{'-':>8}{ms:>8.2f}{'-':>8}{'-':>8}"
-                )
-            else:
-                print(
-                    f"  {comp:<12}{op:<14}{shape:<26}{calls:>6.0f}{mb:>8.1f}"
-                    f"{ms:>8.2f}{gbs:>8.0f}{pct:>7.0f}%"
-                )
+            mb = shape_bytes(op, shape, calls, spec) / 1e6
+            mbs = f"{mb:>8.1f}" if mb else f"{'-':>8}"
+            print(
+                f"  {comp:<12}{op:<14}{shape:<26}{calls:>6.0f}{mbs}{100 * us / tot_us:>7.1f}%"
+            )
 
     if stats:
-        # SQTT plus SPM counter collection costs real time per dispatch, so a
-        # capture's wall clock runs well above the step it is measuring. It is
-        # authoritative for composition and for the bound classes -- which is
-        # what it is here for -- and not for absolute ms.
+        # SQTT plus SPM counter collection costs real time per dispatch and
+        # stretches idle gaps far more than kernels, so none of this is wall
+        # time. It is here for the bound classes and to show the inflation.
+        span = stats.get("span_ms", stats["busy_ms"] + stats["gap_ms"])
         print(
-            f"\ncapture wall clock: {stats['busy_ms']:.2f} ms kernels"
-            f" + {stats['gap_ms']:.2f} ms between them"
-            f" = {stats['busy_ms'] + stats['gap_ms']:.2f} ms/step"
-        )
-        if args.measured_ms:
-            infl = (stats["busy_ms"] + stats["gap_ms"]) / args.measured_ms
-            print(
-                f"  vs {args.measured_ms:.2f} ms/token measured without the"
-                f" profiler: x{infl:.2f} instrumentation cost"
+            f"\nSQTT wall clock (inflated, not used for time): {span:.2f} ms/step ="
+            f" {stats['busy_ms']:.2f} busy + {stats['gap_ms']:.2f} idle"
+            + (
+                f"; other queue {stats['other_queue_ms']:.2f} ms of the busy"
+                if stats.get("other_queue_ms")
+                else ""
             )
-        print(
-            f"  inter-kernel gap is {100 * stats['gap_ms'] / (stats['busy_ms'] + stats['gap_ms']):.0f}%"
-            f" of the captured step over ~{stats['n_dispatch']:.0f} dispatches"
-            f" ({1000 * stats['gap_ms'] / stats['n_dispatch']:.1f} us each)"
         )
+        real = host["period"] if host else args.measured_ms
+        if real:
+            print(
+                f"  vs {real:.2f} ms/token measured without the profiler: x{span / real:.2f}"
+            )
+        if host:
+            print(
+                f"  SQTT idle {stats['gap_ms']:.2f} ms vs host timeline: outside the"
+                f" decoder {host['period'] - host['dec_compute']:.2f} ms"
+            )
         if stats["artifact_ms"] > 0.01:
             print(
                 f"  ({stats['artifact_ms']:.2f} ms of fence/capture-setup idle"
                 " excluded as measurement, not workload)"
             )
-        print("\n  SPM bound class, by share of kernel time:")
-        for k, v in sorted(stats["bound"].items(), key=lambda kv: -kv[1]):
-            print(f"    {k or '(unclassified)':<34}{100 * v:>6.1f}%")
+        if stats["bound"]:
+            print("\n  SPM bound class, by share of decoder kernel time:")
+            for k, v in sorted(stats["bound"].items(), key=lambda kv: -kv[1]):
+                print(f"    {k or '(unclassified)':<34}{100 * v:>6.1f}%")
 
-    print("\nranked by recoverable ms/token:")
-    for comp, _mb, fl, ms, pct, _share, rec in sorted(rows, key=lambda r: -r[6]):
-        if rec <= 0.01:
-            continue
-        print(
-            f"  {comp:<14}{rec:>7.2f} ms   ({ms:.2f} -> {fl:.2f}, now at {pct:.0f}% of floor)"
-        )
+    if validated:
+        print("\nranked by recoverable ms/token (estimates -- confirm each with")
+        print("bench/ab_interleaved.ps1 -Metric tps before quoting a gain):")
+        for comp, _mb, fl, ms, pct, rec, eff, gain in sorted(rows, key=lambda r: -r[5]):
+            if rec <= 0.01:
+                continue
+            cap = f", capped at sync wait {eff:.2f}" if eff < rec else ""
+            print(
+                f"  {comp:<14}{rec:>7.2f} ms   ({ms:.2f} -> {fl:.2f}, now at"
+                f" {pct:.0f}% of floor{cap}) -> up to +{gain:.1f}% tok/s"
+            )
 
 
 if __name__ == "__main__":

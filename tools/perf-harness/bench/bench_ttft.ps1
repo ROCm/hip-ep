@@ -79,8 +79,6 @@ try {
 Set-HarnessPath
 Clear-HarnessProfilingEnv
 Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS -EA SilentlyContinue
-$env:HIPDNN_EP_AUTOTUNE = '1'
-$env:HIPDNN_EP_MATMUL_CUSTOM_WMMA = '1'
 # Env: is process-wide and a script shares it with the session that invoked it,
 # so a -SetEnv key with no teardown outlives this run and silently applies to
 # every later one. That is not hypothetical: a kill switch set for one arm of a
@@ -96,7 +94,7 @@ foreach ($kv in $SetEnv) {
 }
 
 # Serial only: concurrent GPU runs invalidate results.
-Stop-HarnessProcesses -IncludePython:($Driver -eq 'vlm')
+Stop-HarnessProcesses
 
 $promptDesc = if ($PromptFile) { "prompt=$(Split-Path -Leaf $PromptFile)" } else { "seqlen=$SeqLen (random ids)" }
 Write-Host ">>> TTFT [$Tag] driver=$Driver $promptDesc -r $Reps -w $Warmup"
@@ -118,8 +116,9 @@ if ($Driver -eq 'vlm') {
   Remove-Item $json -EA SilentlyContinue
   if (-not $MaxLength) { $MaxLength = $SeqLen + 128 }
 
-  & $HarnessEnv.Python '-u' $HarnessEnv.VlmBench `
-    '-m' $HarnessEnv.Model '-i' $HarnessEnv.Image '--prompt_file' $PromptFile `
+  & $HarnessEnv.Python '-u' (Join-Path $PSScriptRoot 'vlm_driver.py') `
+    '--bin' $HarnessEnv.Bin '--prompt-file' $PromptFile $HarnessEnv.VlmBench `
+    '-m' $HarnessEnv.Model '-i' $HarnessEnv.Image `
     '--max_tokens' "$MaxTokens" '--max_length' "$MaxLength" `
     '-e' $ExecutionProvider `
     '-n' "$Reps" '-w' "$Warmup" '-o' $json *>&1 |

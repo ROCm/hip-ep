@@ -93,9 +93,43 @@ function Set-HarnessPath {
 # either variable, so a trace path left over from an earlier shell turns the
 # profiler on with none of PERF's console output to give it away. That leak
 # inflated a 16K VLM baseline from 14,610 ms to 17,545 ms before it was found.
+#
+# HIPDNN_EP_PERF_OPS turns the profiler on the same way. HIPDNN_EP_HOST_TIMELINE
+# adds no sync but still writes files, so a baseline runs without it too.
+#
+# HIPDNN_EP_AUTOTUNE and HIPDNN_EP_MATMUL_CUSTOM_WMMA go because CI sets neither:
+# the harness used to force both on, so its captures and benches measured
+# kernels CI does not run. Opt back in per run with -SetEnv.
 function Clear-HarnessProfilingEnv {
-  Remove-Item Env:HIPDNN_EP_PERF, Env:HIPDNN_EP_DEBUG, Env:HIPDNN_EP_TRACE_FILE `
+  Remove-Item Env:HIPDNN_EP_PERF, Env:HIPDNN_EP_DEBUG, Env:HIPDNN_EP_TRACE_FILE,
+              Env:HIPDNN_EP_PERF_OPS, Env:HIPDNN_EP_HOST_TIMELINE,
+              Env:HIPDNN_EP_AUTOTUNE, Env:HIPDNN_EP_MATMUL_CUSTOM_WMMA `
     -EA SilentlyContinue
+}
+
+# -SetEnv 'K=V' pairs, applied for one run. Env: is process-wide and outlives
+# the script, so the previous values are returned for Restore-HarnessEnv to put
+# back -- a key left set once silently applied to every later run in a sweep.
+function Set-HarnessEnv {
+  param([string[]]$Pairs)
+  $saved = @{}
+  foreach ($kv in $Pairs) {
+    $k, $v = $kv -split '=', 2
+    if (-not $k) { continue }
+    if (-not $saved.ContainsKey($k)) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+    Set-Item -Path "Env:$k" -Value $v
+    Write-Host "    env $k=$v"
+  }
+  return $saved
+}
+
+function Restore-HarnessEnv {
+  param([hashtable]$Saved)
+  if (-not $Saved) { return }
+  foreach ($k in $Saved.Keys) {
+    if ($null -eq $Saved[$k]) { Remove-Item "Env:$k" -EA SilentlyContinue }
+    else { Set-Item -Path "Env:$k" -Value $Saved[$k] }
+  }
 }
 
 # Single-instance lock, because Stop-HarnessProcesses is not one.
@@ -147,13 +181,50 @@ function Exit-HarnessLock {
   Remove-Item Env:HIPEP_LOCK_OWNER -EA SilentlyContinue
 }
 
+# Driver processes the harness started, by PID and start time. The vlm driver is
+# a python process, and stopping python by name took down every unrelated python
+# on the box (editors' language servers, other sessions). The start time guards
+# against a recorded PID that has since been reused by something else.
+function Register-HarnessDriver {
+  param([System.Diagnostics.Process]$Process)
+  New-Item -ItemType Directory -Force -Path $HarnessEnv.OutRoot | Out-Null
+  $f = Join-Path $HarnessEnv.OutRoot 'drivers.txt'
+  Add-Content -Path $f -Value ("{0} {1}" -f $Process.Id, $Process.StartTime.ToFileTimeUtc())
+}
+
+function Stop-HarnessProcessTree {
+  param([int]$Id)
+  $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -EA SilentlyContinue)
+  $tree = [System.Collections.Generic.List[int]]::new()
+  $tree.Add($Id)
+  for ($i = 0; $i -lt $tree.Count; $i++) {
+    foreach ($p in $all) {
+      if ($p.ParentProcessId -eq $tree[$i] -and -not $tree.Contains([int]$p.ProcessId)) {
+        $tree.Add([int]$p.ProcessId)
+      }
+    }
+  }
+  # Children first, so none is orphaned mid-teardown and reparented out of reach.
+  for ($i = $tree.Count - 1; $i -ge 0; $i--) {
+    Stop-Process -Id $tree[$i] -Force -EA SilentlyContinue
+  }
+}
+
 function Stop-HarnessProcesses {
-  # -IncludePython only when the vlm driver is in use: killing every python on
-  # the box would be unacceptable collateral otherwise.
-  param([switch]$IncludePython)
-  $names = @('model_benchmark', 'RadeonDeveloper*')
-  if ($IncludePython) { $names += 'python' }
-  Get-Process $names -EA SilentlyContinue |
+  # model_benchmark and the RGP panel are harness-only binaries, so they go by
+  # name. Anything else goes only if this harness started it.
+  Get-Process 'model_benchmark', 'RadeonDeveloper*' -EA SilentlyContinue |
     Stop-Process -Force -EA SilentlyContinue
+  $f = Join-Path $HarnessEnv.OutRoot 'drivers.txt'
+  if (Test-Path $f) {
+    foreach ($line in Get-Content $f) {
+      $id, $start = $line -split ' ', 2
+      $p = Get-Process -Id ([int]$id) -EA SilentlyContinue
+      if ($p -and "$($p.StartTime.ToFileTimeUtc())" -eq $start) {
+        Stop-HarnessProcessTree -Id $p.Id
+      }
+    }
+    Remove-Item $f -EA SilentlyContinue
+  }
   Start-Sleep 2
 }
