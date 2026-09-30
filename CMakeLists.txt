@@ -265,6 +265,32 @@ foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect
   endif()
 endforeach()
 
+# hip-config-amd.cmake appends `clang-cl -print-libgcc-file-name`'s answer to
+# hip::host/device without checking the file exists, so a prefix built without
+# compiler-rt leaves every consumer depending on a library ninja cannot make.
+# Drop only absent clang_rt paths, and do it after every add_subdirectory, since
+# hip-config re-appends on each find_package(hip).
+foreach(_hip_target hip::host hip::device)
+  if(NOT TARGET ${_hip_target})
+    continue()
+  endif()
+  get_target_property(_hip_link_libs ${_hip_target} INTERFACE_LINK_LIBRARIES)
+  if(NOT _hip_link_libs)
+    continue()
+  endif()
+  set(_hip_kept_libs "")
+  foreach(_hip_lib IN LISTS _hip_link_libs)
+    if(_hip_lib MATCHES "clang_rt" AND NOT EXISTS "${_hip_lib}")
+      message(STATUS "[onnx-hipdnn-ep] ${_hip_target}: dropping absent compiler-rt "
+                     "builtins ${_hip_lib}")
+    else()
+      list(APPEND _hip_kept_libs "${_hip_lib}")
+    endif()
+  endforeach()
+  set_property(TARGET ${_hip_target}
+    PROPERTY INTERFACE_LINK_LIBRARIES "${_hip_kept_libs}")
+endforeach()
+
 # Public C API headers (compiler_api.h, compiler_types.h, ...).
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
   DESTINATION include
