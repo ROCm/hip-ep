@@ -34,63 +34,6 @@ void mlir_populate_cast_conversion_patterns(
   mlir::hipsr::populateCastConversionPatterns(*converter, *patterns, ctx);
 }
 
-// Helper: Populate Return conversion patterns
-void mlir_erase_dead_novalue_ops(uint64_t module_ptr) {
-  if (!module_ptr) return;
-
-  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
-  if (!module) return;
-
-  llvm::SmallVector<mlir::onnx::NoValueOp> dead;
-  module.walk([&](mlir::onnx::NoValueOp op) {
-    if (op->use_empty()) {
-      dead.push_back(op);
-    }
-  });
-
-  for (auto op : dead) {
-    op.erase();
-  }
-}
-
-// Helper: Rewire placeholder inputs to follow shape graph
-void mlir_rewire_placeholder_inputs(uint64_t module_ptr) {
-  if (!module_ptr) return;
-
-  auto module = mlir::dyn_cast<mlir::ModuleOp>(reinterpret_cast<mlir::Operation*>(module_ptr));
-  if (!module) return;
-
-  module.walk([](mlir::hipsr::PlaceholderOp placeholder) {
-    llvm::SmallVector<mlir::Value> resolvedInputs;
-    for (mlir::Value input : placeholder.getInputs()) {
-      resolvedInputs.push_back(mlir::hipsr::getShapeGraphCounterpart(input));
-    }
-    placeholder.getInputsMutable().assign(resolvedInputs);
-  });
-}
-
-//===----------------------------------------------------------------------===//
-// MLIR Dialect Conversion Framework Primitives
-//===----------------------------------------------------------------------===//
-
-// Create a TypeConverter object
-// Returns TypeConverter* as uint64_t (opaque handle for Scheme)
-void mlir_conversion_target_add_legal_hipsr(uint64_t target_ptr) {
-  if (!target_ptr) return;
-  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
-  target->addLegalDialect<mlir::hipsr::HipsrDialect>();
-}
-
-// Mark common operations legal (ModuleOp, arith.constant)
-void mlir_conversion_target_mark_unknown_ops_nested_legal(uint64_t target_ptr) {
-  if (!target_ptr) return;
-  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
-  target->markUnknownOpDynamicallyLegal([](mlir::Operation *op) {
-    return op->getParentOfType<mlir::hipsr::ComputeOp>() != nullptr ||
-           op->getParentOfType<mlir::hipsr::PlaceholderOp>() != nullptr;
-  });
-}
-
 // Create a RewritePatternSet
 // Returns RewritePatternSet* as uint64_t (opaque handle for Scheme)
 void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {

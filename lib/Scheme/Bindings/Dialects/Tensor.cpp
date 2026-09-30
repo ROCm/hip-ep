@@ -85,20 +85,7 @@ uint64_t mlir_type_get_element_type(uint64_t type_ptr) {
   return reinterpret_cast<uint64_t>(const_cast<void*>(tensorType.getElementType().getAsOpaquePointer()));
 }
 
-// Clone tensor type with device memory space
-// Returns new Type* as unsigned-64, or original if not a ranked tensor
-uint64_t mlir_tensor_type_in_device_space(uint64_t type_ptr) {
-  if (!type_ptr) return 0;
-  mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
-  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
-  if (!tensorType) return type_ptr; // Return original if not a tensor
 
-  // Use tensorTypeInSpace from OnnxToHipsrUtils
-  auto newType = tensorType.cloneWithEncoding(
-      mlir::hipsr::MemorySpaceAttr::get(tensorType.getContext(), mlir::hipsr::MemorySpace::Device));
-
-  return reinterpret_cast<uint64_t>(const_cast<void*>(newType.getAsOpaquePointer()));
-}
 
 // Clone tensor type with host memory space
 uint64_t mlir_tensor_type_in_host_space(uint64_t type_ptr) {

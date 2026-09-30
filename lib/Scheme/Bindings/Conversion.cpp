@@ -109,26 +109,6 @@ void mlir_destroy_type_converter(uint64_t converter_ptr) {
   delete reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
 }
 
-// Add standard type conversions to TypeConverter
-// This adds: identity conversion + ranked tensor device memory space conversion
-void mlir_type_converter_add_device_memory_conversions(uint64_t converter_ptr) {
-  if (!converter_ptr) return;
-  auto* converter = reinterpret_cast<mlir::TypeConverter*>(converter_ptr);
-
-  // Identity conversion for all types
-  converter->addConversion([](mlir::Type type) { return type; });
-
-  // Ranked tensor conversion: add device memory space attribute
-  converter->addConversion([](mlir::RankedTensorType type) -> mlir::Type {
-    if (type.getRank() == 0 || type.getEncoding()) {
-      return type;
-    }
-    auto encoding = mlir::hipsr::MemorySpaceAttr::get(type.getContext(),
-                                                      mlir::hipsr::MemorySpace::Device);
-    return mlir::RankedTensorType::get(type.getShape(), type.getElementType(), encoding);
-  });
-}
-
 // Create a ConversionTarget object
 // Returns ConversionTarget* as uint64_t (opaque handle for Scheme)
 uint64_t mlir_create_conversion_target(uint64_t ctx_ptr) {

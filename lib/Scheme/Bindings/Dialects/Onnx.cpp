@@ -59,15 +59,6 @@ void mlir_populate_constant_conversion_patterns(
     *reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr));
 }
 
-// Helper: Erase dead NoValue operations
-void mlir_conversion_target_add_illegal_onnx(uint64_t target_ptr) {
-  if (!target_ptr) return;
-  auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
-  target->addIllegalDialect<mlir::onnx::OnnxDialect>();
-  target->addLegalOp<mlir::onnx::NoValueOp>();
-}
-
-// Mark HipSR dialect legal
 
 } // extern "C"
 
