@@ -1,0 +1,194 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+The model matrix, as an actual matrix: one row per model, one column per
+property, sortable and filterable. It replaced seven per-family sections on
+/docs/models/ that listed the same models as prose -- a hip-ep developer's
+review pointed out that a page called Model Matrix was a list, and that
+comparing two models meant opening two pages.
+
+The seven family pages are still there and still the place the architectural
+story is told. What changed is that they stopped being the navigation path:
+the Family cell links to them, so a reader who wants depth clicks once, and a
+reader comparing models never has to.
+
+Takes no parameters. Everything comes from _data/models.yml and
+_data/benchmarks.yml, so this table cannot claim a condition its caller
+invented.
+
+NO-JS FALLBACK. The table is fully rendered in source order and every row is
+visible; the controls above it are `hidden` until initModelMatrix() removes
+the attribute. Same arrangement as the deck and the card wall on the landing
+page: ship the readable thing, then upgrade it. Sorting and filtering are
+conveniences, not the only way to read this.
+
+SORT KEYS. Text columns sort on their own text. The three that must not are
+carried in `data-sort-value`:
+
+  Parameters  the leading total-parameter count as a number, so 9B sorts
+              below 70B instead of above it -- `params` is a sentence
+              ("35B total, 3B active") and its own text sorts alphabetically.
+  Prefill     the computed rate, as a number.
+  Decode      the measured rate, as a number.
+
+A row with no measurement gets `data-sort-value="-1"`, which parks it at the
+bottom ascending and the top descending -- deliberately, either way: a blank
+is not a zero and should not be sorted among real figures.
+{%- endcomment -%}
+{%- assign snap = site.data.benchmarks.snapshot -%}
+{%- assign lens = site.data.benchmarks.prompt_lengths -%}
+{%- assign all_llm = site.data.models.llm -%}
+{%- assign all_vlm = site.data.models.vlm -%}
+{%- assign total = all_llm.size | plus: all_vlm.size -%}
+{%- comment -%}
+THE TWO MEASURED COLUMNS, AND WHY THEY ARE THESE TWO.
+
+  Prefill @2K  prompt tokens / TTFT at the 2048-token case, in tokens/second.
+  Decode       generated tokens/second at the 128-token case.
+
+Both are pinned to ONE prompt length across every row, and that is the whole
+point of putting them in a sortable column. The card wall on the landing page
+does something different -- it prints each model's BEST prefill rate, whichever
+length produced it, and labels which one. That is right for a card, which is
+read alone. It would be wrong here: a column readers can sort has to hold one
+condition, or the sort ranks models measured differently against each other and
+looks authoritative doing it.
+
+2048 rather than 128 for prefill. At 128 tokens the figure is almost entirely
+fixed start-up cost and separates nothing; 2048 is where the rate is actually
+a rate. 16384 would also be defensible and is on /docs/benchmarks/ along with
+everything else -- this page shows one length, not three.
+
+Decode stays at 128 because it barely moves with prompt length: a few percent
+across the whole range on most rows. No length is printed in its header for
+the same reason -- see the same note in model-card.html.
+
+THE RATE IS DERIVED, NOT MEASURED. The dashboard reports TTFT and TPS; prefill
+tokens/second is prompt_tokens over TTFT, an average across the whole prefill
+including start-up, so it runs slightly pessimistic and exists nowhere
+upstream. Do not try to reconcile it with a dashboard column.
+
+The numerator is `prompt_tokens` -- tokens actually fed -- not `lens`, the
+nominal name of the case. For a vision-language model those differ by more than
+15x because the image is tokenised into the prompt, so using the nominal length
+would not give a slightly wrong rate, it would give a meaningless one.
+
+CROSS-CLASS COMPARISON IS THE ONE THING THIS TABLE CANNOT DO HONESTLY. A VLM's
+prefill includes running the image through the vision encoder; a text model's
+does not. Sorting all sixteen by prefill therefore ranks two different amounts
+of work. That is what the Text / Vision-language filter is for, and there is a
+note under the table saying so. Do not remove either.
+{%- endcomment -%}
+{%- assign i_prefill = 1 -%}
+{%- assign i_decode = 0 -%}
+{%- assign prefill_label = lens[i_prefill] | divided_by: 1024 | append: "K" -%}
+<div class="matrix" data-matrix>
+  <div class="matrix__controls" data-matrix-controls hidden>
+    <div class="matrix__search">
+      <label class="visually-hidden" for="matrix-search">Filter the matrix</label>
+      <input id="matrix-search" class="matrix__input" type="search" autocomplete="off"
+             placeholder="Filter by name, family, architecture or quantization"
+             data-matrix-search>
+    </div>
+    <div class="pill-list matrix__filters" data-matrix-filters>
+      <button class="pill-list__item is-active" type="button" data-matrix-filter="all">All
+        <span class="pill-list__meta">{{ total }}</span></button>
+      <button class="pill-list__item" type="button" data-matrix-filter="llm">Text
+        <span class="pill-list__meta">{{ all_llm.size }}</span></button>
+      <button class="pill-list__item" type="button" data-matrix-filter="vlm">Vision-language
+        <span class="pill-list__meta">{{ all_vlm.size }}</span></button>
+    </div>
+  </div>
+
+  <table class="matrix__table" data-matrix-table>
+    <thead>
+      <tr>
+        <th scope="col" data-matrix-sort="text">Model</th>
+        <th scope="col" data-matrix-sort="text">Family</th>
+        <th scope="col" data-matrix-sort="text">Type</th>
+        <th scope="col" class="is-numeric" data-matrix-sort="number">Parameters</th>
+        <th scope="col" data-matrix-sort="text">Architecture</th>
+        <th scope="col" data-matrix-sort="text">Quantization</th>
+        <th scope="col" class="is-numeric" data-matrix-sort="number">Prefill @{{ prefill_label }}<span class="matrix__unit">tok/s</span></th>
+        <th scope="col" class="is-numeric" data-matrix-sort="number">Decode<span class="matrix__unit">tok/s</span></th>
+      </tr>
+    </thead>
+    <tbody data-matrix-body>
+      {%- comment -%}
+      `tiers` is assigned before the loop rather than filtered inside the `for`
+      expression. Liquid does not apply a filter there: `for tier in "llm,vlm"
+      | split: ","` parses as one iteration over the whole string, which silently
+      rendered the vlm branch only and dropped all eight text models.
+      {%- endcomment -%}
+      {%- assign tiers = "llm,vlm" | split: "," -%}
+      {%- for tier in tiers -%}
+      {%- if tier == "llm" -%}
+      {%- assign rows = all_llm -%}{%- assign kind = "LLM" -%}{%- assign kind_long = "Text" -%}
+      {%- else -%}
+      {%- assign rows = all_vlm -%}{%- assign kind = "VLM" -%}{%- assign kind_long = "Vision-language" -%}
+      {%- endif -%}
+      {%- for m in rows -%}
+      {%- assign fam = site.data.model_families | where: "slug", m.family | first -%}
+      {%- assign b = site.data.benchmarks.lm | where: "id", m.id | first -%}
+      {%- assign has_bench = false -%}
+      {%- unless snap.placeholder -%}{%- if b -%}{%- assign has_bench = true -%}{%- endif -%}{%- endunless -%}
+      {%- comment -%}
+      The anchor reproduces kramdown's heading-id rule for the `## {{ m.name }}`
+      that model-detail.html emits on the family page: lower-case, drop full
+      stops, spaces to hyphens. It is a copy of someone else's rule, so it is
+      not left to trust -- htmlproofer checks internal link hashes and a name
+      that breaks the rule fails the build instead of shipping a dead anchor.
+      {%- endcomment -%}
+      {%- assign anchor = m.name | downcase | replace: ".", "" | replace: " ", "-" -%}
+      {%- assign model_url = "/docs/models/" | append: m.family | append: "/#" | append: anchor -%}
+      {%- assign fam_url = "/docs/models/" | append: m.family | append: "/" -%}
+      {%- comment -%}
+      Shape, in as few words as carry the distinction. Matched on `arch`
+      because that is the field describing the architecture, and every sparse
+      entry spells out "mixture of experts" whatever else it says. "+ vision
+      encoder" is dropped from all of them: the Type column already says it,
+      and repeating it in every VLM row would make the column look like it
+      varies when it does not.
+      {%- endcomment -%}
+      {%- if m.arch contains "Gated DeltaNet" -%}
+      {%- assign shape = "Gated DeltaNet + MoE" -%}
+      {%- elsif m.arch contains "mixture of experts" -%}
+      {%- assign shape = "Sparse MoE" -%}
+      {%- else -%}
+      {%- assign shape = "Dense" -%}
+      {%- endif -%}
+      {%- assign params_n = m.params | split: "B" | first -%}
+      {%- assign prefill = -1 -%}
+      {%- if has_bench and b.prompt_tokens -%}
+      {%- assign t = b.ttft[i_prefill] | times: 1.0 -%}
+      {%- assign n = b.prompt_tokens[i_prefill] -%}
+      {%- if t > 0 and n -%}{%- assign prefill = n | divided_by: t | round: 0 -%}{%- endif -%}
+      {%- endif -%}
+      {%- assign decode = -1 -%}
+      {%- if has_bench -%}{%- assign decode = b.tps[i_decode] | times: 1.0 -%}{%- endif -%}
+      <tr data-matrix-row data-matrix-type="{{ tier }}">
+        <th scope="row"><a href="{{ model_url | relative_url }}">{{ m.name }}</a></th>
+        <td><a href="{{ fam_url | relative_url }}">{{ fam.name }}</a></td>
+        <td>{{ kind_long }}<span class="visually-hidden"> ({{ kind }})</span></td>
+        <td class="is-numeric" data-sort-value="{{ params_n }}">{{ m.params }}</td>
+        <td>{{ shape }}</td>
+        <td>{{ m.quant }}</td>
+        {%- if prefill >= 0 %}
+        <td class="is-numeric" data-sort-value="{{ prefill }}">{{ prefill }}</td>
+        {%- else %}
+        <td class="is-numeric" data-sort-value="-1"><span class="matrix__blank" aria-label="not measured">&mdash;</span></td>
+        {%- endif %}
+        {%- if decode >= 0 %}
+        <td class="is-numeric" data-sort-value="{{ decode }}">{{ b.tps[i_decode] }}</td>
+        {%- else %}
+        <td class="is-numeric" data-sort-value="-1"><span class="matrix__blank" aria-label="not measured">&mdash;</span></td>
+        {%- endif %}
+      </tr>
+      {%- endfor -%}
+      {%- endfor -%}
+    </tbody>
+  </table>
+
+  <p class="matrix__empty" data-matrix-empty hidden>No model matches that filter.</p>
+</div>
