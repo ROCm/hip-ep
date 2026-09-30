@@ -2056,7 +2056,9 @@ def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
 
     Output element type is integer (i64 for the ONNX importer). The input
     element type is preserved on `data` and compared as that type, including
-    integers.
+    integers. Supported inputs are f16, bf16, f32, f64, i8, ui8, i16, ui16,
+    i32, and i64, at rank 1 through 8. ui32 and ui64 are rejected. A
+    zero-length reduction axis is rejected by the runtime.
 
     Example:
     ```mlir

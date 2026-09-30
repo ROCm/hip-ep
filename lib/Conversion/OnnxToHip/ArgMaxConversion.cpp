@@ -83,6 +83,11 @@ ArgMaxToHip::matchAndRewrite(mlir::Operation *op,
   if (!inputType)
     return rewriter.notifyMatchFailure(op, "ArgMax input must be ranked");
 
+  mlir::Type elemType = inputType.getElementType();
+  if (elemType.isUnsignedInteger(32) || elemType.isUnsignedInteger(64))
+    return rewriter.notifyMatchFailure(op,
+                                       "ArgMax does not support ui32 or ui64");
+
   int64_t axis = 0;
   if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
     axis = axisAttr.getSInt();

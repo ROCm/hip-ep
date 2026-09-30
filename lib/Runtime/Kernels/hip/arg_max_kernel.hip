@@ -161,6 +161,15 @@ extern "C" int hip_arg_max(void *stream, const void *data, void *indices,
     geom.in_stride[i] = geom.in_stride[i + 1] * geom.in_shape[i + 1];
 
   geom.axis_size = geom.in_shape[geom.axis];
+  // A zero-length axis still has one output index per other dimension.
+  // Launching and returning without a store leaves that memory uninitialized
+  // while hip_arg_max reports success. ONNX does not define ArgMax of an
+  // empty axis; fail here so wrap_arg_max propagates the error.
+  if (geom.axis_size <= 0) {
+    fprintf(stderr, "[custom_kernels] hip_arg_max: empty reduction axis\n");
+    return -1;
+  }
+
   geom.num_rows = 1;
   for (int64_t i = 0; i < rank; ++i) {
     if (i == geom.axis)

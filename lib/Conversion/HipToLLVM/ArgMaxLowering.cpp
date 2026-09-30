@@ -61,7 +61,16 @@ struct ArgMaxOpLowering : public ConvertOpToLLVMPattern<ArgMaxOp> {
     if (!outputType.getElementType().isInteger(64))
       return rewriter.notifyMatchFailure(op, "ArgMax indices must be i64");
 
-    int64_t dataTypeEnum = getHipdnnDataType(dataType.getElementType());
+    // isInteger(32/64) is true for ui32/ui64 as well, and getHipdnnDataType
+    // would then label them INT32/INT64. The kernel compares those as signed,
+    // so a high bit looks negative and the index is wrong. There is no
+    // unsigned 32/64 ABI type; refuse them before the mapping.
+    Type elemType = dataType.getElementType();
+    if (elemType.isUnsignedInteger(32) || elemType.isUnsignedInteger(64))
+      return rewriter.notifyMatchFailure(
+          op, "ArgMax does not support ui32 or ui64");
+
+    int64_t dataTypeEnum = getHipdnnDataType(elemType);
     if (dataTypeEnum < 0)
       return rewriter.notifyMatchFailure(op, "unsupported ArgMax element type");
 

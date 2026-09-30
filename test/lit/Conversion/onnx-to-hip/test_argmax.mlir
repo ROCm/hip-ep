@@ -52,4 +52,13 @@ module {
     // CHECK-NOT: onnx.ArgMax
     return %output : tensor<?xi64>
   }
+
+  // ui32 would be compared as signed i32. Leave the ONNX op in place.
+  func.func @test_argmax_ui32(%data: tensor<2x3xui32>) -> tensor<2xi64> {
+    // CHECK-LABEL: func.func @test_argmax_ui32
+    // CHECK-NOT: hip.arg_max
+    // CHECK: onnx.ArgMax
+    %output = "onnx.ArgMax"(%data) {axis = 1 : si64, keepdims = 0 : si64} : (tensor<2x3xui32>) -> tensor<2xi64>
+    return %output : tensor<2xi64>
+  }
 }
