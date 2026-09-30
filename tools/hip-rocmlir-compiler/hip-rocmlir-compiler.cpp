@@ -22,6 +22,7 @@
 // containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops are
 // dropped from the clone we compile).
 
+#include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -69,10 +70,6 @@
 
 #include "CrashHandler.h"
 
-#if HIP_ROCMLIR_AUTOTUNE
-#include <hip/hip_runtime.h>
-#endif
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -80,6 +77,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -124,701 +122,6 @@ static void printPhaseTimes() {
                << " ms\n";
 }
 
-#if HIP_ROCMLIR_AUTOTUNE
-static const char *tuningKindName(mlir::rock::TuningParamSetKind kind) {
-  switch (kind) {
-  case mlir::rock::TuningParamSetKind::Quick:
-    return "quick";
-  case mlir::rock::TuningParamSetKind::Full:
-    return "full";
-  case mlir::rock::TuningParamSetKind::Exhaustive:
-    return "exhaustive";
-  }
-  return "unknown";
-}
-
-// Winners for this process, same role as MIGraphX's problem cache during one
-// compile. The first kernel with a rocMLIR problem key is searched; every
-// other kernel with that key compiles only the winning perfConfig. Both sets
-// are model-wide pools: all search configs first, then the serial benchmark,
-// then the winner compiles. The problem string already carries the chip and
-// the conv/gemm shape, but not which space produced the winner, so the kind is
-// part of the key. The binary is not reused: each outlined kernel has its own
-// symbol and must be compiled.
-static llvm::StringMap<std::string> &autotuneWinnerCache() {
-  static llvm::StringMap<std::string> cache;
-  return cache;
-}
-
-static std::string autotuneCacheKey(mlir::rock::TuningParamSetKind kind,
-                                    llvm::StringRef problem) {
-  std::string key;
-  key.reserve(problem.size() + 16);
-  key.append(tuningKindName(kind));
-  key.push_back('\n');
-  key.append(problem.data(), problem.size());
-  return key;
-}
-#endif
-
-#if HIP_ROCMLIR_AUTOTUNE
-// Width of the perfConfig compile pool. Every config is queued; this only
-// bounds how many rocMLIR backend compiles run at once. Unset uses one job
-// per hardware thread. GPU benchmarking stays serial either way.
-static unsigned compileJobs(unsigned numConfigs) {
-  unsigned jobs = std::thread::hardware_concurrency();
-  if (jobs == 0)
-    jobs = 1;
-  if (const char *env = std::getenv("HIP_ROCMLIR_COMPILE_JOBS")) {
-    unsigned parsed = 0;
-    if (!llvm::StringRef(env).getAsInteger(10, parsed) && parsed > 0)
-      jobs = parsed;
-    else
-      llvm::errs() << "warning: ignoring invalid HIP_ROCMLIR_COMPILE_JOBS='"
-                   << env << "'\n";
-  }
-  return std::max(1u, std::min(jobs, numConfigs));
-}
-#endif
-
-struct AutotuneOptions {
-  bool enabled = true;
-  bool verbose = false;
-  mlir::rock::TuningParamSetKind kind = mlir::rock::TuningParamSetKind::Quick;
-  unsigned warmupRuns = 5;
-  unsigned measuredRuns = 20;
-};
-
-#if HIP_ROCMLIR_AUTOTUNE
-static bool reportHipError(hipError_t status, llvm::StringRef operation) {
-  if (status == hipSuccess)
-    return true;
-  llvm::errs() << "error: " << operation
-               << " failed: " << hipGetErrorString(status) << "\n";
-  return false;
-}
-
-static bool getBufferSize(mlir::Type type, size_t &bytes) {
-  auto shaped = mlir::dyn_cast<mlir::ShapedType>(type);
-  if (!shaped || !shaped.hasStaticShape())
-    return false;
-
-  mlir::Type elementType = shaped.getElementType();
-  uint64_t elementBits =
-      elementType.isIndex() ? 64 : elementType.getIntOrFloatBitWidth();
-  int64_t elements = shaped.getNumElements();
-  if (elements <= 0 || elementBits == 0)
-    return false;
-
-  uint64_t numElements = static_cast<uint64_t>(elements);
-  if (numElements > std::numeric_limits<uint64_t>::max() / elementBits)
-    return false;
-  uint64_t totalBits = numElements * elementBits;
-  uint64_t totalBytes = totalBits / 8 + (totalBits % 8 != 0);
-  if (totalBytes > std::numeric_limits<size_t>::max())
-    return false;
-  bytes = static_cast<size_t>(totalBytes);
-  return true;
-}
-
-class AutotuneBuffers {
-public:
-  AutotuneBuffers() = default;
-  AutotuneBuffers(const AutotuneBuffers &) = delete;
-  AutotuneBuffers &operator=(const AutotuneBuffers &) = delete;
-
-  ~AutotuneBuffers() {
-    for (void *buffer : deviceBuffers)
-      if (buffer)
-        (void)hipFree(buffer);
-    if (stream)
-      (void)hipStreamDestroy(stream);
-  }
-
-  bool initialize(mlir::ModuleOp module) {
-    auto func = *module.getOps<mlir::func::FuncOp>().begin();
-    llvm::SmallVector<mlir::Type> kernelArgTypes(func.getArgumentTypes());
-    llvm::append_range(kernelArgTypes, func.getResultTypes());
-
-    if (kernelArgTypes.empty()) {
-      llvm::errs() << "error: autotune kernel has no buffer arguments\n";
-      return false;
-    }
-    if (!reportHipError(hipStreamCreate(&stream), "hipStreamCreate"))
-      return false;
-
-    for (mlir::Type type : kernelArgTypes) {
-      size_t bytes = 0;
-      if (!getBufferSize(type, bytes)) {
-        llvm::errs()
-            << "error: autotune requires statically-shaped tensor/memref "
-               "kernel arguments; unsupported type: "
-            << type << "\n";
-        return false;
-      }
-      void *buffer = nullptr;
-      if (!reportHipError(hipMalloc(&buffer, bytes), "hipMalloc"))
-        return false;
-      deviceBuffers.push_back(buffer);
-      if (!reportHipError(hipMemsetAsync(buffer, 0, bytes, stream),
-                          "hipMemsetAsync"))
-        return false;
-    }
-    return reportHipError(hipStreamSynchronize(stream),
-                          "hipStreamSynchronize(buffer initialization)");
-  }
-
-  hipStream_t getStream() const { return stream; }
-  std::vector<void *> &getDeviceBuffers() { return deviceBuffers; }
-
-private:
-  hipStream_t stream = nullptr;
-  std::vector<void *> deviceBuffers;
-};
-
-static bool launchKernel(hipFunction_t function,
-                         const mlir::hip::CompiledKernel &kernel,
-                         AutotuneBuffers &buffers) {
-  std::vector<void *> &deviceBuffers = buffers.getDeviceBuffers();
-  size_t kernargSize = deviceBuffers.size() * sizeof(void *);
-  void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, deviceBuffers.data(),
-                    HIP_LAUNCH_PARAM_BUFFER_SIZE, &kernargSize,
-                    HIP_LAUNCH_PARAM_END};
-  (void)hipGetLastError();
-  hipError_t status =
-      hipModuleLaunchKernel(function, static_cast<unsigned>(kernel.gridSize), 1,
-                            1, static_cast<unsigned>(kernel.blockSize), 1, 1, 0,
-                            buffers.getStream(), nullptr, config);
-  return reportHipError(status, "hipModuleLaunchKernel") &&
-         reportHipError(hipGetLastError(), "kernel launch");
-}
-
-static bool benchmarkKernel(const mlir::hip::CompiledKernel &kernel,
-                            llvm::StringRef kernelName,
-                            const AutotuneOptions &options,
-                            AutotuneBuffers &buffers, double &milliseconds) {
-  hipModule_t hipModule = nullptr;
-  if (!reportHipError(hipModuleLoadData(&hipModule, kernel.binary.data()),
-                      "hipModuleLoadData"))
-    return false;
-
-  hipFunction_t function = nullptr;
-  std::string kernelNameStorage = kernelName.str();
-  hipError_t lookupStatus =
-      hipModuleGetFunction(&function, hipModule, kernelNameStorage.c_str());
-  if (!reportHipError(lookupStatus, "hipModuleGetFunction")) {
-    (void)hipModuleUnload(hipModule);
-    return false;
-  }
-
-  bool ok = true;
-  for (unsigned i = 0; ok && i < options.warmupRuns; ++i)
-    ok = launchKernel(function, kernel, buffers);
-  if (ok)
-    ok = reportHipError(hipStreamSynchronize(buffers.getStream()),
-                        "hipStreamSynchronize(warmup)");
-
-  std::vector<hipEvent_t> starts(options.measuredRuns, nullptr);
-  std::vector<hipEvent_t> stops(options.measuredRuns, nullptr);
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
-    ok = reportHipError(hipEventCreate(&starts[i]), "hipEventCreate(start)") &&
-         reportHipError(hipEventCreate(&stops[i]), "hipEventCreate(stop)");
-  }
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
-    ok = reportHipError(hipEventRecord(starts[i], buffers.getStream()),
-                        "hipEventRecord(start)") &&
-         launchKernel(function, kernel, buffers) &&
-         reportHipError(hipEventRecord(stops[i], buffers.getStream()),
-                        "hipEventRecord(stop)");
-  }
-  if (ok)
-    ok = reportHipError(hipStreamSynchronize(buffers.getStream()),
-                        "hipStreamSynchronize(benchmark)");
-
-  std::vector<float> samples;
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
-    float elapsed = 0.0f;
-    ok = reportHipError(hipEventElapsedTime(&elapsed, starts[i], stops[i]),
-                        "hipEventElapsedTime");
-    if (ok)
-      samples.push_back(elapsed);
-  }
-  for (hipEvent_t event : starts)
-    if (event)
-      (void)hipEventDestroy(event);
-  for (hipEvent_t event : stops)
-    if (event)
-      (void)hipEventDestroy(event);
-  (void)hipModuleUnload(hipModule);
-
-  if (!ok || samples.empty())
-    return false;
-  std::sort(samples.begin(), samples.end());
-  size_t trim = samples.size() / 4;
-  auto first = samples.begin() + trim;
-  auto last = samples.end() - trim;
-  milliseconds = std::accumulate(first, last, 0.0) / std::distance(first, last);
-  return true;
-}
-
-// Dialects the backend pipeline needs, built once. DialectRegistry is
-// move-only; each worker context reads this registry while loading its own
-// copy of the dialects. A throwaway context loads them on the calling thread
-// first so dialect static init is not raced by the pool.
-static mlir::DialectRegistry &rocmlirAutotuneRegistry() {
-  static mlir::DialectRegistry registry = [] {
-    mlir::DialectRegistry reg;
-    hip::compiler::registerAllDialects(reg);
-    mlir::registerRocMLIRDialects(reg);
-    return reg;
-  }();
-  return registry;
-}
-
-static void ensureRocmlirDialectsLoaded() {
-  static bool loaded = false;
-  if (loaded)
-    return;
-  mlir::MLIRContext warmup(rocmlirAutotuneRegistry(),
-                           mlir::MLIRContext::Threading::DISABLED);
-  warmup.loadAllAvailableDialects();
-  loaded = true;
-}
-
-// One perfConfig compile. A private context is required: PassManager::run is
-// not safe on two modules that share an MLIRContext. The post-high-level rock
-// module is parsed from text so workers never touch the caller's IR.
-static bool compilePerfConfig(llvm::StringRef rockModule, llvm::StringRef arch,
-                              llvm::StringRef perfConfig,
-                              mlir::hip::CompiledKernel &out) {
-  mlir::MLIRContext context(rocmlirAutotuneRegistry(),
-                            mlir::MLIRContext::Threading::DISABLED);
-  context.loadAllAvailableDialects();
-  mlir::ParserConfig parserConfig(&context);
-  mlir::OwningOpRef<mlir::ModuleOp> parsed =
-      mlir::parseSourceString<mlir::ModuleOp>(rockModule, parserConfig);
-  if (!parsed)
-    return false;
-  mlir::ModuleOp parsedModule = *parsed;
-  if (!mlir::rock::tuningSetStr(parsedModule, perfConfig))
-    return false;
-  return mlir::hip::compileRocMlirBackend(parsedModule, arch, perfConfig, out);
-}
-
-struct CompiledCandidate {
-  std::string perfConfig;
-  CompiledKernel kernel;
-  bool compiled = false;
-};
-
-struct DeferredCacheHit {
-  std::string kernelName;
-  std::string rockModule;
-  std::string perfConfig;
-  std::string cacheKey;
-  CompiledKernel kernel;
-  bool compiled = false;
-};
-
-static std::vector<DeferredCacheHit> &deferredCacheHits() {
-  static std::vector<DeferredCacheHit> hits;
-  return hits;
-}
-
-// One entry per kernel whose problem key has not been seen yet. Candidates
-// are filled with perfConfig strings here and compiled together later.
-struct DeferredSearch {
-  std::string kernelName;
-  std::string rockModule;
-  std::string cacheKey;
-  std::vector<CompiledCandidate> candidates;
-};
-
-static std::vector<DeferredSearch> &deferredSearches() {
-  static std::vector<DeferredSearch> searches;
-  return searches;
-}
-
-// A later kernel whose problem is already queued for search. The winning
-// perfConfig is not known until that search is benchmarked, so the compile
-// waits for the winner pool. Same role as MIGraphX marking a problem with a
-// null solution until the first copy has been timed.
-struct PendingWinnerCompile {
-  std::string kernelName;
-  std::string rockModule;
-  std::string cacheKey;
-};
-
-static std::vector<PendingWinnerCompile> &pendingWinnerCompiles() {
-  static std::vector<PendingWinnerCompile> pending;
-  return pending;
-}
-
-static llvm::StringSet<> &searchesInFlight() {
-  static llvm::StringSet<> keys;
-  return keys;
-}
-
-static bool autotuneKernel(mlir::ModuleOp module, llvm::StringRef arch,
-                           llvm::StringRef kernelName,
-                           const AutotuneOptions &options,
-                           mlir::hip::CompiledKernel &winner,
-                           bool deferCacheHits = true) {
-  hipDeviceProp_t properties{};
-  int device = 0;
-  if (!reportHipError(hipGetDevice(&device), "hipGetDevice") ||
-      !reportHipError(hipGetDeviceProperties(&properties, device),
-                      "hipGetDeviceProperties"))
-    return false;
-  llvm::StringRef requestedArch = arch.split(':').first;
-  llvm::StringRef deviceArch(properties.gcnArchName);
-  deviceArch = deviceArch.split(':').first;
-  if (requestedArch != deviceArch)
-    llvm::errs() << "warning: autotuning for " << requestedArch << " on device "
-                 << deviceArch << "; compiled candidates may not load\n";
-
-  std::string rockModule;
-  {
-    llvm::raw_string_ostream os(rockModule);
-    module.print(os);
-  }
-  ensureRocmlirDialectsLoaded();
-
-  // Look up before building the search space. A known winner is compiled in
-  // the second pool. A problem already queued in this compile waits for that
-  // same pool once the search has been benchmarked. A later compile failure
-  // drops the entry and searches, so a config that won for a different
-  // epilogue cannot fail this kernel.
-  llvm::SmallString<2048> problem;
-  std::string cacheKey;
-  if (mlir::succeeded(mlir::rock::getTuningProblemStr(module, problem))) {
-    cacheKey = autotuneCacheKey(options.kind, problem);
-    auto cached = autotuneWinnerCache().find(cacheKey);
-    if (cached != autotuneWinnerCache().end()) {
-      if (deferCacheHits) {
-        DeferredCacheHit hit;
-        hit.kernelName = kernelName.str();
-        hit.rockModule = std::move(rockModule);
-        hit.perfConfig = cached->getValue();
-        hit.cacheKey = std::move(cacheKey);
-        deferredCacheHits().push_back(std::move(hit));
-        return true;
-      }
-      const auto compileStart = std::chrono::steady_clock::now();
-      bool ok = compilePerfConfig(rockModule, arch, cached->getValue(), winner);
-      compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
-      if (ok)
-        return true;
-      llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                   << kernelName << "'; searching the "
-                   << tuningKindName(options.kind) << " space\n";
-      autotuneWinnerCache().erase(cached);
-    }
-    if (deferCacheHits && searchesInFlight().count(cacheKey)) {
-      PendingWinnerCompile pending;
-      pending.kernelName = kernelName.str();
-      pending.rockModule = std::move(rockModule);
-      pending.cacheKey = std::move(cacheKey);
-      pendingWinnerCompiles().push_back(std::move(pending));
-      return true;
-    }
-  }
-
-  std::unique_ptr<mlir::rock::TuningParamSet> space(
-      mlir::rock::createTunableParamSpace(module, options.kind));
-  if (!space || space->tuningRange.empty()) {
-    llvm::errs() << "error: autotune perfConfig search space is empty\n";
-    return false;
-  }
-
-  const unsigned numConfigs = space->tuningRange.size();
-  std::vector<CompiledCandidate> candidates(numConfigs);
-  for (auto [index, tuningAttr] : llvm::enumerate(space->tuningRange)) {
-    llvm::SmallString<1024> perfConfig;
-    tuningAttr.getPerfConfigStr(perfConfig);
-    candidates[index].perfConfig = perfConfig.str().str();
-  }
-
-  // The fallback path (deferCacheHits == false) compiles this kernel on its
-  // own. The normal path queues every candidate and returns; one pool compiles
-  // them with every other kernel after high-level lowering has finished.
-  if (deferCacheHits) {
-    DeferredSearch search;
-    search.kernelName = kernelName.str();
-    search.rockModule = std::move(rockModule);
-    search.cacheKey = std::move(cacheKey);
-    search.candidates = std::move(candidates);
-    if (!search.cacheKey.empty())
-      searchesInFlight().insert(search.cacheKey);
-    deferredSearches().push_back(std::move(search));
-    return true;
-  }
-
-  const unsigned jobs = compileJobs(numConfigs);
-  llvm::errs() << "[hip-rocmlir-compiler] compiling " << numConfigs << " "
-               << tuningKindName(options.kind) << " perfConfigs for '"
-               << kernelName << "' on " << jobs << " threads\n";
-  {
-    // Each task owns a context. Nested MLIR/LLVM parallelism stays off inside
-    // compileRocMlirBackend (rocMLIR pins llvm::parallel::strategy to 1
-    // thread).
-    const auto compileStart = std::chrono::steady_clock::now();
-    llvm::DefaultThreadPool pool(llvm::hardware_concurrency(jobs));
-    for (unsigned index = 0; index < numConfigs; ++index) {
-      pool.async([&, index] {
-        candidates[index].compiled =
-            compilePerfConfig(rockModule, arch, candidates[index].perfConfig,
-                              candidates[index].kernel);
-      });
-    }
-    pool.wait();
-    compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
-  }
-
-  AutotuneBuffers buffers;
-  if (!buffers.initialize(module))
-    return false;
-
-  double bestMilliseconds = std::numeric_limits<double>::infinity();
-  std::string bestConfig;
-  unsigned compiled = 0;
-  unsigned benchmarked = 0;
-  const auto benchmarkStart = std::chrono::steady_clock::now();
-  for (unsigned index = 0; index < numConfigs; ++index) {
-    CompiledCandidate &candidate = candidates[index];
-    if (!candidate.compiled) {
-      if (options.verbose)
-        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                     << numConfigs << ": compile failed\n";
-      continue;
-    }
-    ++compiled;
-
-    double elapsed = 0.0;
-    if (!benchmarkKernel(candidate.kernel, kernelName, options, buffers,
-                         elapsed)) {
-      if (options.verbose)
-        llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                     << numConfigs << ": benchmark failed\n";
-      continue;
-    }
-    ++benchmarked;
-    if (options.verbose)
-      llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1) << "/"
-                   << numConfigs << ": " << elapsed << " ms  "
-                   << candidate.perfConfig << "\n";
-    if (elapsed < bestMilliseconds) {
-      bestMilliseconds = elapsed;
-      bestConfig = candidate.perfConfig;
-      winner = std::move(candidate.kernel);
-    }
-  }
-  compilePhaseTimes.benchmarkMs += millisecondsSince(benchmarkStart);
-
-  if (bestConfig.empty()) {
-    llvm::errs() << "error: autotune found no runnable perfConfig (compiled "
-                 << compiled << ", benchmarked " << benchmarked << ")\n";
-    return false;
-  }
-  if (!cacheKey.empty())
-    autotuneWinnerCache()[cacheKey] = bestConfig;
-  if (options.verbose)
-    llvm::errs() << "[hip-rocmlir-compiler] autotune winner for '" << kernelName
-                 << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
-  return true;
-}
-
-// Compile every queued search config in one pool, then benchmark each kernel
-// serially and record the winner. Duplicates queued while the search was in
-// flight become cache hits for the winner pool.
-static bool
-compileAndBenchmarkSearches(llvm::StringRef arch,
-                            const AutotuneOptions &options,
-                            llvm::StringMap<CompiledKernel> &compiledByKernel) {
-  std::vector<DeferredSearch> searches = std::move(deferredSearches());
-  deferredSearches().clear();
-  searchesInFlight().clear();
-
-  if (!searches.empty()) {
-    unsigned total = 0;
-    for (const DeferredSearch &search : searches)
-      total += static_cast<unsigned>(search.candidates.size());
-    const unsigned jobs = compileJobs(total);
-    llvm::errs() << "[hip-rocmlir-compiler] compiling " << total << " "
-                 << tuningKindName(options.kind) << " perfConfigs for "
-                 << searches.size() << " kernels on " << jobs << " threads\n";
-    {
-      // Each task owns a context. Nested MLIR/LLVM parallelism stays off
-      // inside compileRocMlirBackend (rocMLIR pins llvm::parallel::strategy
-      // to 1 thread).
-      const auto compileStart = std::chrono::steady_clock::now();
-      llvm::DefaultThreadPool pool(llvm::hardware_concurrency(jobs));
-      for (unsigned searchIndex = 0; searchIndex < searches.size();
-           ++searchIndex) {
-        const unsigned numCandidates =
-            static_cast<unsigned>(searches[searchIndex].candidates.size());
-        for (unsigned candidateIndex = 0; candidateIndex < numCandidates;
-             ++candidateIndex) {
-          pool.async([&, searchIndex, candidateIndex] {
-            DeferredSearch &search = searches[searchIndex];
-            CompiledCandidate &candidate = search.candidates[candidateIndex];
-            candidate.compiled =
-                compilePerfConfig(search.rockModule, arch, candidate.perfConfig,
-                                  candidate.kernel);
-          });
-        }
-      }
-      pool.wait();
-      compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
-    }
-
-    for (DeferredSearch &search : searches) {
-      mlir::MLIRContext context(rocmlirAutotuneRegistry(),
-                                mlir::MLIRContext::Threading::DISABLED);
-      context.loadAllAvailableDialects();
-      mlir::ParserConfig parserConfig(&context);
-      mlir::OwningOpRef<mlir::ModuleOp> parsed =
-          mlir::parseSourceString<mlir::ModuleOp>(search.rockModule,
-                                                  parserConfig);
-      if (!parsed) {
-        llvm::errs() << "error: failed to reparse rock module for '"
-                     << search.kernelName << "'\n";
-        return false;
-      }
-      AutotuneBuffers buffers;
-      if (!buffers.initialize(*parsed))
-        return false;
-
-      const unsigned numConfigs =
-          static_cast<unsigned>(search.candidates.size());
-      double bestMilliseconds = std::numeric_limits<double>::infinity();
-      std::string bestConfig;
-      unsigned compiled = 0;
-      unsigned benchmarked = 0;
-      CompiledKernel winner;
-      const auto benchmarkStart = std::chrono::steady_clock::now();
-      for (unsigned index = 0; index < numConfigs; ++index) {
-        CompiledCandidate &candidate = search.candidates[index];
-        if (!candidate.compiled) {
-          if (options.verbose)
-            llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1)
-                         << "/" << numConfigs << ": compile failed\n";
-          continue;
-        }
-        ++compiled;
-
-        double elapsed = 0.0;
-        if (!benchmarkKernel(candidate.kernel, search.kernelName, options,
-                             buffers, elapsed)) {
-          if (options.verbose)
-            llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1)
-                         << "/" << numConfigs << ": benchmark failed\n";
-          continue;
-        }
-        ++benchmarked;
-        if (options.verbose)
-          llvm::errs() << "[hip-rocmlir-compiler] autotune " << (index + 1)
-                       << "/" << numConfigs << ": " << elapsed << " ms  "
-                       << candidate.perfConfig << "\n";
-        if (elapsed < bestMilliseconds) {
-          bestMilliseconds = elapsed;
-          bestConfig = candidate.perfConfig;
-          winner = std::move(candidate.kernel);
-        }
-      }
-      compilePhaseTimes.benchmarkMs += millisecondsSince(benchmarkStart);
-
-      if (bestConfig.empty()) {
-        llvm::errs() << "error: autotune found no runnable perfConfig for '"
-                     << search.kernelName << "' (compiled " << compiled
-                     << ", benchmarked " << benchmarked << ")\n";
-        return false;
-      }
-      if (!search.cacheKey.empty())
-        autotuneWinnerCache()[search.cacheKey] = bestConfig;
-      if (options.verbose)
-        llvm::errs() << "[hip-rocmlir-compiler] autotune winner for '"
-                     << search.kernelName << "': " << bestMilliseconds
-                     << " ms  " << bestConfig << "\n";
-      compiledByKernel[search.kernelName] = std::move(winner);
-      search.candidates.clear();
-    }
-  }
-
-  std::vector<PendingWinnerCompile> pending =
-      std::move(pendingWinnerCompiles());
-  pendingWinnerCompiles().clear();
-  for (PendingWinnerCompile &item : pending) {
-    auto cached = autotuneWinnerCache().find(item.cacheKey);
-    if (cached == autotuneWinnerCache().end()) {
-      llvm::errs() << "error: no autotune winner for repeated problem on '"
-                   << item.kernelName << "'\n";
-      return false;
-    }
-    DeferredCacheHit hit;
-    hit.kernelName = std::move(item.kernelName);
-    hit.rockModule = std::move(item.rockModule);
-    hit.perfConfig = cached->getValue();
-    hit.cacheKey = std::move(item.cacheKey);
-    deferredCacheHits().push_back(std::move(hit));
-  }
-  return true;
-}
-
-// One pool for every kernel that reused a winner. Each task compiles that
-// kernel's own symbol; benchmarking already happened on the first kernel with
-// the key. A compile failure erases the winner and searches that kernel.
-static bool
-compileDeferredCacheHits(llvm::StringRef arch, const AutotuneOptions &options,
-                         llvm::StringMap<CompiledKernel> &compiledByKernel) {
-  std::vector<DeferredCacheHit> hits = std::move(deferredCacheHits());
-  deferredCacheHits().clear();
-  if (hits.empty())
-    return true;
-
-  const unsigned jobs = compileJobs(hits.size());
-  llvm::errs() << "[hip-rocmlir-compiler] compiling " << hits.size()
-               << " cached " << tuningKindName(options.kind)
-               << " perfConfigs on " << jobs << " threads\n";
-  {
-    const auto compileStart = std::chrono::steady_clock::now();
-    llvm::DefaultThreadPool pool(llvm::hardware_concurrency(jobs));
-    for (unsigned index = 0; index < hits.size(); ++index) {
-      pool.async([&, index] {
-        hits[index].compiled =
-            compilePerfConfig(hits[index].rockModule, arch,
-                              hits[index].perfConfig, hits[index].kernel);
-      });
-    }
-    pool.wait();
-    compilePhaseTimes.perfConfigCompileMs += millisecondsSince(compileStart);
-  }
-
-  for (DeferredCacheHit &hit : hits) {
-    if (hit.compiled) {
-      compiledByKernel[hit.kernelName] = std::move(hit.kernel);
-      continue;
-    }
-    llvm::errs() << "warning: cached perfConfig failed to compile for '"
-                 << hit.kernelName << "'; searching the "
-                 << tuningKindName(options.kind) << " space\n";
-    autotuneWinnerCache().erase(hit.cacheKey);
-    mlir::MLIRContext context(rocmlirAutotuneRegistry(),
-                              mlir::MLIRContext::Threading::DISABLED);
-    context.loadAllAvailableDialects();
-    mlir::ParserConfig parserConfig(&context);
-    mlir::OwningOpRef<mlir::ModuleOp> parsed =
-        mlir::parseSourceString<mlir::ModuleOp>(hit.rockModule, parserConfig);
-    CompiledKernel winner;
-    if (!parsed ||
-        !autotuneKernel(*parsed, arch, hit.kernelName, options, winner,
-                        /*deferCacheHits=*/false))
-      return false;
-    compiledByKernel[hit.kernelName] = std::move(winner);
-  }
-  return true;
-}
-#endif
 
 // Write a module as MLIR text for --dump-hip / --dump-tosa. Those dumps are
 // diagnostics on the way to `-o`, so a failure to write one is reported but
@@ -857,7 +160,12 @@ int main(int argc, char **argv) {
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
   bool autotuneFlagSeen = false;
-  AutotuneOptions autotune;
+  // On unless HIP_ROCMLIR_SKIP_BENCHMARKING says otherwise: benchmarking is
+  // the reason this tool exists, unlike the EP, which opts in.
+  bool autotuneEnabled = true;
+  mlir::hip::AutotuneOptions autotune;
+  autotune.log = &llvm::errs();
+  autotune.logPrefix = "[hip-rocmlir-compiler]";
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -872,19 +180,13 @@ int main(int argc, char **argv) {
       autotune.verbose = true;
     } else if (arg == "--autotune") {
       autotuneFlagSeen = true;
-      autotune.enabled = true;
-      autotune.kind = mlir::rock::TuningParamSetKind::Quick;
+      autotuneEnabled = true;
+      autotune.space = mlir::hip::AutotuneSpace::Quick;
     } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
       autotuneFlagSeen = true;
-      autotune.enabled = true;
+      autotuneEnabled = true;
       llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
-      if (kind == "quick")
-        autotune.kind = mlir::rock::TuningParamSetKind::Quick;
-      else if (kind == "full")
-        autotune.kind = mlir::rock::TuningParamSetKind::Full;
-      else if (kind == "exhaustive")
-        autotune.kind = mlir::rock::TuningParamSetKind::Exhaustive;
-      else {
+      if (!mlir::hip::parseAutotuneSpace(kind, autotune.space)) {
         llvm::errs() << "error: unknown autotune space '" << kind
                      << "' (expected quick, full, or exhaustive)\n";
         return 1;
@@ -905,13 +207,13 @@ int main(int argc, char **argv) {
     }
   }
   if (skipBenchmarking())
-    autotune.enabled = false;
+    autotuneEnabled = false;
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotune.enabled) {
+  if (autotuneFlagSeen && autotuneEnabled) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
-  autotune.enabled = false;
+  autotuneEnabled = false;
 #endif
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
@@ -931,8 +233,14 @@ int main(int argc, char **argv) {
         << "                       embed the fastest GPU candidate.\n"
         << "  --autotune-warmup <n>\n"
         << "                       Warmup launches per candidate (default: "
-           "5).\n"
-        << "  --autotune-runs <n> Timed launches per candidate (default: 20).\n"
+           "20).\n"
+        << "  --autotune-runs <n> Timed launches per candidate (default: "
+           "100).\n"
+        << "                       Lower values get noisy: at 5/20 the same "
+           "kernel\n"
+        << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
+           "the\n"
+        << "                       differences being searched for.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
@@ -1115,35 +423,38 @@ int main(int argc, char **argv) {
   embedOpts.arch = arch;
   embedOpts.log = &llvm::errs();
   embedOpts.logPrefix = "[hip-rocmlir-compiler]";
-  // Autotune replaces the default "first perfConfig" choice with a
-  // benchmarked winner. It needs a real HIP device, so it stays in the tool.
-  // `single` arrives already lowered to rock form, which is what
-  // autotuneKernel's tuning-space query needs. autotuneOne only queues each
-  // kernel; finishAutotune compiles every search config in one pool,
-  // benchmarks them, then compiles the winning perfConfig for every repeated
-  // problem in a second pool.
+  // Autotune replaces the default perfConfig choice -- position 0 of the
+  // tuning space, which rocMLIR orders by applicability rather than speed --
+  // with a benchmarked winner. It lives in LibHipCompiler so the EP can reach
+  // it too; see include/hip/Compiler/RocMlirAutotune.h.
+  //
+  // Declared in this scope because embedOpts only holds function_refs into it.
+  std::optional<mlir::hip::RocMlirAutotuner> autotuner;
 #if HIP_ROCMLIR_AUTOTUNE
-  auto autotuneOne = [&](mlir::ModuleOp single, llvm::StringRef name,
-                         mlir::hip::CompiledKernel &out) {
-    return autotuneKernel(single, arch, name, autotune, out);
-  };
-  auto finishAutotune =
-      [&](llvm::StringMap<mlir::hip::CompiledKernel> &compiledByKernel) {
-        return compileAndBenchmarkSearches(arch, autotune, compiledByKernel) &&
-               compileDeferredCacheHits(arch, autotune, compiledByKernel);
-      };
-  if (autotune.enabled) {
-    embedOpts.compileOne = autotuneOne;
-    embedOpts.finishCompiles = finishAutotune;
+  if (autotuneEnabled) {
+    autotuner.emplace(arch, autotune);
+    if (!autotuner->isUsable()) {
+      llvm::errs() << "error: autotune could not reach a HIP device\n";
+      return 1;
+    }
+    autotuner->installInto(embedOpts);
   }
 #else
-  if (autotune.enabled) {
+  if (autotuneEnabled) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
 #endif
-  if (mlir::failed(
-          mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts)))
+  bool embedOk = mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts)
+                     .succeeded();
+  // Whether or not the embed succeeded: the pool and benchmark figures explain
+  // where a slow or failed compile spent its time.
+  if (autotuner) {
+    compilePhaseTimes.perfConfigCompileMs +=
+        autotuner->phaseTimes().perfConfigCompileMs;
+    compilePhaseTimes.benchmarkMs += autotuner->phaseTimes().benchmarkMs;
+  }
+  if (!embedOk)
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant

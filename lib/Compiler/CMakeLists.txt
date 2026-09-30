@@ -22,7 +22,16 @@ add_library(LibHipCompiler STATIC
 # kernels but never fills in hip.rocmlir's kernel_binary, and every dispatch
 # fails at hipModuleLoadData.
 if(ENABLE_ROCMLIRTRITON)
-  target_sources(LibHipCompiler PRIVATE RocMlirKernelCompiler.cpp)
+  # RocMlirAutotune.cpp replaces the default perfConfig choice with a
+  # benchmarked winner. It sits here rather than in hip-rocmlir-compiler for
+  # the same reason RocMlirKernelCompiler.cpp does: otherwise the EP can only
+  # ever compile position 0 of the tuning space. It resolves HIP at call time
+  # (see the file header), so it adds no import-table dependency and compiles
+  # to a stub when HIPDNN_EP_LINK_HIP_HOST is off.
+  target_sources(LibHipCompiler PRIVATE
+    RocMlirKernelCompiler.cpp
+    RocMlirAutotune.cpp
+  )
   # rocMLIR/Triton's per-library static archives have circular dependencies,
   # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
   # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan

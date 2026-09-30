@@ -15,9 +15,11 @@
 #include "hip/Support/DiskFileSystem.h"
 
 #ifdef ENABLE_ROCMLIRTRITON
+#include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
+#include <optional>
 #endif
 
 #include "hip/Target/LLVM/DLLLinker.h"
@@ -423,6 +425,25 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
+
+    // Opt-in: without this the embed falls back to position 0 of the tuning
+    // space, which rocMLIR picks for applicability rather than speed. Tuning
+    // compiles and times every candidate, so it costs far more than a session
+    // creation normally should -- hence off unless asked for. Declared in this
+    // scope because embedOpts only holds function_refs into it.
+    std::optional<mlir::hip::RocMlirAutotuner> autotuner;
+    mlir::hip::AutotuneSpace autotuneSpace;
+    if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
+      mlir::hip::AutotuneOptions autotuneOpts;
+      autotuneOpts.space = autotuneSpace;
+      autotuneOpts.log = embedOpts.log;
+      autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      autotuner.emplace(embedOpts.arch, autotuneOpts);
+      // Unusable means no HIP runtime or no device; it has already warned, and
+      // the default perfConfig path still produces a working model.
+      autotuner->installInto(embedOpts);
+    }
+
     if (mlir::failed(
             mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
       error_message = "rocMLIR kernel compilation failed";
