@@ -383,44 +383,6 @@ uint64_t mlir_create_op(uint64_t builder_ptr, uint64_t loc_op_ptr,
   return reinterpret_cast<uint64_t>(builder->create(state));
 }
 
-// Like mlir_create_op but takes a RewriterBase* (for top-level pattern rewriting).
-// Uses rewriter->create() to ensure listener notifications reach the conversion framework.
-uint64_t mlir_create_op_rw(uint64_t rewriter_ptr, uint64_t loc_op_ptr,
-                             const char* op_name,
-                             ptr operands_list, ptr result_types_list,
-                             int num_regions) {
-  if (!rewriter_ptr || !loc_op_ptr) return 0;
-  auto* rewriter = reinterpret_cast<mlir::RewriterBase*>(rewriter_ptr);
-  auto* loc_op   = reinterpret_cast<mlir::Operation*>(loc_op_ptr);
-
-  llvm::SmallVector<mlir::Value> operands;
-  llvm::SmallVector<mlir::Type>  resultTypes;
-
-  for (ptr cur = static_cast<ptr>(operands_list); cur != Snil; cur = Scdr(cur)) {
-    if (!Spairp(cur)) { mlir_log_error("mlir_create_op_rw: bad operands list"); return 0; }
-    uint64_t v = Sunsigned64_value(Scar(cur));
-    operands.push_back(mlir::Value::getFromOpaquePointer(reinterpret_cast<void*>(v)));
-  }
-  for (ptr cur = static_cast<ptr>(result_types_list); cur != Snil; cur = Scdr(cur)) {
-    if (!Spairp(cur)) { mlir_log_error("mlir_create_op_rw: bad result types list"); return 0; }
-    uint64_t t = Sunsigned64_value(Scar(cur));
-    resultTypes.push_back(mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(t)));
-  }
-
-  mlir::OperationState state(loc_op->getLoc(), op_name);
-  state.addOperands(operands);
-  state.addTypes(resultTypes);
-  for (int i = 0; i < num_regions; ++i)
-    state.addRegion();
-
-  if (std::string_view(op_name) == "hipsr.placeholder") {
-    state.addAttribute("placeholder_type",
-        mlir::hipsr::PlaceholderTypeAttr::get(loc_op->getContext(),
-                                               mlir::hipsr::PlaceholderType::Normal));
-  }
-
-  return reinterpret_cast<uint64_t>(rewriter->create(state));
-}
 
 // Set rewriter insertion point to immediately before op.
 void mlir_set_insertion_point_before(uint64_t rewriter_ptr, uint64_t op_ptr) {
@@ -699,7 +661,6 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_build_op", (void*)::mlir_build_op);
   Sregister_symbol("mlir_build_op_with_regions", (void*)::mlir_build_op_with_regions);
   Sregister_symbol("mlir_create_op", (void*)::mlir_create_op);
-  Sregister_symbol("mlir_create_op_rw", (void*)::mlir_create_op_rw);
   Sregister_symbol("mlir_set_insertion_point_before", (void*)::mlir_set_insertion_point_before);
   Sregister_symbol("mlir_set_insertion_point_to_block_end", (void*)::mlir_set_insertion_point_to_block_end);
   Sregister_symbol("mlir_op_get_region", (void*)::mlir_op_get_region);
