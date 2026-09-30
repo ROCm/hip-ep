@@ -5,7 +5,8 @@
           generate-debug-codegen
           make-unbound-value)
   (import (rnrs)
-          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier?)
+          (only (chezscheme) syntax->list syntax->datum syntax-object->datum record-rtd record-type-field-names record-accessor identifier?
+                call-with-string-output-port display-condition)
           (rename (rime loop) (:with :rime-with))
           (for (only (chezscheme) syntax->list syntax->datum record-rtd record-type-field-names record-accessor identifier?) expand)
           (for (rename (rime loop) (:with :rime-with)) expand)
@@ -124,13 +125,20 @@
         (with-syntax ([(form ...) raw-body])
           (case pattern-type
             [(conversion rewrite)
-             #`(with-rewrite-builder (#,rw #,op)
-                 (let ([result (with-mlir-ops form ...)])
-                   ;; result is a Value* uptr on success, or #f when a
-                   ;; Scheme escape returned #f to signal pattern failure.
-                   (if result
-                       (begin (mlir-replace-op #,rw #,op result) #t)
-                       #f)))]))))
+             #`(guard (exn [#t
+                            ;; A Scheme exception in the rewrite body is a pattern
+                            ;; failure. Emit the full condition text as an MLIR
+                            ;; diagnostic so it appears in ORT's error output.
+                            (mlir-emit-error! #,op
+                              (call-with-string-output-port
+                                (lambda (p) (display-condition exn p))))
+                            #f])
+                 (with-rewrite-builder (#,rw #,op)
+                   (let ([result (with-mlir-ops form ...)])
+                     ;; result is a Value* uptr on success, or #f to signal failure.
+                     (if result
+                         (begin (mlir-replace-op #,rw #,op result) #t)
+                         #f))))]))))
 
     ;;=======================================================================
   ;; :then-let bindings

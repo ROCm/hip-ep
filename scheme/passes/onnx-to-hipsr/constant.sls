@@ -31,8 +31,11 @@
   ;; Build a value attr (ElementsAttr) for the constant.
   ;; For inline: reads the "value" attr directly.
   ;; For external: constructs DenseResourceElementsAttr.
-  ;; Returns attr uptr or #f on error.
+  ;; Emits an MLIR diagnostic and raises on error — never returns #f.
   (define (constant-value-attr op ctx !result-type)
+    (define (fail msg)
+      (mlir-emit-error! op msg)
+      (error 'onnx-constant msg))
     (cond
       [(mlir-operation-has-attr? op "value")
        (mlir-operation-get-attribute op "value")]
@@ -47,17 +50,15 @@
                              offset size))
                      (let ([buf (mlir-hipsr-load-file-map ctx location)])
                        (if (zero? buf)
-                           0
+                           (fail (string-append "cannot memory-map: " location))
                            (make-mlir-attribute ctx :dense-resource
                              (list !result-type
                                    (string-append "file|" location "|"
                                                   (number->string offset))
                                    (+ buf offset) size)))))])
-         (if (zero? r)
-             (begin (mlir-emit-error! op "onnx.Constant: cannot build external resource") #f)
-             r))]
+         (if (zero? r) (fail "cannot build dense resource attr") r))]
       [else
-       (begin (mlir-emit-error! op "onnx.Constant has neither value nor location") #f)]))
+       (fail "onnx.Constant has neither value nor location")]))
 
   ;; Pattern 1: rank-0 scalar → arith.constant (host result type)
   (define-conversion-pattern (onnx-constant-scalar->arith op operands-ref rewriter type-converter)
@@ -69,11 +70,7 @@
          [!out-type   (mlir-value-get-type %output)]
          [$value-attr (constant-value-attr op ctx !out-type)])
     :rewrite %output :with
-        (%result = (and $value-attr
-                        (let* ([c-op (mlir-build-operation "arith.constant"
-                                        '() (list !out-type))])
-                          (mlir-operation-set-attribute! c-op "value" $value-attr)
-                          (mlir-operation-get-result c-op 0)))))
+        (%result = arith.constant () ("value" = $value-attr) -> !out-type))
 
   ;; Pattern 2: ranked tensor → hipsr.constant (device result type)
   (define-conversion-pattern (onnx-constant-tensor->hipsr op operands-ref rewriter type-converter)
@@ -86,11 +83,7 @@
          [!out-dev    (make-mlir-tensor-in-device-space !out-type)]
          [$value-attr (constant-value-attr op ctx !out-dev)])
     :rewrite %output :with
-        (%result = (and $value-attr
-                        (let* ([c-op (mlir-build-operation "hipsr.constant"
-                                        '() (list !out-dev))])
-                          (mlir-operation-set-attribute! c-op "value" $value-attr)
-                          (mlir-operation-get-result c-op 0)))))
+        (%result = hipsr.constant () ("value" = $value-attr) -> !out-dev))
 
   (define (populate-constant-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
