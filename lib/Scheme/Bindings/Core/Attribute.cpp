@@ -10,9 +10,11 @@
 
 #include "hip/Scheme/Bindings/SchemeMlirBindings.h"
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include <string>
 
 extern "C" {
 
@@ -50,11 +52,21 @@ uint64_t mlir_make_attr_i64_array(uint64_t ctx_ptr, ptr value) {
       mlir::DenseI64ArrayAttr::get(ctx, vec).getAsOpaquePointer());
 }
 
+// Extract a C++ std::string from a Chez Scheme string object.
+static std::string schemeStringToStd(ptr s) {
+  iptr len = Sstring_length(s);
+  std::string result(static_cast<size_t>(len), '\0');
+  for (iptr i = 0; i < len; ++i)
+    result[i] = static_cast<char>(Sstring_ref(s, i));
+  return result;
+}
+
 // value: Scheme list (result-type-uptr key-string data-addr data-size)
 // data-addr is a raw memory address as integer; caller keeps backing memory alive.
 uint64_t mlir_make_attr_dense_resource(uint64_t /*ctx_ptr*/, ptr value) {
   auto result_type_ptr = Sunsigned64_value(Scar(value));
-  const char* key      = Sstring_data(Scar(Scdr(value)));
+  std::string key_str  = schemeStringToStd(Scar(Scdr(value)));
+  const char* key      = key_str.c_str();
   int64_t data_addr    = Sinteger64_value(Scar(Scdr(Scdr(value))));
   int64_t data_size    = Sinteger64_value(Scar(Scdr(Scdr(Scdr(value)))));
 
