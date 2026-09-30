@@ -1,0 +1,122 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+# The latest benchmark snapshot, rendered by site/docs/benchmarks/index.md and
+# quoted on the model cards in the landing-page wall at site/index.md.
+#
+# Every `id` here must exist in site/_data/models.yml, which is where the
+# display name and the model's identity live. This file carries numbers only.
+#
+# Policy for this page (decided for v1): one snapshot only, and generative
+# language models only -- the same models that site/_data/models.yml carries.
+# No version history, no trend lines, no comparison against other runtimes.
+#
+# `run_date` is not rendered on the site, but it records when the snapshot was
+# collected and must move with the measurements.
+#
+# Updating this file is the whole job of publishing a new snapshot: replace the
+# numbers, set `run_date`, set `release`. No page needs to change.
+#
+# Values are stored with two decimal places so numeric columns align. Keep a
+# row's TTFT, TPS, and prompt-token counts from the same validated snapshot when
+# refreshing this file.
+
+snapshot:
+  placeholder: false
+  release: v0.5.1
+  run_date: "2026-09-23"
+  gpu: Ryzen AI Max ("Strix Halo", gfx1151)
+  os: Windows
+  note: >-
+    Single machine, runs executed serially. Numbers from a different GPU,
+    driver or thermal envelope are not comparable to these.
+
+# Prompt lengths, in tokens, used as the column groups of the LM table. These
+# are the NOMINAL lengths -- the name of each case, not what was fed to the
+# model. See `prompt_tokens` below.
+prompt_lengths: [128, 2048, 16384]
+
+# TTFT is seconds to the first generated token, lower is better.
+# TPS is generated tokens per second in steady state, higher is better.
+# Both are ordered to match `prompt_lengths`.
+#
+# `prompt_tokens` is the count of tokens actually fed to the model in each of
+# those cases, and it is not the nominal length. Two reasons it differs:
+#
+#   - Text models land a few tokens short of the target, because the harness
+#     truncates on a boundary: 16384 nominal is 15856 to 16328 in practice.
+#   - Vision-language models land far OVER it, because the image is tokenised
+#     into the same prompt. Qwen3.5-9B's "128" case is 1971 tokens; 1850 of
+#     those are the picture. gemma-3-4b-it's is 392. The overhead is a property
+#     of the model's vision encoder, so it cannot be inferred from one model
+#     and applied to another.
+#
+# Only the model-card prefill rate uses this, and only because a rate computed
+# from the nominal length would be wrong by 15x on a VLM.
+#
+lm:
+  - id: gpt-oss-20b
+    ttft: ["0.17", "1.21", "11.27"]
+    tps: ["77.62", "77.67", "68.20"]
+    prompt_tokens: [125, 1984, 15856]
+  - id: gpt-oss-120b
+    ttft: ["0.74", "5.32", "44.20"]
+    tps: ["44.53", "43.37", "39.02"]
+    prompt_tokens: [125, 1984, 15856]
+  - id: qwen2.5-coder-14b
+    ttft: ["0.16", "2.35", "27.51"]
+    tps: ["26.77", "24.49", "17.56"]
+    prompt_tokens: [128, 2043, 16328]
+  - id: qwen2.5-14b
+    ttft: ["0.16", "2.34", "27.31"]
+    tps: ["26.84", "24.49", "17.60"]
+    prompt_tokens: [128, 2043, 16328]
+  - id: llama-3.1-8b
+    ttft: ["0.12", "1.50", "16.48"]
+    tps: ["46.75", "43.14", "30.59"]
+    prompt_tokens: [128, 2007, 16040]
+  - id: mistral-7b-v0.3
+    ttft: ["0.11", "1.45", "16.30"]
+    tps: ["51.56", "48.02", "33.10"]
+    prompt_tokens: [124, 2014, 16104]
+  - id: phi-4-14b
+    ttft: ["0.17", "2.52", "26.52"]
+    tps: ["25.70", "24.01", "18.05"]
+    prompt_tokens: [128, 2007, 16040]
+  - id: deepseek-r1-distill-llama-70b
+    ttft: ["1.05", "12.03", "116.60"]
+    tps: ["6.09", "5.93", "5.20"]
+    prompt_tokens: [128, 2007, 16040]
+  - id: qwen3.6-35b-a3b
+    ttft: ["2.59", "3.95", "15.37"]
+    tps: ["58.66", "57.77", "52.13"]
+    prompt_tokens: [1971, 3952, 18755]
+  - id: qwen3.5-9b
+    ttft: ["2.71", "4.45", "20.82"]
+    tps: ["36.94", "36.21", "33.38"]
+    prompt_tokens: [1971, 3952, 18755]
+  - id: qwen3.5-35b-a3b
+    ttft: ["2.66", "3.74", "15.73"]
+    tps: ["58.40", "57.67", "51.96"]
+    prompt_tokens: [1971, 3952, 18755]
+  - id: qwen3.6-27b
+    ttft: ["6.20", "11.55", "54.49"]
+    tps: ["13.00", "12.90", "11.78"]
+    prompt_tokens: [1971, 3952, 18755]
+  - id: qwen3.8-27b
+    ttft: ["5.61", "10.28", "53.44"]
+    tps: ["13.78", "13.60", "12.34"]
+    prompt_tokens: [2013, 3994, 18797]
+  - id: gemma-3-4b-it
+    ttft: ["0.79", "1.41", "7.12"]
+    tps: ["65.96", "62.98", "57.42"]
+    prompt_tokens: [392, 2283, 16379]
+  - id: gemma-4-12b-it
+    ttft: ["0.52", "2.46", "21.54"]
+    tps: ["23.99", "21.85", "19.40"]
+    prompt_tokens: [392, 2283, 16379]
+  - id: gemma-4-26b-a4b-it
+    ttft: ["0.84", "1.80", "11.45"]
+    tps: ["54.46", "47.21", "18.86"]
+    prompt_tokens: [392, 2283, 16379]

@@ -1,0 +1,20 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+Every model in one family, in data-file order. Each family page is a short
+hand-written introduction followed by one call to this -- so the pages cannot
+drift apart in what they print about a model, and adding a model to
+_data/models.yml adds it to its family page with no page edit at all.
+
+Parameters:
+  family -- a slug from _data/model_families.yml. Family pages pass
+            `page.family`, which is also what the overview matches on.
+
+Language models come before vision-language ones. Within each tier the order
+is the data file's; see the note there about why it is hand-kept.
+{%- endcomment -%}
+{%- assign lms = site.data.models.llm | where: "family", include.family -%}
+{%- assign vlms = site.data.models.vlm | where: "family", include.family -%}
+{%- for m in lms %}{% include model-detail.html m=m kind="Language model" %}{% endfor -%}
+{%- for m in vlms %}{% include model-detail.html m=m kind="Vision-language model" %}{% endfor -%}
