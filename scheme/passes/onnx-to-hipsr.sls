@@ -81,10 +81,10 @@
   ;;   - otherwise → take the DPS init (outs slot) at the same result index
   ;;===--------------------------------------------------------------------===;;
   (define (shape-graph-counterpart value)
-    (if (= 1 (mlir-value-is-block-argument value))
+    (if (mlir-value-is-block-argument? value)
         value
-        (let* ((def-op (mlir-value-get-defining-op value))
-               (op-name (if (= 0 def-op) "" (mlir-operation-name def-op))))
+        (let* ((def-op  (mlir-value-get-defining-op value))
+               (op-name (if (zero? def-op) "" (mlir-operation-name def-op))))
           (if (or (string=? op-name "hipsr.placeholder")
                   (string=? op-name "hipsr.constant")
                   (string=? op-name "arith.constant"))
@@ -104,7 +104,7 @@
             (when (< i (mlir-operation-num-operands op))
               (let* ((old-val (mlir-operation-get-operand-value op i))
                      (new-val (shape-graph-counterpart old-val)))
-                (unless (= old-val new-val)
+                (unless (eqv? old-val new-val)  ; pointer identity: Values are uptr integers
                   (mlir-operation-set-operand op i new-val)))
               (loop (+ i 1))))))))
 
@@ -123,8 +123,8 @@
             (rewire-placeholder-inputs! module-op)
             (mlir-log-info "ONNX to HipSR Conversion (Scheme): Success"))
           (begin
-            (mlir-log-error "ONNX to HipSR Conversion (Scheme): FAILED")
-            (error (quote run-pass) "Dialect conversion failed")))))
+            (mlir-emit-error! module-op "onnx-to-hipsr: dialect conversion failed")
+            #f))))
 
   (define (run-pass module-op . args)
     (mlir-log-info "=== run-pass ENTERED ===")

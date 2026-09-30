@@ -50,7 +50,7 @@
     ;; Value operations
     mlir-value-get-defining-op
     mlir-value-get-type
-    mlir-value-is-block-argument
+    mlir-value-is-block-argument?
     mlir-value-get-result-number
 
     ;; Attribute access and mutation
@@ -167,6 +167,9 @@
 
   (define mlir-value-is-block-argument
     (foreign-procedure "mlir_value_is_block_argument" (uptr) int))
+
+  (define (mlir-value-is-block-argument? v)
+    (= 1 (mlir-value-is-block-argument v)))
 
   (define mlir-value-get-result-number
     (foreign-procedure "mlir_value_get_result_number" (uptr) int))

@@ -36,12 +36,12 @@
          [!out-device (mlir-tensor-type-in-device-space! !out-type)]
          [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
-        (%placeholder = "hipsr.placeholder" (%ctx %lhs %rhs !out-device)
+        (%placeholder = hipsr.placeholder (%ctx %lhs %rhs !out-device)
                         (^bb0 ((%ls : !shape-type) (%rs : !shape-type))
-                              (%broadcast = "shape.broadcast" (%ls %rs) -> !shape-type)
-                              ("hipsr.shape_yield" (%broadcast)))
+                              (%broadcast = shape.broadcast (%ls %rs) -> !shape-type)
+                              (hipsr.shape_yield (%broadcast)))
                         -> !out-device)
-        (%result = "hipsr.min" (%ctx %lhs %rhs %placeholder !out-device) -> !out-device))
+        (%result = hipsr.min (%ctx %lhs %rhs %placeholder !out-device) -> !out-device))
 
   ;;===--------------------------------------------------------------------===;;
   ;; General case — N=1 identity; N>2 chain (binary DSL pattern handles N=2)
