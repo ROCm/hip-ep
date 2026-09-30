@@ -34,7 +34,25 @@
 #include "llvm/ADT/StringMap.h"
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
+// Headers only -- see loadHipGetDeviceProperties below for why the HIP runtime
+// is resolved at call time rather than linked.
 #include <hip/hip_runtime.h>
+#ifdef _WIN32
+// Declared rather than including <windows.h>, whose macros collide with the
+// MLIR/LLVM headers here. Same pattern as include/hip/debug_log.h.
+extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *);
+extern "C" __declspec(dllimport) void *__stdcall LoadLibraryExA(const char *,
+                                                                void *,
+                                                                unsigned long);
+extern "C" __declspec(dllimport) void *__stdcall GetProcAddress(void *,
+                                                                const char *);
+// From libloaderapi.h. System32 plus the application/AddDllDirectory set;
+// notably excludes the working directory and PATH, which users can write to.
+#define HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#define HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS 0x00001000
+#else
+#include <dlfcn.h>
+#endif
 #endif
 
 #include <memory>
@@ -141,6 +159,43 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   return count == 1 && !out.binary.empty();
 }
 
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
+// Resolved at call time, not linked: hip-compiler links this library but only
+// compiles, and a load-time HIP import stops it starting where no driver is
+// installed. (hip-rocmlir-compiler links HIP itself for autotuning, by design.)
+using HipGetDevicePropsFn = hipError_t (*)(hipDeviceProp_t *, int);
+
+#define HIPDNN_STRINGIFY_(x) #x
+#define HIPDNN_STRINGIFY(x) HIPDNN_STRINGIFY_(x)
+
+HipGetDevicePropsFn loadHipGetDeviceProperties() {
+  // Stringified through the macro: the header #defines this to the versioned
+  // export (hipGetDevicePropertiesR0600), which is what the runtime exports.
+  static const char *kSymbol = HIPDNN_STRINGIFY(hipGetDeviceProperties);
+#ifdef _WIN32
+  void *mod = GetModuleHandleA(HIPDNN_HIP_RUNTIME_LIB);
+  if (!mod)
+    // Restricted search: the name is unqualified, and the default order would
+    // also trust the working directory and PATH. A runtime reachable only via
+    // PATH is missed, and the caller falls back to the build's architecture.
+    mod = LoadLibraryExA(HIPDNN_HIP_RUNTIME_LIB, nullptr,
+                         HIPDNN_LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                             HIPDNN_LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+#else
+  void *mod = dlopen(HIPDNN_HIP_RUNTIME_LIB, RTLD_LAZY | RTLD_NOLOAD);
+  if (!mod)
+    mod = dlopen(HIPDNN_HIP_RUNTIME_LIB, RTLD_LAZY);
+#endif
+  if (!mod)
+    return nullptr;
+#ifdef _WIN32
+  return reinterpret_cast<HipGetDevicePropsFn>(GetProcAddress(mod, kSymbol));
+#else
+  return reinterpret_cast<HipGetDevicePropsFn>(dlsym(mod, kSymbol));
+#endif
+}
+#endif
+
 } // namespace
 
 std::string resolveRocMlirArch() {
@@ -151,13 +206,15 @@ std::string resolveRocMlirArch() {
   if (!arch.empty())
     return arch;
 
-#ifdef HIPDNN_EP_LINK_HIP_HOST
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
   // Ask the GPU we are about to run on. Guessing here is not a harmless
   // default: a code object built for the wrong chip loads with "no kernel
   // image is available for execution on the device" at the first dispatch.
-  // Mirrors LlvmIrJit::detectCustomKernelArch.
+  // Mirrors LlvmIrJit::detectCustomKernelArch. A machine with no HIP runtime
+  // (or no device) just falls through to the build's target below.
+  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
   hipDeviceProp_t prop{};
-  if (hipGetDeviceProperties(&prop, 0) == hipSuccess) {
+  if (getProps && getProps(&prop, 0) == hipSuccess) {
     std::string deviceArch = prop.gcnArchName;
     // Empty gcnArchName has been seen on some Windows TheRock builds.
     if (!deviceArch.empty()) {

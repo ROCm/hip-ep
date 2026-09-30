@@ -18,6 +18,15 @@ foreach(_dep IN LISTS _HIPDNN_DEPS_LIST)
   set(DEP_HASH_${_dep_name} "${_dep}")  # remaining column = hash (may be empty)
 endforeach()
 
+# hip-ep uses none of the ROCm runner, and leaving it on breaks the configure:
+# rocMLIR then adds mlir/utils/performance, which needs amd_arch_db from the
+# mlir/test tree disabled below. FORCE, ahead of every add_subdirectory, because
+# rocMLIR sets this with a plain `set(... CACHE ...)` -- a no-op only if the
+# entry exists, so without this the outcome depends on subproject order.
+if(ENABLE_ROCMLIRTRITON)
+  set(MLIR_ENABLE_ROCM_RUNNER OFF CACHE BOOL "" FORCE)
+endif()
+
 # Local patches applied to the fetched rocmlirTriton checkout, each temporary
 # until upstreamed and the rocmlirtriton pin is bumped:
 #   - rocmlirTriton-use-external-LLVM.patch: skip its in-tree LLVM build when
@@ -429,8 +438,28 @@ if(ENABLE_ROCMLIRTRITON)
   endif()
 
   set(ROCM_PATH "${THEROCK_DIST}")
+
+  # rocMLIR's mlir/CMakeLists.txt sets LLVM_ENABLE_WERROR before including
+  # HandleLLVMOptions, so every diagnostic in its tree is fatal, and it layers
+  # -Wshadow/-Wformat=2/-Wundef/-Wmissing-declarations on top of -Wall -Wextra.
+  # GCC flags patterns Clang does not (-Wmaybe-uninitialized has no Clang
+  # equivalent), so the clang-cl build is clean while GCC fails on rocMLIR's own
+  # sources. Relax the promotion for this vendored subtree; the warnings still
+  # print. Directory COMPILE_OPTIONS land after CMAKE_CXX_FLAGS -- where
+  # HandleLLVMOptions puts -Werror -- so -Wno-error wins.
+  #
+  # Restored right after add_subdirectory: add_subdirectory(morphizen) below
+  # relies on -Werror being live (hence onnx-ir-imp's own -Wno-error=conversion),
+  # and leaking this would silently disarm it for the whole project.
+  get_directory_property(_hipep_copts_before COMPILE_OPTIONS)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error>)
+  endif()
+
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
+
+  set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_hipep_copts_before}")
 
   # Curated rock/triton link closure. rocMLIR maintains this list for its fat
   # archive in mlir/tools/rocmlir-lib/librockcompiler_deps.cmake (set(__rocmlir_libs
@@ -658,6 +687,11 @@ else()
   if(NOT DEFINED HIP_PLATFORM)
     set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
   endif()
+  # Claim the hip:: targets in top-level scope first: hip-targets.cmake creates
+  # them non-GLOBAL, so a subdirectory find_package(hip) would hide them from
+  # the compiler-rt fix-up at the end of the top-level CMakeLists. Later calls
+  # reuse these via hip-targets.cmake's already-defined early return.
+  find_package(hip CONFIG QUIET)
 endif()
 
 add_subdirectory(morphizen)
