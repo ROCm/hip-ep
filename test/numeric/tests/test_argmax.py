@@ -5,13 +5,15 @@
 
 """Numeric coverage for ONNX ArgMax against the ORT CPU reference.
 
-Indices are bit-exact (atol=0). Ties are included so select_last_index is
-checked, not only the unique-maximum case. ui32 and ui64 are intentionally
-absent: the kernel has no unsigned 32/64 compare.
+Indices are bit-exact (atol=0). Ties and NaNs are included so
+select_last_index is checked, not only the unique-maximum case. ui32 and
+ui64 are intentionally absent: the kernel has no unsigned 32/64 compare.
+bfloat16 uses ml_dtypes, the same representation ORT accepts.
 """
 
 from __future__ import annotations
 
+import ml_dtypes
 import numpy as np
 import pytest
 from onnx import helper
@@ -55,7 +57,19 @@ def _make_argmax_model(
 
 class TestArgMax:
     @pytest.mark.parametrize(
-        "dtype", [np.float32, np.float16, np.int32, np.int64, np.uint8]
+        "dtype",
+        [
+            np.float16,
+            np.float32,
+            np.float64,
+            ml_dtypes.bfloat16,
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+        ],
     )
     @pytest.mark.parametrize("keepdims", [0, 1])
     @pytest.mark.parametrize("axis", [0, -1])
@@ -80,6 +94,25 @@ class TestArgMax:
             keepdims=0,
             select_last_index=select_last_index,
             dtype=np.int32,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
+    @pytest.mark.parametrize("select_last_index", [0, 1])
+    def test_nan(self, model_runner, dtype, select_last_index):
+        # Row 0: NaN at indices 1 and 3. First -> 1, last -> 3.
+        # Row 1: NaN only at index 0, so both attributes select 0.
+        x = np.array(
+            [[1.0, np.nan, 0.0, np.nan], [np.nan, 4.0, 2.0, 3.0]],
+            dtype=dtype,
+        )
+        model = _make_argmax_model(
+            list(x.shape),
+            axis=1,
+            keepdims=0,
+            select_last_index=select_last_index,
+            dtype=dtype,
         )
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)

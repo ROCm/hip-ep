@@ -9,6 +9,11 @@
 // to be float: the text-encoder ArgMax is i32. select_last_index == 0 keeps
 // the first maximum; select_last_index != 0 keeps the last.
 //
+// NaN compares false against every value, so a plain > / >= walk would keep
+// index 0 when a later element is NaN. ONNX follows numpy.argmax: NaN
+// outranks every number. The first NaN wins unless select_last_index is set,
+// in which case the last NaN wins.
+//
 // The output buffer is the contiguous product of every input dim except
 // `axis` (keepdims only inserts a size-1 dim, which does not change that
 // count). Dynamic sizes arrive in `data_shape`.
@@ -41,19 +46,38 @@ __device__ bool argmax_take(T candidate, T best, int select_last) {
   return select_last ? (candidate >= best) : (candidate > best);
 }
 
+// Float compare used by f32, f64, and the half types after promotion.
+// Integers stay on the template above so a 4-byte int is not read as float.
+template <typename T>
+__device__ bool argmax_take_float(T candidate, T best, int select_last) {
+  bool candidate_nan = isnan(candidate);
+  bool best_nan = isnan(best);
+  if (candidate_nan || best_nan) {
+    if (candidate_nan && best_nan)
+      return select_last != 0;
+    return candidate_nan;
+  }
+  return select_last ? (candidate >= best) : (candidate > best);
+}
+
+__device__ bool argmax_take(float candidate, float best, int select_last) {
+  return argmax_take_float(candidate, best, select_last);
+}
+
+__device__ bool argmax_take(double candidate, double best, int select_last) {
+  return argmax_take_float(candidate, best, select_last);
+}
+
 // Half types have no reliable integer-style compare. Order them as float.
-// i32/i64 stay on the template above so a 4-byte int is not read as float.
 __device__ bool argmax_take(__half candidate, __half best, int select_last) {
-  float c = __half2float(candidate);
-  float b = __half2float(best);
-  return select_last ? (c >= b) : (c > b);
+  return argmax_take_float(__half2float(candidate), __half2float(best),
+                           select_last);
 }
 
 __device__ bool argmax_take(hip_bfloat16 candidate, hip_bfloat16 best,
                             int select_last) {
-  float c = static_cast<float>(candidate);
-  float b = static_cast<float>(best);
-  return select_last ? (c >= b) : (c > b);
+  return argmax_take_float(static_cast<float>(candidate),
+                           static_cast<float>(best), select_last);
 }
 
 template <typename T>
