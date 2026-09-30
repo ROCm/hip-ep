@@ -36,7 +36,7 @@
                         (^bb0 ((%data-shape : !shape-type))
                               (hipsr.shape_yield (%data-shape)))
                         -> !output-device)
-        (%result = hipsr.scatter_nd (%ctx %data %indices %updates %placeholder !output-device)
+        (%result = hipsr.scatter_nd (%ctx %data %indices %updates %placeholder)
                    -> !output-device))
 
   (define (populate-scatter-nd-patterns type-converter patterns ctx)

@@ -79,7 +79,7 @@
                                         -> !shape-type)
                               (hipsr.shape_yield (%res)))
                         -> !output-device)
-        (%result = hipsr.matmul (%ctx %a %b %placeholder !output-device)
+        (%result = hipsr.matmul (%ctx %a %b %placeholder)
                    -> !output-device))
 
   (define (populate-matmul-patterns type-converter patterns ctx)

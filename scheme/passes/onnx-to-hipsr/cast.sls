@@ -39,7 +39,7 @@
                         (^bb0 ((%shape-in : !shape-type))
                               (hipsr.shape_yield (%shape-in)))
                         -> !output-device)
-        (%cast = hipsr.cast (%ctx %input %placeholder !output-device)
+        (%cast = hipsr.cast (%ctx %input %placeholder)
                  -> !output-device))
 
   ;;===--------------------------------------------------------------------===;;

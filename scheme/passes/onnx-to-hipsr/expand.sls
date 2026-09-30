@@ -54,7 +54,7 @@
                                           (list !out-device))])
                           (mlir-placeholder-set-barrier-type ph-op)
                           (mlir-operation-get-result ph-op 0)))
-        (%result = "hipsr.expand" (%ctx %input %shape-host %placeholder !out-device)
+        (%result = "hipsr.expand" (%ctx %input %shape-host %placeholder)
                    -> !out-device))
 
   (define (populate-expand-patterns type-converter patterns ctx)

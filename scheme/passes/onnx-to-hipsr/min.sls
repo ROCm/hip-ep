@@ -42,7 +42,7 @@
                               (%broadcast = shape.broadcast (%ls %rs) -> !shape-type)
                               (hipsr.shape_yield (%broadcast)))
                         -> !out-device)
-        (%result = hipsr.min (%ctx %lhs %rhs %placeholder !out-device) -> !out-device))
+        (%result = hipsr.min (%ctx %lhs %rhs %placeholder) -> !out-device))
 
   ;;===--------------------------------------------------------------------===;;
   ;; General case — N=1 identity; N>2 chain (binary DSL pattern handles N=2)

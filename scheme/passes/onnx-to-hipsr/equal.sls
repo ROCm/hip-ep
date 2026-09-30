@@ -36,7 +36,7 @@
                               (%bcast = shape.broadcast (%lhs-shape %rhs-shape) -> !shape-type)
                               (hipsr.shape_yield (%bcast)))
                         -> !output-device)
-        (%result = hipsr.equal (%ctx %lhs %rhs %placeholder !output-device)
+        (%result = hipsr.equal (%ctx %lhs %rhs %placeholder)
                    -> !output-device))
 
   (define (populate-equal-patterns type-converter patterns ctx)
