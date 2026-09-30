@@ -48,11 +48,10 @@
     mlir-value-get-result-number
 
     ;; Attribute access and mutation
-    mlir-operation-set-attr
-    mlir-operation-get-integer-attr
-    mlir-operation-get-integer-array-attr
+    mlir-operation-set-attr!
+    mlir-operation-get-attr
     mlir-operation-copy-attr
-    mlir-operation-has-attr
+    mlir-operation-has-attr?
     mlir-operation-set-operand
     mlir-operation-use-empty?
     mlir-operation-num-dps-inits
@@ -197,28 +196,35 @@
   (define %set-i64-attr
     (foreign-procedure "mlir_operation_set_attr" (uptr string iptr) void))
 
-  (define (mlir-operation-set-attr op name value type)
+  (define (mlir-operation-set-attr! op name value type)
     (case type
       [(:i64)       (%set-i64-attr op name value)]
       [(:index)     (%set-index-attr op name value)]
       [(:i32-array) (%set-i32-array-attr op name value)]
-      [(:i64-array) (mlir-operation-set-dense-i64-array op name value)]
-      [else (error 'mlir-operation-set-attr "unknown attr type" type)]))
+      [(:i64-array) (%set-i64-array-attr op name value)]
+      [else (error 'mlir-operation-set-attr! "unknown attr type" type)]))
 
-  (define mlir-operation-get-integer-attr
+  (define %get-string-attr
+    (foreign-procedure "mlir_operation_get_string_attr" (uptr string) string))
+  (define %get-i64-attr
     (foreign-procedure "mlir_operation_get_integer_attr" (uptr string integer-64) integer-64))
-
-  (define mlir-operation-get-integer-array-attr
+  (define %get-i64-array-attr
     (foreign-procedure "mlir_operation_get_integer_array_attr" (uptr string) scheme-object))
-
-  (define mlir-operation-set-dense-i64-array
+  (define %set-i64-array-attr
     (foreign-procedure "mlir_operation_set_dense_i64_array" (uptr string scheme-object) void))
+
+  (define (mlir-operation-get-attr op name type . rest)
+    (case type
+      [(:string)    (%get-string-attr op name)]
+      [(:i64)       (%get-i64-attr op name (if (null? rest) 0 (car rest)))]
+      [(:i64-array) (%get-i64-array-attr op name)]
+      [else (error 'mlir-operation-get-attr "unknown attr type" type)]))
 
   (define mlir-operation-copy-attr
     (foreign-procedure "mlir_operation_copy_attr" (uptr string uptr string) void))
 
-  (define mlir-operation-has-attr
-    (foreign-procedure "mlir_operation_has_attr" (uptr string) int))
+  (define (mlir-operation-has-attr? op name)
+    (= 1 ((foreign-procedure "mlir_operation_has_attr" (uptr string) int) op name)))
 
   (define mlir-operation-set-operand
     (foreign-procedure "mlir_operation_set_operand" (uptr int uptr) void))

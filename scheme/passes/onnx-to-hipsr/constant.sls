@@ -41,8 +41,8 @@
         ;;   location present → external data, defer to C++ fallback
         ;;   neither          → emit error (C++ would notifyMatchFailure)
         (_ = (cond
-               [(not (zero? (mlir-operation-has-attr op "value")))  #t]
-               [(not (zero? (mlir-operation-has-attr op "location"))) #f]
+               [(mlir-operation-has-attr? op "value")    #t]
+               [(mlir-operation-has-attr? op "location") #f]
                [else
                 (begin (mlir-emit-error! op "onnx.Constant has neither value nor location")
                        #f)]))

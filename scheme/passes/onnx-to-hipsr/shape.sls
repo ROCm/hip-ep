@@ -50,7 +50,7 @@
                  [ext (if (dynamic-dim? dim)
                           (let* ([ci-op (mlir-build-operation "arith.constant"
                                           '() (list index-type))]
-                                 [_     (mlir-operation-set-attr ci-op "value" axis ':index)]
+                                 [_     (mlir-operation-set-attr! ci-op "value" axis ':index)]
                                  [ci    (mlir-operation-get-result ci-op 0)]
                                  [d-op  (mlir-build-operation "tensor.dim"
                                           (list in-val ci) (list index-type))]
@@ -60,12 +60,12 @@
                             (mlir-operation-get-result e-op 0))
                           (let* ([e-op (mlir-build-operation "arith.constant"
                                          '() (list i64-type))]
-                                 [_    (mlir-operation-set-attr e-op "value" dim ':i64)])
+                                 [_    (mlir-operation-set-attr! e-op "value" dim ':i64)])
                             (mlir-operation-get-result e-op 0)))]
                  ;; slot constant (= axis - start within the output tensor)
                  [slot-op (mlir-build-operation "arith.constant"
                              '() (list index-type))]
-                 [_       (mlir-operation-set-attr slot-op "value" slot ':index)]
+                 [_       (mlir-operation-set-attr! slot-op "value" slot ':index)]
                  [slot-c  (mlir-operation-get-result slot-op 0)]
                  ;; tensor.insert %ext into %acc[%slot-c]
                  [ins-op  (mlir-build-operation "tensor.insert"
@@ -84,8 +84,8 @@
          [input-rank  (mlir-type-get-rank !input-type)]
          [input-shape (mlir-type-get-shape !input-type)]
          [%ctx        (mlir-get-hipsr-context-arg op)]
-         [start-raw   (mlir-operation-get-integer-attr op "start" 0)]
-         [end-raw     (mlir-operation-get-integer-attr op "end" 0)]
+         [start-raw   (mlir-operation-get-attr op "start" :i64 0)]
+         [end-raw     (mlir-operation-get-attr op "end" :i64 0)]
          ;; ONNX normalizes negative bounds by adding rank, then clamps to [0, rank].
          ;; A zero end means "absent" and defaults to the rank.
          [start       (normalize-bound start-raw input-rank #f 0)]

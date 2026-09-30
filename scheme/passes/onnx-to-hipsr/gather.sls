@@ -42,7 +42,7 @@
   (define (build-gather-shape! axis data-shape idx-shape shape-type size-type)
     (define (mk-sz n)
       (let ([op (mlir-build-operation "shape.const_size" '() (list size-type))])
-        (mlir-operation-set-attr op "value" n ':index)
+        (mlir-operation-set-attr! op "value" n ':index)
         (mlir-operation-get-result op 0)))
     (let* ([sz1      (mk-sz axis)]
            [sp1      (mlir-build-operation "shape.split_at"
@@ -70,7 +70,7 @@
          [!out-device (make-mlir-tensor-in-device-space !out-type)]
          [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))]
          [!size-type  (mlir-shape.size-type  (mlir-operation-get-context op))]
-         [axis        (let ([a (mlir-operation-get-integer-attr op "axis" 0)])
+         [axis        (let ([a (mlir-operation-get-attr op "axis" :i64 0)])
                         (if (< a 0) (+ a (mlir-type-get-rank !data-type)) a))]
          ;; guard: only handle device data (eqv? avoids shadowed = keyword)
          [ok?         (eqv? 1 (mlir-type-is-device-tensor !data-type))])

@@ -195,7 +195,7 @@
           (lambda (new-op-stx)
             (with-syntax ([new-op new-op-stx] [n name-str] [v val-stx]
                           [type-q type-quoted-stx])
-              #'(mlir-operation-set-attr new-op n v type-q))))
+              #'(mlir-operation-set-attr! new-op n v type-q))))
         (syntax-case attr-stx (=)
           [(name = val type)
            ;; #''type = syntax for (quote :index) so :index is quoted in output

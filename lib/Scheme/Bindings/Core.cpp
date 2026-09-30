@@ -496,6 +496,16 @@ void mlir_op_erase(uint64_t op_ptr) {
 //===----------------------------------------------------------------------===//
 
 
+// Returns the string value of a StringAttr, or "" if absent or wrong type.
+// The returned pointer is owned by the attribute storage (valid while op lives).
+const char* mlir_operation_get_string_attr(uint64_t op_ptr, const char* attr_name) {
+  if (!op_ptr) return "";
+  auto *op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto attr = op->getAttrOfType<mlir::StringAttr>(attr_name);
+  if (!attr) return "";
+  return attr.getValue().data();
+}
+
 void mlir_operation_set_attr(uint64_t op, const char* attr_name, int64_t value) {
   if (!op) return;
   mlir::Operation* cppOp = reinterpret_cast<mlir::Operation*>(op);
@@ -678,7 +688,8 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_emit_warning", (void*)::mlir_emit_warning);
   Sregister_symbol("mlir_emit_remark",  (void*)::mlir_emit_remark);
   Sregister_symbol("mlir_op_erase", (void*)::mlir_op_erase);
-  Sregister_symbol("mlir_operation_set_attr",       (void*)::mlir_operation_set_attr);
+  Sregister_symbol("mlir_operation_get_string_attr", (void*)::mlir_operation_get_string_attr);
+  Sregister_symbol("mlir_operation_set_attr",        (void*)::mlir_operation_set_attr);
   Sregister_symbol("mlir_operation_set_index_attr", (void*)::mlir_operation_set_index_attr);
   Sregister_symbol("mlir_operation_get_integer_attr", (void*)::mlir_operation_get_integer_attr);
   Sregister_symbol("mlir_operation_get_integer_array_attr", (void*)::mlir_operation_get_integer_array_attr);
