@@ -42,9 +42,9 @@
                         #f)
                  #t))
         ;; Rank 0 → arith.constant (host type); rank > 0 → hipsr.constant (device type)
-        (%result = (let* ([!result-type (if (= rank 0) !out-type !out-dev)]
+        (%result = (let* ([!result-type (if (zero? rank) !out-type !out-dev)]
                           [c-op (mlir-build-operation
-                                  (if (= rank 0) "arith.constant" "hipsr.constant")
+                                  (if (zero? rank) "arith.constant" "hipsr.constant")
                                   '() (list !result-type))])
                      (mlir-operation-copy-attr c-op "value" op "value")
                      (mlir-operation-get-result c-op 0))))
