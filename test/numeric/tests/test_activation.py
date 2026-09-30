@@ -3,8 +3,8 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for activation / unary operations: Sigmoid, Tanh, Sqrt, Reciprocal,
-Softplus, Swish."""
+"""Tests for activation operations: Sigmoid, Tanh, Sqrt, Reciprocal,
+Softplus, Swish, and fused SwiGLU."""
 
 import numpy as np
 import pytest
@@ -222,4 +222,38 @@ class TestSwish:
         x = rng.uniform(-8, 8, [4, 17]).astype(dtype)
 
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)
+
+
+class TestSwiGluFusion:
+    """Llama export pattern: (gate * sigmoid(gate)) * up."""
+
+    @pytest.mark.parametrize(
+        "dtype,shape,atol,rtol",
+        [
+            (np.float16, [2, 17], 3e-3, 3e-3),
+            (np.float32, [2, 17], 1e-5, 1e-5),
+            (np.float32, [2, 16], 1e-5, 1e-5),
+            (np.float16, [1, 1, INTERMEDIATE], 3e-3, 3e-3),
+        ],
+    )
+    def test_swiglu_export_pattern(self, model_runner, dtype, shape, atol, rtol):
+        tp = np_to_onnx_type(dtype)
+        gate_info = helper.make_tensor_value_info("gate", tp, shape)
+        up_info = helper.make_tensor_value_info("up", tp, shape)
+        output_info = helper.make_tensor_value_info("output", tp, shape)
+        nodes = [
+            helper.make_node("Sigmoid", ["gate"], ["sigmoid"]),
+            helper.make_node("Mul", ["gate", "sigmoid"], ["activated"]),
+            helper.make_node("Mul", ["activated", "up"], ["output"]),
+        ]
+        model = make_model_from_nodes(nodes, [gate_info, up_info], [output_info])
+        # ONNX 1.19+ emits IR v14, while the current ORT release accepts v13.
+        model.ir_version = min(model.ir_version, 13)
+
+        rng = np.random.default_rng(31)
+        gate = rng.uniform(-8, 8, shape).astype(dtype)
+        up = rng.uniform(-3, 3, shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [gate, up])
         compare_outputs(actual, expected, atol=atol, rtol=rtol)
