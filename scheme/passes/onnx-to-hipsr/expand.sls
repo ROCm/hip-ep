@@ -52,7 +52,7 @@
         (%placeholder = (let* ([ph-op (mlir-build-operation "hipsr.placeholder"
                                           (list %ctx %input %shape-host)
                                           (list !out-device))])
-                          (mlir-placeholder-set-barrier-type ph-op)
+                          (mlir-placeholder-set-barrier-type! ph-op)
                           (mlir-operation-get-result ph-op 0)))
         (%result = "hipsr.expand" (%ctx %input %shape-host %placeholder)
                    -> !out-device))
