@@ -61,7 +61,7 @@
     mlir-operation-copy-attr
     mlir-operation-has-attr
     mlir-operation-set-operand
-    mlir-operation-use-empty
+    mlir-operation-use-empty?
     mlir-operation-num-dps-inits
     mlir-operation-get-dps-init-value
 
@@ -88,7 +88,9 @@
     mlir-replace-op
     mlir-erase-op
     mlir-op-erase
-    mlir-notify-match-failure
+    mlir-emit-error!
+    mlir-emit-warning!
+    mlir-emit-remark!
 
     ;; Generic RAII (type-specific RAII macros are in (mlir core conversion))
     with-raii
@@ -219,8 +221,9 @@
   (define mlir-operation-set-operand
     (foreign-procedure "mlir_operation_set_operand" (uptr int uptr) void))
 
-  (define mlir-operation-use-empty
-    (foreign-procedure "mlir_operation_use_empty" (uptr) int))
+  ;; Returns #t when all results of the operation have no uses (op is dead).
+  (define (mlir-operation-use-empty? op)
+    (= 1 ((foreign-procedure "mlir_operation_use_empty" (uptr) int) op)))
 
   (define mlir-operation-num-dps-inits
     (foreign-procedure "mlir_operation_num_dps_inits" (uptr) int))
@@ -302,8 +305,23 @@
   (define mlir-op-erase
     (foreign-procedure "mlir_op_erase" (uptr) void))
 
-  (define mlir-notify-match-failure
-    (foreign-procedure "mlir_notify_match_failure" (uptr string) void))
+  ;;===--------------------------------------------------------------------===;;
+  ;; MLIR Diagnostic Emission
+  ;;
+  ;; Each function takes ctx and an optional loc.
+  ;; loc defaults to (current-loc); when #f, the C++ side uses UnknownLoc.
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Emit an MLIR diagnostic attached to op, routing through MLIR's diagnostic
+  ;; engine (visible to ORT's handler, mlir-opt output, etc.).
+  ;; When op is #f/0 (no op in scope), falls back to mlir_log_*.
+  ;; These do not raise Scheme exceptions; callers propagate failure explicitly.
+  (define mlir-emit-error!
+    (foreign-procedure "mlir_emit_error"   (uptr string) void))
+  (define mlir-emit-warning!
+    (foreign-procedure "mlir_emit_warning" (uptr string) void))
+  (define mlir-emit-remark!
+    (foreign-procedure "mlir_emit_remark"  (uptr string) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; ValueArrayRef Accessors
@@ -426,16 +444,15 @@
 
   (define-syntax with-block-builder
     (syntax-rules ()
-      [(_ (builder-var block loc) body ...)
-       (let ([builder-var (mlir-builder-at-block-end block)])
+      [(_ block body ...)
+       (let ([%builder (mlir-builder-at-block-end block)])
          (dynamic-wind
            (lambda () #f)
            (lambda ()
-             (parameterize ([current-block-builder builder-var]
-                            [current-rewriter #f]
-                            [current-loc loc])
+             (parameterize ([current-block-builder %builder]
+                            [current-rewriter #f])
                body ...))
-           (lambda () (mlir-destroy-builder builder-var))))]))
+           (lambda () (mlir-destroy-builder %builder))))]))
 
   (define-syntax with-op-location
     (syntax-rules ()

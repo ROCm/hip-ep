@@ -64,7 +64,7 @@
       (mlir-operation-walk module-op
         (lambda (op)
           (when (and (string=? (mlir-operation-name op) "onnx.NoValue")
-                     (= 1 (mlir-operation-use-empty op)))
+                     (mlir-operation-use-empty? op))
             (set! dead (cons op dead)))))
       (for-each mlir-op-erase dead)))
 

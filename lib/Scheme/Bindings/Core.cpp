@@ -492,8 +492,34 @@ int mlir_erase_op(uint64_t rewriter_ptr, uint64_t op_ptr) {
   return 1;
 }
 
-void mlir_notify_match_failure(uint64_t op_ptr, const char* reason) {
-  mlir_log_debug((std::string("Pattern match failure: ") + reason).c_str());
+
+//===----------------------------------------------------------------------===//
+// MLIR Diagnostic Emission
+//
+// Route diagnostics through MLIR's diagnostic engine (visible to ORT's
+// diagnostic handler, mlir-opt, etc.).  They do not raise Scheme exceptions —
+// callers must propagate failure explicitly (e.g. return #f from a pattern).
+//
+// ctx_ptr  : MLIRContext* — required; used to construct UnknownLoc fallback.
+// loc_ptr  : opaque Location pointer from mlir_operation_get_loc, or 0.
+//            When 0, mlir::UnknownLoc::get(ctx) is used automatically.
+//===----------------------------------------------------------------------===//
+
+// Emit MLIR diagnostics attached to an operation.
+// When op_ptr is 0 (no op in scope), falls back to mlir_log_*.
+void mlir_emit_error(uint64_t op_ptr, const char *msg) {
+  if (!op_ptr) { mlir_log_error(msg); return; }
+  reinterpret_cast<mlir::Operation *>(op_ptr)->emitError(msg);
+}
+
+void mlir_emit_warning(uint64_t op_ptr, const char *msg) {
+  if (!op_ptr) { mlir_log_warning(msg); return; }
+  reinterpret_cast<mlir::Operation *>(op_ptr)->emitWarning(msg);
+}
+
+void mlir_emit_remark(uint64_t op_ptr, const char *msg) {
+  if (!op_ptr) { mlir_log_info(msg); return; }
+  reinterpret_cast<mlir::Operation *>(op_ptr)->emitRemark(msg);
 }
 
 // Direct erase without a rewriter — for post-pass cleanup outside a pattern callback.
@@ -686,7 +712,9 @@ void registerCoreBindings() {
   Sregister_symbol("mlir_build_op_in_block_with_regions", (void*)::mlir_build_op_in_block_with_regions);
   Sregister_symbol("mlir_replace_op", (void*)::mlir_replace_op);
   Sregister_symbol("mlir_erase_op", (void*)::mlir_erase_op);
-  Sregister_symbol("mlir_notify_match_failure", (void*)::mlir_notify_match_failure);
+  Sregister_symbol("mlir_emit_error",   (void*)::mlir_emit_error);
+  Sregister_symbol("mlir_emit_warning", (void*)::mlir_emit_warning);
+  Sregister_symbol("mlir_emit_remark",  (void*)::mlir_emit_remark);
   Sregister_symbol("mlir_op_erase", (void*)::mlir_op_erase);
   Sregister_symbol("mlir_operation_set_attr",       (void*)::mlir_operation_set_attr);
   Sregister_symbol("mlir_operation_set_index_attr", (void*)::mlir_operation_set_index_attr);

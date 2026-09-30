@@ -74,8 +74,13 @@
          ;; guard: only handle device data (eqv? avoids shadowed = keyword)
          [ok?         (eqv? 1 (mlir-type-is-device-tensor !data-type))])
     :rewrite %output :with
-        ;; Guard check via scheme escape — return #f to signal match failure
-        (_ = (if (not ok?) (error 'onnx-gather->hipsr "host data not supported") 'ok))
+        ;; Guard: device data only. Emit a remark so diagnostics are visible,
+        ;; then return #f so the conversion framework falls through to the
+        ;; fallback pattern (mlir-populate-gather-conversion-patterns).
+        (_ = (if (not ok?)
+                 (begin (mlir-emit-remark! op "onnx-gather->hipsr: skipping host data")
+                        #f)
+                 #t))
         (%placeholder = "hipsr.placeholder" (%ctx %data %indices !out-device)
                         (^bb0 ((%ds : !shape-type) (%is : !shape-type))
                               (%result-shape = (build-gather-shape!
