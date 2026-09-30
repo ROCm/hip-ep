@@ -126,8 +126,11 @@
             [(conversion rewrite)
              #`(with-rewrite-builder (#,rw #,op)
                  (let ([result (with-mlir-ops form ...)])
-                   (mlir-replace-op #,rw #,op result)
-                   #t))]))))
+                   ;; result is a Value* uptr on success, or #f when a
+                   ;; Scheme escape returned #f to signal pattern failure.
+                   (if result
+                       (begin (mlir-replace-op #,rw #,op result) #t)
+                       #f)))]))))
 
     ;;=======================================================================
   ;; :then-let bindings
