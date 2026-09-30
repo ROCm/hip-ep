@@ -29,7 +29,7 @@
     :then-let
         ([%ctx           (mlir-get-hipsr-context-arg op)]
          [!output-type   (mlir-value-get-type %output)]
-         [!output-device (mlir-tensor-type-in-device-space! !output-type)]
+         [!output-device (make-mlir-tensor-in-device-space !output-type)]
          [!shape-type    (mlir-get-shape-shape-type   (mlir-operation-get-context op))]
          [!size-type     (mlir-get-shape-size-type    (mlir-operation-get-context op))]
          [!witness-type  (mlir-get-shape-witness-type (mlir-operation-get-context op))]

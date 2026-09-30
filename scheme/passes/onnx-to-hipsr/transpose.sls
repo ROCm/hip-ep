@@ -48,7 +48,7 @@
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!in-type    (mlir-value-get-type %input)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         [!out-device (make-mlir-tensor-in-device-space !out-type)]
          [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
          [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
          [perm        (let ([raw (mlir-operation-get-integer-array-attr op "perm")])

@@ -18,7 +18,7 @@
   (export
     ;; Memory space
     hipsr-device-memory-space
-    mlir-tensor-type-in-device-space!   ; creates new MLIR type in context
+    make-mlir-tensor-in-device-space   ; creates new MLIR type in context
 
     ;; Context convention
     mlir-get-hipsr-context-arg           ; pure read
@@ -35,7 +35,7 @@
 
     ;; HipSR-specific type queries and op mutation
     mlir-type-is-device-tensor          ; 1 if RankedTensorType with device space
-    mlir-tensor-type-in-host-space      ; clone type with host memory-space encoding
+    make-mlir-tensor-in-host-space      ; clone type with host memory-space encoding
     mlir-get-hipsr-context-type         ; hipsr::ContextType from MLIRContext
     mlir-placeholder-set-barrier-type)  ; change placeholder_type attr to Barrier
 
@@ -51,7 +51,7 @@
   (define mlir-type-is-device-tensor
     (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
 
-  (define mlir-tensor-type-in-host-space
+  (define make-mlir-tensor-in-host-space
     (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
 
   (define mlir-get-hipsr-context-type
@@ -67,7 +67,7 @@
   ;; MemorySpace::Device = 1  (from HipsrEnums.td: Hipsr_Device I32EnumAttrCase 1)
   (define hipsr-device-memory-space 1)
 
-  (define (mlir-tensor-type-in-device-space! type)
+  (define (make-mlir-tensor-in-device-space type)
     (mlir-type-set-memory-space type hipsr-device-memory-space))
 
   ;;===--------------------------------------------------------------------===;;
@@ -115,7 +115,7 @@
         (if (and (= 1 (mlir-type-is-ranked-tensor type))
                  (> (mlir-type-get-rank type) 0)
                  (= 0 (mlir-type-get-encoding type)))
-            (mlir-tensor-type-in-device-space! type)
+            (make-mlir-tensor-in-device-space type)
             #f)))
     ;; Source materialization: resolve unrealized casts between ranked tensor
     ;; types that differ only in shape specificity (e.g. tensor<?x32> vs tensor<?x?>)

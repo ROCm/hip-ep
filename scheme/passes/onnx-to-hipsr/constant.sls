@@ -32,7 +32,7 @@
     (if (= 0 (mlir-operation-has-attr op "value"))
         #f
         (let* ((out-type  (mlir-value-get-type (mlir-operation-get-result op 0)))
-               (out-dev   (mlir-tensor-type-in-device-space! out-type))
+               (out-dev   (make-mlir-tensor-in-device-space out-type))
                (rank      (mlir-type-get-rank out-type)))
           (if (= rank 0)
               ;; Rank-0 scalar: arith.constant keeps the raw (unencoded) result type

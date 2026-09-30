@@ -42,7 +42,7 @@
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         [!out-device (make-mlir-tensor-in-device-space !out-type)]
          ;; Unwrap any unrealized_conversion_cast to get the host-space shape value.
          ;; The type converter wraps the tensor<Nxi64> shape in a cast to device space,
          ;; but hipsr.expand and hipsr.placeholder (barrier) require the host-space value.

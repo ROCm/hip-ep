@@ -80,7 +80,7 @@
         ([ctx         (mlir-operation-get-context op)]
          [!input-type (mlir-value-get-type %input)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-host   (mlir-tensor-type-in-host-space !out-type)]
+         [!out-host   (make-mlir-tensor-in-host-space !out-type)]
          [input-rank  (mlir-type-get-rank !input-type)]
          [input-shape (mlir-type-get-shape !input-type)]
          [%ctx        (mlir-get-hipsr-context-arg op)]

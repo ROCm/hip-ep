@@ -66,7 +66,7 @@
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!data-type  (mlir-value-get-type %data)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (mlir-tensor-type-in-device-space! !out-type)]
+         [!out-device (make-mlir-tensor-in-device-space !out-type)]
          [!shape-type (mlir-get-shape-shape-type (mlir-operation-get-context op))]
          [!size-type  (mlir-get-shape-size-type  (mlir-operation-get-context op))]
          [axis        (let ([a (mlir-operation-get-integer-attr op "axis" 0)])
