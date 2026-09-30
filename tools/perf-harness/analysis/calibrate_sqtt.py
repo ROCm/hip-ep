@@ -37,6 +37,19 @@ A factor below 1 therefore means "SQTT is the tighter bound here", not "SQTT
 under-reports".
 Both runs must use the same build and env (CI's), and the same prompt length:
 kernel choice and KV length change per-family time.
+
+The marker packets can be measured instead of argued about. The decoder is
+GPU-bound (host_timeline.py: sync wait > 0), so whatever the markers add to the
+GPU shows up one-for-one in the decoder's launch + sync wait per step. With
+--base-timeline and --op-timeline OP=..., both host_timeline.py --json files:
+  marker ms = op run's (dec_launch + dec_sync) - base run's
+  event ms  = event ms - marker ms           (the factor uses this)
+The base should be a run with HIPDNN_EP_PERF_OPS set to a name no op has
+(bench_tps.ps1 -PerfOps none): PERF mode's own per-inference events and sync
+then cancel, leaving only the op's start/end pairs. A plain run works too but
+folds PERF mode's fixed cost into the marker estimate. A delta below zero or
+at least the op's event time is noise or a broken run, so it is reported and
+not applied.
 """
 
 from __future__ import annotations
@@ -113,6 +126,15 @@ def sqtt_per_step(
     )
 
 
+def dec_gpu_ms(path: str) -> float:
+    """Median decoder launch + sync wait per step, from a host_timeline.py
+    --json file. dec_post is left out: PERF mode resolves its events there,
+    after the sync, so it is host time the markers' GPU cost is not in."""
+    with open(path) as f:
+        s = json.load(f)["summary"]
+    return (s["dec_launch"]["median_us"] + s["dec_sync"]["median_us"]) / 1000.0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -146,11 +168,33 @@ def main(argv=None) -> int:
         help="OP's fractional dispatches/call was checked by hand (e.g. hipBLASLt "
         "adds a PostGSU reduction kernel on some layers only); recorded in the JSON",
     )
+    ap.add_argument(
+        "--base-timeline",
+        metavar="JSON",
+        help="host_timeline.py --json of the marker-free run (-PerfOps none)",
+    )
+    ap.add_argument(
+        "--op-timeline",
+        action="append",
+        default=[],
+        metavar="OP=JSON",
+        help="host_timeline.py --json of OP's -PerfOps run; subtracts the markers' "
+        "GPU cost from OP's event time (needs --base-timeline)",
+    )
     ap.add_argument("--json", help="write the factors here (for decode_model --calib)")
     add_model_args(ap)
     args = ap.parse_args(argv)
     spec, _dev = specs_from_args(args)
     fmap = op_family_map(args.map)
+    op_tl = {}
+    for item in args.op_timeline:
+        op, sep, path = item.partition("=")
+        if not sep or not path:
+            ap.error(f"--op-timeline expects OP=JSON, got {item!r}")
+        op_tl[op] = path
+    if op_tl and not args.base_timeline:
+        ap.error("--op-timeline needs --base-timeline")
+    base_ms = dec_gpu_ms(args.base_timeline) if args.base_timeline else None
 
     ops: dict[str, dict] = {}
     for log in args.perf_log:
@@ -169,6 +213,26 @@ def main(argv=None) -> int:
     for op in [o for o, v in ops.items() if v["steps"] < most / 10]:
         print(f"skipping {op}: {ops[op]['steps']} tables vs {most}; not a decode op")
         del ops[op]
+
+    for op, ev in ops.items():
+        ev["raw_ms"] = ev["gpu_ms"]
+        ev["marker_ms"] = None
+        if op not in op_tl:
+            continue
+        delta = dec_gpu_ms(op_tl[op]) - base_ms
+        if 0.0 <= delta < ev["raw_ms"]:
+            ev["marker_ms"] = delta
+            ev["gpu_ms"] = ev["raw_ms"] - delta
+            print(
+                f"{op}: markers add {delta:.3f} ms/step "
+                f"({1000 * delta / ev['calls']:.1f} us/call); event "
+                f"{ev['raw_ms']:.3f} -> {ev['gpu_ms']:.3f} ms"
+            )
+        else:
+            print(
+                f"WARNING: {op}: marker delta {delta:.3f} ms/step is outside "
+                f"[0, {ev['raw_ms']:.3f}); not applied"
+            )
 
     if not args.capture:
         print(f"{'op':<14}{'event ms/step':>14}{'calls':>7}{'steps':>7}  log")
@@ -227,6 +291,8 @@ def main(argv=None) -> int:
         out[op] = {
             "factor": factor,
             "event_ms_per_step": ev["gpu_ms"],
+            "event_ms_raw": ev["raw_ms"],
+            "marker_ms_per_step": ev["marker_ms"],
             "event_calls_per_step": ev["calls"],
             "event_steps": ev["steps"],
             "sqtt_ms_per_step": sq["us"] / 1000.0,
@@ -262,6 +328,8 @@ def main(argv=None) -> int:
                     "capture": args.capture,
                     "steps": info["steps"],
                     "sqtt_kernel_ms_per_step": tot / 1000.0,
+                    "base_timeline": args.base_timeline,
+                    "op_timelines": op_tl,
                     "ops": out,
                 },
                 f,

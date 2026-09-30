@@ -322,7 +322,7 @@ def dispatch_stats(rows: list[dict], steps: float) -> dict:
     rounding.
     """
     busy = sum(float(r["dur_us"]) for r in rows)
-    gaps = [float(r.get("gap_before_us") or 0) for r in rows]
+    gaps = [float(r.get("gap_before_us") or 0) for r in rows if not r.get("artifact")]
     art = sum(g for g in gaps if g >= _ARTIFACT_GAP_US)
     gap = sum(g for g in gaps if g < _ARTIFACT_GAP_US)
     bound: dict[str, float] = collections.defaultdict(float)
