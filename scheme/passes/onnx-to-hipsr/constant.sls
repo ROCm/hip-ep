@@ -36,14 +36,13 @@
          [!out-dev  (make-mlir-tensor-in-device-space !out-type)]
          [rank      (mlir-type-get-rank !out-type)])
     :rewrite %output :with
-        ;; Guard: only handle the inline value form here.
-        ;; External data (location/offset/size) defers to the C++ fallback.
-        ;; Broken (neither value nor location) also defers; C++ emits the diagnostic.
+        ;; Mirror C++ ConstantOpLowering logic:
+        ;;   value present   → inline path (handled below)
+        ;;   location present → external data, defer to C++ fallback
+        ;;   neither          → emit error (C++ would notifyMatchFailure)
         (_ = (cond
-               [(not (zero? (mlir-operation-has-attr op "value")))
-                #t]
-               [(not (zero? (mlir-operation-has-attr op "location")))
-                #f]  ; external data — C++ fallback handles it
+               [(not (zero? (mlir-operation-has-attr op "value")))  #t]
+               [(not (zero? (mlir-operation-has-attr op "location"))) #f]
                [else
                 (begin (mlir-emit-error! op "onnx.Constant has neither value nor location")
                        #f)]))
