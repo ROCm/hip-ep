@@ -170,3 +170,14 @@ lib/Runtime/Kernels/test/example/*/data_*/
 .depend/
 CMakeUserPresets.json
 build.*/
+
+# Jekyll documentation site
+/_site/
+site/.jekyll-cache/
+site/.jekyll-metadata
+site/vendor/
+site/.bundle/
+
+# The repository-wide models/ rule above is for downloaded model files. Keep
+# the documentation pages under site/docs/models/ tracked.
+!site/docs/models/

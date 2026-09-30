@@ -1,0 +1,257 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+# The official model matrix, rendered by site/docs/models/index.md, by the
+# per-family pages under site/docs/models/ and by the card wall on
+# site/index.md, and used by site/docs/benchmarks/index.md to resolve the
+# display name for every benchmark row.
+#
+# Scope, decided for v1: generative language models only -- eight text and
+# eight vision-language, sixteen in total. The release validation suite also
+# covers Whisper and single-graph vision models; those are deliberately not
+# published on this site, so do not re-add a tier here without also adding the
+# page sections and the benchmark rows to match.
+#
+# This is the curated model set used by the site's release snapshot. Add a
+# model only when its public identity, family page, and benchmark row can be
+# maintained together.
+#
+# `status: New this release` is relative to `snapshot.release` in
+# benchmarks.yml. Demote last release's new models when that moves.
+#
+# `id` is the join key. Every id used in site/_data/benchmarks.yml must exist
+# here, or that row renders with a bare slug and no model behind it.
+#
+# `family` is the grouping key, and every value must have a matching entry in
+# _data/model_families.yml AND a page at site/docs/models/<slug>.md. A model
+# whose family has neither is not rendered anywhere: it vanishes from the site
+# silently rather than erroring, so add the three together.
+#
+# Order within a tier is by family, and within a family it is the order the
+# family page reads in -- oldest version first; within a version, smallest
+# first, and a base model before a specialisation of it (Qwen2.5 14B Instruct
+# before Qwen2.5-Coder). That order is hand-kept because Liquid's `sort` puts
+# "35B" before
+# "9B" and cannot do it for us. The tiers are also what the card wall
+# iterates, so moving an entry moves its card.
+#
+# `quant` is the short form of `precision`, for the matrix table's column, and
+# it is a hand-written field rather than a derivation: `precision` describes
+# the whole artifact -- "int4 RTN text decoder, group 32; fp16 vision encoder"
+# -- and no rule that truncates that string produces a sensible label for every
+# row. Keep the two in step by hand. `quant` is what the table sorts and
+# filters on, `precision` is what the family page prints in full.
+#
+# `name` is the base model, not the artifact. The quantized ONNX exports the
+# validation suite actually runs live in AMD-owned Hugging Face repositories
+# that are not all public, so naming the base model plus the quantization is
+# both accurate and linkable. `hf` is the base model's repository.
+
+llm:
+  - id: gpt-oss-20b
+    family: gpt-oss
+    name: GPT-OSS 20B
+    hf: openai/gpt-oss-20b
+    params: 20B total, 3.6B active
+    arch: Sparse mixture of experts
+    task: Text generation, reasoning
+    precision: int4 RTN, block 32
+    quant: int4 RTN
+    status: Validated
+    tagline: >-
+      The fastest model in the matrix, and a sparse MoE — the architecture that
+      breaks naive per-operator dispatch.
+
+  - id: gpt-oss-120b
+    family: gpt-oss
+    name: GPT-OSS 120B
+    hf: openai/gpt-oss-120b
+    params: 120B total, 5.1B active
+    arch: Sparse mixture of experts
+    task: Text generation, reasoning
+    precision: uint4 AWQ, per-group asymmetric
+    quant: uint4 AWQ
+    status: Validated
+    tagline: >-
+      120B parameters on an integrated GPU, at interactive speed. This is what
+      128 GB of unified memory is for.
+
+  - id: qwen2.5-14b
+    family: qwen
+    name: Qwen2.5 14B Instruct
+    hf: Qwen/Qwen2.5-14B-Instruct
+    params: 14B
+    arch: Dense transformer
+    task: Text generation
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: Validated
+
+  - id: qwen2.5-coder-14b
+    family: qwen
+    name: Qwen2.5-Coder 14B Instruct
+    hf: Qwen/Qwen2.5-Coder-14B-Instruct
+    params: 14B
+    arch: Dense transformer
+    task: Code generation
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: Validated
+    tagline: >-
+      A coding assistant that fits in local memory and holds a 16K-token file in
+      its context without falling over.
+
+  - id: llama-3.1-8b
+    family: llama
+    name: Llama 3.1 8B
+    hf: meta-llama/Llama-3.1-8B
+    params: 8B
+    arch: Dense transformer
+    task: Text generation
+    precision: int4 AWQ, group 128, asymmetric
+    quant: int4 AWQ
+    status: Validated
+
+  - id: mistral-7b-v0.3
+    family: mistral
+    name: Mistral 7B Instruct v0.3
+    hf: mistralai/Mistral-7B-Instruct-v0.3
+    params: 7B
+    arch: Dense transformer
+    task: Text generation
+    precision: int4 AWQ, block 128
+    quant: int4 AWQ
+    status: Validated
+
+  - id: phi-4-14b
+    family: phi
+    name: Phi-4 14B
+    hf: microsoft/phi-4
+    params: 14B
+    arch: Dense transformer
+    task: Text generation, reasoning
+    precision: int4 RTN, block 32
+    quant: int4 RTN
+    status: Validated
+
+  - id: deepseek-r1-distill-llama-70b
+    family: deepseek
+    name: DeepSeek-R1-Distill-Llama 70B
+    hf: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+    params: 70B
+    arch: Dense transformer
+    task: Text generation, reasoning
+    precision: int4 AWQ, block 128
+    quant: int4 AWQ
+    status: Validated
+    tagline: >-
+      The largest dense model in the matrix. Included because a 70B dense
+      decoder is where memory planning stops being an implementation detail.
+
+vlm:
+  - id: qwen3.5-9b
+    family: qwen
+    name: Qwen3.5 9B
+    hf: Qwen/Qwen3.5-9B
+    params: 9B
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: int4 text decoder, group 32; fp16 vision encoder
+    quant: int4
+    status: Validated
+
+  - id: qwen3.5-35b-a3b
+    family: qwen
+    name: Qwen3.5 35B-A3B
+    hf: Qwen/Qwen3.5-35B-A3B
+    params: 35B total, 3B active
+    arch: Sparse mixture of experts + vision encoder
+    task: Image understanding, text generation
+    precision: int4 text decoder, group 32; fp16 vision encoder
+    quant: int4
+    status: Validated
+
+  - id: qwen3.6-27b
+    family: qwen
+    name: Qwen3.6 27B
+    hf: Qwen/Qwen3.6-27B
+    params: 27B
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: int4 RTN text decoder, group 32; fp16 vision encoder
+    quant: int4 RTN
+    status: Validated
+
+  - id: qwen3.6-35b-a3b
+    family: qwen
+    name: Qwen3.6 35B-A3B
+    hf: Qwen/Qwen3.6-35B-A3B
+    params: 35B total, 3B active
+    arch: Gated DeltaNet + sparse mixture of experts
+    task: Image understanding, text generation
+    precision: int4 text decoder, group 32; fp16 vision encoder
+    quant: int4
+    status: Validated
+    tagline: >-
+      Gated DeltaNet and a sparse MoE in the same graph. Nothing about this
+      model is a stock transformer, and it still compiles to one artifact.
+
+  - id: qwen3.8-27b
+    family: qwen
+    name: Qwen3.8 27B
+    hf: Qwen/Qwen3.8-27B
+    params: 27B
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: int4 k-quant text decoder, group 128; fp16 vision encoder
+    quant: int4 k-quant
+    # Demoted from `New this release` at the v0.5.1 bump. It was new in v0.4.0,
+    # and the renderer spells that field out as "New in <snapshot release>" --
+    # left alone it would have claimed this model arrived in v0.5.1. The
+    # tagline below keeps saying v0.4.0 because that is a fact about the model,
+    # not a label relative to the snapshot.
+    status: Validated
+    tagline: >-
+      Added in v0.4.0. A model that did not exist when the compiler was
+      designed, brought up without a new operator library.
+
+  - id: gemma-3-4b-it
+    family: gemma
+    name: Gemma 3 4B IT
+    hf: google/gemma-3-4b-it
+    params: 4B
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: Validated
+    tagline: >-
+      The small end of the matrix. Vision plus text at 4B, fast enough that the
+      model stops being the bottleneck.
+
+  - id: gemma-4-12b-it
+    family: gemma
+    name: Gemma 4 12B IT
+    hf: google/gemma-4-12B-it
+    params: 12B
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: int4 k-quant, block 32
+    quant: int4 k-quant
+    # Demoted at the v0.5.1 bump for the same reason as Qwen3.8 27B above: new
+    # in v0.4.0, and v0.5.1 added no models at all -- the matrix is the same
+    # sixteen. If a release ever does add one, this is the field to set, and
+    # last release's winners come back down here in the same change.
+    status: Validated
+
+  - id: gemma-4-26b-a4b-it
+    family: gemma
+    name: Gemma 4 26B-A4B IT
+    hf: google/gemma-4-26B-A4B-it
+    params: 26B total, 4B active
+    arch: Sparse mixture of experts + vision encoder
+    task: Image understanding, text generation
+    precision: int4 weights, quantized MoE
+    quant: int4 QMoE
+    status: Validated

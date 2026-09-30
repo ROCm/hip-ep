@@ -1,0 +1,78 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: pages
+
+# Pull requests build and link-check the Jekyll site but do not deploy it.
+# A push to main deploys after a repository administrator enables GitHub Pages
+# with Settings > Pages > Build and deployment > Source = GitHub Actions.
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        submodules: false
+        lfs: false
+        fetch-depth: 1
+
+    - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+      with:
+        ruby-version: "3.3"
+        bundler-cache: true
+        working-directory: site
+
+    - name: Build site
+      working-directory: site
+      env:
+        JEKYLL_ENV: production
+      run: bundle exec jekyll build --destination ../_site --trace
+
+    - name: Check internal links
+      working-directory: site
+      run: |
+        baseurl="$(bundle exec ruby -ryaml -e 'print YAML.load_file("_config.yml")["baseurl"].to_s')"
+        bundle exec htmlproofer ../_site \
+          --checks Links \
+          --disable-external \
+          --allow-hash-href \
+          --swap-urls "^${baseurl}:"
+
+    - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      with:
+        path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - id: deployment
+      uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

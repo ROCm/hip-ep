@@ -1,0 +1,122 @@
+---
+layout: default
+---
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+{%- endcomment -%}
+
+{%- comment -%}
+  Flatten docs_nav into a single ordered list so the previous/next pager can be
+  derived from it. Keeping one source of truth (docs_nav in _config.yml) means
+  the sidebar and the pager can never disagree about page order.
+{%- endcomment -%}
+{%- comment -%}
+  Liquid has no array-push filter, so the lists are accumulated as
+  pipe-delimited strings and split at the end. No label or URL may contain "|".
+{%- endcomment -%}
+{%- assign urls_str = "" -%}
+{%- assign labels_str = "" -%}
+{%- for entry in site.docs_nav -%}
+  {%- if entry.url -%}
+    {%- assign urls_str = urls_str | append: entry.url | append: "|" -%}
+    {%- assign labels_str = labels_str | append: entry.label | append: "|" -%}
+  {%- endif -%}
+  {%- for child in entry.children -%}
+    {%- assign urls_str = urls_str | append: child.url | append: "|" -%}
+    {%- assign labels_str = labels_str | append: entry.label | append: " · " | append: child.label | append: "|" -%}
+  {%- endfor -%}
+{%- endfor -%}
+{%- assign flat_urls = urls_str | split: "|" -%}
+{%- assign flat_labels = labels_str | split: "|" -%}
+{%- comment -%}
+  page.url never carries the baseurl, and neither do the docs_nav entries, so
+  the two are directly comparable.
+{%- endcomment -%}
+{%- assign here = page.url -%}
+{%- assign pos = -1 -%}
+{%- for u in flat_urls -%}
+  {%- if u == here -%}{%- assign pos = forloop.index0 -%}{%- endif -%}
+{%- endfor -%}
+
+<section class="section section--docs">
+  <div class="section__inner docs-layout">
+
+    <aside class="docs-sidebar" aria-label="Documentation navigation">
+      <div class="docs-sidebar__header">
+        <p class="kicker">Docs</p>
+        <div class="docs-search">
+          <label class="visually-hidden" for="docs-search-input">Search docs</label>
+          <input id="docs-search-input" type="search" placeholder="Search docs" autocomplete="off"
+            spellcheck="false" class="docs-search__input" data-docs-search-input />
+          <div class="docs-search__results" data-docs-search-results aria-label="Search results"></div>
+        </div>
+      </div>
+      <nav class="docs-nav">
+        {% for entry in site.docs_nav %}
+        <div class="docs-nav__group{% if entry.children %} docs-nav__group--section{% endif %}">
+          {% if entry.url %}
+          <a href="{{ entry.url | relative_url }}"
+            class="docs-nav__link{% if entry.url == here %} is-active{% endif %}">{{ entry.label }}</a>
+          {% else %}
+          <p class="docs-nav__label">{{ entry.label }}</p>
+          {% endif %}
+          {% if entry.children %}
+          <div class="docs-nav__children">
+            {% for child in entry.children %}
+            <a href="{{ child.url | relative_url }}"
+              class="docs-nav__sublink{% if child.url == here %} is-active{% endif %}">{{ child.label }}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </nav>
+    </aside>
+
+    <article class="docs-content">
+      {% if page.title %}
+      <header class="docs-content__header">
+        <h1 class="headline-md">{{ page.title }}</h1>
+        {% if page.description %}<p class="lede">{{ page.description | replace: '%VERSION%', site.hip_ep_version }}</p>{% endif %}
+      </header>
+      {% endif %}
+
+      {{ content }}
+
+      <nav class="docs-pager" aria-label="Previous and next page">
+        {% if pos > 0 %}
+        {%- assign prev_i = pos | minus: 1 -%}
+        <a class="docs-pager__link docs-pager__link--prev" href="{{ flat_urls[prev_i] | relative_url }}">
+          <span class="docs-pager__dir">Previous</span>
+          <span class="docs-pager__label">{{ flat_labels[prev_i] }}</span>
+        </a>
+        {% endif %}
+        {%- assign last_i = flat_urls.size | minus: 1 -%}
+        {% if pos >= 0 and pos < last_i %}
+        {%- assign next_i = pos | plus: 1 -%}
+        <a class="docs-pager__link docs-pager__link--next" href="{{ flat_urls[next_i] | relative_url }}">
+          <span class="docs-pager__dir">Next</span>
+          <span class="docs-pager__label">{{ flat_labels[next_i] }}</span>
+        </a>
+        {% endif %}
+      </nav>
+
+      <footer class="docs-content__footer">
+        <a class="docs-edit-link"
+          href="{{ site.repo_url }}/edit/main/site/{{ page.path }}">Edit this page on GitHub</a>
+      </footer>
+    </article>
+
+    {%- comment -%}
+      Populated client-side from the rendered h2/h3 headings. Doing it in JS
+      rather than Liquid keeps it accurate for headings emitted by kramdown
+      without needing a heading-extraction filter.
+    {%- endcomment -%}
+    <aside class="docs-toc" aria-label="On this page" data-docs-toc hidden>
+      <p class="docs-toc__title">On this page</p>
+      <nav class="docs-toc__list" data-docs-toc-list></nav>
+    </aside>
+
+  </div>
+</section>
