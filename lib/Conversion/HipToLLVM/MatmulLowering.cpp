@@ -5,6 +5,10 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipShapeUtils.h"
+
+#include "llvm/ADT/STLExtras.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -32,6 +36,19 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
+    auto AType = cast<MemRefType>(op.getA().getType());
+    auto BType = cast<MemRefType>(op.getB().getType());
+    int64_t transA = op.getTransA();
+    int64_t transB = op.getTransB();
+    if (failed(inferMatmulShape(
+            AType.getShape(), BType.getShape(),
+            [&]() { return op.emitOpError(); }, transA, transB)))
+      return failure();
+    if (failed(verifyStridedBatchMatmul(AType.getShape(), BType.getShape(),
+                                        [&]() { return op.emitOpError(); })))
+      return failure();
+
+    // No IR is emitted before all static representability checks pass.
     // Extract pointers
     Value statePtr = adaptor.getCtx();
     Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
@@ -39,13 +56,9 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    // Get memref types and shapes
-    auto AType = cast<MemRefType>(op.getA().getType());
-    auto BType = cast<MemRefType>(op.getB().getType());
+    // Get memref ranks.
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
-    int64_t transA = op.getTransA();
-    int64_t transB = op.getTransB();
 
     // === DYNAMIC SHAPE SUPPORT ===
     // For dynamic shapes, we compute dimensions at runtime

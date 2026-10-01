@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipShapeUtils.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -30,6 +32,14 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     };
 
     auto AType = cast<MemRefType>(op.getInputA().getType());
+    auto BType = cast<MemRefType>(op.getInputB().getType());
+    std::optional<ArrayRef<int64_t>> cShape;
+    if (op.getInputC())
+      cShape = cast<MemRefType>(op.getInputC().getType()).getShape();
+    if (failed(inferGemmShape(AType.getShape(), BType.getShape(), cShape,
+                              adaptor.getTransA(), adaptor.getTransB(),
+                              [&]() { return op.emitOpError(); })))
+      return failure();
     Type elemType = AType.getElementType();
     int64_t typeCode;
     if (elemType.isF16())
@@ -77,7 +87,6 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       M = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
       K = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
     }
-    auto BType = cast<MemRefType>(op.getInputB().getType());
     if (adaptor.getTransB()) {
       N = getMemRefDimSize(BType, 0, adaptor.getInputB(), rewriter, loc);
     } else {
