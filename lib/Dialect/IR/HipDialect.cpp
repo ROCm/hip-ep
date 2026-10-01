@@ -1363,6 +1363,22 @@ void ArgMaxOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// RandomNormalLikeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, input, output). The input is a shape donor; the
+// kernel fills `output` and does not load input elements.
+MutableOperandRange RandomNormalLikeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RandomNormalLikeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 

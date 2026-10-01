@@ -77,6 +77,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GatherElements | Custom HIP kernel |
 | TopK | Custom HIP kernel |
 | ArgMax | Custom HIP kernel. f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64; rank 1–8. ui32 and ui64 are not supported. An empty reduction axis fails. NaN outranks every number; the first NaN wins unless select_last_index keeps the last. |
+| RandomNormalLike | Custom HIP kernel. Output f16, bf16, f32, and f64; rank 0–8. The input contributes only its shape, including dynamic dimensions. `seed` makes the fill reproducible inside hip-ep; the generator is not bit-identical to another runtime. An absent seed comes from the clock. |
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
