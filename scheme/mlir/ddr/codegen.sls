@@ -206,13 +206,17 @@
                  #f))]
 
         [(:check-eq)
+         ;; DAG diamond: verify that the operand of this op equals an already-bound var.
+         ;; get-operand retrieves a Value* from an op by index.
+         ;; value-equal? checks pointer identity (same SSA value).
          (let* ([fields      (cdr action)]
                 [op-idx      (cdr (assq 'op-idx fields))]
                 [operand-idx (cdr (assq 'operand-idx fields))]
                 [var         (cdr (assq 'var fields))])
-           #`(value-equal? (get-operand (vector-ref all-operations #,op-idx)
-                                        #,operand-idx)
-                           #,var))]
+           #`(eqv? (mlir-operation-get-operand-value
+                      (vector-ref all-operations #,op-idx)
+                      #,operand-idx)
+                   #,var))]
 
         [(:check-where)
          ;; Emit the guard expression directly — it runs after all operands of
