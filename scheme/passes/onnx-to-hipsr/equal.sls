@@ -13,8 +13,7 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (passes onnx-to-hipsr equal)
-  (export populate-equal-patterns
-          onnx-equal->hipsr)
+  (export populate-equal-patterns)
   (import (except (rnrs (6)) =)
           (mlir core ir)
           (mlir core conversion)
@@ -27,12 +26,14 @@
     :if-match
         %output = onnx.Equal (%lhs %rhs)
     :then-let
-        ([%ctx           (mlir-get-hipsr-context-arg op)]
+        ([ctx            (mlir-operation-get-context op)]
+         [%ctx           (mlir-get-hipsr-context-arg op)]
          [!output-type   (mlir-value-get-type %output)]
-         [!output-device (mlir-tensor-type-with-encoding !output-type (make-hipsr-device-space-attr (mlir-type-get-context !output-type)))]
-         [!shape-type    (mlir-shape.shape-type (mlir-operation-get-context op))])
+         [!output-device (mlir-tensor-type-with-encoding !output-type
+                            (make-hipsr-device-space-attr ctx))]
+         [!shape-type    (mlir-shape.shape-type ctx)])
     :rewrite %output :with
-        (%placeholder = hipsr.placeholder (%ctx %lhs %rhs !output-device)
+        (%placeholder = hipsr.placeholder (%ctx %lhs %rhs)
                         (^bb0 ((%lhs-shape : !shape-type) (%rhs-shape : !shape-type))
                               (%bcast = shape.broadcast (%lhs-shape %rhs-shape) -> !shape-type)
                               (hipsr.shape_yield (%bcast)))

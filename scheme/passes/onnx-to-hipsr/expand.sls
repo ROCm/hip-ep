@@ -15,8 +15,7 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (passes onnx-to-hipsr expand)
-  (export populate-expand-patterns
-          onnx-expand->hipsr)
+  (export populate-expand-patterns)
   (import (except (rnrs (6)) =)
           (mlir core ir)
           (mlir core conversion)
@@ -24,9 +23,10 @@
           (mlir dialects tensor)
           (mlir ddr))
 
-  ;; The shape operand may be wrapped in a builtin.unrealized_conversion_cast
-  ;; by the type converter (tensor<Nxi64> → device space). Unwrap to get the
-  ;; host-space value that hipsr.placeholder (barrier) requires.
+  ;; Unwrap one level of builtin.unrealized_conversion_cast.
+  ;; The type converter may wrap tensor<Nxi64> → device space; this removes
+  ;; that wrapper to recover the host-space value that hipsr.placeholder requires.
+  ;; Assumption: at most one cast is inserted. Nested casts are not handled.
   (define (unwrap-cast v)
     (let ([def (mlir-value-get-defining-op v)])
       (if (and (not (zero? def))

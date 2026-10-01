@@ -9,8 +9,9 @@
 ;; onnx.Constant → hipsr.constant (or arith.constant for rank-0 scalars)
 ;;
 ;; Two patterns, selected by rank via :where guard:
-;;   onnx-constant-scalar→arith — rank-0 inline → arith.constant (host type)
-;;   onnx-constant-tensor→hipsr — rank>0        → hipsr.constant (device type)
+;;   onnx-constant-scalar→arith — rank-0 → arith.constant (host type)
+;;   onnx-constant-tensor→hipsr — rank>0 → hipsr.constant (device type)
+;; Both handle inline value and external data (location/offset/size).
 ;;
 ;; External data (location/offset/size) is handled via DenseResourceElementsAttr
 ;; constructed through make-mlir-attribute :dense-resource.
@@ -27,7 +28,7 @@
           (mlir dialects tensor)
           (mlir ddr))
 
-  (define kOrtMemAddrTag "*/_ORT_MEM_ADDR_/*")
+  (define ort-mem-addr-tag "*/_ORT_MEM_ADDR_/*")
 
   ;; Build a value attr (ElementsAttr) for the constant.
   ;; For inline: reads the "value" attr directly.
@@ -44,7 +45,7 @@
        (let* ([location (mlir-operation-get-attr op "location" ':string)]
               [offset   (mlir-operation-get-attr op "offset"   ':i64 0)]
               [size     (mlir-operation-get-attr op "size"     ':i64 0)]
-              [r (if (string=? location kOrtMemAddrTag)
+              [r (if (string=? location ort-mem-addr-tag)
                      (make-mlir-attribute ctx ':dense-resource
                        (list !result-type
                              (string-append "mem|0x" (number->string offset 16))
@@ -81,7 +82,7 @@
     :then-let
         ([ctx         (mlir-operation-get-context op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-dev    (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
+         [!out-dev    (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr ctx))]
          [$value-attr (constant-value-attr op ctx !out-dev)])
     :rewrite %output :with
         (%result = hipsr.constant () ("value" = $value-attr) -> !out-dev))
