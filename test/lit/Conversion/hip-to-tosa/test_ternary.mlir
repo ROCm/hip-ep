@@ -108,7 +108,7 @@ func.func @incompatible_broadcast(%ctx: !hip.context, %cond: tensor<2x8xi1>,
                                   %x: tensor<2x8xf16>, %y: tensor<4xf16>,
                                   %init: tensor<2x8xf16>) -> tensor<2x8xf16>
     attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.where'}}
+  // expected-error @+1 {{broadcast verification: incompatible broadcast shapes [2, 8] and [4]}}
   %r = hip.where(%ctx) ins(%cond, %x, %y :
                            tensor<2x8xi1>, tensor<2x8xf16>, tensor<4xf16>)
                        outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
