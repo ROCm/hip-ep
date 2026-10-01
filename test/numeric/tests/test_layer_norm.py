@@ -488,6 +488,79 @@ class TestInstanceNormalization:
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
 
 
+def _make_batch_norm_model(input_shape: list[int], dtype=np.float32):
+    """Build an inference ONNX BatchNormalization model.
+
+    Scale, bias, mean, and variance are per-channel initializers.
+    """
+    channels = input_shape[1]
+    tp = {
+        np.float16: TensorProto.FLOAT16,
+        np.float32: TensorProto.FLOAT,
+    }[dtype]
+    X = helper.make_tensor_value_info("X", tp, input_shape)
+    Y = helper.make_tensor_value_info("Y", tp, input_shape)
+    rng = np.random.default_rng(2026)
+    scale_init = numpy_helper.from_array(
+        rng.uniform(0.5, 1.5, [channels]).astype(dtype), name="scale"
+    )
+    bias_init = numpy_helper.from_array(
+        rng.uniform(-0.5, 0.5, [channels]).astype(dtype), name="B"
+    )
+    mean_init = numpy_helper.from_array(
+        rng.uniform(-1.0, 1.0, [channels]).astype(dtype), name="mean"
+    )
+    var_init = numpy_helper.from_array(
+        rng.uniform(0.1, 1.5, [channels]).astype(dtype), name="var"
+    )
+    node = helper.make_node(
+        "BatchNormalization",
+        ["X", "scale", "B", "mean", "var"],
+        ["Y"],
+        epsilon=1e-5,
+    )
+    return make_model_from_nodes(
+        [node],
+        [X],
+        [Y],
+        initializers=[scale_init, bias_init, mean_init, var_init],
+    )
+
+
+class TestBatchNormalization:
+    """Inference BN: supplied per-channel mean and variance, one kernel."""
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            [1, 4, 1, 1],
+            [2, 3, 8],
+            [1, 3, 4, 5],
+            [1, 4, 2, 3, 3],
+        ],
+    )
+    def test_batch_norm_f32(self, model_runner, input_shape):
+        model = _make_batch_norm_model(input_shape, np.float32)
+        rng = np.random.default_rng(9)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            [1, 4, 1, 1],
+            [2, 3, 8, 8],
+        ],
+    )
+    def test_batch_norm_f16(self, model_runner, input_shape):
+        model = _make_batch_norm_model(input_shape, np.float16)
+        rng = np.random.default_rng(10)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
 def _make_group_norm_model(
     input_shape: list[int],
     groups: int,

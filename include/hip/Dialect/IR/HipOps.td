@@ -1429,6 +1429,57 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_BatchNormOp : Hip_DpsOp<"batch_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "ONNX BatchNormalization inference (supplied per-channel mean/var)";
+  let description = [{
+    Inference form of ONNX BatchNormalization
+    (https://arxiv.org/abs/1502.03167):
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are the supplied per-channel vectors, not reduced from
+    the input. Input rank is at least 2: (N, C, D1, ..., Dn). Rank 2 has a
+    spatial extent of 1. Scale, B, mean, and variance are 1-D tensors of
+    length C. Training mode is not represented by this op.
+
+    Example:
+    ```mlir
+    hip.batch_norm(%ctx)
+        ins(%input, %scale, %bias, %mean, %variance :
+            memref<1x4x1x1xf16, 1>, memref<4xf16, 1>, memref<4xf16, 1>,
+            memref<4xf16, 1>, memref<4xf16, 1>)
+        outs(%output : memref<1x4x1x1xf16, 1>)
+        {epsilon = 1.001000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$mean,
+    Hip_TensorOrMemRef:$variance,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `,` $mean `,` $variance `:`
+        type($input) `,` type($scale) `,` type($bias) `,`
+        type($mean) `,` type($variance)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
                                 /*outsAccessor=*/"Output",
                                 /*autoReify=*/1,
