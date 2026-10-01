@@ -41,18 +41,18 @@
       [(mlir-operation-has-attr? op "value")
        (mlir-operation-get-attribute op "value")]
       [(mlir-operation-has-attr? op "location")
-       (let* ([location (mlir-operation-get-attr op "location" :string)]
-              [offset   (mlir-operation-get-attr op "offset"   :i64 0)]
-              [size     (mlir-operation-get-attr op "size"     :i64 0)]
+       (let* ([location (mlir-operation-get-attr op "location" ':string)]
+              [offset   (mlir-operation-get-attr op "offset"   ':i64 0)]
+              [size     (mlir-operation-get-attr op "size"     ':i64 0)]
               [r (if (string=? location kOrtMemAddrTag)
-                     (make-mlir-attribute ctx :dense-resource
+                     (make-mlir-attribute ctx ':dense-resource
                        (list !result-type
                              (string-append "mem|0x" (number->string offset 16))
                              offset size))
                      (let ([buf (mlir-hipsr-load-file-map ctx location)])
                        (if (zero? buf)
                            (fail (string-append "cannot memory-map: " location))
-                           (make-mlir-attribute ctx :dense-resource
+                           (make-mlir-attribute ctx ':dense-resource
                              (list !result-type
                                    (string-append "file|" location "|"
                                                   (number->string offset))

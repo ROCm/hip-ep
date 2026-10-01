@@ -29,17 +29,17 @@
 
   (import (rnrs)
           (only (chezscheme) foreign-procedure foreign-entry?
-                make-eq-hashtable hashtable-ref hashtable-set!
-                symbol->string string-map string-append substring
-                string-length))
+                make-eq-hashtable hashtable-ref hashtable-set!))
 
   ;; Derive the C symbol name from a type keyword.
   ;; :dense-resource → "mlir_make_attr_dense_resource"
   (define (type->sym-name type)
-    (let* ([s (symbol->string type)]
-           [s (substring s 1 (string-length s))]   ; strip leading ":"
-           [s (string-map (lambda (c) (if (char=? c #\-) #\_ c)) s)])
-      (string-append "mlir_make_attr_" s)))
+    (let* ([s    (symbol->string type)]
+           [s    (substring s 1 (string-length s))]   ; strip leading ":"
+           [body (list->string
+                   (map (lambda (c) (if (char=? c #\-) #\_ c))
+                        (string->list s)))])
+      (string-append "mlir_make_attr_" body)))
 
   ;; Cache: type keyword → foreign-procedure wrapper (or #f if unavailable).
   (define %cache (make-eq-hashtable))

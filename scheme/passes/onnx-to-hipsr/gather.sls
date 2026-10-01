@@ -71,7 +71,7 @@
          [!out-device (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
          [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))]
          [!size-type  (mlir-shape.size-type  (mlir-operation-get-context op))]
-         [axis        (let ([a (mlir-operation-get-attr op "axis" :i64 0)])
+         [axis        (let ([a (mlir-operation-get-attr op "axis" ':i64 0)])
                         (if (< a 0) (+ a (mlir-type-get-rank !data-type)) a))]
          ;; guard: only handle device data (eqv? avoids shadowed = keyword)
          [ok?         (eqv? 1 (mlir-type-is-device-tensor !data-type))])

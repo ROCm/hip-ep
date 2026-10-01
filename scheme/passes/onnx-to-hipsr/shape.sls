@@ -84,8 +84,8 @@
          [input-rank  (mlir-type-get-rank !input-type)]
          [input-shape (mlir-type-get-shape !input-type)]
          [%ctx        (mlir-get-hipsr-context-arg op)]
-         [start-raw   (mlir-operation-get-attr op "start" :i64 0)]
-         [end-raw     (mlir-operation-get-attr op "end" :i64 0)]
+         [start-raw   (mlir-operation-get-attr op "start" ':i64 0)]
+         [end-raw     (mlir-operation-get-attr op "end" ':i64 0)]
          ;; ONNX normalizes negative bounds by adding rank, then clamps to [0, rank].
          ;; A zero end means "absent" and defaults to the rank.
          [start       (normalize-bound start-raw input-rank #f 0)]

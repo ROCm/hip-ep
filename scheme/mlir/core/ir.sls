@@ -66,6 +66,7 @@
     with-current-block-builder
     with-block-builder
     with-op-location
+    mlir-build-op
     mlir-replace-op
     mlir-erase-op
     mlir-op-erase

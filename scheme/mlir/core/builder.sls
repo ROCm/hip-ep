@@ -32,6 +32,7 @@
     with-block-builder
     with-op-location
     ;; Low-level rewriter ops
+    mlir-build-op
     mlir-replace-op
     mlir-erase-op
     mlir-op-erase
@@ -60,8 +61,7 @@
     mlir-type-set-memory-space)
 
   (import (rnrs)
-          (only (chezscheme) foreign-procedure parameterize make-parameter
-                dynamic-wind void))
+          (only (chezscheme) foreign-procedure parameterize make-parameter))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Low-level rewriter FFI
@@ -85,6 +85,7 @@
   (define %build-op
     (foreign-procedure "mlir_build_op"
                        (uptr uptr string scheme-object scheme-object) uptr))
+  (define mlir-build-op %build-op)
   (define %build-op-regions
     (foreign-procedure "mlir_build_op_with_regions"
                        (uptr uptr string scheme-object scheme-object int) uptr))
