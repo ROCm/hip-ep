@@ -73,6 +73,14 @@ __device__ inline float coord_to_input(int o, int out_dim, int in_dim,
              static_cast<float>(in_dim - 1) /
              static_cast<float>(out_dim - 1);
     }
+    case 3: { // pytorch_half_pixel
+      // Same map as half_pixel, except an output axis of length 1 samples
+      // input coordinate 0.
+      if (out_dim == 1)
+        return 0.0f;
+      float scale = static_cast<float>(out_dim) / static_cast<float>(in_dim);
+      return (static_cast<float>(o) + 0.5f) / scale - 0.5f;
+    }
     default:
       return static_cast<float>(o);
   }
