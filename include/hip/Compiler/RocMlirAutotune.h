@@ -22,8 +22,11 @@
 // HIP is resolved symbol-by-symbol at call time rather than linked: a
 // load-time HIP import would stop hip-compiler starting on a machine with no
 // driver, and LibHipCompiler is deliberately headers-only against hip::host.
-// Construction fails softly when no runtime or device is present, and the
-// caller then keeps the default perfConfig path.
+// Construction therefore does not throw or abort when no runtime or device is
+// present; it reports that through `isUsable`, and whether to fall back to the
+// default perfConfig or refuse the compile is the caller's decision. Both
+// callers today refuse, because the artifact records which mode was asked for
+// and an untuned artifact must not be labelled tuned.
 //
 // Only built when ENABLE_ROCMLIRTRITON is on, which is also the macro
 // consumers gate on.
@@ -70,7 +73,10 @@ struct AutotuneOptions {
   // which is what the EP wants: its compiles happen inside ORT session
   // creation.
   llvm::raw_ostream *log = nullptr;
-  StringRef logPrefix = "[rocmlir-autotune]";
+  // Owning: the autotuner keeps a copy of these options for the whole compile
+  // and logs through it long after the constructor returns, so a StringRef
+  // here would dangle for any caller that did not pass a literal.
+  std::string logPrefix = "[rocmlir-autotune]";
   // Also print a line per candidate and the winning perfConfig. Separate from
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
