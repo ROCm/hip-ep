@@ -263,6 +263,20 @@ void mlir_operation_set_index_attr(uint64_t op_ptr, const char* attr_name, int64
 // op_ptr: Operation* as uptr
 // attr_name: attribute dictionary key
 // values_list: Scheme list of integer Scheme objects
+// Set a named attribute to an ArrayAttr of I64IntegerAttr values.
+// Use this for ODS attributes declared as I64ArrayAttr (not DenseI64ArrayAttr).
+void mlir_operation_set_i64_array_attr(uint64_t op_ptr, const char* attr_name, ptr values_list) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  llvm::SmallVector<mlir::Attribute> attrs;
+  auto i64Type = mlir::IntegerType::get(op->getContext(), 64);
+  for (ptr cur = static_cast<ptr>(values_list); cur != Snil; cur = Scdr(cur)) {
+    if (!Spairp(cur)) break;
+    attrs.push_back(mlir::IntegerAttr::get(i64Type, Sinteger_value(Scar(cur))));
+  }
+  op->setAttr(attr_name, mlir::ArrayAttr::get(op->getContext(), attrs));
+}
+
 void mlir_operation_set_dense_i64_array(uint64_t op_ptr, const char* attr_name, ptr values_list) {
   if (!op_ptr) return;
   auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
@@ -403,6 +417,7 @@ void registerOperationBindings() {
   Sregister_symbol("mlir_operation_set_unit_attr",          (void*)::mlir_operation_set_unit_attr);
   Sregister_symbol("mlir_operation_set_index_attr",         (void*)::mlir_operation_set_index_attr);
   Sregister_symbol("mlir_operation_set_dense_i64_array",   (void*)::mlir_operation_set_dense_i64_array);
+  Sregister_symbol("mlir_operation_set_i64_array_attr",    (void*)::mlir_operation_set_i64_array_attr);
   Sregister_symbol("mlir_operation_set_dense_i32_array",   (void*)::mlir_operation_set_dense_i32_array);
   Sregister_symbol("mlir_operation_copy_attr",             (void*)::mlir_operation_copy_attr);
   Sregister_symbol("mlir_operation_has_attr",              (void*)::mlir_operation_has_attr);

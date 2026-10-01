@@ -90,29 +90,28 @@
   ;; The "operandSegmentSizes" attribute encodes the counts in that order.
   ;;===--------------------------------------------------------------------===;;
 
-  (define (hip-qdq-segments op)
-    ;; Return the operand segment list, falling back to (1 1 1 0 1) when absent.
-    (let ([segs (mlir-op-get-operand-segment-sizes op)])
-      (if (pair? segs) segs '(1 1 1 0 1))))
+  ;; hip.quantize_linear and hip.dequantize_linear operand layout:
+  ;;   4 operands: ctx(0), input(1), scale(2), init(3)          — no zero_point
+  ;;   5 operands: ctx(0), input(1), scale(2), zp(3), init(4)   — has zero_point
+  ;; Do NOT rely on operandSegmentSizes — it is not present as a named attribute
+  ;; on these ops; use operand count instead.
+
+  (define (hip-qdq-has-zeropoint? op)
+    (= (mlir-operation-num-operands op) 5))
 
   (define (hip-qdq-input-operand op)
-    ;; Operand layout: ctx(0), input(1), scale(2), [zp], [init]
-    ;; Index 1 is always the input tensor.
+    ;; input is always at index 1
     (mlir-operation-get-operand-value op 1))
 
   (define (hip-qdq-scale-operand op)
-    ;; Scale follows ctx + input.
-    (let ([segs (hip-qdq-segments op)])
-      (mlir-operation-get-operand-value
-        op (+ (list-ref segs 0) (list-ref segs 1)))))
+    ;; scale is always at index 2
+    (mlir-operation-get-operand-value op 2))
 
   (define (hip-qdq-zeropoint op absent-val)
-    ;; If zeropoint segment size is 0, the operand is absent → return absent-val.
-    (let ([segs (hip-qdq-segments op)])
-      (if (zero? (list-ref segs 3))
-          absent-val
-          (mlir-operation-get-operand-value
-            op (+ (list-ref segs 0) (list-ref segs 1) (list-ref segs 2))))))
+    ;; zp is at index 3 when present (5-operand form); absent → return absent-val
+    (if (hip-qdq-has-zeropoint? op)
+        (mlir-operation-get-operand-value op 3)
+        absent-val))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Scale checks
@@ -133,17 +132,23 @@
   ;;===--------------------------------------------------------------------===;;
 
   (define (hip-qdq-element-type op)
-    ;; Element type of the quantized result tensor.
-    (mlir-type-element-type
-      (mlir-value-get-type (mlir-operation-get-result op 0))))
+    ;; Returns the INTEGER element type of the quantized tensor:
+    ;; - For hip.quantize_linear: result 0 IS the integer tensor.
+    ;; - For hip.dequantize_linear: operand 1 (the input) IS the integer tensor;
+    ;;   result 0 is float.
+    (if (string=? (mlir-operation-name op) "hip.quantize_linear")
+        (mlir-type-element-type
+          (mlir-value-get-type (mlir-operation-get-result op 0)))
+        ;; DQ: the quantized integer tensor is the INPUT operand.
+        (mlir-type-element-type
+          (mlir-value-get-type (hip-qdq-input-operand op)))))
 
   (define (hip-qdq-value-bits op)
-    ;; packed_int4 attr (integer, 0=false, 1=true) signals that the storage
-    ;; holds two 4-bit values per byte; the logical width is 4 in that case.
-    (let ([packed? (mlir-operation-get-integer-attr op "packed_int4" 0)])
-      (if (= packed? 1)
-          4
-          (mlir-type-integer-width (hip-qdq-element-type op)))))
+    ;; packed_int4 is a UnitAttr (presence means true) — use has-attr? to test.
+    ;; Do NOT use get-integer-attr; UnitAttr has no integer value, returns 0.
+    (if (mlir-operation-has-attr? op "packed_int4")
+        4
+        (mlir-type-integer-width (hip-qdq-element-type op))))
 
   (define (hip-qdq-unsigned? op)
     (mlir-type-is-unsigned (hip-qdq-element-type op)))
@@ -201,27 +206,22 @@
   (define (hip-int-attr-equal? op name expected absent-val)
     (= (mlir-operation-get-integer-attr op name absent-val) expected))
 
+  ;; C++ FFI for the full L2-equivalence check (epsilon=0, trailing axis,
+  ;; scale = 1/sqrt(N) rounded to element type precision).
+  ;; Pure Scheme cannot replicate the APFloat bit-exact scale comparison.
+  (define %hip-is-l2-equiv-rms-norm-c
+    (foreign-procedure "hip_is_l2_equiv_rms_norm" (uptr) int))
+
   (define (hip-l2-equiv-rms-norm? op)
-    ;; Must be: trailing axis, zero epsilon, scale = 1/sqrt(N).
-    ;; The full check requires inspecting the dense scale attr — a complex
-    ;; check best left to the C++ guard hip_is_l2_equiv_rms_norm if needed.
-    ;; Here we expose the simpler sub-checks available via generic FFI.
-    ;; Patterns using this should call the C++ helper directly when available.
-    (and (let ([eps (mlir-op-get-float-attr op "epsilon")])
-           (and (not (nan? eps)) (< (abs eps) 1e-9)))
-         ;; axis check: -1 or last axis; read as integer attr
-         (let ([axis (mlir-operation-get-integer-attr op "axis" -1)])
-           (or (= axis -1) (= axis (- (mlir-type-get-rank
-                                        (mlir-value-get-type
-                                          (mlir-operation-get-result op 0)))
-                                       1))))))
+    (not (zero? (%hip-is-l2-equiv-rms-norm-c op))))
+
+  (define %hip-is-fusable-conv-geometry-c
+    (foreign-procedure "hip_is_fusable_conv_geometry" (uptr) int))
 
   (define (hip-fusable-conv-geometry? op)
-    ;; 1x1 kernel, unit stride, unit dilation, zero pad, no group.
-    ;; Uses ArrayAttr attributes so the generic integer-attr getter won't work.
-    ;; Delegate to C++ for full accuracy; this Scheme version covers the attrs
-    ;; accessible via mlir-operation-get-integer-attr.
-    (and (hip-int-attr-equal? op "group" 1 1)))
+    ;; 1x1 kernel, unit stride/dilation, zero pads, group=1.
+    ;; Delegates to C++ which reads I64ArrayAttr attrs via MLIR APIs.
+    (not (zero? (%hip-is-fusable-conv-geometry-c op))))
 
   (define (hip-per-axis-weight? dq-op rank axis packed-int4?)
     ;; Scale must be rank-1 and packed_int4 must match.

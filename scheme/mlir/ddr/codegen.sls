@@ -253,8 +253,10 @@
             :for idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec idx)
             :rime-with op-name  := (syntax->datum (ast-match-expand-op-name match-op))
-            ;; :any ops are never the root (they have no compile-time name to match on)
-            :when (and (not (eq? op-name ':any))
+            ;; :any ops are never the root — guard against both symbol ':any and
+            ;; string ":any" (validate.sls may have normalized the symbol to string).
+            :when (and (not (or (eq? op-name ':any)
+                                (and (string? op-name) (string=? op-name ":any"))))
                        (string=? (if (string? op-name) op-name (symbol->string op-name))
                                  (if (string? root-op-name) root-op-name (symbol->string root-op-name))))
             :break match-op)))

@@ -69,7 +69,11 @@
             (set! acc (cons (action:set-current-op op-idx result-var) acc))
             ;; Skip :check-op for :any ops — they match any op name at runtime.
             ;; Use :where to filter which ops are acceptable.
-            (unless (eq? (syntax->datum (ast-match-expand-op-name match-op)) ':any)
+            ;; validate.sls normalizes symbol op-names to strings, so :any
+            ;; may be stored as the symbol ':any OR the string ":any".
+            (unless (let ([name (syntax->datum (ast-match-expand-op-name match-op))])
+                      (or (eq? name ':any)
+                          (and (string? name) (string=? name ":any"))))
               (set! acc (cons (action:check-op op-idx) acc)))
 
             ;; Bind ALL result variables of this operation.

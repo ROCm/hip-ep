@@ -141,6 +141,57 @@ int64_t hip_qdq_value_bits(uint64_t op_ptr) {
   return static_cast<int64_t>(intType.getWidth());
 }
 
+// Check if a hip.conv op has the geometry required for QConv fusion:
+// 1x1 kernel, unit strides, unit dilations, zero pads, group=1.
+// Reuses hipListAttrAllEqual from the PDLL fusion helpers.
+int hip_is_fusable_conv_geometry(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  std::optional<int64_t> group = tryHipIntAttr(op, "group", 1);
+  if (!group || *group != 1) return 0;
+  if (!hipListAttrAllEqual(op, "kernel_shape", 2, 1)) return 0;
+  if (!hipListAttrAllEqual(op, "strides",      2, 1)) return 0;
+  if (!hipListAttrAllEqual(op, "dilations",    2, 1)) return 0;
+  if (!hipListAttrAllEqual(op, "pads",         4, 0)) return 0;
+  return 1;
+}
+
+// Check whether a hip.rms_norm op is mathematically equivalent to L2
+// normalization.  Reuses isHipL2EquivalentRmsNorm from the PDLL header
+// as a pure predicate (no PatternRewriter mutation needed).
+int hip_is_l2_equiv_rms_norm(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto rms = mlir::dyn_cast<mlir::hip::RmsNormOp>(op);
+  if (!rms) return 0;
+
+  auto epsilon = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilon || !epsilon.getValue().isZero()) return 0;
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(rms.getInput().getType());
+  if (!inputType || inputType.getRank() == 0) return 0;
+  int64_t rank = inputType.getRank();
+
+  std::optional<int64_t> axis = tryHipIntAttr(op, "axis", -1);
+  if (!axis) return 0;
+  int64_t normAxis = *axis < 0 ? *axis + rank : *axis;
+  if (normAxis != rank - 1) return 0;
+
+  int64_t n = inputType.getDimSize(rank - 1);
+  if (n == mlir::ShapedType::kDynamic || n <= 0) return 0;
+
+  mlir::DenseElementsAttr payload = tryHipConstantPayload(rms.getScale());
+  if (!payload || !payload.isSplat() ||
+      !mlir::isa<mlir::FloatType>(payload.getElementType())) return 0;
+  if (payload.getNumElements() != n) return 0;
+
+  llvm::APFloat actual = payload.getSplatValue<llvm::APFloat>();
+  llvm::APFloat expected(1.0f / std::sqrt(static_cast<float>(n)));
+  bool losesInfo = false;
+  expected.convert(actual.getSemantics(), llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+  return actual.bitwiseIsEqual(expected) ? 1 : 0;
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -153,6 +204,8 @@ void registerHipFusionBindings() {
   Sregister_symbol("hip_extractable_qdq_zeropoint",      (void*)::hip_extractable_qdq_zeropoint);
   Sregister_symbol("hip_extract_qdq_zeropoint_i64",      (void*)::hip_extract_qdq_zeropoint_i64);
   Sregister_symbol("hip_qdq_value_bits",                 (void*)::hip_qdq_value_bits);
+  Sregister_symbol("hip_is_l2_equiv_rms_norm",           (void*)::hip_is_l2_equiv_rms_norm);
+  Sregister_symbol("hip_is_fusable_conv_geometry",       (void*)::hip_is_fusable_conv_geometry);
 }
 
 } // namespace hipsr
