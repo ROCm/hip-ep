@@ -19,6 +19,7 @@
     ;; Memory space
     hipsr-device-memory-space
     make-hipsr-device-space-attr       ; creates HipSR MemorySpaceAttr(Device)
+    make-hipsr-barrier-type-attr       ; creates HipSR PlaceholderTypeAttr(Barrier)
 
     ;; Context convention
     mlir-get-hipsr-context-arg           ; pure read
@@ -85,6 +86,15 @@
   ;; Public wrapper for %make-device-space-attr.
   ;; ctx: MLIRContext* uptr
   ;; Returns: HipSR device MemorySpaceAttr as opaque Attribute uptr
+  (define %make-barrier-type-attr
+    (foreign-procedure "mlir_hipsr_make_barrier_type_attr" (uptr) uptr))
+
+  ;; Create a HipSR PlaceholderTypeAttr(Barrier).
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: PlaceholderTypeAttr opaque attr uptr — use as "placeholder_type" attr
+  (define (make-hipsr-barrier-type-attr ctx)
+    (%make-barrier-type-attr ctx))
+
   (define (make-hipsr-device-space-attr ctx)
     (%make-device-space-attr ctx))
 

@@ -64,6 +64,16 @@ uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
 }
 
 // Construct a hipsr::MemorySpaceAttr for Device memory space.
+// Create a PlaceholderTypeAttr(Barrier) — marks a placeholder as Barrier.
+// ctx_ptr: MLIRContext* as uptr
+// Returns: PlaceholderTypeAttr opaque attr uptr
+uint64_t mlir_hipsr_make_barrier_type_attr(uint64_t ctx_ptr) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::hipsr::PlaceholderTypeAttr::get(ctx, mlir::hipsr::PlaceholderType::Barrier)
+          .getAsOpaquePointer());
+}
+
 // Used as the encoding attribute on device tensors (tensor<..., #hipsr.mem<device>>).
 // ctx_ptr: MLIRContext* as uptr
 // Returns: MemorySpaceAttr(Device) as an opaque attribute uptr
@@ -93,6 +103,7 @@ void registerHipsrBindings() {
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)::mlir_populate_cast_conversion_patterns);
   Sregister_symbol("mlir_placeholder_set_barrier_type", (void*)::mlir_placeholder_set_barrier_type);
   Sregister_symbol("mlir_get_hipsr_context_type", (void*)::mlir_get_hipsr_context_type);
+  Sregister_symbol("mlir_hipsr_make_barrier_type_attr", (void*)::mlir_hipsr_make_barrier_type_attr);
   Sregister_symbol("mlir_hipsr_make_device_space_attr", (void*)::mlir_hipsr_make_device_space_attr);
   Sregister_symbol("mlir_hipsr_load_file_map",          (void*)::mlir_hipsr_load_file_map);
 }

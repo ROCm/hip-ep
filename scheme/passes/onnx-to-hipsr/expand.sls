@@ -10,8 +10,7 @@
 ;;
 ;; Creates a Barrier placeholder with ins=(input, shape) then hipsr.expand.
 ;; The placeholder must be Barrier because the shape is computed at runtime
-;; from the shape operand (a host tensor). The shape region is filled by
-;; hipsr-populate-shape-region.
+;; from the shape operand (a host tensor).
 ;;
 ;;===----------------------------------------------------------------------===;;
 
@@ -25,10 +24,9 @@
           (mlir dialects tensor)
           (mlir ddr))
 
-  ;; The shape adaptor value may be wrapped in a builtin.unrealized_conversion_cast
-  ;; by the dialect conversion framework when it maps tensor<Nxi64> → device space.
-  ;; But hipsr.expand and hipsr.placeholder (barrier) both require host-space shape
-  ;; operands. Unwrap the cast to obtain the actual hipsr.compute result (host space).
+  ;; The shape operand may be wrapped in a builtin.unrealized_conversion_cast
+  ;; by the type converter (tensor<Nxi64> → device space). Unwrap to get the
+  ;; host-space value that hipsr.placeholder (barrier) requires.
   (define (unwrap-cast v)
     (let ([def (mlir-value-get-defining-op v)])
       (if (and (not (zero? def))
@@ -41,21 +39,17 @@
     :if-match
         %output = onnx.Expand (%input %shape-operand)
     :then-let
-        ([%ctx        (mlir-get-hipsr-context-arg op)]
+        ([ctx         (mlir-operation-get-context op)]
+         [%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
-         ;; Unwrap any unrealized_conversion_cast to get the host-space shape value.
-         ;; The type converter wraps the tensor<Nxi64> shape in a cast to device space,
-         ;; but hipsr.expand and hipsr.placeholder (barrier) require the host-space value.
+         [!out-device (mlir-tensor-type-with-encoding !out-type
+                        (make-hipsr-device-space-attr ctx))]
          [%shape-host (unwrap-cast %shape-operand)])
     :rewrite %output :with
-        ;; Barrier placeholder: ins=(input, shape-host).
-        (%placeholder = (let* ([ph-op (mlir-build-operation "hipsr.placeholder"
-                                          (list %ctx %input %shape-host)
-                                          (list !out-device))])
-                          (mlir-placeholder-set-barrier-type! ph-op)
-                          (mlir-operation-get-result ph-op 0)))
-        (%result = "hipsr.expand" (%ctx %input %shape-host %placeholder)
+        (%placeholder = hipsr.placeholder (%ctx %input %shape-host)
+                        ("placeholder_type" = (make-hipsr-barrier-type-attr ctx))
+                        -> !out-device)
+        (%result = hipsr.expand (%ctx %input %shape-host %placeholder)
                    -> !out-device))
 
   (define (populate-expand-patterns type-converter patterns ctx)
