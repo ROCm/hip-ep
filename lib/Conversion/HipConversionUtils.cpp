@@ -139,26 +139,6 @@ createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
   return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
 }
 
-FailureOr<Value> createReductionEmptyTensor(OpBuilder &builder, Location loc,
-                                            RankedTensorType resultType,
-                                            Value data,
-                                            llvm::ArrayRef<int64_t> reducedAxes,
-                                            int64_t keepdims) {
-  FailureOr<llvm::SmallVector<OpFoldResult>> shape =
-      reifyReductionResultShape(builder, loc, data, reducedAxes, keepdims);
-  if (failed(shape))
-    return failure();
-  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
-}
-
-Value materializeReductionAxes(OpBuilder &builder, Location loc,
-                               llvm::ArrayRef<int64_t> resolvedAxes) {
-  auto axesType = RankedTensorType::get(
-      {static_cast<int64_t>(resolvedAxes.size())}, builder.getI64Type());
-  auto axesAttr = DenseIntElementsAttr::get(axesType, resolvedAxes);
-  return arith::ConstantOp::create(builder, loc, axesType, axesAttr);
-}
-
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter) {
   auto funcOp = op->getParentOfType<func::FuncOp>();
   if (!funcOp)
