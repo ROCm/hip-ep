@@ -91,8 +91,18 @@ std::string rocMlirArtifactTarget() {
   // HIPDNN_EP_HIPSR take precedence, so the rocMLIR arm (and its HSACO) is
   // not reached under either.
   if (hip_get_env("HIPDNN_EP_PIPELINE").empty() && !hipsrPipelineRequested() &&
-      rocMlirPipelineRequested())
-    return mlir::hip::resolveRocMlirArch();
+      rocMlirPipelineRequested()) {
+    std::string target = mlir::hip::resolveRocMlirArch();
+    // Which perfConfig each kernel was tuned to is baked into the embedded
+    // HSACO, so an artifact built with the default configs must not be reused
+    // once tuning is requested -- the cache is keyed on the graph alone, and
+    // the knob would silently appear to do nothing. Folding the mode into the
+    // target string puts it under the recorded-vs-current check below.
+    mlir::hip::AutotuneSpace space;
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+      target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    return target;
+  }
 #endif
   return "";
 }

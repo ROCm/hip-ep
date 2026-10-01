@@ -77,8 +77,8 @@
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -121,7 +121,6 @@ static void printPhaseTimes() {
                << llvm::format("%.1f", compilePhaseTimes.hipToLlvmMs)
                << " ms\n";
 }
-
 
 // Write a module as MLIR text for --dump-hip / --dump-tosa. Those dumps are
 // diagnostics on the way to `-o`, so a failure to write one is reported but
@@ -445,8 +444,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 #endif
-  bool embedOk = mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts)
-                     .succeeded();
+  bool embedOk =
+      mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts).succeeded();
   // Whether or not the embed succeeded: the pool and benchmark figures explain
   // where a slow or failed compile spent its time.
   if (autotuner) {
