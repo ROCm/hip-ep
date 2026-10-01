@@ -370,11 +370,19 @@ logical prefix; with a growing non-shared cache, the logical prefix can be
 larger than the past allocation. Conversion therefore sizes each dynamic
 present-cache sequence dimension as the nonnegative index maximum of its
 matching past dim 2 and `total_seq_len`. Without past operands, the dynamic
-present extent is `total_seq_len` directly. Conversion performs exactly one
-synchronized logical-length readback per op when any dynamic present or QK
-extent needs it, reusing that value for separate past-key/past-value maxima.
+present extent is `total_seq_len` directly. Conversion requests one host
+logical-length scalar per op when any dynamic present or QK extent needs it,
+reusing that value for separate past-key/past-value maxima.
 Optional QK always uses the logical extent rather than cache capacity.
 Reification keeps the DPS-init fallback for these payload-dependent extents.
+
+The existing pre-bufferization canonicalizer removes a scalar readback through
+a rank-zero `hip.cast` from i64 to i32 when its input is a constant or a packed
+`tensor.dim` converted to i64. It reproduces the narrowing with host arithmetic
+and leaves other consumers of the GPU cast unchanged. Tensor-form readback
+establishes readiness of its returned value; it is not a fence for unrelated
+work. Unknown tensor payloads, unsupported casts, and memref reads retain the
+synchronized path. No tensor-payload load is introduced by this rewrite.
 
 The `hip.multi_head_attention` semantic rule supports separate rank-3 or
 rank-4 K/V, packed rank-5 KV, and packed rank-5 QKV. The primary result has
