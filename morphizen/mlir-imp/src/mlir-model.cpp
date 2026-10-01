@@ -12,6 +12,11 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
 #include "morphizen-foundation/env_config.hpp"
+#include "morphizen/symbolic_dims.hpp"
+#include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <filesystem>
 #include <fstream>
@@ -22,9 +27,74 @@ DEF_ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_DEBUG_INFO, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_MODEL) >= n)
 namespace morphizen {
 namespace mlir_impl {
+namespace {
+
+std::vector<SymbolicDimRecord>
+parse_symbolic_dim_attr(mlir::ArrayAttr records_attr) {
+  std::vector<SymbolicDimRecord> records;
+  records.reserve(records_attr.size());
+  for (mlir::Attribute attr : records_attr) {
+    auto dictionary = mlir::dyn_cast<mlir::DictionaryAttr>(attr);
+    if (!dictionary)
+      throw std::runtime_error(
+          "symbolic dimension record must be a dictionary");
+    auto scope = dictionary.getAs<mlir::StringAttr>("scope");
+    auto value_name = dictionary.getAs<mlir::StringAttr>("value_name");
+    auto dimensions = dictionary.getAs<mlir::ArrayAttr>("dimensions");
+    if (!scope || !value_name || !dimensions)
+      throw std::runtime_error(
+          "symbolic dimension record is missing required fields");
+
+    SymbolicDimRecord record{
+        scope.getValue().str(), value_name.getValue().str(), {}};
+    record.dimensions.reserve(dimensions.size());
+    for (mlir::Attribute dimension_attr : dimensions) {
+      auto dimension = mlir::dyn_cast<mlir::StringAttr>(dimension_attr);
+      if (!dimension)
+        throw std::runtime_error("symbolic dimension entry must be a string");
+      record.dimensions.push_back(dimension.getValue().str());
+    }
+    records.push_back(std::move(record));
+  }
+  return records;
+}
+
+std::string compute_compiler_graph_digest(mlir::ModuleOp module) {
+  mlir::OwningOpRef<mlir::ModuleOp> clone(
+      mlir::cast<mlir::ModuleOp>(module->clone()));
+  clone->walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() != "onnx.Constant")
+      return;
+    auto location = op->getAttrOfType<mlir::StringAttr>("location");
+    if (!location || location.getValue() != "*/_ORT_MEM_ADDR_/*")
+      return;
+    if (auto offset = op->getAttrOfType<mlir::IntegerAttr>("offset"))
+      op->setAttr("offset",
+                  mlir::IntegerAttr::get(offset.getType(), /*value=*/0));
+  });
+
+  std::string canonical;
+  llvm::raw_string_ostream stream(canonical);
+  mlir::OpPrintingFlags flags;
+  flags.printGenericOpForm();
+  clone->print(stream, flags);
+  llvm::SHA256 sha256;
+  sha256.update(canonical);
+  return llvm::toHex(sha256.final(), /*LowerCase=*/true);
+}
+
+} // namespace
 
 MLIRModel::MLIRModel(PrivateTag, mlir::OwningOpRef<mlir::ModuleOp> module)
     : module_(std::move(module)) {
+  mlir::ModuleOp moduleOp = *module_;
+  if (auto attr =
+          moduleOp->getAttrOfType<mlir::ArrayAttr>(kOnnxDimParamsModuleAttr)) {
+    metadata_[std::string(kOnnxDimParamsMetadataKey)] =
+        encode_symbolic_dim_records(parse_symbolic_dim_attr(attr));
+    moduleOp->removeAttr(kOnnxDimParamsModuleAttr);
+  }
+
   // get the function with sym_name = "main_graph" from the module.
   mlir::func::FuncOp mainFunc = nullptr;
   auto ops = module_->getOps<mlir::func::FuncOp>();
@@ -129,7 +199,20 @@ MLIRGraph &MLIRModel::main_graph() const { return *main_graph_; }
 
 void MLIRModel::set_metadata_prop(const std::string &key,
                                   const std::string &value) {
+  if ((key == kOnnxDimParamsMetadataKey ||
+       key == kInitializerDataDigestMetadataKey ||
+       key == kCompilerGraphDigestMetadataKey) &&
+      metadata_.count(key))
+    throw std::runtime_error(
+        "reserved compiler metadata cannot be overwritten");
+  if (key == kInitializerDataDigestMetadataKey &&
+      metadata_.count(kCompilerGraphDigestMetadataKey))
+    throw std::runtime_error(
+        "reserved compiler graph metadata cannot be overwritten");
   metadata_[key] = value;
+  if (key == kInitializerDataDigestMetadataKey)
+    metadata_[kCompilerGraphDigestMetadataKey] =
+        compute_compiler_graph_digest(getModule());
 }
 
 std::string MLIRModel::get_metadata_prop(const std::string &key) const {
@@ -142,6 +225,34 @@ bool MLIRModel::has_metadata_prop(const std::string &key) const {
 }
 
 mlir::ModuleOp MLIRModel::getModule() const { return *module_; }
+
+mlir::ArrayAttr MLIRModel::get_symbolic_dim_attr() const {
+  if (!has_metadata_prop(kOnnxDimParamsMetadataKey))
+    return {};
+  std::string error;
+  auto records = decode_symbolic_dim_records(
+      get_metadata_prop(kOnnxDimParamsMetadataKey), error);
+  if (!records)
+    throw std::runtime_error("invalid symbolic dimension model metadata: " +
+                             error);
+
+  mlir::Builder builder(getModule().getContext());
+  llvm::SmallVector<mlir::Attribute> record_attrs;
+  record_attrs.reserve(records->size());
+  for (const SymbolicDimRecord &record : *records) {
+    llvm::SmallVector<mlir::Attribute> dimensions;
+    dimensions.reserve(record.dimensions.size());
+    for (const std::string &dimension : record.dimensions)
+      dimensions.push_back(builder.getStringAttr(dimension));
+    record_attrs.push_back(builder.getDictionaryAttr({
+        builder.getNamedAttr("scope", builder.getStringAttr(record.scope)),
+        builder.getNamedAttr("value_name",
+                             builder.getStringAttr(record.value_name)),
+        builder.getNamedAttr("dimensions", builder.getArrayAttr(dimensions)),
+    }));
+  }
+  return builder.getArrayAttr(record_attrs);
+}
 
 void MLIRModel::maybe_dump_mlir(const std::filesystem::path &path) const {
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_MODEL) > 5) {
@@ -209,6 +320,18 @@ MLIRModel::create_main_graph(MLIRModel &model, mlir::OpBuilder &builder,
 }
 
 std::string MLIRModel::serialize_as_string() const {
+  mlir::ModuleOp module = getModule();
+  if (module->hasAttr(kOnnxDimParamsModuleAttr))
+    throw std::runtime_error(
+        "live module contains conflicting symbolic dimension metadata");
+  bool projected = has_metadata_prop(kOnnxDimParamsMetadataKey);
+  if (projected)
+    module->setAttr(kOnnxDimParamsModuleAttr, get_symbolic_dim_attr());
+  llvm::scope_exit restore([&]() {
+    if (projected)
+      module->removeAttr(kOnnxDimParamsModuleAttr);
+  });
+
   std::string result;
   llvm::raw_string_ostream stream(result);
   mlir::OpPrintingFlags flags;
@@ -220,7 +343,7 @@ std::string MLIRModel::serialize_as_string() const {
     flags.printValueUsers();
   }
 
-  getModule().print(stream, flags);
+  module.print(stream, flags);
   return result;
 }
 
