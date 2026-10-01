@@ -78,9 +78,12 @@ BiasGeluToHip::matchAndRewrite(mlir::Operation *op,
   if (biasType && biasType.hasStaticShape() && biasType.getRank() != 1)
     return rewriter.notifyMatchFailure(op, "bias must be a 1D tensor");
 
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, data);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "BiasGelu result type must match the data shape");
   auto hipOp =
-      mlir::hip::BiasGeluOp::create(rewriter, loc, context, data, bias, init);
+      mlir::hip::BiasGeluOp::create(rewriter, loc, context, data, bias, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
