@@ -1147,6 +1147,14 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
 
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,
@@ -1303,9 +1311,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
@@ -1381,6 +1390,13 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
                                 void *bias, void *output, int64_t n, int64_t c,
                                 int64_t spatial, int64_t data_type,
                                 float epsilon);
+
+// com.microsoft GroupNorm. channels_last 0 is NCHW, 1 is NHWC.
+// activation 0 is none, 1 is SiLU after the affine transform.
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]

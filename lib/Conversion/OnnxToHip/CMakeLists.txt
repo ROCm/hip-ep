@@ -191,6 +191,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
+  ArgMaxConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
@@ -255,6 +256,7 @@ add_library(OnnxToHip STATIC
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
+  DepthToSpaceConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp

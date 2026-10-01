@@ -69,6 +69,18 @@ class TestBiasGelu:
         compare_outputs(actual, expected, atol=1e-4, rtol=1e-3)
 
 
+class TestMicrosoftGelu:
+    """com.microsoft.Gelu is the erf formula, lowered to hip.gelu."""
+
+    @pytest.mark.parametrize("shape", [[2, 16], [4, 8, 32]])
+    def test_microsoft_gelu_smoke(self, model_runner, shape):
+        model = _make_gelu_model("Gelu", shape, with_bias=False)
+        rng = np.random.default_rng(306)
+        x = rng.uniform(-3.0, 3.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-3)
+
+
 class TestFastGelu:
     @pytest.mark.parametrize("shape", [[2, 16], [4, 8, 32]])
     def test_fast_gelu_smoke(self, model_runner, shape):

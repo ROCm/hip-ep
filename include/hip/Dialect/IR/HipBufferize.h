@@ -128,6 +128,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);
     TopKOp::attachInterface<HipDstBufferizableModel<TopKOp>>(*ctx);
+    ArgMaxOp::attachInterface<HipDstBufferizableModel<ArgMaxOp>>(*ctx);
     ScatterElementsOp::attachInterface<
         HipDstBufferizableModel<ScatterElementsOp>>(*ctx);
     CompressOp::attachInterface<HipDstBufferizableModel<CompressOp>>(*ctx);
@@ -177,6 +178,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);
+    GroupNormOp::attachInterface<HipDstBufferizableModel<GroupNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);

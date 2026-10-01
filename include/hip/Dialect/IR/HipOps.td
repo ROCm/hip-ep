@@ -1429,6 +1429,57 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "com.microsoft GroupNorm (per-group mean/var, optional SiLU)";
+  let description = [{
+    Group normalization from the `com.microsoft` contrib operator:
+
+      y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+
+    Channels are split into `groups` equal groups. Mean and variance are
+    computed over each (N, group) slice. `gamma` and `beta` are per-channel
+    and length C. `channels_last` 0 is NCHW (channel axis 1); 1 is NHWC
+    (channel axis rank-1). `activation` 0 is none; 1 applies SiLU after the
+    affine transform.
+
+    Example:
+    ```mlir
+    hip.group_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<1x8x4x4xf32, 1>, memref<8xf32, 1>, memref<8xf32, 1>)
+        outs(%output : memref<1x8x4x4xf32, 1>)
+        {activation = 1 : i64, channels_last = 0 : i64,
+         epsilon = 1.000000e-05 : f32, groups = 4 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$groups,
+    DefaultValuedAttr<I64Attr, "0">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$channels_last,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
@@ -2037,6 +2088,50 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `,` $k `:` type($x) `,` type($k) `)`
     `outs` `(` $values `,` $indices `:` type($values) `,` type($indices) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Index of the maximum element along an axis";
+  let description = [{
+    Implements ONNX ArgMax: along `axis`, write the index of the maximum
+    element into `output`. `keepdims = 0` drops the reduced axis;
+    `keepdims = 1` leaves it as size 1. `select_last_index = 0` keeps the
+    first occurrence; `select_last_index = 1` keeps the last.
+
+    Output element type is integer (i64 for the ONNX importer). The input
+    element type is preserved on `data` and compared as that type, including
+    integers. NaN outranks every number: the first NaN wins unless
+    `select_last_index` is set, in which case the last NaN wins. Supported
+    inputs are f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64, at rank
+    1 through 8. ui32 and ui64 are rejected. A zero-length reduction axis is
+    rejected by the runtime.
+
+    Example:
+    ```mlir
+    hip.arg_max(%ctx)
+        ins(%data : tensor<?x?xi32>)
+        outs(%indices : tensor<?xi64>)
+        {axis = 1 : i64, keepdims = 0 : i64, select_last_index = 0 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$select_last_index
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -4643,8 +4738,11 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
       * mode in {"nearest", "linear"}              — encoded as i64
         - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
       * coordinate_transformation_mode in
-          {"half_pixel", "asymmetric", "align_corners"}  — encoded as i64
-        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+          {"half_pixel", "pytorch_half_pixel", "asymmetric",
+           "align_corners"}  — encoded as i64
+        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+          3 = pytorch_half_pixel (half_pixel, but an output axis of length 1
+          samples input coordinate 0)
       * nearest_mode in {"round_prefer_floor"}      — encoded as i64
         - 0 = round_prefer_floor (only used when mode=nearest)
 

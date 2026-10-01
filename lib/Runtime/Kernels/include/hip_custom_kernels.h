@@ -1304,6 +1304,14 @@ HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              const int64_t* x_shape, int64_t k,
                              int element_size_bytes);
 
+// Index of the maximum along `axis`. `data_shape` is the input shape (dynamic
+// dims included). Indices are i64. `hip_dtype` is hip_dtype_t so i32 is not
+// compared as float. Output is one index per slice, contiguous.
+HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
+                               int64_t axis, int64_t select_last_index,
+                               int64_t rank, const int64_t* data_shape,
+                               int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,
@@ -1501,7 +1509,8 @@ HIP_KERNEL_API int hip_pool(
  * pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
@@ -1910,6 +1919,31 @@ HIP_KERNEL_API int hip_instance_norm(
     int64_t n,
     int64_t c,
     int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * GroupNorm (com.microsoft)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
+ *
+ * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
+ * activation 1 applies SiLU after the affine transform.
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_group_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int activation,
     float epsilon,
     int hip_dtype);
 

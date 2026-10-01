@@ -834,6 +834,23 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type) {
+  (void)data;
+  (void)indices;
+  (void)data_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "
+             "select_last_index=%lld, rank=%lld, data_type=%lld)\n",
+             (long long)axis, (long long)keepdims, (long long)select_last_index,
+             (long long)rank, (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
@@ -2303,6 +2320,28 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
              "data_type=%lld, epsilon=%f)\n",
              (long long)n, (long long)c, (long long)spatial,
              (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
+  return 0;
+}
+
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_group_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_group_norm(n=%lld, c=%lld, spatial=%lld, groups=%lld, "
+      "channels_last=%lld, activation=%lld, data_type=%lld, epsilon=%f)\n",
+      (long long)n, (long long)c, (long long)spatial, (long long)groups,
+      (long long)channels_last, (long long)activation, (long long)data_type,
+      epsilon);
   (void)input;
   (void)scale;
   (void)bias;

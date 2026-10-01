@@ -22,11 +22,11 @@ namespace {
 //
 //   * mode in {"nearest", "linear"}                                  (no cubic)
 //   * coordinate_transformation_mode in
-//       {"half_pixel", "asymmetric", "align_corners"}
+//       {"half_pixel", "pytorch_half_pixel", "asymmetric", "align_corners"}
 //   * nearest_mode = "round_prefer_floor"            (ONNX default)
 //   * antialias = 0, exclude_outside = 0             (defaults)
 //   * keep_aspect_ratio_policy = "stretch"           (default)
-//   * roi must be absent / NoValue                   (no tf_crop_and_resize)
+//   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
 //
 // The runtime kernel is unchanged: a copied prefix of at most two axes and a
@@ -63,8 +63,15 @@ struct ResizeToHip : public mlir::RewritePattern {
   ResizeToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Resize", /*benefit=*/1, ctx) {}
 
+  // none, or the 0-element tensor exporters use for an omitted optional.
+  // ONNX only reads roi when coordinate_transformation_mode is
+  // tf_crop_and_resize, which this conversion rejects, so an empty tensor
+  // carries no crop.
   static bool isAbsent(mlir::Value v) {
-    return !v || mlir::isa<mlir::NoneType>(v.getType());
+    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+      return true;
+    auto shaped = mlir::dyn_cast<mlir::ShapedType>(v.getType());
+    return shaped && shaped.hasStaticShape() && shaped.getNumElements() == 0;
   }
 
   mlir::LogicalResult
@@ -75,7 +82,7 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     // ONNX Resize accepts (X, roi?, scales?, sizes?) — between 1 and 4
     // operands depending on what the exporter supplied.  We accept any
-    // count but require `roi` (operand 1) to be NoValue.
+    // count but require `roi` (operand 1) to be absent.
     auto operands = op->getOperands();
     if (operands.empty())
       return rewriter.notifyMatchFailure(op, "no input");
@@ -141,10 +148,15 @@ struct ResizeToHip : public mlir::RewritePattern {
       coordId = 1;
     else if (ct == "align_corners")
       coordId = 2;
+    else if (ct == "pytorch_half_pixel")
+      // Same map as half_pixel, except an output axis of length 1 samples
+      // input coordinate 0. The kernel applies that guard; the id stays
+      // distinct so a length-1 axis is not treated as half_pixel.
+      coordId = 3;
     else
       return rewriter.notifyMatchFailure(
           op, "Resize coordinate_transformation_mode must be one of "
-              "{half_pixel, asymmetric, align_corners}");
+              "{half_pixel, pytorch_half_pixel, asymmetric, align_corners}");
 
     std::string nm = getStrAttr("nearest_mode", "round_prefer_floor");
     int64_t nearestId;

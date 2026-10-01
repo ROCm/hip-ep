@@ -23,7 +23,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
-| Gelu | Custom HIP kernel |
+| Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
 | Swish | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
@@ -76,10 +76,12 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Gather | Custom HIP kernel |
 | GatherElements | Custom HIP kernel |
 | TopK | Custom HIP kernel |
+| ArgMax | Custom HIP kernel. f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64; rank 1–8. ui32 and ui64 are not supported. An empty reduction axis fails. NaN outranks every number; the first NaN wins unless select_last_index keeps the last. |
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
@@ -134,6 +136,7 @@ These operations are handled through standard MLIR transformations and generally
 | ConstantOfShape | `arith.constant` when foldable | Produces a splat constant for constant shape inputs |
 | Identity | SSA value forwarding | No runtime operation |
 | Flatten | `tensor.collapse_shape` and, where needed, `tensor.expand_shape` | Metadata-only where representable |
+| DepthToSpace | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | Rank-4 NCHW. `blocksize >= 1`, `C` divisible by `blocksize^2`, and output `[N, C / blocksize^2, H * blocksize, W * blocksize]`. Modes `DCR` (default) and `CRD`. `blocksize == 1` is the input |
 
 ## Fusion and preprocessing
 

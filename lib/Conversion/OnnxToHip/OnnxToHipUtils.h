@@ -356,6 +356,8 @@ void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateArgMaxConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -466,6 +468,8 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
