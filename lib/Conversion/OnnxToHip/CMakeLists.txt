@@ -9,6 +9,7 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  OnnxDimParams.cpp
   OnnxToHipUtils.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
