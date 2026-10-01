@@ -8,6 +8,7 @@ add_library(HipDialectIR STATIC
   HipDialect.cpp
   HipDpsOpInterface.cpp
   HipOpStateInterface.cpp
+  HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
   HipShapeUtilsAttention.cpp
@@ -35,6 +36,7 @@ if(MSVC)
 endif()
 
 target_link_libraries(HipDialectIR PUBLIC
+  MLIRArithDialect
   MLIRIR
   MLIRSupport
   MLIRDestinationStyleOpInterface
