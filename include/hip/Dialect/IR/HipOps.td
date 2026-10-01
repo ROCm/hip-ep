@@ -2650,6 +2650,47 @@ def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_IsNaNOp : Hip_DpsOp<"isnan", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise NaN test: y = isnan(x)";
+  let description = [{
+    Returns which elements of the input are NaN.
+    Implements the standard ONNX IsNaN operator.
+
+    Formula: Y = isnan(X)
+
+    The input is a floating-point tensor (f16, bf16, f32, or f64). The
+    output is a 1-byte boolean with the same shape. ONNX bool is `i1` in
+    hand-written IR and `ui8` in the ORT/morphizen frontend; both are one
+    byte per element and are accepted by `hip.where`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.isnan(%ctx) ins(%x : memref<24x20x1x1xf16, 1>)
+                    outs(%y : memref<24x20x1x1xui8, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
