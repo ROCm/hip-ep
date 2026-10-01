@@ -116,12 +116,16 @@ private:
   std::unique_ptr<Impl> impl;
 };
 
-// Reads the EP's autotune knob, following the same precedence the custom-kernel
-// autotuners use (HIPDNN_GQA_AUTOTUNE_MODE and friends): HIPDNN_EP_ROCMLIR_
-// AUTOTUNE first, then the caller's provider option, then off. Recognizes
-// "quick", "full", "exhaustive", and "off"/"0"/"" for disabled. Returns false
-// when disabled or unparseable, leaving \p out alone.
-bool rocMlirAutotuneFromEnv(AutotuneSpace &out, StringRef providerOption = {});
+// Reads HIPDNN_EP_ROCMLIR_AUTOTUNE. Recognizes "quick", "full", "exhaustive",
+// and "off"/"0"/"" for disabled; returns false when disabled or unparseable,
+// leaving \p out alone.
+//
+// Env-only on purpose for now. The custom-kernel autotuners also accept a
+// provider option, but those are read in the Runtime, which already has the
+// option map; CompilationOptions carries no rocMLIR autotune field, and adding
+// one means touching the compilation schema. Worth doing when a caller needs
+// per-session control -- an env var is process-wide.
+bool rocMlirAutotuneFromEnv(AutotuneSpace &out);
 
 } // namespace hip
 } // namespace mlir

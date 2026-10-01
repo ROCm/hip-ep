@@ -49,6 +49,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -81,13 +82,11 @@ bool parseAutotuneSpace(StringRef name, AutotuneSpace &out) {
   return true;
 }
 
-bool rocMlirAutotuneFromEnv(AutotuneSpace &out, StringRef providerOption) {
+bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL, and
   // std::getenv there cannot see env vars set by the host process -- the
   // override would be silently dropped. Same reasoning as resolveRocMlirArch.
   std::string mode = hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE");
-  if (mode.empty())
-    mode = providerOption.str();
   if (mode.empty() || mode == "0" || mode == "off")
     return false;
   if (parseAutotuneSpace(mode, out))
@@ -192,7 +191,7 @@ void *hipRuntimeSymbol(const char *name) {
 // deep inside a benchmark loop instead of at the point where the caller can
 // still fall back to the default perfConfig.
 struct HipRuntime {
-#define HIPDNN_DECLARE_FN(name, ret, params) ret (*name) params = nullptr;
+#define HIPDNN_DECLARE_FN(name, ret, params) ret(*name) params = nullptr;
   HIPDNN_HIP_RUNTIME_FUNCTIONS(HIPDNN_DECLARE_FN)
 #undef HIPDNN_DECLARE_FN
 
@@ -205,7 +204,7 @@ const HipRuntime &hipRuntime() {
     bool ok = hipRuntimeHandle() != nullptr;
 #define HIPDNN_RESOLVE_FN(name, ret, params)                                   \
   if (ok) {                                                                    \
-    t.name = reinterpret_cast<ret (*) params>(                                 \
+    t.name = reinterpret_cast<ret(*) params>(                                  \
         hipRuntimeSymbol(HIPDNN_LOADER_STRINGIFY(name)));                      \
     ok = t.name != nullptr;                                                    \
   }
@@ -403,8 +402,9 @@ struct RocMlirAutotuner::Impl {
   bool reportError(hipError_t status, StringRef operation) const {
     if (status == hipSuccess)
       return true;
-    llvm::errs() << "error: " << operation << " failed: "
-                 << hipRuntime().hipGetErrorString(status) << "\n";
+    llvm::errs() << "error: " << operation
+                 << " failed: " << hipRuntime().hipGetErrorString(status)
+                 << "\n";
     return false;
   }
 
@@ -555,10 +555,9 @@ bool RocMlirAutotuner::Impl::benchmark(const CompiledKernel &kernel,
 
   hipFunction_t function = nullptr;
   std::string kernelNameStorage = kernelName.str();
-  if (!reportError(
-          fns.hipModuleGetFunction(&function, hipModule,
-                                   kernelNameStorage.c_str()),
-          "hipModuleGetFunction")) {
+  if (!reportError(fns.hipModuleGetFunction(&function, hipModule,
+                                            kernelNameStorage.c_str()),
+                   "hipModuleGetFunction")) {
     (void)fns.hipModuleUnload(hipModule);
     return false;
   }
@@ -616,6 +615,15 @@ bool RocMlirAutotuner::Impl::benchmark(const CompiledKernel &kernel,
 bool RocMlirAutotuner::Impl::pickWinner(
     std::vector<CompiledCandidate> &candidates, StringRef kernelName,
     ModuleOp benchModule, std::string &bestConfig, CompiledKernel &winner) {
+  // Benchmarking is only meaningful when this kernel has the GPU to itself.
+  // Search state is per-instance so concurrent sessions can each tune, but two
+  // instances timing candidates at once would measure each other's work and
+  // could pick a slower winner. Held across the whole candidate loop, not per
+  // launch: interleaving at a finer grain reintroduces the interference. The
+  // compile pools stay outside it and still overlap.
+  static std::mutex benchmarkMutex;
+  std::lock_guard<std::mutex> benchmarkGuard(benchmarkMutex);
+
   AutotuneBuffers buffers;
   if (!buffers.initialize(benchModule, options))
     return false;
@@ -657,13 +665,13 @@ bool RocMlirAutotuner::Impl::pickWinner(
 
   if (bestConfig.empty()) {
     llvm::errs() << "error: autotune found no runnable perfConfig for '"
-                 << kernelName << "' (compiled " << compiled
-                 << ", benchmarked " << benchmarked << ")\n";
+                 << kernelName << "' (compiled " << compiled << ", benchmarked "
+                 << benchmarked << ")\n";
     return false;
   }
-  if (log())
-    *log() << options.logPrefix << " autotune winner for '" << kernelName
-           << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
+  if (detail())
+    *detail() << options.logPrefix << " autotune winner for '" << kernelName
+              << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
   return true;
 }
 
@@ -806,8 +814,8 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
             DeferredSearch &search = queued[searchIndex];
             CompiledCandidate &candidate = search.candidates[candidateIndex];
             candidate.compiled =
-                compilePerfConfig(search.rockModule, arch,
-                                  candidate.perfConfig, candidate.kernel);
+                compilePerfConfig(search.rockModule, arch, candidate.perfConfig,
+                                  candidate.kernel);
           });
         }
       }
