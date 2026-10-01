@@ -449,8 +449,19 @@ bool CompilerDriver::runMLIRPasses(
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
       autotuner.emplace(embedOpts.arch, autotuneOpts);
-      // Unusable means no HIP runtime or no device; it has already warned, and
-      // the default perfConfig path still produces a working model.
+      // Refuse rather than fall back to the default perfConfig. By this point
+      // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
+      // metadata, so continuing would label an untuned artifact as tuned --
+      // and carrying it to a machine with a working runtime would then pass
+      // the cache check and reuse position 0 for good. Unusable means no HIP
+      // runtime or no visible device, which the autotuner has already
+      // described on the log.
+      if (!autotuner->isUsable()) {
+        error_message = "HIPDNN_EP_ROCMLIR_AUTOTUNE was set, but autotuning "
+                        "could not reach a HIP device; unset it to compile "
+                        "with the default perfConfig";
+        return false;
+      }
       autotuner->installInto(embedOpts);
     }
 

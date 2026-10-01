@@ -440,7 +440,11 @@ int main(int argc, char **argv) {
   }
 #else
   if (autotuneEnabled) {
-    llvm::errs() << "error: autotune requires a real HIP build\n";
+    llvm::errs() << "error: this build has no autotune support (LibHipCompiler "
+                    "compiled RocMlirAutotune's stub; needs a non-mock build "
+                    "with HIPDNN_EP_LINK_HIP_HOST=ON). Set "
+                    "HIP_ROCMLIR_SKIP_BENCHMARKING=1 to compile with the "
+                    "default perfConfig instead.\n";
     return 1;
   }
 #endif
