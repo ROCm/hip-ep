@@ -9,6 +9,7 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Wrap.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/Operation.h"
 
 extern "C" {
 
@@ -41,6 +42,14 @@ int mlir_value_get_result_number(uint64_t value) {
   return static_cast<int>(result.getResultNumber());
 }
 
+// Return the number of uses of a Value.
+// Useful for single-use guards (e.g. hip-op-single-use? in Scheme).
+uint64_t mlir_value_num_uses(uint64_t val_ptr) {
+  if (!val_ptr) return 0;
+  auto val = mlir::Value::getFromOpaquePointer(reinterpret_cast<const void*>(val_ptr));
+  return static_cast<uint64_t>(std::distance(val.use_begin(), val.use_end()));
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -50,6 +59,7 @@ void registerValueBindings() {
   Sregister_symbol("mlir_value_get_defining_op",   (void*)::mlir_value_get_defining_op);
   Sregister_symbol("mlir_value_is_block_argument", (void*)::mlir_value_is_block_argument);
   Sregister_symbol("mlir_value_get_result_number", (void*)::mlir_value_get_result_number);
+  Sregister_symbol("mlir_value_num_uses",          (void*)::mlir_value_num_uses);
 }
 
 } // namespace hipsr

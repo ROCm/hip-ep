@@ -36,6 +36,8 @@ ptr makeSchemeAttribute(mlir::Attribute attr) {
 namespace mlir {
 namespace hipsr {
 
+void registerHipFusionBindings();  // Hip.cpp
+
 void registerMlirForeignFunctions() {
   registerConversionBindings();
   registerCoreBindings();
@@ -44,6 +46,7 @@ void registerMlirForeignFunctions() {
   registerShapeBindings();
   registerTensorBindings();
   registerLoggingBindings();
+  registerHipFusionBindings();
   LLVM_DEBUG(llvm::dbgs() << "All MLIR FFI functions registered\n");
 }
 

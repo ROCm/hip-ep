@@ -58,7 +58,15 @@
     mlir-type-get-shape
     mlir-type-get-rank
     mlir-type-get-encoding
-    mlir-type-set-memory-space)
+    mlir-type-set-memory-space
+    ;; Pattern application
+    mlir-apply-patterns-greedy
+    ;; Generic op rebuild
+    mlir-op-clone-with-types
+    ;; hip fusion C++ helpers
+    hip-extract-splat-scale
+    hip-build-init
+    hip-create-requantized-layout-op)
 
   (import (rnrs)
           (only (chezscheme) foreign-procedure parameterize make-parameter void))
@@ -326,5 +334,26 @@
     (syntax-rules ()
       [(_ loc body ...)
        (parameterize ([current-loc loc]) body ...)]))
+
+  ;; === Pattern application ===
+
+  (define mlir-apply-patterns-greedy
+    (foreign-procedure "mlir_apply_patterns_greedy" (uptr uptr) boolean))
+
+  ;; === Generic op rebuild ===
+
+  (define mlir-op-clone-with-types
+    (foreign-procedure "mlir_op_clone_with_types" (uptr uptr scheme-object scheme-object) uptr))
+
+  ;; === hip fusion C++ helpers ===
+
+  (define hip-extract-splat-scale
+    (foreign-procedure "hip_extract_splat_scale" (uptr) double))
+
+  (define hip-build-init
+    (foreign-procedure "hip_build_init" (uptr uptr uptr) uptr))
+
+  (define hip-create-requantized-layout-op
+    (foreign-procedure "hip_create_requantized_layout_op" (uptr uptr uptr uptr) uptr))
 
 ) ;; end library (mlir core builder)

@@ -18,6 +18,7 @@ add_library(HipsrSchemeRuntime
   Core/Builder.cpp
   Logging.cpp
   Conversion.cpp
+  Hip.cpp
   Dialects/Tensor.cpp
   Dialects/Shape.cpp
   Dialects/Hipsr.cpp
@@ -29,6 +30,7 @@ target_include_directories(HipsrSchemeRuntime
     ${ChezScheme_BINARY_DIR}/${CHEZ_MACHINE}
   PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/lib/Dialect/Transforms
     ${ChezBootHeaders_BINARY_DIR}
     ${ChezScheme_SOURCE_DIR}/boot/pb
 )
@@ -49,6 +51,8 @@ target_link_libraries(HipsrSchemeRuntime
   MLIRPass
   MLIRSupport
   MLIRIR
+  MLIRTensorDialect
+  HipDialectIR
   HipsrDialectIR
   ${CMAKE_DL_LIBS}
   m

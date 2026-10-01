@@ -14,6 +14,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include <limits>
 #include <string>
 
 extern "C" {
@@ -134,19 +135,97 @@ void mlir_operation_set_attribute(uint64_t op_ptr, const char* name, uint64_t at
   op->setAttr(name, attr);
 }
 
+// === Type inspection ===
+
+// Element type of a ShapedType (ranked tensor, vector, etc.); 0 if not applicable.
+uint64_t mlir_type_element_type(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  if (auto st = mlir::dyn_cast<mlir::ShapedType>(type))
+    return reinterpret_cast<uint64_t>(st.getElementType().getAsOpaquePointer());
+  return 0;
+}
+
+// Bit width of an IntegerType; 0 if the type is not an IntegerType.
+uint64_t mlir_type_integer_width(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  if (auto it = mlir::dyn_cast<mlir::IntegerType>(type))
+    return static_cast<uint64_t>(it.getWidth());
+  return 0;
+}
+
+// 1 if the type is an unsigned IntegerType, 0 otherwise.
+int mlir_type_is_unsigned(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  if (auto it = mlir::dyn_cast<mlir::IntegerType>(type))
+    return it.isUnsigned() ? 1 : 0;
+  return 0;
+}
+
+// === Attribute inspection ===
+
+// Get a FloatAttr by name from an operation; returns NaN as double when absent.
+double mlir_op_get_float_attr(uint64_t op_ptr, const char* name) {
+  if (!op_ptr || !name) return std::numeric_limits<double>::quiet_NaN();
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
+  if (!attr) return std::numeric_limits<double>::quiet_NaN();
+  return attr.getValueAsDouble();
+}
+
+// 1 if the attribute is a DenseElementsAttr splat, 0 otherwise.
+int mlir_attr_is_splat(uint64_t attr_ptr) {
+  if (!attr_ptr) return 0;
+  auto attr = mlir::Attribute::getFromOpaquePointer(reinterpret_cast<const void*>(attr_ptr));
+  auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr);
+  return (dense && dense.isSplat()) ? 1 : 0;
+}
+
+// Get the splat float value from a DenseElementsAttr; NaN if not applicable.
+double mlir_attr_splat_float_value(uint64_t attr_ptr) {
+  if (!attr_ptr) return std::numeric_limits<double>::quiet_NaN();
+  auto attr = mlir::Attribute::getFromOpaquePointer(reinterpret_cast<const void*>(attr_ptr));
+  auto dense = mlir::dyn_cast<mlir::DenseFPElementsAttr>(attr);
+  if (!dense || !dense.isSplat()) return std::numeric_limits<double>::quiet_NaN();
+  return (*dense.begin()).convertToDouble();
+}
+
+// Get "operandSegmentSizes" DenseI32ArrayAttr as a Scheme list of fixnums.
+// Returns Snil when the attribute is absent.
+ptr mlir_op_get_operand_segment_sizes(uint64_t op_ptr) {
+  if (!op_ptr) return Snil;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto attr = op->getAttrOfType<mlir::DenseI32ArrayAttr>("operandSegmentSizes");
+  if (!attr) return Snil;
+  ptr result = Snil;
+  auto vals = attr.asArrayRef();
+  for (int i = static_cast<int>(vals.size()) - 1; i >= 0; --i)
+    result = Scons(Sfixnum(vals[i]), result);
+  return result;
+}
+
 } // extern "C"
 
 namespace mlir {
 namespace hipsr {
 
 void registerAttributeBindings() {
-  Sregister_symbol("mlir_make_attr_i64",            (void*)::mlir_make_attr_i64);
-  Sregister_symbol("mlir_make_attr_index",          (void*)::mlir_make_attr_index);
-  Sregister_symbol("mlir_make_attr_i32_array",      (void*)::mlir_make_attr_i32_array);
-  Sregister_symbol("mlir_make_attr_i64_array",      (void*)::mlir_make_attr_i64_array);
-  Sregister_symbol("mlir_make_attr_dense_resource", (void*)::mlir_make_attr_dense_resource);
-  Sregister_symbol("mlir_operation_get_attribute",  (void*)::mlir_operation_get_attribute);
-  Sregister_symbol("mlir_operation_set_attribute",  (void*)::mlir_operation_set_attribute);
+  Sregister_symbol("mlir_make_attr_i64",                    (void*)::mlir_make_attr_i64);
+  Sregister_symbol("mlir_make_attr_index",                  (void*)::mlir_make_attr_index);
+  Sregister_symbol("mlir_make_attr_i32_array",              (void*)::mlir_make_attr_i32_array);
+  Sregister_symbol("mlir_make_attr_i64_array",              (void*)::mlir_make_attr_i64_array);
+  Sregister_symbol("mlir_make_attr_dense_resource",         (void*)::mlir_make_attr_dense_resource);
+  Sregister_symbol("mlir_operation_get_attribute",          (void*)::mlir_operation_get_attribute);
+  Sregister_symbol("mlir_operation_set_attribute",          (void*)::mlir_operation_set_attribute);
+  Sregister_symbol("mlir_type_element_type",                (void*)::mlir_type_element_type);
+  Sregister_symbol("mlir_type_integer_width",               (void*)::mlir_type_integer_width);
+  Sregister_symbol("mlir_type_is_unsigned",                 (void*)::mlir_type_is_unsigned);
+  Sregister_symbol("mlir_op_get_float_attr",                (void*)::mlir_op_get_float_attr);
+  Sregister_symbol("mlir_attr_is_splat",                    (void*)::mlir_attr_is_splat);
+  Sregister_symbol("mlir_attr_splat_float_value",           (void*)::mlir_attr_splat_float_value);
+  Sregister_symbol("mlir_op_get_operand_segment_sizes",     (void*)::mlir_op_get_operand_segment_sizes);
 }
 
 } // namespace hipsr

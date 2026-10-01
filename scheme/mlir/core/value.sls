@@ -18,6 +18,7 @@
     mlir-value-get-type
     mlir-value-is-block-argument?
     mlir-value-get-result-number
+    mlir-value-num-uses
     value-array-ref-size
     value-array-ref-at)
 
@@ -58,6 +59,13 @@
   ;; Returns: result index as int
   (define mlir-value-get-result-number
     (foreign-procedure "mlir_value_get_result_number" (uptr) int))
+
+  ;; Return the number of uses of a Value.
+  ;; Useful for single-use guards in pattern matching.
+  ;; value: Value* opaque ptr uptr
+  ;; Returns: use count as uptr (fixnum for typical counts)
+  (define mlir-value-num-uses
+    (foreign-procedure "mlir_value_num_uses" (uptr) uptr))
 
   ;; Return the number of Value* elements in a ValueArrayRef.
   ;; ref-ptr: uptr pointing to a ValueArrayRef struct in C memory

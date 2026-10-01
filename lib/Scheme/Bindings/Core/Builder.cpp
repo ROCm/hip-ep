@@ -14,6 +14,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
 extern "C" {
@@ -382,6 +383,44 @@ uint64_t mlir_get_i1_type(uint64_t ctx_ptr) {
       mlir::IntegerType::get(reinterpret_cast<mlir::MLIRContext*>(ctx_ptr), 1).getAsOpaquePointer());
 }
 
+// Apply patterns greedily to an operation (applyPatternsAndFoldGreedily).
+// patterns_ptr: RewritePatternSet* as uptr; the pattern set is MOVED (consumed).
+// Returns 1 on success (converged), 0 on failure.
+int mlir_apply_patterns_greedy(uint64_t op_ptr, uint64_t patterns_ptr) {
+  if (!op_ptr || !patterns_ptr) return 0;
+  auto* op       = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto* patterns = reinterpret_cast<mlir::RewritePatternSet*>(patterns_ptr);
+  return mlir::succeeded(
+      mlir::applyPatternsAndFoldGreedily(op, std::move(*patterns))) ? 1 : 0;
+}
+
+// Clone an operation with new operands and result types, copying all attributes.
+// operands_list:      Scheme list of Value* uptrs (each Sunsigned64)
+// result_types_list:  Scheme list of Type* uptrs (each Sunsigned64)
+// Returns: new Operation* as uptr, or 0 on bad input.
+uint64_t mlir_op_clone_with_types(uint64_t rw_ptr, uint64_t op_ptr,
+                                   ptr operands_list, ptr result_types_list) {
+  if (!rw_ptr || !op_ptr) return 0;
+  auto* rw = reinterpret_cast<mlir::RewriterBase*>(rw_ptr);
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+
+  llvm::SmallVector<mlir::Value> operands;
+  llvm::SmallVector<mlir::Type>  resultTypes;
+
+  for (ptr cur = operands_list; cur != Snil; cur = Scdr(cur))
+    operands.push_back(mlir::Value::getFromOpaquePointer(
+        reinterpret_cast<const void*>(Sunsigned64_value(Scar(cur)))));
+  for (ptr cur = result_types_list; cur != Snil; cur = Scdr(cur))
+    resultTypes.push_back(mlir::Type::getFromOpaquePointer(
+        reinterpret_cast<const void*>(Sunsigned64_value(Scar(cur)))));
+
+  mlir::OperationState state(op->getLoc(), op->getName());
+  state.addOperands(operands);
+  state.addTypes(resultTypes);
+  state.addAttributes(op->getAttrs());
+  return reinterpret_cast<uint64_t>(rw->create(state));
+}
+
 } // extern "C"
 
 namespace mlir {
@@ -407,6 +446,8 @@ void registerBuilderBindings() {
   Sregister_symbol("mlir_get_index_type",                    (void*)::mlir_get_index_type);
   Sregister_symbol("mlir_get_i64_type",                      (void*)::mlir_get_i64_type);
   Sregister_symbol("mlir_get_i1_type",                       (void*)::mlir_get_i1_type);
+  Sregister_symbol("mlir_apply_patterns_greedy",             (void*)::mlir_apply_patterns_greedy);
+  Sregister_symbol("mlir_op_clone_with_types",               (void*)::mlir_op_clone_with_types);
 }
 
 } // namespace hipsr

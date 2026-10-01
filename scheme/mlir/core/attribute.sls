@@ -31,7 +31,16 @@
 ;;===----------------------------------------------------------------------===;;
 
 (library (mlir core attribute)
-  (export make-mlir-attribute)
+  (export make-mlir-attribute
+          ;; Type inspection
+          mlir-type-element-type
+          mlir-type-integer-width
+          mlir-type-is-unsigned
+          ;; Attribute inspection
+          mlir-op-get-float-attr
+          mlir-attr-is-splat
+          mlir-attr-splat-float-value
+          mlir-op-get-operand-segment-sizes)
 
   (import (rnrs)
           (only (chezscheme) foreign-procedure foreign-entry?
@@ -47,6 +56,31 @@
                    (map (lambda (c) (if (char=? c #\-) #\_ c))
                         (string->list s)))])
       (string-append "mlir_make_attr_" body)))
+
+  ;; === Type inspection ===
+
+  (define mlir-type-element-type
+    (foreign-procedure "mlir_type_element_type" (uptr) uptr))
+
+  (define mlir-type-integer-width
+    (foreign-procedure "mlir_type_integer_width" (uptr) uptr))
+
+  (define mlir-type-is-unsigned
+    (foreign-procedure "mlir_type_is_unsigned" (uptr) boolean))
+
+  ;; === Attribute inspection ===
+
+  (define mlir-op-get-float-attr
+    (foreign-procedure "mlir_op_get_float_attr" (uptr string) double))
+
+  (define mlir-attr-is-splat
+    (foreign-procedure "mlir_attr_is_splat" (uptr) boolean))
+
+  (define mlir-attr-splat-float-value
+    (foreign-procedure "mlir_attr_splat_float_value" (uptr) double))
+
+  (define mlir-op-get-operand-segment-sizes
+    (foreign-procedure "mlir_op_get_operand_segment_sizes" (uptr) scheme-object))
 
   ;; Per-type procedure cache: type keyword → foreign-procedure wrapper.
   ;; 'missing means the C symbol was not found via foreign-entry?.
