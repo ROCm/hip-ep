@@ -5,7 +5,7 @@
 
 ;; Print the generated code to see what is wrong
 (define-conversion-pattern test-cast
-  :match
+  :if-match
       %output = onnx.Cast (%input)
   :then-let
       ([%ctx (mlir-get-hipsr-context-arg op)])

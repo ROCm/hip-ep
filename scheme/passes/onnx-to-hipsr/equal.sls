@@ -24,7 +24,7 @@
           (mlir ddr))
 
   (define-conversion-pattern (onnx-equal->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Equal (%lhs %rhs)
     :then-let
         ([%ctx           (mlir-get-hipsr-context-arg op)]

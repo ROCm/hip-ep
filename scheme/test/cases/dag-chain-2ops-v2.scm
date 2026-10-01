@@ -3,7 +3,7 @@
 ;; Demonstrates :bind-argument-operand for both operand types
 
 (:pattern
-  (:match %a = op1 (%x)
+  (:if-match %a = op1 (%x)
           %b = op2 (%a %y)
    :rewrite %b :with (op3 (%a %y) -> !t))
 

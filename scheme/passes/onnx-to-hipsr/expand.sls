@@ -38,7 +38,7 @@
           v)))
 
   (define-conversion-pattern (onnx-expand->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Expand (%input %shape-operand)
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]

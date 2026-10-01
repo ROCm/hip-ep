@@ -74,7 +74,7 @@
             (loop (+ axis 1) (+ slot 1) ins)))))
 
   (define-conversion-pattern (onnx-shape->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Shape (%input)
     :then-let
         ([ctx         (mlir-operation-get-context op)]

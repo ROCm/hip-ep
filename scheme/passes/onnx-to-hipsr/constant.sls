@@ -63,7 +63,7 @@
 
   ;; Pattern 1: rank-0 scalar → arith.constant (host result type)
   (define-conversion-pattern (onnx-constant-scalar->arith op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Constant ()
             :where (zero? (mlir-type-get-rank (mlir-value-get-type %output)))
     :then-let
@@ -75,7 +75,7 @@
 
   ;; Pattern 2: ranked tensor → hipsr.constant (device result type)
   (define-conversion-pattern (onnx-constant-tensor->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Constant ()
             :where (positive? (mlir-type-get-rank (mlir-value-get-type %output)))
     :then-let

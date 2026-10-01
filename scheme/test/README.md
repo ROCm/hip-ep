@@ -33,7 +33,7 @@ Each test case in `test-pattern-bodies.scm`:
 ```scheme
 (pattern-name
   :pattern (
-    :match %out = "test.op" (%in) : (f32) -> f32
+    :if-match %out = "test.op" (%in) : (f32) -> f32
     :rewrite %out :with
       (%new = "new.op" (%in) : (f32) -> f32))
   :expect-parse ((match-count . 1) (rewrite-count . 1))
@@ -54,7 +54,7 @@ Just add one S-expression to `test-pattern-bodies.scm`:
 ```scheme
 (my-new-test
   :pattern (
-    :match %a = "my.op" (%x) : (i32) -> i32
+    :if-match %a = "my.op" (%x) : (i32) -> i32
     :rewrite %a :with
       (%b = "new.op" (%x) : (i32) -> i32))
   :expect-parse ((has-function-name . #t))

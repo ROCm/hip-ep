@@ -1,13 +1,13 @@
 #!r6rs
 (library (mlir ddr keywords)
-  (export :match :then-let :rewrite :with :where
+  (export :if-match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
           :index)
   (import (except (rnrs) =))
 
   ;; Define keywords as syntax (for cross-library hygiene)
-  (define-syntax :match (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :if-match (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :then-let (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :rewrite (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :with (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))

@@ -2,5 +2,5 @@
 ;; Pattern with &variadic operands
 
 (:pattern
-  (:match %a = test.concat (%x (&variadic %rest))
+  (:if-match %a = test.concat (%x (&variadic %rest))
    :rewrite %a :with (new.concat (%x) -> !t)))

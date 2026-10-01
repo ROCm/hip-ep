@@ -30,7 +30,7 @@
   ;;===--------------------------------------------------------------------===;;
 
   (define-conversion-pattern (onnx-min-2->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Min (%lhs %rhs)
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]

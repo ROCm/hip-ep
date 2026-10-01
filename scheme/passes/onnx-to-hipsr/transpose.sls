@@ -44,7 +44,7 @@
       (mlir-operation-get-result out-op 0)))
 
   (define-conversion-pattern (onnx-transpose->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Transpose (%input)
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]

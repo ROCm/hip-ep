@@ -26,7 +26,7 @@
           (mlir ddr))
 
   (define-conversion-pattern (onnx-matmul->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.MatMul (%a %b)
     :then-let
         ([%ctx           (mlir-get-hipsr-context-arg op)]

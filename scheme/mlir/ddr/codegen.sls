@@ -23,7 +23,7 @@
   ;; ├── generate-root-result-setters  (set! %varN (mlir-operation-get-result op N)) per root result
   ;; │   └── find-root-op
   ;; ├── collect-all-variables
-  ;; ├── generate-check-code           (and check₀ check₁ …) for :match
+  ;; ├── generate-check-code           (and check₀ check₁ …) for :if-match
   ;; │   └── action->check-code
   ;; ├── generate-rewrite-code (raw-body)  wraps with-rewrite-builder + with-mlir-ops
   ;; │   :rewrite :with body forwarded verbatim to with-mlir-ops; no AST round-trip

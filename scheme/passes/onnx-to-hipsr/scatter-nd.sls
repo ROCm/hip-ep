@@ -24,7 +24,7 @@
           (mlir ddr))
 
   (define-conversion-pattern (onnx-scatter-nd->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.ScatterND (%data %indices %updates)
     :then-let
         ([%ctx           (mlir-get-hipsr-context-arg op)]

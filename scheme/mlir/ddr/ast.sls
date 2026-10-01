@@ -156,7 +156,7 @@
 
       (mutable root-op-index)    ;; Phase 1 (parse): not set (initialized to #f)
                                  ;; Phase 2 (validate): integer - index of root operation in match vector
-                                 ;; Example: 2 (if root is 3rd operation in :match clause)
+                                 ;; Example: 2 (if root is 3rd operation in :if-match clause)
                                  ;; Cached for efficiency, used by codegen to initialize root variable
 
       (mutable root-result-idx)  ;; Phase 1 (parse): not set (initialized to #f)
@@ -213,7 +213,7 @@
   ;; Used by: ast-pattern-expand (match field)
   ;;
   ;; Represents a single operation to match in the pattern.
-  ;; Corresponds to one line in the :match clause.
+  ;; Corresponds to one line in the :if-match clause.
   ;;
   ;; Contains:
   ;;   - operands: list of ast-operand records

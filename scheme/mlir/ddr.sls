@@ -1,7 +1,7 @@
 #!r6rs
 (library (mlir ddr)
   (export define-conversion-pattern
-          :match :then-let :rewrite :with :where
+          :if-match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
           :index

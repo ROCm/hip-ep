@@ -78,10 +78,10 @@
        (parse-rest #'rest (make-ast-pattern-expand 'conversion))]))
 
   ;;-----------------------------------------------------------------------
-  ;; parse-rest - Parse function name, debug flags, then dispatch to :match
+  ;; parse-rest - Parse function name, debug flags, then dispatch to :if-match
   ;;-----------------------------------------------------------------------
   (define (parse-rest rest ast)
-    (syntax-case rest (:debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching :match :then-let :rewrite :with)
+    (syntax-case rest (:debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching :if-match :then-let :rewrite :with)
       ;; Debug flags
       [(:debug-parse . more)
        (begin
@@ -120,12 +120,12 @@
          (ast-pattern-expand-param-type-converter-set!  ast #'p-type-converter)
          (parse-rest #'more ast))]
 
-      [(:match . match-rest)
+      [(:if-match . match-rest)
        (ast-pattern-expand-function-name ast)
        (parse-match-ops-recursive #'match-rest '() ast)]
 
       [_ (syntax-violation 'parse-rest
-           "Expected function name and :match clause"
+           "Expected function name and :if-match clause"
            rest)]))
 
   ;;=======================================================================

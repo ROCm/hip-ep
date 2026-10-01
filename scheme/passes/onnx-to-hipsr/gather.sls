@@ -62,7 +62,7 @@
         0)))
 
   (define-conversion-pattern (onnx-gather->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Gather (%data %indices)
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]

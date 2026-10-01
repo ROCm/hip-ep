@@ -3,7 +3,7 @@
         (mlir ddr))
 
 (define-conversion-pattern test-pattern
-  :match
+  :if-match
       %output = onnx.Cast (%input)
   :then-let
       ([%ctx (mlir-get-hipsr-context-arg op)])

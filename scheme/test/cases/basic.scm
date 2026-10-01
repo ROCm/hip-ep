@@ -3,7 +3,7 @@
 ;; Demonstrates: match one op, rewrite to sequence of ops
 
 (:pattern
-  (:match
+  (:if-match
       %out = test.op (%a %b)
    :then-let
       ([!t1 (mlir-value-get-type %out)])

@@ -3,7 +3,7 @@
 ;; This verifies the fix at pattern-codegen.sls:228-236
 
 (:pattern
-  (:match %out = test.op (%in)
+  (:if-match %out = test.op (%in)
    :rewrite %out :with (new.op (%in) -> !t))
 
  ;; The analyze phase should generate a :bind-operand action for %in

@@ -28,12 +28,14 @@
 
   ;; Use the pattern DSL macro with explicit parameters
   (define-conversion-pattern (onnx-cast->hipsr op operands-ref rewriter type-converter)
-    :match
+    :if-match
         %output = onnx.Cast (%input)
     :then-let
         ([%ctx           (mlir-get-hipsr-context-arg op)]
          [!output-type   (mlir-value-get-type %output)]
-         [!output-device (mlir-tensor-type-with-encoding !output-type (make-hipsr-device-space-attr (mlir-type-get-context !output-type)))]
+         [!output-device (mlir-tensor-type-with-encoding !output-type 
+                            (make-hipsr-device-space-attr 
+                                (mlir-type-get-context !output-type)))]
          [!shape-type    (mlir-shape.shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %input !output-device)
