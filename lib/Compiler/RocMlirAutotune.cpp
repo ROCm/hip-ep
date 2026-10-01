@@ -488,18 +488,31 @@ bool AutotuneBuffers::initialize(ModuleOp module,
       return false;
     }
     void *buffer = nullptr;
-    if (fns.hipMalloc(&buffer, bytes) != hipSuccess) {
-      llvm::errs() << "error: hipMalloc failed for " << bytes << " bytes\n";
+    if (hipError_t status = fns.hipMalloc(&buffer, bytes);
+        status != hipSuccess) {
+      llvm::errs() << "error: hipMalloc failed for " << bytes
+                   << " bytes: " << fns.hipGetErrorString(status) << "\n";
       return false;
     }
     deviceBuffers.push_back(buffer);
-    if (fns.hipMemsetAsync(buffer, 0, bytes, stream) != hipSuccess) {
-      llvm::errs() << "error: hipMemsetAsync failed\n";
+    if (hipError_t status = fns.hipMemsetAsync(buffer, 0, bytes, stream);
+        status != hipSuccess) {
+      llvm::errs() << "error: hipMemsetAsync failed: "
+                   << fns.hipGetErrorString(status) << "\n";
       return false;
     }
   }
   (void)options;
-  return fns.hipStreamSynchronize(stream) == hipSuccess;
+  // Named, like the failures above: this is where an async fault from the
+  // memsets above actually surfaces, and reporting it as a bare false left the
+  // caller with nothing but a generic deferred-compilation failure.
+  if (hipError_t status = fns.hipStreamSynchronize(stream);
+      status != hipSuccess) {
+    llvm::errs() << "error: hipStreamSynchronize failed: "
+                 << fns.hipGetErrorString(status) << "\n";
+    return false;
+  }
+  return true;
 }
 
 } // namespace
@@ -539,8 +552,13 @@ bool RocMlirAutotuner::Impl::launch(hipFunction_t function,
       function, static_cast<unsigned>(kernel.gridSize), 1, 1,
       static_cast<unsigned>(kernel.blockSize), 1, 1, 0, buffers.getStream(),
       nullptr, config);
-  return reportError(status, "hipModuleLaunchKernel") &&
-         reportError(fns.hipGetLastError(), "kernel launch");
+  // Both statuses, unconditionally: `&&` would skip hipGetLastError whenever
+  // the launch call itself reported an error, leaving that error sticky for
+  // whatever HIP call runs next -- which is a different candidate's benchmark,
+  // so one bad perfConfig would be blamed on its successor.
+  const bool launchOk = reportError(status, "hipModuleLaunchKernel");
+  const bool pendingOk = reportError(fns.hipGetLastError(), "kernel launch");
+  return launchOk && pendingOk;
 }
 
 bool RocMlirAutotuner::Impl::benchmark(const CompiledKernel &kernel,
