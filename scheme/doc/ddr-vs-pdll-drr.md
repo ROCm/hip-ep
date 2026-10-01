@@ -106,8 +106,6 @@ Within dialect conversion use cases, DDR's Scheme host provides measurable advan
 
 The two operational risks — filesystem coupling and FFI maintenance burden — are the primary cost of the DDR approach. Both are engineering discipline problems, not language design problems.
 
-One feature to add: pattern priority (benefit). Registration order currently determines priority silently; explicit benefit avoids fragility as pattern count grows.
-
 ---
 
 ## Related Documents
