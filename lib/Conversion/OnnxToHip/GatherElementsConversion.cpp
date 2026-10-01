@@ -37,21 +37,22 @@ GatherElementsToHip::matchAndRewrite(mlir::Operation *op,
 
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
 
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (auto i : llvm::seq<int64_t>(0, resultType.getRank())) {
-    if (resultType.isDynamicDim(i))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, indices, i));
-  }
-
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  // ONNX GatherElements produces `indices`'s shape. Use the same helper that
+  // backs `GatherElementsOp::reifyResultShapes` so the two cannot disagree.
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      mlir::hip::reifyElementwiseSameShape(rewriter, loc, indices);
+  if (mlir::failed(resultShape))
+    return rewriter.notifyMatchFailure(
+        op, "GatherElements indices must be a ranked tensor");
+  mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, resultType, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "GatherElements result type is incompatible with indices shape");
 
   auto gatherOp = mlir::hip::GatherElementsOp::create(
-      rewriter, loc, context, data, indices, init,
+      rewriter, loc, context, data, indices, *init,
       rewriter.getI64IntegerAttr(axis));
 
   rewriter.replaceOp(op, gatherOp->getResult(0));
