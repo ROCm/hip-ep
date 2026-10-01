@@ -107,15 +107,52 @@ uint64_t hip_create_requantized_layout_op(uint64_t rw_ptr, uint64_t dq_ptr,
   return reinterpret_cast<uint64_t>(newOp->getResult(0).getAsOpaquePointer());
 }
 
+// Returns 1 if the zero-point of op is extractable (absent or a splat constant),
+// 0 otherwise. Absent → treated as 0, which is always extractable.
+int hip_extractable_qdq_zeropoint(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  return tryHipQdqZeropoint(op, 0).has_value() ? 1 : 0;
+}
+
+// Extracts the zero-point of op as i64. Returns absent_value if absent.
+// Returns INT64_MIN on extraction failure (non-constant zero point).
+int64_t hip_extract_qdq_zeropoint_i64(uint64_t op_ptr, int64_t absent_value) {
+  if (!op_ptr) return absent_value;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  std::optional<int64_t> zp = tryHipQdqZeropoint(op, absent_value);
+  return zp.value_or(INT64_MIN);
+}
+
+// Extracts the logical quantized bit-width: 4 if packed_int4, else the storage
+// integer width. Returns 0 on failure.
+int64_t hip_qdq_value_bits(uint64_t op_ptr) {
+  if (!op_ptr) return 0;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  auto dq = mlir::dyn_cast<mlir::hip::DequantizeLinearOp>(op);
+  if (!dq) {
+    auto q = mlir::dyn_cast<mlir::hip::QuantizeLinearOp>(op);
+    if (!q) return 0;
+  }
+  mlir::IntegerType intType = getQdqQuantizedElementType(op);
+  if (!intType) return 0;
+  if (auto dq2 = mlir::dyn_cast<mlir::hip::DequantizeLinearOp>(op))
+    return dq2.getPackedInt4() ? 4 : static_cast<int64_t>(intType.getWidth());
+  return static_cast<int64_t>(intType.getWidth());
+}
+
 } // extern "C"
 
 namespace mlir {
 namespace hipsr {
 
 void registerHipFusionBindings() {
-  Sregister_symbol("hip_extract_splat_scale",          (void*)::hip_extract_splat_scale);
-  Sregister_symbol("hip_build_init",                   (void*)::hip_build_init);
-  Sregister_symbol("hip_create_requantized_layout_op", (void*)::hip_create_requantized_layout_op);
+  Sregister_symbol("hip_extract_splat_scale",            (void*)::hip_extract_splat_scale);
+  Sregister_symbol("hip_build_init",                     (void*)::hip_build_init);
+  Sregister_symbol("hip_create_requantized_layout_op",   (void*)::hip_create_requantized_layout_op);
+  Sregister_symbol("hip_extractable_qdq_zeropoint",      (void*)::hip_extractable_qdq_zeropoint);
+  Sregister_symbol("hip_extract_qdq_zeropoint_i64",      (void*)::hip_extract_qdq_zeropoint_i64);
+  Sregister_symbol("hip_qdq_value_bits",                 (void*)::hip_qdq_value_bits);
 }
 
 } // namespace hipsr

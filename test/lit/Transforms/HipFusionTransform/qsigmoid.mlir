@@ -6,6 +6,7 @@
 // and the checks have to prove both pairs reach the attributes.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: func.func @qsigmoid
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x128x2048xui16>) -> tensor<1x128x2048xui16> {

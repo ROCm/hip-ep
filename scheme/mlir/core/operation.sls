@@ -36,7 +36,11 @@
     mlir-operation-get-dps-init-value
     mlir-emit-error!
     mlir-emit-warning!
-    mlir-emit-remark!)
+    mlir-emit-remark!
+    mlir-operation-set-f32-attr!
+    mlir-operation-set-i64-attr!
+    mlir-operation-set-unit-attr!
+    mlir-operation-get-integer-attr)
 
   (import (rnrs)
           (only (chezscheme) foreign-procedure))
@@ -175,6 +179,23 @@
       [(:i64)       (%get-i64-attr op name (if (null? rest) 0 (car rest)))]
       [(:i64-array) (%get-i64-array-attr op name)]
       [else (error 'mlir-operation-get-attr "unknown attr type" type)]))
+
+  ;; Get a named IntegerAttr as i64. Returns default-val when absent.
+  ;; Convenience alias for the common case — equivalent to (mlir-operation-get-attr op name :i64 default).
+  (define mlir-operation-get-integer-attr
+    (foreign-procedure "mlir_operation_get_integer_attr" (uptr string integer-64) integer-64))
+
+  ;; Set a named f32 FloatAttr on op.
+  (define mlir-operation-set-f32-attr!
+    (foreign-procedure "mlir_operation_set_f32_attr" (uptr string double) void))
+
+  ;; Set a named i64 IntegerAttr (signless) on op.
+  (define mlir-operation-set-i64-attr!
+    (foreign-procedure "mlir_operation_set_i64_attr" (uptr string integer-64) void))
+
+  ;; Set a named UnitAttr on op.
+  (define mlir-operation-set-unit-attr!
+    (foreign-procedure "mlir_operation_set_unit_attr" (uptr string) void))
 
   ;; Replace the i-th operand of the operation with a new value.
   ;; op:    Operation* uptr

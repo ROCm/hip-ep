@@ -12,6 +12,7 @@
 // patterns can match at all.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // A 1x1 conv over a 1x1 input is a single patch, which exempts it from the
 // unit-kernel guard, so PatchEmbedConvToGemm matches this conv. So does

@@ -7,6 +7,7 @@
 // missing CHECK-NOT names the constraint that stopped gating.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // A 1x1 Conv standing in for a linear layer. The weight scale and zero point
 // hold one value per output channel, so they stay operands and their carriers

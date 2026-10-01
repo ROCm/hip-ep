@@ -55,12 +55,21 @@
     ;; Init guard
     hip-can-build-init?        ; result type rank matches shape-source rank
 
+    ;; Value-level single-use check
+    hip-value-single-use?
+
+    ;; C++ wrappers for zero-point and value-bits (require ODS accessors)
+    hip-extractable-qdq-zeropoint?
+    hip-extract-qdq-zeropoint-i64
+    hip-qdq-value-bits-c
+
     ;; Re-export C++ helpers declared in (mlir core builder)
     hip-extract-splat-scale
     hip-build-init
     hip-create-requantized-layout-op)
 
-  (import (except (rnrs) =)
+  (import (rnrs)
+          (only (chezscheme) foreign-procedure nan?)
           (mlir core ir))
 
   ;;===--------------------------------------------------------------------===;;
@@ -239,5 +248,33 @@
            [src-type   (mlir-value-get-type shape-source)])
       (and (= (mlir-type-get-rank out-type)
               (mlir-type-get-rank src-type)))))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Value-level single-use helper
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Returns #t when val (a result Value) has exactly one use.
+  ;; Complement to hip-op-single-use? — use when you have the Value not the Op.
+  (define (hip-value-single-use? val)
+    (= (mlir-value-num-uses val) 1))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; C++ wrappers for ODS-accessor-based zero-point extraction
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Returns #t when the zero-point operand of op is absent or a splat constant.
+  ;; Uses C++ ODS accessor getZeroPoint() — cannot be expressed with generic FFI.
+  (define hip-extractable-qdq-zeropoint?
+    (let ([f (foreign-procedure "hip_extractable_qdq_zeropoint" (uptr) int)])
+      (lambda (op) (not (zero? (f op))))))
+
+  ;; Extracts zero-point of op as i64. Returns absent-val when absent.
+  ;; Returns (most-negative-fixnum) on failure (non-constant zero-point).
+  (define hip-extract-qdq-zeropoint-i64
+    (foreign-procedure "hip_extract_qdq_zeropoint_i64" (uptr integer-64) integer-64))
+
+  ;; Logical quantized bit-width: 4 if packed_int4, else storage integer width.
+  (define hip-qdq-value-bits-c
+    (foreign-procedure "hip_qdq_value_bits" (uptr) integer-64))
 
 ) ;; end library (mlir hip fusion)

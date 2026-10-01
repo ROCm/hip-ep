@@ -64,10 +64,14 @@
           (string-append "Pattern parameter '" name
                          "' must be an identifier — write (fname op operands-ref rewriter type-converter)")
           (ast-pattern-expand-function-name ast-rec))))
-    (check-param (ast-pattern-expand-param-op             ast-rec) "op")
-    (check-param (ast-pattern-expand-param-operands-ref   ast-rec) "operands-ref")
-    (check-param (ast-pattern-expand-param-rewriter       ast-rec) "rewriter")
-    (check-param (ast-pattern-expand-param-type-converter ast-rec) "type-converter"))
+    ;; operands-ref and type-converter are #f for rewrite patterns (3-param form).
+    (let ([is-rewrite? (eq? (ast-pattern-expand-pattern-type ast-rec) 'rewrite)])
+      (check-param (ast-pattern-expand-param-op      ast-rec) "op")
+      (unless is-rewrite?
+        (check-param (ast-pattern-expand-param-operands-ref   ast-rec) "operands-ref"))
+      (check-param (ast-pattern-expand-param-rewriter ast-rec) "rewriter")
+      (unless is-rewrite?
+        (check-param (ast-pattern-expand-param-type-converter ast-rec) "type-converter"))))
 
   (define (validate-ast-match-function-name ast-rec)
     (unless (identifier? (ast-pattern-expand-function-name ast-rec))

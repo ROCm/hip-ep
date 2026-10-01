@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // transB=1 reads B as [N, K], so Y is [64, 32]; the rank-1 C broadcasts along
 // M. transA keeps its default and so is elided on print, as is B_bits at 8.

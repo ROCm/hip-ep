@@ -290,6 +290,29 @@ void mlir_operation_set_dense_i32_array(uint64_t op_ptr, const char* attr_name, 
   op->setAttr(attr_name, mlir::DenseI32ArrayAttr::get(op->getContext(), values));
 }
 
+// Set a named f32 FloatAttr on an operation.
+void mlir_operation_set_f32_attr(uint64_t op_ptr, const char* name, double value) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  op->setAttr(name, mlir::FloatAttr::get(mlir::Float32Type::get(op->getContext()),
+                                          static_cast<float>(value)));
+}
+
+// Set a named i64 IntegerAttr (signless) on an operation.
+void mlir_operation_set_i64_attr(uint64_t op_ptr, const char* name, int64_t value) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  op->setAttr(name, mlir::IntegerAttr::get(
+                       mlir::IntegerType::get(op->getContext(), 64), value));
+}
+
+// Set a named UnitAttr on an operation (marks a boolean-style flag as present).
+void mlir_operation_set_unit_attr(uint64_t op_ptr, const char* name) {
+  if (!op_ptr) return;
+  auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
+  op->setAttr(name, mlir::UnitAttr::get(op->getContext()));
+}
+
 // Copy a named attribute from src_op to dst_op under a (possibly different) name.
 // No-op if the attribute is absent on src_op.
 // dst_op_ptr: destination Operation* as uptr
@@ -375,7 +398,10 @@ void registerOperationBindings() {
   Sregister_symbol("mlir_operation_get_string_attr",       (void*)::mlir_operation_get_string_attr);
   Sregister_symbol("mlir_operation_get_integer_attr",      (void*)::mlir_operation_get_integer_attr);
   Sregister_symbol("mlir_operation_get_integer_array_attr",(void*)::mlir_operation_get_integer_array_attr);
-  Sregister_symbol("mlir_operation_set_index_attr",        (void*)::mlir_operation_set_index_attr);
+  Sregister_symbol("mlir_operation_set_f32_attr",           (void*)::mlir_operation_set_f32_attr);
+  Sregister_symbol("mlir_operation_set_i64_attr",           (void*)::mlir_operation_set_i64_attr);
+  Sregister_symbol("mlir_operation_set_unit_attr",          (void*)::mlir_operation_set_unit_attr);
+  Sregister_symbol("mlir_operation_set_index_attr",         (void*)::mlir_operation_set_index_attr);
   Sregister_symbol("mlir_operation_set_dense_i64_array",   (void*)::mlir_operation_set_dense_i64_array);
   Sregister_symbol("mlir_operation_set_dense_i32_array",   (void*)::mlir_operation_set_dense_i32_array);
   Sregister_symbol("mlir_operation_copy_attr",             (void*)::mlir_operation_copy_attr);

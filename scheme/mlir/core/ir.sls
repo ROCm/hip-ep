@@ -48,6 +48,10 @@
     mlir-emit-error!
     mlir-emit-warning!
     mlir-emit-remark!
+    mlir-operation-set-f32-attr!
+    mlir-operation-set-i64-attr!
+    mlir-operation-set-unit-attr!
+    mlir-operation-get-integer-attr
     ;; (mlir core value)
     mlir-value-get-defining-op
     mlir-value-get-type
