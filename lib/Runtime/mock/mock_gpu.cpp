@@ -2327,6 +2327,28 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
   return 0;
 }
 
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_group_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_group_norm(n=%lld, c=%lld, spatial=%lld, groups=%lld, "
+      "channels_last=%lld, activation=%lld, data_type=%lld, epsilon=%f)\n",
+      (long long)n, (long long)c, (long long)spatial, (long long)groups,
+      (long long)channels_last, (long long)activation, (long long)data_type,
+      epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
+  return 0;
+}
+
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
