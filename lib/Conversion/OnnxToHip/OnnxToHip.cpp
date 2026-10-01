@@ -235,6 +235,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
+  populateEinsumConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
   populatePowerConversionPatterns(patterns, ctx);
