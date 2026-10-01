@@ -256,6 +256,13 @@ void mlir_destroy_builder(uint64_t builder_ptr) {
   delete reinterpret_cast<mlir::OpBuilder*>(builder_ptr);
 }
 
+uint64_t mlir_type_get_context(uint64_t type_ptr) {
+  if (!type_ptr) return 0;
+  return reinterpret_cast<uint64_t>(
+      mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr))
+          .getContext());
+}
+
 uint64_t mlir_get_index_type(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   return reinterpret_cast<uint64_t>(
@@ -295,6 +302,7 @@ void registerBuilderBindings() {
   Sregister_symbol("mlir_new_block",                         (void*)::mlir_new_block);
   Sregister_symbol("mlir_builder_at_block_end",              (void*)::mlir_builder_at_block_end);
   Sregister_symbol("mlir_destroy_builder",                   (void*)::mlir_destroy_builder);
+  Sregister_symbol("mlir_type_get_context",                   (void*)::mlir_type_get_context);
   Sregister_symbol("mlir_get_index_type",                    (void*)::mlir_get_index_type);
   Sregister_symbol("mlir_get_i64_type",                      (void*)::mlir_get_i64_type);
   Sregister_symbol("mlir_get_i1_type",                       (void*)::mlir_get_i1_type);

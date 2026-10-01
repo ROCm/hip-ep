@@ -45,6 +45,8 @@
     mlir-builder-at-block-end
     mlir-destroy-builder
     mlir-create-op
+    ;; Type context
+    mlir-type-get-context
     ;; Type constructors needed by builder callers
     mlir-get-index-type
     mlir-get-i64-type
@@ -115,6 +117,9 @@
   ;;===--------------------------------------------------------------------===;;
   ;; Type constructors / queries
   ;;===--------------------------------------------------------------------===;;
+
+  (define mlir-type-get-context
+    (foreign-procedure "mlir_type_get_context" (uptr) uptr))
 
   (define mlir-get-index-type
     (foreign-procedure "mlir_get_index_type" (uptr) uptr))

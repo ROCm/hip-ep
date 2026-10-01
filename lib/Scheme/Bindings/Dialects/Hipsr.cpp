@@ -58,6 +58,14 @@ uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
       mlir::hipsr::ContextType::get(ctx).getAsOpaquePointer());
 }
 
+// Create a HipSR device memory space attribute.
+uint64_t mlir_hipsr_make_device_space_attr(uint64_t ctx_ptr) {
+  auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
+  return reinterpret_cast<uint64_t>(
+      mlir::hipsr::MemorySpaceAttr::get(ctx, mlir::hipsr::MemorySpace::Device)
+          .getAsOpaquePointer());
+}
+
 // mlir_hipsr_load_file_map — HipSR-specific: memory-map a file via HipsrDialect.
 // Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
 uint64_t mlir_hipsr_load_file_map(uint64_t ctx_ptr, const char* path) {
@@ -77,7 +85,8 @@ void registerHipsrBindings() {
   Sregister_symbol("mlir_populate_cast_conversion_patterns", (void*)::mlir_populate_cast_conversion_patterns);
   Sregister_symbol("mlir_placeholder_set_barrier_type", (void*)::mlir_placeholder_set_barrier_type);
   Sregister_symbol("mlir_get_hipsr_context_type", (void*)::mlir_get_hipsr_context_type);
-  Sregister_symbol("mlir_hipsr_load_file_map", (void*)::mlir_hipsr_load_file_map);
+  Sregister_symbol("mlir_hipsr_make_device_space_attr", (void*)::mlir_hipsr_make_device_space_attr);
+  Sregister_symbol("mlir_hipsr_load_file_map",          (void*)::mlir_hipsr_load_file_map);
 }
 
 } // namespace hipsr

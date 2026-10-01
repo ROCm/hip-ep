@@ -87,6 +87,17 @@ uint64_t mlir_type_get_element_type(uint64_t type_ptr) {
 
 
 
+// Attach any encoding attribute to a RankedTensorType (generic, dialect-agnostic).
+uint64_t mlir_tensor_type_with_encoding(uint64_t type_ptr, uint64_t attr_ptr) {
+  if (!type_ptr || !attr_ptr) return 0;
+  auto baseType  = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
+  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(baseType);
+  if (!tensorType) return 0;
+  auto attr = mlir::Attribute::getFromOpaquePointer(reinterpret_cast<const void*>(attr_ptr));
+  return reinterpret_cast<uint64_t>(
+      tensorType.cloneWithEncoding(attr).getAsOpaquePointer());
+}
+
 // Clone tensor type with host memory space
 uint64_t mlir_tensor_type_in_host_space(uint64_t type_ptr) {
   if (!type_ptr) return 0;
@@ -138,6 +149,7 @@ void registerTensorBindings() {
   Sregister_symbol("mlir_type_is_ranked_tensor", (void*)::mlir_type_is_ranked_tensor);
   Sregister_symbol("mlir_type_get_rank", (void*)::mlir_type_get_rank);
   Sregister_symbol("mlir_type_get_element_type", (void*)::mlir_type_get_element_type);
+  Sregister_symbol("mlir_tensor_type_with_encoding",   (void*)::mlir_tensor_type_with_encoding);
   Sregister_symbol("mlir_tensor_type_in_host_space",   (void*)::mlir_tensor_type_in_host_space);
   Sregister_symbol("mlir_type_get_encoding", (void*)::mlir_type_get_encoding);
   Sregister_symbol("mlir_type_is_device_tensor", (void*)::mlir_type_is_device_tensor);

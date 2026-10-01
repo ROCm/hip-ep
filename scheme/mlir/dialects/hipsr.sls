@@ -16,9 +16,10 @@
 
 (library (mlir dialects hipsr)
   (export
-    ;; Memory space
+    ;; Memory space attribute and tensor encoding
     hipsr-device-memory-space
-    make-mlir-tensor-in-device-space   ; creates new MLIR type in context
+    make-hipsr-device-space-attr       ; creates HipSR MemorySpaceAttr(Device)
+    make-mlir-tensor-in-device-space   ; convenience: with-encoding + device attr
 
     ;; Context convention
     mlir-get-hipsr-context-arg           ; pure read
@@ -45,7 +46,8 @@
   (import (rnrs (6))
           (only (chezscheme) foreign-procedure)
           (mlir core ir)
-          (mlir core conversion))
+          (mlir core conversion)
+          (mlir dialects tensor))
 
   ;;===--------------------------------------------------------------------===;;
   ;; HipSR-specific FFI bindings
@@ -63,6 +65,19 @@
   (define mlir-placeholder-set-barrier-type!
     (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
+  ;; Construct a HipSR device memory space attribute.
+  (define %make-device-space-attr
+    (foreign-procedure "mlir_hipsr_make_device_space_attr" (uptr) uptr))
+
+  (define (make-hipsr-device-space-attr ctx)
+    (%make-device-space-attr ctx))
+
+  ;; Convenience: attach the HipSR device memory space to a tensor type.
+  ;; Equivalent to: (mlir-tensor-type-with-encoding !type (make-hipsr-device-space-attr ctx))
+  (define (make-mlir-tensor-in-device-space !type)
+    (mlir-tensor-type-with-encoding !type
+      (make-hipsr-device-space-attr (mlir-type-get-context !type))))
+
   ;; Memory-map a file via HipsrDialect::getOrLoadFileMap.
   ;; Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
   (define mlir-hipsr-load-file-map
@@ -74,9 +89,6 @@
 
   ;; MemorySpace::Device = 1  (from HipsrEnums.td: Hipsr_Device I32EnumAttrCase 1)
   (define hipsr-device-memory-space 1)
-
-  (define (make-mlir-tensor-in-device-space type)
-    (mlir-type-set-memory-space type hipsr-device-memory-space))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Context Convention
