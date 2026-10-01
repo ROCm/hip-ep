@@ -22,6 +22,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects tensor)
           (mlir ddr))
 
   ;; The shape adaptor value may be wrapped in a builtin.unrealized_conversion_cast
@@ -42,7 +43,7 @@
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (make-mlir-tensor-in-device-space !out-type)]
+         [!out-device (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
          ;; Unwrap any unrealized_conversion_cast to get the host-space shape value.
          ;; The type converter wraps the tensor<Nxi64> shape in a cast to device space,
          ;; but hipsr.expand and hipsr.placeholder (barrier) require the host-space value.

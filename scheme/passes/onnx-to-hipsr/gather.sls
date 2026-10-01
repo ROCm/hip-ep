@@ -20,6 +20,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects tensor)
           (mlir dialects shape)
           (mlir ddr rewrite)
           (mlir ddr))
@@ -67,7 +68,7 @@
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!data-type  (mlir-value-get-type %data)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (make-mlir-tensor-in-device-space !out-type)]
+         [!out-device (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
          [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))]
          [!size-type  (mlir-shape.size-type  (mlir-operation-get-context op))]
          [axis        (let ([a (mlir-operation-get-attr op "axis" :i64 0)])

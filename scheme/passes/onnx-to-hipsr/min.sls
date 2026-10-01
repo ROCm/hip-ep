@@ -20,6 +20,7 @@
           (mlir core ir)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects tensor)
           (mlir dialects shape)
           (mlir ddr rewrite)
           (mlir ddr))
@@ -34,7 +35,7 @@
     :then-let
         ([%ctx        (mlir-get-hipsr-context-arg op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-device (make-mlir-tensor-in-device-space !out-type)]
+         [!out-device (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
          [!shape-type (mlir-shape.shape-type (mlir-operation-get-context op))])
     :rewrite %output :with
         (%placeholder = hipsr.placeholder (%ctx %lhs %rhs !out-device)
@@ -68,8 +69,9 @@
          #t]
         [(> n 2)
          (let* ([ctx      (mlir-get-hipsr-context-arg op)]
-                [out-type (make-mlir-tensor-in-device-space
-                            (mlir-value-get-type (mlir-operation-get-result op 0)))])
+                [!base    (mlir-value-get-type (mlir-operation-get-result op 0))]
+                [out-type (mlir-tensor-type-with-encoding !base
+                            (make-hipsr-device-space-attr (mlir-type-get-context !base)))])
            (let loop ([i 2]
                       [acc (make-binary-min! rewriter op ctx
                              (value-array-ref-at operands-ref 0)

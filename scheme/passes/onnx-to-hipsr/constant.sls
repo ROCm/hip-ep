@@ -24,6 +24,7 @@
           (mlir core attribute)
           (mlir core conversion)
           (mlir dialects hipsr)
+          (mlir dialects tensor)
           (mlir ddr))
 
   (define kOrtMemAddrTag "*/_ORT_MEM_ADDR_/*")
@@ -80,7 +81,7 @@
     :then-let
         ([ctx         (mlir-operation-get-context op)]
          [!out-type   (mlir-value-get-type %output)]
-         [!out-dev    (make-mlir-tensor-in-device-space !out-type)]
+         [!out-dev    (mlir-tensor-type-with-encoding !out-type (make-hipsr-device-space-attr (mlir-type-get-context !out-type)))]
          [$value-attr (constant-value-attr op ctx !out-dev)])
     :rewrite %output :with
         (%result = hipsr.constant () ("value" = $value-attr) -> !out-dev))

@@ -16,10 +16,9 @@
 
 (library (mlir dialects hipsr)
   (export
-    ;; Memory space attribute and tensor encoding
+    ;; Memory space
     hipsr-device-memory-space
     make-hipsr-device-space-attr       ; creates HipSR MemorySpaceAttr(Device)
-    make-mlir-tensor-in-device-space   ; convenience: with-encoding + device attr
 
     ;; Context convention
     mlir-get-hipsr-context-arg           ; pure read
@@ -72,11 +71,6 @@
   (define (make-hipsr-device-space-attr ctx)
     (%make-device-space-attr ctx))
 
-  ;; Convenience: attach the HipSR device memory space to a tensor type.
-  ;; Equivalent to: (mlir-tensor-type-with-encoding !type (make-hipsr-device-space-attr ctx))
-  (define (make-mlir-tensor-in-device-space !type)
-    (mlir-tensor-type-with-encoding !type
-      (make-hipsr-device-space-attr (mlir-type-get-context !type))))
 
   ;; Memory-map a file via HipsrDialect::getOrLoadFileMap.
   ;; Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
@@ -135,7 +129,8 @@
         (if (and (= 1 (mlir-type-is-ranked-tensor type))
                  (> (mlir-type-get-rank type) 0)
                  (= 0 (mlir-type-get-encoding type)))
-            (make-mlir-tensor-in-device-space type)
+            (mlir-tensor-type-with-encoding type
+              (make-hipsr-device-space-attr (mlir-type-get-context type)))
             #f)))
     ;; Source materialization: resolve unrealized casts between ranked tensor
     ;; types that differ only in shape specificity (e.g. tensor<?x32> vs tensor<?x?>)
