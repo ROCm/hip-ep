@@ -132,7 +132,7 @@ func.func @kernel_shape_mismatch(
     %ctx: !hip.context, %input: tensor<1x3x5x5xf32>,
     %weight: tensor<4x3x3x3xf32>, %init: tensor<1x4x3x3xf32>)
     -> tensor<1x4x3x3xf32> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.conv'}}
+  // expected-error @+1 {{conv kernel_shape dimension 1 does not match weights spatial dimension 3 at axis 0}}
   %result = hip.conv(%ctx) ins(
       %input, %weight : tensor<1x3x5x5xf32>, tensor<4x3x3x3xf32>)
       outs(%init : tensor<1x4x3x3xf32>)
