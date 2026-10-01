@@ -9,6 +9,7 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  OnnxToHipUtils.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
@@ -43,6 +44,7 @@ add_library(OnnxToHip STATIC
   OneHotConversion.cpp
   GatherShapeFold.cpp
   TransposeMatMulFold.cpp
+  ShapeProvenanceAnalysis.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
   SliceShapeFold.cpp
@@ -128,6 +130,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
+  MLIRAnalysis
   MLIRIR
   MLIRSupport
   MLIRTransforms
