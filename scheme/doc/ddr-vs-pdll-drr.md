@@ -63,10 +63,6 @@ DRR and PDLL require C++ escapes for complex pattern logic (axis normalization, 
 
 DDR provides `:debug-codegen` (shows the generated Scheme lambda) and `:debug-matching` (traces execution). DRR and PDLL require gdb or compile-time instrumentation.
 
-### Pattern Priority
-
-PDLL and DRR both support a `benefit` integer for ranking competing patterns. DDR uses registration order. `SchemeConversionPattern` inherits `PatternBenefit` from `ConversionPattern`; exposing it requires ~15 lines of C++ and one optional argument in `mlir-register-conversion-pattern`.
-
 ### Deployment
 
 | Property | DRR | PDLL | DDR |
@@ -90,7 +86,6 @@ Each MLIR API function used from Scheme requires a C++ registration (`Sregister_
 | Extra toolchain | mlir-tblgen | mlir-pdll + mlir-tblgen | **None** |
 | Constraints/rewrites without C++ | No | No | **Yes** |
 | Turing-complete pattern computation | Via C++ | Via C++ | **Native** |
-| Pattern priority/benefit | Yes | Yes | Missing (addable) |
 | Formal pattern verification | Limited | Via PDL IR | No |
 | Interactive debugging | No | No | **Yes** |
 | Filesystem deployment dependency | No | No | **Yes** |
