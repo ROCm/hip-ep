@@ -61,7 +61,7 @@
     mlir-type-set-memory-space)
 
   (import (rnrs)
-          (only (chezscheme) foreign-procedure parameterize make-parameter))
+          (only (chezscheme) foreign-procedure parameterize make-parameter void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Low-level rewriter FFI
