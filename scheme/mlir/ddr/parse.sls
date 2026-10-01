@@ -71,11 +71,11 @@
   ;; SECTION 1: Entry Points
   ;;=======================================================================
 
-  (define (parse-to-ast whole-stx)
-    (syntax-case whole-stx ()
-      [(_ . rest)
-       ;; define-conversion-pattern always creates 'conversion patterns
-       (parse-rest #'rest (make-ast-pattern-expand 'conversion))]))
+  (define (parse-to-ast whole-stx . args)
+    (let ([pattern-type (if (pair? args) (car args) 'conversion)])
+      (syntax-case whole-stx ()
+        [(_ . rest)
+         (parse-rest #'rest (make-ast-pattern-expand pattern-type))])))
 
   ;;-----------------------------------------------------------------------
   ;; parse-rest - Parse function name, debug flags, then dispatch to :if-match
@@ -108,7 +108,20 @@
          (ast-pattern-expand-debug-matching?-set! ast #t)
          (parse-rest #'more ast))]
 
-      ;; Function name with exactly 4 parameters: (fname op operands-ref rewriter type-converter)
+      ;; 3-param form for rewrite patterns: (fname op rewriter)
+      [((fname p-op p-rewriter) . more)
+       (and (identifier? #'fname)
+            (not (ast-pattern-expand-function-name ast))
+            (eq? (ast-pattern-expand-pattern-type ast) 'rewrite))
+       (begin
+         (ast-pattern-expand-function-name-set!         ast #'fname)
+         (ast-pattern-expand-param-op-set!              ast #'p-op)
+         (ast-pattern-expand-param-operands-ref-set!    ast #f)
+         (ast-pattern-expand-param-rewriter-set!        ast #'p-rewriter)
+         (ast-pattern-expand-param-type-converter-set!  ast #f)
+         (parse-rest #'more ast))]
+
+      ;; 5-param form for conversion patterns: (fname op operands-ref rewriter type-converter)
       [((fname p-op p-operands-ref p-rewriter p-type-converter) . more)
        (and (identifier? #'fname)
             (not (ast-pattern-expand-function-name ast)))

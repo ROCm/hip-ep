@@ -68,6 +68,38 @@ private:
   std::string targetOpName;      // Target operation name
 };
 
+// Wrapper that implements RewritePattern by calling a Scheme callback.
+// Callback signature: (lambda (op rewriter) → #t/#f)
+// No TypeConverter or converted-operands adaptor — for local rewrites.
+class SchemeRewritePattern : public mlir::RewritePattern {
+public:
+  SchemeRewritePattern(mlir::MLIRContext *ctx,
+                       ptr schemeCallback, llvm::StringRef opName,
+                       int benefit = 1)
+      : RewritePattern(opName, benefit, ctx),
+        callback_(schemeCallback),
+        targetOpName(opName.str()) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getName().getStringRef() != targetOpName)
+      return mlir::failure();
+
+    ptr opPtr       = Sunsigned64(reinterpret_cast<uint64_t>(op));
+    ptr rewriterPtr = Sunsigned64(reinterpret_cast<uint64_t>(&rewriter));
+    ptr args_list   = Scons(opPtr, Scons(rewriterPtr, Snil));
+    ptr apply_proc  = Stop_level_value(Sstring_to_symbol("apply"));
+    ptr result      = Scall2(apply_proc, callback_.get(), args_list);
+
+    return result == Strue ? mlir::success() : mlir::failure();
+  }
+
+private:
+  mlir::hipsr::LockedSchemeObject callback_;
+  std::string targetOpName;
+};
+
 } // anonymous namespace
 
 
@@ -92,6 +124,20 @@ void mlir_register_conversion_pattern(ptr patterns_ptr,
   // Add pattern to the pattern set
   patterns->add<SchemeConversionPattern>(
       typeConverter, patterns->getContext(), schemeCallback, llvm::StringRef(op_name));
+}
+
+// Register a Scheme-defined rewrite pattern for a named MLIR op.
+// The callback is called as (callback op rewriter) and must return #t/#f.
+// patterns_ptr: RewritePatternSet* as ptr
+// op_name:      MLIR op name string, e.g. "some.Op"
+// callback:     Scheme procedure ptr (GC-locked for the pattern's lifetime)
+void mlir_register_rewrite_pattern(ptr patterns_ptr,
+                                    const char *op_name,
+                                    ptr callback) {
+  auto *patterns = reinterpret_cast<mlir::RewritePatternSet *>(patterns_ptr);
+  mlir_log_info((std::string("Registering Scheme rewrite pattern for ") + op_name).c_str());
+  patterns->add<SchemeRewritePattern>(
+      patterns->getContext(), callback, llvm::StringRef(op_name));
 }
 
 //===----------------------------------------------------------------------===//
@@ -381,6 +427,7 @@ namespace hipsr {
 
 void registerConversionBindings() {
   Sregister_symbol("mlir_register_conversion_pattern", (void*)::mlir_register_conversion_pattern);
+  Sregister_symbol("mlir_register_rewrite_pattern",    (void*)::mlir_register_rewrite_pattern);
   Sregister_symbol("mlir_create_type_converter", (void*)::mlir_create_type_converter);
   Sregister_symbol("mlir_destroy_type_converter", (void*)::mlir_destroy_type_converter);
   Sregister_symbol("mlir_create_conversion_target", (void*)::mlir_create_conversion_target);

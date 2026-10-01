@@ -82,8 +82,12 @@
           (let ([check-code  (generate-check-code actions match-vec operands-ref)]
                 [rewrite-code (generate-rewrite-code raw-rewrite pattern-type rewriter op)])
 
+        ;; Build param list: 4 params for conversion, 2 for rewrite (no operands-ref/type-converter)
+        (let ([params (if operands-ref
+                          (list op operands-ref rewriter type-converter)
+                          (list op rewriter))])
         (with-syntax ([fname    (ast-pattern-expand-function-name ast-rec)]
-                      [(param ...) (list op operands-ref rewriter type-converter)]
+                      [(param ...) params]
                       [(var ...) all-vars]
                       [num-operations num-ops]
                       [(root-result-setter ...) root-result-setters]
@@ -98,7 +102,7 @@
                   (if checks
                       (let* (then-let-binding ...)
                         rewrite)
-                      #f))))))))))
+                      #f)))))))))))
 
   ;;=======================================================================
   ;; Rewrite code — thin wrapper delegating to with-mlir-ops

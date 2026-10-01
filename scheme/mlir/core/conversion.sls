@@ -51,6 +51,7 @@
 
     ;; Scheme-defined pattern registration
     mlir-register-conversion-pattern
+    mlir-register-rewrite-pattern
 
     ;; RAII macros (require conversion lifecycle functions above)
     with-type-converter
@@ -201,6 +202,12 @@
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
                        (uptr string scheme-object uptr) void))
+
+  ;; Register a Scheme rewrite pattern (2-arg callback: op rewriter).
+  ;; No TypeConverter — for local rewrites, not type-converting lowerings.
+  (define mlir-register-rewrite-pattern
+    (foreign-procedure "mlir_register_rewrite_pattern"
+                       (uptr string scheme-object) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; RAII Macros
