@@ -40,9 +40,13 @@ target_link_libraries(hip-rocmlir-compiler PRIVATE
   ${llvm_libs}
 )
 
-if(NOT BUILD_MOCK_RUNTIME)
-  find_package(hip REQUIRED)
-  target_link_libraries(hip-rocmlir-compiler PRIVATE hip::host)
+# Follows what LibHipCompiler actually built, not BUILD_MOCK_RUNTIME: the
+# benchmarking code lives there now and stubs itself out when the build does not
+# allow HIP host APIs, so a tool flag derived from the mock setting alone would
+# offer tuning that cannot run. No hip::host link either -- nothing here
+# references a HIP symbol since the autotuner moved, which is why this binary no
+# longer carries a HIP import at all.
+if(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE)
   target_compile_definitions(hip-rocmlir-compiler
     PRIVATE HIP_ROCMLIR_AUTOTUNE=1)
 else()
