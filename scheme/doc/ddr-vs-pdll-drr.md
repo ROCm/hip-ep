@@ -100,7 +100,7 @@ Each MLIR API function used from Scheme requires a C++ registration (`Sregister_
 
 ## Conclusion
 
-DDR is the only DSL-based option for dialect conversion patterns today. PDLL and DRR cannot express `ConversionPattern` subclasses and are not suitable for the onnx→HipSR pass.
+DDR is the only DSL-based option for dialect conversion patterns today. PDLL and DRR cannot express `ConversionPattern` subclasses.
 
 Within dialect conversion use cases, DDR's Scheme host provides measurable advantages over hypothetical future PDLL dialect-conversion support: no C++ required for constraints or rewrites, seconds-level edit-test cycle, and interactive debugging.
 
