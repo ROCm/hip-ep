@@ -72,11 +72,18 @@
             (unless (eq? (syntax->datum (ast-match-expand-op-name match-op)) ':any)
               (set! acc (cons (action:check-op op-idx) acc)))
 
-            ;; Bind ALL result variables of this operation
+            ;; Bind ALL result variables of this operation.
+            ;; For non-root ops emit action:bind-result so the Scheme variable
+            ;; is set to the actual mlir::Value at match time (needed for :where
+            ;; guards and :then-let that reference non-root result variables).
+            ;; The root op's results are set by root-result-setters before checks.
             (loop :for res-var :in (ast-match-expand-result-var match-op)
                   :for result-idx :from 0
                   :rime-with result-entry := (find-binding-entry binding-mgr res-var)
-                  :do (binding-entry-bound?-set! result-entry #t))
+                  :do (begin
+                        (binding-entry-bound?-set! result-entry #t)
+                        (when (not (= op-idx root-op-idx))
+                          (set! acc (cons (action:bind-result op-idx result-idx res-var) acc)))))
                     
 
             ;; Process operands - handle all 4 cases
@@ -109,8 +116,20 @@
                              (set! acc (cons (action:bind-operand op-idx operand-idx operand-var) acc)))
                          (binding-entry-bound?-set! entry #t)]))
 
-            ;; Emit :where guard AFTER all results and operands of this op are bound.
-            ;; The guard expression may reference any variable bound up to this point.
+            ;; Emit :where guard AFTER this op's own operands are bound.
+            ;;
+            ;; Binding scope at :where time (what the guard CAN reference):
+            ;;   - This op's own operands (all bound before check-where)
+            ;;   - Operands of ops traversed as THIS op's operands (deeper in the DAG)
+            ;;   - `op` parameter (always available — the matched root op)
+            ;;
+            ;; NOT yet bound at :where time:
+            ;;   - Operands of PARENT ops that come AFTER this op's traversal
+            ;;   (e.g. in Q→add→dq chain, dq's :where cannot see Q's remaining operands)
+            ;;
+            ;; To use a parent op's operand in a guard, attach the :where to the parent
+            ;; op. The root op's :where fires last (after all sub-traversals) and can
+            ;; reference all variables.
             (let ([where-expr (ast-match-expand-where-expr match-op)])
               (when where-expr
                 (set! acc (cons (action:check-where where-expr) acc)))))))

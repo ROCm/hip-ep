@@ -5,7 +5,8 @@
           action:bind-operand
           action:bind-argument-operand
           action:check-eq
-          action:check-where)
+          action:check-where
+          action:bind-result)
   (import (rnrs))
 
   ;; Action constructors with labeled fields using pairs
@@ -48,4 +49,13 @@
   ;; the enclosing match-op are bound.  Returns truthy to continue, falsy to fail.
   (define (action:check-where expr)
     (list ':check-where
-          (cons 'expr expr))))
+          (cons 'expr expr)))
+
+  ;; Bind a non-root result variable to the Value produced by a matched op.
+  ;; Emitted for each result var of every non-root match op after :check-op,
+  ;; so the variable can be used in :where guards and :then-let.
+  (define (action:bind-result op-idx result-idx var)
+    (list ':bind-result
+          (cons 'op-idx     op-idx)
+          (cons 'result-idx result-idx)
+          (cons 'var        var))))

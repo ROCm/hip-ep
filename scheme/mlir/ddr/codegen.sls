@@ -222,6 +222,19 @@
                       #,operand-idx)
                    #,var))]
 
+        [(:bind-result)
+         ;; Set a non-root result variable to the actual mlir::Value so that
+         ;; :where guards and :then-let can reference it by name.
+         (let* ([fields     (cdr action)]
+                [op-idx     (cdr (assq 'op-idx     fields))]
+                [result-idx (cdr (assq 'result-idx fields))]
+                [var        (cdr (assq 'var        fields))])
+           #`(begin
+               (set! #,var (mlir-operation-get-result
+                             (vector-ref all-operations #,op-idx)
+                             #,result-idx))
+               #t))]
+
         [(:check-where)
          ;; Emit the guard expression directly — it runs after all operands of
          ;; the enclosing match-op are bound and returns truthy to continue.
