@@ -5,6 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 #include "ReadbackScalar.h"
+#include "hip/Dialect/IR/HipShapeUtilsShapeOps.h"
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"

@@ -5,12 +5,12 @@
 //===- HipShapeUtilsReduction.cpp - Reduction shape helpers --------------===//
 //
 // Category implementation for the public shape helpers declared in
-// `hip/Dialect/IR/HipShapeUtils.h`.
+// `hip/Dialect/IR/HipShapeUtilsReduction.h`.
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipShapeUtilsReduction.h"
 #include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -177,7 +177,7 @@ mlir::hip::reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
   if (!dataType)
     return failure();
   // Validate before emitting any `tensor.dim`, so a failure leaves the IR
-  // unchanged (see the contract in HipShapeUtils.h).
+  // unchanged (see the contract in HipShapeUtilsCommon.h).
   FailureOr<SmallVector<std::optional<int64_t>>> dimMap =
       computeReductionDimMap(dataType.getRank(), axes, keepdims);
   if (failed(dimMap))
