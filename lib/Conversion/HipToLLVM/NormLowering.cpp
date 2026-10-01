@@ -388,12 +388,106 @@ struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
   }
 };
 
+// hip.group_norm -> wrap_group_norm(state, input, scale, bias, output,
+//   n, c, spatial, groups, channels_last, activation, data_type, epsilon)
+struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GroupNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value biasPtr =
+        extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    if (inputType.getRank() < 3)
+      return rewriter.notifyMatchFailure(
+          op, "hip.group_norm requires input rank >= 3");
+
+    int64_t channelAxis = op.getChannelsLast() ? inputType.getRank() - 1 : 1;
+    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value c = getMemRefDimSize(inputType, static_cast<unsigned>(channelAxis),
+                               adaptor.getInput(), rewriter, loc);
+    Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = 1, rank = inputType.getRank(); dimIdx < rank;
+         ++dimIdx) {
+      if (dimIdx == channelAxis)
+        continue;
+      spatial = LLVM::MulOp::create(
+          rewriter, loc,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc),
+          spatial);
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+    Value dataTypeVal = i64Const(dataType);
+    Value groupsVal = i64Const(op.getGroups());
+    Value channelsLastVal = i64Const(op.getChannelsLast());
+    Value activationVal = i64Const(op.getActivation());
+    Value epsilonVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // input, scale, bias
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // n, c, spatial
+        i64Type, i64Type, i64Type, // groups, channels_last, activation
+        i64Type, f32Type           // data_type, epsilon
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGroupNorm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr,
+                               inputPtr,
+                               scalePtr,
+                               biasPtr,
+                               outputPtr,
+                               n,
+                               c,
+                               spatial,
+                               groupsVal,
+                               channelsLastVal,
+                               activationVal,
+                               dataTypeVal,
+                               epsilonVal};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-               InstanceNormOpLowering>(converter);
+               InstanceNormOpLowering, GroupNormOpLowering>(converter);
 }
 
 } // namespace hip

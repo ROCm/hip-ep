@@ -4,9 +4,10 @@
 #
 
 """Tests for data-rearrangement / shape ops: Tile, Expand, Pad, GatherND,
-Slice, ScatterND.
+Slice, ScatterND, and DepthToSpace.
 
-All six ops are added by the qwen-vision-kernels PR. They share a common
+Tile, Expand, Pad, GatherND, Slice, and ScatterND are added by the
+qwen-vision-kernels PR. They share a common
 property: the **shape** of an output depends on a graph-time tensor (repeats
 for Tile, shape for Expand, pads for Pad, indices for GatherND, starts/ends
 for Slice, indices for ScatterND). The runtime D2H-reads these small tensors
@@ -696,4 +697,51 @@ class TestScatterND:
         x = rng.uniform(-2.0, 2.0, data_shape).astype(np.float32)
         u = rng.uniform(-2.0, 2.0, updates_shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x, u])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# DepthToSpace
+# ---------------------------------------------------------------------------
+#
+# Decomposed to expand_shape + hip.transpose + collapse_shape. blocksize 1
+# is forwarded as the input. Both DCR and CRD are checked against ORT.
+
+
+def _make_depth_to_space_model(dtype, shape, blocksize, mode):
+    n, c, h, w = shape
+    out_shape = [
+        n,
+        c // (blocksize * blocksize),
+        h * blocksize,
+        w * blocksize,
+    ]
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, list(shape))
+    y = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node(
+        "DepthToSpace", ["X"], ["Y"], blocksize=blocksize, mode=mode
+    )
+    return make_model_from_nodes([node], [x], [y])
+
+
+class TestDepthToSpace:
+    @pytest.mark.parametrize(
+        "dtype,shape,blocksize,mode",
+        [
+            (np.float32, [1, 8, 2, 3], 2, "DCR"),
+            (np.float16, [1, 8, 2, 3], 2, "CRD"),
+            (np.int32, [2, 16, 1, 2], 4, "DCR"),
+            (np.float32, [1, 4, 2, 2], 1, "CRD"),
+            (np.int64, [1, 4, 2, 2], 1, "DCR"),
+        ],
+    )
+    def test_depth_to_space(self, model_runner, dtype, shape, blocksize, mode):
+        model = _make_depth_to_space_model(dtype, shape, blocksize, mode)
+        rng = np.random.default_rng(900 + blocksize)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
