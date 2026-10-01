@@ -135,6 +135,7 @@ These operations are handled through standard MLIR transformations and generally
 | ConstantOfShape | `arith.constant` when foldable | Produces a splat constant for constant shape inputs |
 | Identity | SSA value forwarding | No runtime operation |
 | Flatten | `tensor.collapse_shape` and, where needed, `tensor.expand_shape` | Metadata-only where representable |
+| DepthToSpace | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | Rank-4 NCHW. `blocksize >= 1`, `C` divisible by `blocksize^2`, and output `[N, C / blocksize^2, H * blocksize, W * blocksize]`. Modes `DCR` (default) and `CRD`. `blocksize == 1` is the input |
 
 ## Fusion and preprocessing
 
