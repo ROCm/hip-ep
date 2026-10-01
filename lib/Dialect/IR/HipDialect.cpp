@@ -1093,6 +1093,71 @@ LogicalResult InstanceNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// GroupNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GroupNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GroupNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GroupNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+  auto shapedType = [](Type t) -> ShapedType {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor;
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref;
+    return ShapedType();
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank || *inputRank < 3)
+    return emitOpError("expected input rank >= 3, got ")
+           << (inputRank ? *inputRank : -1);
+  if (getGroups() <= 0)
+    return emitOpError("groups must be positive");
+  if (getActivation() != 0 && getActivation() != 1)
+    return emitOpError("activation must be 0 (none) or 1 (SiLU)");
+  if (getChannelsLast() != 0 && getChannelsLast() != 1)
+    return emitOpError("channels_last must be 0 (NCHW) or 1 (NHWC)");
+
+  int64_t channelAxis = getChannelsLast() ? *inputRank - 1 : 1;
+  ShapedType inputShaped = shapedType(getInput().getType());
+  if (inputShaped && !inputShaped.isDynamicDim(channelAxis)) {
+    int64_t channels = inputShaped.getDimSize(channelAxis);
+    if (channels % getGroups() != 0)
+      return emitOpError("channel extent ")
+             << channels << " is not divisible by groups " << getGroups();
+  }
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
