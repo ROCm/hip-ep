@@ -67,7 +67,10 @@
 
             ;; Emit header actions (building backwards, will reverse at end)
             (set! acc (cons (action:set-current-op op-idx result-var) acc))
-            (set! acc (cons (action:check-op op-idx) acc))
+            ;; Skip :check-op for :any ops — they match any op name at runtime.
+            ;; Use :where to filter which ops are acceptable.
+            (unless (eq? (syntax->datum (ast-match-expand-op-name match-op)) ':any)
+              (set! acc (cons (action:check-op op-idx) acc)))
 
             ;; Bind ALL result variables of this operation
             (loop :for res-var :in (ast-match-expand-result-var match-op)

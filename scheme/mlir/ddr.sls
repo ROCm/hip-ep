@@ -5,7 +5,7 @@
           :if-match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
-          :index
+          :index :any
           make-unbound-value)
   (import (except (rnrs) =)
           (mlir ddr keywords)  ;; Import keywords at run time for re-export

@@ -240,7 +240,10 @@
             :for idx :from 0 :below (vector-length match-vec)
             :rime-with match-op := (vector-ref match-vec idx)
             :rime-with op-name  := (syntax->datum (ast-match-expand-op-name match-op))
-            :when (string=? op-name root-op-name)
+            ;; :any ops are never the root (they have no compile-time name to match on)
+            :when (and (not (eq? op-name ':any))
+                       (string=? (if (string? op-name) op-name (symbol->string op-name))
+                                 (if (string? root-op-name) root-op-name (symbol->string root-op-name))))
             :break match-op)))
 
   (define (generate-root-result-setters root-result-vars op-param)

@@ -3,7 +3,7 @@
   (export :if-match :then-let :rewrite :with :where
           :debug-parse :debug-validate :debug-analyze :debug-codegen :debug-matching
           = : -> :region :regions
-          :index)
+          :index :any)
   (import (except (rnrs) =))
 
   ;; Define keywords as syntax (for cross-library hygiene)
@@ -23,4 +23,5 @@
   (define-syntax :region (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :regions (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
   (define-syntax :index   (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
+  (define-syntax :any     (lambda (x) (syntax-violation 'pattern-keyword "misplaced aux keyword" x)))
 )
