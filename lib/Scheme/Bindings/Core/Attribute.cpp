@@ -18,6 +18,10 @@
 
 extern "C" {
 
+// Create an IntegerAttr<i64> with the given integer value.
+// ctx_ptr:  MLIRContext* as uptr
+// value:    Scheme integer (fixnum or bignum) — the 64-bit integer value
+// Returns:  Attribute opaque ptr (Attribute::getAsOpaquePointer())
 uint64_t mlir_make_attr_i64(uint64_t ctx_ptr, ptr value) {
   auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
   return reinterpret_cast<uint64_t>(
@@ -26,6 +30,12 @@ uint64_t mlir_make_attr_i64(uint64_t ctx_ptr, ptr value) {
           .getAsOpaquePointer());
 }
 
+// Create an IntegerAttr<IndexType> with the given integer value.
+// Used for attributes that must carry MLIR's platform-sized index type
+// (e.g. shape.const_size "value").
+// ctx_ptr:  MLIRContext* as uptr
+// value:    Scheme integer — the index value
+// Returns:  Attribute opaque ptr
 uint64_t mlir_make_attr_index(uint64_t ctx_ptr, ptr value) {
   auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
   return reinterpret_cast<uint64_t>(
@@ -34,6 +44,10 @@ uint64_t mlir_make_attr_index(uint64_t ctx_ptr, ptr value) {
           .getAsOpaquePointer());
 }
 
+// Create a DenseI32ArrayAttr from a Scheme list of fixnum integers.
+// ctx_ptr:  MLIRContext* as uptr
+// value:    Scheme list of fixnums — the i32 elements
+// Returns:  Attribute opaque ptr
 uint64_t mlir_make_attr_i32_array(uint64_t ctx_ptr, ptr value) {
   auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
   llvm::SmallVector<int32_t> vec;
@@ -43,6 +57,10 @@ uint64_t mlir_make_attr_i32_array(uint64_t ctx_ptr, ptr value) {
       mlir::DenseI32ArrayAttr::get(ctx, vec).getAsOpaquePointer());
 }
 
+// Create a DenseI64ArrayAttr from a Scheme list of integers.
+// ctx_ptr:  MLIRContext* as uptr
+// value:    Scheme list of integers (fixnum or bignum) — the i64 elements
+// Returns:  Attribute opaque ptr
 uint64_t mlir_make_attr_i64_array(uint64_t ctx_ptr, ptr value) {
   auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
   llvm::SmallVector<int64_t> vec;
@@ -53,6 +71,7 @@ uint64_t mlir_make_attr_i64_array(uint64_t ctx_ptr, ptr value) {
 }
 
 // Extract a C++ std::string from a Chez Scheme string object.
+// Sstring_data is not available in this Chez Scheme version; iterate chars.
 static std::string schemeStringToStd(ptr s) {
   iptr len = Sstring_length(s);
   std::string result(static_cast<size_t>(len), '\0');
@@ -61,8 +80,18 @@ static std::string schemeStringToStd(ptr s) {
   return result;
 }
 
-// value: Scheme list (result-type-uptr key-string data-addr data-size)
-// data-addr is a raw memory address as integer; caller keeps backing memory alive.
+// Create a DenseResourceElementsAttr wrapping a pre-existing raw memory region.
+// This is the generic blob attr — caller is responsible for keeping backing
+// memory alive (UnmanagedAsmResourceBlob takes a non-owning reference).
+//
+// ctx_ptr is unused (ctx is derived from result_type).
+// value:   Scheme list of four elements:
+//            (result-type-uptr  key-string  data-addr-integer  data-size-integer)
+//   result-type-uptr: RankedTensorType opaque ptr — the shaped type of the resource
+//   key-string:       Scheme string — unique blob key (e.g. "mem|0x..." or "file|...|4")
+//   data-addr:        Scheme integer — raw memory address of the data bytes
+//   data-size:        Scheme integer — byte count
+// Returns:  Attribute opaque ptr, or 0 if result-type is not a RankedTensorType.
 uint64_t mlir_make_attr_dense_resource(uint64_t /*ctx_ptr*/, ptr value) {
   auto result_type_ptr = Sunsigned64_value(Scar(value));
   std::string key_str  = schemeStringToStd(Scar(Scdr(value)));
@@ -83,6 +112,10 @@ uint64_t mlir_make_attr_dense_resource(uint64_t /*ctx_ptr*/, ptr value) {
           .getAsOpaquePointer());
 }
 
+// Get a named attribute from an operation as an opaque Attribute pointer.
+// op_ptr:  Operation* as uptr
+// name:    attribute name string
+// Returns: Attribute opaque ptr, or 0 if the attribute is absent.
 uint64_t mlir_operation_get_attribute(uint64_t op_ptr, const char* name) {
   auto *op = reinterpret_cast<mlir::Operation*>(op_ptr);
   auto attr = op->getAttr(name);
@@ -90,6 +123,10 @@ uint64_t mlir_operation_get_attribute(uint64_t op_ptr, const char* name) {
   return reinterpret_cast<uint64_t>(attr.getAsOpaquePointer());
 }
 
+// Set a named attribute on an operation from an opaque Attribute pointer.
+// op_ptr:   Operation* as uptr
+// name:     attribute name string
+// attr_ptr: Attribute opaque ptr (from any mlir_make_attr_* or get_attribute)
 void mlir_operation_set_attribute(uint64_t op_ptr, const char* name, uint64_t attr_ptr) {
   auto *op   = reinterpret_cast<mlir::Operation*>(op_ptr);
   auto  attr = mlir::Attribute::getFromOpaquePointer(
