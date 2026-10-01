@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "../ResizeLayout.h"
 #include "OnnxToHipUtils.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
@@ -12,7 +13,7 @@ namespace hip {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// onnx.Resize -> hip.resize (native, spatial-only resampling)
+// onnx.Resize -> hip.resize
 //===----------------------------------------------------------------------===//
 //
 // ONNX Resize is a multi-dimensional resampler whose full attribute surface
@@ -26,10 +27,13 @@ namespace {
 //   * antialias = 0, exclude_outside = 0             (defaults)
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent: none, or a 0-element tensor (no tf_crop_and_resize)
-//   * scale on the leading two axes (N, C) must be 1 — i.e. resampling
-//     happens only on trailing spatial axes, which is the universal
-//     contract for image/volume CNNs and is what onnx-mlir's importer
-//     produces for typical exports.
+//   * rank in [3, 5], input and output ranks equal
+//
+// The runtime kernel is unchanged: a copied prefix of at most two axes and a
+// trailing window of at most three.  Channels-first `1x3x16x16 -> 1x3x32x32`
+// is prefix (N, C) and window (H, W).  Channels-last `1x16x16x3 -> 1x32x32x3`
+// is prefix (N), an empty channel slot, and window (H, W, C).  The channel
+// extent is unchanged, so that window axis copies through.
 //
 // The actual `scales` / `sizes` operand is NOT passed through to runtime —
 // the upstream importer has already used it to compute the static result
@@ -38,8 +42,9 @@ namespace {
 // Compile-time work:
 //   * decode the three string attributes into i64 enums baked onto the
 //     hip.resize op
-//   * verify the (N, C) axes are pass-through (input & output extents
-//     match)
+//   * reject a shape the runtime kernel cannot express: more than two copied
+//     prefix axes, a trailing window longer than three, or a dynamic extent
+//     inside that window
 //
 // Before:
 //   %y = "onnx.Resize"(%x, %roi, %scales, %sizes)
@@ -99,30 +104,22 @@ struct ResizeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
 
     int64_t rank = inputType.getRank();
-    if (rank < 3 || rank != outputType.getRank())
+    if (rank < 3 || rank > 5 || rank != outputType.getRank())
       return rewriter.notifyMatchFailure(
-          op, "Resize requires rank >= 3 and matching in/out ranks");
-    int64_t spatialRank = rank - 2;
-    if (spatialRank < 1 || spatialRank > 3)
-      return rewriter.notifyMatchFailure(
-          op, "only 1D / 2D / 3D spatial Resize supported");
+          op, "Resize requires rank in [3, 5] and matching in/out ranks");
     if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
         inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(
           op, "Resize runtime supports only matching float types");
 
-    // (N, C) must be pass-through.  If both extents are static and differ,
-    // bail.  Dynamic on either side is OK as long as both are dynamic
-    // (tensor.dim of input feeds tensor.empty for the output).
-    for (int64_t i : llvm::seq<int64_t>(2)) {
-      bool inDyn = inputType.isDynamicDim(i);
-      bool outDyn = outputType.isDynamicDim(i);
-      if (!inDyn && !outDyn &&
-          inputType.getDimSize(i) != outputType.getDimSize(i))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: only spatial-axis resampling supported "
-                "(N, C must match between input and output)");
-    }
+    // Channels-last rank 4 fits the existing kernel: the batch is the prefix,
+    // and (H, W, C) is the trailing window.  See planHipResizeLaunch.
+    std::optional<HipResizeLaunch> launch =
+        planHipResizeLaunch(inputType, outputType);
+    if (!launch)
+      return rewriter.notifyMatchFailure(
+          op, "Resize does not fit a copied prefix of at most 2 axes and a "
+              "trailing window of at most 3");
 
     // ===== Decode string attrs to enum-like i64 values =====================
 
@@ -197,25 +194,14 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     // ===== Build DPS init =================================================
     //
-    // Output shape: leading (N, C) inherit from the input (their dynamic
-    // status is required to match by the check above).  Trailing spatial
-    // dims must be static — at runtime the kernel reads them off the
-    // output memref descriptor; if they were dynamic we'd need arith ops
-    // for the per-axis output extents, left out of scope.
-    for (int64_t i : llvm::seq<int64_t>(spatialRank)) {
-      if (outputType.isDynamicDim(2 + i))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: dynamic output spatial dims not supported");
-    }
-
+    // A dynamic output dim is only legal in the copied prefix, and
+    // planHipResizeLaunch already required the input axis to be dynamic too.
+    // tensor.dim of the input sizes that axis.  A resized axis is static.
     llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (outputType.isDynamicDim(i)) {
-        if (i >= 2)
-          return rewriter.notifyMatchFailure(op, "unreachable");
+    for (int64_t i : llvm::seq<int64_t>(launch->prefixCount)) {
+      if (outputType.isDynamicDim(i))
         dynSizes.push_back(
             mlir::tensor::DimOp::create(rewriter, loc, input, i));
-      }
     }
     mlir::Value init =
         mlir::tensor::EmptyOp::create(rewriter, loc, outputType.getShape(),
