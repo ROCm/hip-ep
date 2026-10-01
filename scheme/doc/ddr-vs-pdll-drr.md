@@ -86,7 +86,6 @@ Each MLIR API function used from Scheme requires a C++ registration (`Sregister_
 | Extra toolchain | mlir-tblgen | mlir-pdll + mlir-tblgen | **None** |
 | Constraints/rewrites without C++ | No | No | **Yes** |
 | Turing-complete pattern computation | Via C++ | Via C++ | **Native** |
-| Formal pattern verification | Limited | Via PDL IR | No |
 | Interactive debugging | No | No | **Yes** |
 | Filesystem deployment dependency | No | No | **Yes** |
 | FFI maintenance burden | None | None | Real |
