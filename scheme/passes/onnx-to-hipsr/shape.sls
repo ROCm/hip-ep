@@ -119,6 +119,6 @@
 
   (define (populate-shape-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Shape"
-                                      onnx-shape->hipsr type-converter))
+                                      onnx-shape->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr shape)

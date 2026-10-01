@@ -89,8 +89,8 @@
 
   (define (populate-constant-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
-                                      onnx-constant-scalar->arith type-converter)
+                                      onnx-constant-scalar->arith type-converter 1)
     (mlir-register-conversion-pattern patterns "onnx.Constant"
-                                      onnx-constant-tensor->hipsr type-converter))
+                                      onnx-constant-tensor->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr constant)

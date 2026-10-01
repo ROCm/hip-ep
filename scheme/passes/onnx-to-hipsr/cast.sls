@@ -39,6 +39,6 @@
                  -> !output-device))
 
   (define (populate-cast-patterns type-converter patterns ctx)
-    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr type-converter))
+    (mlir-register-conversion-pattern patterns "onnx.Cast" onnx-cast->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr cast)

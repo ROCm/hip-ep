@@ -50,7 +50,7 @@
 
   (define (populate-return-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Return"
-                                      onnx-return->func-return type-converter))
+                                      onnx-return->func-return type-converter 1))
 
   ;;===--------------------------------------------------------------------===;;
   ;; Post-processing: erase dead onnx.NoValue ops

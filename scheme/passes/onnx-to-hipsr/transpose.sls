@@ -76,6 +76,6 @@
 
   (define (populate-transpose-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Transpose"
-                                      onnx-transpose->hipsr type-converter))
+                                      onnx-transpose->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr transpose)

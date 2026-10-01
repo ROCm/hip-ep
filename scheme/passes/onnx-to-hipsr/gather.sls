@@ -96,6 +96,6 @@
 
   (define (populate-gather-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Gather"
-                                      onnx-gather->hipsr type-converter))
+                                      onnx-gather->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr gather)

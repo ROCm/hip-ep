@@ -42,6 +42,6 @@
 
   (define (populate-scatter-nd-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.ScatterND"
-                                      onnx-scatter-nd->hipsr type-converter))
+                                      onnx-scatter-nd->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr scatter-nd)

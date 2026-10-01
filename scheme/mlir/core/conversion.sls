@@ -201,13 +201,13 @@
   ;; type-converter: TypeConverter* uptr passed to the callback
   (define mlir-register-conversion-pattern
     (foreign-procedure "mlir_register_conversion_pattern"
-                       (uptr string scheme-object uptr) void))
+                       (uptr string scheme-object uptr int) void))
 
   ;; Register a Scheme rewrite pattern (2-arg callback: op rewriter).
   ;; No TypeConverter — for local rewrites, not type-converting lowerings.
   (define mlir-register-rewrite-pattern
     (foreign-procedure "mlir_register_rewrite_pattern"
-                       (uptr string scheme-object) void))
+                       (uptr string scheme-object int) void))
 
   ;;===--------------------------------------------------------------------===;;
   ;; RAII Macros

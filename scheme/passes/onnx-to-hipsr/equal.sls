@@ -43,6 +43,6 @@
 
   (define (populate-equal-patterns type-converter patterns ctx)
     (mlir-register-conversion-pattern patterns "onnx.Equal"
-                                      onnx-equal->hipsr type-converter))
+                                      onnx-equal->hipsr type-converter 1))
 
 ) ;; end library (onnx-to-hipsr equal)
