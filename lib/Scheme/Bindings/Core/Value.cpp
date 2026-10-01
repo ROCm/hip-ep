@@ -12,18 +12,27 @@
 
 extern "C" {
 
+// Return the Operation* that defines a Value (i.e. the op whose result this is).
+// value: Value* as uptr (via MLIR C-API opaque pointer)
+// Returns: Operation* as uptr, or 0 if the value is a block argument (no defining op).
 uint64_t mlir_value_get_defining_op(uint64_t value) {
   if (!value) return 0;
   MlirValue cVal{reinterpret_cast<const void*>(value)};
   return reinterpret_cast<uint64_t>(unwrap(cVal).getDefiningOp());
 }
 
+// Test whether a Value is a block argument (rather than an op result).
+// value: Value* as uptr
+// Returns: 1 if the value is a BlockArgument, 0 if it is an OpResult or null.
 int mlir_value_is_block_argument(uint64_t value) {
   if (!value) return 0;
   mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
   return mlir::isa<mlir::BlockArgument>(val) ? 1 : 0;
 }
 
+// Return the zero-based result index of an OpResult Value within its defining op.
+// value: Value* as uptr; must be an OpResult (not a BlockArgument)
+// Returns: result index (>= 0), or -1 if the value is a BlockArgument or null.
 int mlir_value_get_result_number(uint64_t value) {
   if (!value) return -1;
   mlir::Value val = unwrap(MlirValue{reinterpret_cast<const void*>(value)});
