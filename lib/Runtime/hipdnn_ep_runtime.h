@@ -1195,6 +1195,14 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
                             int64_t scale_bits, int64_t seed_bits,
                             int64_t has_seed, int64_t data_type);
 
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,
