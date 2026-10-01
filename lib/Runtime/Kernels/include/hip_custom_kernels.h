@@ -1509,7 +1509,8 @@ HIP_KERNEL_API int hip_pool(
  * pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,

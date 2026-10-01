@@ -4685,8 +4685,11 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
       * mode in {"nearest", "linear"}              — encoded as i64
         - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
       * coordinate_transformation_mode in
-          {"half_pixel", "asymmetric", "align_corners"}  — encoded as i64
-        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+          {"half_pixel", "pytorch_half_pixel", "asymmetric",
+           "align_corners"}  — encoded as i64
+        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+          3 = pytorch_half_pixel (half_pixel, but an output axis of length 1
+          samples input coordinate 0)
       * nearest_mode in {"round_prefer_floor"}      — encoded as i64
         - 0 = round_prefer_floor (only used when mode=nearest)
 

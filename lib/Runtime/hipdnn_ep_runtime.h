@@ -1311,9 +1311,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
