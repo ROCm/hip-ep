@@ -71,6 +71,14 @@ private:
 } // anonymous namespace
 
 
+// Register a Scheme-defined conversion pattern for a named MLIR op.
+// The callback is called as (callback op operands-ref rewriter type-converter)
+// and must return #t on success or #f on failure (pattern does not apply).
+// The SchemeConversionPattern wrapper handles GC locking via LockedSchemeObject.
+// patterns_ptr:       RewritePatternSet* as ptr (scheme-object)
+// op_name:            MLIR op name string, e.g. "onnx.Cast"
+// callback:           Scheme procedure ptr (GC-locked for the pattern's lifetime)
+// type_converter_ptr: TypeConverter* as ptr
 void mlir_register_conversion_pattern(ptr patterns_ptr,
                                       const char* op_name,
                                       ptr callback,
@@ -90,8 +98,8 @@ void mlir_register_conversion_pattern(ptr patterns_ptr,
 // Additional utility FFI functions
 //===----------------------------------------------------------------------===//
 
-// Get HipSR context argument (first function argument)
-// Returns Value* as unsigned-64, or 0 if not found
+// Allocate a new mlir::TypeConverter on the heap.
+// Returns: TypeConverter* as uptr — caller must destroy via mlir_destroy_type_converter
 uint64_t mlir_create_type_converter() {
   mlir::TypeConverter* tc = new mlir::TypeConverter();
   uint64_t result = reinterpret_cast<uint64_t>(tc);
@@ -215,7 +223,9 @@ int mlir_type_converter_is_signature_legal(uint64_t converter_ptr, uint64_t func
   return converter->isSignatureLegal(func_op.getFunctionType()) ? 1 : 0;
 }
 
-// Generic: get the encoding attribute of a type (0 if no encoding)
+// Mark ModuleOp and arith.constant legal in the conversion target.
+// These ops appear in every module and are not lowered by the ONNX→HipSR pass.
+// target_ptr: ConversionTarget* as uptr
 void mlir_conversion_target_add_legal_common_ops(uint64_t target_ptr) {
   if (!target_ptr) return;
   auto* target = reinterpret_cast<mlir::ConversionTarget*>(target_ptr);
@@ -252,7 +262,9 @@ void mlir_conversion_target_add_dynamically_legal_func(
   mlir_log_info("mlir_conversion_target_add_dynamically_legal_func: lambdas registered");
 }
 
-// Mark unknown ops legal if nested inside ComputeOp or PlaceholderOp
+// Allocate a new mlir::RewritePatternSet on the heap for the given MLIRContext.
+// ctx_ptr: MLIRContext* as uptr; returns 0 if null
+// Returns: RewritePatternSet* as uptr — caller must destroy via mlir_destroy_rewrite_pattern_set
 uint64_t mlir_create_rewrite_pattern_set(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
@@ -291,10 +303,10 @@ int mlir_apply_full_conversion(uint64_t module_ptr, uint64_t target_ptr, uint64_
   return 1;
 }
 
-// Set an integer attribute on an operation
-
-// Populate FuncOp type conversion pattern — conversion framework utility,
-// not func dialect bindings per se.
+// Populate the FuncOp type-conversion pattern that rewrites func.func signatures
+// according to the TypeConverter. Required when converting function argument types.
+// patterns_ptr:   RewritePatternSet* as uptr
+// converter_ptr:  TypeConverter* as uptr
 void mlir_populate_func_type_conversion_pattern(
     uint64_t patterns_ptr, uint64_t converter_ptr) {
   if (!patterns_ptr || !converter_ptr) return;

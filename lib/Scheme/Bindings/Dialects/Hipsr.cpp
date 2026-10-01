@@ -26,8 +26,10 @@
 
 extern "C" {
 
-// mlir_get_hipsr_context_arg was removed: the Scheme implementation in
-// (mlir hipsr helpers) using mlir-operation-get-block-argument is sufficient.
+// Populate C++ patterns for onnx.Cast → hipsr.cast lowering.
+// converter_ptr: TypeConverter* as uptr
+// patterns_ptr:  RewritePatternSet* as uptr — patterns are added in-place
+// ctx_ptr:       MLIRContext* as uptr
 void mlir_populate_cast_conversion_patterns(
     uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
   if (!converter_ptr || !patterns_ptr || !ctx_ptr) return;
@@ -39,8 +41,10 @@ void mlir_populate_cast_conversion_patterns(
   mlir::hipsr::populateCastConversionPatterns(*converter, *patterns, ctx);
 }
 
-// Create a RewritePatternSet
-// Returns RewritePatternSet* as uint64_t (opaque handle for Scheme)
+// Change a hipsr.placeholder op's placeholder_type attribute to Barrier.
+// Barrier placeholders compute their shape at runtime from a host-side input
+// rather than from the data graph.
+// op_ptr: Operation* for a hipsr.placeholder op, as uptr
 void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {
   if (!op_ptr) return;
   auto* op = reinterpret_cast<mlir::Operation*>(op_ptr);
@@ -49,8 +53,9 @@ void mlir_placeholder_set_barrier_type(uint64_t op_ptr) {
                                              mlir::hipsr::PlaceholderType::Barrier));
 }
 
-// Copy a named attribute from src_op to dst_op. No-op if attr is absent on src.
-
+// Return the hipsr::ContextType singleton for the given MLIRContext.
+// ctx_ptr: MLIRContext* as uptr
+// Returns: hipsr::ContextType as an opaque type uptr, or 0 if ctx_ptr is null
 uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
@@ -58,7 +63,10 @@ uint64_t mlir_get_hipsr_context_type(uint64_t ctx_ptr) {
       mlir::hipsr::ContextType::get(ctx).getAsOpaquePointer());
 }
 
-// Create a HipSR device memory space attribute.
+// Construct a hipsr::MemorySpaceAttr for Device memory space.
+// Used as the encoding attribute on device tensors (tensor<..., #hipsr.mem<device>>).
+// ctx_ptr: MLIRContext* as uptr
+// Returns: MemorySpaceAttr(Device) as an opaque attribute uptr
 uint64_t mlir_hipsr_make_device_space_attr(uint64_t ctx_ptr) {
   auto *ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
   return reinterpret_cast<uint64_t>(

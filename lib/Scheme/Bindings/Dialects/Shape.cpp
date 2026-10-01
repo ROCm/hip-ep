@@ -13,6 +13,9 @@
 
 extern "C" {
 
+// Return mlir::shape::ShapeType (the !shape.shape type) for the given context.
+// ctx_ptr: MLIRContext* as uptr
+// Returns: ShapeType as opaque type uptr, or 0 if ctx_ptr is null
 uint64_t mlir_get_shape_shape_type(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
@@ -20,6 +23,9 @@ uint64_t mlir_get_shape_shape_type(uint64_t ctx_ptr) {
       mlir::shape::ShapeType::get(ctx).getAsOpaquePointer());
 }
 
+// Return mlir::shape::SizeType (the !shape.size type) for the given context.
+// ctx_ptr: MLIRContext* as uptr
+// Returns: SizeType as opaque type uptr, or 0 if ctx_ptr is null
 uint64_t mlir_get_shape_size_type(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);
@@ -27,6 +33,9 @@ uint64_t mlir_get_shape_size_type(uint64_t ctx_ptr) {
       mlir::shape::SizeType::get(ctx).getAsOpaquePointer());
 }
 
+// Return mlir::shape::WitnessType (the !shape.witness type) for the given context.
+// ctx_ptr: MLIRContext* as uptr
+// Returns: WitnessType as opaque type uptr, or 0 if ctx_ptr is null
 uint64_t mlir_get_shape_witness_type(uint64_t ctx_ptr) {
   if (!ctx_ptr) return 0;
   auto* ctx = reinterpret_cast<mlir::MLIRContext*>(ctx_ptr);

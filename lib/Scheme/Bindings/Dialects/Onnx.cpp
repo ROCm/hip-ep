@@ -15,6 +15,14 @@
 
 // Note: scheme.h included via SchemeMlirBindings.h -> ChezSchemeInterpreter.h
 
+// DEFINE_POPULATE_PATTERNS generates populate_* FFI functions.
+// Each generated function adds C++ conversion patterns for one ONNX op to a
+// RewritePatternSet, using the provided TypeConverter and MLIRContext.
+// All generated functions share the same signature:
+//   converter_ptr: TypeConverter* as uptr
+//   patterns_ptr:  RewritePatternSet* as uptr — patterns are appended in-place
+//   ctx_ptr:       MLIRContext* as uptr
+// None of them return a value; they are no-ops if any pointer is null.
 #define DEFINE_POPULATE_PATTERNS(name, fn) \
   void name(uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) { \
     if (!converter_ptr || !patterns_ptr || !ctx_ptr) return; \
@@ -41,7 +49,11 @@ DEFINE_POPULATE_PATTERNS(mlir_populate_nonzero_conversion_patterns,    populateN
 
 extern "C" {
 
-// onnx.Return → func.return conversion (belongs with ONNX patterns, not func dialect)
+// Populate the onnx.Return → func.return conversion pattern.
+// Placed here (not in Func.cpp) because onnx.Return is an ONNX-dialect concept.
+// converter_ptr: TypeConverter* as uptr
+// patterns_ptr:  RewritePatternSet* as uptr
+// ctx_ptr:       MLIRContext* as uptr
 void mlir_populate_return_conversion_patterns(
     uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t ctx_ptr) {
   if (!converter_ptr || !patterns_ptr || !ctx_ptr) return;
@@ -51,6 +63,12 @@ void mlir_populate_return_conversion_patterns(
     reinterpret_cast<mlir::MLIRContext*>(ctx_ptr));
 }
 
+// Populate C++ patterns for onnx.Constant lowering (external data path).
+// The Scheme patterns handle the inline value path; these C++ patterns are the
+// fallback for DenseResourceElementsAttr from file or ORT memory-mapped data.
+// converter_ptr: TypeConverter* as uptr
+// patterns_ptr:  RewritePatternSet* as uptr
+// ctx_ptr:       unused (context is derived from the pattern set)
 void mlir_populate_constant_conversion_patterns(
     uint64_t converter_ptr, uint64_t patterns_ptr, uint64_t /*ctx_ptr*/) {
   if (!converter_ptr || !patterns_ptr) return;

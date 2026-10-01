@@ -17,6 +17,11 @@
 
 extern "C" {
 
+// Clone a RankedTensorType with a HipSR MemorySpaceAttr encoding.
+// type_ptr:  RankedTensorType* as opaque ptr (ptr, not uint64_t)
+// space_int: mlir::hipsr::MemorySpace enum value (0=Host, 1=Device)
+// Returns:   new type with the memory space set; returns type_ptr unchanged
+//            if the type is not a RankedTensorType (and logs an error)
 ptr mlir_type_set_memory_space(ptr type_ptr, int space_int) {
   mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
@@ -32,7 +37,10 @@ ptr mlir_type_set_memory_space(ptr type_ptr, int space_int) {
   return const_cast<void*>(newType.getAsOpaquePointer());
 }
 
-// Type shape query - returns Scheme list
+// Return the shape of a RankedTensorType as a Scheme list of integers.
+// Uses kDynamic (very negative int64) for dynamic dimensions.
+// type_ptr: RankedTensorType* as opaque ptr
+// Returns:  Scheme list of exact integers, or Snil if not a ranked tensor
 ptr mlir_type_get_shape(ptr type_ptr) {
   if (!type_ptr) return Snil;
   mlir::Type type = mlir::Type::getFromOpaquePointer(type_ptr);
@@ -48,7 +56,9 @@ ptr mlir_type_get_shape(ptr type_ptr) {
   return Snil;
 }
 
-// Get type from value
+// Return the MLIR type of a Value.
+// value_ptr: Value* as opaque ptr
+// Returns:   Type* as opaque ptr, or null if value_ptr is null
 ptr mlir_value_get_type(ptr value_ptr) {
   if (!value_ptr) return nullptr;
   mlir::Value value = mlir::Value::getFromOpaquePointer(value_ptr);
@@ -59,6 +69,8 @@ ptr mlir_value_get_type(ptr value_ptr) {
 // Phase 2: Operation/Value Navigation FFI
 //===----------------------------------------------------------------------===//
 
+// Return 1 if type_ptr is a RankedTensorType, 0 otherwise.
+// type_ptr: Type* as uptr
 int mlir_type_is_ranked_tensor(uint64_t type_ptr) {
   if (!type_ptr) return 0;
   mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
@@ -87,7 +99,12 @@ uint64_t mlir_type_get_element_type(uint64_t type_ptr) {
 
 
 
-// Attach any encoding attribute to a RankedTensorType (generic, dialect-agnostic).
+// Attach any MLIR attribute as the encoding of a RankedTensorType.
+// Dialect-agnostic: works with any attribute type (HipSR MemorySpaceAttr,
+// DLTI attrs, custom attrs, etc.).
+// type_ptr: RankedTensorType* as uptr; returns 0 if not a ranked tensor
+// attr_ptr: Attribute* (opaque) as uptr — the encoding to set
+// Returns:  new RankedTensorType with the encoding attached, as opaque type uptr
 uint64_t mlir_tensor_type_with_encoding(uint64_t type_ptr, uint64_t attr_ptr) {
   if (!type_ptr || !attr_ptr) return 0;
   auto baseType  = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
@@ -98,7 +115,10 @@ uint64_t mlir_tensor_type_with_encoding(uint64_t type_ptr, uint64_t attr_ptr) {
       tensorType.cloneWithEncoding(attr).getAsOpaquePointer());
 }
 
-// Clone tensor type with host memory space
+// Clone a RankedTensorType with the HipSR Host memory space encoding.
+// Produces a host tensor type (tensor<..., #hipsr.mem<host>>).
+// type_ptr: RankedTensorType* as uptr; returns type_ptr unchanged if not ranked tensor
+// Returns:  new type with host encoding as opaque type uptr
 uint64_t mlir_tensor_type_in_host_space(uint64_t type_ptr) {
   if (!type_ptr) return 0;
   mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<void*>(type_ptr));
@@ -113,8 +133,9 @@ uint64_t mlir_tensor_type_in_host_space(uint64_t type_ptr) {
 // MLIR Dialect Conversion Primitives
 //===----------------------------------------------------------------------===//
 
-// Helper: Populate Cast conversion patterns
-// This is kept as a helper since it's a reusable component
+// Return the encoding attribute of a RankedTensorType (e.g. #hipsr.mem<device>).
+// type_ptr: RankedTensorType* as uptr
+// Returns:  Attribute* as opaque uptr, or 0 if the type has no encoding
 uint64_t mlir_type_get_encoding(uint64_t type_ptr) {
   if (!type_ptr) return 0;
   mlir::Type type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
@@ -125,7 +146,8 @@ uint64_t mlir_type_get_encoding(uint64_t type_ptr) {
   return reinterpret_cast<uint64_t>(enc.getAsOpaquePointer());
 }
 
-// Mark ONNX dialect illegal (except NoValueOp)
+// Return 1 if type_ptr is a RankedTensorType with HipSR Device memory space, 0 otherwise.
+// type_ptr: Type* as uptr
 int mlir_type_is_device_tensor(uint64_t type_ptr) {
   if (!type_ptr) return 0;
   auto type = mlir::Type::getFromOpaquePointer(reinterpret_cast<const void*>(type_ptr));
