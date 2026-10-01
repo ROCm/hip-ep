@@ -19,10 +19,21 @@
     mlir-shape.witness-type)
   (import (chezscheme))
 
+  ;; Return the !shape.shape type for the given MLIRContext.
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: shape::ShapeType uptr (opaque type pointer)
   (define mlir-shape.shape-type
     (foreign-procedure "mlir_get_shape_shape_type" (uptr) uptr))
+
+  ;; Return the !shape.size type for the given MLIRContext.
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: shape::SizeType uptr (opaque type pointer)
   (define mlir-shape.size-type
     (foreign-procedure "mlir_get_shape_size_type" (uptr) uptr))
+
+  ;; Return the !shape.witness type for the given MLIRContext.
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: shape::WitnessType uptr (opaque type pointer)
   (define mlir-shape.witness-type
     (foreign-procedure "mlir_get_shape_witness_type" (uptr) uptr))
 

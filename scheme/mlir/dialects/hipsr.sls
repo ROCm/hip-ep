@@ -52,28 +52,47 @@
   ;; HipSR-specific FFI bindings
   ;;===--------------------------------------------------------------------===;;
 
+  ;; Returns 1 if type is a RankedTensorType with a HipSR device MemorySpaceAttr, 0 otherwise.
+  ;; type: Type* uptr (opaque)
   (define mlir-type-is-device-tensor
     (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
 
+  ;; Clone a RankedTensorType with the HipSR host memory space encoding.
+  ;; !type: RankedTensorType uptr — must be a ranked tensor; returned as-is if not
+  ;; Returns: new RankedTensorType uptr with host MemorySpaceAttr set
   (define make-mlir-tensor-in-host-space
     (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
 
+  ;; Return the !hipsr.context type for the given MLIRContext.
+  ;; ctx:     MLIRContext* uptr
+  ;; Returns: hipsr::ContextType uptr (opaque type pointer)
   (define mlir-get-hipsr-context-type
     (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
 
+  ;; Set the placeholder_type attribute of a hipsr.placeholder op to Barrier.
+  ;; Barrier placeholders require the shape region to be fully computed before
+  ;; the kernel launches (unlike Normal placeholders which can be lazy).
+  ;; op: hipsr.PlaceholderOp Operation* uptr — mutated in place
   (define mlir-placeholder-set-barrier-type!
     (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
 
-  ;; Construct a HipSR device memory space attribute.
+  ;; Create a HipSR device MemorySpaceAttr for the given MLIRContext.
+  ;; ctx:     MLIRContext* uptr
+  ;; Returns: mlir::hipsr::MemorySpaceAttr(Device) as opaque Attribute uptr
   (define %make-device-space-attr
     (foreign-procedure "mlir_hipsr_make_device_space_attr" (uptr) uptr))
 
+  ;; Public wrapper for %make-device-space-attr.
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: HipSR device MemorySpaceAttr as opaque Attribute uptr
   (define (make-hipsr-device-space-attr ctx)
     (%make-device-space-attr ctx))
 
-
-  ;; Memory-map a file via HipsrDialect::getOrLoadFileMap.
-  ;; Returns the buffer start address as uptr, or 0 if the file cannot be mapped.
+  ;; Memory-map a file via HipsrDialect::getOrLoadFileMap (lazy, cached per dialect).
+  ;; ctx:      MLIRContext* uptr — used to load the HipsrDialect instance
+  ;; path:     absolute file path string
+  ;; Returns:  buffer start address as uptr, or 0 if the file cannot be mapped.
+  ;;           The buffer lifetime is managed by the dialect; do not free it.
   (define mlir-hipsr-load-file-map
     (foreign-procedure "mlir_hipsr_load_file_map" (uptr string) uptr))
 
@@ -91,6 +110,10 @@
   ;; is the !hipsr.context value.
   ;;===--------------------------------------------------------------------===;;
 
+  ;; Return the !hipsr.context Value* for the enclosing inference function.
+  ;; By HipSR convention, argument 0 of the nearest func.func is the context.
+  ;; op: any Operation* uptr nested inside an inference function
+  ;; Returns: Value* uptr of the context block argument
   (define (mlir-get-hipsr-context-arg op)
     (mlir-operation-get-block-argument op 0))
 
@@ -105,9 +128,13 @@
         ((string=? (mlir-operation-name parent) name) #t)
         (else (loop (mlir-operation-get-parent parent))))))
 
+  ;; Returns #t if op is nested inside a hipsr.compute region, #f otherwise.
+  ;; op: Operation* uptr
   (define (hipsr-has-compute-ancestor? op)
     (has-ancestor-named? op "hipsr.compute"))
 
+  ;; Returns #t if op is nested inside a hipsr.placeholder region, #f otherwise.
+  ;; op: Operation* uptr
   (define (hipsr-has-placeholder-ancestor? op)
     (has-ancestor-named? op "hipsr.placeholder"))
 
