@@ -14,7 +14,7 @@
 // fusions: no new kernel is involved, only the layout op's existing lowering.
 //
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
-// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --scheme-pass="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // hip.transpose is a DPS op, so the rebuilt copy needs a fresh init carrying
 // the quantized element type.

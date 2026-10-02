@@ -7,7 +7,7 @@
 // to the C++ implementation (test/lit/Conversion/onnx-to-hipsr/cast.mlir).
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --onnx-dialect=modeled -allow-unregistered-dialect --conversion-in-scheme="module=passes/onnx-to-hipsr" | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-dialect=modeled -allow-unregistered-dialect --scheme-pass="module=passes/onnx-to-hipsr" | FileCheck %s
 
 // CHECK-LABEL: func.func @cast_chain(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,

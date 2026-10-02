@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
-// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --scheme-pass="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // Per-tensor B: both weight quantization parameters fold into attributes.
 // CHECK-LABEL: func.func @qmatmul

@@ -2,20 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ConversionInScheme.cpp - Generic conversion via Scheme --------------===//
+//===- SchemePass.cpp - Generic pass runner for Scheme-defined passes -----===//
 //
-// General-purpose conversion pass that loads Scheme-defined patterns.
-// The Scheme module is configurable via the 'module' option.
+// Loads a Scheme library by name and calls its run-pass function.
+// The module name is specified via the 'module' option using slash-separated
+// R6RS library name notation (e.g. "passes/onnx-to-hipsr").
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "hip/Scheme/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "hip/Scheme/Interpreter/ChezSchemeInterpreter.h"
 #include "hip/Scheme/Bindings/SchemeMlirBindings.h"
-#include "hip/Dialect/Hipsr/Transforms/Passes.h"
-#include "hip/Dialect/Onnx/IR/OnnxOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -25,14 +24,13 @@
 namespace mlir {
 namespace hipsr {
 
-#define GEN_PASS_DEF_CONVERSIONINSCHEMEPASS
-#include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
+#define GEN_PASS_DEF_SCHEMEPASS
+#include "hip/Scheme/Passes.h.inc"
 
 namespace {
 
-struct ConversionInSchemePass
-    : impl::ConversionInSchemePassBase<ConversionInSchemePass> {
-  using impl::ConversionInSchemePassBase<ConversionInSchemePass>::ConversionInSchemePassBase;
+struct SchemePass : impl::SchemePassBase<SchemePass> {
+  using impl::SchemePassBase<SchemePass>::SchemePassBase;
 
   void getDependentDialects(mlir::DialectRegistry &registry) const override {
     registry.insert<mlir::hipsr::HipsrDialect,
@@ -42,46 +40,38 @@ struct ConversionInSchemePass
   }
 
   void runOnOperation() override {
-
-    // Check if module name is specified
     if (moduleName.empty()) {
       emitError(getOperation().getLoc(),
-                "Scheme module name not specified. Use --conversion-in-scheme=\"module=<name>\"");
+                "Scheme module name not specified. "
+                "Use --scheme-pass=\"module=<name>\"");
       signalPassFailure();
       return;
     }
 
-    // Initialize Scheme runtime if needed
     if (!ChezSchemeInterpreter::isInitialized()) {
       SchemeLogLevel level = ChezSchemeInterpreter::parseLogLevel(logLevel);
       ChezSchemeInterpreter::initialize(level);
     }
+    ChezSchemeInterpreter::setLogLevel(
+        ChezSchemeInterpreter::parseLogLevel(logLevel));
 
-    // Set log level
-    SchemeLogLevel level = ChezSchemeInterpreter::parseLogLevel(logLevel);
-    ChezSchemeInterpreter::setLogLevel(level);
-
-    // Import the specified Scheme module
-    // Convert slash notation to space notation for R6RS library names
-    // e.g., "passes/onnx-to-hipsr" -> "passes onnx-to-hipsr"
+    // Convert slash-separated name to space-separated R6RS library name.
+    // e.g. "passes/onnx-to-hipsr" → "(import (passes onnx-to-hipsr))"
     std::string libraryName = moduleName;
     std::replace(libraryName.begin(), libraryName.end(), '/', ' ');
     std::string importCode = "(import (" + libraryName + "))";
 
-    llvm::errs() << "[ConversionInScheme] About to import: " << importCode << "\n";
+    llvm::errs() << "[SchemePass] About to import: " << importCode << "\n";
 
     if (!ChezSchemeInterpreter::eval(importCode.c_str())) {
       emitError(getOperation().getLoc(), "Failed to import (")
-        << moduleName << ") module";
+          << moduleName << ")";
       signalPassFailure();
       return;
     }
 
-    llvm::errs() << "[ConversionInScheme] Import successful, calling run-pass\n";
-
-    // Call the Scheme run-pass function
-    ModuleOp module = getOperation();
-    ChezSchemeInterpreter::callPassFunction("run-pass", module);
+    llvm::errs() << "[SchemePass] Import successful, calling run-pass\n";
+    ChezSchemeInterpreter::callPassFunction("run-pass", getOperation());
   }
 };
 

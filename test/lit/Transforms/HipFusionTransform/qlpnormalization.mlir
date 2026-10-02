@@ -13,7 +13,7 @@
 // that identity each, which is what separates a real RMS norm from an L2 one.
 //
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
-// RUN: hip-mlir-opt --conversion-in-scheme="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --scheme-pass="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: func.func @qlpnormalization
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x128x64xui16>) -> tensor<1x128x64xui16> {
