@@ -462,6 +462,8 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,

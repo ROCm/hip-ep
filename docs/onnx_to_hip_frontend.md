@@ -155,6 +155,7 @@ runtime coverage.
 | `Div` | `hip.div` | Element-wise division |
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
+| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
 
 Unmapped ops default to `hip.<OpType>`.
 
