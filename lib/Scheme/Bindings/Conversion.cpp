@@ -74,10 +74,11 @@ private:
 class SchemeRewritePattern : public mlir::RewritePattern {
 public:
   SchemeRewritePattern(mlir::MLIRContext *ctx,
-                       ptr schemeCallback, llvm::StringRef opName,
+                       mlir::hipsr::LockedSchemeObject &&schemeCallback,
+                       llvm::StringRef opName,
                        int benefit = 1)
       : RewritePattern(opName, benefit, ctx),
-        callback_(schemeCallback),
+        callback_(std::move(schemeCallback)),  // transfer ownership; exactly one lock
         targetOpName(opName.str()) {}
 
   mlir::LogicalResult
@@ -136,9 +137,13 @@ void mlir_register_rewrite_pattern(ptr patterns_ptr,
                                     ptr callback,
                                     int benefit) {
   auto *patterns = reinterpret_cast<mlir::RewritePatternSet *>(patterns_ptr);
+  // Lock callback here — before any C++ allocation — so it is GC-safe even if
+  // RewritePattern's base-class constructor were ever to invoke Scheme.
+  // Ownership is moved into SchemeRewritePattern::callback_; exactly one lock.
+  mlir::hipsr::LockedSchemeObject lockedCallback(callback);
   mlir_log_info((std::string("Registering Scheme rewrite pattern for ") + op_name).c_str());
   patterns->add<SchemeRewritePattern>(
-      patterns->getContext(), callback, llvm::StringRef(op_name), benefit);
+      patterns->getContext(), std::move(lockedCallback), llvm::StringRef(op_name), benefit);
 }
 
 //===----------------------------------------------------------------------===//
