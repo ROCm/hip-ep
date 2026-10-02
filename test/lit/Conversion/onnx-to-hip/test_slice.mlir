@@ -7,7 +7,8 @@
 //      constants with positive unit stride, so onnx.Slice is rewritten to
 //      a zero-cost tensor.extract_slice.
 //   2. SliceToHip (fallback) — non-constant indices or negative steps fall
-//      through to a native hip.slice op whose runtime is a stub today.
+//      through to a native hip.slice op. Constant fallback parameters are
+//      carried as host attributes; dynamic parameters remain operands.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -67,9 +68,8 @@ module {
     return %r : tensor<2x3xf32>
   }
 
-  // Test 4: negative step forces the native fallback (hip.slice).  The
-  // runtime is a stub today, but the conversion + bufferization pipeline
-  // must still produce valid IR.
+  // Test 4: negative step forces the native fallback (hip.slice). Its constant
+  // controls are stamped onto the op so runtime lowering avoids D2H.
   func.func @test_slice_native_negative_step(%input: tensor<6xf32>) -> tensor<3xf32> {
     // CHECK-LABEL: func.func @test_slice_native_negative_step
     %starts = arith.constant dense<[5]> : tensor<1xi64>
@@ -82,7 +82,7 @@ module {
 
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.empty() : tensor<3xf32>
-    // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<6xf32>, tensor<1xi64>, tensor<1xi64>)
+    // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<6xf32>, tensor<1xi64>, tensor<1xi64>) axes({{.*}} : tensor<1xi64>) steps({{.*}} : tensor<1xi64>) outs({{.*}} : tensor<3xf32>) {axes_attr = array<i64: 0>, ends_attr = array<i64: -1>, starts_attr = array<i64: 5>, steps_attr = array<i64: -2>}
 
     return %r : tensor<3xf32>
   }

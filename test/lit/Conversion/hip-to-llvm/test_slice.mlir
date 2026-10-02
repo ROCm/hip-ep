@@ -4,9 +4,8 @@
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 // Verify that hip.slice lowers to a single wrap_slice call with the full
-// (data, starts, ends, axes-or-null, steps-or-null, output, shape arrays,
-// counts, dtype) parameter pack regardless of whether the optional axes /
-// steps operands are present.
+// device/host pointer pairs for starts, ends, axes and steps, followed by the
+// output, shape arrays, counts and dtype.
 
 module {
   // Case 1: all five inputs present (data, starts, ends, axes, steps).
@@ -38,15 +37,35 @@ module {
         outs(%output : memref<4xf32, 1>)
     return
   }
+
+  func.func @test_slice_host_constants(%ctx: !hip.context,
+                                        %data: memref<6xf32, 1>,
+                                        %starts: memref<1xi64, 1>,
+                                        %ends: memref<1xi64, 1>,
+                                        %axes: memref<1xi64, 1>,
+                                        %steps: memref<1xi64, 1>,
+                                        %output: memref<3xf32, 1>) {
+    hip.slice(%ctx)
+        ins(%data, %starts, %ends :
+            memref<6xf32, 1>, memref<1xi64, 1>, memref<1xi64, 1>)
+        axes(%axes : memref<1xi64, 1>)
+        steps(%steps : memref<1xi64, 1>)
+        outs(%output : memref<3xf32, 1>)
+        {axes_attr = array<i64: 0>, ends_attr = array<i64: -1>,
+         starts_attr = array<i64: 5>, steps_attr = array<i64: -2>}
+
+    return
+  }
 }
 
-// Each variant emits the same 15-parameter wrap_slice signature
-// (4 + 3 pointers, 2 i64 shape ranks, 4 i64 counts/dtype).
+// Each variant emits the same 19-parameter wrap_slice signature.
 
 // CHECK-LABEL: llvm.func @test_slice_full
-// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_slice_minimal
-// CHECK: llvm.mlir.zero : !llvm.ptr
-// CHECK: llvm.mlir.zero : !llvm.ptr
-// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+
+// CHECK-LABEL: llvm.func @test_slice_host_constants
+// CHECK: llvm.alloca {{.*}} x !llvm.array<1 x i64>
+// CHECK: llvm.call @wrap_slice({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32

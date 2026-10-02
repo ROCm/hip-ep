@@ -9,9 +9,9 @@ Slice, ScatterND.
 All six ops are added by the qwen-vision-kernels PR. They share a common
 property: the **shape** of an output depends on a graph-time tensor (repeats
 for Tile, shape for Expand, pads for Pad, indices for GatherND, starts/ends
-for Slice, indices for ScatterND). The runtime D2H-reads these small tensors
-once per call and dispatches a host-built launch -- so the test must pin
-both the value tensors and the data tensor in the same model.
+for Slice, indices for ScatterND). Runtime-dynamic Slice and Pad controls stay
+on the GPU; the test must pin both the value tensors and the data tensor in the
+same model.
 
 Per the runtime dtype tables in lib/Runtime/real/<op>.cpp the supported
 data dtype set is:
@@ -382,7 +382,7 @@ class TestGatherND:
 # `tensor.extract_slice` upstream; this test exercises the runtime fallback
 # kernel by:
 #   (a) feeding `starts` / `ends` as *graph inputs* (non-constant) -- forces
-#       the runtime D2H + host-side resolution path, OR
+#       the device-resident runtime resolution path, OR
 #   (b) using negative steps -- the fold rejects this case so it falls
 #       through to the runtime kernel as well.
 #

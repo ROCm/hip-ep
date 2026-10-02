@@ -17,13 +17,13 @@
  * v1.22.2 (`_PadKernel` -- generic ND, kept as a single fused kernel).
  */
 
-#include "hip_custom_kernels.h"
 #include "debug_log.h"
+#include "hip_custom_kernels.h"
 
-#include <hip/hip_fp16.h>
-#include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
 
 static constexpr int kPadMaxRank = 8;
 
@@ -38,9 +38,10 @@ struct PadParams {
 
 // Returns false if out_coord falls outside the input region for some dim
 // in `constant` mode (so the caller should write the pad_value instead).
-__device__ inline bool compute_input_offset(
-    const PadParams &p, int64_t output_index, int pad_mode,
-    int64_t &input_index_out) {
+__device__ inline bool
+compute_input_offset(const PadParams &p, int64_t output_index, int pad_mode,
+                     const int64_t *__restrict__ lower_pads_device,
+                     int64_t &input_index_out) {
   int64_t remaining = output_index;
   int64_t input_index = 0;
 
@@ -50,7 +51,7 @@ __device__ inline bool compute_input_offset(
     remaining -= out_coord * stride;
 
     int64_t in_dim = p.input_shape[d];
-    int64_t lower = p.lower_pads[d];
+    int64_t lower = lower_pads_device ? lower_pads_device[d] : p.lower_pads[d];
     int64_t in_coord;
 
     if (out_coord < lower) {
@@ -99,35 +100,103 @@ __device__ inline bool compute_input_offset(
 }
 
 template <typename T>
-__global__ void hip_pad_kernel(const T *__restrict__ input,
-                               T *__restrict__ output, PadParams p,
-                               int pad_mode, T pad_value,
-                               int64_t num_output_elements) {
-  int64_t out_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+__global__ void
+hip_pad_kernel(const T *__restrict__ input, T *__restrict__ output, PadParams p,
+               const int64_t *__restrict__ lower_pads_device, int pad_mode,
+               T pad_value_host, const T *__restrict__ pad_value_device,
+               int64_t num_output_elements) {
+  int64_t out_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (out_idx >= num_output_elements)
     return;
 
   int64_t in_idx;
-  if (compute_input_offset(p, out_idx, pad_mode, in_idx)) {
+  if (compute_input_offset(p, out_idx, pad_mode, lower_pads_device, in_idx)) {
     output[out_idx] = input[in_idx];
   } else {
-    output[out_idx] = pad_value;
+    output[out_idx] = pad_value_device ? *pad_value_device : pad_value_host;
   }
+}
+
+struct PadResolveParams {
+  int64_t pads_host[2 * kPadMaxRank];
+  int64_t axes_host[kPadMaxRank];
+  int rank;
+  int num_axes;
+  bool pads_on_device;
+  bool axes_present;
+  bool axes_on_device;
+};
+
+__global__ void hip_pad_resolve_kernel(const int64_t *__restrict__ pads_device,
+                                       const int64_t *__restrict__ axes_device,
+                                       PadResolveParams p,
+                                       int64_t *__restrict__ lower_pads) {
+  if (blockIdx.x != 0 || threadIdx.x != 0)
+    return;
+  for (int d = 0; d < p.rank; ++d)
+    lower_pads[d] = 0;
+
+  // Invalid axes are ignored; duplicate axes use last-writer-wins.
+  for (int i = 0; i < p.num_axes; ++i) {
+    int64_t axis = p.axes_present
+                       ? (p.axes_on_device ? axes_device[i] : p.axes_host[i])
+                       : i;
+    if (axis < 0)
+      axis += p.rank;
+    if (axis < 0 || axis >= p.rank)
+      continue;
+    lower_pads[axis] = p.pads_on_device ? pads_device[i] : p.pads_host[i];
+  }
+}
+
+extern "C" int hip_pad_resolve(void *stream, const int64_t *pads_device,
+                               const int64_t *pads_host,
+                               const int64_t *axes_device,
+                               const int64_t *axes_host, int num_axes, int rank,
+                               int64_t *lower_pads_device) {
+  if (rank <= 0 || rank > kPadMaxRank || num_axes <= 0 ||
+      num_axes > kPadMaxRank || (!pads_device && !pads_host))
+    return -1;
+
+  PadResolveParams p{};
+  p.rank = rank;
+  p.num_axes = num_axes;
+  p.pads_on_device = pads_host == nullptr;
+  p.axes_present = axes_device || axes_host;
+  p.axes_on_device = p.axes_present && axes_host == nullptr;
+  if (pads_host) {
+    for (int i = 0; i < 2 * num_axes; ++i)
+      p.pads_host[i] = pads_host[i];
+  }
+  if (axes_host) {
+    for (int i = 0; i < num_axes; ++i)
+      p.axes_host[i] = axes_host[i];
+  }
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(hip_pad_resolve_kernel, dim3(1), dim3(1), 0, hip_stream,
+                     pads_device, axes_device, p, lower_pads_device);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_pad_resolve launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
 }
 
 extern "C" int hip_pad(void *stream, const void *input, void *output,
                        const int64_t *input_shape_host,
                        const int64_t *output_shape_host,
-                       const int64_t *lower_pads_host, int rank,
-                       int hip_dtype, int pad_mode,
-                       const void *pad_value_host) {
+                       const int64_t *lower_pads, int lower_pads_on_device,
+                       int rank, int hip_dtype, int pad_mode,
+                       const void *pad_value, int pad_value_on_device) {
   if (rank <= 0)
     return 0;
   if (rank > kPadMaxRank) {
     fprintf(stderr,
-            "[custom_kernels] hip_pad: rank=%d exceeds kPadMaxRank=%d\n",
-            rank, kPadMaxRank);
+            "[custom_kernels] hip_pad: rank=%d exceeds kPadMaxRank=%d\n", rank,
+            kPadMaxRank);
     return -1;
   }
 
@@ -137,7 +206,8 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
   for (int d = 0; d < rank; ++d) {
     p.input_shape[d] = input_shape_host[d];
     p.output_shape[d] = output_shape_host[d];
-    p.lower_pads[d] = lower_pads_host[d];
+    if (!lower_pads_on_device)
+      p.lower_pads[d] = lower_pads[d];
     num_output_elements *= output_shape_host[d];
   }
 
@@ -155,55 +225,67 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
-  int grid_size = static_cast<int>(
-      (num_output_elements + kBlockSize - 1) / kBlockSize);
+  int grid_size =
+      static_cast<int>((num_output_elements + kBlockSize - 1) / kBlockSize);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_pad: dtype=%d, rank=%d, mode=%d, num_out=%lld\n",
       hip_dtype, rank, pad_mode, (long long)num_output_elements);
 
+  const int64_t *lower_pads_device =
+      lower_pads_on_device ? lower_pads : nullptr;
+  (void)hipGetLastError();
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16: {
-    __half pv = pad_value_host
-                    ? *static_cast<const __half *>(pad_value_host)
+    __half pv = pad_value && !pad_value_on_device
+                    ? *static_cast<const __half *>(pad_value)
                     : __float2half(0.0f);
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<__half>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+    const __half *pv_device =
+        pad_value_on_device ? static_cast<const __half *>(pad_value) : nullptr;
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<__half>), dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half *>(input),
-                       static_cast<__half *>(output), p, pad_mode, pv,
-                       num_output_elements);
+                       static_cast<__half *>(output), p, lower_pads_device,
+                       pad_mode, pv, pv_device, num_output_elements);
     break;
   }
   case HIP_DTYPE_FLOAT32: {
-    float pv = pad_value_host ? *static_cast<const float *>(pad_value_host)
-                              : 0.0f;
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<float>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+    float pv = pad_value && !pad_value_on_device
+                   ? *static_cast<const float *>(pad_value)
+                   : 0.0f;
+    const float *pv_device =
+        pad_value_on_device ? static_cast<const float *>(pad_value) : nullptr;
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<float>), dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
                        static_cast<const float *>(input),
-                       static_cast<float *>(output), p, pad_mode, pv,
-                       num_output_elements);
+                       static_cast<float *>(output), p, lower_pads_device,
+                       pad_mode, pv, pv_device, num_output_elements);
     break;
   }
   case HIP_DTYPE_INT32: {
-    int32_t pv = pad_value_host
-                     ? *static_cast<const int32_t *>(pad_value_host)
+    int32_t pv = pad_value && !pad_value_on_device
+                     ? *static_cast<const int32_t *>(pad_value)
                      : 0;
+    const int32_t *pv_device =
+        pad_value_on_device ? static_cast<const int32_t *>(pad_value) : nullptr;
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<int32_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int32_t *>(input),
-                       static_cast<int32_t *>(output), p, pad_mode, pv,
-                       num_output_elements);
+                       static_cast<int32_t *>(output), p, lower_pads_device,
+                       pad_mode, pv, pv_device, num_output_elements);
     break;
   }
   case HIP_DTYPE_INT64: {
-    int64_t pv = pad_value_host
-                     ? *static_cast<const int64_t *>(pad_value_host)
+    int64_t pv = pad_value && !pad_value_on_device
+                     ? *static_cast<const int64_t *>(pad_value)
                      : 0;
+    const int64_t *pv_device =
+        pad_value_on_device ? static_cast<const int64_t *>(pad_value) : nullptr;
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<int64_t>),
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int64_t *>(input),
-                       static_cast<int64_t *>(output), p, pad_mode, pv,
-                       num_output_elements);
+                       static_cast<int64_t *>(output), p, lower_pads_device,
+                       pad_mode, pv, pv_device, num_output_elements);
     break;
   }
   default:

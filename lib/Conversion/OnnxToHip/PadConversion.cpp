@@ -227,6 +227,19 @@ struct PadToHip : public mlir::RewritePattern {
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
 
+    mlir::DenseElementsAttr constantValueAttr;
+    if (constantValue) {
+      mlir::DenseElementsAttr dense = getConstantDense(constantValue);
+      if (dense && dense.getNumElements() == 1) {
+        mlir::Type elemTy = dense.getElementType();
+        if (elemTy.isF16() || elemTy.isF32() || elemTy.isInteger(32) ||
+            elemTy.isInteger(64)) {
+          constantValueAttr = dense;
+          constantValue = nullptr;
+        }
+      }
+    }
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
@@ -290,6 +303,15 @@ struct PadToHip : public mlir::RewritePattern {
 
     mlir::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(rewriter.getNamedAttr("mode", modeAttr));
+    if (hasPadsAttr)
+      attrs.push_back(rewriter.getNamedAttr(
+          "pads_attr", rewriter.getDenseI64ArrayAttr(padsAttr)));
+    if (hasAxesAttr)
+      attrs.push_back(rewriter.getNamedAttr(
+          "axes_attr", rewriter.getDenseI64ArrayAttr(axesAttr)));
+    if (constantValueAttr)
+      attrs.push_back(
+          rewriter.getNamedAttr("constant_value_attr", constantValueAttr));
 
     mlir::OperationState state(loc, "hip.pad");
     state.addOperands(operands);

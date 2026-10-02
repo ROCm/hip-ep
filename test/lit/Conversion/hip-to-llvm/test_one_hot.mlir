@@ -17,7 +17,7 @@ module {
             memref<2x2xi64, 1>, memref<i64, 1>, memref<2xf32, 1>)
         outs(%output : memref<2x10x2xf32, 1>) {axis = 1 : i64}
 
-    // CHECK: llvm.call @wrap_one_hot({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_one_hot({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
     return
   }
 }

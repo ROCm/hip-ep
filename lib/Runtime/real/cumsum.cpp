@@ -8,9 +8,8 @@
 //
 // Source: onnxruntime/core/providers/cuda/math/cumsum_impl.cu @ v1.22.2.
 //
-// The axis input is a GPU scalar; we D2H-read it once per call. The lowering
-// already passes data_shape as a host int64 array, so the outer/axis/inner
-// decomposition is done on the host without inspecting GPU tensors.
+// A compile-time axis arrives as a host ABI value. A genuinely dynamic axis
+// remains a GPU scalar and is D2H-read once per call.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -34,10 +33,10 @@ static int cumsum_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   }
 }
 
-int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
+int wrap_cumsum(RuntimeState *state, void *x, void *axis_device, void *y,
                 const int64_t *data_shape, int64_t data_rank,
                 int64_t num_elements, int64_t data_type, int64_t axis_dtype,
-                int64_t exclusive, int64_t reverse) {
+                int64_t axis_host, int64_t exclusive, int64_t reverse) {
   OP_PROFILE(
       "cumsum",
       [&] {
@@ -51,7 +50,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
 
   (void)num_elements;
 
-  if (!state || !x || !axis || !y || !data_shape) {
+  if (!state || !x || !y || !data_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_cumsum: null argument\n");
     return -1;
   }
@@ -73,14 +72,15 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   void *stream = hipdnn_ep_state_get_stream(state);
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
-  // ONNX CumSum-14: axis is a 0-D scalar (single element) of int32 or
-  // int64. The MLIR pipeline doesn't fold this constant for us, so we
-  // synchronously D2H-read it. This adds one stall per CumSum call --
-  // acceptable because the op typically occurs once or twice per graph.
-  int64_t axis_value = 0;
-  if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
+  // Before: every axis tensor was copied D2H and synchronized.
+  // After: a null device pointer selects the compile-time host ABI value;
+  // only genuinely dynamic axes take the synchronized fallback.
+  int64_t axis_value = axis_host;
+  if (!axis_device) {
+    // Nothing to copy.
+  } else if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
     int32_t a32 = 0;
-    hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
+    hipError_t err = hipMemcpyAsync(&a32, axis_device, sizeof(int32_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
@@ -96,7 +96,7 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     }
     axis_value = static_cast<int64_t>(a32);
   } else if (axis_dtype == HIPDNN_EP_DATATYPE_INT64) {
-    hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
+    hipError_t err = hipMemcpyAsync(&axis_value, axis_device, sizeof(int64_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",

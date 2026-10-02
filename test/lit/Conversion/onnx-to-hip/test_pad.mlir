@@ -60,6 +60,19 @@ module {
   // CHECK-LABEL: func.func @pad_axes
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<2xi64>) axes({{.*}} : tensor<1xi64>) outs({{.*}} : tensor<3x6xf32>)
 
+  // Static output shapes still stamp constants because the runtime consumes
+  // the host attributes even when no shape arithmetic is needed.
+  func.func @pad_static_onnx_constants(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %pads = "onnx.Constant"() {value = dense<[1, 1, 1, 1]> : tensor<4xi64>} : () -> tensor<4xi64>
+    %cval = "onnx.Constant"() {value = dense<2.5> : tensor<f32>} : () -> tensor<f32>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<f32>, none) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_static_onnx_constants
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {constant_value_attr = dense<2.500000e+00> : tensor<f32>, pads_attr = array<i64: 1, 1, 1, 1>}
+
   // Dynamic output dims with a compile-time constant `pads`: the
   // pattern resolves each padded axis's output extent to
   //   data_dim[i] + pads[i] + pads[i + N]
@@ -82,7 +95,7 @@ module {
   // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
   // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>) {pads_attr = array<i64: 1, 1, 2, 1>}
 
   // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
   // lowerOnnxConstants turns into a carrier. The pre-lowering PadShapeFold
@@ -104,7 +117,7 @@ module {
   // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: tensor.extract_slice
   // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>) {pads_attr = array<i64: 1, 1, 2, 1>}
 
   // Dynamic output dims with a non-constant `pads` (function arg): the
   // per-axis padding amounts are read on the HOST through a synchronized

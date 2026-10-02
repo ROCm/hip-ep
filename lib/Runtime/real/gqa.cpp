@@ -84,89 +84,6 @@
 // JIT link / native import.
 //===----------------------------------------------------------------------===//
 
-//===----------------------------------------------------------------------===//
-// Dispatch helpers (shared by the fused and decomposed paths)
-//===----------------------------------------------------------------------===//
-
-// Env-var gate to cache seqlens_k_val across the GQA layers in a single
-// forward pass. Default ON. Caching skips the per-layer
-// hipMemcpyAsync(D2H) + hipStreamSynchronize on both paths after the first
-// GQA call -- a 32-layer Llama decode then issues one D2H instead of 32,
-// eliminating ~30-45 ms/token of pipeline stalls on Strix Halo. Set
-// HIPDNN_EP_GQA_CACHE_SEQLENS=0 to disable (escape hatch for running against
-// an older per-model bitcode without the begin_compute export, or for A/B
-// measurement).
-//
-// Correctness depends on the EP-side MlirCustomOp::Compute() invoking
-// hipdnn_ep_runtime_begin_compute(state) at the start of each forward pass to
-// invalidate the cache. Older per-model bitcode without that symbol exported
-// is detected at session creation and produces a LOG(WARNING) directing the
-// user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0 (otherwise the cache would survive
-// across forward passes and return stale total_seq values).
-static bool gqa_cache_seqlens_enabled() {
-  static const bool enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
-    // Default on; explicit "0" disables.
-    return !v || std::strcmp(v, "0") != 0;
-  }();
-  return enabled;
-}
-
-// Sentinel returned by read_seqlens_k_for_dispatch when the pre-dispatch read
-// is not applicable (multi-batch or missing seqlens_k_ptr) or failed (D2H copy
-// / stream sync error). Outside the valid range of real seqlens_k values (-1 is
-// ORT's prefill sentinel; 0..max_seq are real). Callers must treat this as "no
-// pre-read available" and fall back to the legacy per-call D2H readback site
-// they already implement.
-static constexpr int32_t kSeqlensKNotRead = -2;
-
-// Read seqlens_k_val from device (or the per-Compute() cache when
-// HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
-// dispatch decision. Two purposes:
-//   1. Give the smart-dispatch heuristic access to total_seq for the decode
-//      case (sq == 1) so it can compare against gqa_fused_decode_max_t().
-//   2. Populate the per-Compute() cache for B == 1 so subsequent GQA layers
-//      within the same forward pass reuse the value with zero D2H.
-//
-// Applies to B == 1 regardless of sq (both prefill and decode share the same
-// seqlens_k pointer and benefit from caching). On B != 1 we return
-// kSeqlensKNotRead because per-batch validation in the multi-batch path
-// requires reading every entry; the legacy readback site there handles it.
-//
-// Behaviour:
-//   - cache enabled and hit:  zero D2H, return cached value.
-//   - cache enabled and miss: one D2H + sync, populate cache, return.
-//   - cache disabled:         one D2H + sync, return (no cache write).
-//   - B != 1, !seqlens_k_ptr, or D2H/sync failure: return kSeqlensKNotRead.
-//
-// The returned int32_t is the raw device value: -1 is ORT's prefill sentinel
-// (callers map it to total_seq=sq, past_len=0); 0..max_seq is the live
-// (total_seq - 1).
-static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
-                                           const void *seqlens_k_ptr, int64_t B,
-                                           RuntimeState *state) {
-  if (!seqlens_k_ptr || B != 1)
-    return kSeqlensKNotRead;
-
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
-      state->seqlens_k_cached_ptr == seqlens_k_ptr)
-    return state->seqlens_k_cached_val;
-
-  int32_t seqlens_k_val = 0;
-  if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                     hipMemcpyDeviceToHost, stream) != hipSuccess)
-    return kSeqlensKNotRead;
-  if (hipStreamSynchronize(stream) != hipSuccess)
-    return kSeqlensKNotRead;
-
-  if (gqa_cache_seqlens_enabled() && state) {
-    state->seqlens_k_cached_val = seqlens_k_val;
-    state->seqlens_k_cached_ptr = seqlens_k_ptr;
-    state->seqlens_k_cached_valid = true;
-  }
-  return seqlens_k_val;
-}
-
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
@@ -309,18 +226,37 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   const bool quantized = (kv_format != KvCacheFormat::Fp16);
   const void *k_sc = quantized ? k_scale : nullptr;
   const void *v_sc = quantized ? v_scale : nullptr;
-  if (past_key && past_len > 0 && past_key != present_key) {
-    // Separate-buffer concat: needs host-side past_len for stride computation.
-    if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
-                                past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, k_sc, copy_lo) != 0)
-      return -1;
-    if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
-                                past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz, kv_dtype, v_sc, copy_lo) != 0)
-      return -1;
-  } else {
-    // In-place append: kernel can read past_len from device via seqlens_k_ptr.
+  if (past_key && past_key != present_key) {
+    // Copy the conservative host-known cache extent, then append new tokens at
+    // the device-derived position. This avoids reading seqlens_k on the host
+    // while still handling separate past/present allocations and strides.
+    const int cache_elem_sz = quantized ? 1 : elem_sz;
+    const int copy_seq = std::min(past_buf_seq, present_seq);
+    const int copy_begin = std::min(std::max(copy_lo, 0), copy_seq);
+    const size_t width =
+        static_cast<size_t>(copy_seq - copy_begin) * d * cache_elem_sz;
+    const size_t src_pitch =
+        static_cast<size_t>(past_buf_seq) * d * cache_elem_sz;
+    const size_t dst_pitch =
+        static_cast<size_t>(present_seq) * d * cache_elem_sz;
+    const size_t byte_off = static_cast<size_t>(copy_begin) * d * cache_elem_sz;
+    if (width > 0) {
+      if (hipMemcpy2DAsync(static_cast<char *>(present_key) + byte_off,
+                           dst_pitch,
+                           static_cast<const char *>(past_key) + byte_off,
+                           src_pitch, width, static_cast<size_t>(B) * G,
+                           hipMemcpyDeviceToDevice, stream) != hipSuccess)
+        return -1;
+      if (hipMemcpy2DAsync(static_cast<char *>(present_value) + byte_off,
+                           dst_pitch,
+                           static_cast<const char *>(past_value) + byte_off,
+                           src_pitch, width, static_cast<size_t>(B) * G,
+                           hipMemcpyDeviceToDevice, stream) != hipSuccess)
+        return -1;
+    }
+  }
+  {
+    // The append kernel reads each batch's live past length from device.
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
                                 present_seq, past_len, seqlens_k_ptr, elem_sz,
                                 kv_dtype, k_sc) != 0)
@@ -359,10 +295,6 @@ static int gqa_forward_fused(
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
 
-  // B==1 pre-read (cached per Compute) feeds host past_len where needed.
-  const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
-
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
 
@@ -374,43 +306,9 @@ static int gqa_forward_fused(
     const void *kSrc = key;
     const void *vSrc = value;
 
-    // past_len only needed host-side for the concat branch (separate buffers);
-    // in-place caches let the kernels read it from device.
-    int64_t past_len = 0;
-    const bool need_host_past_len =
-        seqlens_k_ptr && past_key && past_key != present_key;
-    if (need_host_past_len) {
-      int32_t seqlens_k_val = 0;
-      if (seqlens_k_pre != kSeqlensKNotRead) {
-        seqlens_k_val = seqlens_k_pre;
-      } else {
-        if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess)
-          return -1;
-        if (hipStreamSynchronize(stream) != hipSuccess)
-          return -1;
-      }
-      if (seqlens_k_val < 0) {
-        past_len = 0; // ORT prefill sentinel
-      } else {
-        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-        int64_t past_len_check = total_seq - sq;
-        if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
-            past_len_check > past_buf_seq) {
-          fprintf(stderr,
-                  "gqa_forward_fused (decode): invalid seqlens_k[0]+1=%lld "
-                  "(sq=%lld, past_len=%lld, present_seq=%lld, "
-                  "past_buf_seq=%lld)\n",
-                  (long long)total_seq, (long long)sq,
-                  (long long)past_len_check, (long long)present_seq,
-                  (long long)past_buf_seq);
-          return -1;
-        }
-        past_len = past_len_check;
-      }
-    } else if (!seqlens_k_ptr) {
-      past_len = skv - sq;
-    }
+    // Device-aware kernels derive the live offset from seqlens_k. The host
+    // fallback is used only when no device sequence length was supplied.
+    int64_t past_len = skv - sq;
     if (past_len < 0)
       past_len = 0;
 
@@ -524,14 +422,9 @@ static int gqa_forward_fused(
             use_smooth_softmax ? 1 : 0, kv_dtype,
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       } else {
-        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
-        // sees the length the kernel will actually scan without adding a sync.
-        // For B>1 this is the host-known shape length, which is the upper
-        // bound; the nearest-neighbour lookup answers it from the closest
-        // measured length either way.
+        // Configuration is selected from the host-stable cache extent. The
+        // kernel independently clamps work to each batch's device seqlens_k.
         int effective_skv = static_cast<int>(skv);
-        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
-          effective_skv = seqlens_k_pre + 1;
         const hipdnn_ep::GqaDecodeRequest request{
             kv_dtype,
             static_cast<int>(B),
@@ -577,55 +470,10 @@ static int gqa_forward_fused(
   //===------------------------------------------------------------------===//
   // Prefill (sq > 1)
   //===------------------------------------------------------------------===//
+  // Prefill geometry is host-stable. Initial prefill has skv == sq; when a
+  // device seqlens_k is present, RoPE/cache-update kernels consume it directly.
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
-  if (seqlens_k_ptr) {
-    int32_t seqlens_k_val = 0;
-    if (seqlens_k_pre != kSeqlensKNotRead) {
-      seqlens_k_val = seqlens_k_pre;
-    } else if (B > 1) {
-      std::vector<int32_t> seqlens_k_host(B);
-      if (hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
-                         B * sizeof(int32_t), hipMemcpyDeviceToHost,
-                         stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
-        return -1;
-      seqlens_k_val = seqlens_k_host[0];
-      for (int64_t b = 1; b < B; ++b) {
-        if (seqlens_k_host[b] != seqlens_k_val) {
-          fprintf(stderr,
-                  "gqa_forward_fused: per-batch seqlens_k not supported "
-                  "(batch %lld has %d, batch 0 has %d)\n",
-                  (long long)b, seqlens_k_host[b], seqlens_k_val);
-          return -1;
-        }
-      }
-    } else {
-      if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                         hipMemcpyDeviceToHost, stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
-        return -1;
-    }
-    if (seqlens_k_val < 0) {
-      total_seq = sq; // ORT prefill sentinel
-      past_len = 0;
-    } else {
-      total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
-          past_len > past_buf_seq) {
-        fprintf(
-            stderr,
-            "gqa_forward_fused (prefill): invalid seqlens_k[0]+1=%lld "
-            "(sq=%lld, past_len=%lld, present_seq=%lld, past_buf_seq=%lld)\n",
-            (long long)total_seq, (long long)sq, (long long)past_len,
-            (long long)present_seq, (long long)past_buf_seq);
-        return -1;
-      }
-    }
-  }
   if (past_len < 0)
     past_len = 0;
 
@@ -677,13 +525,13 @@ static int gqa_forward_fused(
     if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(H), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
+                     static_cast<int>(past_len), seqlens_k_ptr,
                      static_cast<int>(elem_sz)) != 0)
       return -1;
     if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(G), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
+                     static_cast<int>(past_len), seqlens_k_ptr,
                      static_cast<int>(elem_sz)) != 0)
       return -1;
     qSrc = d_Qroped;
@@ -943,33 +791,6 @@ static bool gqa_fused_decode_disabled() {
   return disabled;
 }
 
-// Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
-// exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
-// instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
-// uses a serial-over-time scheme with cross-wave reductions on the critical
-// path of every iteration, so it loses to the GEMM-based decomposed path on
-// long sequences (measured ~12x slower at total_seq~=2048 on Strix Halo). When
-// flash_decode is eligible we keep the fused branch active even at long
-// total_seq -- flash_decode is exactly what this threshold was working around.
-//
-// Default 256 is a starter value pending a full threshold sweep. Set
-// HIPDNN_EP_GQA_FUSED_DECODE_MAX_T=N to override (or a very large value like
-// 999999 to effectively disable smart-dispatch and preserve the always-fused-
-// when-eligible behaviour for A/B testing).
-static int gqa_fused_decode_max_t() {
-  static const int max_t = [] {
-    const char *v = std::getenv("HIPDNN_EP_GQA_FUSED_DECODE_MAX_T");
-    if (!v || !*v)
-      return 256;
-    char *end = nullptr;
-    long parsed = std::strtol(v, &end, 10);
-    if (end == v || parsed <= 0)
-      return 256;
-    return static_cast<int>(parsed);
-  }();
-  return max_t;
-}
-
 //===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
 //===----------------------------------------------------------------------===//
@@ -1223,44 +1044,7 @@ static int gqa_forward_hipblaslt(
   bool gemm_fp32 = (elem_sz == 4);
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
-  // Pre-dispatch read of seqlens_k (or per-Compute() cache lookup for B==1
-  // when HIPDNN_EP_GQA_CACHE_SEQLENS=1). Applies to both prefill (sq>1) and
-  // decode (sq==1) for B==1 -- both share the same seqlens_k pointer and
-  // benefit from caching. The result is reused by the fused-path
-  // need_host_past_len block (eliminating its inline D2H) and the
-  // decomposed-path readback site (consumed unconditionally instead of issuing
-  // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
-  // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
-  // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
-  int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
-  int64_t total_seq_pre = -1;
-  if (bidirectional_no_past) {
-    // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
-    // means "all skv keys valid", there is no past. total_seq is exactly skv --
-    // do NOT apply the +1 decode convention (would over-count and trip the
-    // smart-dispatch size check / fused validation). See the matching exemption
-    // at the decomposed-path total_seq derivation below.
-    total_seq_pre = skv;
-  } else if (seqlens_k_pre != kSeqlensKNotRead) {
-    // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values are
-    // 0..max_seq; total_seq = seqlens_k_val + 1.
-    total_seq_pre =
-        (seqlens_k_pre < 0) ? sq : static_cast<int64_t>(seqlens_k_pre) + 1;
-  }
-
   bool fused_d = (d == 64 || d == 128 || d == 256);
-
-  // Smart dispatch: the legacy fused decode kernel (hip_gqa_fused_decode)
-  // serializes over the time dimension (cross-wave reduction tree on the
-  // critical path of every iteration). For total_seq above
-  // gqa_fused_decode_max_t() the GEMM-based decomposed path wins (~12x at
-  // total_seq=2048 on Strix Halo), so route long sequences there. When we can't
-  // read total_seq (B>1, no seqlens_k, or D2H failure) default to permitting
-  // fused -- preserves behaviour on workloads that pass the predicate today.
-  bool size_ok_for_fused =
-      (total_seq_pre < 0) ||
-      (total_seq_pre <= static_cast<int64_t>(gqa_fused_decode_max_t()));
 
   // hip_gqa_fused_decode implements neither the sliding window nor the head
   // sink / smooth softmax, so a windowed or sink decode cannot use it -- gate
@@ -1299,8 +1083,7 @@ static int gqa_forward_hipblaslt(
   bool fused_predicate =
       (!gqa_fused_decode_disabled() && !no_causal && !attention_bias &&
        fused_fp16 && fused_d && sq == 1 && kv_inputs_ok && present_key &&
-       present_value && sliding_ok_for_fused && sink_ok_for_fused &&
-       size_ok_for_fused);
+       present_value && sliding_ok_for_fused && sink_ok_for_fused);
 
   //===--------------------------------------------------------------------===//
   // Fused GQA decode fallback (sq == 1, d in {64,128,256}, KV cache on).
@@ -1323,55 +1106,9 @@ static int gqa_forward_hipblaslt(
     const void *kSrc = key;
     const void *vSrc = value;
 
-    // For fused decode, kernels read seqlens_k from device memory directly.
-    // past_len is only needed on host for the concat branch (separate buffers);
-    // for in-place caches (past_key == present_key) it is unused on host.
-    int64_t past_len = 0;
-    bool need_host_past_len =
-        seqlens_k_ptr && past_key && past_key != present_key;
-    if (need_host_past_len) {
-      // Reuse the value the pre-dispatch helper already read above. Fall back
-      // to a per-call D2H + sync only when the pre-read was not applicable
-      // (multi-batch, or copy/sync failure). For the asym Llama decode hot path
-      // (B==1, sq==1) the pre-read is always applicable, so this branch becomes
-      // pure host arithmetic.
-      int32_t seqlens_k_val = 0;
-      if (seqlens_k_pre != kSeqlensKNotRead) {
-        seqlens_k_val = seqlens_k_pre;
-      } else {
-        if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess) {
-          return -1;
-        }
-        if (hipStreamSynchronize(stream) != hipSuccess) {
-          return -1;
-        }
-      }
-
-      // ORT prefill sentinel: when there is no past KV yet, the producer
-      // initialises seqlens_k[b] to -1 (so seqlens_k[b]+1 == 0). Treat that as
-      // a fresh prefill (past_len=0) instead of rejecting it as invalid.
-      if (seqlens_k_val < 0) {
-        past_len = 0;
-      } else {
-        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-        int64_t past_len_check = total_seq - sq;
-        if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
-            past_len_check > past_buf_seq) {
-          fprintf(stderr,
-                  "gqa_forward_hipblaslt (fused decode): invalid "
-                  "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
-                  "present_seq=%lld, past_buf_seq=%lld)\n",
-                  (long long)total_seq, (long long)sq,
-                  (long long)past_len_check, (long long)present_seq,
-                  (long long)past_buf_seq);
-          return -1;
-        }
-        past_len = past_len_check;
-      }
-    } else if (!seqlens_k_ptr) {
-      past_len = skv - sq;
-    }
+    // Fused kernels consume live sequence lengths from device. Host arithmetic
+    // is only a fallback for callers without seqlens_k.
+    int64_t past_len = skv - sq;
     if (past_len < 0)
       past_len = 0;
 
@@ -1485,98 +1222,18 @@ static int gqa_forward_hipblaslt(
   // features requiring sliding window / smooth softmax / head sink / fp32)
   //===--------------------------------------------------------------------===//
 
-  // D2H readback of seqlens_k is required here because hipBLASLt descriptor
-  // creation and workspace sizing are host-side APIs that need total_seq. For
-  // B == 1 the value was already read (and cached when
-  // HIPDNN_EP_GQA_CACHE_SEQLENS=1) by the pre-dispatch helper above; we just
-  // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
-  // because per-batch validation requires reading every entry and we have no
-  // validated multi-batch decode workload yet.
+  // hipBLASLt descriptors and workspace use the host-stable present-cache
+  // extent. Device-aware RoPE and cache-update kernels still consume live
+  // per-batch seqlens_k without a host read or an equality check.
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
-  // no_causal (Whisper encoder self-attn + decoder cross-attn) is bidirectional
-  // with NO past KV: the converters emit a compile-time seqlens_k = skv meaning
-  // "all skv keys are valid". The ORT decode convention below (seqlens_k[b] =
-  // PAST tokens => total_seq = seqlens_k+1) does NOT apply here -- it would
-  // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
-  // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
-  // skv=1500 => bogus past_len=1499). Gated on bidirectional_no_past (not raw
-  // no_causal): an onnx.Attention that DOES carry a past KV cache keeps the
-  // standard seqlens_k path below regardless of is_causal. For the no-past case
-  // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
+  // Bidirectional attention with no past cache consumes the complete key/value
+  // input, so its query origin is zero even when sq != skv (cross-attention).
+  // Other paths use the host cache extent as their conservative query origin;
+  // device-aware RoPE/cache kernels override it from seqlens_k.
   if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
-  } else if (seqlens_k_ptr) {
-    int32_t seqlens_k_val = 0;
-
-    if (seqlens_k_pre != kSeqlensKNotRead) {
-      seqlens_k_val = seqlens_k_pre;
-    } else if (B > 1) {
-      std::vector<int32_t> seqlens_k_host(B);
-      if (hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
-                         B * sizeof(int32_t), hipMemcpyDeviceToHost,
-                         stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
-        return -1;
-      seqlens_k_val = seqlens_k_host[0];
-      for (int64_t b = 1; b < B; ++b) {
-        if (seqlens_k_host[b] != seqlens_k_val) {
-          fprintf(stderr,
-                  "gqa_forward_hipblaslt: per-batch seqlens_k not yet "
-                  "supported (batch %lld has %d, batch 0 has %d)\n",
-                  (long long)b, seqlens_k_host[b], seqlens_k_val);
-          return -1;
-        }
-      }
-    } else {
-      // Defensive fallback for B == 1 when the pre-dispatch helper bailed out
-      // (D2H or sync failure). Rare path; not cached because the same failure
-      // mode would have prevented the helper from caching too.
-      //
-      // Both failures are reported rather than returned bare: this is the one
-      // place the decomposed path can fail before it has done any work, and a
-      // silent -1 here surfaces only as a zero-filled attention output, which
-      // looks like a kernel bug rather than a seqlens_k that could not be read.
-      hipError_t cp =
-          hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                         hipMemcpyDeviceToHost, stream);
-      if (cp != hipSuccess) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: could not read seqlens_k from %p: %s\n",
-                seqlens_k_ptr, hipGetErrorString(cp));
-        return -1;
-      }
-      hipError_t sy = hipStreamSynchronize(stream);
-      if (sy != hipSuccess) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: sync after seqlens_k read failed: %s\n",
-                hipGetErrorString(sy));
-        return -1;
-      }
-    }
-
-    // ORT prefill sentinel: when there is no past KV yet, the producer
-    // initialises seqlens_k[b] to -1. Treat that as a fresh prefill
-    // (past_len=0, total_seq=sq) instead of rejecting it as invalid.
-    if (seqlens_k_val < 0) {
-      total_seq = sq;
-      past_len = 0;
-    } else {
-      total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
-          past_len > past_buf_seq) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
-                "(sq=%lld, past_len=%lld, present_seq=%lld, "
-                "past_buf_seq=%lld)\n",
-                (long long)total_seq, (long long)sq, (long long)past_len,
-                (long long)present_seq, (long long)past_buf_seq);
-        return -1;
-      }
-    }
   }
   if (past_len < 0)
     past_len = 0;
@@ -1871,73 +1528,10 @@ static int gqa_forward_hipblaslt(
 
   const bool chunked = (sq_chunk < sq);
 
-  //===--------------------------------------------------------------------===//
-  // Per-chunk key bound recovered from the additive mask
-  //
-  // For a bidirectional op the diagonal bound above is unavailable, so this is
-  // the only thing that can bound a chunk from above -- and for a WINDOWED
-  // bidirectional op it is also what keeps the narrowing correct, since the
-  // diagonal would cut through the mask's same-image-block leg. Where such an
-  // op carries an additive mask, the mask already states which keys are
-  // attended, and the entries it rules out are exactly the ones a chunk can
-  // drop: an additive bias at or below -65504 contributes exactly zero to the
-  // softmax, so dropping it is bit-exact. That makes this a recovery of a bound
-  // the graph already contains rather than an assumption about the model, which
-  // is what the alternative would have been -- AttentionWindowFold cannot
-  // supply it, because the reach of Gemma-4's same-image-block leg is a
-  // property of the input, not of the mask's shape.
-  //
-  // Only worth doing when the op is actually chunked: a single chunk spans
-  // every query row, so its bound is the whole key range either way.
-  //
-  // One kernel over half the mask plus one D2H of a few ints per call, on each
-  // of Gemma-4's 30 layers: ~250 MB read apiece, against the ~6 GB of score
-  // traffic it removes on the 5 global ones and correctness on the 25 local
-  // ones. The mask is shared across layers of a kind, so a cache keyed on the
-  // bias pointer and this call's geometry would collapse the 30 scans to 2 and
-  // their stream syncs with them; that is left for later because the scan is
-  // already small against the score GEMMs it bounds, and because such a cache
-  // belongs on RuntimeState rather than in a file-static -- per-session, and so
-  // safe against a second session and against teardown. A failure anywhere here
-  // leaves the vector empty and the op scores its full range, which is exactly
-  // the old behaviour.
-  //===--------------------------------------------------------------------===//
-  std::vector<int32_t> mask_chunk_hi;
-  if (chunked && chunk_narrow_ok && !causal_narrow_ok && attention_bias &&
-      !use_no_expand) {
-    const int64_t nchunks = (sq + sq_chunk - 1) / sq_chunk;
-    // The scan's output lands at the front of the state workspace, which the
-    // layout below re-sizes and re-partitions for the score buffers. Both uses
-    // are safe together: the result is copied out and the stream synchronized
-    // before that happens, so the region is dead by the time it is reused, and
-    // ensure_workspace only ever grows. On a warm call the workspace already
-    // dwarfs the few hundred bytes wanted here and the request is a no-op; only
-    // a cold first inference pays an extra allocation for it.
-    const size_t hi_bytes = static_cast<size_t>(nchunks) * sizeof(int32_t);
-    int32_t *d_hi = nullptr;
-    if (hipdnn_ep_state_ensure_workspace(state, hi_bytes) == 0)
-      d_hi = static_cast<int32_t *>(hipdnn_ep_state_get_workspace(state));
-    if (d_hi &&
-        hip_gqa_bias_key_extent(
-            stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-            static_cast<int>(total_seq), static_cast<int>(sq),
-            static_cast<int>(sq_chunk), static_cast<int>(past_len),
-            static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
-      std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
-      if (hipMemcpyAsync(hi.data(), d_hi, hi_bytes, hipMemcpyDeviceToHost,
-                         stream) == hipSuccess &&
-          hipStreamSynchronize(stream) == hipSuccess)
-        mask_chunk_hi = std::move(hi);
-    }
-    // Never expected: only a failed scratch allocation or a failed launch gets
-    // here, and both mean the prefill silently reverts to scoring every key.
-    if (mask_chunk_hi.empty())
-      fprintf(stderr,
-              "gqa_forward_hipblaslt: mask key-extent recovery failed; "
-              "scoring the full key range for sq=%lld total_seq=%lld\n",
-              (long long)sq, (long long)total_seq);
-  }
+  // Bidirectional chunks keep the stable full host-shape upper bound. The old
+  // device-mask scan synchronized a D2H vector of per-chunk extents, making
+  // capture depend on live data. The softmax still applies the device bias;
+  // this only trades the narrowing optimization for padded-column overcompute.
 
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero,
@@ -2032,18 +1626,6 @@ static int gqa_forward_hipblaslt(
         const int64_t h = past_len + q0 + c;
         if (h < k_hi)
           k_hi = h;
-      } else if (!mask_chunk_hi.empty()) {
-        // Bidirectional op, windowed or not: no diagonal bound is available,
-        // but the mask stated one. The stored value is the highest key position
-        // any row in this chunk attends, so the exclusive end is one past it.
-        // It is floored at the diagonal, so this is never looser than the bound
-        // a causal op would take.
-        const size_t idx = static_cast<size_t>(q0 / sq_chunk);
-        if (idx < mask_chunk_hi.size()) {
-          const int64_t h = static_cast<int64_t>(mask_chunk_hi[idx]) + 1;
-          if (h < k_hi)
-            k_hi = h;
-        }
       }
       if (local_window_size > 0) {
         // The chunk's first query row has the lowest lower bound in the chunk,
@@ -2268,12 +1850,12 @@ static int gqa_forward_hipblaslt(
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
+                             static_cast<int>(past_len), seqlens_k_ptr,
                              static_cast<int>(elem_sz)));
       HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(G), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
+                             static_cast<int>(past_len), seqlens_k_ptr,
                              static_cast<int>(elem_sz)));
 
       qSrc = d_Qroped;
@@ -2290,8 +1872,9 @@ static int gqa_forward_hipblaslt(
     }
 
     // ---- Steps 4-5: KV Cache Update (concat/append into BNSD present) ----
-    // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
-    // no D2H); the expand path already read total_seq host-side so passes null.
+    // Every causal cache update hands seqlens_k to the append kernel; GEMM
+    // layout selection no longer changes whether the live offset stays device
+    // resident.
     if (present_key && present_value) {
       // bidirectional_no_past (Whisper encoder / cross-attn, KV-sharing decoder
       // layers): never hand seqlens_k to the append kernel (it would apply the
@@ -2322,7 +1905,7 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
+          !bidirectional_no_past ? seqlens_k_ptr : nullptr,
           static_cast<int>(elem_sz), static_cast<int>(kv_lo),
           bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
           /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
@@ -2724,18 +2307,9 @@ static int gqa_forward_fused_from_fp32(
   const bool packed_qkv = (!key && !value);
   const bool need_rope = do_rotary && cos_cache && sin_cache;
 
-  int64_t past_len = 0;
-  const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k, B, state);
-  if (seqlens_k_pre == -1) {
-    past_len = 0;
-  } else if (seqlens_k_pre >= 0) {
-    past_len = static_cast<int64_t>(seqlens_k_pre) + 1 - sq;
-    if (past_len < 0)
-      past_len = 0;
-  } else if (skv > sq) {
-    past_len = skv - sq;
-  }
+  // Size the adapter from the host-visible maximum. The fused kernels use
+  // seqlens_k on device for the live RoPE/cache offsets.
+  int64_t past_len = std::max<int64_t>(skv - sq, 0);
 
   const int64_t q_elems =
       packed_qkv ? (B * sq * (H + 2 * G) * d) : (B * sq * H * d);

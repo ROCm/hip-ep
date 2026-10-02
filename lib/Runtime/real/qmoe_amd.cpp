@@ -37,11 +37,10 @@
 //   3. routed branch -> acc                                     [latent]
 //        decode (num_tokens == 1): hip_qmoe_amd_decode_fused, three launches
 //          that index the expert weights on the device
-//        prefill on an arch with WMMA: hip_qmoe_amd_prefill_grouped_wmma,
-//          GPU bucketing feeding one ragged expert-batched GEMM per FC
-//        otherwise: hip_qmoe_amd_bucket_tokens -> count readback -> per
-//          active expert gather(h) -> fc1 -> relu2 -> fc2 -> weighted
-//          scatter_add
+//        wave32 prefill: hip_qmoe_amd_prefill_grouped_wmma, GPU bucketing
+//          feeding one ragged expert-batched WMMA GEMM per FC
+//        wave64 prefill: hip_qmoe_amd_prefill_grouped_wave64, direct fused
+//          dispatch over every (token, top-k slot), followed by slot reduction
 //   4. fc2_latent_proj (matmul_nbits): acc -> y                 [hidden]
 //   5. shared expert: hidden_states -> fc1 -> relu2 -> fc2 -> s  [hidden]
 //   6. output = y + s (hip_elementwise_add)
@@ -182,10 +181,9 @@ int wrap_qmoe_amd(
   // full hipStreamSynchronize plus a 5-launch chain per active expert on every
   // decode step, which at this op's k is ~110 launches per layer.
   //
-  // Prefill buckets the routing pairs on the device and runs one ragged
-  // expert-batched GEMM per FC. That GEMM is built on the WMMA matrix
-  // intrinsics, which wave64 parts do not have, so they keep the per-expert
-  // host dispatch loop below.
+  // Prefill is fully device-dispatched on both wave sizes. Wave32 uses ragged
+  // expert-batched WMMA; wave64 directly dispatches every routing slot through
+  // the fused FC kernels. Neither path reads expert counts back to the host.
   //
   // Declared here rather than at the branch below because every `goto cleanup`
   // in between would otherwise jump into its scope.
@@ -194,8 +192,14 @@ int wrap_qmoe_amd(
                                           block_size, expert_weight_bits,
                                           elem_size) != 0;
   const bool use_decode_fused = fused_supported && num_tokens == 1;
-  const bool use_prefill_grouped =
-      fused_supported && num_tokens > 1 && !hipdnn_device_is_wave64();
+  const bool use_prefill_grouped = fused_supported && num_tokens > 1;
+  const bool use_prefill_wmma =
+      use_prefill_grouped && !hipdnn_device_is_wave64();
+  if (num_tokens > 1 && !fused_supported) {
+    fprintf(stderr,
+            "wrap_qmoe_amd: prefill requires aligned int4 grouped geometry\n");
+    return -1;
+  }
 
   // Per-session grow-on-demand scratch (own qmoe_amd_scratch field --
   // independent from com.microsoft QMoE's qmoe_scratch). 64-byte aligned
@@ -313,19 +317,33 @@ int wrap_qmoe_amd(
         /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, latent_size,
         moe_intermediate_size, k, expert_weight_bits, block_size, elem_size));
   } else if (use_prefill_grouped) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: prefill grouped WMMA branch "
-                      "(tokens=%lld experts=%lld k=%lld)\n",
-                      (long long)num_tokens, (long long)num_experts,
-                      (long long)k);
-    HIP_CHECK(hip_qmoe_amd_prefill_grouped_wmma(
-        stream, d_h_buf, d_expert_indices, d_expert_weights,
-        fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
-        fc2_experts_scales, d_expert_counts, d_expert_offsets,
-        d_sorted_token_ids, d_sorted_pair_ids, d_sorted_weights,
-        /*packed_latent=*/d_gather_buf, /*packed_act=*/d_fc1_buf,
-        /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, num_tokens, num_experts,
-        latent_size, moe_intermediate_size, k, expert_weight_bits, block_size,
-        elem_size));
+    if (use_prefill_wmma) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: prefill grouped WMMA branch "
+                        "(tokens=%lld experts=%lld k=%lld)\n",
+                        (long long)num_tokens, (long long)num_experts,
+                        (long long)k);
+      HIP_CHECK(hip_qmoe_amd_prefill_grouped_wmma(
+          stream, d_h_buf, d_expert_indices, d_expert_weights,
+          fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
+          fc2_experts_scales, d_expert_counts, d_expert_offsets,
+          d_sorted_token_ids, d_sorted_pair_ids, d_sorted_weights,
+          /*packed_latent=*/d_gather_buf, /*packed_act=*/d_fc1_buf,
+          /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, num_tokens,
+          num_experts, latent_size, moe_intermediate_size, k,
+          expert_weight_bits, block_size, elem_size));
+    } else {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe_amd: prefill grouped wave64 branch "
+                        "(tokens=%lld experts=%lld k=%lld)\n",
+                        (long long)num_tokens, (long long)num_experts,
+                        (long long)k);
+      HIP_CHECK(hip_qmoe_amd_prefill_grouped_wave64(
+          stream, d_h_buf, d_expert_indices, d_expert_weights,
+          fc1_experts_weights, fc1_experts_scales, fc2_experts_weights,
+          fc2_experts_scales, /*act_scratch=*/d_fc1_buf,
+          /*slot_scratch=*/d_fc2_buf, /*acc=*/d_acc_buf, num_tokens,
+          latent_size, moe_intermediate_size, k, expert_weight_bits, block_size,
+          elem_size));
+    }
   } else {
     HIP_CHECK(hipMemsetAsync(d_acc_buf, 0, num_tokens * latent_size * elem_size,
                              hip_stream));

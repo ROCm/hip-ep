@@ -36,8 +36,8 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 //   -> wrap_one_hot(state, indices, depth, values, output, axis,
 //                   indices_rank, output_rank, indices_shape_ptr,
 //                   output_shape_ptr, num_indices, num_output_elements,
-//                   element_size_bytes, indices_element_size_bytes,
-//                   depth_element_size_bytes)
+//                   element_size_bytes, indices_element_size_bytes)
+// Host depth is output_shape[axis]; the GPU depth pointer is forwarded unused.
 struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -67,7 +67,6 @@ struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
 
     auto indicesType = cast<MemRefType>(op.getIndices().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    auto depthType = cast<MemRefType>(op.getDepth().getType());
 
     int indicesRank = indicesType.getRank();
     int outputRank = outputType.getRank();
@@ -89,6 +88,8 @@ struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
     int64_t normAxis = axisAttr;
     if (normAxis < 0)
       normAxis += outputRank;
+    if (normAxis < 0 || normAxis >= outputRank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
 
     Value axisVal = createI64Const(normAxis);
     Value indicesRankVal = createI64Const(indicesRank);
@@ -98,31 +99,26 @@ struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
         outputType.getElementType().getIntOrFloatBitWidth() / 8;
     unsigned indicesElemBytes =
         indicesType.getElementType().getIntOrFloatBitWidth() / 8;
-    unsigned depthElemBytes =
-        depthType.getElementType().getIntOrFloatBitWidth() / 8;
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value indicesElemSizeVal = createI64Const(indicesElemBytes);
-    Value depthElemSizeVal = createI64Const(depthElemBytes);
 
-    SmallVector<Type, 14> paramTypes = {
-        ptrType, ptrType, ptrType,
-        ptrType, ptrType,          // state, idx, depth, val, out
-        i64Type, i64Type, i64Type, // axis, idx_rank, out_rank
-        ptrType, ptrType,          // idx_shape, out_shape
-        i64Type, i64Type, i64Type,
-        i64Type, i64Type}; // num_idx, num_out, elem, idx_elem, depth_elem
+    SmallVector<Type, 13> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType,
+        ptrType,                             // state, idx, depth, val, out
+        i64Type, i64Type, i64Type,           // axis, idx_rank, out_rank
+        ptrType, ptrType,                    // idx_shape, out_shape
+        i64Type, i64Type, i64Type, i64Type}; // num_idx, num_out, elem, idx_elem
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapOneHot, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 14> args = {
-        statePtr,       indicesPtr,         depthPtr,
-        valuesPtr,      outputPtr,          axisVal,
-        indicesRankVal, outputRankVal,      indicesShapeArr,
-        outputShapeArr, numIndices,         numOutputElements,
-        elemSizeVal,    indicesElemSizeVal, depthElemSizeVal};
+    SmallVector<Value, 13> args = {
+        statePtr,        indicesPtr,        depthPtr,       valuesPtr,
+        outputPtr,       axisVal,           indicesRankVal, outputRankVal,
+        indicesShapeArr, outputShapeArr,    numIndices,     numOutputElements,
+        elemSizeVal,     indicesElemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
