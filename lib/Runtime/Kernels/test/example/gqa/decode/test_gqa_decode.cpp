@@ -10,18 +10,19 @@
 // correctness against a CPU fp32 reference (incl. seqlens_k / sliding-window /
 // head-sink / smooth-softmax), then reports a three-column latency comparison.
 //
-// IMPORTANT: all three columns run on the CURRENT v2 kernel, toggled by env.
-// They measure the value of v2's per-shape autotune RELATIVE TO fixed configs
-// on the SAME kernel -- they are NOT the historical legacy code. (In
-// particular fix-def8 forces the v2 kernel's WMMA path at 8 splits, whose
-// absolute cost differs from the real legacy WMMA kernel; do not read it as
-// "PR438".) Apples-to-apples on identical inputs:
+// IMPORTANT: all three columns run on the CURRENT v2 kernel. The fixed
+// columns pass an explicit config to hip_gqa_flash_decode_configured; they do
+// not mutate HIPDNN_GQA_DECODE_* (those are read once per process). They
+// measure the value of v2's per-shape autotune RELATIVE TO fixed configs on
+// the SAME kernel -- they are NOT the historical legacy code. (In particular
+// fix-def8 forces the v2 kernel's default impl at 8 splits, whose absolute
+// cost differs from the real legacy WMMA kernel; do not read it as "PR438".)
+// Apples-to-apples on identical inputs:
 //
-//   [fix-scalar8] force scalar split kernel @ 8 splits
-//                 (HIPDNN_GQA_DECODE_SCALAR=1, SPLITS=8)
-//   [fix-def8]    force default impl (WMMA@d64 / scalar else) @ 8 splits
-//                 (HIPDNN_GQA_DECODE_SPLITS=8)
-//   [v2]          autotune (impl, split-count<=64) per shape + cache (no env)
+//   [fix-scalar8] scalar split kernel @ 8 splits, bkv=16
+//   [fix-def8]    default impl (WMMA where supported and d==64, else scalar)
+//                 @ 8 splits, bkv=16
+//   [v2]          autotune (impl, split-count<=64) per shape + cache
 //
 // Coverage spans MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in
 // {64,128,256} x context length in {512..32768}, plus gpt-oss-20b full/sliding
@@ -67,9 +68,9 @@ extern "C" int hip_gqa_flash_decode(
     int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale);
 
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-#include "gqa_autotune.h"
-
+// Explicit config. Used for the fixed columns, and for the LUT hit path.
+// Does not run the in-launcher autotuner. A process-start HIPDNN_GQA_DECODE_*
+// override still wins, because the kernel snapshots those variables once.
 extern "C" int hip_gqa_flash_decode_configured(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -87,6 +88,9 @@ extern "C" int hip_gqa_flash_decode_configured(
     int use_wmma,
     int splits,
     int bkv);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
@@ -217,37 +221,46 @@ static float max_abs(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 // Decode configurations the harness exercises.
-//   AUTO       : production flow after this change -- launcher autotunes
-//                (impl, split-count<=64) per shape and caches the winner.
-//   BASELINE   : production flow BEFORE this change -- default impl
-//                (wmma@d64 / scalar@d128) locked at K_SPLITS=8.
-//   SCALAR8/WMMA8: force one impl at 8 splits (correctness A/B coverage).
+//   AUTO       : production flow -- launcher autotunes (impl, split-count<=64)
+//                per shape and caches the winner.
+//   BASELINE   : default impl locked at K_SPLITS=8.
+//   SCALAR8/WMMA8: one impl at 8 splits (correctness A/B coverage).
 enum DecodeMode { MODE_AUTO, MODE_BASELINE, MODE_SCALAR8, MODE_WMMA8 };
 
-static void set_mode_env(DecodeMode m) {
-  // Cleared ("") => atoi==0 => not forced (launcher reads getenv every call).
+// Mirrors flash_decode_wmma_supported() in gqa_kernel.hip. WMMA is only
+// instantiated for (HpG==4, d in {64,128}) and (HpG==8, d==64).
+static bool wmma_supported(int d, int hpg) {
+  if (hpg == 4) return d == 64 || d == 128;
+  if (hpg == 8) return d == 64;
+  return false;
+}
+
+// Explicit launch config. forced==false uses the autotune entry.
+struct ForcedCfg {
+  bool forced;
+  int use_wmma;
+  int splits;
+  int bkv;
+};
+
+static ForcedCfg forced_cfg(DecodeMode m, const Case& c) {
+  const int hpg = c.G > 0 ? c.H / c.G : 0;
+  const bool wmma_ok = wmma_supported(c.D, hpg);
+  // Same default as the launcher: WMMA only where it is templated and d==64.
+  const int default_wmma = (wmma_ok && c.D == 64) ? 1 : 0;
   switch (m) {
     case MODE_AUTO:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "");
-      break;
-    case MODE_BASELINE:  // default impl, fixed 8 splits
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
+      return {false, 0, 0, 16};
+    case MODE_BASELINE:
+      return {true, default_wmma, BASELINE_SPLITS, 16};
     case MODE_SCALAR8:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "1");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
+      return {true, 0, BASELINE_SPLITS, 16};
     case MODE_WMMA8:
-      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
-      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "1");
-      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
-      break;
+      // Requesting WMMA on a geometry that has no instantiation is rejected
+      // by hip_gqa_flash_decode_configured. Those shapes run scalar.
+      return {true, wmma_ok ? 1 : 0, BASELINE_SPLITS, 16};
   }
+  return {false, 0, 0, 16};
 }
 
 // ---- run one launcher config; returns avg ms over iters --------------------
@@ -256,12 +269,18 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          __half* dO, float* dPart, const int* dSeq,
                          const __half* dSink, int iters,
                          std::vector<float>& host_O, bool* lut_hit = nullptr) {
-  set_mode_env(mode);
+  const ForcedCfg cfg = forced_cfg(mode, c);
 
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
 
   auto launch = [&]() -> int {
+    if (cfg.forced) {
+      return hip_gqa_flash_decode_configured(
+          nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq,
+          MAX_SPLITS, scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16,
+          nullptr, nullptr, cfg.use_wmma, cfg.splits, cfg.bkv);
+    }
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     if (mode == MODE_AUTO) {
       using namespace hipdnn_ep;
