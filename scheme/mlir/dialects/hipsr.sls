@@ -1,0 +1,207 @@
+#!r6rs
+;;===----------------------------------------------------------------------===;;
+;;
+;; Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+;; Licensed under the MIT License.
+;;
+;;===----------------------------------------------------------------------===;;
+;;
+;; (mlir dialects hipsr) — HipSR-specific dialect helpers.
+;;
+;; Encapsulates all knowledge of the HipSR and ONNX dialects:
+;; memory spaces, context conventions, conversion target configuration,
+;; type conversion rules, and hipsr-specific FFI bindings.
+;;
+;;===----------------------------------------------------------------------===;;
+
+(library (mlir dialects hipsr)
+  (export
+    ;; Memory space
+    hipsr-device-memory-space
+    make-hipsr-device-space-attr       ; creates HipSR MemorySpaceAttr(Device)
+    make-hipsr-barrier-type-attr       ; creates HipSR PlaceholderTypeAttr(Barrier)
+
+    ;; Context convention
+    mlir-get-hipsr-context-arg           ; pure read
+
+    ;; Type converter configuration
+    hipsr-type-converter-add-device-memory-conversions!  ; mutates type-converter
+
+    ;; Conversion target configuration
+    hipsr-configure-conversion-target!   ; mutates target
+
+    ;; Op ancestry predicates (pure)
+    hipsr-has-compute-ancestor?
+    hipsr-has-placeholder-ancestor?
+
+    ;; HipSR-specific type queries and op mutation
+    mlir-type-is-device-tensor          ; 1 if RankedTensorType with device space
+    make-mlir-tensor-in-host-space      ; clone type with host memory-space encoding
+    mlir-get-hipsr-context-type         ; hipsr::ContextType from MLIRContext
+    mlir-placeholder-set-barrier-type!  ; change placeholder_type attr to Barrier
+
+    ;; HipSR file mapping for external constant data
+    mlir-hipsr-load-file-map)
+
+  (import (rnrs (6))
+          (only (chezscheme) foreign-procedure)
+          (mlir core ir)
+          (mlir core conversion)
+          (mlir dialects tensor))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; HipSR-specific FFI bindings
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Returns 1 if type is a RankedTensorType with a HipSR device MemorySpaceAttr, 0 otherwise.
+  ;; type: Type* uptr (opaque)
+  (define mlir-type-is-device-tensor
+    (foreign-procedure "mlir_type_is_device_tensor" (uptr) int))
+
+  ;; Clone a RankedTensorType with the HipSR host memory space encoding.
+  ;; !type: RankedTensorType uptr — must be a ranked tensor; returned as-is if not
+  ;; Returns: new RankedTensorType uptr with host MemorySpaceAttr set
+  (define make-mlir-tensor-in-host-space
+    (foreign-procedure "mlir_tensor_type_in_host_space" (uptr) uptr))
+
+  ;; Return the !hipsr.context type for the given MLIRContext.
+  ;; ctx:     MLIRContext* uptr
+  ;; Returns: hipsr::ContextType uptr (opaque type pointer)
+  (define mlir-get-hipsr-context-type
+    (foreign-procedure "mlir_get_hipsr_context_type" (uptr) uptr))
+
+  ;; Set the placeholder_type attribute of a hipsr.placeholder op to Barrier.
+  ;; Barrier placeholders require the shape region to be fully computed before
+  ;; the kernel launches (unlike Normal placeholders which can be lazy).
+  ;; op: hipsr.PlaceholderOp Operation* uptr — mutated in place
+  (define mlir-placeholder-set-barrier-type!
+    (foreign-procedure "mlir_placeholder_set_barrier_type" (uptr) void))
+
+  ;; Create a HipSR device MemorySpaceAttr for the given MLIRContext.
+  ;; ctx:     MLIRContext* uptr
+  ;; Returns: mlir::hipsr::MemorySpaceAttr(Device) as opaque Attribute uptr
+  (define %make-device-space-attr
+    (foreign-procedure "mlir_hipsr_make_device_space_attr" (uptr) uptr))
+
+  ;; Public wrapper for %make-device-space-attr.
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: HipSR device MemorySpaceAttr as opaque Attribute uptr
+  (define %make-barrier-type-attr
+    (foreign-procedure "mlir_hipsr_make_barrier_type_attr" (uptr) uptr))
+
+  ;; Create a HipSR PlaceholderTypeAttr(Barrier).
+  ;; ctx: MLIRContext* uptr
+  ;; Returns: PlaceholderTypeAttr opaque attr uptr — use as "placeholder_type" attr
+  (define (make-hipsr-barrier-type-attr ctx)
+    (%make-barrier-type-attr ctx))
+
+  (define (make-hipsr-device-space-attr ctx)
+    (%make-device-space-attr ctx))
+
+  ;; Memory-map a file via HipsrDialect::getOrLoadFileMap (lazy, cached per dialect).
+  ;; ctx:      MLIRContext* uptr — used to load the HipsrDialect instance
+  ;; path:     absolute file path string
+  ;; Returns:  buffer start address as uptr, or 0 if the file cannot be mapped.
+  ;;           The buffer lifetime is managed by the dialect; do not free it.
+  (define mlir-hipsr-load-file-map
+    (foreign-procedure "mlir_hipsr_load_file_map" (uptr string) uptr))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Memory Space
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; MemorySpace::Device = 1  (from HipsrEnums.td: Hipsr_Device I32EnumAttrCase 1)
+  (define hipsr-device-memory-space 1)
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Context Convention
+  ;;
+  ;; By HipSR convention, the first block argument of every inference function
+  ;; is the !hipsr.context value.
+  ;;===--------------------------------------------------------------------===;;
+
+  ;; Return the !hipsr.context Value* for the enclosing inference function.
+  ;; By HipSR convention, argument 0 of the nearest func.func is the context.
+  ;; op: any Operation* uptr nested inside an inference function
+  ;; Returns: Value* uptr of the context block argument
+  (define (mlir-get-hipsr-context-arg op)
+    (mlir-operation-get-block-argument op 0))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Op Ancestry Predicates
+  ;;===--------------------------------------------------------------------===;;
+
+  (define (has-ancestor-named? op name)
+    (let loop ((parent (mlir-operation-get-parent op)))
+      (cond
+        ((= 0 parent) #f)
+        ((string=? (mlir-operation-name parent) name) #t)
+        (else (loop (mlir-operation-get-parent parent))))))
+
+  ;; Returns #t if op is nested inside a hipsr.compute region, #f otherwise.
+  ;; op: Operation* uptr
+  (define (hipsr-has-compute-ancestor? op)
+    (has-ancestor-named? op "hipsr.compute"))
+
+  ;; Returns #t if op is nested inside a hipsr.placeholder region, #f otherwise.
+  ;; op: Operation* uptr
+  (define (hipsr-has-placeholder-ancestor? op)
+    (has-ancestor-named? op "hipsr.placeholder"))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Type Converter Configuration
+  ;;
+  ;; Mirrors TypeConverter setup in OnnxToHipsr.cpp:
+  ;;   - Identity conversion for all types.
+  ;;   - Ranked tensors without an encoding (unplaced tensors) get device space.
+  ;;   - Rank-0 tensors and tensors that already carry an encoding are left alone.
+  ;;===--------------------------------------------------------------------===;;
+
+  (define (hipsr-type-converter-add-device-memory-conversions! type-converter)
+    ;; Identity: every type is legal as-is (lowest priority, tried last)
+    (mlir-type-converter-add-conversion type-converter (lambda (t) t))
+    ;; Device placement: unencoded ranked tensors of rank > 0 go to device space
+    (mlir-type-converter-add-conversion type-converter
+      (lambda (type)
+        (if (and (= 1 (mlir-type-is-ranked-tensor type))
+                 (> (mlir-type-get-rank type) 0)
+                 (= 0 (mlir-type-get-encoding type)))
+            (mlir-tensor-type-with-encoding type
+              (make-hipsr-device-space-attr (mlir-type-get-context type)))
+            #f)))
+    ;; Source materialization: resolve unrealized casts between ranked tensor
+    ;; types that differ only in shape specificity (e.g. tensor<?x32> vs tensor<?x?>)
+    ;; by inserting tensor.cast.
+    (mlir-type-converter-add-tensor-widening-materialization type-converter))
+
+  ;;===--------------------------------------------------------------------===;;
+  ;; Conversion Target Configuration
+  ;;
+  ;; Mirrors ConversionTarget setup in OnnxToHipsr.cpp:
+  ;;   - onnx dialect: illegal (except onnx.NoValue — consumer drops it first)
+  ;;   - hipsr dialect: legal
+  ;;   - builtin.module, arith.constant: legal
+  ;;   - func.func: legal when signature is converted
+  ;;   - func.return: legal when operand types are converted
+  ;;   - unknown ops: legal if nested inside hipsr.compute or hipsr.placeholder
+  ;;===--------------------------------------------------------------------===;;
+
+  (define (hipsr-configure-conversion-target! target ctx type-converter)
+    (mlir-conversion-target-add-illegal-dialect target "onnx")
+    (mlir-conversion-target-add-legal-op target ctx "onnx.NoValue")
+    (mlir-conversion-target-add-legal-dialect target "hipsr")
+    (mlir-conversion-target-add-legal-op target ctx "builtin.module")
+    (mlir-conversion-target-add-legal-op target ctx "arith.constant")
+    (mlir-conversion-target-add-legal-op target ctx "tensor.cast")
+    (mlir-conversion-target-add-dynamically-legal-op target ctx "func.func"
+      (lambda (op)
+        (= 1 (mlir-type-converter-is-signature-legal type-converter op))))
+    (mlir-conversion-target-add-dynamically-legal-op target ctx "func.return"
+      (lambda (op)
+        (= 1 (mlir-type-converter-is-legal type-converter op))))
+    (mlir-conversion-target-mark-unknown-ops-dynamically-legal target
+      (lambda (op)
+        (or (hipsr-has-compute-ancestor? op)
+            (hipsr-has-placeholder-ancestor? op)))))
+
+) ;; end library (mlir dialects hipsr)

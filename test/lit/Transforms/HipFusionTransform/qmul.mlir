@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --scheme-pass="module=passes/hip-fusion" --split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: func.func @qmul
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<1x128x32xi8>, %[[RHS:.*]]: tensor<32xi8>) -> tensor<1x128x32xi8> {

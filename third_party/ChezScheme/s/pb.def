@@ -1,0 +1,6 @@
+(define-constant machine-type (constant machine-type-pb))
+(features)
+
+(include "pbcommon64.def")
+(include "pbcommon.def")
+(include "default.def")

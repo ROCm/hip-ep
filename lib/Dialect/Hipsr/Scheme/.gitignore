@@ -1,0 +1,11 @@
+*.so
+*.wpo
+*.boot
+hipsr
+
+# Editor backup and temporary files
+*.backup
+*~
+\#*\#
+.\#*
+build/

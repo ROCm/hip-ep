@@ -17,3 +17,5 @@ add_subdirectory(Runtime)
 add_subdirectory(Target/LLVM)
 add_subdirectory(Compiler)
 add_subdirectory(CInterface)
+
+add_subdirectory(Scheme)

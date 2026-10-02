@@ -12,6 +12,11 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_EP_CONTEXT_SHARED_WORKSPACE, "0")
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_EP_CONTEXT_SHARED_WORKSPACE) >= n)
 
 namespace morphizen {
+struct path_hash {
+  std::size_t operator()(const std::filesystem::path &p) const {
+    return std::filesystem::hash_value(p);
+  }
+};
 struct path_equal_to {
   bool operator()(const std::filesystem::path &p1,
                   const std::filesystem::path &p2) const {
@@ -21,7 +26,7 @@ struct path_equal_to {
 using store_t =
     std::unordered_map<std::filesystem::path,
                        std::unique_ptr<SharedContextContextWorkspace>,
-                       std::hash<std::filesystem::path>, path_equal_to>;
+                       path_hash, path_equal_to>;
 static store_t &the_store() {
   static store_t g_store;
   static bool inialized = false;

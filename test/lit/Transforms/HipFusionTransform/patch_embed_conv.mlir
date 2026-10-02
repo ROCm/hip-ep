@@ -12,6 +12,9 @@
 // patterns can match at all.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// The Scheme DDR pass omits PatchEmbedConvToGemm (a C++ native pattern that
+// must coexist with QConvFusion for benefit ordering to apply), so the
+// conversion-in-scheme variant of this test is not meaningful here.
 
 // A 1x1 conv over a 1x1 input is a single patch, which exempts it from the
 // unit-kernel guard, so PatchEmbedConvToGemm matches this conv. So does
