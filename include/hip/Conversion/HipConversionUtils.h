@@ -45,6 +45,11 @@ createEmptyTensorFromReifiedShape(OpBuilder &builder, Location loc,
                                   RankedTensorType resultType,
                                   llvm::ArrayRef<OpFoldResult> reifiedShape);
 
+/// Build a destination whose shape comes from one named semantic source.
+FailureOr<Value> createSameShapeEmptyTensor(OpBuilder &builder, Location loc,
+                                            RankedTensorType resultType,
+                                            Value source);
+
 /// Build a tensor.empty from the shared NumPy broadcast shape rule. Pure shape
 /// and imported-result checks complete before shape SSA emits.
 FailureOr<Value>
