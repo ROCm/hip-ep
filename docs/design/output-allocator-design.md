@@ -261,7 +261,7 @@ MlirCustomOp::Compute(context)
    ├─ inference_state_->compute(&inputs.span)
    │  └─ inference_compute(state, inputs)        2-arg ABI, NO outputs span
    │     ├─ hipdnn_ep_tensor_prepare_input(...) x N   -> input memref descriptors
-   │     ├─ hipdnn_ep_state_reset_error_flag(state)
+   │     ├─ hipdnn_ep_state_reset_error_flag(state)   host store, no memset kernel
    │     ├─ main_graph(state, inputs)            thin wrapper: unpacks input descriptors,
    │     │  └─ main_graph_internal(...)          calls body, DISCARDS its returned descriptor
    │     │     ├─ hipdnn_ep_get_pool_base(state, domain_id, size)   grow-on-demand GPU pool
@@ -276,7 +276,7 @@ MlirCustomOp::Compute(context)
    │     │     │           host output -> EP GPU scratch + queue pending_d2h
    │     │     └─ <final op writes into that ptr>; returns output by-value memref (wrapper ignores it)
    │     ├─ hipdnn_ep_stream_sync(state)         all GPU writes complete on return
-   │     ├─ hipdnn_ep_state_read_and_clear_error_flag(state)
+   │     ├─ hipdnn_ep_state_read_and_clear_error_flag(state)  host load; no second sync
    │     └─ hipdnn_ep_tensor_free_input(state, ...) x N
    ├─ inference_state_->set_output_allocator(nullptr)   clear before octx leaves scope
    ├─ output-completeness guard: every allocated[i] true else LOG(FATAL)

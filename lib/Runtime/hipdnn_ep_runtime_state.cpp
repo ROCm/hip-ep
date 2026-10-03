@@ -226,6 +226,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
   state->provider_options = nullptr;
+  state->error_flag_host = nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -280,11 +281,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
-  // Allocate device-side error flag used by kernels for runtime error
-  // propagation (e.g., Range delta==0).
-  if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
-      hipSuccess) {
-    fprintf(stderr, "Failed to allocate device error flag\n");
+  // Host-mapped error flag. Kernels store through the device mapping;
+  // inference_compute reads the host address after its stream sync, so the
+  // boundary does not D2H or memset this word.
+  if (hipHostMalloc((void **)&state->error_flag_host, sizeof(int),
+                    hipHostMallocMapped) != hipSuccess) {
+    fprintf(stderr, "Failed to allocate error flag\n");
     if (state->hipblas_handle)
       hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
@@ -292,11 +294,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 10;
   }
-  if (hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream) !=
+  void *error_flag_dev = nullptr;
+  if (hipHostGetDevicePointer(&error_flag_dev, state->error_flag_host, 0) !=
       hipSuccess) {
-    fprintf(stderr, "Failed to initialize device error flag\n");
-    HIP_CLEANUP(hipFree(state->device_error_flag));
-    state->device_error_flag = nullptr;
+    fprintf(stderr, "Failed to map error flag into device address space\n");
+    HIP_CLEANUP(hipHostFree(state->error_flag_host));
+    state->error_flag_host = nullptr;
     if (state->hipblas_handle)
       hipblasLtDestroy(state->hipblas_handle);
     if (state->stream)
@@ -304,6 +307,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 11;
   }
+  state->device_error_flag = static_cast<int *>(error_flag_dev);
+  *state->error_flag_host = 0;
 
   *out_state = state;
   return 0;
@@ -822,8 +827,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->loop_cond_host));
   }
 
-  if (state->device_error_flag) {
-    HIP_CLEANUP(hipFree(state->device_error_flag));
+  if (state->error_flag_host) {
+    HIP_CLEANUP(hipHostFree(state->error_flag_host));
+    state->error_flag_host = nullptr;
+    state->device_error_flag = nullptr;
   }
 
   // Free host-mapped scratch buffer (if allocated)
@@ -1713,36 +1720,30 @@ void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
 }
 
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
-  if (!state || !state->device_error_flag || !state->stream) {
+  if (!state || !state->error_flag_host) {
     fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
     return -1;
   }
-  hipError_t err =
-      hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
+  // Host store. The previous inference_compute already drained the stream,
+  // and the next kernels are launched after this call on the same thread.
+  *state->error_flag_host = 0;
+  return 0;
 }
 
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
-  if (!state || !state->device_error_flag || !state->stream) {
+  if (!state || !state->error_flag_host) {
     fprintf(stderr,
             "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
     return -1;
   }
 
-  int host_error = 0;
-  hipError_t err =
-      hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
-                     hipMemcpyDeviceToHost, state->stream);
-  if (err != hipSuccess)
-    return -1;
-  err = hipStreamSynchronize(state->stream);
-  if (err != hipSuccess)
-    return -1;
-  if (host_error != 0)
-    return host_error;
-
-  err = hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
-  return (err == hipSuccess) ? 0 : -1;
+  // inference_compute calls hipdnn_ep_stream_sync immediately before this.
+  // The flag is hipHostMallocMapped, so that sync publishes the kernel store
+  // to this address. A second stream sync or a 4-byte memset would only add
+  // another idle-stream round trip and a fill kernel on the next submit.
+  int host_error = *state->error_flag_host;
+  *state->error_flag_host = 0;
+  return host_error;
 }
 
 } // extern "C"
