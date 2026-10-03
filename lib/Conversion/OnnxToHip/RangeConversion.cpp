@@ -238,34 +238,53 @@ struct RangeToHip : public RewritePattern {
     Value limitS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(1));
     Value deltaS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(2));
 
-    // Read start/limit/delta to host SSA values for the trip-count arithmetic.
-    // Constants fold; GPU-computed operands go through a synchronized
-    // hip.readback_scalar (see ReadbackScalar.h for why a plain tensor.extract
-    // is a correctness bug on true-device-memory targets).
-    Value startE = readbackScalarToHost(rewriter, loc, ctx, startS);
-    Value limitE = readbackScalarToHost(rewriter, loc, ctx, limitS);
-    Value deltaE = readbackScalarToHost(rewriter, loc, ctx, deltaS);
-
-    Value len = llvm::TypeSwitch<Type, Value>(elemTy)
-                    .Case<IntegerType>([&](IntegerType ity) {
-                      return buildIntRangeCount(rewriter, loc, startE, limitE,
-                                                deltaE, ity);
-                    })
-                    .Case<FloatType>([&](FloatType fty) {
-                      return buildFloatRangeCount(rewriter, loc, startE, limitE,
-                                                  deltaE, fty);
-                    })
-                    .Default([&](Type) { return Value(); });
-    if (!len)
-      return failure();
-
     Value init;
-    if (resultType.isDynamicDim(0)) {
-      init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                     elemTy, ValueRange{len});
-    } else {
-      init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                     elemTy, ValueRange{});
+    SmallVector<int64_t> startValues, limitValues, deltaValues, staticValues;
+    if (isa<IntegerType>(elemTy) &&
+        extractConstantIntTensor(op->getOperand(0), startValues) &&
+        extractConstantIntTensor(op->getOperand(1), limitValues) &&
+        extractConstantIntTensor(op->getOperand(2), deltaValues) &&
+        startValues.size() == 1 && limitValues.size() == 1 &&
+        deltaValues.size() == 1) {
+      staticValues = {startValues[0], limitValues[0], deltaValues[0]};
+      SmallVector<OpFoldResult> reifiedShape;
+      if (succeeded(mlir::hip::reifyRangeShape(
+              rewriter, loc, startS, limitS, deltaS, reifiedShape,
+              ArrayRef<int64_t>(staticValues)))) {
+        auto constantInit = createEmptyTensorFromReifiedShape(
+            rewriter, loc, resultType, reifiedShape);
+        if (failed(constantInit))
+          return rewriter.notifyMatchFailure(
+              op, "Range result type contradicts constant trip count");
+        init = *constantInit;
+      }
+    }
+
+    if (!init) {
+      // Preserve the payload-dynamic path exactly. GPU-computed bounds use
+      // synchronized scalar readback before sizing the destination.
+      Value startE = readbackScalarToHost(rewriter, loc, ctx, startS);
+      Value limitE = readbackScalarToHost(rewriter, loc, ctx, limitS);
+      Value deltaE = readbackScalarToHost(rewriter, loc, ctx, deltaS);
+      Value len = llvm::TypeSwitch<Type, Value>(elemTy)
+                      .Case<IntegerType>([&](IntegerType ity) {
+                        return buildIntRangeCount(rewriter, loc, startE, limitE,
+                                                  deltaE, ity);
+                      })
+                      .Case<FloatType>([&](FloatType fty) {
+                        return buildFloatRangeCount(rewriter, loc, startE,
+                                                    limitE, deltaE, fty);
+                      })
+                      .Default([&](Type) { return Value(); });
+      if (!len)
+        return failure();
+      init = resultType.isDynamicDim(0)
+                 ? Value(tensor::EmptyOp::create(rewriter, loc,
+                                                 resultType.getShape(), elemTy,
+                                                 ValueRange{len}))
+                 : Value(tensor::EmptyOp::create(rewriter, loc,
+                                                 resultType.getShape(), elemTy,
+                                                 ValueRange{}));
     }
 
     auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS,
