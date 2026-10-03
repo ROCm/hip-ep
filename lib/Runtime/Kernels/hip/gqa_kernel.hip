@@ -26,6 +26,62 @@ static constexpr int GQA_THREADS = 256;
 static constexpr int WAVE_SIZE = HIPDNN_WAVE_SIZE;
 static constexpr float LOG2E = 1.4426950408889634f;
 
+// Accessors for environment settings. Ensure the environment is only read
+// once to prevent frequent getenv calls on the critical path.
+
+static bool envGqaDecodeScalar() {
+  static const bool enabled = [] {
+    const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR");
+    return (e != nullptr && atoi(e) != 0);
+  }();
+  return enabled;
+}
+
+static bool envGqaDecodeWmma() {
+  static const bool enabled = [] {
+    const char* e = getenv("HIPDNN_GQA_DECODE_WMMA");
+    return (e != nullptr && atoi(e) != 0);
+  }();
+  return enabled;
+}
+
+static int envGqaDecodeSplits() {
+  static const int value = [] {
+    const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS");
+    if (e != nullptr) {
+      return atoi(e);
+    } else {
+      return 0;
+    }
+  }();
+  return value;
+}
+
+static int envGqaDecodeBkv() {
+  static const int value = [] {
+    const char* e = getenv("HIPDNN_GQA_DECODE_BKV");
+    if (e != nullptr) {
+      return atoi(e);
+    } else {
+      return 0;
+    }
+  }();
+  return value;
+}
+
+static bool envGqaDecodeNoAutotune() {
+  static const bool enabled = [] {
+    const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE");
+    return (e != nullptr && atoi(e) != 0);
+  }();
+  return enabled;
+}
+
+static bool envHipDnnPrefillTuneDebug() {
+  static const bool enabled = getenv("HIPDNN_PREFILL_TUNE_DEBUG") != nullptr;
+  return enabled;
+}
+
 // Element-size dispatch helper for the pure data-movement kernels (transpose,
 // kv-cache append/concat, kv-expand, split-qkv). These kernels only copy bytes
 // of the element type, so templating them on T and selecting __half (2 bytes)
@@ -2957,16 +3013,15 @@ static int runGqaFlashDecode(
     cfg = FlashDecodeCfg{configured_use_wmma != 0, configured_splits,
                          configured_bkv};
   }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
-    int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
+  if (envGqaDecodeScalar()) { cfg.use_wmma = false; forced = true; }
+  if (envGqaDecodeWmma()) { cfg.use_wmma = true;  forced = true; }
+  if (int v = envGqaDecodeSplits()) {
+    if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
   }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_BKV")) {
-    int v = atoi(e); if (v == 16 || v == 32) { cfg.bkv = v; forced = true; }
+  if (int v = envGqaDecodeBkv()) {
+    if (v == 16 || v == 32) { cfg.bkv = v; forced = true; }
   }
-  bool no_autotune = false;
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
+  bool no_autotune = envGqaDecodeNoAutotune();
 
   // INT8 path: cache is int8, scales are per-channel fp32. Autotune keeps its
   // own cache/mutex (identical geometry, but the int8 kernels time differently).
@@ -3535,7 +3590,7 @@ static int tunePrefillV5Cfg(
     (void)hipEventDestroy(ev0);
     (void)hipEventDestroy(ev1);
 
-    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+    if (envHipDnnPrefillTuneDebug()) {
         for (int i = 0; i < nc; ++i)
             fprintf(stderr,
                 "[prefill-v5-tune] d=%d sq=%d skv=%d  M_TILES=%-2d BKV=%-3d "
@@ -3899,7 +3954,7 @@ static int tunePrefillV7Cfg(
     (void)hipEventDestroy(ev0);
     (void)hipEventDestroy(ev1);
 
-    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+    if (envHipDnnPrefillTuneDebug()) {
         for (int i = 0; i < nc; ++i)
             fprintf(stderr,
                 "[prefill-v7-tune] d=%d sq=%d skv=%d  NW=%-2d BKV=%-3d MT=%d "
@@ -4372,7 +4427,7 @@ static int tunePrefillV8Cfg(
     (void)hipEventDestroy(ev0);
     (void)hipEventDestroy(ev1);
 
-    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+    if (envHipDnnPrefillTuneDebug()) {
         for (int i = 0; i < nc; ++i)
             fprintf(stderr,
                 "[prefill-v8-tune] d=%d sq=%d skv=%d  ND=%d MT=%d BKV=%-3d : "
