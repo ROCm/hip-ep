@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
@@ -2167,6 +2168,142 @@ void MultiHeadAttentionOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MultiHeadAttentionOp::verify() {
+  SmallVector<Value> operands = {getQuery()};
+  for (Value value : {getKey(), getValue(), getBias(), getKeyPaddingMask(),
+                      getAttentionBias(), getPastKey(), getPastValue(),
+                      getPastSequenceLength(), getCacheIndirection()})
+    if (value)
+      operands.push_back(value);
+  auto inits = getDpsInits();
+  llvm::append_range(operands, inits);
+  if (failed(verifyDpsComputeOp(*this, operands, inits.size())))
+    return failure();
+
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  Type elementType = queryType.getElementType();
+  if (!isa<FloatType>(elementType))
+    return emitOpError("query must have floating-point element type");
+  for (Value value :
+       {getKey(), getValue(), getBias(), getAttentionBias(), getPastKey(),
+        getPastValue(), getOutput(), getPresentKey(), getPresentValue()})
+    if (value &&
+        cast<ShapedType>(value.getType()).getElementType() != elementType)
+      return emitOpError(
+          "Q/K/V, bias, cache, and output element types must match");
+  if (getUnidirectional() != 0 && getUnidirectional() != 1)
+    return emitOpError("unidirectional must be 0 or 1");
+
+  std::optional<ArrayRef<int64_t>> keyShape, valueShape;
+  if (getKey())
+    keyShape = cast<ShapedType>(getKey().getType()).getShape();
+  if (getValue())
+    valueShape = cast<ShapedType>(getValue().getType()).getShape();
+  FailureOr<SmallVector<int64_t>> expected = inferMultiHeadAttentionOutputShape(
+      queryType.getShape(), keyShape, valueShape, getNumHeads(),
+      [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  // An output template cannot specialize an unknown semantic source extent.
+  ArrayRef<int64_t> outputShape = outputType.getShape();
+  if (outputShape.size() == expected->size()) {
+    for (size_t dim : llvm::seq<size_t>(0, outputShape.size())) {
+      if (ShapedType::isDynamic((*expected)[dim]) &&
+          !ShapedType::isDynamic(outputShape[dim]))
+        return emitOpError("output dimension ")
+               << dim
+               << " must remain dynamic because the corresponding "
+                  "source extent is dynamic";
+    }
+  }
+  if (failed(verifyHipOpShape(*this, [&]() -> FailureOr<SmallVector<int64_t>> {
+        return *expected;
+      })))
+    return failure();
+
+  auto compatible = [&](int64_t actual, int64_t wanted,
+                        const Twine &name) -> LogicalResult {
+    if (!ShapedType::isDynamic(actual) && !ShapedType::isDynamic(wanted) &&
+        actual != wanted)
+      return emitOpError() << name << " must be " << wanted << ", got "
+                           << actual;
+    return success();
+  };
+  int64_t keyHeadSize = queryType.getRank() == 5 ? queryType.getDimSize(4)
+                                                 : queryType.getDimSize(2);
+  if (queryType.getRank() == 3 && !ShapedType::isDynamic(keyHeadSize))
+    keyHeadSize /= getNumHeads();
+  int64_t valueHeadSize = (*expected)[2];
+  if (!ShapedType::isDynamic(valueHeadSize))
+    valueHeadSize /= getNumHeads();
+  auto verifyCache = [&](Value cache, int64_t headSize,
+                         StringRef name) -> LogicalResult {
+    if (!cache)
+      return success();
+    auto type = cast<ShapedType>(cache.getType());
+    if (type.getRank() != 4)
+      return emitOpError() << name << " must be rank-4 BNSH";
+    for (auto [dim, wanted] : {std::pair<int64_t, int64_t>{0, (*expected)[0]},
+                               {1, getNumHeads()},
+                               {3, headSize}})
+      if (failed(compatible(type.getDimSize(dim), wanted,
+                            Twine(name) + " dimension " + Twine(dim))))
+        return failure();
+    return success();
+  };
+  if (static_cast<bool>(getPastKey()) != static_cast<bool>(getPastValue()))
+    return emitOpError(
+        "past_key and past_value must both be provided or omitted");
+  if (failed(verifyCache(getPastKey(), keyHeadSize, "past_key")) ||
+      failed(verifyCache(getPastValue(), valueHeadSize, "past_value")) ||
+      failed(verifyCache(getPresentKey(), keyHeadSize, "present_key")) ||
+      failed(verifyCache(getPresentValue(), valueHeadSize, "present_value")))
+    return failure();
+  auto verifyCapacityPair = [&](Value key, Value value) -> LogicalResult {
+    if (!key || !value)
+      return success();
+    return compatible(cast<ShapedType>(key.getType()).getDimSize(2),
+                      cast<ShapedType>(value.getType()).getDimSize(2),
+                      "key/value cache capacity");
+  };
+  if (failed(verifyCapacityPair(getPastKey(), getPastValue())) ||
+      failed(verifyCapacityPair(getPresentKey(), getPresentValue())))
+    return failure();
+
+  if (Value qk = getQk()) {
+    auto type = cast<ShapedType>(qk.getType());
+    if (type.getRank() != 4 || !isa<FloatType>(type.getElementType()))
+      return emitOpError("qk must be a rank-4 floating-point tensor or memref");
+    for (auto [dim, wanted] : {std::pair<int64_t, int64_t>{0, (*expected)[0]},
+                               {1, getNumHeads()},
+                               {2, (*expected)[1]}})
+      if (failed(compatible(type.getDimSize(dim), wanted,
+                            Twine("qk dimension ") + Twine(dim))))
+        return failure();
+    if (!getPastSequenceLength() && !getCacheIndirection()) {
+      int64_t current = queryType.getRank() == 5
+                            ? queryType.getDimSize(1)
+                            : (*keyShape)[keyShape->size() == 4 ? 2 : 1];
+      int64_t past =
+          getPastKey() ? cast<ShapedType>(getPastKey().getType()).getDimSize(2)
+                       : 0;
+      if (!ShapedType::isDynamic(current) && !ShapedType::isDynamic(past)) {
+        APInt total = APInt(128, current) + APInt(128, past);
+        if (!total.isSignedIntN(64))
+          return emitOpError("qk logical sequence extent is out of range");
+        if (failed(compatible(type.getDimSize(3), total.getSExtValue(),
+                              "qk logical sequence extent")))
+          return failure();
+      }
+    }
+  }
+  // Cache sequence dimensions describe caller-provided physical capacity;
+  // do not require it to equal QK's logical sequence length.
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GqaOp: ins(query, [key, value, past_key, past_value,]
 //             seqlens_k, total_seq_len, [cos_cache, ...])
@@ -2223,6 +2360,64 @@ void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LinearAttentionOp::verify() {
+  SmallVector<Value> operands = {getQuery(), getKey(), getValue()};
+  if (Value past = getPastState())
+    operands.push_back(past);
+  if (Value decay = getDecay())
+    operands.push_back(decay);
+  if (Value beta = getBeta())
+    operands.push_back(beta);
+  operands.push_back(getOutput());
+  operands.push_back(getPresentState());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/2)))
+    return failure();
+
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!queryType || !queryType.hasRank() || !keyType || !keyType.hasRank() ||
+      !valueType || !valueType.hasRank())
+    return emitOpError("query, key, and value must be ranked");
+  if (queryType.getElementType() != keyType.getElementType() ||
+      queryType.getElementType() != valueType.getElementType())
+    return emitOpError("query, key, and value element types must match");
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferLinearAttentionOutputShapes(queryType.getShape(), keyType.getShape(),
+                                       valueType.getShape(), getQNumHeads(),
+                                       getKvNumHeads(),
+                                       [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  auto verifyShape = [&](Value value, ArrayRef<int64_t> wanted,
+                         StringRef name) -> LogicalResult {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() ||
+        type.getRank() != static_cast<int64_t>(wanted.size()))
+      return emitOpError() << name << " has the wrong rank";
+    for (int64_t dim : llvm::seq<int64_t>(0, type.getRank())) {
+      int64_t actual = type.getDimSize(dim);
+      if (!ShapedType::isDynamic(actual) &&
+          !ShapedType::isDynamic(wanted[dim]) && actual != wanted[dim])
+        return emitOpError()
+               << name << " dimension " << dim << " must be " << wanted[dim];
+    }
+    if (type.getElementType() != queryType.getElementType())
+      return emitOpError() << name << " element type must match query";
+    return success();
+  };
+
+  if (failed(verifyShape(getOutput(), (*expected)[0], "output")) ||
+      failed(verifyShape(getPresentState(), (*expected)[1], "present_state")))
+    return failure();
+  if (Value past = getPastState())
+    if (failed(verifyShape(past, (*expected)[1], "past_state")))
+      return failure();
+  return success();
 }
 
 LogicalResult GqaOp::verify() {

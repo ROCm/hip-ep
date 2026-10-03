@@ -176,7 +176,9 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
+| LinearAttention | Shared output/state formula used by converter, reification, and verifier |
 | SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
+| MultiHeadAttention | Primary result follows query batch/sequence and value hidden width; packed forms share the same infer/reify rule. Cache capacity and payload-dependent QK length remain destination-owned. |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
@@ -353,6 +355,36 @@ training outputs and are not implemented by `hip.skip_rms_norm`. Conversion
 accepts every inference output arity (one to four schema slots with omitted
 stats) but rejects a real stats tensor rather than treating the last present
 tensor as the residual output.
+
+LinearAttention uses one two-result rule in `HipShapeUtils`:
+`Dk = query[-1] / Hq`, `Dv = value[-1] / Hkv`, output shape
+`[B, T, max(Hq, Hkv) * Dv]`, and recurrent-state shape
+`[B, Hkv, Dk, Dv]`. Conversion, `reifyResultShapes`, and the op verifier all
+call that rule. In particular, a missing `past_state` does not make key's
+positional dimensions authoritative for the state destination.
+
+The `hip.multi_head_attention` semantic rule supports separate rank-3 or
+rank-4 K/V, packed rank-5 KV, and packed rank-5 QKV. The primary result has
+query's batch and sequence extents and value's hidden width. For packed KV
+the hidden width comes from query; for packed QKV it is query's head size
+times `num_heads`. Static inference and dynamic reification share the same
+validated layout plan. Optional cache buffers provide physical capacity,
+while QK has logical total-sequence length (which may depend on runtime
+payloads). The verifier checks structural shape relationships and statically
+known logical lengths before reification lifts those optional destinations.
+
+The default LLVM/runtime lowering supports a narrower subset: Q/K/V are
+separate rank-3 fp16 tensors,
+Q/K/V batch and hidden extents agree, K/V sequence extents agree, hidden is
+positive and divisible by `num_heads`, `unidirectional` is 0 or 1,
+`mask_filter_value` remains its -10000 default, and the sole output is exactly
+`[query.B, query.S, query.hidden]`. The runtime honors an explicit `scale`
+(with zero retaining the automatic `1/sqrt(head_size)` sentinel). Biases,
+masks, packed layouts, past/cache inputs, cache indirection, and present/QK
+outputs are rejected by that lowering before any LLVM IR is emitted. The
+ONNX converter retains this default-path restriction; decoder self-attention
+and rank-4 cross-attention routes to `hip.gqa` run first. The HIP-to-TOSA
+backend independently supports additional packed, bias, mask, and cache forms.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
