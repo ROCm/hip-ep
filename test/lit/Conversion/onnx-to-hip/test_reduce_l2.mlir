@@ -21,12 +21,14 @@ module {
   }
 
   // SwinV2 Q/K L2 norm: trailing axis -1, keepdims=1.
-  func.func @test_reduce_l2_swinv2_attn(%data: tensor<128x3x256x32xf16>, %axes: tensor<1xi64>) -> tensor<128x3x256x1xf16> {
+  func.func @test_reduce_l2_swinv2_attn(%data: tensor<128x3x256x32xf16>) -> tensor<128x3x256x1xf16> {
     // CHECK-LABEL: func.func @test_reduce_l2_swinv2_attn
-    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<128x3x256x32xf16>, %[[AXES:.*]]: tensor<1xi64>) -> tensor<128x3x256x1xf16>
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<128x3x256x32xf16>) -> tensor<128x3x256x1xf16>
 
+    %axes = arith.constant dense<[-1]> : tensor<1xi64>
     %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<128x3x256x32xf16>, tensor<1xi64>) -> tensor<128x3x256x1xf16>
 
+    // CHECK: %[[AXES:.*]] = arith.constant dense<3> : tensor<1xi64>
     // CHECK: tensor.empty() : tensor<128x3x256x1xf16>
     // CHECK: hip.reduce_l2(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<128x3x256x32xf16>, tensor<1xi64>) outs({{.*}} : tensor<128x3x256x1xf16>)
     // CHECK-NOT: onnx.ReduceSum
@@ -36,34 +38,37 @@ module {
     return %output : tensor<128x3x256x1xf16>
   }
 
-  func.func @test_reduce_l2_keepdims(%data: tensor<1x128xf16>, %axes: tensor<i64>) -> tensor<1x1xf16> {
+  func.func @test_reduce_l2_keepdims(%data: tensor<1x128xf16>) -> tensor<1x1xf16> {
     // CHECK-LABEL: func.func @test_reduce_l2_keepdims
 
-    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<1x128xf16>, tensor<i64>) -> tensor<1x1xf16>
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<1x128xf16>, tensor<1xi64>) -> tensor<1x1xf16>
 
-    // CHECK: hip.reduce_l2(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x128xf16>, tensor<i64>) outs({{.*}} : tensor<1x1xf16>)
+    // CHECK: hip.reduce_l2(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x128xf16>, tensor<1xi64>) outs({{.*}} : tensor<1x1xf16>)
 
     return %output : tensor<1x1xf16>
   }
 
-  func.func @test_reduce_l2_no_keepdims(%data: tensor<4x8xf16>, %axes: tensor<i64>) -> tensor<4xf16> {
+  func.func @test_reduce_l2_no_keepdims(%data: tensor<4x8xf16>) -> tensor<4xf16> {
     // CHECK-LABEL: func.func @test_reduce_l2_no_keepdims
 
-    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<4x8xf16>, tensor<i64>) -> tensor<4xf16>
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<4x8xf16>, tensor<1xi64>) -> tensor<4xf16>
 
-    // CHECK: hip.reduce_l2(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8xf16>, tensor<i64>) outs({{.*}} : tensor<4xf16>) {keepdims = 0 : i64}
+    // CHECK: hip.reduce_l2(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8xf16>, tensor<1xi64>) outs({{.*}} : tensor<4xf16>) {keepdims = 0 : i64, normalized_axes = array<i64: 1>}
 
     return %output : tensor<4xf16>
   }
 
-  func.func @reduce_l2_dynamic(%data: tensor<?x?x512xf16>, %axes: tensor<i64>) -> tensor<?x?xf16> {
-    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf16>, tensor<i64>) -> tensor<?x?xf16>
+  func.func @reduce_l2_dynamic(%data: tensor<?x?x512xf16>) -> tensor<?x?xf16> {
+    %axes = arith.constant dense<[2]> : tensor<1xi64>
+    %output = "onnx.ReduceL2"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf16>, tensor<1xi64>) -> tensor<?x?xf16>
     return %output : tensor<?x?xf16>
   }
 
   // CHECK-LABEL: func.func @reduce_l2_dynamic
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf16>, %[[AXES:.*]]: tensor<i64>) -> tensor<?x?xf16>
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf16>) -> tensor<?x?xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf16>
-  // CHECK: hip.reduce_l2(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf16>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf16>) {keepdims = 0 : i64}
+  // CHECK: hip.reduce_l2(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x512xf16>, tensor<1xi64>) outs(%[[INIT]] : tensor<?x?xf16>) {keepdims = 0 : i64, normalized_axes = array<i64: 2>}
   // CHECK-NOT: hip.alloc
 }

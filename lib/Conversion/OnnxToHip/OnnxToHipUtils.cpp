@@ -36,4 +36,48 @@ bool extractConstantIntVector(Value value,
   return extractConstantIntTensor(value, out, /*expectedRank=*/1);
 }
 
+std::optional<llvm::ArrayRef<int64_t>>
+resolveReductionAxes(Operation *op, Value data, int64_t noopWithEmptyAxes,
+                     llvm::SmallVectorImpl<int64_t> &storage) {
+  storage.clear();
+  bool hasAxesOperand =
+      op->getNumOperands() > 1 && !isa<NoneType>(op->getOperand(1).getType());
+  if (hasAxesOperand) {
+    auto axesType = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+    if (!axesType || (axesType.getRank() != 0 && axesType.getRank() != 1) ||
+        !extractConstantIntTensor(op->getOperand(1), storage))
+      return std::nullopt;
+  } else if (auto axesAttr = op->getAttrOfType<ArrayAttr>("axes")) {
+    for (Attribute entry : axesAttr)
+      storage.push_back(cast<IntegerAttr>(entry).getValue().getSExtValue());
+  }
+
+  if (storage.empty() && noopWithEmptyAxes == 0) {
+    auto dataType = dyn_cast<RankedTensorType>(data.getType());
+    if (!dataType)
+      return std::nullopt;
+    llvm::append_range(storage, llvm::seq<int64_t>(0, dataType.getRank()));
+  }
+  return llvm::ArrayRef<int64_t>(storage);
+}
+
+FailureOr<RankedTensorType>
+inferReduceResultType(Operation *op, Value data,
+                      llvm::ArrayRef<int64_t> reducedAxes, int64_t keepdims) {
+  auto ranked = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(data.getType());
+  if (!inputType)
+    return failure();
+  FailureOr<llvm::SmallVector<int64_t>> outShape =
+      inferReductionShape(inputType.getShape(), reducedAxes, keepdims);
+  if (failed(outShape))
+    return failure();
+  if (ranked) {
+    if (!isResultTypeCompatibleWithInferredShape(ranked, *outShape))
+      return failure();
+    return ranked;
+  }
+  return RankedTensorType::get(*outShape, inputType.getElementType());
+}
+
 } // namespace mlir::hip
