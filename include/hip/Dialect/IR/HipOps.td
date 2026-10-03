@@ -618,8 +618,8 @@ def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir"> {
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
-    "conv", /*outsAccessor=*/"Output", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvOp :
+    Hip_DpsOp_Semantic<"conv", /*traits=*/[OpStateOpInterface]> {
   let summary = "Forward convolution, 1D / 2D / 3D (in-place)";
   let description = [{
     Performs forward convolution on the in-tree `hip_conv` kernel. Operand
@@ -627,7 +627,7 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
     per-axis slots and rejects anything wider.
 
     Uses destination-passing style: output buffer is provided as argument,
-    operation writes result in-place.
+    and the operation writes the result in-place.
 
     Every per-axis attribute below has one entry per spatial axis (`pads` has
     two, begin then end), so a 2D conv spells them as shown and a 3D conv adds
@@ -681,10 +681,14 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
-    "conv_transpose", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvTransposeOp :
+    Hip_DpsOp_Semantic<"conv_transpose",
+                       /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output"> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -753,6 +757,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
 // ===== hipBLASLt ops =========================================================
