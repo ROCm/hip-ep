@@ -10,7 +10,7 @@
 // canonicalisers) in a single fixed point.  Folds `tensor.dim` queries on
 // any op carrying `ReifyRankedShapedTypeOpInterface` -- including
 // `tensor.expand_shape`, `tensor.collapse_shape`, `tensor.pad`, and the
-// HIP DPS ops registered via this dialect's external models -- and
+// HIP DPS ops that implement the interface directly -- and
 // composes the upstream `Compose{Expand,Collapse}OfX` patterns so chains
 // like `dim(collapse(expand(arg)))` collapse end-to-end in one pass.
 //
@@ -59,6 +59,18 @@ namespace mlir::hip {
 
 namespace {
 
+struct FoldSelectOfSameValue final : public OpRewritePattern<arith::SelectOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getTrueValue() != op.getFalseValue())
+      return failure();
+    rewriter.replaceOp(op, op.getTrueValue());
+    return success();
+  }
+};
+
 struct ResolveTensorDimsPass final
     : public impl::ResolveTensorDimsPassBase<ResolveTensorDimsPass> {
   using Base::Base;
@@ -76,10 +88,10 @@ void ResolveTensorDimsPass::runOnOperation() {
   // Upstream reify-driven dim folds.  `populateResolveRankedShapedType...`
   // contributes
   // `DimOfReifyRankedShapedTypeOpInterface<{memref,tensor}::DimOp>`, which
-  // dispatches through the op's `reifyResultShapes`
-  // (`ReifyRankedShapedTypeOpInterface`).  The companion populator covers ops
-  // on `InferShapedTypeOpInterface` (`tensor.dim` of HIP DPS results, via
-  // `reifyReturnTypeShapes`).
+  // dispatches through `ReifyRankedShapedTypeOpInterface::reifyDimOfResult`.
+  // HIP DPS ops implement that direct hook from the tied destination, so one
+  // query does not materialize every dimension of every result. The companion
+  // populator covers ops on `InferShapedTypeOpInterface`.
   memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
   memref::populateResolveShapedTypeResultDimsPatterns(patterns);
 
@@ -89,6 +101,7 @@ void ResolveTensorDimsPass::runOnOperation() {
   tensor::DimOp::getCanonicalizationPatterns(patterns, ctx);
   tensor::ExpandShapeOp::getCanonicalizationPatterns(patterns, ctx);
   tensor::CollapseShapeOp::getCanonicalizationPatterns(patterns, ctx);
+  patterns.add<FoldSelectOfSameValue>(ctx);
 
   if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
     return signalPassFailure();

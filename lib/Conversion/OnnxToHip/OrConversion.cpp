@@ -12,9 +12,8 @@ namespace {
 /// onnx.Or -> hip.or
 ///
 /// Element-wise logical OR of two boolean tensors with NumPy-style
-/// broadcasting. Dynamic output dims are resolved via
-/// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting
-/// operand.
+/// broadcasting. Dynamic output dimensions use the shared exact broadcast
+/// selection, including when both aligned operand dimensions are dynamic.
 struct OrToHip : public mlir::RewritePattern {
   OrToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Or", /*benefit=*/1, ctx) {}
@@ -44,10 +43,10 @@ struct OrToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor inputs");
 
     mlir::FailureOr<mlir::Value> initOrFailure =
-        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+        createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
-          op, "Or: no ranked operand spans dynamic result dim");
+          op, "Or: result type is incompatible with the broadcast shape");
 
     auto hipOp =
         mlir::hip::OrOp::create(rewriter, loc, context, a, b, *initOrFailure);

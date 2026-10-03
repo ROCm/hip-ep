@@ -15,6 +15,7 @@ namespace {
 //                     indices_shape_ptr, indices_rank,
 //                     output_shape_ptr, output_rank,
 //                     batch_dims, data_type)
+// The ABI carries no indices width; indices_ptr always addresses i64 values.
 struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -30,6 +31,10 @@ struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
     auto dataType = cast<MemRefType>(op.getData().getType());
     auto indicesType = cast<MemRefType>(op.getIndices().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
+    if (!indicesType.getElementType().isInteger(64))
+      return rewriter.notifyMatchFailure(
+          op, "GatherND indices element type must be i64 because the runtime "
+              "ABI reads int64 indices");
 
     int64_t hipDtype = getHipdnnDataType(dataType.getElementType());
     if (hipDtype < 0)

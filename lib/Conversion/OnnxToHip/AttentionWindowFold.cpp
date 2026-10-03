@@ -140,9 +140,7 @@
 #include <algorithm>
 #include <optional>
 
-// DEBUG_TYPE comes from OnnxToHipUtils.h ("convert-onnx-to-hip"), shared with
-// the rest of this directory rather than defined per file here, so that this
-// change does not also have to move the header's definition.
+#define DEBUG_TYPE "convert-onnx-to-hip"
 
 STATISTIC(NumAttentionWindowStamps,
           "Number of onnx.Attention ops stamped with a sliding window "

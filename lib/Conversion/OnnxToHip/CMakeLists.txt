@@ -9,6 +9,8 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  OnnxDimParams.cpp
+  OnnxToHipUtils.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
@@ -18,9 +20,6 @@ add_library(OnnxToHip STATIC
   BiasGeluConversion.cpp
   FastGeluConversion.cpp
   CastConversion.cpp
-  ReduceSumConversion.cpp
-  ReduceMeanConversion.cpp
-  ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   QMoEAmdConversion.cpp
@@ -43,8 +42,8 @@ add_library(OnnxToHip STATIC
   OneHotConversion.cpp
   GatherShapeFold.cpp
   TransposeMatMulFold.cpp
+  ShapeProvenanceAnalysis.cpp
   ReshapeShapeFold.cpp
-  PadShapeFold.cpp
   SliceShapeFold.cpp
   PackBroadcastTo4D.cpp
   AttentionWindowFold.cpp
@@ -61,8 +60,6 @@ add_library(OnnxToHip STATIC
   LpNormalizationConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
-  ReduceMaxConversion.cpp
-  ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
   NotConversion.cpp
@@ -79,7 +76,6 @@ add_library(OnnxToHip STATIC
   PadConversion.cpp
   TileConversion.cpp
   ExpandConversion.cpp
-  ReduceProdConversion.cpp
   LessConversion.cpp
   GreaterConversion.cpp
   GreaterOrEqualConversion.cpp
@@ -119,6 +115,7 @@ add_dependencies(OnnxToHip
 )
 
 target_link_libraries(OnnxToHip PUBLIC
+  HipConversionUtils
   HipDialectIR
   MLIRPass
   MLIRFuncDialect
@@ -127,6 +124,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
+  MLIRAnalysis
   MLIRIR
   MLIRSupport
   MLIRTransforms

@@ -23,6 +23,8 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/plugin.hpp
   include/morphizen/morphizen.hpp
   include/morphizen/_sanity_check.hpp
+  include/morphizen/cache_identity.hpp
+  src/cache_identity.cpp
   src/ort_api_impl.cpp
   include/morphizen/pass_context.hpp
   src/pass_context_imp.hpp

@@ -183,8 +183,8 @@ module {
   // Expectations:
   // - output init: tensor.dim for dims 0 and 1 of query + tensor.empty with
   //   two dynamic sizes (output's last dim H_q*d_v stays static).
-  // - present_state init: no past_state, so source is key -- tensor.dim for
-  //   dim 0 of key + tensor.empty with one dynamic size (B). Remaining dims
+  // - present_state init: batch is semantically query dim 0 -- the same SSA
+  //   extent is reused by both destinations. Remaining dims
   //   (H_kv=8, d_k=128, d_v=128) are static per spec.
   // ===========================================================================
   func.func @test_linear_dynamic_prefill(
@@ -206,13 +206,11 @@ module {
            tensor<?x?x1024xf16>)
         -> (tensor<?x?x4096xf16>, tensor<?x8x128x128xf16>)
 
-    // output init: dims 0 and 1 of query extracted at runtime.
-    // CHECK: tensor.dim %[[Q5]]
-    // CHECK: tensor.dim %[[Q5]]
-    // CHECK: tensor.empty({{.*}}) : tensor<?x?x4096xf16>
-    // present_state init: no past_state -> source is key, only dim 0 dynamic.
-    // CHECK: tensor.dim %[[K5]]
-    // CHECK: tensor.empty({{.*}}) : tensor<?x8x128x128xf16>
+    // output and state share query's batch extent.
+    // CHECK: %[[B5:.*]] = tensor.dim %[[Q5]]
+    // CHECK: %[[S5:.*]] = tensor.dim %[[Q5]]
+    // CHECK: tensor.empty(%[[B5]], %[[S5]]) : tensor<?x?x4096xf16>
+    // CHECK: tensor.empty(%[[B5]]) : tensor<?x8x128x128xf16>
     // CHECK: hip.linear_attention(%[[CTX5]])
     // CHECK-SAME: ins(%[[Q5]], %[[K5]], %[[V5]]
     // CHECK-SAME: kv_num_heads = 8
@@ -225,13 +223,12 @@ module {
   // ===========================================================================
   // Test 6: Dynamic batch + seq_len with past_state (gated_delta decode).
   //
-  // When past_state is provided it becomes the preferred source for the
-  // present_state init, which means every present_state dim can be sourced
-  // from the matching past_state dim (shapes are identical per spec).
+  // past_state must agree with the semantic state shape, but the destination
+  // is still built from query/value plus the head-count attributes.
   //
   // Expectations:
   // - output init: tensor.dim for dims 0 and 1 of query + tensor.empty(...).
-  // - present_state init: tensor.dim for dim 0 of past_state + tensor.empty.
+  // - present_state init reuses query dim 0 + tensor.empty.
   // ===========================================================================
   func.func @test_linear_dynamic_decode_with_state(
       %query: tensor<?x?x4096xf16>,
@@ -256,19 +253,51 @@ module {
            tensor<?x?x1024xf16>, tensor<?x?x8xf16>)
         -> (tensor<?x?x4096xf16>, tensor<?x8x128x128xf16>)
 
-    // output init: dims 0 and 1 of query extracted at runtime.
-    // CHECK: tensor.dim %[[Q6]]
-    // CHECK: tensor.dim %[[Q6]]
-    // CHECK: tensor.empty({{.*}}) : tensor<?x?x4096xf16>
-    // present_state init: past_state provided -> source is past_state for
-    // the dynamic batch dim.
-    // CHECK: tensor.dim %[[PS6]]
-    // CHECK: tensor.empty({{.*}}) : tensor<?x8x128x128xf16>
+    // output and state share query's batch extent.
+    // CHECK: %[[B6:.*]] = tensor.dim %[[Q6]]
+    // CHECK: %[[S6:.*]] = tensor.dim %[[Q6]]
+    // CHECK: tensor.empty(%[[B6]], %[[S6]]) : tensor<?x?x4096xf16>
+    // CHECK: tensor.empty(%[[B6]]) : tensor<?x8x128x128xf16>
     // CHECK: hip.linear_attention(%[[CTX6]])
     // CHECK-SAME: ins(%[[Q6]], %[[K6]], %[[V6]]
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: q_num_heads = 32
 
     return %out#0, %out#1 : tensor<?x?x4096xf16>, tensor<?x8x128x128xf16>
+  }
+
+  // Fully dynamic hidden extents must be mapped semantically rather than
+  // copied positionally from query/key:
+  //   Dk = query_hidden / Hq, Dv = value_hidden / Hkv.
+  func.func @test_linear_dynamic_hidden(
+      %query: tensor<?x?x?xf16>,
+      %key: tensor<?x?x?xf16>,
+      %value: tensor<?x?x?xf16>)
+      -> (tensor<?x?x?xf16>, tensor<?x8x?x?xf16>) {
+    %out:2 = "onnx.Custom"(%query, %key, %value)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 32 : si64,
+         kv_num_heads = 8 : si64}
+        : (tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>)
+        -> (tensor<?x?x?xf16>, tensor<?x8x?x?xf16>)
+
+    // CHECK-LABEL: func.func @test_linear_dynamic_hidden
+    // CHECK-SAME: %[[Q7:[^,]+]]: tensor<?x?x?xf16>
+    // CHECK-SAME: %[[K7:[^,]+]]: tensor<?x?x?xf16>
+    // CHECK-SAME: %[[V7:[^)]+]]: tensor<?x?x?xf16>
+    // CHECK: %[[B7:.*]] = tensor.dim %[[Q7]]
+    // CHECK: %[[S7:.*]] = tensor.dim %[[Q7]]
+    // CHECK: %[[QH7:.*]] = tensor.dim %[[Q7]]
+    // CHECK: %[[VH7:.*]] = tensor.dim %[[V7]]
+    // CHECK: %[[DK7:.*]] = arith.divui %[[QH7]]
+    // CHECK: %[[DV7:.*]] = arith.divui %[[VH7]]
+    // CHECK: %[[OH7:.*]] = arith.muli %[[DV7]]
+    // CHECK: tensor.empty(%[[B7]], %[[S7]], %[[OH7]]) : tensor<?x?x?xf16>
+    // CHECK: tensor.empty(%[[B7]], %[[DK7]], %[[DV7]]) : tensor<?x8x?x?xf16>
+    // CHECK: hip.linear_attention
+
+    return %out#0, %out#1
+        : tensor<?x?x?xf16>, tensor<?x8x?x?xf16>
   }
 }
