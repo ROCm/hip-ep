@@ -32,6 +32,12 @@ DenseElementsAttr matchHipCompileTimeConstantTensor(Value value);
 bool isResultTypeCompatibleWithInferredShape(
     RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
 
+/// Derive a ranked tensor type from a reified shape. Constant dimensions become
+/// static and every SSA dimension remains dynamic.
+RankedTensorType
+getTensorTypeFromReifiedShape(llvm::ArrayRef<OpFoldResult> reifiedShape,
+                              Type elementType, Attribute encoding = {});
+
 /// Build a tensor.empty with \p resultType and the dynamic sizes described by
 /// \p reifiedShape. Validation completes before index or destination IR emits.
 FailureOr<Value>

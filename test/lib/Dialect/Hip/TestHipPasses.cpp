@@ -7,12 +7,16 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include <iterator>
+#include <optional>
 
 namespace {
 
@@ -58,6 +62,64 @@ public:
   }
 };
 
+/// Resolve tensor.dim through the whole-shape interface implementation. This
+/// test-only path keeps semantic reifier tests independent from the production
+/// direct-dimension override.
+struct ResolveDimFromWholeShapeReify final
+    : public mlir::OpRewritePattern<mlir::tensor::DimOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  void initialize() { setHasBoundedRewriteRecursion(); }
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::tensor::DimOp dimOp,
+                  mlir::PatternRewriter &rewriter) const final {
+    auto result = mlir::dyn_cast<mlir::OpResult>(dimOp.getSource());
+    if (!result || !mlir::isa<mlir::hip::HipDpsOp>(result.getOwner()))
+      return mlir::failure();
+    std::optional<int64_t> dim = dimOp.getConstantIndex();
+    if (!dim)
+      return mlir::failure();
+
+    auto reify =
+        mlir::cast<mlir::ReifyRankedShapedTypeOpInterface>(result.getOwner());
+    mlir::ReifiedRankedShapedTypeDims shapes;
+    if (mlir::failed(reify.reifyResultShapes(rewriter, shapes)) ||
+        result.getResultNumber() >= shapes.size() || *dim < 0 ||
+        *dim >= static_cast<int64_t>(shapes[result.getResultNumber()].size()))
+      return mlir::failure();
+
+    mlir::OpFoldResult extent = shapes[result.getResultNumber()][*dim];
+    if (!extent)
+      return mlir::failure();
+    mlir::Value value =
+        mlir::getValueOrCreateConstantIndexOp(rewriter, dimOp.getLoc(), extent);
+    rewriter.replaceOp(dimOp, value);
+    return mlir::success();
+  }
+};
+
+struct TestHipWholeShapeDimReifyPass final
+    : public mlir::PassWrapper<TestHipWholeShapeDimReifyPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestHipWholeShapeDimReifyPass)
+
+  llvm::StringRef getArgument() const final {
+    return "test-hip-whole-shape-dim-reify";
+  }
+  llvm::StringRef getDescription() const final {
+    return "Resolve HIP result dims through whole-shape semantic reification";
+  }
+
+  void runOnOperation() final {
+    mlir::RewritePatternSet patterns(&getContext());
+    patterns.add<ResolveDimFromWholeShapeReify>(&getContext());
+    if (mlir::failed(
+            mlir::applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
 /// Probe the HipDpsOp shared default on a zero-result memref-mode operation.
 struct TestHipDpsDefaultReifyPass final
     : public mlir::PassWrapper<TestHipDpsDefaultReifyPass,
@@ -76,6 +138,56 @@ struct TestHipDpsDefaultReifyPass final
     mlir::WalkResult walkResult =
         getOperation().walk([&](mlir::hip::HipDpsOp op) -> mlir::WalkResult {
           mlir::Operation *operation = op.getOperation();
+          if (operation->hasAttr("test.default_reify_dim_failure_atomic")) {
+            if (operation->getNumResults() == 0) {
+              operation->emitOpError(
+                  "direct-dim atomicity fixture requires a tensor result");
+              return mlir::WalkResult::interrupt();
+            }
+
+            auto dps = mlir::cast<mlir::DestinationStyleOpInterface>(operation);
+            mlir::OpResult result = operation->getResult(0);
+            mlir::OpOperand *tiedOperand = dps.getTiedOpOperand(result);
+            auto initType = mlir::cast<mlir::RankedTensorType>(
+                tiedOperand->get().getType());
+            if (initType.getRank() == 0) {
+              operation->emitOpError(
+                  "direct-dim atomicity fixture requires positive rank");
+              return mlir::WalkResult::interrupt();
+            }
+
+            llvm::SmallVector<int64_t> invalidShape(initType.getShape());
+            invalidShape[0] =
+                initType.isDynamicDim(0) ? 7 : initType.getDimSize(0) + 1;
+            mlir::Type invalidType = mlir::RankedTensorType::get(
+                invalidShape, initType.getElementType(),
+                initType.getEncoding());
+            tiedOperand->get().setType(invalidType);
+
+            mlir::Block *block = operation->getBlock();
+            size_t before = std::distance(block->begin(), block->end());
+            rewriter.setInsertionPoint(operation);
+            auto reify =
+                mlir::cast<mlir::ReifyRankedShapedTypeOpInterface>(operation);
+            bool rejected =
+                mlir::failed(reify.reifyDimOfResult(rewriter, -1, 0)) &&
+                mlir::failed(reify.reifyDimOfResult(rewriter, 0, -1)) &&
+                mlir::failed(
+                    reify.reifyDimOfResult(rewriter, 0, initType.getRank())) &&
+                mlir::failed(reify.reifyDimOfResult(rewriter, 0, 0));
+            size_t after = std::distance(block->begin(), block->end());
+            tiedOperand->get().setType(initType);
+
+            if (!rejected || after != before) {
+              operation->emitOpError(
+                  "invalid direct-dim reification mutated IR or succeeded");
+              return mlir::WalkResult::interrupt();
+            }
+            operation->setAttr("test.default_reify_dim_failure_atomic_passed",
+                               rewriter.getUnitAttr());
+            return mlir::WalkResult::advance();
+          }
+
           if (operation->hasAttr("test.reify_rank_zero")) {
             auto reify =
                 mlir::cast<mlir::ReifyRankedShapedTypeOpInterface>(operation);
@@ -162,5 +274,6 @@ void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *, HipDialect *dialect) {
     RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
   });
+  PassRegistration<TestHipWholeShapeDimReifyPass>();
   PassRegistration<TestHipDpsDefaultReifyPass>();
 }
