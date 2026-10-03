@@ -601,6 +601,14 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
 
     int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
     auto out_tensor = octx->ctx->GetOutput(ort_idx, out_shape);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+    // GetOutput runs whichever allocator owns the output's memory info (this
+    // EP's, a parent EP's, or ORT's) on the thread that launches the model's
+    // kernels. A failed HIP call in there stays in HIP's per-thread last-error
+    // slot; the buffer is valid, so discard it before the next kernel's
+    // post-launch check reports it as that kernel's failure.
+    (void)hipGetLastError();
+#endif
     int mem_type =
         static_cast<int>(out_tensor.GetTensorMemoryInfo().GetDeviceType());
     void *ort_ptr = out_tensor.GetTensorMutableRawData();
@@ -759,6 +767,10 @@ void MlirCustomOp::compute_with_output_allocator(
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   if (perf)
     timer->record_start();
+  // The model's post-launch checks read this thread's HIP last-error slot,
+  // which may still hold a failure left by earlier host code on the thread
+  // (ORT, another EP, the application). Start the inference from a clean slot.
+  (void)hipGetLastError();
 #endif
 
   int ret = inference_state_->compute(&inputs.span);

@@ -102,12 +102,11 @@ inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 // mapped pinned allocator, since AMD APU iGPU shares physical memory with
 // the host). ORT keeps the allocator alive for the matching session.
 struct HipGpuAllocator : OrtAllocator {
-  // memory_info ownership stays with the factory. The OrtMemoryInfo's
-  // device_id (extracted via OrtApi::MemoryInfoGetId at construction time)
-  // is what the allocator passes to hipSetDevice; this is how a single
-  // factory serving multiple AMD GPUs keeps each allocator pinned to the
-  // GPU that the OrtEpDevice actually represents (instead of always hitting
-  // device 0).
+  // memory_info ownership stays with the factory, or with the parent EP that
+  // forwarded it (see SelectAllocatorHipDevice for how its device id maps to
+  // a HIP ordinal). The constructor makes no HIP calls: ORT creates allocators
+  // while it enumerates EP devices, and the delay-loaded HIP runtime must stay
+  // out of that window. The HIP device is resolved on the first allocation.
   HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api);
   // Frees every pinned buffer this allocator ever handed out (both the
   // currently-free pool entries and any still checked out). Called by the
@@ -159,11 +158,19 @@ private:
   // FreeImpl when it is freed back to the driver.
   std::unordered_map<void *, size_t> ptr_to_size_;
 
+  // HIP ordinal to make current around HIP calls, or -1 to keep the calling
+  // thread's current device. Resolved once, on first use.
+  int HipDevice();
+
   const OrtMemoryInfo *memory_info_;
-  // Cached at construction time. -1 means "couldn't read it from memory_info"
-  // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
-  // current HIP device in that case rather than failing the allocation.
-  int device_id_;
+  // memory_info's device id, -1 when it cannot be read (e.g. a degenerate /
+  // fake OrtMemoryInfo).
+  int requested_device_id_;
+  // True when memory_info is one of the factory's own (its device id is a HIP
+  // ordinal) rather than a parent EP's.
+  bool own_memory_info_;
+  std::once_flag hip_device_once_;
+  int hip_device_ = -1;
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared
