@@ -54,7 +54,7 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   mlir::FailureOr<mlir::Value> initOrFailure =
-      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+      createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "Add: no ranked operand spans dynamic result dim");
@@ -80,7 +80,7 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   mlir::FailureOr<mlir::Value> initOrFailure =
-      createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+      createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "Mul: no ranked operand spans dynamic result dim");
@@ -105,7 +105,7 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::FailureOr<mlir::Value> initOrFailure =
-      createBroadcastEmptyTensor(rewriter, loc, resultType, {lhs, rhs});
+      createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {lhs, rhs}, op);
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "Sub: no ranked operand spans dynamic result dim");
