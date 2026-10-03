@@ -72,8 +72,9 @@ The foundation represents compile-time extents in `RankedTensorType` and
 runtime extents as ordinary index SSA carried by `OpFoldResult`. It does not
 maintain a persistent inter-operation constraint set for facts such as “these
 two dynamic dimensions are equal.” Consequently, type-level verification treats
-dynamic extents as compatible unknowns, while runtime contracts check
-relationships that are not statically visible.
+dynamic extents as compatible unknowns. Accepting such a type does not prove a
+runtime relationship; each operation's lowering and runtime contract determine
+which relationships are checked during execution.
 
 This does not preclude symbolic reasoning. A future analysis may use MLIR's
 `ValueBoundsOpInterface` and external models over the same dimension SSA without
@@ -268,17 +269,44 @@ Failure must leave the IR unchanged, including when the valid result shape is
 rank zero; `FailureOr` distinguishes that empty success from failure.
 Conversion-side destination builders in `HipConversionUtils.cpp` validate
 through the same pure shape rule and check imported static result metadata
-before creating `tensor.empty`. The foundation retains the established dynamic
-extent-source policy; the later activation layer switches destination sizing to
-exact reification together with the frontend identity proofs that prevent
-redundant live merge SSA. Imported and inferred extents follow standard
-shaped-type compatibility: a dynamic extent on either side is compatible,
-while unequal static extents are contradictions.
+before creating `tensor.empty`. Exact dynamic destination sizing is activated
+together with frontend identity proofs that fold redundant merge SSA. Imported
+and inferred extents follow standard shaped-type compatibility: a dynamic extent
+on either side is compatible, while unequal static extents are contradictions.
+Only after every fallible static check succeeds may reification emit dimension
+SSA and destination builders create the destination.
 
 Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
 checks ranked tensor/memref uniformity, destination count, result count, and
 tensor result/init type equality before a category-specific verifier examines
 shape semantics.
+
+MatMul and Gemm accept a dynamic contraction K as unknown-compatible. Static
+equal K remains valid, while static unequal K is rejected by the pure shape
+rule before reification or conversion emits IR. The existing HIP-to-LLVM
+lowerings pass one K, taken from A after applying its transpose attribute.
+They do not pass B's K independently, so accepting a dynamic contraction must
+not be described as validating its equality at runtime. This shape layer does
+not change the wrapper ABI or add shared-error propagation.
+
+### MatMul strided-batch representability
+
+One constant batch stride can express a single matrix reused for every batch
+or one matrix per batch. It cannot express a mixture of broadcast and varying
+batch axes within one operand.
+
+A partial per-axis broadcast falls strictly between the two — batch `[2, 1]`
+against an output batch of `[2, 3]` holds 2 matrices where the output needs 6.
+`verifyStridedBatchMatmul` checks this structural restriction from the types.
+Unknown extents count as possible non-unit extents; they are not assumed away.
+The check does not emit runtime axis comparisons.
+
+The current lowering takes the batch count from A's leading dimensions. B uses
+stride zero when its leading-dimension product is at most one, and `K * N`
+otherwise. It does not carry independent A/B batch counts or an output-based
+batch count to the wrapper. Broader batch broadcasting and dynamic mismatch
+handling require separate lowering/runtime work; the shared shape rule alone
+does not establish those capabilities.
 
 ## `--hip-infer-shapes`
 
