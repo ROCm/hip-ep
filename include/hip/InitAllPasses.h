@@ -7,6 +7,7 @@
 
 #include <mutex>
 
+#include "crest/Passes/Passes.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
@@ -199,6 +200,9 @@ inline void registerAllPasses() {
     // hipsr-populate-shape-region, hipsr-externalize-constants, ...
     mlir::hipsr::registerHipsrPasses();
     mlir::hipsr::registerHipsrPipelines();
+
+    // Generic Scheme/CREST pass runner (--scheme-pass="module=<name>")
+    crest::registerCrestPass();
 
     // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
     // convert-hip-to-llvm); onnx-loop-outline and its sibling onnx-if-outline

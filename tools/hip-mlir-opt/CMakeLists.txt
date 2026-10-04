@@ -23,6 +23,8 @@ target_link_libraries(hip-mlir-opt PRIVATE
   OnnxDialectIR
   HipsrDialectTransforms
   HipsrDialectPipelines
+  CrestBindings
+  CrestPasses
   HipDialectTransforms
   HipToLLVM
   OnnxToHip
