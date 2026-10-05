@@ -4797,7 +4797,8 @@ def Hip_PoolOp : Hip_DpsOp<"pool"> {
     HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h):
 
       * pool_mode=0 (AVERAGE): Y = mean over the window
-      * pool_mode=1 (MAX)    : Y = max over the window
+      * pool_mode=1 (MAX)    : Y = max over the window. Element type may be
+                             f16/bf16/f32/f64 or i8/ui8 (integer compare).
       * pool_mode=2 (LP)     : Y = pow(sum(pow(|x|, p)), 1/p)
 
     Pad positions are never read (they fall outside the input bounds). For
