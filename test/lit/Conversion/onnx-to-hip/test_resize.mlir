@@ -6,7 +6,7 @@
 // covers:
 //   * variadic ONNX operands (X, NoValue roi, scales, NoValue sizes)
 //   * rejection / pass-through of attribute defaults
-//   * (N, C) pass-through invariant
+//   * channels-last rank 4, packed as prefix N and window (H, W, C)
 //   * single Variadic input form (only X — no extra operands at all)
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -102,7 +102,25 @@ module {
     return %y : tensor<?x3x32x32xf16>
   }
 
-  // Test 5: empty roi supplied as a statically empty (0-element) tensor rather
+  // Test 5: channels-last. Axes 1 and 2 change; batch and channel stay.
+  func.func @test_resize_nhwc(%arg0: tensor<1x16x16x3xf32>,
+                              %scales: tensor<4xf32>)
+      -> tensor<1x32x32x3xf32> {
+    // CHECK-LABEL: func.func @test_resize_nhwc
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x16x16x3xf32>, none, tensor<4xf32>)
+        -> tensor<1x32x32x3xf32>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x32x32x3xf32>
+  }
+
+  // Test 6: empty roi supplied as a statically empty (0-element) tensor rather
   // than a NoValue -- what some ONNX exporters emit for an omitted roi. It must
   // be treated as absent so the Resize still converts (regression: previously
   // the "roi present" guard rejected it and onnx.Resize survived unlowered).
