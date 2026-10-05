@@ -112,7 +112,7 @@ struct MicrosoftQuickGeluToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "missing context argument");
 
     // ONNX Runtime marks alpha optional and defaults it to 1.702.
-    double alpha = 1.702;
+    double alpha = static_cast<double>(1.702f);
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
       alpha = attr.getValueAsDouble();
 
