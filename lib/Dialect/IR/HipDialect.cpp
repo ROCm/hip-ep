@@ -1093,6 +1093,56 @@ LogicalResult InstanceNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// BatchNormOp: ins(input, scale, bias, mean, variance), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BatchNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BatchNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult BatchNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(),    getBias(),
+                                  getMean(),  getVariance(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 2 (N, C, ...)");
+  if (*inputRank < 2)
+    return emitOpError("expected input rank >= 2 (N, C, ...), got ")
+           << *inputRank;
+
+  auto expectRank1 = [&](Type type, StringRef name) -> LogicalResult {
+    auto rank = rankedShape(type);
+    if (rank && *rank != 1)
+      return emitOpError("expected 1-D ")
+             << name << " of length C, got rank " << *rank;
+    return success();
+  };
+  if (failed(expectRank1(getScale().getType(), "scale")) ||
+      failed(expectRank1(getBias().getType(), "bias")) ||
+      failed(expectRank1(getMean().getType(), "mean")) ||
+      failed(expectRank1(getVariance().getType(), "variance")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GroupNormOp: ins(input, scale, bias), outs(output)
 //===----------------------------------------------------------------------===//
 

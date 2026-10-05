@@ -388,6 +388,86 @@ struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
   }
 };
 
+// hip.batch_norm(%ctx) ins(%input, %scale, %bias, %mean, %variance)
+//   outs(%output)
+//   -> wrap_batch_normalization(state, input, scale, bias, mean, variance,
+//        output, n, c, spatial, data_type, epsilon)
+struct BatchNormOpLowering : public ConvertOpToLLVMPattern<BatchNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(BatchNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value biasPtr =
+        extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value meanPtr =
+        extractContiguousMemRefPtr(adaptor.getMean(), rewriter, loc);
+    Value variancePtr =
+        extractContiguousMemRefPtr(adaptor.getVariance(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    if (inputType.getRank() < 2)
+      return rewriter.notifyMatchFailure(
+          op, "hip.batch_norm requires input rank >= 2");
+
+    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value c = getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = 2, rank = inputType.getRank(); dimIdx < rank;
+         ++dimIdx) {
+      spatial = LLVM::MulOp::create(
+          rewriter, loc,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc),
+          spatial);
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    Value dataTypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dataType));
+    Value epsilonVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType, // state
+        ptrType, ptrType, ptrType,
+        ptrType, ptrType,          // input, scale, bias, mean, var
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // n, c, spatial
+        i64Type, f32Type           // data_type, epsilon
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapBatchNormalization,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr, inputPtr,    scalePtr,    biasPtr,
+                               meanPtr,  variancePtr, outputPtr,   n,
+                               c,        spatial,     dataTypeVal, epsilonVal};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.group_norm -> wrap_group_norm(state, input, scale, bias, output,
 //   n, c, spatial, groups, channels_last, activation, data_type, epsilon)
 struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
@@ -486,8 +566,10 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-               InstanceNormOpLowering, GroupNormOpLowering>(converter);
+  patterns
+      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering>(
+          converter);
 }
 
 } // namespace hip
