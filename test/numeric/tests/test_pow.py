@@ -21,9 +21,7 @@ def _make_pow_model(dtype, shape, exponent: float):
     tp = np_to_onnx_type(dtype)
     x = helper.make_tensor_value_info("X", tp, shape)
     y = helper.make_tensor_value_info("Y", tp, shape)
-    exp = numpy_helper.from_array(
-        np.array(exponent, dtype=dtype), name="exponent"
-    )
+    exp = numpy_helper.from_array(np.array(exponent, dtype=dtype), name="exponent")
     node = helper.make_node("Pow", ["X", "exponent"], ["Y"])
     return make_model_from_nodes([node], [x], [y], initializers=[exp])
 
