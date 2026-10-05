@@ -15,6 +15,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
+| Einsum | Binary contraction decomposed to Transpose + MatMul (hipBLASLt); static shapes |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
 | Mul | Custom HIP kernel |
