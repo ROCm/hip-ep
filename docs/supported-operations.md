@@ -110,7 +110,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
-| Resize | Custom HIP kernel |
+| Resize | Custom HIP kernel. Dynamic NCHW spatial extents are accepted when `scales` is a compile-time constant |
 | Upsample | Lowered through Resize (`asymmetric`, nearest `floor`) |
 | GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |

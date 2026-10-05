@@ -25,9 +25,13 @@ struct HipResizeLaunch {
 };
 
 // The window is the shortest suffix that contains every statically resized
-// axis. Axes before it are the copied prefix and must number at most 2. A
-// dynamic axis is legal only in that prefix, and only when both the input and
-// the output axis are dynamic (the output copies the input extent).
+// axis. Axes before it are the copied prefix and must number at most 2.
+// A dynamic axis is legal when both sides are dynamic. In the prefix the
+// output copies the input extent. In the window, conversion fills the output
+// extent from a constant scale and lowering reads it from the memref
+// descriptor. When nothing is statically resized, a trailing static channel
+// after a dynamic axis is channels-last (prefix is N). Otherwise the copied
+// prefix is the leading two axes.
 inline std::optional<HipResizeLaunch>
 planHipResizeLaunch(ShapedType inputType, ShapedType outputType) {
   if (!inputType.hasRank() || !outputType.hasRank())
@@ -36,33 +40,56 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType) {
   if (rank < 3 || rank > 5 || outputType.getRank() != rank)
     return std::nullopt;
 
-  // true: copied. false: statically resized. nullopt: not expressible.
-  auto axis = [&](int64_t i) -> std::optional<bool> {
+  enum class AxisKind { Copied, Resized, Dynamic };
+  auto axis = [&](int64_t i) -> std::optional<AxisKind> {
     const bool inDyn = inputType.isDynamicDim(i);
     const bool outDyn = outputType.isDynamicDim(i);
     if (inDyn || outDyn)
-      return (inDyn && outDyn) ? std::optional<bool>(true) : std::nullopt;
-    return inputType.getDimSize(i) == outputType.getDimSize(i);
+      return (inDyn && outDyn) ? std::optional<AxisKind>(AxisKind::Dynamic)
+                               : std::nullopt;
+    return inputType.getDimSize(i) == outputType.getDimSize(i)
+               ? AxisKind::Copied
+               : AxisKind::Resized;
   };
 
+  AxisKind kinds[5];
   int64_t firstResized = rank;
+  int64_t firstDynamic = rank;
   for (int64_t i = 0; i < rank; ++i) {
-    std::optional<bool> copied = axis(i);
-    if (!copied)
+    std::optional<AxisKind> kind = axis(i);
+    if (!kind)
       return std::nullopt;
-    if (!*copied) {
+    kinds[i] = *kind;
+    if (*kind == AxisKind::Resized && firstResized == rank)
       firstResized = i;
-      break;
-    }
+    if (*kind == AxisKind::Dynamic && firstDynamic == rank)
+      firstDynamic = i;
   }
 
-  int64_t prefixCount = std::min<int64_t>(2, firstResized);
-  int64_t spatialRank = rank - prefixCount;
+  int64_t prefixCount;
+  if (firstResized < rank) {
+    prefixCount = std::min<int64_t>(2, firstResized);
+  } else if (firstDynamic < rank) {
+    bool trailingStaticChannel = false;
+    if (kinds[rank - 1] == AxisKind::Copied) {
+      for (int64_t i = 1; i < rank - 1; ++i) {
+        if (kinds[i] == AxisKind::Dynamic) {
+          trailingStaticChannel = true;
+          break;
+        }
+      }
+    }
+    prefixCount = trailingStaticChannel ? std::min<int64_t>(2, firstDynamic)
+                                        : std::min<int64_t>(2, rank - 1);
+  } else {
+    prefixCount = std::min<int64_t>(2, rank - 1);
+  }
+
+  const int64_t spatialRank = rank - prefixCount;
   if (prefixCount > 2 || spatialRank < 1 || spatialRank > 3)
     return std::nullopt;
-
-  for (int64_t i = prefixCount; i < rank; ++i) {
-    if (inputType.isDynamicDim(i) || outputType.isDynamicDim(i))
+  for (int64_t i = 0; i < prefixCount; ++i) {
+    if (kinds[i] == AxisKind::Resized)
       return std::nullopt;
   }
   return HipResizeLaunch{prefixCount, spatialRank};

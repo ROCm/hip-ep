@@ -15,15 +15,16 @@ namespace {
 //===----------------------------------------------------------------------===//
 //
 // The kernel takes a copied prefix (N, C) and a trailing window of
-// spatial_rank axes (1..3).  planHipResizeLaunch chooses
-// that split from which extents change:
+// spatial_rank axes (1..3).  planHipResizeLaunch chooses that split from
+// which extents change:
 //
 //   NCHW  1x3x16x16 -> 1x3x32x32 : N, C,     spatial_rank=2, (H, W)
 //   NHWC  1x16x16x3 -> 1x32x32x3 : N, C=1,   spatial_rank=3, (H, W, C)
 //
 // An empty prefix slot is the constant 1, so it does not add a tensor axis.
-// A window axis whose extents match is copied.  Dynamic prefix dims are read
-// from the memref descriptor.
+// A window axis whose extents match is copied.  Dynamic prefix dims and
+// dynamic window dims are read from the memref descriptor.  The kernel
+// recovers per-axis scale from those extents.
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,

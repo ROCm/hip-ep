@@ -160,4 +160,41 @@ module {
     // CHECK-SAME: mode = 1
     return %y : tensor<1x3x32x32xf16>
   }
+
+  // Test 7: dynamic H/W with constant scales [1, 1, 2, 2]. N and C are
+  // copies; H and W are floor(dim * 2).
+  func.func @test_resize_dynamic_spatial_nchw(%arg0: tensor<?x3x?x?xf16>)
+      -> tensor<?x3x?x?xf16> {
+    // CHECK-LABEL: func.func @test_resize_dynamic_spatial_nchw
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0, 2.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<?x3x?x?xf16>, none, tensor<4xf32>) -> tensor<?x3x?x?xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: arith.sitofp
+    // CHECK: arith.mulf
+    // CHECK: arith.fptosi
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x3x?x?xf16>
+    // CHECK: hip.resize
+    // CHECK: return
+    return %y : tensor<?x3x?x?xf16>
+  }
+
+  // Test 8: a scales argument with dynamic spatial dims cannot be folded.
+  func.func @test_resize_dynamic_scales_rejected(%arg0: tensor<?x3x?x?xf16>,
+                                                  %scales: tensor<4xf32>)
+      -> tensor<?x3x?x?xf16> {
+    // CHECK-LABEL: func.func @test_resize_dynamic_scales_rejected
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<?x3x?x?xf16>, none, tensor<4xf32>) -> tensor<?x3x?x?xf16>
+    // CHECK: onnx.Resize
+    // CHECK-NOT: hip.resize
+    // CHECK: return
+    return %y : tensor<?x3x?x?xf16>
+  }
 }
