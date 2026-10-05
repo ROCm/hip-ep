@@ -2232,6 +2232,48 @@ void NegOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// IsNaNOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IsNaNOp::getDpsInitsMutable() { return getYMutable(); }
+
+void IsNaNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult IsNaNOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getX().getType());
+  auto outputType = dyn_cast<ShapedType>(getY().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      !outputType.hasRank())
+    return emitOpError("expects ranked input and output");
+
+  Type inputElem = inputType.getElementType();
+  if (!inputElem.isF16() && !inputElem.isBF16() && !inputElem.isF32() &&
+      !inputElem.isF64())
+    return emitOpError("input element type must be f16, bf16, f32, or f64");
+
+  // ONNX bool is i1 in hand-written IR and an 8-bit integer in the
+  // ORT/morphizen frontend. Both are one byte per element at runtime.
+  Type outputElem = outputType.getElementType();
+  if (!outputElem.isInteger(1) && !outputElem.isInteger(8))
+    return emitOpError(
+        "output element type must be a 1-byte boolean (i1 or i8/ui8)");
+
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+  for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
+    if (inputType.isDynamicDim(dim) || outputType.isDynamicDim(dim))
+      continue;
+    if (inputType.getDimSize(dim) != outputType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // NotOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
