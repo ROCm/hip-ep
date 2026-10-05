@@ -12,6 +12,8 @@
 // 4. conv_stride2        — strided conv (stride=2)
 // 5. conv_asymmetric_stride — asymmetric stride [2,3]
 // 6. conv_dynamic_spatial — dynamic batch + dynamic spatial output dim
+// 7. conv_3d               — rank-5 NCDHW, depth kernel 3, spatial kernel 1x1
+// 8. conv_rank6            — left unconverted (no runtime path)
 //
 // Note: conv without bias requires onnx.NoValue syntax which the current
 // ConvToHipPattern does not guard against NoneType operands; tracked separately.
@@ -153,4 +155,46 @@ module {
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x128x?x64xf16>
   // CHECK: hip.conv({{.*}}) outs({{.*}} : tensor<?x128x?x64xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 7. Rank-5 NCDHW. Depth kernel 3 with pad 1 keeps D; the 1x1 spatial kernel
+  //    with zero spatial pad keeps H and W. This is an overlapping conv, so it
+  //    must become hip.conv rather than the patch-embed GEMM.
+  // --------------------------------------------------------------------------
+  func.func @conv_3d(%input: tensor<1x4x6x4x4xf16>, %weights: tensor<4x4x3x1x1xf16>, %bias: tensor<4xf16>) -> tensor<1x4x6x4x4xf16> {
+    %output = "onnx.Conv"(%input, %weights, %bias) {
+      kernel_shape = [3, 1, 1],
+      strides = [1, 1, 1],
+      pads = [1, 0, 0, 1, 0, 0],
+      dilations = [1, 1, 1],
+      group = 1 : i64
+    } : (tensor<1x4x6x4x4xf16>, tensor<4x4x3x1x1xf16>, tensor<4xf16>) -> tensor<1x4x6x4x4xf16>
+    return %output : tensor<1x4x6x4x4xf16>
+  }
+
+  // CHECK-LABEL: func.func @conv_3d
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x4x6x4x4xf16>, %[[W:.*]]: tensor<4x4x3x1x1xf16>, %[[B:.*]]: tensor<4xf16>) -> tensor<1x4x6x4x4xf16>
+  // CHECK-NOT: hip.gemm
+  // CHECK: tensor.empty() : tensor<1x4x6x4x4xf16>
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x4x6x4x4xf16>, tensor<4x4x3x1x1xf16>, tensor<4xf16>) outs({{.*}} : tensor<1x4x6x4x4xf16>) {dilations = [1, 1, 1], group = 1 : i64, kernel_shape = [3, 1, 1], pads = [1, 0, 0, 1, 0, 0], strides = [1, 1, 1]}
+  // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 8. Rank 6 has no kernel path and must stay onnx.Conv.
+  // --------------------------------------------------------------------------
+  func.func @conv_rank6(%input: tensor<1x1x2x2x2x2xf32>, %weights: tensor<1x1x1x1x1x1xf32>, %bias: tensor<1xf32>) -> tensor<1x1x2x2x2x2xf32> {
+    %output = "onnx.Conv"(%input, %weights, %bias) {
+      kernel_shape = [1, 1, 1, 1],
+      strides = [1, 1, 1, 1],
+      pads = [0, 0, 0, 0, 0, 0, 0, 0],
+      dilations = [1, 1, 1, 1],
+      group = 1 : i64
+    } : (tensor<1x1x2x2x2x2xf32>, tensor<1x1x1x1x1x1xf32>, tensor<1xf32>) -> tensor<1x1x2x2x2x2xf32>
+    return %output : tensor<1x1x2x2x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @conv_rank6
+  // CHECK-SAME: !hip.context
+  // CHECK: onnx.Conv
+  // CHECK-NOT: hip.conv
 }

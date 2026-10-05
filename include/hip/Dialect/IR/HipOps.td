@@ -646,18 +646,20 @@ def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
-  let summary = "2D convolution operation using MIOpen (in-place)";
+  let summary = "2D or 3D convolution using the custom HIP kernel (in-place)";
   let description = [{
-    Performs 2D convolution using MIOpen (miopenConvolutionForward).
+    Performs 2D (NCHW) or 3D (NCDHW) convolution with the custom HIP kernel.
+    A rank-3 (NCL) ONNX conv is rewritten to this 2D form before it is built.
 
     Uses destination-passing style: output buffer is provided as argument,
     operation writes result in-place.
 
-    Attributes:
-    - kernel_shape: Array of kernel dimensions [H, W]
-    - strides: Array of stride values [H, W]
-    - pads: Array of padding values [top, left, bottom, right]
-    - dilations: Array of dilation values [H, W]
+    Attributes follow the input's spatial rank (2 for NCHW, 3 for NCDHW):
+    - kernel_shape: [H, W] or [D, H, W]
+    - strides: [H, W] or [D, H, W]
+    - pads: [top, left, bottom, right] or
+      [D_begin, H_begin, W_begin, D_end, H_end, W_end]
+    - dilations: [H, W] or [D, H, W]
     - group: Number of groups for grouped convolution
 
     Example:
