@@ -99,8 +99,10 @@ jobs:
       # (lld-link in-process), InferenceState loads it via morphizen::Plugin
       # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
       # lld-link consumes the MSVC/UCRT release CRT import libs + hipdnn-ep-tls.lib
-      # staged into gpu-test-package/lib (+ LIB) to link the model .dll. This is
-      # now a real gate (no exit /b 0): if native breaks, the job fails.
+      # staged into gpu-test-package/lib (+ LIB) to link the model .dll.
+      # A real gate when the package was built with
+      # HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON (marker file staged by
+      # windows-build-real.yml). Otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run native-artifact smoke test (GPU)
         if: always()
@@ -110,6 +112,10 @@ jobs:
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
           set ROOT=%CD%
+          if not exist "%ROOT%\gpu-test-package\native-artifacts.enabled" (
+            echo [SKIP] native artifacts were not built ^(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=OFF^)
+            exit /b 0
+          )
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -146,7 +152,8 @@ jobs:
       # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
       # directly. profile=hip selects the hipgpu backend; artifact_format=NATIVE
       # is a Hip-owned option forwarded under the shared ep.<amdgpu>.* prefix
-      # (amdgpu-ep PR 102/105 via AMDGPU_PR_PATCHES). Real gate (no exit /b 0).
+      # (amdgpu-ep PR 102/105 via AMDGPU_PR_PATCHES). Real gate when the
+      # package contains native-artifacts.enabled; otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella native smoke test (GPU)
         if: always()
@@ -156,6 +163,10 @@ jobs:
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
           set ROOT=%CD%
+          if not exist "%ROOT%\gpu-test-package\native-artifacts.enabled" (
+            echo [SKIP] native artifacts were not built ^(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=OFF^)
+            exit /b 0
+          )
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%

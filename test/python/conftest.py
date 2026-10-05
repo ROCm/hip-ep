@@ -49,7 +49,9 @@ EP_PROVIDER_OPTIONS = {"profile": "hip"}
 # Optional artifact-format override (escape hatch). Production / CI use the
 # default in-process LLVM-IR (bitcode) JIT, so this is UNSET by default and the
 # tests run on bitcode. Set HIPEP_ARTIFACT_FORMAT=NATIVE to compile each model to
-# a per-model DLL (lld-link + LoadLibrary) instead. Normally not needed — build
+# a per-model DLL (lld-link + LoadLibrary) instead. That requires the EP to be
+# built with -DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON; otherwise session setup
+# throws. Normally not needed — build
 # the EP against a Tier-1 `llvm-install` (see docs/whisper_quick_start.md §1) and
 # bitcode works; NATIVE is just a fallback. The value rides through as a raw
 # `ep.hipgpu.*` session-config entry (NOT a provider option: ORT validates those

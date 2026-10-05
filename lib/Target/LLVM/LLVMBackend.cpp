@@ -4,29 +4,34 @@
  */
 #include "hip/Target/LLVM/LLVMBackend.h"
 
+#if HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 #include "hip/Compiler/PluginRegistry.h"
+#endif
 
 #include <mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h>
 #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
 #include <mlir/Target/LLVMIR/Export.h>
 
-#include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/DataLayout.h>
-#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/Linker/Linker.h>
-#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/TargetParser/Triple.h>
+
+#if HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Linker/Linker.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
-#include <llvm/TargetParser/Triple.h>
+#endif
 
 #include "hip/debug_log.h"
 
@@ -45,10 +50,12 @@ void LLVMBackend::initializeTarget() {
     return;
   }
 
+#if HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
   // Initialize native target for object file emission
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
   llvm::InitializeNativeTargetAsmParser();
+#endif
 
   target_initialized_ = true;
 }
@@ -156,6 +163,23 @@ bool LLVMBackend::emitLlvmIr(llvm::Module *module,
 }
 
 // ---- Native backend --------------------------------------------------------
+
+#if !HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+
+llvm::TargetMachine *LLVMBackend::createTargetMachine() { return nullptr; }
+
+bool LLVMBackend::compileToObjectFile(llvm::Module *, const std::string &) {
+  return false;
+}
+
+bool LLVMBackend::compileToObjectInMemory(llvm::Module *,
+                                          std::vector<uint8_t> &) {
+  return false;
+}
+
+bool LLVMBackend::linkRuntimeModule(llvm::Module *) { return false; }
+
+#else
 
 llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   initializeTarget();
@@ -372,5 +396,7 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
 
   return true;
 }
+
+#endif // HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 
 } // namespace hipdnn

@@ -9,55 +9,67 @@ message(STATUS "Building Target LLVM Library")
 # provided by the shared runtime-bc-embed lib (lib/Runtime) so the bytes are
 # generated once and shared with the EP/JIT consumer; LLVMBackend.cpp's extern
 # reference pulls the embed object into the final binary.
-add_library(HipTargetLLVM STATIC
-  LLVMBackend.cpp
-  DLLLinker.cpp
-)
+set(_hip_target_llvm_sources LLVMBackend.cpp)
+# DLLLinker and in-process lld exist only for the opt-in native artifact path.
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  list(APPEND _hip_target_llvm_sources DLLLinker.cpp)
+endif()
+add_library(HipTargetLLVM STATIC ${_hip_target_llvm_sources})
 
 if(TARGET runtime-bc-embed)
     target_link_libraries(HipTargetLLVM PUBLIC runtime-bc-embed)
 endif()
 
-# Link LLVM components
+# Link LLVM components.
 #
-# DLLLinker.cpp's Windows path invokes lld::lldMain in-process with the COFF
-# driver. The Linux path uses a `clang++ -shared` subprocess instead (see
-# linkDLL_Linux for the rationale), so it pulls in no in-process lld libs.
-# The COFF driver, lldCOFF/lldCommon, and the WindowsDriver/WindowsManifest/
-# LibDriver transitives are therefore Windows-only.
-llvm_map_components_to_libnames(llvm_libs
-  # Core infrastructure
+# When native artifacts are enabled, DLLLinker.cpp's Windows path invokes
+# lld::lldMain in-process with the COFF driver. The Linux path uses a
+# `clang++ -shared` subprocess instead (see linkDLL_Linux), so it pulls in no
+# in-process lld libs. The COFF driver, lldCOFF/lldCommon, and the
+# WindowsDriver/WindowsManifest/LibDriver transitives are therefore
+# Windows-only, and only linked when HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON.
+# Bitcode emission and the O2 pipeline. Host codegen, the bitcode linker, and
+# lld are native-artifact only; the default JIT path links its own codegen via
+# morphizen-custom-op-mlir.
+set(_hip_llvm_components
   Support
   Core
   IRReader
   BitWriter
   Passes
   Target
-
-  # Code generation (required by both lldCOFF and lldELF)
-  CodeGen
-  SelectionDAG
-  AsmPrinter
-  BinaryFormat
-  MC
-  MCParser
   TargetParser
-
-  # X86 backend
-  X86CodeGen
-  X86AsmParser
-  X86Desc
-  X86Info
-
-  # Linker support
-  Linker
-
-  # LTO and option parsing (required by both lldCOFF and lldELF)
-  LTO
-  Option
 )
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  list(APPEND _hip_llvm_components
+    # Code generation (required by both lldCOFF and lldELF)
+    CodeGen
+    SelectionDAG
+    AsmPrinter
+    BinaryFormat
+    MC
+    MCParser
 
-if(WIN32)
+    # X86 backend
+    X86CodeGen
+    X86AsmParser
+    X86Desc
+    X86Info
+
+    # Linker support
+    Linker
+
+    # LTO and option parsing (required by both lldCOFF and lldELF)
+    LTO
+    Option
+  )
+endif()
+llvm_map_components_to_libnames(llvm_libs ${_hip_llvm_components})
+
+set(lld_libs "")
+set(LLVM_DTLTO_LIB "")
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  if(WIN32)
     # Windows COFF-only LLVM components needed by lldCOFF.
     llvm_map_components_to_libnames(llvm_libs_coff
         WindowsDriver
@@ -65,13 +77,12 @@ if(WIN32)
         LibDriver
     )
     list(APPEND llvm_libs ${llvm_libs_coff})
-endif()
+  endif()
 
-# LLD: Windows only (Linux uses clang++ driver subprocess). Prefer
-# find_package(LLD CONFIG) (apt.llvm.org / IMPORTED targets); fall back to
-# find_library for legacy trees that omit LLDConfig.cmake.
-set(lld_libs "")
-if(WIN32)
+  # LLD: Windows only (Linux uses clang++ driver subprocess). Prefer
+  # find_package(LLD CONFIG) (apt.llvm.org / IMPORTED targets); fall back to
+  # find_library for legacy trees that omit LLDConfig.cmake.
+  if(WIN32)
     find_package(LLD CONFIG QUIET)
     if(LLD_FOUND)
         message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
@@ -82,10 +93,11 @@ if(WIN32)
         find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
         list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
     endif()
-endif()
+  endif()
 
-# LLVMDTLTO was split from LLVMLTO in LLVM 22.1; link it when present.
-find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO PATHS ${LLVM_LIBRARY_DIRS})
+  # LLVMDTLTO was split from LLVMLTO in LLVM 22.1; link it when present.
+  find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO PATHS ${LLVM_LIBRARY_DIRS})
+endif()
 
 # Link against required libraries
 target_link_libraries(HipTargetLLVM PUBLIC
@@ -104,7 +116,7 @@ target_link_libraries(HipTargetLLVM PUBLIC
 # deployed to a host with clang elsewhere). clang++ (not bare clang) — the
 # driver auto-pulls libstdc++ which the generated model object needs for
 # __cxa_begin_catch / __cxa_rethrow.
-if(NOT WIN32)
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS AND NOT WIN32)
     if(TARGET clang)
         # In-tree (from-source) LLVM: the clang/lld .exe are not present at
         # configure time, so find_program can't see them and would fall back to

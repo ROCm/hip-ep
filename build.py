@@ -270,6 +270,18 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
     run_subprocess(cmd)
 
 
+def _cmake_cache_flag(build_dir, name):
+    """True when CMakeCache.txt records name:BOOL=ON (or name:STRING=ON)."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    prefix = f"{name}:"
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith(prefix) and line.rstrip().endswith("=ON"):
+            return True
+    return False
+
+
 def _llvm_built_from_source(build_dir):
     """True when cmake/deps.cmake built LLVM in-tree (embedded sub-build)."""
     cache = Path(build_dir) / "CMakeCache.txt"
@@ -300,7 +312,13 @@ def build_targets(args, build_dir):
     # (We cannot pull lld into the CMake graph via add_dependencies -- that
     # corrupts LLVM's install(EXPORT); see cmake/deps.cmake.) clang itself is
     # already built as a dependency of lib/Runtime's bitcode step.
-    if _llvm_built_from_source(build_dir) and not IS_WINDOWS:
+    # ld.lld is only required by the opt-in native artifact link
+    # (clang++ -fuse-ld=lld). The default LLVM IR path does not use it.
+    if (
+        _llvm_built_from_source(build_dir)
+        and not IS_WINDOWS
+        and _cmake_cache_flag(build_dir, "HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS")
+    ):
         step("Build in-tree lld (runtime device-link toolchain)")
         run_subprocess(
             [

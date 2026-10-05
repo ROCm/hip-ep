@@ -17,6 +17,7 @@
 // Component headers
 #include "InferenceState.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
+#include "hip/native_artifacts.h"
 #include "hip/init_config_abi.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
@@ -29,6 +30,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -278,6 +280,12 @@ customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
                << customop::kArtifactFormatLlvmIr << "' or '"
                << customop::kArtifactFormatNative << "'.";
   }
+
+#if !HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  if (kind == customop::ArtifactKind::NATIVE) {
+    throw std::runtime_error(hipdnn::kNativeArtifactsDisabledMessage);
+  }
+#endif
 
   MY_LOG(1) << "Artifact loader: "
             << (kind == customop::ArtifactKind::NATIVE ? "native (Plugin)"

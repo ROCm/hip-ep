@@ -250,6 +250,16 @@ jobs:
           mkdir -p dll-sizes
           python -c 'import glob,json,os; b="staging/bin"; d={}; p=os.path.join(b,"hipgpu.dll"); d.update({"hipgpu.dll": os.path.getsize(p)} if os.path.isfile(p) else {}); d.update({os.path.basename(x): os.path.getsize(x) for x in sorted(glob.glob(os.path.join(b,"custom_kernels*.dll")))}); open("dll-sizes/dll-sizes.json","w",encoding="utf-8",newline="\n").write(json.dumps(d,indent=2)+"\n"); print(open("dll-sizes/dll-sizes.json",encoding="utf-8").read())'
 
+          # Marker consumed by windows-gpu-test.yml. Absent means the native
+          # smoke tests skip; present only when this build opted in.
+          CACHE="../build/$(basename "$PWD")/CMakeCache.txt"
+          if grep -q '^HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS:BOOL=ON$' "$CACHE"; then
+            echo "Native artifacts enabled; GPU native smoke tests will run"
+            touch staging/native-artifacts.enabled
+          else
+            echo "Native artifacts disabled; GPU native smoke tests will skip"
+          fi
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
