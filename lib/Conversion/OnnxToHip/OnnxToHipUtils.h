@@ -298,6 +298,8 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateEinsumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,

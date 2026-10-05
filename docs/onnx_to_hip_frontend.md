@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
 
