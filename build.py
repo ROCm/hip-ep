@@ -32,6 +32,7 @@ Usage:
     python build.py --hip_arch gfx1151    # explicit GPU arch
     python build.py --cmake_prefix_path "/x/llvm-install;/x/ort-install"
     python build.py --clean               # remove build/ + install/
+    python build.py --clang_cl            # Windows: clang-cl instead of cl.exe
 """
 
 import argparse
@@ -124,12 +125,24 @@ def update_submodules():
 
 
 def default_generator():
-    # Like ONNX Runtime: on Windows default to the Visual Studio generator so
-    # CMake locates MSVC itself (no vcvarsall sourcing); Ninja elsewhere.
-    return "Visual Studio 17 2022" if IS_WINDOWS else "Ninja"
+    # Ninja everywhere it is available, which on Windows means any developer
+    # shell: VS ships ninja.exe and both Windows CI jobs already pass
+    # `--cmake_generator Ninja`, so this makes the default the configuration
+    # that is actually exercised. It also matters for the in-tree LLVM build
+    # (ENABLE_ROCMLIRTRITON), where cmake/deps.cmake consumes single-config
+    # build-tree paths such as ${CMAKE_BINARY_DIR}/lib/cmake/mlir that a
+    # multi-config generator does not produce.
+    #
+    # Outside a developer shell there is no ninja, so fall back to the Visual
+    # Studio generator, which locates MSVC itself. Pinned to 2022 (VS 17)
+    # rather than probed: that is the toolset CI builds with, and the dependency
+    # set is not yet green on VS 18. Pass --cmake_generator to override.
+    if IS_WINDOWS and not have_tool("ninja"):
+        return "Visual Studio 17 2022"
+    return "Ninja"
 
 
-def check_toolchain(generator):
+def check_toolchain(generator, clang_cl=False):
     for tool in ("cmake", "git"):
         if not have_tool(tool):
             raise BuildError(f"required tool not found on PATH: {tool}")
@@ -139,12 +152,19 @@ def check_toolchain(generator):
         # The Visual Studio generator finds MSVC on its own. For Ninja we rely on
         # the caller having loaded the MSVC environment (run from an "x64 Native
         # Tools Command Prompt for VS"), exactly as ONNX Runtime's build expects.
+        # That environment is required even for --clang_cl, since lld-link
+        # resolves the Windows system libraries through it -- but there cl.exe
+        # itself is not the compiler, so a missing one is only a warning.
         if generator == "Ninja" and not have_tool("cl"):
-            log.warning(
+            msg = (
                 "cl.exe not on PATH; for the Ninja generator on Windows run from "
                 "an 'x64 Native Tools Command Prompt for VS' (or pass "
                 "--cmake_generator 'Visual Studio 17 2022')."
             )
+            if clang_cl:
+                log.warning(msg)
+            else:
+                raise BuildError(msg)
     elif not (have_tool("c++") or have_tool("g++") or have_tool("clang++")):
         raise BuildError("no C++ compiler (c++/g++/clang++) on PATH")
 
@@ -228,17 +248,28 @@ def detect_hip_arch():
 
 
 # ---------------------------------------------------------------------------
-# Windows LLVM host toolchain (TheRock clang-cl + lld-link)
+# Windows host toolchain
 #
-# rocmlirTriton (ENABLE_ROCMLIRTRITON) hard-requires a clang-cl compiler and an
-# lld-link linker on Windows -- it FATAL_ERRORs on MSVC cl.exe. That toolchain
-# must exist BEFORE cmake project(), so it cannot be the in-tree LLVM this build
-# may produce. We therefore always source it from TheRock, which ships lld-link
-# and a clang that acts as clang-cl once named clang-cl.exe (clang selects its
-# driver mode from argv[0]). Using TheRock's clang as the host compiler also
-# lets hip-config resolve compiler-rt natively, so no HIP_CXX_COMPILER override
-# is needed. TheRock must be resolved here (build.py), not in cmake/deps.cmake,
-# because deps.cmake runs after project() -- too late to pick the compiler.
+# The default is MSVC cl.exe, which is also what this project's own sources are
+# written for (morphizen/cmake/compile_options.msvc.cmake tunes /W4 /WX for
+# cl.exe and treats clang-cl as the special case). CMake picks it up from the
+# environment, so there is nothing to provision: pass no CMAKE_*_COMPILER and
+# let the Visual Studio generator locate it, or run Ninja from a developer
+# shell. rocMLIR used to block this -- it FATAL_ERRORed on cl.exe right after
+# project() -- until ROCm/rocmlirTriton#538 added the ROCMLIR_ALLOW_MSVC opt-out
+# that cmake/deps.cmake now sets.
+#
+# --clang_cl selects the previous toolchain instead, for parity with the CI
+# jobs that build against a prebuilt clang-cl LLVM prefix. That compiler must
+# exist BEFORE cmake project(), so it cannot be the in-tree LLVM this build may
+# produce; we source it from TheRock, which ships lld-link and a clang that
+# acts as clang-cl once named clang-cl.exe (clang selects its driver mode from
+# argv[0]). Using TheRock's clang as the host compiler also lets hip-config
+# resolve compiler-rt natively, so no HIP_CXX_COMPILER override is needed.
+# TheRock must be resolved here (build.py), not in cmake/deps.cmake, because
+# deps.cmake runs after project() -- too late to pick the compiler. Under the
+# MSVC default there is no such ordering constraint, so TheRock is left to
+# deps.cmake's own resolution (explicit path, then auto-download).
 # ---------------------------------------------------------------------------
 
 
@@ -294,7 +325,7 @@ def _download_therock(build_dir, dest):
 
 
 def provision_windows_toolchain(args, build_dir):
-    """Resolve a complete clang-cl + lld-link toolchain from TheRock.
+    """Resolve a complete clang-cl + lld-link toolchain from TheRock (--clang_cl).
 
     Returns (c_compiler, cxx_compiler, therock_dist) as forward-slash strings.
     RMT derives CMAKE_LINKER (lld-link) from the compiler directory, so we only
@@ -353,12 +384,16 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
         cmd.append("-DBUILD_MOCK_RUNTIME=OFF")
         cmd.append(f"-DHIP_ARCHITECTURES={hip_arch}")
         therock_dist = args.therock_dist
-        # On Windows, source the mandatory clang-cl + lld-link from TheRock
-        # (see provision_windows_toolchain) unless the caller pinned their own
-        # compiler. This keeps one consistent host toolchain across both the
-        # external-LLVM (CI) and in-tree-LLVM builds.
+        # Windows defaults to MSVC: name no compiler and let CMake resolve
+        # cl.exe from the environment (see the toolchain note above). Only
+        # --clang_cl provisions a toolchain, and a caller-pinned
+        # CMAKE_C_COMPILER/CMAKE_CXX_COMPILER wins over either.
         user_defs = {d.split("=", 1)[0] for d in args.cmake_extra_defines}
-        if IS_WINDOWS and not {"CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"} & user_defs:
+        if (
+            IS_WINDOWS
+            and args.clang_cl
+            and not {"CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"} & user_defs
+        ):
             cc, cxx, dist = provision_windows_toolchain(args, build_dir)
             cmd += [f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}"]
             therock_dist = therock_dist or dist
@@ -502,6 +537,12 @@ def parse_arguments():
         help="path to a TheRock ROCm SDK (else cmake/deps.cmake auto-downloads)",
     )
     p.add_argument(
+        "--clang_cl",
+        action="store_true",
+        help="Windows: build with TheRock's clang-cl + lld-link instead of the "
+        "default MSVC cl.exe",
+    )
+    p.add_argument(
         "--hip_arch",
         default="",
         help="GPU arch (e.g. gfx1151); auto-detected on Linux if unset",
@@ -568,7 +609,11 @@ def main():
 
     if not args.skip_submodule_sync:
         update_submodules()
-    check_toolchain(args.cmake_generator)
+    check_toolchain(args.cmake_generator, clang_cl=args.clang_cl)
+    if IS_WINDOWS:
+        log.info(
+            f"host toolchain: {'clang-cl (TheRock)' if args.clang_cl else 'MSVC cl.exe'}"
+        )
 
     mock = args.mock
     hip_arch = args.hip_arch.strip()

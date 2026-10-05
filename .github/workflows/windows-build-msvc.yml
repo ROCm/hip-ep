@@ -1,0 +1,131 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Windows Build (MSVC)
+
+# Real Windows build with the default host toolchain, MSVC cl.exe.
+#
+# windows-build-real.yml pins CMAKE_C_COMPILER/CMAKE_CXX_COMPILER to the
+# clang-cl in the prebuilt LLVM prefix, so without this job nothing covers the
+# toolchain `python build.py` actually selects on Windows (see the toolchain
+# note in build.py). The mock job already builds with cl.exe, but mock compiles
+# neither the runtime nor rocMLIR/Triton -- the part that needed
+# ROCMLIR_ALLOW_MSVC -- so it does not cover this either.
+#
+# Deliberately build-and-test only: no GPU staging, no OGA, no wheel. Those
+# package the same artifacts regardless of which host compiler produced them,
+# and windows-build-real.yml already covers them.
+
+on:
+  workflow_call:
+    inputs:
+      llvm_cache_key:
+        description: Cache key of the prebuilt LLVM/MLIR/LLD install prefix.
+        required: true
+        type: string
+      ort_cache_key:
+        description: Cache key of the prebuilt ONNX Runtime install prefix.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Pin to VS 2022 for the same reason as the other Windows jobs:
+    # windows-latest now serves the VS 2026 image (actions/runner-images#14017),
+    # which the pinned deps were not validated against. It matters more here,
+    # since this job is the one that actually compiles with cl.exe.
+    runs-on: windows-2022
+    concurrency:
+      group: build-windows-msvc-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
+      SCCACHE_CACHE_SIZE: "200M"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Restore llvm-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: ${{ inputs.llvm_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Restore ort-install
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/ort-install
+          key: ${{ inputs.ort_cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install pip dependencies
+        run: pip install lit requests
+
+      # Supplies cl.exe and ninja.exe, which is all build.py needs on this
+      # path: with no --clang_cl it names no compiler and lets CMake resolve
+      # them from this environment.
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Prepare sccache local cache
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
+          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
+
+      # Separate key from the clang-cl jobs: the two toolchains share no
+      # compilation cache entries, so pooling them would only evict.
+      - name: Restore sccache directory
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-msvc-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: |
+            sccache-windows-msvc-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # No CMAKE_C_COMPILER/CMAKE_CXX_COMPILER and no --clang_cl, so this is
+      # the default toolchain. ENABLE_ROCMLIRTRITON=ON is the point of the job:
+      # it is rocMLIR/Triton that cl.exe could not compile before
+      # ROCm/rocmlirTriton#538. build.py runs the LIT suite and the GPU-free
+      # ctest suites after install; neither needs a device.
+      - name: Build hip-ep (MSVC)
+        shell: bash
+        run: |
+          python build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
+            --build_dir "${{ runner.workspace }}/build/msvc" \
+            --install_dir "${{ runner.workspace }}/install-msvc" \
+            --skip_wheel \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines ENABLE_ROCMLIRTRITON=ON
+
+      - name: Save sccache directory
+        if: always() && github.ref_name == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-dir
+          key: sccache-windows-msvc-${{ env.SCCACHE_KEY_DATE }}

@@ -398,6 +398,17 @@ if(ENABLE_ROCMLIRTRITON)
   # rocmlirTriton's mlir/test/common_utils imports pip pybind11 at configure
   # time. hip-ep does not run those tests, so skip that tree.
   set(MLIR_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+  # rocMLIR's root CMakeLists rejects any Windows compiler that is not clang-cl
+  # (it checks CMAKE_CXX_COMPILER_ID/SIMULATE_ID right after project()), which
+  # this project's default cl.exe toolchain fails. ROCMLIR_ALLOW_MSVC (added
+  # upstream by ROCm/rocmlirTriton#538) opts out of that check and of the
+  # pre-project() clang-cl/lld-link search, which as a subdirectory would fire
+  # too late to pick the compiler anyway. Scoped to real cl.exe so a clang-cl
+  # build (CI, and -DCMAKE_CXX_COMPILER=clang-cl locally) keeps rocMLIR's
+  # upstream-supported path unchanged.
+  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(ROCMLIR_ALLOW_MSVC ON CACHE BOOL "" FORCE)
+  endif()
   if(NOT DEFINED rocmlirtriton_SOURCE_DIR)
     FetchContent_Declare(rocmlirtriton
       GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
