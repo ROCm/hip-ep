@@ -1441,6 +1441,13 @@ void RandomNormalLikeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  // Tensor-mode DPS effects are empty, so an unseeded fill looks pure and
+  // CSE can merge two calls that must each take a new clock seed. A Write
+  // on the default resource keeps only the seeded (deterministic) form
+  // eligible for CSE.
+  if (!getSeedAttr())
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         SideEffects::DefaultResource::get());
 }
 
 //===----------------------------------------------------------------------===//

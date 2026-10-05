@@ -134,6 +134,8 @@ int launch_f32(hipStream_t stream, void *output, int64_t numel, float mean,
             (long long)numel);
     return -1;
   }
+  // Drop a stale error so a successful launch is not reported as failed.
+  (void)hipGetLastError();
   hipLaunchKernelGGL(random_normal_f32_kernel<OutT>,
                      dim3(static_cast<uint32_t>(grid64)), dim3(kBlockSize), 0,
                      stream, static_cast<OutT *>(output), numel, mean, scale,
@@ -154,15 +156,18 @@ extern "C" int hip_random_normal_like(void *stream, void *output, int64_t rank,
                                       const int64_t *shape, float mean,
                                       float scale, uint64_t seed,
                                       int hip_dtype) {
-  if (!output || (rank > 0 && !shape)) {
-    fprintf(stderr, "[custom_kernels] hip_random_normal_like: null argument\n");
-    return -1;
-  }
   if (rank < 0 || rank > kMaxRank) {
     fprintf(
         stderr,
         "[custom_kernels] hip_random_normal_like: rank %lld not in [0, %d]\n",
         (long long)rank, kMaxRank);
+    return -1;
+  }
+  // A zero-extent tensor may have no allocation. Decide that from the shape
+  // before requiring a data pointer. Rank 0 is one element and still needs
+  // storage.
+  if (rank > 0 && !shape) {
+    fprintf(stderr, "[custom_kernels] hip_random_normal_like: null argument\n");
     return -1;
   }
 
@@ -175,6 +180,10 @@ extern "C" int hip_random_normal_like(void *stream, void *output, int64_t rank,
   }
   if (numel == 0)
     return 0;
+  if (!output) {
+    fprintf(stderr, "[custom_kernels] hip_random_normal_like: null argument\n");
+    return -1;
+  }
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_random_normal_like: rank=%lld, numel=%lld, "
@@ -200,6 +209,8 @@ extern "C" int hip_random_normal_like(void *stream, void *output, int64_t rank,
               (long long)numel);
       return -1;
     }
+    // Drop a stale error so a successful launch is not reported as failed.
+    (void)hipGetLastError();
     hipLaunchKernelGGL(
         random_normal_f64_kernel, dim3(static_cast<uint32_t>(grid64)),
         dim3(kBlockSize), 0, hip_stream, static_cast<double *>(output), numel,

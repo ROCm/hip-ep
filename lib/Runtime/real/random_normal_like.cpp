@@ -50,7 +50,22 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
       },
       state);
 
-  if (!state || !output || (rank > 0 && !shape)) {
+  if (!state || (rank > 0 && !shape)) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_random_normal_like: null argument\n");
+    return -1;
+  }
+  // Match the kernel: a zero extent is a successful no-op, and the output
+  // allocator's zero-byte scratch pointer is null. Out-of-range rank is
+  // left for the kernel so it still reports the rank error.
+  if (rank > 0 && rank <= 8) {
+    for (int64_t i = 0; i < rank; ++i) {
+      if (shape[i] < 0)
+        break;
+      if (shape[i] == 0)
+        return 0;
+    }
+  }
+  if (!output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_random_normal_like: null argument\n");
     return -1;
   }
