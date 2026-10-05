@@ -243,15 +243,22 @@ else()
   message(STATUS "LLVM/MLIR not found; building from rocmlirTriton's external/llvm-project (${DEP_HASH_rocmlirtriton})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
   # lib/Runtime gets a version-matched clang for runtime bitcode with no
-  # external dependency. Kept identical to the CI LLVM build so the prefix that
-  # CI caches (find_package path) and this fallback produce equivalent toolsets.
-  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  # external dependency. lld is only needed for the opt-in native artifact
+  # path (HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS) and for rocmlirTriton's LLD
+  # package lookup. Kept identical to the CI LLVM build, aside from that lld
+  # gate, so the prefix that CI caches (find_package path) and this fallback
+  # produce equivalent toolsets.
   # rocMLIR/Triton needs the AMDGPU backend. When ENABLE_ROCMLIRTRITON is on,
   # the single in-tree LLVM must be a superset that satisfies both hip-ep and
   # rocmlirTriton (which is added as a subdirectory later and reuses these
   # targets instead of building its own LLVM). Assertions are left at the
   # build-type default (OFF for Release) to match the CI prebuilt LLVM prefix,
   # so the from-source and find_package paths produce equivalent toolsets.
+  if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS OR ENABLE_ROCMLIRTRITON)
+    set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  else()
+    set(LLVM_ENABLE_PROJECTS "clang;mlir" CACHE STRING "" FORCE)
+  endif()
   if(ENABLE_ROCMLIRTRITON)
     set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
     # rocMLIR's Rock libraries link Triton targets and get registered into
@@ -357,8 +364,9 @@ else()
   set(MLIR_CMAKE_DIR "${llvm-project_SOURCE_DIR}/mlir/cmake/modules" CACHE PATH "" FORCE)
   # Tool dirs so downstream find_program (e.g. lib/Runtime's llvm-link/opt
   # lookup) resolves against the in-tree LLVM build. clang is always built
-  # in-tree (clang;mlir;lld), so lib/Runtime's runtime-bitcode step uses the
-  # version-matched in-tree clang target.
+  # in-tree, so lib/Runtime's runtime-bitcode step uses the version-matched
+  # in-tree clang target. lld is included only when native artifacts or
+  # rocmlirTriton are enabled.
   set(LLVM_BINARY_DIR "${llvm-project_BINARY_DIR}" CACHE PATH "" FORCE)
   set(LLVM_TOOLS_BINARY_DIR "${llvm-project_BINARY_DIR}/bin" CACHE PATH "" FORCE)
   # LLD headers (lld/Common/Driver.h) live in a separate source tree; the

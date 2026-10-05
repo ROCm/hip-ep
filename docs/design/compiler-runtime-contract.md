@@ -67,7 +67,9 @@ mirror are produced for both artifact formats
   is present in the native artifact too.
 
 The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
-opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+opening the artifact. `NATIVE` is available only when the EP is built with
+`-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON` (default `OFF`); otherwise session
+setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
 
 ---
 

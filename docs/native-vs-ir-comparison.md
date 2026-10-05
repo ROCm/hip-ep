@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 **Date:** 2026-05-29 (dual-format update 2026-06-08)
 **Document Type:** Design (Alternatives Considered)
-**Status:** Both formats supported — **LLVM IR bitcode is the production default**; **Native DLL is opt-in** (benchmarking/dev), selected by a single compile option.
+**Status:** Both formats supported — **LLVM IR bitcode is the production default**; **Native DLL is opt-in** (benchmarking/dev), selected by a single compile option and gated by the CMake option `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS` (default `OFF`).
 **Related:** [design/morphizen-ep-integration.md](design/morphizen-ep-integration.md), [design/compiler-runtime-contract.md](design/compiler-runtime-contract.md), [design/compilation-options.md](design/compilation-options.md)
 
 **Adapted from:** [ROCm/hip-compiler `docs/design/alternatives/NATIVE-VS-IR-COMPARISON.md`](https://github.com/ROCm/hip-compiler/blob/main/docs/design/alternatives/NATIVE-VS-IR-COMPARISON.md).
@@ -27,6 +27,7 @@ compile option (`artifact_format` / `CompilationOptions.output_mode`):
 - `hip-compiler` merges the embedded `runtime.bc` at producer time (`LLVMBackend::linkRuntimeModule`), emits a host object (`compileToObjectFile`, PIC), and links a per-OS `.dll`/`.so` via `DLLLinker` (in-process `lld-link` COFF on Windows; `clang++ -shared -fuse-ld=lld` subprocess on Linux), linking the per-arch `custom_kernels_<arch>` import lib + ROCm import libs.
 - `onnxruntime_morphizen_ep.dll` writes the artifact bytes to a temp file and loads it via `morphizen::Plugin` (`LoadLibraryW` / `dlopen`), resolving the same five-symbol C ABI through `get_method` (`GetProcAddress` / `dlsym`). The temp file is deleted on session teardown.
 - The EP picks the loader from the `artifact_format` field in the EPContext metadata (`mlir_metadata::Metadata`); the compiler always records it, and an empty/unknown value is fatal.
+- Native support is a build-time option, `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS`, default `OFF`. When it is off, `DLLLinker` and in-process `lld` are not linked, and `artifact_format=NATIVE` throws `std::runtime_error` at session setup (the same exception is thrown when loading an EPContext recorded as `NATIVE`). Enable it with `-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON`.
 
 Why native is **not** the production default — the signed-DLL-only loading
 policy below. It remains available for internal benchmarking against the JIT
@@ -120,7 +121,7 @@ per artifact is now implemented:
 
 1. **`llvm::Module` retention after JIT codegen.** After `addIRModule`, ORC LLJIT owns the Module and currently keeps it alive for the JIT's lifetime. Whether dropping the Module post-codegen (via a custom `IRTransformLayer` or explicit unload) would meaningfully reduce steady-state memory is unmeasured. Suspect small — JITted code dominates.
 2. **Session-creation latency on the largest shipping models.** Need wall-clock measurements on the Qwen-vision sized workloads (see [design/qwen-vision-ops.md](design/qwen-vision-ops.md)) before declaring "bounded" with confidence.
-3. **EP DLL binary size budget.** The ~5-10 MB cost of statically linked LLVM ORC + the per-OS `runtime.bc` is accepted today. A future slimming pass (strip unused LLVM targets, drop dead codegen passes) is plausible but not planned.
+3. **EP DLL binary size budget.** The ~5-10 MB cost of statically linked LLVM ORC + the per-OS `runtime.bc` is accepted today. In-process `lld` is no longer part of that cost unless `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS` is ON. A future slimming pass (strip unused LLVM targets, drop dead codegen passes) is plausible but not planned.
 
 ---
 
