@@ -2524,7 +2524,8 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
-    Applies the ONNX Swish activation element-wise.
+    Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
+    is the same formula; its alpha defaults to 1.702 rather than 1.
 
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
