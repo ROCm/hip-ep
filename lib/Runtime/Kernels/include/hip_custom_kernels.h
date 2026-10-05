@@ -436,6 +436,16 @@ HIP_KERNEL_API int hip_elementwise_not(
     void* output,
     int64_t num_elements);
 
+// Element-wise IsNaN. input is the floating-point buffer selected by
+// hip_dtype (f16/bf16/f32/f64). output is one byte per element, 1 where
+// the input is NaN and 0 otherwise.
+HIP_KERNEL_API int hip_isnan(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 /* =========================================================================
  * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================

@@ -156,6 +156,7 @@ runtime coverage.
 | `Div` | `hip.div` | Element-wise division |
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
+| `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
 
 Unmapped ops default to `hip.<OpType>`.
 
