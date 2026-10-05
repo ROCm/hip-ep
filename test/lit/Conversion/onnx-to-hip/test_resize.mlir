@@ -6,7 +6,7 @@
 // covers:
 //   * variadic ONNX operands (X, NoValue roi, scales, NoValue sizes)
 //   * rejection / pass-through of attribute defaults
-//   * (N, C) pass-through invariant
+//   * channels-last rank 4, packed as prefix N and window (H, W, C)
 //   * single Variadic input form (only X — no extra operands at all)
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -102,7 +102,25 @@ module {
     return %y : tensor<?x3x32x32xf16>
   }
 
-  // Test 5: empty roi/scales tensors (tensor<0xf32>) stand in for none.
+  // Test 5: channels-last. Axes 1 and 2 change; batch and channel stay.
+  func.func @test_resize_nhwc(%arg0: tensor<1x16x16x3xf32>,
+                              %scales: tensor<4xf32>)
+      -> tensor<1x32x32x3xf32> {
+    // CHECK-LABEL: func.func @test_resize_nhwc
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x16x16x3xf32>, none, tensor<4xf32>)
+        -> tensor<1x32x32x3xf32>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x32x32x3xf32>
+  }
+
+  // Test 6: empty roi/scales tensors (tensor<0xf32>) stand in for none.
   // sizes supplies the output shape; the converter reads it from the result type.
   func.func @test_resize_empty_roi(%arg0: tensor<1x512x6x6xf16>,
                                     %roi: tensor<0xf32>,
@@ -123,7 +141,7 @@ module {
     return %y : tensor<1x512x12x12xf16>
   }
 
-  // Test 6: pytorch_half_pixel is its own coord id (3), not an alias of
+  // Test 7: pytorch_half_pixel is its own coord id (3), not an alias of
   // half_pixel. An output axis of length 1 samples input coordinate 0.
   func.func @test_resize_pytorch_half_pixel(%arg0: tensor<1x3x16x16xf16>,
                                              %scales: tensor<4xf32>)
