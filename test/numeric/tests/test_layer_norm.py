@@ -180,6 +180,64 @@ class TestSkipLayerNorm:
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
 
 
+def _make_skip_layer_norm_bias_model(input_shape: list[int]):
+    """5-input SkipLayerNormalization: bias is added to input before the skip.
+
+    Stable Diffusion's text encoder uses this form (SkipLayerNorm_AddBias):
+        sum    = input + bias + skip
+        output = LayerNorm(sum, gamma, beta, epsilon)
+        output[3] = sum
+    """
+    hidden = input_shape[-1]
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, input_shape)
+    skip = helper.make_tensor_value_info("skip", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT16, input_shape)
+
+    rng = np.random.default_rng(66)
+    gamma_data = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    beta_data = rng.uniform(-0.5, 0.5, [hidden]).astype(np.float16)
+    bias_data = rng.uniform(-0.5, 0.5, [hidden]).astype(np.float16)
+    gamma_init = numpy_helper.from_array(gamma_data, name="gamma")
+    beta_init = numpy_helper.from_array(beta_data, name="beta")
+    bias_init = numpy_helper.from_array(bias_data, name="bias")
+
+    node = helper.make_node(
+        "SkipLayerNormalization",
+        ["X", "skip", "gamma", "beta", "bias"],
+        ["Y", "", "", "Y3"],
+        domain="com.microsoft",
+        epsilon=1e-5,
+    )
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    return make_model_from_nodes(
+        [node],
+        [X, skip],
+        [Y, Y3],
+        initializers=[gamma_init, beta_init, bias_init],
+        extra_opsets=[ms_opset],
+    )
+
+
+class TestSkipLayerNormInputBias:
+    """5-input SkipLayerNormalization (Stable Diffusion text encoder)."""
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            [1, 4, 16],
+            [1, 8, 1024],
+        ],
+    )
+    def test_skip_layer_norm_input_bias(self, model_runner, input_shape):
+        model = _make_skip_layer_norm_bias_model(input_shape)
+        rng = np.random.default_rng(79)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
 class TestSimplifiedLayerNorm:
     @pytest.mark.parametrize(
         "input_shape",
