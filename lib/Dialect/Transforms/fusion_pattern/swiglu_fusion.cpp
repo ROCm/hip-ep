@@ -119,13 +119,11 @@ std::optional<Extent> stepProjection(mlir::Operation *op, int64_t outDim) {
     int64_t aPad = batchRank - (aRank - 2);
     int64_t bPad = batchRank - (bRank - 2);
     int64_t aExtent =
-        outDim < aPad
-            ? 1
-            : aType.getDimSize(static_cast<unsigned>(outDim - aPad));
+        outDim < aPad ? 1
+                      : aType.getDimSize(static_cast<unsigned>(outDim - aPad));
     int64_t bExtent =
-        outDim < bPad
-            ? 1
-            : bType.getDimSize(static_cast<unsigned>(outDim - bPad));
+        outDim < bPad ? 1
+                      : bType.getDimSize(static_cast<unsigned>(outDim - bPad));
     bool aCanonical = outDim >= aPad && aExtent != 1;
     bool bCanonical = outDim >= bPad && bExtent != 1;
     bool pickA = aCanonical || (!bCanonical && outDim >= aPad);
