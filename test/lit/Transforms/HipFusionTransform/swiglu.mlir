@@ -55,19 +55,30 @@ func.func @swiglu_commuted(%ctx: !hip.context, %gate: tensor<4x32xf32>,
 
 // -----
 
-// Dynamic leading dims: the fused op reuses the outer mul's destination.
+// Dynamic leading dims share one activation, so each dynamic axis of the
+// gate and up projections is that activation's axis. The fused op reuses
+// the outer mul's destination.
 // CHECK-LABEL: func.func @swiglu_dynamic_bf16
 // CHECK-NOT: hip.sigmoid
-// CHECK-NOT: hip.mul
+// CHECK-NOT: {{hip\.mul\(}}
 // CHECK: hip.swiglu
 func.func @swiglu_dynamic_bf16(%ctx: !hip.context,
-                               %gate: tensor<?x?x14336xbf16>,
-                               %up: tensor<?x?x14336xbf16>)
+                               %hidden: tensor<?x?x4096xbf16>,
+                               %wGate: tensor<4096x14336xbf16>,
+                               %wUp: tensor<4096x14336xbf16>)
     -> tensor<?x?x14336xbf16> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %d0 = tensor.dim %gate, %c0 : tensor<?x?x14336xbf16>
-  %d1 = tensor.dim %gate, %c1 : tensor<?x?x14336xbf16>
+  %d0 = tensor.dim %hidden, %c0 : tensor<?x?x4096xbf16>
+  %d1 = tensor.dim %hidden, %c1 : tensor<?x?x4096xbf16>
+  %eg = tensor.empty(%d0, %d1) : tensor<?x?x14336xbf16>
+  %gate = hip.matmul(%ctx)
+      ins(%hidden, %wGate : tensor<?x?x4096xbf16>, tensor<4096x14336xbf16>)
+      outs(%eg : tensor<?x?x14336xbf16>) : tensor<?x?x14336xbf16>
+  %eu = tensor.empty(%d0, %d1) : tensor<?x?x14336xbf16>
+  %up = hip.matmul(%ctx)
+      ins(%hidden, %wUp : tensor<?x?x4096xbf16>, tensor<4096x14336xbf16>)
+      outs(%eu : tensor<?x?x14336xbf16>) : tensor<?x?x14336xbf16>
   %e0 = tensor.empty(%d0, %d1) : tensor<?x?x14336xbf16>
   %s = hip.sigmoid(%ctx) ins(%gate : tensor<?x?x14336xbf16>)
        outs(%e0 : tensor<?x?x14336xbf16>) : tensor<?x?x14336xbf16>
@@ -84,25 +95,38 @@ func.func @swiglu_dynamic_bf16(%ctx: !hip.context,
 
 // Dynamic export: convert-onnx-to-hip sizes the outer mul's init with
 // tensor.dim of the inner product. Those queries are not value uses. The
-// fused op retargets them to the gate, which has the same type.
+// fused op retargets them to the gate. The projections share one activation,
+// which is what makes the dynamic axes equal.
 // CHECK-LABEL: func.func @swiglu_dim_of_intermediate
-// CHECK-SAME: (%[[CTX:arg[0-9]+]]: !hip.context, %[[GATE:arg[0-9]+]]: tensor<?x?x14336xf16>,
+// CHECK-SAME: (%[[CTX:arg[0-9]+]]: !hip.context, %[[HIDDEN:arg[0-9]+]]: tensor<?x?x4096xf16>,
 // CHECK-NOT: hip.sigmoid
-// CHECK-NOT: hip.mul
+// CHECK-NOT: {{hip\.mul\(}}
+// CHECK: %[[GATE:.*]] = hip.matmul
 // CHECK: tensor.dim %[[GATE]]
 // CHECK: hip.swiglu(%[[CTX]]) ins(%[[GATE]], %{{.*}} : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
 func.func @swiglu_dim_of_intermediate(%ctx: !hip.context,
-                                      %gate: tensor<?x?x14336xf16>,
-                                      %up: tensor<?x?x14336xf16>)
+                                      %hidden: tensor<?x?x4096xf16>,
+                                      %wGate: tensor<4096x14336xf16>,
+                                      %wUp: tensor<4096x14336xf16>)
     -> tensor<?x?x14336xf16> {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %d0 = tensor.dim %gate, %c0 : tensor<?x?x14336xf16>
-  %d1 = tensor.dim %gate, %c1 : tensor<?x?x14336xf16>
-  %e0 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %d0 = tensor.dim %hidden, %c0 : tensor<?x?x4096xf16>
+  %d1 = tensor.dim %hidden, %c1 : tensor<?x?x4096xf16>
+  %eg = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %gate = hip.matmul(%ctx)
+      ins(%hidden, %wGate : tensor<?x?x4096xf16>, tensor<4096x14336xf16>)
+      outs(%eg : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %eu = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %up = hip.matmul(%ctx)
+      ins(%hidden, %wUp : tensor<?x?x4096xf16>, tensor<4096x14336xf16>)
+      outs(%eu : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %dg0 = tensor.dim %gate, %c0 : tensor<?x?x14336xf16>
+  %dg1 = tensor.dim %gate, %c1 : tensor<?x?x14336xf16>
+  %e0 = tensor.empty(%dg0, %dg1) : tensor<?x?x14336xf16>
   %s = hip.sigmoid(%ctx) ins(%gate : tensor<?x?x14336xf16>)
        outs(%e0 : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
-  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %e1 = tensor.empty(%dg0, %dg1) : tensor<?x?x14336xf16>
   %a = hip.mul(%ctx) ins(%gate, %s : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
        outs(%e1 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
   %d2 = tensor.dim %a, %c0 : tensor<?x?x14336xf16>
@@ -223,10 +247,75 @@ func.func @swiglu_blocked_broadcast(%ctx: !hip.context, %gate: tensor<8x16xf16>,
 
 // -----
 
+// Two unbound dynamic tensors have the same type and may still differ at
+// runtime, including a 1 that hip.mul broadcasts. hip.swiglu does not.
+// CHECK-LABEL: func.func @swiglu_blocked_dynamic_broadcast
+// CHECK-NOT: hip.swiglu
+// CHECK: hip.sigmoid
+// CHECK: hip.mul
+func.func @swiglu_blocked_dynamic_broadcast(%ctx: !hip.context,
+                                            %gate: tensor<?x?x14336xf16>,
+                                            %up: tensor<?x?x14336xf16>)
+    -> tensor<?x?x14336xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %gate, %c0 : tensor<?x?x14336xf16>
+  %d1 = tensor.dim %gate, %c1 : tensor<?x?x14336xf16>
+  %e0 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %s = hip.sigmoid(%ctx) ins(%gate : tensor<?x?x14336xf16>)
+       outs(%e0 : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %a = hip.mul(%ctx) ins(%gate, %s : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e1 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  %e2 = tensor.empty(%d0, %d1) : tensor<?x?x14336xf16>
+  %y = hip.mul(%ctx) ins(%a, %up : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e2 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  return %y : tensor<?x?x14336xf16>
+}
+
+// -----
+
+// Projections of different activations do not share dynamic extents.
+// CHECK-LABEL: func.func @swiglu_blocked_distinct_projections
+// CHECK-NOT: hip.swiglu
+// CHECK: hip.sigmoid
+// CHECK: hip.mul
+func.func @swiglu_blocked_distinct_projections(
+    %ctx: !hip.context, %hiddenGate: tensor<?x?x4096xf16>,
+    %hiddenUp: tensor<?x?x4096xf16>, %wGate: tensor<4096x14336xf16>,
+    %wUp: tensor<4096x14336xf16>) -> tensor<?x?x14336xf16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %g0 = tensor.dim %hiddenGate, %c0 : tensor<?x?x4096xf16>
+  %g1 = tensor.dim %hiddenGate, %c1 : tensor<?x?x4096xf16>
+  %eg = tensor.empty(%g0, %g1) : tensor<?x?x14336xf16>
+  %gate = hip.matmul(%ctx)
+      ins(%hiddenGate, %wGate : tensor<?x?x4096xf16>, tensor<4096x14336xf16>)
+      outs(%eg : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %u0 = tensor.dim %hiddenUp, %c0 : tensor<?x?x4096xf16>
+  %u1 = tensor.dim %hiddenUp, %c1 : tensor<?x?x4096xf16>
+  %eu = tensor.empty(%u0, %u1) : tensor<?x?x14336xf16>
+  %up = hip.matmul(%ctx)
+      ins(%hiddenUp, %wUp : tensor<?x?x4096xf16>, tensor<4096x14336xf16>)
+      outs(%eu : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %e0 = tensor.empty(%g0, %g1) : tensor<?x?x14336xf16>
+  %s = hip.sigmoid(%ctx) ins(%gate : tensor<?x?x14336xf16>)
+       outs(%e0 : tensor<?x?x14336xf16>) : tensor<?x?x14336xf16>
+  %e1 = tensor.empty(%g0, %g1) : tensor<?x?x14336xf16>
+  %a = hip.mul(%ctx) ins(%gate, %s : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e1 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  %e2 = tensor.empty(%g0, %g1) : tensor<?x?x14336xf16>
+  %y = hip.mul(%ctx) ins(%a, %up : tensor<?x?x14336xf16>, tensor<?x?x14336xf16>)
+       outs(%e2 : tensor<?x?x14336xf16>) -> tensor<?x?x14336xf16>
+  return %y : tensor<?x?x14336xf16>
+}
+
+// -----
+
 // The sigmoid destination may be produced by a side-effecting op. Fusion
 // still drops the primitive chain, and that producer stays.
 // CHECK-LABEL: func.func @swiglu_keeps_side_effecting_init
-// CHECK: func.call @make_init_and_record
+// CHECK: call @make_init_and_record
 // CHECK-NOT: hip.sigmoid
 // CHECK-NOT: hip.mul
 // CHECK: hip.swiglu
