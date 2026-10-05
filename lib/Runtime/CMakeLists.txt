@@ -312,6 +312,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/instance_normalization.cpp runtime_instance_normalization.bc)
+    compile_to_bitcode(real/batch_normalization.cpp runtime_batch_normalization.bc)
     compile_to_bitcode(real/group_norm.cpp runtime_group_norm.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
@@ -408,6 +409,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_instance_normalization.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_batch_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_group_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc

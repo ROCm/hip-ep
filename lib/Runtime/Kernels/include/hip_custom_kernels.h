@@ -1923,6 +1923,32 @@ HIP_KERNEL_API int hip_instance_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * BatchNormalization (inference)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean[c]) * rsqrt(var[c] + epsilon) + bias[c]
+ *
+ * Mean and variance are the supplied per-channel vectors. Input is
+ * (N, C, spatial) in row-major layout. Scale, bias, mean, and variance
+ * are length C.
+ *
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_batch_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    const void* mean,
+    const void* variance,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * GroupNorm (com.microsoft)
  * =========================================================================
  *
