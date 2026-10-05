@@ -7,7 +7,7 @@
 // Norm conversions (ONNX -> HIP dialect).
 //
 // All Norm-family operators live here so they share helpers and so the file
-// layout makes it obvious where to plug in future variants (BatchNorm, ...).
+// layout makes it obvious where to plug in future variants.
 //
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
@@ -16,6 +16,7 @@
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
+//   - onnx.BatchNormalization (inference)               -> hip.batch_norm
 //   - onnx.Custom(GroupNorm, com.microsoft)             -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
@@ -699,6 +700,97 @@ InstanceNormToHip::matchAndRewrite(mlir::Operation *op,
 }
 
 //===----------------------------------------------------------------------===//
+// onnx.BatchNormalization (inference) -> hip.batch_norm
+//===----------------------------------------------------------------------===//
+
+/// ONNX BatchNormalization (schema 15), inference only:
+///   inputs:  X (N,C,...), scale (C), B (C), input_mean (C), input_var (C)
+///   attrs:   epsilon (default 1e-5); momentum is ignored
+///   output:  Y, same shape as X
+///
+///   Y = scale * (X - input_mean) / sqrt(input_var + epsilon) + B
+///
+/// training_mode != 0, and the three-result training form, stay unconverted.
+struct BatchNormToHip : public mlir::RewritePattern {
+  BatchNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.BatchNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+BatchNormToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  if (auto trainingMode = op->getAttrOfType<mlir::IntegerAttr>("training_mode"))
+    if (trainingMode.getInt() != 0)
+      return rewriter.notifyMatchFailure(
+          op, "BatchNormalization training_mode is not supported");
+
+  if (op->getNumOperands() != 5 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization inference expects 5 operands and 1 result");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+  mlir::Value mean = op->getOperand(3);
+  mlir::Value variance = op->getOperand(4);
+  if (mlir::isa<mlir::NoneType>(input.getType()) ||
+      mlir::isa<mlir::NoneType>(scale.getType()) ||
+      mlir::isa<mlir::NoneType>(bias.getType()) ||
+      mlir::isa<mlir::NoneType>(mean.getType()) ||
+      mlir::isa<mlir::NoneType>(variance.getType()))
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization inference requires X, scale, B, mean, and var");
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 2)
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization requires ranked input of rank >= 2");
+
+  auto channelVector = [&](mlir::Value value) {
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
+    if (!type || type.getRank() != 1 ||
+        type.getElementType() != inputType.getElementType())
+      return false;
+    if (type.hasStaticShape() && !inputType.isDynamicDim(1) &&
+        type.getDimSize(0) != inputType.getDimSize(1))
+      return false;
+    return true;
+  };
+  if (!channelVector(scale) || !channelVector(bias) || !channelVector(mean) ||
+      !channelVector(variance))
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization scale, B, mean, and var must be 1-D of length "
+            "C and the same element type as X");
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = a.getValue();
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (outputType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization result element type must match X");
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  auto hipOp = mlir::hip::BatchNormOp::create(
+      rewriter, loc, context, input, scale, bias, mean, variance, outputInit,
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // onnx.Custom(GroupNorm, com.microsoft) -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
@@ -820,7 +912,7 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip, GroupNormToHip>(ctx);
+               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
 }
 
 } // namespace hip
