@@ -59,6 +59,8 @@ inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
+inline constexpr const char *kWrapBatchNormalization =
+    "wrap_batch_normalization";
 inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
@@ -68,6 +70,7 @@ inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapArgMax = "wrap_arg_max";
+inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
 inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
@@ -113,6 +116,7 @@ inline constexpr const char *kWrapOr = "wrap_or";
 inline constexpr const char *kWrapAnd = "wrap_and";
 inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
+inline constexpr const char *kWrapIsNaN = "wrap_isnan";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";
@@ -438,6 +442,8 @@ void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateArgMaxLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
+void populateRandomNormalLikeLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
