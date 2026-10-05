@@ -301,6 +301,8 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateEinsumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
@@ -361,6 +363,8 @@ void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateArgMaxConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -389,6 +393,8 @@ void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateIsNaNConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,

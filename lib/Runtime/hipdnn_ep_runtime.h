@@ -1155,6 +1155,18 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
                  int64_t keepdims, int64_t select_last_index, int64_t rank,
                  const int64_t *data_shape, int64_t data_type);
 
+// RandomNormalLike. `shape` is the output rank's sizes, including dynamic
+// dims filled in by the HIP-to-LLVM lowering. The input tensor is not
+// passed: only its shape was copied onto the output. `mean_bits` and
+// `scale_bits` are the IEEE-754 bit patterns of the f32 attributes.
+// `seed_bits` is the f32 bit pattern of the ONNX seed when `has_seed` is
+// non-zero; otherwise the runtime picks a clock seed for this call.
+// `data_type` is HIPDNN_EP_DATATYPE_* and must be a float type.
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,
@@ -1390,6 +1402,14 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
                                 void *bias, void *output, int64_t n, int64_t c,
                                 int64_t spatial, int64_t data_type,
                                 float epsilon);
+
+// BatchNormalization inference:
+//   y = scale * (x - mean) / sqrt(var + epsilon) + B
+// Mean and variance are supplied per-channel vectors. Input is (N, C, ...).
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type, float epsilon);
 
 // com.microsoft GroupNorm. channels_last 0 is NCHW, 1 is NHWC.
 // activation 0 is none, 1 is SiLU after the affine transform.
@@ -1728,6 +1748,11 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+// Element-wise IsNaN. `data_type` is the floating-point INPUT type. The
+// output is always one byte per element (0 or 1), matching ONNX bool as
+// consumed by wrap_where.
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type);
 
 // ONNX NonZero wrapper.
 // Returns the indices of the non-zero elements of `input` in row-major
