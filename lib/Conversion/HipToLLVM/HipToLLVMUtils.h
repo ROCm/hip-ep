@@ -59,6 +59,8 @@ inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
+inline constexpr const char *kWrapBatchNormalization =
+    "wrap_batch_normalization";
 inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
@@ -113,6 +115,7 @@ inline constexpr const char *kWrapOr = "wrap_or";
 inline constexpr const char *kWrapAnd = "wrap_and";
 inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
+inline constexpr const char *kWrapIsNaN = "wrap_isnan";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";

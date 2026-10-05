@@ -386,6 +386,8 @@ void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateIsNaNConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,

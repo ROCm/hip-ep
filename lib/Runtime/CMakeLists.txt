@@ -312,6 +312,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/instance_normalization.cpp runtime_instance_normalization.bc)
+    compile_to_bitcode(real/batch_normalization.cpp runtime_batch_normalization.bc)
     compile_to_bitcode(real/group_norm.cpp runtime_group_norm.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
@@ -349,6 +350,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
+    compile_to_bitcode(real/isnan.cpp runtime_isnan.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/erf.cpp runtime_erf.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
@@ -408,6 +410,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_instance_normalization.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_batch_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_group_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
@@ -443,6 +446,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_isnan.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_erf.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
