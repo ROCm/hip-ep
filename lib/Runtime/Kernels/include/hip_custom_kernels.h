@@ -436,6 +436,16 @@ HIP_KERNEL_API int hip_elementwise_not(
     void* output,
     int64_t num_elements);
 
+// Element-wise IsNaN. input is the floating-point buffer selected by
+// hip_dtype (f16/bf16/f32/f64). output is one byte per element, 1 where
+// the input is NaN and 0 otherwise.
+HIP_KERNEL_API int hip_isnan(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
 /* =========================================================================
  * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
@@ -1312,6 +1322,14 @@ HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
                                int64_t rank, const int64_t* data_shape,
                                int hip_dtype);
 
+// Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
+// (rank 0 is one element). `seed` selects the counter-hash generator.
+// `hip_dtype` is f16, bf16, f32, or f64.
+HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
+                                          int64_t rank, const int64_t* shape,
+                                          float mean, float scale,
+                                          uint64_t seed, int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,
@@ -1915,6 +1933,32 @@ HIP_KERNEL_API int hip_instance_norm(
     const void* input,
     const void* scale,
     const void* bias,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * BatchNormalization (inference)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean[c]) * rsqrt(var[c] + epsilon) + bias[c]
+ *
+ * Mean and variance are the supplied per-channel vectors. Input is
+ * (N, C, spatial) in row-major layout. Scale, bias, mean, and variance
+ * are length C.
+ *
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_batch_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    const void* mean,
+    const void* variance,
     void* output,
     int64_t n,
     int64_t c,
