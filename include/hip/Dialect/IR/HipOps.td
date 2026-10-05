@@ -2619,6 +2619,40 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   }];
 }
 
+def Hip_PowOp : Hip_DpsOp<"pow"> {
+  let summary = "Element-wise power with a compile-time scalar exponent";
+  let description = [{
+    Computes Y = X ^ exponent element-wise. The exponent is a compile-time
+    scalar baked into the op. Integer exponents that decompose to Mul, and
+    the exponents 0.5, -0.5, and -1, are rewritten before this op is created.
+
+    A negative base with a non-integer exponent yields NaN.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.pow(%ctx) ins(%x : memref<4x8xf32, 1>)
+                  outs(%y : memref<4x8xf32, 1>)
+                  {exponent = 2.2 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F64Attr:$exponent
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_DivOp : Hip_DpsOp_Broadcast<"div", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise division";
   let description = [{

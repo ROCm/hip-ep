@@ -714,6 +714,20 @@ HIP_KERNEL_API int hip_swish(void *stream, const void *input, void *output,
                              int64_t num_elements, int hip_dtype, double alpha);
 
 /* =========================================================================
+ * Element-wise power
+ * =========================================================================
+ *
+ * y = pow(x, exponent), with exponent a host scalar. Supports
+ * HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64. A negative base with a non-integer exponent yields NaN.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_pow(void *stream, const void *input, void *output,
+                           int64_t num_elements, int hip_dtype,
+                           double exponent);
+
+/* =========================================================================
  * Softplus activation
  * =========================================================================
  *
