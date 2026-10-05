@@ -45,13 +45,13 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 → hip-loop-body-to-out-params
 → hip-use-output-allocator
 → hip-fix-loop-accumulator-offset
-→ CSE → canonicalize
+→ lower-affine → CSE → canonicalize
 → convert-linalg-to-loops
 → hip-optimize-memrefs
 → hip-promote-strided-operands
 → hip-materialize-host-scalars
 → hip-resolve-memref-dims
-→ CSE
+→ CSE → canonicalize
 → hip-hoist-alloc-size-arith
 → hip-pool-allocs
 → convert-bufferization-to-memref
@@ -71,13 +71,36 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 ### Pool-quality preconditions
 
+After bufferization, `lower-affine` exposes affine products to arithmetic
+canonicalization before `hip-optimize-memrefs` compares dynamic sizes. For
+example, lowering an affine `s * 16` enables the upstream signed-division fold
+`(s * 16) / 16 -> s`, which can also remove a redundant broadcast select.
+This normalization must precede buffer reuse: allocations merged across
+multiple operations acquire longer live intervals that later pool planning
+cannot split. The separate late `lower-affine` remains necessary for affine
+operations introduced by strided-metadata expansion.
+
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
 The following CSE removes repeated size queries exposed by late allocation and
-view rewrites.
+view rewrites. Canonicalization then folds identities exposed by CSE, such as
+`select(c, d, d) -> d`. Folding must precede pool planning to recover reuse:
+the redundant select's later definition can otherwise open a separate domain
+even when buffer lifetimes do not overlap.
 
-`hip-hoist-alloc-size-arith` moves pure dynamic-size arithmetic above
-the earliest used allocation when the complete operand cone can move safely.
+`hip-hoist-alloc-size-arith` moves each pure dynamic-size producer before the
+earliest used allocation its operands permit. Reads and non-speculatable
+operations remain fixed, but their pure consumers can move before later
+allocations. For example, a division by a positive constant can move directly
+after a late shape read and before a temporary whose storage the divided-size
+buffer can reuse. This avoids unnecessary pool domains without moving reads
+or assuming equality between unrelated dimensions.
+
+The pass plans in SSA order before moving operations. Each producer carries
+the index of the first permissible allocation anchor; a consumer takes the
+maximum of its operands' indices. This avoids invalidating and recomputing
+MLIR's block ordering after every move, with expected linear work in the
+block size and visited operand edges.
 
 These preconditions preserve correctness when omitted, but omission may create
 more dominance domains and increase peak memory.
@@ -250,7 +273,7 @@ More than eight domains emits a non-fatal performance remark. Recommended triage
 
 1. `hip-infer-shapes` and the following canonicalize/CSE;
 2. pre-bufferization `hip-resolve-tensor-dims` and tensor InferType external-model registration;
-3. post-bufferization `hip-resolve-memref-dims`;
+3. post-bufferization `hip-resolve-memref-dims` and the following CSE/canonicalize;
 4. `hip-hoist-alloc-size-arith`;
 5. remaining non-speculatable runtime dependencies.
 
