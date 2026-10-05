@@ -26,6 +26,7 @@
 #include <cctype>
 #include <fstream>
 #include <glog/logging.h>
+#include <set>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
@@ -224,11 +225,6 @@ void initialize_onnxruntime_morphizen_ep(
     intialize_op_defs_old(contrib_domains, ret_domain);
   }
   CollectCustomOpDomains(ret_domain);
-  morphizen::add_cleanup_function("protobuf shutdown", []() {
-#ifdef _WIN32
-    google::protobuf::ShutdownProtobufLibrary();
-#endif
-  });
 }
 
 MORPHIZEN_DLL_SPEC

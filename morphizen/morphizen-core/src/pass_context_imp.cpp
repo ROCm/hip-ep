@@ -5,7 +5,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <fstream>
 #include <glog/logging.h>
-#include <google/protobuf/util/json_util.h>
 #include <onnxruntime_session_options_config_keys.h>
 #include <stdexcept>
 
@@ -68,14 +67,8 @@ static FILE *write_to_tmp_file(gsl::span<const char> data) {
   return tmp_file;
 }
 
-static std::string msg_to_json_string(const google::protobuf::Message &msg) {
-  google::protobuf::util::JsonPrintOptions options;
-  options.add_whitespace = true;
-  auto json_str = std::string();
-  auto status =
-      google::protobuf::util::MessageToJsonString(msg, &json_str, options);
-  CHECK(status.ok()) << "cannot write json string:" << msg.DebugString();
-  return json_str;
+static std::string msg_to_json_string(const ContextProto &msg) {
+  return json::dump(msg.ToJson(), true);
 }
 std::unique_ptr<PassContextImp>
 PassContextImp::create_pass_context(const ConfigProto &config_proto1) {
@@ -313,13 +306,7 @@ PassContextImp::get_run_option(const std::string &option_name,
 }
 std::string
 PassContextImp::get_meta_def_param(const MetaDefProto &meta_def) const {
-  auto json_str = std::string();
-  auto status =
-      google::protobuf::util::MessageToJsonString(meta_def.param(), &json_str);
-  if (!status.ok()) {
-    LOG(FATAL) << "failed to get meta_def param: " << status.ToString();
-  }
-  return json_str;
+  return json::dump(meta_def.param());
 }
 std::string
 PassContextImp::get_ep_dynamic_option(const std::string &option_name,
@@ -1065,13 +1052,11 @@ void PassContextImp::pass_context_update_context_json(
     gsl::span<char> json_str) {
   // parse the context proto
   ContextProto context_proto_in_cache;
-  google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = true;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      &json_str[0], &context_proto_in_cache, options);
-
-  CHECK(status.ok()) << "cannot parse json string:" << status.message()
-                     << &json_str[0];
+  try {
+    context_proto_in_cache = ContextProto::FromJsonString(&json_str[0]);
+  } catch (const json::ParseError &error) {
+    CHECK(false) << "cannot parse json string:" << error.what() << &json_str[0];
+  }
   // Note: Old cache files with config field in ContextProto are not supported
   // after this refactoring (breaking change). The config field is now
   // runtime-only.

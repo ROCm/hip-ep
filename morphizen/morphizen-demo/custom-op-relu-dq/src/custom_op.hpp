@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "relu_dq.pb.h"
+#include "relu_dq_param.hpp"
 #include <algorithm>
 #include <future>
 #include <mutex>

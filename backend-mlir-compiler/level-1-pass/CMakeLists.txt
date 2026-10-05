@@ -5,18 +5,10 @@
 
 message(STATUS "Configuring level-1-pass (MLIR compiler plugin)")
 
-# glog::glog and protobuf::libprotobuf are provided by cmake/deps.cmake or the
-# morphizen subdirectory (find_package or from-source fallback). Only resolve
-# standalone when the targets are absent.
+# glog::glog is provided by cmake/deps.cmake or the morphizen subdirectory.
 if(NOT TARGET glog::glog)
   find_package(glog CONFIG REQUIRED)
 endif()
-if(NOT TARGET protobuf::libprotobuf)
-  find_package(Protobuf CONFIG REQUIRED)
-endif()
-
-# Use shared protobuf library (no local generation needed)
-# Proto is generated in parent CMakeLists.txt as mlir_compilation_proto
 
 set(LIB_NAME morphizen-level1-pass-mlir-compiler)
 add_library(${LIB_NAME} STATIC
@@ -29,14 +21,13 @@ add_library(${LIB_NAME} STATIC
 target_link_libraries(${LIB_NAME} PRIVATE
     morphizen::morphizen-core-static
     glog::glog
-    mlir_compilation_proto  # Shared protobuf library
     cpptrace::cpptrace
 )
 
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated proto headers from parent
+    ${CMAKE_CURRENT_SOURCE_DIR}/..  # metadata.hpp
     ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
     ${CMAKE_SOURCE_DIR}/lib/Support # CrashHandler.h
 )

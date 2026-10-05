@@ -18,7 +18,6 @@
 #include "pass_imp.hpp"
 #include <fstream>
 #include <glog/logging.h>
-#include <google/protobuf/util/json_util.h>
 #include <ios>
 #include <string>
 #include <thread>
@@ -37,14 +36,11 @@ void IPass::attach_meta_def_param(MetaDefProto &meta_def,
   if (json_param == nullptr) {
     return;
   }
-  auto json_str = std::string(json_param);
-  auto struct_proto = google::protobuf::Struct();
-  auto status =
-      google::protobuf::util::JsonStringToMessage(json_str, &struct_proto);
-  if (!status.ok()) {
-    LOG(FATAL) << "failed to attach meta_def param: " << status.ToString();
+  try {
+    *meta_def.mutable_param() = json::parse(json_param);
+  } catch (const json::ParseError &error) {
+    LOG(FATAL) << "failed to attach meta_def param: " << error.what();
   }
-  meta_def.mutable_param()->CopyFrom(struct_proto);
 }
 
 static bool can_be_dumped(const std::shared_ptr<PassContext> &proto) {
@@ -327,19 +323,13 @@ std::map<std::string, std::string> Pass::get_all_provider_options() const {
 
 void Pass::add_subgraph_device_count(const std::string &device, int count) {
   context_->context_proto.mutable_device_subgraph_count()->insert(
-      google::protobuf::MapPair<std::string, int>{device, count});
+      {device, count});
 }
 
 const PassProto &Pass::get_pass_proto() const { return pass_proto_; }
 
 std::string Pass::get_pass_generic_param() const {
-  auto json_str = std::string();
-  auto status = google::protobuf::util::MessageToJsonString(
-      pass_proto_.pass_generic_param(), &json_str);
-  if (!status.ok()) {
-    LOG(FATAL) << "failed to get pass_generic_param: " << status.ToString();
-  }
-  return json_str;
+  return json::dump(pass_proto_.pass_generic_param());
 }
 
 std::vector<AttributeProtoPtr> &Pass::node_extra_attrs(const char *name) {
