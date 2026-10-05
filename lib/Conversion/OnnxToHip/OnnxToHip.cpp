@@ -235,6 +235,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
+  populateEinsumConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
   populatePowerConversionPatterns(patterns, ctx);
@@ -251,6 +252,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGatherElementsConversionPatterns(patterns, ctx);
   populateTopKConversionPatterns(patterns, ctx);
   populateArgMaxConversionPatterns(patterns, ctx);
+  populateRandomNormalLikeConversionPatterns(patterns, ctx);
   populateScatterElementsConversionPatterns(patterns, ctx);
   populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
@@ -318,6 +320,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
   populateQLinearConvConversionPatterns(patterns, ctx);
+  populateUpsampleConversionPatterns(patterns, ctx);
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);

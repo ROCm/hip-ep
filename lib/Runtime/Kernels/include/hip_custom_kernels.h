@@ -1368,6 +1368,14 @@ HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
                                int64_t rank, const int64_t* data_shape,
                                int hip_dtype);
 
+// Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
+// (rank 0 is one element). `seed` selects the counter-hash generator.
+// `hip_dtype` is f16, bf16, f32, or f64.
+HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
+                                          int64_t rank, const int64_t* shape,
+                                          float mean, float scale,
+                                          uint64_t seed, int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,
@@ -1533,7 +1541,8 @@ HIP_KERNEL_API int hip_reduce_l2(
  * (the lowering does this).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are MaxPool only (integer compare, no float cast).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_pool(

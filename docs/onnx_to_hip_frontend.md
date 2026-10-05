@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
 
@@ -70,7 +71,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
-| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, custom HIP kernels |
+| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, including the optional input bias |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
@@ -165,6 +166,7 @@ runtime coverage.
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
 | `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
+| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
 
 Unmapped ops default to `hip.<OpType>`.
 

@@ -44,6 +44,10 @@ static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
     return HIP_DTYPE_BFLOAT16;
   case HIPDNN_EP_DATATYPE_DOUBLE:
     return HIP_DTYPE_FLOAT64;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_UINT8;
   default:
     return -1;
   }
@@ -100,6 +104,15 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
   if (hip_dtype < 0) {
     fprintf(stderr, "[REAL] wrap_pool: unsupported data_type %lld\n",
             (long long)data_type);
+    return -1;
+  }
+  // i8/ui8 are order-preserving for a shared quant scale, so MaxPool on a
+  // quantized activation is the quantized max. Average and LP stay float.
+  if ((hip_dtype == HIP_DTYPE_INT8 || hip_dtype == HIP_DTYPE_UINT8) &&
+      pool_mode != HIPDNN_EP_POOL_MAX) {
+    fprintf(stderr,
+            "[REAL] wrap_pool: i8/ui8 only supported for MaxPool (mode=%lld)\n",
+            (long long)pool_mode);
     return -1;
   }
 
