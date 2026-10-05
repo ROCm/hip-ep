@@ -148,6 +148,44 @@ jobs:
           exit /b %RC%
 
       # ----------------------------------------------------------------------
+      # AMD GPU umbrella bitcode smoke test. profile=hip selects the hipgpu
+      # backend through amdgpu-ep; artifact_format is left unset so the
+      # production LLVM IR path compiles, JIT-loads, and runs. This step always
+      # runs. The native umbrella smoke below skips when the package was built
+      # without native artifacts, and nothing else drives profile=hip.
+      # ----------------------------------------------------------------------
+      - name: Run AMD GPU umbrella bitcode smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set ROOT=%CD%
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          mkdir "%ROOT%\gpu-test-package\results-amdgpu" 2>nul
+          cd /d "%ROOT%\gpu-test-package\bin"
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === AMD GPU umbrella bitcode smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
+            --plugin_eps "AMDGPUExecutionProvider" ^
+            --plugin_ep_options "profile|hip" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "%ROOT%\gpu-test-package\results-amdgpu\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "%ROOT%\gpu-test-package\results-amdgpu\smoke.txt"
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
       # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
       # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
       # directly. profile=hip selects the hipgpu backend; artifact_format=NATIVE
