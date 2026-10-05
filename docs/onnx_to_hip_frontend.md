@@ -158,6 +158,7 @@ runtime coverage.
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
 | `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
+| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
 
 Unmapped ops default to `hip.<OpType>`.
 
