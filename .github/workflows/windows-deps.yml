@@ -623,6 +623,11 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # OGA build.py's util.dependency_resolver imports requests at module
+          # load. The pinned Python 3.14 image does not ship it (same gap the
+          # Linux toolchain step already covers). numpy/wheel/setuptools/
+          # packaging are required when the OGA wheel is configured.
+          python -m pip install -q requests numpy wheel setuptools packaging
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
