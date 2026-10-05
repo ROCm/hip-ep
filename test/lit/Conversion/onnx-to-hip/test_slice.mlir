@@ -294,4 +294,65 @@ module {
     // CHECK: hip.slice
     return %r : tensor<?x?xf16>
   }
+
+  // Test 12: the opset<10 `Slice-1` form, where starts/ends/axes are
+  // attributes and `data` is the only operand. Nothing upgrades opsets in this
+  // pipeline, so without SliceLegacyAttrsToOperands this reaches
+  // SliceDecompose with one operand and is rejected by its arity check -- which
+  // is how both Topaz models (drw-v1, prap-v3, both opset 9) failed to
+  // bufferize. This is drw-v1's channel extraction verbatim: take channel 3 of
+  // a 4-channel NHWC image.
+  func.func @test_slice_legacy_attrs_channel(%input: tensor<1x256x256x4xf32>)
+      -> tensor<1x256x256x1xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_channel
+    // `ends` keeps the exporter's INT32_MAX sentinel on the untouched axes;
+    // SliceDecompose's per-axis clamp maps it onto the dim.
+    %r = "onnx.Slice"(%input) {
+        starts = [0, 0, 0, 3],
+        ends = [2147483647, 2147483647, 2147483647, 4],
+        axes = [0, 1, 2, 3]
+      } : (tensor<1x256x256x4xf32>) -> tensor<1x256x256x1xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 3] [1, 256, 256, 1] [1, 1, 1, 1]
+
+    return %r : tensor<1x256x256x1xf32>
+  }
+
+  // Test 13: legacy form naming fewer axes than the data has dims. The
+  // rewrite spells out the defaulted `axes` rather than omitting the operand,
+  // because SliceDecompose derives an absent `axes` from the data rank and
+  // would otherwise see a starts/ends/axes length mismatch and fall through.
+  // prap-v3 slices exactly this way.
+  func.func @test_slice_legacy_attrs_partial_axes(%input: tensor<8x6xf32>)
+      -> tensor<8x5xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_partial_axes
+    %r = "onnx.Slice"(%input) {
+        starts = [0, 1],
+        ends = [2147483647, 2147483647],
+        axes = [0, 1]
+      } : (tensor<8x6xf32>) -> tensor<8x5xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK: tensor.extract_slice {{.*}}[0, 1] [8, 5] [1, 1]
+
+    return %r : tensor<8x5xf32>
+  }
+
+  // Test 14: legacy form with `axes` omitted entirely, which ONNX defines as
+  // the leading dims.
+  func.func @test_slice_legacy_attrs_default_axes(%input: tensor<4x6xf32>)
+      -> tensor<2x6xf32> {
+    // CHECK-LABEL: func.func @test_slice_legacy_attrs_default_axes
+    %r = "onnx.Slice"(%input) {
+        starts = [1],
+        ends = [3]
+      } : (tensor<4x6xf32>) -> tensor<2x6xf32>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK: tensor.extract_slice {{.*}}[1, 0] [2, 6] [1, 1]
+
+    return %r : tensor<2x6xf32>
+  }
 }

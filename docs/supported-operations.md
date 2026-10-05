@@ -107,6 +107,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
 | Clip | Decomposed to Max + Min |
+| HardSigmoid | Decomposed to Mul + Add + Clip (`alpha` defaults to 0.2, `beta` to 0.5) |
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
@@ -134,7 +135,7 @@ These operations are handled through standard MLIR transformations and generally
 | Unsqueeze | `tensor.expand_shape` | Inserts size-one axes |
 | Squeeze | `tensor.collapse_shape` | Removes size-one axes |
 | Split | `tensor.extract_slice` | Produces tensor slices that bufferize to views |
-| Slice | `tensor.extract_slice` or `hip.slice` | Constant positive-stride forms decompose to tensor slices; runtime indices or negative steps use the runtime path |
+| Slice | `tensor.extract_slice` or `hip.slice` | Constant positive-stride forms decompose to tensor slices; runtime indices or negative steps use the runtime path. The opset<10 form, with starts/ends/axes as attributes, is rewritten to the operand form first |
 | Concat | `tensor.empty` + `tensor.insert_slice` | Bufferizes to destination subviews and copies |
 | Shape | `tensor.dim` + `tensor.from_elements` | Static shapes fold to constants; dynamic dimensions remain runtime SSA |
 | Constant | `arith.constant` or external constants file | Large values are externalized |
