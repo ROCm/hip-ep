@@ -100,6 +100,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
 | DequantizeLinear | Custom HIP kernel |
+| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. Separate from the W4A16 `hip.qconv` fusion |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |

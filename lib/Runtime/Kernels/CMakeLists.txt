@@ -54,6 +54,7 @@ set(_kernel_sources
     hip/qmatmul_kernel.hip
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
+    hip/qlinear_conv_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less

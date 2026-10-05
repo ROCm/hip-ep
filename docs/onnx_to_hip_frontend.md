@@ -92,10 +92,18 @@ packed `__half2` path for fp16 rows of even width.
 |---|---|---|
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
+| `QLinearConv` | `hip.qlinear_conv` | `qlinear_conv_kernel.hip` |
 
-Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
-shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
-tensor is per-axis along `axis`, and `block_size > 0` is blocked.
+`QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
+windows, and an optional int32 bias. Input and output quantization is
+per-tensor. Weight quantization is per-tensor or per output channel. `auto_pad`
+must be `NOTSET`. `hip.qconv` is a different op, the W4A16 1x1 QDQ fusion, and
+does not accept `QLinearConv`.
+
+QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
+int4/uint4. Granularity comes from the shape of `scale` rather than a flag: a
+single element is per-tensor, a 1-D tensor is per-axis along `axis`, and
+`block_size > 0` is blocked.
 
 int4/uint4 imports as an 8-bit element type at the logical element count, two
 values per byte, so the width travels as a `packed_int4` marker rather than in
