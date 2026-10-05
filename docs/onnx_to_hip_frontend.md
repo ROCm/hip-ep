@@ -93,6 +93,10 @@ packed `__half2` path for fp16 rows of even width.
 |---|---|---|
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
+| `QLinearAdd` (`com.microsoft`) | `hip.qadd` | decomposed, then QDQ fusion |
+| `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
+| `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
+| `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
 
 Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
 shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
