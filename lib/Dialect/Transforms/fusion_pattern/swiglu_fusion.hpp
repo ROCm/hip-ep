@@ -11,10 +11,11 @@
 //   %y = hip.mul(%ctx) ins(%a, %up)
 //
 // into one hip.swiglu. Both multiplies are commutative. The pattern declines
-// unless the tensors are identical and the sigmoid and inner product each
-// have a single value use, because hip.swiglu is a flat elementwise kernel.
-// A tensor.dim of either intermediate is not a value use: it is retargeted
-// to the gate, which has the same type.
+// unless the tensors are identical, each dynamic axis traces to the same
+// runtime extent, and the sigmoid and inner product each have a single
+// value use, because hip.swiglu is a flat elementwise kernel. A tensor.dim
+// of either intermediate is not a value use: it is retargeted to the gate,
+// which has the same type.
 //
 // Before/After IR: swiglu_fusion.cpp.
 //===----------------------------------------------------------------------===//
