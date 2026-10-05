@@ -1310,6 +1310,14 @@ HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              const int64_t* x_shape, int64_t k,
                              int element_size_bytes);
 
+// Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
+// (rank 0 is one element). `seed` selects the counter-hash generator.
+// `hip_dtype` is f16, bf16, f32, or f64.
+HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
+                                          int64_t rank, const int64_t* shape,
+                                          float mean, float scale,
+                                          uint64_t seed, int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,

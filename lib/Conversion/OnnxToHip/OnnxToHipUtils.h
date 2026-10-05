@@ -358,6 +358,8 @@ void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,

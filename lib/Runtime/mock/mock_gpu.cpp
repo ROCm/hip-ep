@@ -834,6 +834,25 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type) {
+  (void)output;
+  (void)shape;
+  (void)mean_bits;
+  (void)scale_bits;
+  (void)seed_bits;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_random_normal_like\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_random_normal_like(rank=%lld, has_seed=%lld, "
+             "data_type=%lld)\n",
+             (long long)rank, (long long)has_seed, (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,

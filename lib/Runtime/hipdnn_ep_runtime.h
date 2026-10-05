@@ -1147,6 +1147,18 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
 
+// RandomNormalLike. `shape` is the output rank's sizes, including dynamic
+// dims filled in by the HIP-to-LLVM lowering. The input tensor is not
+// passed: only its shape was copied onto the output. `mean_bits` and
+// `scale_bits` are the IEEE-754 bit patterns of the f32 attributes.
+// `seed_bits` is the f32 bit pattern of the ONNX seed when `has_seed` is
+// non-zero; otherwise the runtime picks a clock seed for this call.
+// `data_type` is HIPDNN_EP_DATATYPE_* and must be a float type.
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,

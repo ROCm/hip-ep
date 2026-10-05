@@ -39,6 +39,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
+  RandomNormalLikeConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
