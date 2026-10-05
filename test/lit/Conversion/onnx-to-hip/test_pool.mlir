@@ -243,12 +243,14 @@ module {
         : (tensor<1x64x8x8xui8>) -> tensor<1x64x4x4xui8>
 
     // CHECK-NOT: onnx.MaxPool
+    // Input type is printed before the attributes; the result type is last.
     // CHECK: hip.pool
+    // CHECK-SAME: tensor<1x64x8x8xui8>
     // CHECK-SAME: ceil_mode = 1
     // CHECK-SAME: kernel_shape = [3, 3]
     // CHECK-SAME: pool_mode = 1
     // CHECK-SAME: strides = [2, 2]
-    // CHECK-SAME: tensor<1x64x8x8xui8>
+    // CHECK-SAME: tensor<1x64x4x4xui8>
 
     return %y : tensor<1x64x4x4xui8>
   }

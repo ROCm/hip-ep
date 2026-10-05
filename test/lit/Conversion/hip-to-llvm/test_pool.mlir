@@ -145,9 +145,10 @@ module {
                     ceil_mode = 1, storage_order = 0,
                     count_include_pad = 0, p = 2}
 
-    // CHECK: llvm.mlir.constant(7 : i64)
-    // CHECK: llvm.mlir.constant(1 : i64)
-    // CHECK: llvm.call @wrap_pool
+    // data_type=7 (UINT8) is the first i64 argument. It is materialized
+    // after pool_mode, so a following CHECK for constant(1) never matches.
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(7 : i64)
+    // CHECK: llvm.call @wrap_pool({{%[^,)]+}}, {{%[^,)]+}}, {{%[^,)]+}}, {{%[^,)]+}}, %[[DT]],
     return
   }
 }
