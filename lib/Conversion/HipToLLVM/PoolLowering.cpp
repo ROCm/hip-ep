@@ -74,9 +74,9 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
     // f16 / bf16 / f32 / f64 for every mode. Max also takes i8 / ui8 so a
     // quantized activation can be pooled without a dequant round trip.
     int64_t dataType = getHipdnnDataType(inputType.getElementType());
-    bool int8Max = op.getPoolMode() == kPoolMax &&
-                   (dataType == HIPDNN_EP_DATATYPE_INT8 ||
-                    dataType == HIPDNN_EP_DATATYPE_UINT8);
+    bool int8Max =
+        op.getPoolMode() == kPoolMax && (dataType == HIPDNN_EP_DATATYPE_INT8 ||
+                                         dataType == HIPDNN_EP_DATATYPE_UINT8);
     bool floatPool = dataType == HIPDNN_EP_DATATYPE_FLOAT ||
                      dataType == HIPDNN_EP_DATATYPE_HALF ||
                      dataType == HIPDNN_EP_DATATYPE_BFLOAT16 ||
