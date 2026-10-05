@@ -17,8 +17,8 @@
 // Component headers
 #include "InferenceState.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
-#include "hip/native_artifacts.h"
 #include "hip/init_config_abi.h"
+#include "hip/native_artifacts.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifdef HIPDNN_EP_LINK_HIP_HOST

@@ -14,9 +14,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
-#include <stdexcept>
 #include <glog/logging.h>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
