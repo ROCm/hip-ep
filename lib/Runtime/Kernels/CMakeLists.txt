@@ -55,6 +55,7 @@ set(_kernel_sources
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
     hip/elementwise_unary_kernel.hip
+    hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
@@ -63,6 +64,7 @@ set(_kernel_sources
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
     hip/instance_norm_kernel.hip
+    hip/batch_norm_kernel.hip
     hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
     hip/skip_rms_norm_kernel.hip

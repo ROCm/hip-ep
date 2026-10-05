@@ -164,6 +164,7 @@ add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
+  EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
   PowerConversion.cpp
@@ -220,6 +221,7 @@ add_library(OnnxToHip STATIC
   ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
+  IsNaNConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   ErfConversion.cpp

@@ -12,9 +12,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | Custom HIP kernel |
+| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
+| Einsum | Binary contraction decomposed to Transpose + MatMul (hipBLASLt); static shapes |
 | Gemm | hipBLASLt |
 | Transpose | Custom HIP kernel |
 | Mul | Custom HIP kernel |
@@ -41,6 +42,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Neg | Custom HIP kernel |
 | Equal | Custom HIP kernel |
 | Not | Custom HIP kernel |
+| IsNaN | Custom HIP kernel |
 | And | Custom HIP kernel |
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
@@ -82,6 +84,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |
+| BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
 | GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
 | RMSNormalization | Custom HIP kernel |

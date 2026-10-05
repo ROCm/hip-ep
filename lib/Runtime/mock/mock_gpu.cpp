@@ -1875,6 +1875,20 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_isnan\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_isnan(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  (void)input;
+  (void)output;
+  return 0;
+}
+
 // Mock memory is plain host memory, so we can compute the true non-zero count
 // directly from `input`. This makes the host-readback path (hip.readback_dim
 // -> hipdnn_ep_readback_i32) return a meaningful dynamic dim under mock builds.
@@ -2342,6 +2356,29 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
   (void)input;
   (void)scale;
   (void)bias;
+  (void)output;
+  return 0;
+}
+
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type,
+                             float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_batch_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_batch_normalization(n=%lld, c=%lld, spatial=%lld, "
+             "data_type=%lld, epsilon=%f)\n",
+             (long long)n, (long long)c, (long long)spatial,
+             (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)mean;
+  (void)variance;
   (void)output;
   return 0;
 }
