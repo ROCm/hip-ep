@@ -103,7 +103,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
 | Clip | Decomposed to Max + Min |
-| MaxPool | Custom HIP kernel |
+| MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
 | Resize | Custom HIP kernel |

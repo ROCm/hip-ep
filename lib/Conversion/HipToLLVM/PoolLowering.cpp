@@ -71,10 +71,19 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
       return rewriter.notifyMatchFailure(op, "output rank mismatch");
 
     // Element type of input (and output) drives the runtime dtype.
+    // f16 / bf16 / f32 / f64 for every mode. Max also takes i8 / ui8 so a
+    // quantized activation can be pooled without a dequant round trip.
     int64_t dataType = getHipdnnDataType(inputType.getElementType());
-    if (dataType < 0 || (dataType > 2 && dataType != 6))
+    bool int8Max = op.getPoolMode() == kPoolMax &&
+                   (dataType == HIPDNN_EP_DATATYPE_INT8 ||
+                    dataType == HIPDNN_EP_DATATYPE_UINT8);
+    bool floatPool = dataType == HIPDNN_EP_DATATYPE_FLOAT ||
+                     dataType == HIPDNN_EP_DATATYPE_HALF ||
+                     dataType == HIPDNN_EP_DATATYPE_BFLOAT16 ||
+                     dataType == HIPDNN_EP_DATATYPE_DOUBLE;
+    if (!floatPool && !int8Max)
       return rewriter.notifyMatchFailure(
-          op, "pool: only f16 / f32 / bf16 / f64 supported");
+          op, "pool: only f16 / f32 / bf16 / f64, or i8 / ui8 MaxPool");
 
     Value statePtr = adaptor.getCtx();
     Value inputPtr =

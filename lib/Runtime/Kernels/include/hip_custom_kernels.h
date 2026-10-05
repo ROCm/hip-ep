@@ -1477,7 +1477,8 @@ HIP_KERNEL_API int hip_reduce_l2(
  * (the lowering does this).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are MaxPool only (integer compare, no float cast).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_pool(

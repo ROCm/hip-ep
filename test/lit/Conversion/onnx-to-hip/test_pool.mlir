@@ -230,4 +230,26 @@ module {
 
     return %y : tensor<1x3x16x16xf32>
   }
+
+  // Test 9: uint8 MaxPool, the quantized-activation form (ceil_mode=1,
+  // kernel 3, stride 2). Output shape is the caller's; ceil_mode is passed
+  // through. i8/ui8 are rejected for AveragePool and LpPool.
+  func.func @test_maxpool_2d_ui8(%arg0: tensor<1x64x8x8xui8>)
+      -> tensor<1x64x4x4xui8> {
+    // CHECK-LABEL: func.func @test_maxpool_2d_ui8
+    %y = "onnx.MaxPool"(%arg0)
+        {ceil_mode = 1 : si64, kernel_shape = [3, 3], strides = [2, 2],
+         pads = [0, 0, 0, 0]}
+        : (tensor<1x64x8x8xui8>) -> tensor<1x64x4x4xui8>
+
+    // CHECK-NOT: onnx.MaxPool
+    // CHECK: hip.pool
+    // CHECK-SAME: ceil_mode = 1
+    // CHECK-SAME: kernel_shape = [3, 3]
+    // CHECK-SAME: pool_mode = 1
+    // CHECK-SAME: strides = [2, 2]
+    // CHECK-SAME: tensor<1x64x8x8xui8>
+
+    return %y : tensor<1x64x4x4xui8>
+  }
 }
