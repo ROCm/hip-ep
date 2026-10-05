@@ -343,14 +343,17 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 /// bias, distinct from SkipSimplifiedLayerNormalization (which is RMS norm and
 /// maps to hip.skip_rms_norm). No fused hip op exists for the standard-LN skip
 /// variant, so we compose:
-///   sum    = input + skip               (hip.add)
+///   biased = input + bias               (hip.add, only when bias is present)
+///   sum    = biased + skip              (hip.add)
 ///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
 ///   output[3] (input_skip_bias_sum) = sum           (the pre-norm residual)
 ///
 /// MS spec (com.microsoft.SkipLayerNormalization):
 ///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
-///                 Whisper uses exactly 4 (input, skip, gamma, beta) with no
-///                 5th input-bias, so input_skip_bias_sum = input + skip.
+///                 The optional bias is added to input before the skip, and
+///                 that sum is input_skip_bias_sum. Whisper uses exactly 4
+///                 inputs (no bias), so the sum is input + skip. Stable
+///                 Diffusion's text encoder uses all 5.
 ///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
 ///                  Whisper consumes output[0] and output[3]; mean/inv_std are
 ///                  emitted as None and never materialized.
@@ -401,13 +404,9 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value gamma = op->getOperand(2);
   // beta (output bias for the LayerNorm) is optional.
   mlir::Value beta = getOptionalOperand(op, 3);
-  // 5th input is an optional bias added to `input` BEFORE the skip add (so it
-  // also feeds input_skip_bias_sum). Whisper does not use it; reject if present
-  // so we never silently drop it.
+  // 5th input is an optional bias added to `input` BEFORE the skip add, so it
+  // also feeds input_skip_bias_sum. It broadcasts on the trailing axis.
   mlir::Value inputBias = getOptionalOperand(op, 4);
-  if (inputBias)
-    return rewriter.notifyMatchFailure(
-        op, "5-input SkipLayerNormalization (input-bias) not supported");
 
   // Epsilon (default 1e-5 per MS spec).
   llvm::APFloat epsValue(9.99999974E-6f);
@@ -416,10 +415,19 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
-  // === 1. sum = input + skip (this is also output[3] input_skip_bias_sum) ===
+  // === 1. sum = (input + bias) + skip. This is output[3]. ==================
+  // Dynamic extents live on `input`; the bias is a static trailing vector, so
+  // the empty tensor is sized from the input.
+  mlir::Value biasedInput = input;
+  if (inputBias) {
+    mlir::Value biasInit = createEmptyTensor(rewriter, loc, inputType, input);
+    biasedInput = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
+                                           input, inputBias, biasInit)
+                      .getResult(0);
+  }
   mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
   mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                             input, skip, sumInit)
+                                             biasedInput, skip, sumInit)
                         .getResult(0);
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
@@ -473,7 +481,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
       replacements.push_back(mlir::Value{}); // mean / inv_std -> None
       continue;
     }
-    // The last real (non-None) result is input_skip_bias_sum = input + skip.
+    // The last real (non-None) result is input_skip_bias_sum.
     replacements.push_back(sum);
   }
 
