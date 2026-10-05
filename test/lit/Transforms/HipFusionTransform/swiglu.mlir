@@ -220,3 +220,29 @@ func.func @swiglu_blocked_broadcast(%ctx: !hip.context, %gate: tensor<8x16xf16>,
        outs(%e2 : tensor<8x16xf16>) -> tensor<8x16xf16>
   return %y : tensor<8x16xf16>
 }
+
+// -----
+
+// The sigmoid destination may be produced by a side-effecting op. Fusion
+// still drops the primitive chain, and that producer stays.
+// CHECK-LABEL: func.func @swiglu_keeps_side_effecting_init
+// CHECK: func.call @make_init_and_record
+// CHECK-NOT: hip.sigmoid
+// CHECK-NOT: hip.mul
+// CHECK: hip.swiglu
+func.func private @make_init_and_record() -> tensor<8x16xf16>
+func.func @swiglu_keeps_side_effecting_init(%ctx: !hip.context,
+                                            %gate: tensor<8x16xf16>,
+                                            %up: tensor<8x16xf16>)
+    -> tensor<8x16xf16> {
+  %init = func.call @make_init_and_record() : () -> tensor<8x16xf16>
+  %s = hip.sigmoid(%ctx) ins(%gate : tensor<8x16xf16>)
+       outs(%init : tensor<8x16xf16>) : tensor<8x16xf16>
+  %e1 = tensor.empty() : tensor<8x16xf16>
+  %a = hip.mul(%ctx) ins(%gate, %s : tensor<8x16xf16>, tensor<8x16xf16>)
+       outs(%e1 : tensor<8x16xf16>) -> tensor<8x16xf16>
+  %e2 = tensor.empty() : tensor<8x16xf16>
+  %y = hip.mul(%ctx) ins(%a, %up : tensor<8x16xf16>, tensor<8x16xf16>)
+       outs(%e2 : tensor<8x16xf16>) -> tensor<8x16xf16>
+  return %y : tensor<8x16xf16>
+}

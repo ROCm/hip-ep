@@ -34,6 +34,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 namespace hip {
 namespace fusion_transform {
@@ -135,9 +136,11 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
     rewriter.replaceOp(outer, swiglu.getResult(0));
     rewriter.eraseOp(silu);
     rewriter.eraseOp(sigmoid);
+    // Drop a destination that exists only to feed an erased op. A producer
+    // with side effects, such as a call that records, stays in the graph.
     auto eraseIfDead = [&](mlir::Value value) {
       mlir::Operation *def = value.getDefiningOp();
-      if (def && def->use_empty())
+      if (def && mlir::isOpTriviallyDead(def))
         rewriter.eraseOp(def);
     };
     eraseIfDead(siluInit);
