@@ -1,5 +1,5 @@
 From 7b2686dc55b7ce28bded2b0c7eb3ca49d4569022 Mon Sep 17 00:00:00 2001
-From: Ilango Rajagopal <ilangokul@gmail.com>
+From: Ilango Rajagopal <ilango.rajagopal@amd.com>
 Date: Tue, 22 Sep 2026 01:58:26 -0600
 Subject: [PATCH 1/2] Use external LLVM
 

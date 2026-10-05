@@ -1478,6 +1478,29 @@ void ArgMaxOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// RandomNormalLikeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, input, output). The input is a shape donor; the
+// kernel fills `output` and does not load input elements.
+MutableOperandRange RandomNormalLikeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RandomNormalLikeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  // Tensor-mode DPS effects are empty, so an unseeded fill looks pure and
+  // CSE can merge two calls that must each take a new clock seed. A Write
+  // on the default resource keeps only the seeded (deterministic) form
+  // eligible for CSE.
+  if (!getSeedAttr())
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 

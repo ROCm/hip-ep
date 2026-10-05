@@ -2189,6 +2189,51 @@ def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
   }];
 }
 
+def Hip_RandomNormalLikeOp : Hip_DpsOp<"random_normal_like",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Fill a tensor with normal random values, copying the input shape";
+  let description = [{
+    Implements ONNX RandomNormalLike. The input is a shape donor: its values
+    are not read. The output has the same rank and dimensions, including
+    dynamic dimensions, and is filled with Normal(mean, scale) samples.
+
+    Output element types are f16, bf16, f32, and f64, at rank 0 through 8.
+    `mean` and `scale` are f32 attributes (defaults 0 and 1). `seed`, when
+    set, makes the fill reproducible inside hip-ep. ONNX does not define the
+    generator, so the values are not bit-identical to another runtime. An
+    absent seed is chosen from the clock at each run.
+
+    The generator is one Box-Muller sample per element from a counter hash of
+    (seed, index), so the element count can change with the input shape
+    without recompiling.
+
+    Example:
+    ```mlir
+    hip.random_normal_like(%ctx)
+        ins(%input : tensor<?x?x?xf16>)
+        outs(%output : tensor<?x?x?xf16>)
+        {mean = 0.0 : f32, scale = 1.0 : f32, seed = 1.0 : f32}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "0.0">:$mean,
+    DefaultValuedAttr<F32Attr, "1.0">:$scale,
+    OptionalAttr<F32Attr>:$seed
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
