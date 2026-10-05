@@ -178,6 +178,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);
+    BatchNormOp::attachInterface<HipDstBufferizableModel<BatchNormOp>>(*ctx);
     GroupNormOp::attachInterface<HipDstBufferizableModel<GroupNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
@@ -185,6 +186,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
+    IsNaNOp::attachInterface<HipDstBufferizableModel<IsNaNOp>>(*ctx);
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
     OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);

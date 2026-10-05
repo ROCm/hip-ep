@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
 
@@ -65,6 +66,7 @@ existing `--convert-hip-to-llvm` pipeline.
 |---|---|---|
 | `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
 | `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
+| `BatchNormalization` | `hip.batch_norm` | custom HIP kernel; inference only |
 | `GroupNorm` (`com.microsoft`) | `hip.group_norm` | `group_norm_kernel.hip` |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
@@ -155,6 +157,7 @@ runtime coverage.
 | `Div` | `hip.div` | Element-wise division |
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
+| `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
 
 Unmapped ops default to `hip.<OpType>`.
 
