@@ -696,6 +696,67 @@ void QConvOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QLinearMatMulOp: onnx.QLinearMatMul, rank-2 8-bit
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearMatMulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+static bool isEightBitInt(Type type) {
+  auto integer = dyn_cast<IntegerType>(type);
+  return integer && integer.getWidth() == 8;
+}
+
+static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
+                                          Value zp, Type storage,
+                                          StringRef name) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  return success();
+}
+
+LogicalResult QLinearMatMulOp::verify() {
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto yType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !yType || !aType.hasRank() || !bType.hasRank() ||
+      !yType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      yType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+
+  if (!isEightBitInt(aType.getElementType()) ||
+      !isEightBitInt(bType.getElementType()) ||
+      !isEightBitInt(yType.getElementType()))
+    return emitOpError("a, b, and output must be 8-bit integers");
+
+  if (failed(verifyPerTensorParam(*this, getAScale(), getAZeroPoint(),
+                                  aType.getElementType(), "a")) ||
+      failed(verifyPerTensorParam(*this, getBScale(), getBZeroPoint(),
+                                  bType.getElementType(), "b")) ||
+      failed(verifyPerTensorParam(*this, getYScale(), getYZeroPoint(),
+                                  yType.getElementType(), "y")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // QLpNormalizationOp: quantized ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

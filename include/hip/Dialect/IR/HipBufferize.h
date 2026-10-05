@@ -220,6 +220,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);
     QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
+    QLinearMatMulOp::attachInterface<HipDstBufferizableModel<QLinearMatMulOp>>(
+        *ctx);
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);

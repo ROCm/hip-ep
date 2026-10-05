@@ -332,6 +332,35 @@ HIP_KERNEL_API int hip_qconv(
     float inv_output_scale, int64_t output_zp);
 
 /* =========================================================================
+ * QLinearMatMul (native ONNX, rank-2 8-bit)
+ * =========================================================================
+ *
+ * y = saturate(round(matmul(a - a_zp, b - b_zp) * a_scale * b_scale
+ *                    / y_scale) + y_zp)
+ *
+ * a is [M, K], b is [K, N], y is [M, N]. Distinct from hip_qmatmul, which is
+ * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. Scales and
+ * zero points are per-tensor. Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_matmul(
+    void* stream,
+    const void* a,
+    const void* a_scale,
+    const void* a_zero_point,
+    const void* b,
+    const void* b_scale,
+    const void* b_zero_point,
+    const void* y_scale,
+    const void* y_zero_point,
+    void* y,
+    int64_t m,
+    int64_t k,
+    int64_t n,
+    int a_dtype,
+    int b_dtype,
+    int y_dtype);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *

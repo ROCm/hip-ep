@@ -295,6 +295,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateQMatMulLoweringPatterns(typeConverter, patterns);
   populateQGemmLoweringPatterns(typeConverter, patterns);
   populateQConvLoweringPatterns(typeConverter, patterns);
+  populateQLinearMatMulLoweringPatterns(typeConverter, patterns);
   populateQLpNormalizationLoweringPatterns(typeConverter, patterns);
   populateQSigmoidLoweringPatterns(typeConverter, patterns);
 

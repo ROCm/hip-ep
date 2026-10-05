@@ -102,6 +102,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
 | DequantizeLinear | Custom HIP kernel |
+| QLinearMatMul | Custom HIP kernel. Rank-2 8-bit, per-tensor scales and zero points. Separate from the `hip.qmatmul` QDQ fusion |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
