@@ -98,8 +98,7 @@ getInlineIntVector(mlir::Value v) {
 /// starts/ends/axes carried as attributes -- into the operand form every later
 /// Slice pattern expects. Nothing in this pipeline upgrades opsets, so an
 /// opset-9 export arrives at SliceDecompose with one operand and is turned away
-/// by its 3-5 operand arity check; both Topaz models (drw-v1, prap-v3) are
-/// opset 9 and failed to bufferize for exactly that reason.
+/// by its 3-5 operand arity check, then survives to bufferization.
 ///
 /// Done here rather than by teaching SliceConversion a second input form so the
 /// whole Slice path downstream keeps a single shape: the next round of the
@@ -107,10 +106,9 @@ getInlineIntVector(mlir::Value v) {
 /// the decomposition then reads the same `hipdnn.slice_*` provenance it already
 /// uses for the modern form.
 ///
-/// `ends` keeps whatever sentinel the exporter wrote (both Topaz models use
-/// INT32_MAX for "to the end"). It needs no special casing: SliceDecompose
-/// clamps every bound against the data dim, which maps any sentinel onto the
-/// extent.
+/// `ends` keeps whatever sentinel the exporter wrote for "to the end", which
+/// needs no special casing: SliceDecompose clamps every bound against the data
+/// dim, mapping any sentinel onto the extent.
 ///
 ///   Before:
 ///     %out = onnx.Slice(%data) {starts = [0, 0, 0, 3],

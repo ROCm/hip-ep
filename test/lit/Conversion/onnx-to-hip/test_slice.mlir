@@ -320,24 +320,26 @@ module {
     return %r : tensor<1x256x256x1xf32>
   }
 
-  // Test 13: legacy form naming fewer axes than the data has dims. The
-  // rewrite spells out the defaulted `axes` rather than omitting the operand,
-  // because SliceDecompose derives an absent `axes` from the data rank and
-  // would otherwise see a starts/ends/axes length mismatch and fall through.
-  // prap-v3 slices exactly this way.
-  func.func @test_slice_legacy_attrs_partial_axes(%input: tensor<8x6xf32>)
-      -> tensor<8x5xf32> {
+  // Test 13: legacy form naming fewer axes than the data has dims, as prap-v3
+  // does -- two of four axes here, so the explicit short `axes` list is what
+  // is actually under test. The rewrite must pass it through as written: if it
+  // instead expanded `axes` to the data rank, starts/ends/axes would mismatch,
+  // SliceDecompose would fall through, and the CHECK-NOTs below would fire.
+  // The untouched trailing axes must survive at full extent.
+  func.func @test_slice_legacy_attrs_partial_axes(%input: tensor<8x6x4x2xf32>)
+      -> tensor<8x5x4x2xf32> {
     // CHECK-LABEL: func.func @test_slice_legacy_attrs_partial_axes
     %r = "onnx.Slice"(%input) {
         starts = [0, 1],
         ends = [2147483647, 2147483647],
         axes = [0, 1]
-      } : (tensor<8x6xf32>) -> tensor<8x5xf32>
+      } : (tensor<8x6x4x2xf32>) -> tensor<8x5x4x2xf32>
 
     // CHECK-NOT: onnx.Slice
-    // CHECK: tensor.extract_slice {{.*}}[0, 1] [8, 5] [1, 1]
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0, 1, 0, 0] [8, 5, 4, 2] [1, 1, 1, 1]
 
-    return %r : tensor<8x5xf32>
+    return %r : tensor<8x5x4x2xf32>
   }
 
   // Test 14: legacy form with `axes` omitted entirely, which ONNX defines as

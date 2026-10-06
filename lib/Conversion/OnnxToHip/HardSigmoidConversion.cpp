@@ -19,10 +19,6 @@
 // revisited and would trip "op was not bufferized" instead (see the note at the
 // top of ClipConversion.cpp).
 //
-// MobileNetV3 is the motivating model: 9 HardSigmoid nodes with alpha = 1/6 and
-// beta left at its default, forming the h-swish gate. It was the only
-// unconverted op in the fp32 graph.
-//
 //   Before:
 //     %y = "onnx.HardSigmoid"(%x) {alpha = 0.166666672 : f32}
 //            : (tensor<1x64x14x14xf32>) -> tensor<1x64x14x14xf32>
@@ -77,10 +73,12 @@ struct HardSigmoidDecompose : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.HardSigmoid expects a float element type");
 
-    // ONNX schema defaults, applied when the exporter omitted the attribute --
-    // MobileNetV3 writes `alpha` but leaves `beta` implicit.
-    double alpha = 0.2;
-    double beta = 0.5;
+    // ONNX schema defaults, applied when the attribute is absent. The schema
+    // types both as float, so these are binary32 literals widened to double:
+    // on an f64 tensor a plain `0.2` would be the binary64 value, which is not
+    // the number ONNX specifies.
+    double alpha = static_cast<double>(0.2f);
+    double beta = static_cast<double>(0.5f);
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
       alpha = attr.getValueAsDouble();
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("beta"))
