@@ -31,6 +31,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
     glog::glog
     mlir_compilation_proto  # Shared protobuf library
     cpptrace::cpptrace
+    LibHipCompiler  # rocMlirArtifactTarget, recorded in the artifact metadata
 )
 
 # Include directories
