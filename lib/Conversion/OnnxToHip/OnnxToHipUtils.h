@@ -471,6 +471,8 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateQLinearConvConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
