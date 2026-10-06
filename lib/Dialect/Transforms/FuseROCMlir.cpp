@@ -7,9 +7,11 @@
 
 #include "RocMlir/RocMlirFusion.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/PDL/IR/PDL.h>
 #include <mlir/Dialect/PDLInterp/IR/PDLInterp.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/UB/IR/UBOps.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
@@ -27,10 +29,6 @@ namespace {
 // mlir-pdll -x cpp compiles them into populateRocMlirFusionPatterns.
 class FuseROCMlirPass : public impl::FuseROCMlirPassBase<FuseROCMlirPass> {
 public:
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<pdl::PDLDialect, pdl_interp::PDLInterpDialect>();
-  }
-
   void runOnOperation() override {
     auto funcOp = getOperation();
     if (funcOp.getSymName() != "main_graph")
