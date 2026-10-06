@@ -168,6 +168,7 @@ add_library(OnnxToHip STATIC
   TransposeConversion.cpp
   ElementwiseConversion.cpp
   PowerConversion.cpp
+  PowConversion.cpp
   ActivationConversion.cpp
   BiasGeluConversion.cpp
   FastGeluConversion.cpp

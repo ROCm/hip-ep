@@ -32,7 +32,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP kernel |
 | Log | Custom HIP kernel |
-| Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents |
+| Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents. Other constant scalar exponents use a custom HIP kernel |
 | Sub | Custom HIP kernel |
 | Cast | Custom HIP kernel |
 | CastLike | Simplified to Cast |

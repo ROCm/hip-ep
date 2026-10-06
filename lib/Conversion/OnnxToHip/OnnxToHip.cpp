@@ -239,6 +239,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
   populatePowerConversionPatterns(patterns, ctx);
+  populatePowConversionPatterns(patterns, ctx);
   populateActivationConversionPatterns(patterns, ctx);
   populateBiasGeluConversionPatterns(patterns, ctx);
   populateFastGeluConversionPatterns(patterns, ctx);

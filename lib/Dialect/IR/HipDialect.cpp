@@ -1640,6 +1640,18 @@ void SwishOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// PowOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PowOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PowOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 

@@ -309,6 +309,8 @@ void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populatePowConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
