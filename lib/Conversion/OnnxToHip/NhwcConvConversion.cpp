@@ -7,6 +7,10 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+
+#include <cstring>
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -26,7 +30,8 @@ namespace {
 //          -> tensor<?x?x?x512xf16>
 // After:
 //   %xn = hip.transpose %x {perm = [0, 3, 1, 2]} : -> tensor<?x4x?x?xf16>
-//   %wn = hip.transpose %w {perm = [0, 3, 1, 2]} : -> tensor<512x4x3x3xf16>
+//   %wn = hip.constant dense<...> : tensor<512x4x3x3xf16>  // static weight
+//   // a non-constant weight stays hip.transpose {perm = [0, 3, 1, 2]}
 //   %yn = hip.conv(%xn, %wn, %b) {kernel_shape = [3, 3], ...}
 //       : -> tensor<?x512x?x?xf16>
 //   %y  = hip.transpose %yn {perm = [0, 2, 3, 1]} : -> tensor<?x?x?x512xf16>
@@ -54,6 +59,93 @@ Value convOutExtent(PatternRewriter &rewriter, Location loc, Value inExtent,
   Value adjusted = arith::AddIOp::create(rewriter, loc, inExtent, i64(addend));
   Value divided = arith::DivSIOp::create(rewriter, loc, adjusted, i64(stride));
   return arith::AddIOp::create(rewriter, loc, divided, i64(1));
+}
+
+// Inline and file-backed filters are readable here. Memory-address carriers
+// are process-local and are not dereferenced from a pass that also runs on
+// textual IR, so those stay a runtime transpose.
+FailureOr<DenseElementsAttr> readWeightConstant(ConstantOp constant,
+                                                RankedTensorType type) {
+  switch (constant.getSourceKind()) {
+  case ConstantOp::SourceKind::Inline: {
+    auto value = dyn_cast<DenseElementsAttr>(constant.getValueAttr());
+    if (!value || value.getType() != type)
+      return failure();
+    return value;
+  }
+  case ConstantOp::SourceKind::Memory:
+    return failure();
+  case ConstantOp::SourceKind::File:
+    break;
+  }
+
+  StringRef path = constant.getLocationAttr().getValue();
+  const int64_t offset = constant.getOffsetAttr().getInt();
+  const int64_t size = constant.getSizeAttr().getInt();
+  const int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
+  if (size != type.getNumElements() * elementBytes)
+    return failure();
+  uint64_t fileSize = 0;
+  if (llvm::sys::fs::file_size(path, fileSize) ||
+      static_cast<uint64_t>(offset) + static_cast<uint64_t>(size) > fileSize)
+    return failure();
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+      llvm::MemoryBuffer::getFileSlice(path, static_cast<uint64_t>(size),
+                                       offset);
+  if (!buffer || (*buffer)->getBufferSize() != static_cast<uint64_t>(size))
+    return failure();
+  DenseElementsAttr value = DenseElementsAttr::getFromRawBuffer(
+      type,
+      ArrayRef<char>((*buffer)->getBufferStart(), static_cast<size_t>(size)));
+  if (!value)
+    return failure();
+  return value;
+}
+
+// [M, kH, kW, C/group] -> [M, C/group, kH, kW], preserving element bits.
+FailureOr<DenseElementsAttr> transposeOhwiToOihw(DenseElementsAttr value,
+                                                 RankedTensorType srcType) {
+  if (!srcType.hasStaticShape() || srcType.getRank() != 4)
+    return failure();
+  auto dstType =
+      RankedTensorType::get({srcType.getDimSize(0), srcType.getDimSize(3),
+                             srcType.getDimSize(1), srcType.getDimSize(2)},
+                            srcType.getElementType());
+  if (value.isSplat())
+    return DenseElementsAttr::get(dstType, value.getSplatValue<Attribute>());
+
+  unsigned bitWidth = srcType.getElementType().getIntOrFloatBitWidth();
+  if (bitWidth == 0 || bitWidth % 8 != 0)
+    return failure();
+  int64_t elemBytes = bitWidth / 8;
+  int64_t numElems = srcType.getNumElements();
+  ArrayRef<char> raw = value.getRawData();
+  if (static_cast<int64_t>(raw.size()) != numElems * elemBytes)
+    return failure();
+
+  int64_t mSize = srcType.getDimSize(0);
+  int64_t kH = srcType.getDimSize(1);
+  int64_t kW = srcType.getDimSize(2);
+  int64_t cSize = srcType.getDimSize(3);
+  SmallVector<char> permuted(raw.size());
+  for (int64_t m = 0; m < mSize; ++m) {
+    for (int64_t kh = 0; kh < kH; ++kh) {
+      for (int64_t kw = 0; kw < kW; ++kw) {
+        for (int64_t c = 0; c < cSize; ++c) {
+          int64_t src = ((m * kH + kh) * kW + kw) * cSize + c;
+          int64_t dst = ((m * cSize + c) * kH + kh) * kW + kw;
+          std::memcpy(permuted.data() + dst * elemBytes,
+                      raw.data() + src * elemBytes,
+                      static_cast<size_t>(elemBytes));
+        }
+      }
+    }
+  }
+  DenseElementsAttr transposed = DenseElementsAttr::getFromRawBuffer(
+      dstType, ArrayRef<char>(permuted.data(), permuted.size()));
+  if (!transposed)
+    return failure();
+  return transposed;
 }
 
 Value transposeRank4(PatternRewriter &rewriter, Location loc, Value context,
@@ -190,18 +282,44 @@ LogicalResult NhwcConvToHip::matchAndRewrite(Operation *op,
   SmallVector<int64_t> oihwShape = {
       weightType.getDimSize(0), weightType.getDimSize(3),
       weightType.getDimSize(1), weightType.getDimSize(2)};
-  SmallVector<Value> weightDyn;
-  if (weightType.isDynamicDim(0))
-    weightDyn.push_back(dimOf(rewriter, loc, weights, 0));
-  if (weightType.isDynamicDim(3))
-    weightDyn.push_back(dimOf(rewriter, loc, weights, 3));
-  if (weightType.isDynamicDim(1))
-    weightDyn.push_back(dimOf(rewriter, loc, weights, 1));
-  if (weightType.isDynamicDim(2))
-    weightDyn.push_back(dimOf(rewriter, loc, weights, 2));
-  Value weightOihw = transposeRank4(rewriter, loc, context, weights,
-                                    RankedTensorType::get(oihwShape, elem),
-                                    {0, 3, 1, 2}, weightDyn);
+  auto oihwType = RankedTensorType::get(oihwShape, elem);
+  Value weightOihw;
+  // Erased after the conv is replaced, and only when this node is the sole
+  // user. A shared carrier keeps its original layout for the other user.
+  ConstantOp deadWeight;
+  if (weightType.hasStaticShape()) {
+    if (auto weightConst = weights.getDefiningOp<ConstantOp>()) {
+      FailureOr<DenseElementsAttr> data =
+          readWeightConstant(weightConst, weightType);
+      FailureOr<DenseElementsAttr> transposed =
+          succeeded(data) ? transposeOhwiToOihw(*data, weightType)
+                          : FailureOr<DenseElementsAttr>(failure());
+      if (succeeded(transposed)) {
+        auto folded = ConstantOp::create(rewriter, loc, oihwType, *transposed);
+        if (auto name = weightConst.getSourceNameAttr())
+          folded.setSourceNameAttr(name);
+        if (weightConst->hasOneUse()) {
+          if (auto order = weightConst.getSerializationOrderAttr())
+            folded.setSerializationOrderAttr(order);
+          deadWeight = weightConst;
+        }
+        weightOihw = folded.getResult();
+      }
+    }
+  }
+  if (!weightOihw) {
+    SmallVector<Value> weightDyn;
+    if (weightType.isDynamicDim(0))
+      weightDyn.push_back(dimOf(rewriter, loc, weights, 0));
+    if (weightType.isDynamicDim(3))
+      weightDyn.push_back(dimOf(rewriter, loc, weights, 3));
+    if (weightType.isDynamicDim(1))
+      weightDyn.push_back(dimOf(rewriter, loc, weights, 1));
+    if (weightType.isDynamicDim(2))
+      weightDyn.push_back(dimOf(rewriter, loc, weights, 2));
+    weightOihw = transposeRank4(rewriter, loc, context, weights, oihwType,
+                                {0, 3, 1, 2}, weightDyn);
+  }
 
   // NHWC result [N, Ho, Wo, M] -> NCHW [N, M, Ho, Wo].
   SmallVector<int64_t> convShape = {
@@ -257,6 +375,8 @@ LogicalResult NhwcConvToHip::matchAndRewrite(Operation *op,
   Value output = transposeRank4(rewriter, loc, context, convResult, resultType,
                                 {0, 2, 3, 1}, outDyn);
   rewriter.replaceOp(op, output);
+  if (deadWeight)
+    rewriter.eraseOp(deadWeight);
   return success();
 }
 

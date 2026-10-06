@@ -58,7 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
-| `NhwcConv` (`com.microsoft`) | transpose + `hip.conv` | rank-4 NHWC, weights `[M, kH, kW, C/group]` |
+| `NhwcConv` (`com.microsoft`) | transpose + `hip.conv` | rank-4 NHWC; static weights `[M, kH, kW, C/group]` are permuted at compile time |
 | `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization

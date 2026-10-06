@@ -93,6 +93,34 @@ module {
     return %y : tensor<1x8x8x4xf32>
   }
 
+  // A static initializer is permuted to OIHW while lowering. OHWI
+  // [1, 2, 1, 2] values 1,2,3,4 become OIHW [1, 2, 2, 1] values 1,3,2,4.
+  // CHECK-LABEL: func.func @nhwc_conv_const_weight
+  // CHECK: hip.constant
+  // CHECK-SAME: 1.000000e+00
+  // CHECK-SAME: 3.000000e+00
+  // CHECK-SAME: 2.000000e+00
+  // CHECK-SAME: 4.000000e+00
+  // CHECK-SAME: tensor<1x2x2x1xf32>
+  // CHECK: hip.conv
+  // CHECK-SAME: tensor<1x2x2x1xf32>
+  // CHECK-NOT: tensor<1x2x1x2xf32>
+  func.func @nhwc_conv_const_weight(%x: tensor<1x4x4x2xf32>) -> tensor<1x3x4x1xf32> {
+    %w = "onnx.Constant"() {value = dense<[[[[1.0, 2.0]], [[3.0, 4.0]]]]> : tensor<1x2x1x2xf32>}
+        : () -> tensor<1x2x1x2xf32>
+    %y = "onnx.Custom"(%x, %w)
+        <{function_name = "NhwcConv"}>
+        {auto_pad = "NOTSET",
+         dilations = [1, 1],
+         domain_name = "com.microsoft",
+         group = 1 : si64,
+         kernel_shape = [2, 1],
+         pads = [0, 0, 0, 0],
+         strides = [1, 1]}
+        : (tensor<1x4x4x2xf32>, tensor<1x2x1x2xf32>) -> tensor<1x3x4x1xf32>
+    return %y : tensor<1x3x4x1xf32>
+  }
+
   // CHECK-LABEL: func.func @nhwc_conv_same_pad
   // CHECK: onnx.Custom
   // CHECK-NOT: hip.conv
