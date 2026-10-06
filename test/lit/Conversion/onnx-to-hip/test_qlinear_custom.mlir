@@ -97,6 +97,26 @@ module {
     return %y : tensor<1x5xui8>
   }
 
+  // Inputs may be int8 and uint8 independently of the output.
+  func.func @qlinear_concat_mixed(%a: tensor<1x2xi8>, %b: tensor<1x3xui8>) -> tensor<1x5xui8> {
+    // CHECK-LABEL: func.func @qlinear_concat_mixed
+    %y_scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<1> : tensor<ui8>} : () -> tensor<ui8>
+    %a_scale = "onnx.Constant"() {value = dense<0.2> : tensor<f32>} : () -> tensor<f32>
+    %a_zp = "onnx.Constant"() {value = dense<-4> : tensor<i8>} : () -> tensor<i8>
+    %b_scale = "onnx.Constant"() {value = dense<0.3> : tensor<f32>} : () -> tensor<f32>
+    %b_zp = "onnx.Constant"() {value = dense<3> : tensor<ui8>} : () -> tensor<ui8>
+    %y = "onnx.Custom"(%y_scale, %y_zp, %a, %a_scale, %a_zp, %b, %b_scale, %b_zp) {
+      axis = 1 : si64, domain_name = "com.microsoft", function_name = "QLinearConcat"
+    } : (tensor<f32>, tensor<ui8>, tensor<1x2xi8>, tensor<f32>, tensor<i8>, tensor<1x3xui8>, tensor<f32>, tensor<ui8>) -> tensor<1x5xui8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.dequantize_linear
+    // CHECK: tensor.insert_slice
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x5xui8>
+  }
+
   func.func @qlinear_gap(%x: tensor<1x8x4x4xi8>) -> tensor<1x8x1x1xi8> {
     // CHECK-LABEL: func.func @qlinear_gap
     %x_scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
@@ -113,6 +133,25 @@ module {
     // CHECK-SAME: mode = 0
     // CHECK: hip.quantize_linear
     return %y : tensor<1x8x1x1xi8>
+  }
+
+  // Dynamic spatial result dims must become static 1s on the pool, not a
+  // copy of the input extents.
+  func.func @qlinear_gap_dynamic(%x: tensor<1x8x?x?xi8>) -> tensor<1x8x?x?xi8> {
+    // CHECK-LABEL: func.func @qlinear_gap_dynamic
+    %x_scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<-2> : tensor<i8>} : () -> tensor<i8>
+    %y_scale = "onnx.Constant"() {value = dense<0.05> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<1> : tensor<i8>} : () -> tensor<i8>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale, %y_zp) {
+      channels_last = 0 : si64, domain_name = "com.microsoft", function_name = "QLinearGlobalAveragePool"
+    } : (tensor<1x8x?x?xi8>, tensor<f32>, tensor<i8>, tensor<f32>, tensor<i8>) -> tensor<1x8x?x?xi8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.global_pool
+    // CHECK-SAME: tensor<1x8x1x1xf32>
+    // CHECK-NOT: tensor<1x8x?x?xf32>
+    return %y : tensor<1x8x?x?xi8>
   }
 
   // NHWC input. Transpose to NCHW, pool, transpose back, then quantize.

@@ -349,10 +349,12 @@ struct QLinearConcatToQdq : public mlir::RewritePattern {
       if (!input || !scale)
         return rewriter.notifyMatchFailure(op, "incomplete concat triple");
       auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-      if (!inputType ||
-          inputType.getElementType() != resultType.getElementType())
+      // Contrib QLinearConcat allows each input to be int8 or uint8
+      // independently of the output. Inputs are dequantized before the
+      // concat, so only the 8-bit width matters here.
+      if (!inputType || !isInt8Element(inputType.getElementType()))
         return rewriter.notifyMatchFailure(
-            op, "concat inputs must be ranked and match the result type");
+            op, "concat inputs must be ranked int8 or uint8");
       inputs.push_back(input);
       scales.push_back(scale);
       zeroPoints.push_back(realOperand(op, i + 2));
@@ -440,8 +442,19 @@ struct QLinearGlobalAveragePoolToQdq : public mlir::RewritePattern {
     mlir::Value dequantized =
         emitDequantize(rewriter, loc, x, xScale, xZp, f32TypeOf(inputType));
 
+    // GlobalAveragePoolToHip copies a dynamic result dim from the input at
+    // the same index, and the pool lowering assumes spatial sizes are the
+    // static value 1. Force N/C through and every spatial dim to 1, even
+    // when the quantized result still says '?' for those axes.
+    auto pooledType = [&](int64_t n, int64_t c) {
+      llvm::SmallVector<int64_t> shape(rank, 1);
+      shape[0] = n;
+      shape[1] = c;
+      return mlir::RankedTensorType::get(shape, rewriter.getF32Type());
+    };
+
     mlir::Value poolInput = dequantized;
-    mlir::RankedTensorType poolType = f32TypeOf(resultType);
+    mlir::RankedTensorType poolType = pooledType(inputShape[0], inputShape[1]);
     if (channelsLast) {
       // NHWC -> NCHW so GlobalAveragePool reduces the spatial axes.
       llvm::SmallVector<int64_t> toChannelsFirst;
@@ -457,11 +470,7 @@ struct QLinearGlobalAveragePoolToQdq : public mlir::RewritePattern {
           mlir::RankedTensorType::get(nchwShape, rewriter.getF32Type()),
           {rewriter.getNamedAttr("perm",
                                  rewriter.getI64ArrayAttr(toChannelsFirst))});
-      llvm::SmallVector<int64_t> pooledShape(rank, 1);
-      pooledShape[0] = nchwShape[0];
-      pooledShape[1] = nchwShape[1];
-      poolType =
-          mlir::RankedTensorType::get(pooledShape, rewriter.getF32Type());
+      poolType = pooledType(nchwShape[0], nchwShape[1]);
     }
 
     mlir::Value pooled = emitOnnxOp(rewriter, loc, "onnx.GlobalAveragePool",
@@ -475,8 +484,13 @@ struct QLinearGlobalAveragePoolToQdq : public mlir::RewritePattern {
       for (int64_t i = 2; i < rank; ++i)
         toChannelsLast.push_back(i);
       toChannelsLast.push_back(1);
+      auto pooledShape = poolType.getShape();
+      llvm::SmallVector<int64_t> channelsLastShape(rank, 1);
+      channelsLastShape[0] = pooledShape[0];
+      channelsLastShape[rank - 1] = pooledShape[1];
       toQuantize = emitOnnxOp(
-          rewriter, loc, "onnx.Transpose", pooled, f32TypeOf(resultType),
+          rewriter, loc, "onnx.Transpose", pooled,
+          mlir::RankedTensorType::get(channelsLastShape, rewriter.getF32Type()),
           {rewriter.getNamedAttr("perm",
                                  rewriter.getI64ArrayAttr(toChannelsLast))});
     }
