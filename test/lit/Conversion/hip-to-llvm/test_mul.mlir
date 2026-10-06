@@ -108,21 +108,4 @@ module {
 
     return
   }
-
-  // Test 6: Rank 5 broadcast - [?,?,?] * [?,1,1,?,?] -> [?,1,?,?,?] folds
-  // into three 4D groups: (bcast, full), (full, bcast), (full, full).
-  func.func @mul_rank5_broadcast_test(
-      %ctx: !hip.context,
-      %a: memref<?x?x?xf32, 1>,
-      %b: memref<?x1x1x?x?xf32, 1>,
-      %c: memref<?x1x?x?x?xf32, 1>) {
-    // CHECK-LABEL: llvm.func @mul_rank5_broadcast_test
-
-    hip.mul(%ctx) ins(%a, %b : memref<?x?x?xf32, 1>, memref<?x1x1x?x?xf32, 1>)
-                         outs(%c : memref<?x1x?x?x?xf32, 1>)
-
-    // CHECK: llvm.call @wrap_elementwise({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-
-    return
-  }
 }

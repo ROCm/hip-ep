@@ -34,6 +34,11 @@ struct AndOpLowering : public ConvertOpToLLVMPattern<AndOp> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
+    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
+        outputType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "rank > 4 unsupported by 4D broadcast descriptor API");
+
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
     // Boolean (i1) inputs are stored as i8 on device but i1 is not part of the
     // HIPDNN_EP_DATATYPE_* enum. Pass a sentinel value (0) since wrap_and's
@@ -44,15 +49,12 @@ struct AndOpLowering : public ConvertOpToLLVMPattern<AndOp> {
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported input element type");
 
-    auto shapes = extractBroadcastShapes4D(
-        lhsType, adaptor.getLhs(), rhsType, adaptor.getRhs(), outputType,
-        adaptor.getOutput(), rewriter, loc, i64Type);
-    if (failed(shapes))
-      return rewriter.notifyMatchFailure(
-          op, "broadcast does not fold into the 4D broadcast descriptor API");
-    auto &lhsDims = shapes->lhs;
-    auto &rhsDims = shapes->rhs;
-    auto &outDims = shapes->out;
+    auto lhsDims =
+        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
+    auto rhsDims =
+        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
+    auto outDims =
+        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
 
     auto createI64Const = [&](int64_t v) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,

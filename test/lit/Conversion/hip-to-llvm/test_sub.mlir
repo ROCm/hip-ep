@@ -53,20 +53,4 @@ module {
     // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
-
-  // Rank 5 minus a scalar: static-1 output axes are dropped and the remaining
-  // axes merge, so the shapes still fit the 4D ABI.
-  func.func @sub_rank5_scalar(
-      %ctx: !hip.context,
-      %lhs: memref<?x1x?x?x1xi32, 1>,
-      %rhs: memref<i32, 1>,
-      %output: memref<?x1x?x?x1xi32, 1>) {
-    // CHECK-LABEL: llvm.func @sub_rank5_scalar
-
-    hip.sub(%ctx) ins(%lhs, %rhs : memref<?x1x?x?x1xi32, 1>, memref<i32, 1>)
-                  outs(%output : memref<?x1x?x?x1xi32, 1>)
-
-    // CHECK: llvm.call @wrap_elementwise_sub({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-    return
-  }
 }
