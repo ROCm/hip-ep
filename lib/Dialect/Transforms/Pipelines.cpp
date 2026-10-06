@@ -350,9 +350,9 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
-                                       const OnnxToHipPipelineOptions &options,
-                                       morphizen::FileSystem *fs) {
+void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
+                                           hipdnnHandle_t handle,
+                                           CompiledGraphMap output_graphs) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -406,6 +406,14 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
+  // hipDNN graph compilation, when a handle was supplied: supported ONNX ops
+  // become hipDNN graphs at pass time and the rest fall through to
+  // ConvertOnnxToHip below.
+  if (handle) {
+    pm.addPass(createOutlineOnnxToHipDNNPass());
+    pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
+  }
+
   pm.addPass(createConvertOnnxToHipPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
@@ -414,7 +422,12 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // hip.constant carriers.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+}
 
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs) {
+  buildOnnxToHipPipelineHead(pm);
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
@@ -423,27 +436,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        morphizen::FileSystem *fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
-  // See sibling overload for rationale.
-  pm.addPass(createSimplifyOnnxPass());
-  addPluginPassesForSlot(pm, ::hip::compiler::PipelineSlot::AfterSimplifyOnnx);
-
-  pm.addPass(createHipAddContextArgPass());
-  pm.addPass(createOnnxLoopOutlinePass());
-  pm.addPass(createOnnxIfOutlinePass());
-  pm.addPass(createInferLoopBodyShapesPass());
-  addPluginPassesForSlot(pm,
-                         ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
-
-  if (handle) {
-    pm.addPass(createOutlineOnnxToHipDNNPass());
-    pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
-  }
-
-  pm.addPass(createConvertOnnxToHipPass());
-
-  addPluginPassesForSlot(pm,
-                         ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
-
+  buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs));
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
@@ -529,6 +522,9 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
 
 void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
+  // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
+  // plain convolutions before anything tries to outline a kernel around it.
+  pm.addPass(mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::hip::createFuseROCMlirPass());
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
