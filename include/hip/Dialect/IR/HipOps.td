@@ -1435,6 +1435,108 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_BatchNormOp : Hip_DpsOp<"batch_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "ONNX BatchNormalization inference (supplied per-channel mean/var)";
+  let description = [{
+    Inference form of ONNX BatchNormalization
+    (https://arxiv.org/abs/1502.03167):
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are the supplied per-channel vectors, not reduced from
+    the input. Input rank is at least 2: (N, C, D1, ..., Dn). Rank 2 has a
+    spatial extent of 1. Scale, B, mean, and variance are 1-D tensors of
+    length C. Training mode is not represented by this op.
+
+    Example:
+    ```mlir
+    hip.batch_norm(%ctx)
+        ins(%input, %scale, %bias, %mean, %variance :
+            memref<1x4x1x1xf16, 1>, memref<4xf16, 1>, memref<4xf16, 1>,
+            memref<4xf16, 1>, memref<4xf16, 1>)
+        outs(%output : memref<1x4x1x1xf16, 1>)
+        {epsilon = 1.001000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$mean,
+    Hip_TensorOrMemRef:$variance,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `,` $mean `,` $variance `:`
+        type($input) `,` type($scale) `,` type($bias) `,`
+        type($mean) `,` type($variance)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "com.microsoft GroupNorm (per-group mean/var, optional SiLU)";
+  let description = [{
+    Group normalization from the `com.microsoft` contrib operator:
+
+      y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+
+    Channels are split into `groups` equal groups. Mean and variance are
+    computed over each (N, group) slice. `gamma` and `beta` are per-channel
+    and length C. `channels_last` 0 is NCHW (channel axis 1); 1 is NHWC
+    (channel axis rank-1). `activation` 0 is none; 1 applies SiLU after the
+    affine transform.
+
+    Example:
+    ```mlir
+    hip.group_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<1x8x4x4xf32, 1>, memref<8xf32, 1>, memref<8xf32, 1>)
+        outs(%output : memref<1x8x4x4xf32, 1>)
+        {activation = 1 : i64, channels_last = 0 : i64,
+         epsilon = 1.000000e-05 : f32, groups = 4 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$groups,
+    DefaultValuedAttr<I64Attr, "0">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$channels_last,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
@@ -2047,6 +2149,95 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   }];
 }
 
+def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Index of the maximum element along an axis";
+  let description = [{
+    Implements ONNX ArgMax: along `axis`, write the index of the maximum
+    element into `output`. `keepdims = 0` drops the reduced axis;
+    `keepdims = 1` leaves it as size 1. `select_last_index = 0` keeps the
+    first occurrence; `select_last_index = 1` keeps the last.
+
+    Output element type is integer (i64 for the ONNX importer). The input
+    element type is preserved on `data` and compared as that type, including
+    integers. NaN outranks every number: the first NaN wins unless
+    `select_last_index` is set, in which case the last NaN wins. Supported
+    inputs are f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64, at rank
+    1 through 8. ui32 and ui64 are rejected. A zero-length reduction axis is
+    rejected by the runtime.
+
+    Example:
+    ```mlir
+    hip.arg_max(%ctx)
+        ins(%data : tensor<?x?xi32>)
+        outs(%indices : tensor<?xi64>)
+        {axis = 1 : i64, keepdims = 0 : i64, select_last_index = 0 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$select_last_index
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_RandomNormalLikeOp : Hip_DpsOp<"random_normal_like",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Fill a tensor with normal random values, copying the input shape";
+  let description = [{
+    Implements ONNX RandomNormalLike. The input is a shape donor: its values
+    are not read. The output has the same rank and dimensions, including
+    dynamic dimensions, and is filled with Normal(mean, scale) samples.
+
+    Output element types are f16, bf16, f32, and f64, at rank 0 through 8.
+    `mean` and `scale` are f32 attributes (defaults 0 and 1). `seed`, when
+    set, makes the fill reproducible inside hip-ep. ONNX does not define the
+    generator, so the values are not bit-identical to another runtime. An
+    absent seed is chosen from the clock at each run.
+
+    The generator is one Box-Muller sample per element from a counter hash of
+    (seed, index), so the element count can change with the input shape
+    without recompiling.
+
+    Example:
+    ```mlir
+    hip.random_normal_like(%ctx)
+        ins(%input : tensor<?x?x?xf16>)
+        outs(%output : tensor<?x?x?xf16>)
+        {mean = 0.0 : f32, scale = 1.0 : f32, seed = 1.0 : f32}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "0.0">:$mean,
+    DefaultValuedAttr<F32Attr, "1.0">:$scale,
+    OptionalAttr<F32Attr>:$seed
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
@@ -2337,7 +2528,8 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
-    Applies the ONNX Swish activation element-wise.
+    Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
+    is the same formula; its alpha defaults to 1.702 rather than 1.
 
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
@@ -2428,6 +2620,40 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_PowOp : Hip_DpsOp<"pow"> {
+  let summary = "Element-wise power with a compile-time scalar exponent";
+  let description = [{
+    Computes Y = X ^ exponent element-wise. The exponent is a compile-time
+    scalar baked into the op. Integer exponents that decompose to Mul, and
+    the exponents 0.5, -0.5, and -1, are rewritten before this op is created.
+
+    A negative base with a non-integer exponent yields NaN.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.pow(%ctx) ins(%x : memref<4x8xf32, 1>)
+                  outs(%y : memref<4x8xf32, 1>)
+                  {exponent = 2.2 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F64Attr:$exponent
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -2555,6 +2781,47 @@ def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_IsNaNOp : Hip_DpsOp<"isnan", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise NaN test: y = isnan(x)";
+  let description = [{
+    Returns which elements of the input are NaN.
+    Implements the standard ONNX IsNaN operator.
+
+    Formula: Y = isnan(X)
+
+    The input is a floating-point tensor (f16, bf16, f32, or f64). The
+    output is a 1-byte boolean with the same shape. ONNX bool is `i1` in
+    hand-written IR and `ui8` in the ORT/morphizen frontend; both are one
+    byte per element and are accepted by `hip.where`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.isnan(%ctx) ins(%x : memref<24x20x1x1xf16, 1>)
+                    outs(%y : memref<24x20x1x1xui8, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -4569,7 +4836,8 @@ def Hip_PoolOp : Hip_DpsOp<"pool"> {
     HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h):
 
       * pool_mode=0 (AVERAGE): Y = mean over the window
-      * pool_mode=1 (MAX)    : Y = max over the window
+      * pool_mode=1 (MAX)    : Y = max over the window. Element type may be
+                             f16/bf16/f32/f64 or i8/ui8 (integer compare).
       * pool_mode=2 (LP)     : Y = pow(sum(pow(|x|, p)), 1/p)
 
     Pad positions are never read (they fall outside the input bounds). For
@@ -4638,21 +4906,26 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
-    upsample-and-downsample patterns.  Resamples the trailing spatial axes of
-    an `(N, C, D_1, ..., D_k)` input onto an `(N, C, O_1, ..., O_k)` output
-    grid.  The leading two dims (N, C) must be unchanged at runtime — i.e.
-    we only resize spatial axes.
+    upsample-and-downsample patterns.  The runtime kernel takes a copied prefix
+    of at most two axes and a trailing window of at most three.  Channels-first
+    `(N, C, H, W)` uses that prefix and window `(H, W)`.  Channels-last
+    `(N, H, W, C)` uses prefix `(N)`, an empty channel slot, and window
+    `(H, W, C)`; the channel extent is unchanged, so that axis is copied.
+    Rank is 3, 4, or 5.
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
         - 0 = nearest, 1 = linear (N-linear: bilinear / trilinear)
       * coordinate_transformation_mode in
-          {"half_pixel", "asymmetric", "align_corners"}  — encoded as i64
-        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+          {"half_pixel", "pytorch_half_pixel", "asymmetric",
+           "align_corners"}  — encoded as i64
+        - 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+          3 = pytorch_half_pixel (half_pixel, but an output axis of length 1
+          samples input coordinate 0)
       * nearest_mode in {"round_prefer_floor"}      — encoded as i64
         - 0 = round_prefer_floor (only used when mode=nearest)
 
-    Per-axis scale is recovered at runtime from the input/output spatial
+    Per-axis scale is recovered at runtime from the window's input and output
     extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
     appear as operands here — they were resolved at compile time into the
     output type that the upstream importer produced.
@@ -5233,6 +5506,62 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
         $weight_zero_points (`,` $bias^)? `:`
         type($input) `,` type($weights) `,` type($weight_scales) `,`
         type($weight_zero_points) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// Native onnx.QLinearConv. Distinct from hip.qconv, which is the W4A16 1x1
+// DequantizeLinear + Conv + QuantizeLinear fusion.
+def Hip_QLinearConvOp : Hip_DpsOp<"qlinear_conv",
+                                  /*traits=*/[],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/1,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
+  let summary = "ONNX QLinearConv";
+  let description = [{
+    8-bit grouped 2D convolution with the ONNX QLinearConv quantization:
+
+      acc = conv(x - x_zp, w - w_zp) + B
+      y = saturate(round(acc * x_scale * w_scale / y_scale) + y_zp)
+
+    Bias is optional, int32, and already quantized at scale `x_scale * w_scale`
+    with zero point 0. Input and output scales and zero points are per-tensor.
+    Weight scale and zero point are per-tensor or per output channel.
+
+    This op is not hip.qconv. hip.qconv fuses a W4A16 QDQ chain and only
+    implements a 1x1 unit-stride convolution.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$input_scale,
+    Hip_TensorOrMemRef:$input_zero_point,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$weight_scale,
+    Hip_TensorOrMemRef:$weight_zero_point,
+    Hip_TensorOrMemRef:$output_scale,
+    Hip_TensorOrMemRef:$output_zero_point,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $input_scale `,` $input_zero_point `,`
+        $weights `,` $weight_scale `,` $weight_zero_point `,` $output_scale `,`
+        $output_zero_point (`,` $bias^)? `:`
+        type($input) `,` type($input_scale) `,` type($input_zero_point) `,`
+        type($weights) `,` type($weight_scale) `,` type($weight_zero_point) `,`
+        type($output_scale) `,` type($output_zero_point) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
