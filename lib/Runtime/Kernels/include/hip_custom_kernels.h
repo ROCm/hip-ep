@@ -2567,10 +2567,14 @@ HIP_KERNEL_API int hip_dequantize_linear(
     int in_dtype,                // hip_dtype_t
     int scale_dtype,
     int out_dtype,
-    // Value width of input and zero_point: 8 or 16 to agree with in_dtype, or
-    // 4 for ONNX INT4/UINT4. At 4 in_dtype supplies only the signedness and
-    // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
-    // first, over the flattened row-major sequence. input_shape stays logical.
+    // Value width of input and zero_point: 8, 16, or 32 to agree with
+    // in_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 in_dtype supplies only the
+    // signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // input_shape stays logical.
     int in_bits);
 
 /* =========================================================================

@@ -35,20 +35,31 @@ Value emitShapeArray(Type ptrType, MemRefType type, Value descriptor, Value one,
   return arr;
 }
 
+// \p allowInt32Storage widens the quantized side to 32-bit integers. Only the
+// dequantize direction passes it: ONNX gives DequantizeLinear an int32 input,
+// which is where QDQ exporters put a conv/gemm bias, but gives QuantizeLinear
+// no int32 output. The runtime mirrors the same split.
 LogicalResult isDataTypeSupported(Operation *op, Type quantElem, Type floatElem,
-                                  Type scaleElem,
+                                  Type scaleElem, bool allowInt32Storage,
                                   ConversionPatternRewriter &rewriter) {
-  // supported: int8, uint8, int16, uint16, float32, float16
-  auto isQuantStorage = [](Type t) {
-    return t.isUnsignedInteger(8) || t.isSignedInteger(8) ||
-           t.isSignlessInteger(8) || t.isUnsignedInteger(16) ||
-           t.isSignedInteger(16) || t.isSignlessInteger(16);
+  // supported: int8, uint8, int16, uint16, float32, float16, and int32 when
+  // allowInt32Storage
+  auto isQuantStorage = [allowInt32Storage](Type t) {
+    if (t.isUnsignedInteger(8) || t.isSignedInteger(8) ||
+        t.isSignlessInteger(8) || t.isUnsignedInteger(16) ||
+        t.isSignedInteger(16) || t.isSignlessInteger(16))
+      return true;
+    return allowInt32Storage &&
+           (t.isSignedInteger(32) || t.isSignlessInteger(32));
   };
   auto isFloat = [](Type t) { return t.isF32() || t.isF16(); };
 
   if (!isQuantStorage(quantElem))
     return rewriter.notifyMatchFailure(
-        op, "unsupported quantized element type; expected i8/ui8/i16/ui16");
+        op, allowInt32Storage ? "unsupported quantized element type; expected "
+                                "i8/ui8/i16/ui16/i32"
+                              : "unsupported quantized element type; expected "
+                                "i8/ui8/i16/ui16");
   if (!isFloat(floatElem) || !isFloat(scaleElem))
     return rewriter.notifyMatchFailure(
         op, "unsupported float element type; expected f32/f16");
@@ -91,7 +102,8 @@ struct QuantizeLinearOpLowering
 
     Type quantElem = outputType.getElementType();
     if (failed(isDataTypeSupported(op, quantElem, inputType.getElementType(),
-                                   scaleType.getElementType(), rewriter)))
+                                   scaleType.getElementType(),
+                                   /*allowInt32Storage=*/false, rewriter)))
       return failure();
 
     FailureOr<int64_t> outputBits =
@@ -168,7 +180,8 @@ struct DequantizeLinearOpLowering
 
     Type quantElem = inputType.getElementType();
     if (failed(isDataTypeSupported(op, quantElem, outputType.getElementType(),
-                                   scaleType.getElementType(), rewriter)))
+                                   scaleType.getElementType(),
+                                   /*allowInt32Storage=*/true, rewriter)))
       return failure();
 
     FailureOr<int64_t> inputBits =

@@ -1584,11 +1584,14 @@ int wrap_dequantize_linear(
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
-    // Value width of `input` and `zero_point`: 8 or 16 to match input_dtype,
-    // or 4 for ONNX INT4/UINT4. At 4 the dtype supplies only the signedness
-    // and both buffers hold ceil(numel/2) bytes, two values per byte, low
-    // nibble first, over the flattened row-major sequence. `input_shape`
-    // stays logical either way.
+    // Value width of `input` and `zero_point`: 8, 16, or 32 to match
+    // input_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 the dtype supplies only
+    // the signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // `input_shape` stays logical either way.
     int64_t input_bits);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)

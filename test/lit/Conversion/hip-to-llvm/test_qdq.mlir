@@ -82,9 +82,11 @@ func.func @dequantize_linear_no_zp(%ctx: !hip.context,
 
 // -----
 
-// ===== 3: QuantizeLinear rejected -- i32 is not a quantized storage type =====
-// Only i8/ui8/i16/ui16 are accepted; a wider integer must fail to legalize
-// rather than reach the runtime as HIPDNN_EP_DATATYPE_INT32.
+// ===== 3: QuantizeLinear rejected -- i32 is not a quantized output type =====
+// ONNX gives QuantizeLinear no int32 output, so only i8/ui8/i16/ui16 are
+// accepted here and a wider integer must fail to legalize rather than reach
+// the runtime as HIPDNN_EP_DATATYPE_INT32. The dequantize direction does take
+// i32 (case 10) -- the asymmetry is the spec's, not an oversight.
 
 func.func @quantize_linear_bad_storage(%ctx: !hip.context,
                                        %x: memref<8x128xf32, 1>,
@@ -222,5 +224,34 @@ func.func @quantize_linear_packed_int4_bad_width(%ctx: !hip.context,
       outs(%y : memref<8x128xi16, 1>)
       {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
        saturate = 1 : i64, packed_int4}
+  return
+}
+
+// -----
+
+// ===== 10: DequantizeLinear accepts i32 storage =====
+// A QDQ exporter quantizes a conv/gemm bias to int32 at
+// input_scale * weight_scale, so this is the shape a biased QDQ conv leaves
+// behind once the fusion declines it. input_dtype must reach the runtime as
+// HIPDNN_EP_DATATYPE_INT32 = 3 with input_bits = 32. The scale and zero point
+// are the 1-element rank-1 spelling of a per-tensor quantization, which is
+// what exporters emit here; `axis` names no dimension of a rank-1 tensor and
+// ONNX ignores it in that case. They share a shape because the spec requires
+// the zero point to match the scale.
+
+// CHECK-LABEL: llvm.func @dequantize_linear_i32_bias
+// CHECK-DAG:   llvm.mlir.constant(3 : i64)
+// CHECK-DAG:   llvm.mlir.constant(32 : i64)
+// CHECK:       llvm.call @wrap_dequantize_linear
+func.func @dequantize_linear_i32_bias(%ctx: !hip.context,
+                                      %x: memref<768xi32, 1>,
+                                      %scale: memref<1xf32, 1>,
+                                      %zp: memref<1xi32, 1>,
+                                      %y: memref<768xf32, 1>) {
+  hip.dequantize_linear(%ctx)
+      ins(%x, %scale : memref<768xi32, 1>, memref<1xf32, 1>)
+      zero_point(%zp : memref<1xi32, 1>)
+      outs(%y : memref<768xf32, 1>)
+      {axis = 1 : i64, block_size = 0 : i64}
   return
 }
