@@ -1000,6 +1000,289 @@ struct SqrtConverter final : public OpConversionPattern<SqrtOp> {
   }
 };
 
+// TOSA has no silu/swish. Both expand to the ONNX definition:
+//   silu(x)        = x * sigmoid(x)
+//   swish(x,alpha) = x * sigmoid(alpha * x)
+// with alpha default 1, which is silu. hip.silu is already a FuseROCMlir
+// pointwise consumer; hip.swish is not, so the swish pattern still needs
+// rock.kernel on the test function.
+//
+// Before:
+//   %y = hip.silu(%ctx) ins(%x : tensor<2x8xf16>)
+//                       outs(%init : tensor<2x8xf16>) -> tensor<2x8xf16>
+// After:
+//   %s = tosa.sigmoid %x
+//   %y = tosa.mul %x, %s
+LogicalResult matchStaticFloatSameType(Operation *op, Value input,
+                                       RankedTensorType &resultType,
+                                       ConversionPatternRewriter &rewriter) {
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected tensor mode");
+  resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+  if (input.getType() != resultType)
+    return rewriter.notifyMatchFailure(
+        op, "operand and result types must match exactly");
+  if (!isa<FloatType>(resultType.getElementType()))
+    return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+  return success();
+}
+
+Value emitMulSigmoid(Value x, Value preSigmoid, RankedTensorType ty,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  Value sig = tosa::SigmoidOp::create(rewriter, loc, ty, preSigmoid);
+  return tosa::MulOp::create(rewriter, loc, ty, x, sig,
+                             createZeroMulShift(rewriter, loc));
+}
+
+struct SiluConverter final : public OpConversionPattern<SiluOp> {
+  using OpConversionPattern<SiluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SiluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchStaticFloatSameType(op, adaptor.getInput(), resultType,
+                                        rewriter)))
+      return failure();
+    rewriter.replaceOp(op,
+                       emitMulSigmoid(adaptor.getInput(), adaptor.getInput(),
+                                      resultType, rewriter, op.getLoc()));
+    return success();
+  }
+};
+
+struct SwishConverter final : public OpConversionPattern<SwishOp> {
+  using OpConversionPattern<SwishOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SwishOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchStaticFloatSameType(op, adaptor.getInput(), resultType,
+                                        rewriter)))
+      return failure();
+    Location loc = op.getLoc();
+    Value x = adaptor.getInput();
+    double alphaVal = op.getAlpha().convertToDouble();
+    Value preSigmoid = x;
+    if (alphaVal != 1.0)
+      preSigmoid = tosa::MulOp::create(
+          rewriter, loc, resultType, x,
+          createSplatFloat(rewriter, loc, resultType, alphaVal),
+          createZeroMulShift(rewriter, loc));
+    rewriter.replaceOp(
+        op, emitMulSigmoid(x, preSigmoid, resultType, rewriter, loc));
+    return success();
+  }
+};
+
+// TOSA has no gelu. Expand to the formula hip.gelu's own description
+// spells out, matching wrap_gelu / hip_elementwise_gelu:
+//
+//   erf (approximate = "none"):
+//     y = 0.5 * x * (1 + erf(x * 1/sqrt(2)))
+//   tanh (approximate = "tanh", also hip.fast_gelu):
+//     y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+//
+// Cubing uses tosa.mul rather than tosa.pow so it holds for every float
+// type TOSA accepts. Dividing by sqrt(2) is a multiply by the reciprocal
+// constant, because TOSA has no float divide.
+//
+// hip.bias_gelu is Gelu(data + last-dim-broadcast(bias)) with the erf
+// form. hip.fast_gelu is the tanh form, with optional bias added first.
+enum class GeluKind { Erf, Tanh };
+
+static LogicalResult matchGeluTensor(Operation *op, Value input,
+                                     ConversionPatternRewriter &rewriter,
+                                     RankedTensorType &resultType) {
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected tensor mode");
+  resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+  if (input.getType() != resultType)
+    return rewriter.notifyMatchFailure(
+        op, "operand and result types must match exactly");
+  if (!isa<FloatType>(resultType.getElementType()))
+    return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+  return success();
+}
+
+static FailureOr<Value> addBroadcastBias(ConversionPatternRewriter &rewriter,
+                                         Location loc,
+                                         RankedTensorType resultType,
+                                         Value data, Value bias) {
+  if (failed(tosa::EqualizeRanks(rewriter, loc, data, bias)))
+    return failure();
+  if (!isTosaCompatibleOperand(data, resultType) ||
+      !isTosaCompatibleOperand(bias, resultType))
+    return failure();
+  return tosa::AddOp::create(rewriter, loc, resultType, data, bias).getResult();
+}
+
+static Value emitGelu(ConversionPatternRewriter &rewriter, Location loc,
+                      RankedTensorType type, Value x, GeluKind kind) {
+  Value shift = createZeroMulShift(rewriter, loc);
+  auto mul = [&](Value lhs, Value rhs) {
+    return tosa::MulOp::create(rewriter, loc, type, lhs, rhs, shift);
+  };
+  auto add = [&](Value lhs, Value rhs) {
+    return tosa::AddOp::create(rewriter, loc, type, lhs, rhs);
+  };
+
+  Value half = createSplatFloat(rewriter, loc, type, 0.5);
+  Value one = createSplatFloat(rewriter, loc, type, 1.0);
+  Value inner;
+  if (kind == GeluKind::Tanh) {
+    Value x2 = mul(x, x);
+    Value x3 = mul(x2, x);
+    Value coeff = createSplatFloat(rewriter, loc, type, 0.044715);
+    Value k = createSplatFloat(rewriter, loc, type, 0.7978845608028654);
+    Value tanhArg = mul(k, add(x, mul(coeff, x3)));
+    inner = add(one, tosa::TanhOp::create(rewriter, loc, type, tanhArg));
+  } else {
+    Value invSqrt2 = createSplatFloat(rewriter, loc, type, 0.7071067811865476);
+    inner =
+        add(one, tosa::ErfOp::create(rewriter, loc, type, mul(x, invSqrt2)));
+  }
+  return mul(mul(x, half), inner);
+}
+
+// Before:
+//   %r = hip.gelu(%ctx) ins(%x : tensor<2x8xf16>)
+//                       outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+// After (exact):
+//   %c = tosa.const dense<0.7071...>
+//   %s = tosa.mul %x, %c
+//   %e = tosa.erf %s
+//   %t = tosa.add %one, %e
+//   %r = tosa.mul (tosa.mul %x, %half), %t
+struct GeluConverter final : public OpConversionPattern<GeluOp> {
+  using OpConversionPattern<GeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getInput(), rewriter, resultType)))
+      return failure();
+
+    StringRef approximate = op.getApproximate();
+    if (approximate != "none" && approximate != "tanh")
+      return rewriter.notifyMatchFailure(
+          op, "approximate must be \"none\" or \"tanh\"");
+
+    GeluKind kind = approximate == "tanh" ? GeluKind::Tanh : GeluKind::Erf;
+    rewriter.replaceOp(op, emitGelu(rewriter, op.getLoc(), resultType,
+                                    adaptor.getInput(), kind));
+    return success();
+  }
+};
+
+struct BiasGeluConverter final : public OpConversionPattern<BiasGeluOp> {
+  using OpConversionPattern<BiasGeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(BiasGeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getData(), rewriter, resultType)))
+      return failure();
+
+    FailureOr<Value> biased =
+        addBroadcastBias(rewriter, op.getLoc(), resultType, adaptor.getData(),
+                         adaptor.getBias());
+    if (failed(biased))
+      return rewriter.notifyMatchFailure(op, "bias is not tosa-broadcastable");
+
+    rewriter.replaceOp(op, emitGelu(rewriter, op.getLoc(), resultType, *biased,
+                                    GeluKind::Erf));
+    return success();
+  }
+};
+
+struct FastGeluConverter final : public OpConversionPattern<FastGeluOp> {
+  using OpConversionPattern<FastGeluOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(FastGeluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    RankedTensorType resultType;
+    if (failed(matchGeluTensor(op, adaptor.getInput(), rewriter, resultType)))
+      return failure();
+
+    Value x = adaptor.getInput();
+    if (Value bias = adaptor.getBias()) {
+      FailureOr<Value> biased =
+          addBroadcastBias(rewriter, op.getLoc(), resultType, x, bias);
+      if (failed(biased))
+        return rewriter.notifyMatchFailure(op,
+                                           "bias is not tosa-broadcastable");
+      x = *biased;
+    }
+
+    rewriter.replaceOp(
+        op, emitGelu(rewriter, op.getLoc(), resultType, x, GeluKind::Tanh));
+    return success();
+  }
+};
+
+// TOSA has no softplus. Expand to the numerically stable form the
+// hip_softplus kernel uses:
+//   softplus(x) = max(x, 0) + log(1 + exp(-abs(x)))
+//
+// The naive log(1 + exp(x)) overflows for values ONNX still considers
+// valid (f16 20 is ordinary; exp(20) is already Inf), so a fused kernel
+// that used it would disagree with wrap_softplus rather than fail.
+//
+// Before:
+//   %r = hip.softplus(%ctx) ins(%x : tensor<2x8xf16>)
+//                           outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
+// After:
+//   %abs = tosa.abs %x
+//   %neg = tosa.negate %abs
+//   %e = tosa.exp %neg
+//   %one = tosa.const dense<1.0> : tensor<2x8xf16>
+//   %s = tosa.add %e, %one
+//   %l = tosa.log %s
+//   %zero = tosa.const dense<0.0> : tensor<2x8xf16>
+//   %m = tosa.maximum %x, %zero
+//   %r = tosa.add %m, %l
+struct SoftplusConverter final : public OpConversionPattern<SoftplusOp> {
+  using OpConversionPattern<SoftplusOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SoftplusOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultType || !resultType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
+    if (adaptor.getX().getType() != resultType)
+      return rewriter.notifyMatchFailure(
+          op, "operand and result types must match exactly");
+    if (!isa<FloatType>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+
+    Location loc = op.getLoc();
+    Value x = adaptor.getX();
+    Value abs = tosa::AbsOp::create(rewriter, loc, resultType, x);
+    Value neg = tosa::NegateOp::create(rewriter, loc, resultType, abs);
+    Value exp = tosa::ExpOp::create(rewriter, loc, resultType, neg);
+    Value one = createSplatFloat(rewriter, loc, resultType, 1.0);
+    Value sum = tosa::AddOp::create(rewriter, loc, resultType, exp, one);
+    Value log = tosa::LogOp::create(rewriter, loc, resultType, sum);
+    Value zero = createSplatFloat(rewriter, loc, resultType, 0.0);
+    Value relu = tosa::MaximumOp::create(rewriter, loc, resultType, x, zero);
+    rewriter.replaceOpWithNewOp<tosa::AddOp>(op, resultType, relu, log);
+    return success();
+  }
+};
+
 // hip.not is logical negation on i1. It becomes tosa.bitwise_xor against an
 // all-ones constant rather than the tosa.logical_not that would map 1-1,
 // because RockTosaToElementwise has a pattern for neither tosa.logical_not nor
@@ -3388,6 +3671,247 @@ struct GatherConverter final : public OpConversionPattern<GatherOp> {
     Value gathered =
         tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
     rewriter.replaceOp(op, reshapeTo(gathered, resultTy.getShape(), rewriter));
+    return success();
+  }
+};
+
+// TOSA has no grid_sample. tosa.resize only scales a regular lattice, so
+// hip.grid_sample expands to the unnormalize / gather / interpolate sequence
+// hip_grid_sample uses:
+//
+//   align_corners=1: ((g + 1) * (size - 1)) / 2
+//   align_corners=0: ((g + 1) * size - 1) / 2
+//   nearest:  floor(coord + 0.5)
+//   bilinear: four-neighbour lerp
+//
+// Input is NCHW; TOSA gather is [N,K,C] x [N,W] -> [N,W,C], so the spatial
+// plane is flattened after an NHWC transpose. Reflection padding is left
+// unconverted: it needs a periodic fold TOSA cannot express with clamp.
+//
+// Before:
+//   %y = hip.grid_sample(%ctx)
+//            ins(%x, %g : tensor<1x3x8x8xf32>, tensor<1x4x4x2xf32>)
+//            outs(%init : tensor<1x3x4x4xf32>)
+//            {mode = 1, padding_mode = 0, align_corners = 0}
+// After (bilinear):
+//   %nhwc = tosa.transpose %x
+//   %flat = tosa.reshape %nhwc
+//   %v00/%v01/%v10/%v11 = tosa.gather ...
+//   %y = tosa.transpose (weighted sum)
+Value unnormalizeCoord(Value g, int64_t size, int64_t alignCorners,
+                       RankedTensorType ty, ConversionPatternRewriter &rewriter,
+                       Location loc) {
+  if (size <= 1)
+    return createSplatFloat(rewriter, loc, ty, 0.0);
+  Value one = createSplatFloat(rewriter, loc, ty, 1.0);
+  Value gp1 = tosa::AddOp::create(rewriter, loc, ty, g, one);
+  if (alignCorners)
+    return emitTosaMul(rewriter, loc, gp1,
+                       createSplatFloat(rewriter, loc, ty,
+                                        0.5 * static_cast<double>(size - 1)),
+                       ty);
+  Value scaled = emitTosaMul(
+      rewriter, loc, gp1,
+      createSplatFloat(rewriter, loc, ty, static_cast<double>(size)), ty);
+  Value inner = tosa::AddOp::create(rewriter, loc, ty, scaled,
+                                    createSplatFloat(rewriter, loc, ty, -1.0));
+  return emitTosaMul(rewriter, loc, inner,
+                     createSplatFloat(rewriter, loc, ty, 0.5), ty);
+}
+
+Value clampIndex(Value idx, int64_t lo, int64_t hi, RankedTensorType ty,
+                 ConversionPatternRewriter &rewriter, Location loc) {
+  Value loV = createSplatInt(rewriter, loc, ty, lo);
+  Value hiV = createSplatInt(rewriter, loc, ty, hi);
+  Value low = tosa::MaximumOp::create(rewriter, loc, ty, idx, loV);
+  return tosa::MinimumOp::create(rewriter, loc, ty, low, hiV);
+}
+
+Value inRangeMask(Value idx, int64_t extent, RankedTensorType idxTy,
+                  ConversionPatternRewriter &rewriter, Location loc) {
+  auto predTy = RankedTensorType::get(idxTy.getShape(), rewriter.getI1Type());
+  Value zero = createSplatInt(rewriter, loc, idxTy, 0);
+  Value hi = createSplatInt(rewriter, loc, idxTy, extent);
+  Value isNeg = tosa::GreaterOp::create(rewriter, loc, predTy, zero, idx);
+  Value ge0 = tosa::BitwiseNotOp::create(rewriter, loc, predTy, isNeg);
+  Value lt = tosa::GreaterOp::create(rewriter, loc, predTy, hi, idx);
+  return tosa::BitwiseAndOp::create(rewriter, loc, predTy, ge0, lt);
+}
+
+Value gatherSpatial(Value values, Value y, Value x, int64_t n, int64_t ho,
+                    int64_t wo, int64_t c, int64_t width,
+                    ConversionPatternRewriter &rewriter, Location loc) {
+  auto idxTy = cast<RankedTensorType>(y.getType());
+  Value wSplat = createSplatInt(rewriter, loc, idxTy, width);
+  Value linear = tosa::AddOp::create(
+      rewriter, loc, idxTy,
+      tosa::MulOp::create(rewriter, loc, idxTy, y, wSplat,
+                          createZeroMulShift(rewriter, loc)),
+      x);
+  linear = reshapeTo(linear, {n, ho * wo}, rewriter);
+  auto gatheredTy = RankedTensorType::get(
+      {n, ho * wo, c},
+      cast<RankedTensorType>(values.getType()).getElementType());
+  Value gathered =
+      tosa::GatherOp::create(rewriter, loc, gatheredTy, values, linear);
+  return reshapeTo(gathered, {n, ho, wo, c}, rewriter);
+}
+
+Value applyZerosMask(Value sample, Value validY, Value validX,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto predTy = cast<RankedTensorType>(validY.getType());
+  Value valid =
+      tosa::BitwiseAndOp::create(rewriter, loc, predTy, validY, validX);
+  auto sampleTy = cast<RankedTensorType>(sample.getType());
+  SmallVector<int64_t> unsqueeze(predTy.getShape().begin(),
+                                 predTy.getShape().end());
+  unsqueeze.push_back(1);
+  Value pred = reshapeTo(valid, unsqueeze, rewriter);
+  if (failed(tosa::EqualizeRanks(rewriter, loc, pred, sample)))
+    return sample;
+  Value zero = createSplatFloat(rewriter, loc, sampleTy, 0.0);
+  return tosa::SelectOp::create(rewriter, loc, sampleTy, pred, sample, zero);
+}
+
+Value bcastMul(Value sample, Value weight, ConversionPatternRewriter &rewriter,
+               Location loc) {
+  auto sampleTy = cast<RankedTensorType>(sample.getType());
+  ArrayRef<int64_t> shape = sampleTy.getShape();
+  Value w = reshapeTo(weight, {shape[0], shape[1], shape[2], 1}, rewriter);
+  if (failed(tosa::EqualizeRanks(rewriter, loc, sample, w)))
+    return sample;
+  return emitTosaMul(rewriter, loc, sample, w, sampleTy);
+}
+
+struct GridSampleConverter final : public OpConversionPattern<GridSampleOp> {
+  using OpConversionPattern<GridSampleOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GridSampleOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto inputTy = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    auto gridTy = dyn_cast<RankedTensorType>(adaptor.getGrid().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!inputTy || !gridTy || !resultTy || !inputTy.hasStaticShape() ||
+        !gridTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (inputTy.getRank() != 4 || gridTy.getRank() != 4 ||
+        resultTy.getRank() != 4)
+      return rewriter.notifyMatchFailure(op, "expected 4-D NCHW grid_sample");
+    if (gridTy.getDimSize(3) != 2)
+      return rewriter.notifyMatchFailure(op, "grid last dim must be 2");
+    Type elemTy = resultTy.getElementType();
+    if (!isa<FloatType>(elemTy) || inputTy.getElementType() != elemTy ||
+        gridTy.getElementType() != elemTy)
+      return rewriter.notifyMatchFailure(op, "tosa op requires a float tensor");
+
+    int64_t n = inputTy.getDimSize(0);
+    int64_t c = inputTy.getDimSize(1);
+    int64_t h = inputTy.getDimSize(2);
+    int64_t w = inputTy.getDimSize(3);
+    int64_t ho = gridTy.getDimSize(1);
+    int64_t wo = gridTy.getDimSize(2);
+    if (n <= 0 || c <= 0 || h <= 0 || w <= 0 || ho <= 0 || wo <= 0)
+      return rewriter.notifyMatchFailure(op, "expected positive extents");
+    if (resultTy.getShape() != ArrayRef<int64_t>({n, c, ho, wo}))
+      return rewriter.notifyMatchFailure(op, "result shape is not NCHW output");
+    if (gridTy.getDimSize(0) != n)
+      return rewriter.notifyMatchFailure(op, "grid batch must match input");
+
+    int64_t mode = op.getMode();
+    int64_t padding = op.getPaddingMode();
+    int64_t align = op.getAlignCorners();
+    if (mode != 0 && mode != 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "mode must be nearest or bilinear");
+    if (padding == 2)
+      return rewriter.notifyMatchFailure(
+          op, "reflection padding is not expressed in TOSA");
+    if (padding != 0 && padding != 1)
+      return rewriter.notifyMatchFailure(op, "unsupported padding_mode");
+
+    Location loc = op.getLoc();
+    auto coordTy = RankedTensorType::get({n, ho, wo}, elemTy);
+    Value gx = reshapeTo(sliceOffsetSize(adaptor.getGrid(), {0, 0, 0, 0},
+                                         {n, ho, wo, 1}, rewriter, loc),
+                         {n, ho, wo}, rewriter);
+    Value gy = reshapeTo(sliceOffsetSize(adaptor.getGrid(), {0, 0, 0, 1},
+                                         {n, ho, wo, 1}, rewriter, loc),
+                         {n, ho, wo}, rewriter);
+    Value x = unnormalizeCoord(gx, w, align, coordTy, rewriter, loc);
+    Value y = unnormalizeCoord(gy, h, align, coordTy, rewriter, loc);
+
+    Value nhwc = transposePerm(adaptor.getInput(), {0, 2, 3, 1}, rewriter, loc);
+    Value values = reshapeTo(nhwc, {n, h * w, c}, rewriter);
+    auto i32CoordTy = RankedTensorType::get({n, ho, wo}, rewriter.getI32Type());
+    auto nhwcTy = RankedTensorType::get({n, ho, wo, c}, elemTy);
+
+    auto sampleAt = [&](Value ys, Value xs, Value maskY, Value maskX) {
+      // TOSA gather requires in-range indices. Clamp first, then zero OOB
+      // samples when padding_mode is zeros.
+      Value yy = clampIndex(ys, 0, h - 1, i32CoordTy, rewriter, loc);
+      Value xx = clampIndex(xs, 0, w - 1, i32CoordTy, rewriter, loc);
+      Value sample =
+          gatherSpatial(values, yy, xx, n, ho, wo, c, w, rewriter, loc);
+      if (padding == 0)
+        sample = applyZerosMask(sample, maskY, maskX, rewriter, loc);
+      return sample;
+    };
+
+    Value resultNHWC;
+    if (mode == 0) {
+      Value half = createSplatFloat(rewriter, loc, coordTy, 0.5);
+      Value yN = tosa::FloorOp::create(
+          rewriter, loc, coordTy,
+          tosa::AddOp::create(rewriter, loc, coordTy, y, half));
+      Value xN = tosa::FloorOp::create(
+          rewriter, loc, coordTy,
+          tosa::AddOp::create(rewriter, loc, coordTy, x, half));
+      Value yi = emitTosaCast(rewriter, loc, yN, rewriter.getI32Type());
+      Value xi = emitTosaCast(rewriter, loc, xN, rewriter.getI32Type());
+      Value maskY = inRangeMask(yi, h, i32CoordTy, rewriter, loc);
+      Value maskX = inRangeMask(xi, w, i32CoordTy, rewriter, loc);
+      resultNHWC = sampleAt(yi, xi, maskY, maskX);
+    } else {
+      Value y0f = tosa::FloorOp::create(rewriter, loc, coordTy, y);
+      Value x0f = tosa::FloorOp::create(rewriter, loc, coordTy, x);
+      Value y0 = emitTosaCast(rewriter, loc, y0f, rewriter.getI32Type());
+      Value x0 = emitTosaCast(rewriter, loc, x0f, rewriter.getI32Type());
+      Value oneI = createSplatInt(rewriter, loc, i32CoordTy, 1);
+      Value y1 = tosa::AddOp::create(rewriter, loc, i32CoordTy, y0, oneI);
+      Value x1 = tosa::AddOp::create(rewriter, loc, i32CoordTy, x0, oneI);
+      Value dy = tosa::SubOp::create(rewriter, loc, coordTy, y, y0f);
+      Value dx = tosa::SubOp::create(rewriter, loc, coordTy, x, x0f);
+      Value oneF = createSplatFloat(rewriter, loc, coordTy, 1.0);
+      Value omx = tosa::SubOp::create(rewriter, loc, coordTy, oneF, dx);
+      Value omy = tosa::SubOp::create(rewriter, loc, coordTy, oneF, dy);
+
+      Value mY0 = inRangeMask(y0, h, i32CoordTy, rewriter, loc);
+      Value mY1 = inRangeMask(y1, h, i32CoordTy, rewriter, loc);
+      Value mX0 = inRangeMask(x0, w, i32CoordTy, rewriter, loc);
+      Value mX1 = inRangeMask(x1, w, i32CoordTy, rewriter, loc);
+      Value v00 = sampleAt(y0, x0, mY0, mX0);
+      Value v01 = sampleAt(y0, x1, mY0, mX1);
+      Value v10 = sampleAt(y1, x0, mY1, mX0);
+      Value v11 = sampleAt(y1, x1, mY1, mX1);
+
+      Value t00 =
+          bcastMul(bcastMul(v00, omx, rewriter, loc), omy, rewriter, loc);
+      Value t01 =
+          bcastMul(bcastMul(v01, dx, rewriter, loc), omy, rewriter, loc);
+      Value t10 =
+          bcastMul(bcastMul(v10, omx, rewriter, loc), dy, rewriter, loc);
+      Value t11 = bcastMul(bcastMul(v11, dx, rewriter, loc), dy, rewriter, loc);
+      Value s0 = tosa::AddOp::create(rewriter, loc, nhwcTy, t00, t01);
+      Value s1 = tosa::AddOp::create(rewriter, loc, nhwcTy, t10, t11);
+      resultNHWC = tosa::AddOp::create(rewriter, loc, nhwcTy, s0, s1);
+    }
+
+    rewriter.replaceOp(op,
+                       transposePerm(resultNHWC, {0, 3, 1, 2}, rewriter, loc));
     return success();
   }
 };
@@ -6025,11 +6549,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     conversion.addIllegalOp<
         ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
         MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, WhereOp, LeakyReluOp,
+        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, GeluOp,
+        BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp, LeakyReluOp,
         MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
         DequantizeLinearOp, MatMulNBitsOp, GatherOp, GatherElementsOp,
-        GatherNDOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, RoundOp,
-        ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        GatherNDOp, GridSampleOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp,
+        RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp,
+        SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -6157,18 +6683,19 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         UnaryConverter<ReciprocalOp, tosa::ReciprocalOp,
                        /*FloatOnly=*/true>,
         LogicalNotConverter, RoundConverter, ModConverter, AtanConverter,
-        SqrtConverter, SignConverter, WhereConverter, LeakyReluConverter,
-        SoftmaxConverter, ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
+        SqrtConverter, SoftplusConverter, GeluConverter, BiasGeluConverter,
+        FastGeluConverter, SiluConverter, SwishConverter, SignConverter,
+        WhereConverter, LeakyReluConverter, SoftmaxConverter,
+        ReduceConverter<ReduceSumOp, tosa::ReduceSumOp>,
         ReduceConverter<ReduceMaxOp, tosa::ReduceMaxOp>,
         ReduceConverter<ReduceMinOp, tosa::ReduceMinOp>,
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, GatherBlockQuantizedConverter,
         MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
-        RangeConverter, RopeConverter, GqaConverter,
+        GridSampleConverter, RangeConverter, RopeConverter, GqaConverter,
         MhaConverter, RmsNormConverter, LayerNormConverter,
         InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
