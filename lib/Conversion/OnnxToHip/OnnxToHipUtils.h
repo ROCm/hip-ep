@@ -254,6 +254,8 @@ constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 /// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
 ///                        encoder paths an unused-but-required DPS init buffer
 /// \param presentValueType ditto for present_value
+/// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
+///                        seq_kv]. nullptr when absent.
 mlir::LogicalResult
 buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value context, mlir::Value query, mlir::Value key,
@@ -261,7 +263,8 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
                 float scale, bool noCausal, mlir::RankedTensorType outputType,
                 mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType);
+                mlir::RankedTensorType presentValueType,
+                mlir::Value attentionBias = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /
@@ -306,6 +309,8 @@ void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populatePowConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
@@ -468,6 +473,8 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateQLinearConvConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 void populateQLinearMatMulConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateUpsampleConversionPatterns(RewritePatternSet &patterns,

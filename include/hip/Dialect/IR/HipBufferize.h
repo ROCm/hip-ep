@@ -145,6 +145,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
+    PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
@@ -220,8 +221,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);
     QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
-    QLinearMatMulOp::attachInterface<HipDstBufferizableModel<QLinearMatMulOp>>(
+    QLinearConvOp::attachInterface<HipDstBufferizableModel<QLinearConvOp>>(
         *ctx);
+    QLinearMatMulOp::attachInterface<
+        HipDstBufferizableModel<QLinearMatMulOp>>(*ctx);
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);

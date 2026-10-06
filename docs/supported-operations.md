@@ -25,14 +25,14 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
-| Swish | Custom HIP kernel |
+| Swish | Custom HIP kernel; `com.microsoft` QuickGelu is this formula with alpha default 1.702 |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP kernel |
 | Log | Custom HIP kernel |
-| Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents |
+| Pow | Decomposed to Mul / Sqrt / Reciprocal for supported constant scalar exponents. Other constant scalar exponents use a custom HIP kernel |
 | Sub | Custom HIP kernel |
 | Cast | Custom HIP kernel |
 | CastLike | Simplified to Cast |
@@ -95,13 +95,18 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
 | MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
-| Attention (`com.microsoft`) | Fused QKV split and GroupQueryAttention path for supported forms |
+| Attention (`com.microsoft`) | Fused QKV split into GroupQueryAttention. Equal Q/K/V sizes may be inferred from a `[H, 3H]` weight. Bidirectional and causal, with static or dynamic batch and sequence. A rank-1 length or rank-2 padding mask becomes an additive attention bias. |
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
 | DequantizeLinear | Custom HIP kernel |
+| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. Separate from the W4A16 `hip.qconv` fusion |
+| QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
+| QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
+| QLinearConcat (`com.microsoft`) | Decomposed to DequantizeLinear + Concat + QuantizeLinear |
+| QLinearGlobalAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + GlobalAveragePool + QuantizeLinear. `channels_last` is transposed around the pool |
 | QLinearMatMul | Custom HIP kernel. Rank-2 8-bit, per-tensor scales and zero points. Separate from the `hip.qmatmul` QDQ fusion |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |

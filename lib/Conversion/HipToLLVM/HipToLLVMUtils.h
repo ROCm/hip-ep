@@ -81,6 +81,7 @@ inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
+inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -151,6 +152,7 @@ inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQGemm = "wrap_qgemm";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
+inline constexpr const char *kWrapQLinearConv = "wrap_qlinear_conv";
 inline constexpr const char *kWrapQLinearMatMul = "wrap_qlinear_matmul";
 inline constexpr const char *kWrapQLpNormalization = "wrap_qlpnormalization";
 inline constexpr const char *kWrapQSigmoid = "wrap_qsigmoid";
@@ -550,6 +552,8 @@ void populateQGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateQLinearConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateQLinearMatMulLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
 void populateQLpNormalizationLoweringPatterns(

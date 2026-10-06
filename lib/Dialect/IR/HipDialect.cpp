@@ -696,6 +696,101 @@ void QConvOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QLinearConvOp: onnx.QLinearConv, 8-bit grouped 2D
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+static bool isEightBitInt(Type type) {
+  auto integer = dyn_cast<IntegerType>(type);
+  return integer && integer.getWidth() == 8;
+}
+
+static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+                                        StringRef name) {
+  if (attr.size() != 2)
+    return op.emitOpError() << name << " must have 2 entries";
+  for (Attribute entry : attr) {
+    auto intAttr = dyn_cast<IntegerAttr>(entry);
+    if (!intAttr || intAttr.getInt() <= 0)
+      return op.emitOpError() << name << " entries must be positive";
+  }
+  return success();
+}
+
+static LogicalResult verifyQuantParam(QLinearConvOp op, Value scale, Value zp,
+                                      Type storage, StringRef name) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  return success();
+}
+
+LogicalResult QLinearConvOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+
+  if (!isEightBitInt(inputType.getElementType()) ||
+      !isEightBitInt(weightsType.getElementType()) ||
+      !isEightBitInt(outputType.getElementType()))
+    return emitOpError("input, weights, and output must be 8-bit integers");
+
+  if (failed(verifyQuantParam(*this, getInputScale(), getInputZeroPoint(),
+                              inputType.getElementType(), "input")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getWeightScale(), getWeightZeroPoint(),
+                              weightsType.getElementType(), "weight")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getOutputScale(), getOutputZeroPoint(),
+                              outputType.getElementType(), "output")))
+    return failure();
+
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank() || biasType.getRank() != 1 ||
+        !biasType.getElementType().isInteger(32))
+      return emitOpError("bias must be rank-1 i32");
+  }
+
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4)
+    return emitOpError("pads must have 4 entries");
+  for (Attribute entry : getPads()) {
+    if (!isa<IntegerAttr>(entry))
+      return emitOpError("pads entries must be integers");
+  }
+  if (getGroup() < 1)
+    return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // QLinearMatMulOp: onnx.QLinearMatMul, rank-2 8-bit
 //===----------------------------------------------------------------------===//
 
@@ -707,11 +802,6 @@ void QLinearMatMulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-static bool isEightBitInt(Type type) {
-  auto integer = dyn_cast<IntegerType>(type);
-  return integer && integer.getWidth() == 8;
 }
 
 static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
@@ -1695,6 +1785,18 @@ void LeakyReluOp::getEffects(
 MutableOperandRange SwishOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void SwishOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PowOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PowOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PowOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
