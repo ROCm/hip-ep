@@ -185,7 +185,10 @@ func.func @not_a_kernel(%x: tensor<4x6xf32>) -> tensor<2x6xf32> {
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: ub.poison : !hip.context
 // CHECK: tensor.empty() : tensor<1x3x6x6xf32>
-// CHECK: hip.pool
+// CHECK: tosa.transpose %arg0 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x8x8xf32>) -> tensor<1x8x8x3xf32>
+// CHECK: tosa.max_pool2d
+// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x6x6x3xf32>) -> tensor<1x3x6x6xf32>
+// CHECK-NOT: hip.pool
 // CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x6x6xf32>) -> tensor<1x6x6x3xf32>
 // CHECK: tosa.reshape
 func.func @rocMlir0(%in: tensor<1x3x8x8xf32>) -> tensor<1x108xf32>
