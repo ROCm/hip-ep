@@ -31,8 +31,13 @@ module {
     // CHECK-NOT: onnx.Clip
     // CHECK-NOT: onnx.Mul
     // CHECK-NOT: onnx.Add
-    // alpha*x, then + beta, then the clamp to [0, 1] that Clip becomes.
+    // alpha*x, then + beta, then the clamp to [0, 1] that Clip becomes. The
+    // constants are asserted in emission order, so reading `alpha` where
+    // `beta` was meant -- or dropping the attribute for the default -- fails
+    // here rather than passing on the operation sequence alone.
+    // CHECK: hip.constant {{.*}}value = dense<0.166666672> : tensor<f32>
     // CHECK: hip.mul
+    // CHECK: hip.constant {{.*}}value = dense<5.000000e-01> : tensor<f32>
     // CHECK: hip.add
     // CHECK: hip.max
     // CHECK: hip.min
@@ -40,7 +45,8 @@ module {
     return %y : tensor<1x64x14x14xf32>
   }
 
-  // Both attributes present and non-default.
+  // Both attributes present and non-default, and deliberately unequal, so an
+  // alpha/beta swap is observable in the asserted constants.
   func.func @test_hard_sigmoid_explicit_attrs(%input: tensor<2x8xf32>)
       -> tensor<2x8xf32> {
     // CHECK-LABEL: func.func @test_hard_sigmoid_explicit_attrs
@@ -48,7 +54,9 @@ module {
         : (tensor<2x8xf32>) -> tensor<2x8xf32>
 
     // CHECK-NOT: onnx.HardSigmoid
+    // CHECK: hip.constant {{.*}}value = dense<2.500000e-01> : tensor<f32>
     // CHECK: hip.mul
+    // CHECK: hip.constant {{.*}}value = dense<7.500000e-01> : tensor<f32>
     // CHECK: hip.add
     // CHECK: hip.max
     // CHECK: hip.min
@@ -65,7 +73,9 @@ module {
         : (tensor<3x5xf32>) -> tensor<3x5xf32>
 
     // CHECK-NOT: onnx.HardSigmoid
+    // CHECK: hip.constant {{.*}}value = dense<2.000000e-01> : tensor<f32>
     // CHECK: hip.mul
+    // CHECK: hip.constant {{.*}}value = dense<5.000000e-01> : tensor<f32>
     // CHECK: hip.add
     // CHECK: hip.max
     // CHECK: hip.min
@@ -74,14 +84,17 @@ module {
   }
 
   // f16, since the scalar constants are built by converting a double into the
-  // result's own float semantics.
+  // result's own float semantics. The asserted alpha is the f32 attribute
+  // narrowed to half, so a conversion that kept the wrong semantics is caught.
   func.func @test_hard_sigmoid_f16(%input: tensor<1x16xf16>) -> tensor<1x16xf16> {
     // CHECK-LABEL: func.func @test_hard_sigmoid_f16
     %y = "onnx.HardSigmoid"(%input) {alpha = 0.166666672 : f32}
         : (tensor<1x16xf16>) -> tensor<1x16xf16>
 
     // CHECK-NOT: onnx.HardSigmoid
+    // CHECK: hip.constant {{.*}}value = dense<1.666260e-01> : tensor<f16>
     // CHECK: hip.mul
+    // CHECK: hip.constant {{.*}}value = dense<5.000000e-01> : tensor<f16>
     // CHECK: hip.add
     // CHECK: hip.max
     // CHECK: hip.min
