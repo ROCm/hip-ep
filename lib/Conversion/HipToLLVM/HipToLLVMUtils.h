@@ -152,6 +152,7 @@ inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQGemm = "wrap_qgemm";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
 inline constexpr const char *kWrapQLinearConv = "wrap_qlinear_conv";
+inline constexpr const char *kWrapQLinearMatMul = "wrap_qlinear_matmul";
 inline constexpr const char *kWrapQLpNormalization = "wrap_qlpnormalization";
 inline constexpr const char *kWrapQSigmoid = "wrap_qsigmoid";
 // Synchronize the stream and read a device i32 scalar back to the host
@@ -550,6 +551,8 @@ void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateQLinearConvLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+void populateQLinearMatMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateQLpNormalizationLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateQSigmoidLoweringPatterns(const LLVMTypeConverter &converter,

@@ -98,6 +98,13 @@ packed `__half2` path for fp16 rows of even width.
 | `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
 | `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
 | `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
+| `QLinearMatMul` | `hip.qlinear_matmul` | `qlinear_matmul_kernel.hip` |
+
+`QLinearMatMul` is the native ONNX op: rank-2 8-bit `a` of shape `[M, K]` times
+`b` of shape `[K, N]`, with per-tensor f32 scales and zero points. `hip.qmatmul`
+is a different op, the DequantizeLinear + MatMul + QuantizeLinear fusion, and
+does not accept `QLinearMatMul`. Rank other than 2, f16 or bf16 scales, and
+per-row or per-column quantization, stay `onnx.QLinearMatMul`.
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is

@@ -1101,6 +1101,19 @@ int wrap_qlinear_conv(
     int64_t output_scale_count, int64_t input_zp_count, int64_t weight_zp_count,
     int64_t output_zp_count);
 
+// Native onnx.QLinearMatMul. Rank-2 8-bit product, a is [M, K], b is [K, N],
+// y is [M, N]. Scales and zero points are per-tensor (count == 1). Dtypes are
+// HIPDNN_EP_DATATYPE_INT8 or UINT8.
+int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
+                        const void *a_zero_point, const void *b,
+                        const void *b_scale, const void *b_zero_point,
+                        const void *y_scale, const void *y_zero_point, void *y,
+                        int64_t m, int64_t k, int64_t n, int64_t a_dtype,
+                        int64_t b_dtype, int64_t y_dtype, int64_t a_scale_count,
+                        int64_t b_scale_count, int64_t y_scale_count,
+                        int64_t a_zp_count, int64_t b_zp_count,
+                        int64_t y_zp_count);
+
 // Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
 // Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
 int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
