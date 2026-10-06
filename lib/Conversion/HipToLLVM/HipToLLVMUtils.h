@@ -80,6 +80,7 @@ inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
+inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
@@ -397,6 +398,102 @@ inline SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
   return dims;
 }
 
+struct BroadcastShapes4D {
+  SmallVector<Value, 4> lhs;
+  SmallVector<Value, 4> rhs;
+  SmallVector<Value, 4> out;
+};
+
+// 4D (N, C, H, W) shapes for a broadcasting binary op. Ranks <= 4 match
+// extractShape4D. Higher ranks drop axes whose output size is a static 1 and
+// merge neighbouring axes that broadcast the same way in both operands. An
+// operand axis counts as broadcast only when it is padding or a static 1, so a
+// dynamic size that is 1 at runtime must not sit in a merged run. Fails when
+// more than four groups remain.
+inline FailureOr<BroadcastShapes4D>
+extractBroadcastShapes4D(MemRefType lhsType, Value lhsDesc, MemRefType rhsType,
+                         Value rhsDesc, MemRefType outType, Value outDesc,
+                         ConversionPatternRewriter &rewriter, Location loc,
+                         Type i64Type) {
+  if (lhsType.getRank() <= 4 && rhsType.getRank() <= 4 &&
+      outType.getRank() <= 4) {
+    return BroadcastShapes4D{
+        extractShape4D(lhsType, lhsDesc, rewriter, loc, i64Type),
+        extractShape4D(rhsType, rhsDesc, rewriter, loc, i64Type),
+        extractShape4D(outType, outDesc, rewriter, loc, i64Type)};
+  }
+
+  int64_t rank = outType.getRank();
+  if (lhsType.getRank() > rank || rhsType.getRank() > rank)
+    return failure();
+
+  auto createConst = [&](int64_t v) -> Value {
+    return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                    rewriter.getI64IntegerAttr(v));
+  };
+  auto dimValue = [&](MemRefType type, Value desc, int64_t idx) -> Value {
+    if (type.isDynamicDim(idx))
+      return MemRefDescriptor(desc).size(rewriter, loc, idx);
+    return createConst(type.getDimSize(idx));
+  };
+  // Operand axis aligned with output axis d, or -1 for left padding.
+  auto operandAxis = [&](MemRefType type, int64_t d) {
+    return d - (rank - type.getRank());
+  };
+  auto isFull = [&](MemRefType type, int64_t d) {
+    int64_t axis = operandAxis(type, d);
+    return axis >= 0 && (type.isDynamicDim(axis) || type.getDimSize(axis) != 1);
+  };
+
+  struct Group {
+    bool lhsFull;
+    bool rhsFull;
+    SmallVector<int64_t> axes;
+  };
+  SmallVector<Group> groups;
+  for (int64_t d : llvm::seq<int64_t>(rank)) {
+    if (!outType.isDynamicDim(d) && outType.getDimSize(d) == 1)
+      continue;
+    bool lhsFull = isFull(lhsType, d);
+    bool rhsFull = isFull(rhsType, d);
+    if (!groups.empty() && groups.back().lhsFull == lhsFull &&
+        groups.back().rhsFull == rhsFull)
+      groups.back().axes.push_back(d);
+    else
+      groups.push_back({lhsFull, rhsFull, {d}});
+  }
+  if (groups.size() > 4)
+    return failure();
+
+  BroadcastShapes4D shapes;
+  for (size_t i = groups.size(); i < 4; ++i) {
+    shapes.lhs.push_back(createConst(1));
+    shapes.rhs.push_back(createConst(1));
+    shapes.out.push_back(createConst(1));
+  }
+  for (const Group &group : groups) {
+    Value lhs = createConst(1);
+    Value rhs = createConst(1);
+    Value out = createConst(1);
+    for (int64_t d : group.axes) {
+      out = LLVM::MulOp::create(rewriter, loc, out,
+                                dimValue(outType, outDesc, d));
+      if (group.lhsFull)
+        lhs = LLVM::MulOp::create(
+            rewriter, loc, lhs,
+            dimValue(lhsType, lhsDesc, operandAxis(lhsType, d)));
+      if (group.rhsFull)
+        rhs = LLVM::MulOp::create(
+            rewriter, loc, rhs,
+            dimValue(rhsType, rhsDesc, operandAxis(rhsType, d)));
+    }
+    shapes.lhs.push_back(lhs);
+    shapes.rhs.push_back(rhs);
+    shapes.out.push_back(out);
+  }
+  return shapes;
+}
+
 // Must match HIPDNN_EP_QELEMENTWISE_* in lib/Runtime/hipdnn_ep_runtime.h
 enum HipdnnQElementwiseKind : int64_t {
   kQElementwiseAdd = 0,
@@ -432,6 +529,8 @@ void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateTriluLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,

@@ -33,11 +33,6 @@ struct OrOpLowering : public ConvertOpToLLVMPattern<OrOp> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
-        outputType.getRank() > 4)
-      return rewriter.notifyMatchFailure(
-          op, "rank > 4 unsupported by 4D broadcast descriptor API");
-
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
     // i1 has no HIPDNN dtype slot; pass a sentinel (0). wrap_or treats the
     // operands as 1-byte bool and does not dispatch on dtype.
@@ -46,12 +41,15 @@ struct OrOpLowering : public ConvertOpToLLVMPattern<OrOp> {
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported input element type");
 
-    auto lhsDims =
-        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
-    auto rhsDims =
-        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
-    auto outDims =
-        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
+    auto shapes = extractBroadcastShapes4D(
+        lhsType, adaptor.getLhs(), rhsType, adaptor.getRhs(), outputType,
+        adaptor.getOutput(), rewriter, loc, i64Type);
+    if (failed(shapes))
+      return rewriter.notifyMatchFailure(
+          op, "broadcast does not fold into the 4D broadcast descriptor API");
+    auto &lhsDims = shapes->lhs;
+    auto &rhsDims = shapes->rhs;
+    auto &outDims = shapes->out;
 
     auto createI64Const = [&](int64_t v) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,

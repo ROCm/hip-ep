@@ -100,17 +100,15 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
-        outputType.getRank() > 4)
+    auto shapes = extractBroadcastShapes4D(
+        lhsType, adaptor.getLhs(), rhsType, adaptor.getRhs(), outputType,
+        adaptor.getOutput(), rewriter, loc, i64Type);
+    if (failed(shapes))
       return rewriter.notifyMatchFailure(
-          op, "rank > 4 unsupported by the 4D shape-passing ABI");
-
-    auto lhsDims =
-        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
-    auto rhsDims =
-        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
-    auto outDims =
-        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
+          op, "broadcast does not fold into the 4D shape-passing ABI");
+    auto &lhsDims = shapes->lhs;
+    auto &rhsDims = shapes->rhs;
+    auto &outDims = shapes->out;
 
     int64_t dataType = getHipdnnDataType(outputType.getElementType());
     if (dataType < 0)
@@ -172,17 +170,15 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
-        outputType.getRank() > 4)
+    auto shapes = extractBroadcastShapes4D(
+        lhsType, adaptor.getLhs(), rhsType, adaptor.getRhs(), outputType,
+        adaptor.getOutput(), rewriter, loc, i64Type);
+    if (failed(shapes))
       return rewriter.notifyMatchFailure(
-          op, "rank > 4 unsupported by 4D broadcast descriptor API");
-
-    auto lhsDims =
-        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
-    auto rhsDims =
-        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
-    auto outDims =
-        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
+          op, "broadcast does not fold into the 4D broadcast descriptor API");
+    auto &lhsDims = shapes->lhs;
+    auto &rhsDims = shapes->rhs;
+    auto &outDims = shapes->out;
 
     int64_t dataType = getHipdnnDataType(outputType.getElementType());
     if (dataType < 0)

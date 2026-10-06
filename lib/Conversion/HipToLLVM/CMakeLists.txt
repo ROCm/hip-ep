@@ -15,6 +15,7 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   BiasGeluLowering.cpp
   FastGeluLowering.cpp
+  TriluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
   GatherElementsLowering.cpp
