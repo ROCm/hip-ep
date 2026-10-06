@@ -48,6 +48,7 @@ set(_kernel_sources
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
     hip/swish_kernel.hip
+    hip/pow_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
