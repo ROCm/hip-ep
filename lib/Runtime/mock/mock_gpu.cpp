@@ -834,6 +834,42 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type) {
+  (void)output;
+  (void)shape;
+  (void)mean_bits;
+  (void)scale_bits;
+  (void)seed_bits;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_random_normal_like\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_random_normal_like(rank=%lld, has_seed=%lld, "
+             "data_type=%lld)\n",
+             (long long)rank, (long long)has_seed, (long long)data_type);
+  return 0;
+}
+
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type) {
+  (void)data;
+  (void)indices;
+  (void)data_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "
+             "select_last_index=%lld, rank=%lld, data_type=%lld)\n",
+             (long long)axis, (long long)keepdims, (long long)select_last_index,
+             (long long)rank, (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
@@ -1839,6 +1875,20 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_isnan\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_isnan(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  (void)input;
+  (void)output;
+  return 0;
+}
+
 // Mock memory is plain host memory, so we can compute the true non-zero count
 // directly from `input`. This makes the host-readback path (hip.readback_dim
 // -> hipdnn_ep_readback_i32) return a meaningful dynamic dim under mock builds.
@@ -2303,6 +2353,51 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
              "data_type=%lld, epsilon=%f)\n",
              (long long)n, (long long)c, (long long)spatial,
              (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
+  return 0;
+}
+
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type,
+                             float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_batch_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_batch_normalization(n=%lld, c=%lld, spatial=%lld, "
+             "data_type=%lld, epsilon=%f)\n",
+             (long long)n, (long long)c, (long long)spatial,
+             (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)mean;
+  (void)variance;
+  (void)output;
+  return 0;
+}
+
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_group_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_group_norm(n=%lld, c=%lld, spatial=%lld, groups=%lld, "
+      "channels_last=%lld, activation=%lld, data_type=%lld, epsilon=%f)\n",
+      (long long)n, (long long)c, (long long)spatial, (long long)groups,
+      (long long)channels_last, (long long)activation, (long long)data_type,
+      epsilon);
   (void)input;
   (void)scale;
   (void)bias;

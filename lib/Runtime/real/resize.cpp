@@ -22,7 +22,8 @@
 //               mode, coord_transform, nearest_mode)
 //
 // `mode`:           0 = nearest, 1 = linear (N-linear)
-// `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners
+// `coord_transform`: 0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+//                    3 = pytorch_half_pixel
 // `nearest_mode`:    0 = round_prefer_floor (only used when mode=nearest)
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
