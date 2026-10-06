@@ -61,13 +61,60 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   const int64_t spatialDims =
       inputRank - 2; // 1 for NCL, 2 for NCHW, 3 for NCDHW
 
+  // hip.conv requires input, weights and result to share a rank. The 1D path
+  // reshapes all three against that shared rank, and the dynamic-extent sizing
+  // below indexes the per-spatial-axis attributes by (result dim - 2), so a
+  // result outranking the input would read past them.
+  //
+  // This has to be settled before any IR exists: the sizing loop starts
+  // emitting tensor.dim for dims 0 and 1, so a refusal after it leaves the
+  // greedy driver holding a half-applied pattern, which fails the whole
+  // pipeline with no diagnostic instead of leaving the op alone.
+  auto weightsType = mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
+  if (!weightsType || weightsType.getRank() != inputRank ||
+      resultType.getRank() != inputRank)
+    return rewriter.notifyMatchFailure(
+        op, "conv input, weights, and result ranks must match");
+
   // Extract attributes from onnx.Conv
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
     for (auto a : attr)
       kernelShape.push_back(
           mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+  } else {
+    // kernel_shape is optional in ONNX; when absent, the weight layout
+    // [Cout, Cin/group, k1..kN] defines it, and the rank check above already
+    // guarantees those trailing spatialDims dims exist. Exporters that leave
+    // the spatial dims dynamic commonly omit the attribute. Only a statically
+    // shaped W is usable, because those extents get folded into compile-time
+    // constants in the sizing below; a dynamic kernel dim leaves the vector
+    // empty for the arity check to refuse.
+    for (int64_t i : llvm::seq<int64_t>(spatialDims)) {
+      if (weightsType.isDynamicDim(2 + i)) {
+        kernelShape.clear();
+        break;
+      }
+      kernelShape.push_back(weightsType.getDimSize(2 + i));
+    }
   }
+
+  // hip.conv needs one kernel extent per spatial dim, and ConvLowering reports
+  // a disagreement with emitError rather than a match failure, so letting a
+  // short kernelShape through here kills the compile later instead of leaving
+  // the op for someone else. That covers an omitted kernel_shape the weights
+  // could not supply as well as an explicit one of the wrong arity.
+  //
+  // It has to be checked before any IR exists: the dynamic-extent sizing below
+  // starts emitting tensor.dim for dims 0 and 1, and a bail-out after that
+  // leaves the greedy driver holding a half-applied pattern, which fails the
+  // whole pipeline with no diagnostic at all. The sizing also indexes
+  // kernelShape per spatial axis, and the 1D path prepends a unit extent to
+  // it; both already assume this holds.
+  if (static_cast<int64_t>(kernelShape.size()) != spatialDims)
+    return rewriter.notifyMatchFailure(
+        op, "kernel_shape is neither given nor inferable from the weights, or "
+            "its arity does not match the spatial rank");
 
   llvm::SmallVector<int64_t> strides;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
@@ -99,9 +146,72 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     dilations.assign(spatialDims, 1);
   }
 
+  // Same contract as kernel_shape above: ConvLowering wants one stride and one
+  // dilation per spatial dim and reports a disagreement with emitError, so a
+  // wrong-arity attribute has to be refused here rather than built into a
+  // malformed hip.conv that kills the compile at lowering. Defaulting the
+  // missing entries instead would convolve with attributes the model never
+  // asked for. Checked before any IR exists, for the same reason as the
+  // kernel_shape check.
+  if (static_cast<int64_t>(strides.size()) != spatialDims ||
+      static_cast<int64_t>(dilations.size()) != spatialDims)
+    return rewriter.notifyMatchFailure(
+        op, "conv strides/dilations arity does not match the spatial rank");
+
   int64_t group = 1;
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
+
+  // Resolve auto_pad into explicit pads. Only NOTSET keeps the `pads` read
+  // above; every other mode overrides them, and hip.conv carries the explicit
+  // form only, so leaving a mode unresolved would quietly convolve with the
+  // wrong padding and return wrong results instead of failing. Inferring
+  // kernel_shape widens what reaches here, which is why it belongs in this
+  // change. The SAME_UPPER / SAME_LOWER budget split -- halve pad_total and
+  // give the odd pad to the end for SAME_UPPER, to the begin for SAME_LOWER --
+  // follows PoolConversion, which follows onnx-mlir's customComputeShape.
+  //
+  // Like the checks above, this settles before any op is created: the sizing
+  // loop below starts emitting tensor.dim, so refusing after it would leave
+  // the greedy driver holding a half-applied pattern and fail the whole
+  // pipeline with no diagnostic.
+  llvm::StringRef autoPad = "NOTSET";
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
+    autoPad = attr.getValue();
+
+  if (autoPad == "VALID") {
+    pads.assign(spatialDims * 2, 0);
+  } else if (autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER") {
+    // Splitting the pad budget needs both the input and output extents, and
+    // only a static pair folds into the compile-time constants below.
+    for (int64_t i : llvm::seq<int64_t>(spatialDims)) {
+      if (inputType.isDynamicDim(2 + i) || resultType.isDynamicDim(2 + i))
+        return rewriter.notifyMatchFailure(
+            op, "conv auto_pad=SAME_* requires static spatial dims");
+    }
+    pads.assign(spatialDims * 2, 0);
+    for (int64_t i : llvm::seq<int64_t>(spatialDims)) {
+      const int64_t st = strides[i];
+      const int64_t dil = dilations[i];
+      const int64_t effK = (kernelShape[i] - 1) * dil + 1;
+      int64_t padTotal = (resultType.getDimSize(2 + i) - 1) * st + effK -
+                         inputType.getDimSize(2 + i);
+      if (padTotal < 0)
+        padTotal = 0;
+      const int64_t half = padTotal / 2;
+      pads[i] = (autoPad == "SAME_UPPER") ? half : padTotal - half;
+      pads[spatialDims + i] = padTotal - pads[i];
+    }
+  } else if (autoPad != "NOTSET") {
+    return rewriter.notifyMatchFailure(op, "conv unknown auto_pad value");
+  }
+
+  // Checked after auto_pad rather than with the strides/dilations pair above:
+  // VALID and SAME_* replace `pads` wholesale with a correctly sized vector,
+  // so only NOTSET can carry an explicit attribute of the wrong arity this far.
+  if (static_cast<int64_t>(pads.size()) != spatialDims * 2)
+    return rewriter.notifyMatchFailure(
+        op, "conv pads arity does not match the spatial rank");
 
   // The rank-3 (1D) case is handled by reshaping to a rank-4 (2D) conv with a
   // unit H dimension and collapsing the result back. `conv2dResultType` is the
@@ -130,6 +240,11 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   //   %h  = tensor.dim %input, 2
   //   %ho = arith ((%h + addend) floordiv stride + 1)
   //   tensor.empty(%n, %ho) : tensor<?x128x?x64xf16>
+  //
+  // The result rank matches the input's, and kernel_shape, strides, dilations
+  // and pads all carry one entry per spatial axis (two for pads) by the time
+  // the loop runs, so (dimIdx - 2) indexes every one of them in range. All of
+  // those checks deliberately precede op creation.
   llvm::SmallVector<mlir::Value> resultDynSize(resultType.getRank(),
                                                mlir::Value());
   for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
@@ -146,19 +261,12 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
           mlir::tensor::DimOp::create(rewriter, loc, weights, /*index=*/0);
       continue;
     }
-    const int64_t s = dimIdx - 2; // spatial axis index (0-based)
-    if (s >= static_cast<int64_t>(kernelShape.size()))
-      return rewriter.notifyMatchFailure(
-          op, "dynamic spatial output dim requires an explicit kernel_shape");
-    const int64_t k = kernelShape[s];
-    const int64_t st =
-        (s < static_cast<int64_t>(strides.size())) ? strides[s] : 1;
-    const int64_t dil =
-        (s < static_cast<int64_t>(dilations.size())) ? dilations[s] : 1;
-    const int64_t pb = (s < static_cast<int64_t>(pads.size())) ? pads[s] : 0;
-    const int64_t pe = (spatialDims + s < static_cast<int64_t>(pads.size()))
-                           ? pads[spatialDims + s]
-                           : 0;
+    const int64_t s = dimIdx - 2;     // spatial axis index (0-based)
+    const int64_t k = kernelShape[s]; // guaranteed present by the check above
+    const int64_t st = strides[s];
+    const int64_t dil = dilations[s];
+    const int64_t pb = pads[s];
+    const int64_t pe = pads[spatialDims + s];
     // Everything except the (dynamic) input extent is a compile-time constant.
     const int64_t addend = pb + pe - dil * (k - 1) - 1;
     mlir::Value inExtent =
@@ -179,18 +287,6 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
         mlir::arith::AddIOp::create(rewriter, loc, divd, oneC);
   }
 
-  if (!is1D) {
-    // hip.conv requires input, weights, and output to share a rank. The 1D
-    // path establishes that by expanding every operand; 2D and 3D must
-    // already agree.
-    auto weightsType =
-        mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
-    if (!weightsType || weightsType.getRank() != inputRank ||
-        resultType.getRank() != inputRank)
-      return rewriter.notifyMatchFailure(
-          op, "conv input, weights, and result ranks must match");
-  }
-
   if (is1D) {
     // The shared 2D path treats NCL as NC[H=1]L. Every 1D attribute maps onto
     // the W axis of that view, including the dilation — the unit H axis takes
@@ -198,8 +294,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     // problem is lost. `group` is preserved verbatim too (a depthwise [C,1,K]
     // filter reshapes to [C,1,1,K] with group=C), so grouped and depthwise 1D
     // convolutions ride the same path.
-    auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
-
+    //
     // Expand a rank-3 NCL operand to rank-4 NC1L (unit H before the spatial
     // dim). Dynamic source dims are carried into output_shape via tensor.dim so
     // a dynamic batch or spatial extent survives the reshape.
@@ -245,13 +340,15 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     //   kernel_shape [K]      -> [1, K]
     //   strides      [s]      -> [1, s]
     //   pads         [b, e]   -> [0, b, 0, e]  (H top/bottom = 0)
-    //   dilations    [d] / {} -> [1, d]
+    //   dilations    [d]      -> [1, d]
+    // The arity checks above pin spatialDims == 1 here: one kernel extent, one
+    // stride, one dilation, two pads.
     kernelShape.insert(kernelShape.begin(), 1);
     strides.insert(strides.begin(), 1);
-    int64_t padBegin = pads.empty() ? 0 : pads[0];
-    int64_t padEnd = pads.size() > 1 ? pads[1] : padBegin;
+    const int64_t padBegin = pads[0];
+    const int64_t padEnd = pads[1];
     pads = {0, padBegin, 0, padEnd};
-    dilations = {1, dilations.empty() ? 1 : dilations[0]};
+    dilations = {1, dilations[0]};
   }
 
   // Create the output (destination) tensor at the ORIGINAL result rank, then —
