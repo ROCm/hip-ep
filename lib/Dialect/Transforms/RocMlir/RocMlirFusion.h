@@ -23,11 +23,13 @@ bool isPointwiseOp(Operation *op);
 bool isPointwiseChainTerminus(Operation *op);
 bool hasSinglePointwiseConsumer(Operation *op);
 bool isFusableRocMlirAnchor(Operation *op);
+bool isRocMlirAnchorTerminus(Operation *op);
 
 // --- native PDL rewrites ----------------------------------------------------
 void outlinePointwise(PatternRewriter &rewriter, Operation *op);
 void fusePointwiseIntoConsumer(PatternRewriter &rewriter, Operation *op);
 void fuseAnchorIntoConsumer(PatternRewriter &rewriter, Operation *op);
+void outlineRocMlirAnchor(PatternRewriter &rewriter, Operation *op);
 
 // Adds the three generated PDLL patterns (RocMlirFusion.pdll) to `patterns`.
 void populateRocMlirFusionPatterns(RewritePatternSet &patterns);

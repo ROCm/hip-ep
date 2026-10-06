@@ -51,6 +51,18 @@ namespace mlir::hip::rocmlir {
 
 namespace {
 
+// Process-wide monotonic ids for the outlined kernels. Shared across every
+// rewrite so a module that both outlines a standalone anchor and fuses another
+// anchor cannot mint two @rocMlir0 symbols.
+int nextRocMlirId() {
+  static std::atomic<int> counter{0};
+  return counter++;
+}
+int nextPointwiseId() {
+  static std::atomic<int> counter{0};
+  return counter++;
+}
+
 //===----------------------------------------------------------------------===//
 // Shared predicates (carried over from FuseROCMlir.cpp)
 //===----------------------------------------------------------------------===//
@@ -163,10 +175,13 @@ struct AbsorbResult {
 };
 
 // Clones `producer`'s closure into the front of the consumer dispatch's
-// function, rewires the block argument that stood for `producer`'s result to
-// the cloned computation, and returns the new dispatch input list (old inputs
-// with that edge removed plus `producer`'s external inputs appended). The
-// function signature is updated; `producer` is left dead for the caller.
+// function and rewires the block argument that stood for `producer`'s result to
+// the cloned computation. Returns the new dispatch input list: `producer`'s
+// external inputs first, then the consumer's surviving inputs (the edge
+// removed). Producer-first keeps the absorbed anchor/producer operands ahead of
+// the ones the consumer contributed, matching the ABI order the monolithic
+// pattern produced. The function signature is updated; `producer` is left dead
+// for the caller.
 AbsorbResult absorbProducer(PatternRewriter &rewriter, Operation *producer,
                             PointwiseOp consumer) {
   auto module = consumer->getParentOfType<ModuleOp>();
@@ -183,24 +198,35 @@ AbsorbResult absorbProducer(PatternRewriter &rewriter, Operation *producer,
 
   Closure c = collectClosure(producer);
 
+  // Producer inputs that are not already a surviving consumer input become new
+  // arguments, inserted at the front so they lead the signature.
+  auto survivingSlotOf = [&](Value v) -> int {
+    for (unsigned k : llvm::seq<unsigned>(0, oldInputs.size()))
+      if (k != edgeIdx && oldInputs[k] == v)
+        return static_cast<int>(k);
+    return -1;
+  };
+  SmallVector<Value> prepended;
+  for (Value in : c.inputs)
+    if (survivingSlotOf(in) < 0)
+      prepended.push_back(in);
+  for (auto [i, in] : llvm::enumerate(prepended))
+    body.insertArgument(i, in.getType(), rewriter.getUnknownLoc());
+  unsigned numNew = prepended.size();
+
   rewriter.setInsertionPointToStart(&body);
   IRMapping mapping;
   mapping.map(c.ctx, ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
                                           c.ctx.getType()));
-
-  SmallVector<Value> appended;
   for (Value in : c.inputs) {
     Value arg;
-    for (unsigned k : llvm::seq<unsigned>(0, oldInputs.size())) {
-      if (k != edgeIdx && oldInputs[k] == in) {
-        arg = body.getArgument(k);
+    for (unsigned i : llvm::seq<unsigned>(0, numNew))
+      if (prepended[i] == in) {
+        arg = body.getArgument(i);
         break;
       }
-    }
-    if (!arg) {
-      arg = body.addArgument(in.getType(), rewriter.getUnknownLoc());
-      appended.push_back(in);
-    }
+    if (!arg)
+      arg = body.getArgument(numNew + survivingSlotOf(in));
     mapping.map(in, arg);
   }
 
@@ -208,16 +234,16 @@ AbsorbResult absorbProducer(PatternRewriter &rewriter, Operation *producer,
     rewriter.clone(*op, mapping);
 
   // The arg that carried producer's result now resolves to the inlined chain.
-  BlockArgument edgeArg = body.getArgument(edgeIdx);
+  BlockArgument edgeArg = body.getArgument(numNew + edgeIdx);
   rewriter.replaceAllUsesWith(edgeArg, mapping.lookup(edge));
-  body.eraseArgument(edgeIdx);
+  body.eraseArgument(numNew + edgeIdx);
 
   AbsorbResult result;
   result.func = func;
+  result.newInputs.append(prepended.begin(), prepended.end());
   for (unsigned k : llvm::seq<unsigned>(0, oldInputs.size()))
     if (k != edgeIdx)
       result.newInputs.push_back(oldInputs[k]);
-  result.newInputs.append(appended.begin(), appended.end());
 
   func.setFunctionType(
       rewriter.getFunctionType(body.getArgumentTypes(), func.getResultTypes()));
@@ -225,31 +251,41 @@ AbsorbResult absorbProducer(PatternRewriter &rewriter, Operation *producer,
 }
 
 // Promote a rank-0 function argument to rank-1 (the ABI rocMLIR expects for a
-// scalar) and reshape the body back to rank-0 so the cloned ops stay valid.
-// Returns the dispatch operand (rank-1 reshape of `dispatchInput`).
+// scalar: rock.transforms_to_ptr has no coordinate to linearize a rank-0
+// boundary, tensor<1xT> carries the single index 0). The pointwise op reading
+// the argument broadcasts the rank-1 value, so no in-body reshape is needed.
+// Returns the dispatch operand (a rank-1 reshape of `dispatchInput`), created
+// at the rewriter's current insertion point -- which the caller must leave in
+// the graph next to the dispatch, not inside the kernel body.
 Value promoteScalarArg(PatternRewriter &rewriter, BlockArgument arg,
                        Value dispatchInput) {
-  auto rank0 = cast<RankedTensorType>(arg.getType());
-  Type rank1 = promoteRankZero(rank0);
-
-  // Body side: arg becomes rank-1, a reshape restores rank-0 for its uses.
-  rewriter.setInsertionPointToStart(arg.getOwner());
+  Type rank1 = promoteRankZero(arg.getType());
   arg.setType(rank1);
-  auto emptyShapeTy = RankedTensorType::get({0}, rewriter.getIndexType());
-  Value emptyShape = arith::ConstantOp::create(
-      rewriter, rewriter.getUnknownLoc(), emptyShapeTy,
-      DenseIntElementsAttr::get(emptyShapeTy, ArrayRef<int64_t>{}));
-  Value back = tensor::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(),
-                                         rank0, arg, emptyShape);
-  rewriter.replaceAllUsesExcept(arg, back, back.getDefiningOp());
 
-  // Call side: reshape the dispatch operand up to rank-1.
   auto shapeTy = RankedTensorType::get({1}, rewriter.getIndexType());
   Value shape = arith::ConstantOp::create(
       rewriter, rewriter.getUnknownLoc(), shapeTy,
       DenseIntElementsAttr::get(shapeTy, ArrayRef<int64_t>{1}));
   return tensor::ReshapeOp::create(rewriter, rewriter.getUnknownLoc(), rank1,
                                    dispatchInput, shape);
+}
+
+// Promote every rank-0 kernel argument to the rank-1 scalar ABI and rewrite the
+// matching dispatch operands. The rewriter insertion point must sit in the
+// graph next to the dispatch; the rank-1 reshapes are emitted there, and on
+// return the insertion point is left after the last of them so the dispatch is
+// built downstream of its operands.
+void applyScalarPromotion(PatternRewriter &rewriter, func::FuncOp func,
+                          SmallVectorImpl<Value> &dispatchInputs) {
+  Block &body = func.front();
+  for (unsigned i : llvm::seq<unsigned>(0, dispatchInputs.size())) {
+    BlockArgument arg = body.getArgument(i);
+    if (promoteRankZero(arg.getType()) == arg.getType())
+      continue;
+    dispatchInputs[i] = promoteScalarArg(rewriter, arg, dispatchInputs[i]);
+  }
+  func.setFunctionType(
+      rewriter.getFunctionType(body.getArgumentTypes(), func.getResultTypes()));
 }
 
 } // namespace
@@ -294,13 +330,27 @@ bool isFusableRocMlirAnchor(Operation *op) {
   return true;
 }
 
+// True when a fusable anchor terminates its chain: it has no single pointwise /
+// hip.pointwise consumer to be absorbed into, so it is outlined directly into
+// its own hip.rocmlir rather than waiting to be folded in by
+// fuseAnchorIntoConsumer. An anchor that feeds a pointwise op is left for that
+// path (the consumer is outlined first, then the anchor folds into it).
+bool isRocMlirAnchorTerminus(Operation *op) {
+  if (!isFusableRocMlirAnchor(op))
+    return false;
+  if (op->hasOneUse()) {
+    Operation *user = *op->user_begin();
+    if (isaPointwiseOp(user) || isa<PointwiseOp>(user))
+      return false;
+  }
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Native PDL rewrites
 //===----------------------------------------------------------------------===//
 
 void outlinePointwise(PatternRewriter &rewriter, Operation *pointOp) {
-  static std::atomic<int> gCounter{0};
-
   Closure c = collectClosure(pointOp);
   auto module = pointOp->getParentOfType<ModuleOp>();
 
@@ -312,7 +362,7 @@ void outlinePointwise(PatternRewriter &rewriter, Operation *pointOp) {
         llvm::map_to_vector(c.inputs, [](Value v) { return v.getType(); }),
         pointOp->getResultTypes());
     func = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
-                                "pointwise" + std::to_string(gCounter++),
+                                "pointwise" + std::to_string(nextPointwiseId()),
                                 funcType);
     Block *body = func.addEntryBlock();
     rewriter.setInsertionPointToStart(body);
@@ -351,8 +401,6 @@ void fusePointwiseIntoConsumer(PatternRewriter &rewriter, Operation *producer) {
 }
 
 void fuseAnchorIntoConsumer(PatternRewriter &rewriter, Operation *anchor) {
-  static std::atomic<int> gCounter{0};
-
   auto consumer = cast<PointwiseOp>(*anchor->user_begin());
   Value ctx = consumer.getCtx();
   Value output = consumer.getOutput();
@@ -362,30 +410,68 @@ void fuseAnchorIntoConsumer(PatternRewriter &rewriter, Operation *anchor) {
   func::FuncOp func = a.func;
 
   // The function is now a rock kernel.
-  func.setName("rocMlir" + std::to_string(gCounter++));
+  func.setName("rocMlir" + std::to_string(nextRocMlirId()));
   func->setAttr("rock.kernel", rewriter.getUnitAttr());
   func->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
 
   // rocMLIR has no coordinate to linearize a rank-0 boundary, so scalars cross
-  // as tensor<1xT>; only the crossing value is reshaped.
+  // as tensor<1xT>; only the crossing value is reshaped. The reshapes and the
+  // dispatch are built in the graph, just after the consumer being replaced.
   rewriter.setInsertionPointAfter(consumer);
   SmallVector<Value> dispatchInputs(a.newInputs.begin(), a.newInputs.end());
-  Block &body = func.front();
-  for (unsigned i : llvm::seq<unsigned>(0, dispatchInputs.size())) {
-    BlockArgument arg = body.getArgument(i);
-    if (promoteRankZero(arg.getType()) == arg.getType())
-      continue;
-    dispatchInputs[i] = promoteScalarArg(rewriter, arg, dispatchInputs[i]);
-  }
-  func.setFunctionType(
-      rewriter.getFunctionType(body.getArgumentTypes(), func.getResultTypes()));
+  applyScalarPromotion(rewriter, func, dispatchInputs);
 
-  rewriter.setInsertionPointAfter(consumer);
   auto dispatch =
       RocMlirOp::create(rewriter, consumer.getLoc(), resultTypes,
                         SymbolRefAttr::get(func), ctx, dispatchInputs, output);
   rewriter.replaceOp(consumer, dispatch);
   rewriter.eraseOp(anchor);
+}
+
+// A fusable anchor with no pointwise consumer to fold into: outline it (and the
+// producers of its init) straight into its own hip.rocmlir kernel. Mirrors
+// fuseAnchorIntoConsumer's kernel shape without an intervening hip.pointwise.
+void outlineRocMlirAnchor(PatternRewriter &rewriter, Operation *anchor) {
+  Closure c = collectClosure(anchor);
+  auto module = anchor->getParentOfType<ModuleOp>();
+  Value output =
+      cast<DestinationStyleOpInterface>(anchor).getDpsInits().front();
+
+  func::FuncOp func;
+  {
+    PatternRewriter::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    auto funcType = rewriter.getFunctionType(
+        llvm::map_to_vector(c.inputs, [](Value v) { return v.getType(); }),
+        anchor->getResultTypes());
+    func = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
+                                "rocMlir" + std::to_string(nextRocMlirId()),
+                                funcType);
+    func->setAttr("rock.kernel", rewriter.getUnitAttr());
+    func->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
+    Block *body = func.addEntryBlock();
+    rewriter.setInsertionPointToStart(body);
+
+    IRMapping mapping;
+    mapping.map(c.ctx, ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
+                                            c.ctx.getType()));
+    for (auto [idx, in] : llvm::enumerate(c.inputs))
+      mapping.map(in, body->getArgument(idx));
+    for (Operation *op : c.ops)
+      rewriter.clone(*op, mapping);
+    auto returns = llvm::map_to_vector(
+        anchor->getResults(), [&](Value v) { return mapping.lookup(v); });
+    func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
+  }
+
+  rewriter.setInsertionPointAfter(anchor);
+  SmallVector<Value> dispatchInputs(c.inputs.begin(), c.inputs.end());
+  applyScalarPromotion(rewriter, func, dispatchInputs);
+
+  auto dispatch = RocMlirOp::create(
+      rewriter, rewriter.getUnknownLoc(), anchor->getResultTypes(),
+      SymbolRefAttr::get(func), c.ctx, dispatchInputs, output);
+  rewriter.replaceOp(anchor, dispatch);
 }
 
 //===----------------------------------------------------------------------===//

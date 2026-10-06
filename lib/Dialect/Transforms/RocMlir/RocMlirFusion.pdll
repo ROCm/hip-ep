@@ -10,6 +10,8 @@
 //                           into that dispatch's function.
 //   FuseRocMlirAnchorOp     a matmul/conv/gemm feeding a hip.pointwise is
 //                           inlined and relabelled a rock kernel -> hip.rocmlir.
+//   OutlineRocMlirAnchorOp  a matmul/conv/gemm with no pointwise chain to fold
+//                           into is outlined straight to its own hip.rocmlir.
 //
 // Only the match (root + result-free constraints) is declarative. Each native
 // Constraint/Rewrite is a one-line trampoline into RocMlirFusion.cpp, where the
@@ -31,6 +33,9 @@ Constraint HasSinglePointwiseConsumer(op: Op) [{
 Constraint IsFusableRocMlirAnchor(op: Op) [{
   return ::mlir::success(::mlir::hip::rocmlir::isFusableRocMlirAnchor(op));
 }];
+Constraint IsRocMlirAnchorTerminus(op: Op) [{
+  return ::mlir::success(::mlir::hip::rocmlir::isRocMlirAnchorTerminus(op));
+}];
 
 Rewrite OutlinePointwise(op: Op) [{
   ::mlir::hip::rocmlir::outlinePointwise(rewriter, op);
@@ -40,6 +45,9 @@ Rewrite FusePointwiseIntoConsumer(op: Op) [{
 }];
 Rewrite FuseAnchorIntoConsumer(op: Op) [{
   ::mlir::hip::rocmlir::fuseAnchorIntoConsumer(rewriter, op);
+}];
+Rewrite OutlineRocMlirAnchor(op: Op) [{
+  ::mlir::hip::rocmlir::outlineRocMlirAnchor(rewriter, op);
 }];
 
 // A pointwise op whose consumer is not fusable: extract it into hip.pointwise.
@@ -70,5 +78,16 @@ Pattern FuseRocMlirAnchorOp with benefit(2) {
   HasSinglePointwiseConsumer(root);
   rewrite root with {
     FuseAnchorIntoConsumer(root);
+  };
+}
+
+// An anchor op with no pointwise consumer to fold into: outline it directly as
+// its own hip.rocmlir. An anchor that feeds a pointwise op is excluded by the
+// constraint and handled by FuseRocMlirAnchorOp once the consumer is outlined.
+Pattern OutlineRocMlirAnchorOp with benefit(1) {
+  let root = op<>;
+  IsRocMlirAnchorTerminus(root);
+  rewrite root with {
+    OutlineRocMlirAnchor(root);
   };
 }
