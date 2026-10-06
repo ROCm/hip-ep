@@ -65,7 +65,7 @@ static std::optional<double> readScalarConstant(mlir::Value v) {
     dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
   else if (auto attr = def->getAttr("value"))
     dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr);
-  if (!dense || (!dense.isSplat() && dense.getNumElements() != 1))
+  if (!dense || dense.getNumElements() != 1)
     return std::nullopt;
 
   mlir::Type et = dense.getElementType();
