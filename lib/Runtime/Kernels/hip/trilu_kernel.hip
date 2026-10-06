@@ -52,6 +52,8 @@ static int launch_trilu(hipStream_t stream, const void *input, void *output,
                         int64_t num_elements, int64_t rows, int64_t cols,
                         int64_t diagonal, int64_t upper, bool broadcast,
                         int grid_size, int block_size) {
+  // Drop a stale error so the caller's hipGetLastError reports this launch.
+  (void)hipGetLastError();
   hipLaunchKernelGGL(trilu_kernel<T>, dim3(grid_size), dim3(block_size), 0,
                      stream, static_cast<const T *>(input),
                      static_cast<T *>(output), num_elements, rows, cols,
