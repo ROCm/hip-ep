@@ -254,6 +254,8 @@ constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 /// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
 ///                        encoder paths an unused-but-required DPS init buffer
 /// \param presentValueType ditto for present_value
+/// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
+///                        seq_kv]. nullptr when absent.
 mlir::LogicalResult
 buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value context, mlir::Value query, mlir::Value key,
@@ -261,7 +263,8 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
                 float scale, bool noCausal, mlir::RankedTensorType outputType,
                 mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType);
+                mlir::RankedTensorType presentValueType,
+                mlir::Value attentionBias = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /
@@ -298,12 +301,16 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateEinsumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populatePowConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
@@ -356,6 +363,10 @@ void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateArgMaxConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -384,6 +395,8 @@ void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateIsNaNConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
@@ -460,12 +473,18 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateQLinearConvConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
@@ -583,6 +602,15 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 /// ProjectorOpsRewrites.cpp.
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.HardSigmoid` into
+/// `onnx.Mul` / `onnx.Add` / `onnx.Clip`, which then flow through their own
+/// ONNX→HIP converters in `convertComputeOps`. Lives in the pre-lowering loop
+/// for the same reason as PowDecompose: the emitted onnx.* primitives are only
+/// picked up because that loop runs to a fixed point. See
+/// HardSigmoidConversion.cpp.
+void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
 /// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /

@@ -62,7 +62,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
         op, "ConvToHip only supports rank-3 (1D), rank-4 (2D) and rank-5 (3D) "
             "Conv");
   const bool is1D = (inputRank == 3);
-  const int64_t spatialDims = inputRank - 2; // 1 for NCL, 2 for NCHW
+  const int64_t spatialDims =
+      inputRank - 2; // 1 for NCL, 2 for NCHW, 3 for NCDHW
 
   // Extract attributes from onnx.Conv
   llvm::SmallVector<int64_t> kernelShape;
@@ -108,8 +109,9 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
   // The rank-3 (1D) case is handled by reshaping to a rank-4 (2D) conv with a
   // unit H dimension and collapsing the result back. `conv2dResultType` is the
-  // type fed to hip.conv; for 1D it is the NC1L' rank-4 type, for 2D it is the
-  // original result type. For 1D, `is1D` drives the destination reshape below.
+  // type fed to hip.conv; for 1D it is the NC1L' rank-4 type, and for 2D/3D
+  // it is the original result type. For 1D, `is1D` drives the destination
+  // reshape below.
   mlir::RankedTensorType conv2dResultType = resultType;
 
   // NCL <-> NC1L reassociation: identity on N and C, split/merge the trailing
@@ -179,6 +181,18 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     mlir::Value oneC = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
     resultDynSize[dimIdx] =
         mlir::arith::AddIOp::create(rewriter, loc, divd, oneC);
+  }
+
+  if (!is1D) {
+    // hip.conv requires input, weights, and output to share a rank. The 1D
+    // path establishes that by expanding every operand; 2D and 3D must
+    // already agree.
+    auto weightsType =
+        mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
+    if (!weightsType || weightsType.getRank() != inputRank ||
+        resultType.getRank() != inputRank)
+      return rewriter.notifyMatchFailure(
+          op, "conv input, weights, and result ranks must match");
   }
 
   if (is1D) {

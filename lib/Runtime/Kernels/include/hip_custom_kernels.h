@@ -332,6 +332,52 @@ HIP_KERNEL_API int hip_qconv(
     float inv_output_scale, int64_t output_zp);
 
 /* =========================================================================
+ * QLinearConv (native ONNX, 8-bit grouped NCHW)
+ * =========================================================================
+ *
+ * y = saturate(round((conv(x - x_zp, w - w_zp) + B) * x_scale * w_scale
+ *                    / y_scale) + y_zp)
+ *
+ * Distinct from hip_qconv, which is the W4A16 1x1 fusion. Dtypes are
+ * HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. weight_scale_count / weight_zp_count are
+ * 1 (per-tensor) or out_channels (per output channel). bias is nullable int32.
+ * Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_conv(
+    void* stream,
+    const void* input,
+    const void* input_scale,
+    const void* input_zero_point,
+    const void* weights,
+    const void* weight_scale,
+    const void* weight_zero_point,
+    const void* output_scale,
+    const void* output_zero_point,
+    const void* bias,
+    void* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t height_in,
+    int64_t width_in,
+    int64_t height_out,
+    int64_t width_out,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
+    int64_t group,
+    int input_dtype,
+    int weight_dtype,
+    int output_dtype,
+    int64_t weight_scale_count,
+    int64_t weight_zp_count);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *
@@ -435,6 +481,16 @@ HIP_KERNEL_API int hip_elementwise_not(
     const void* input,
     void* output,
     int64_t num_elements);
+
+// Element-wise IsNaN. input is the floating-point buffer selected by
+// hip_dtype (f16/bf16/f32/f64). output is one byte per element, 1 where
+// the input is NaN and 0 otherwise.
+HIP_KERNEL_API int hip_isnan(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
 
 /* =========================================================================
  * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
@@ -702,6 +758,20 @@ HIP_KERNEL_API int hip_leaky_relu(
  */
 HIP_KERNEL_API int hip_swish(void *stream, const void *input, void *output,
                              int64_t num_elements, int hip_dtype, double alpha);
+
+/* =========================================================================
+ * Element-wise power
+ * =========================================================================
+ *
+ * y = pow(x, exponent), with exponent a host scalar. Supports
+ * HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64. A negative base with a non-integer exponent yields NaN.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_pow(void *stream, const void *input, void *output,
+                           int64_t num_elements, int hip_dtype,
+                           double exponent);
 
 /* =========================================================================
  * Softplus activation
@@ -1304,6 +1374,22 @@ HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              const int64_t* x_shape, int64_t k,
                              int element_size_bytes);
 
+// Index of the maximum along `axis`. `data_shape` is the input shape (dynamic
+// dims included). Indices are i64. `hip_dtype` is hip_dtype_t so i32 is not
+// compared as float. Output is one index per slice, contiguous.
+HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
+                               int64_t axis, int64_t select_last_index,
+                               int64_t rank, const int64_t* data_shape,
+                               int hip_dtype);
+
+// Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
+// (rank 0 is one element). `seed` selects the counter-hash generator.
+// `hip_dtype` is f16, bf16, f32, or f64.
+HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
+                                          int64_t rank, const int64_t* shape,
+                                          float mean, float scale,
+                                          uint64_t seed, int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,
@@ -1469,7 +1555,8 @@ HIP_KERNEL_API int hip_reduce_l2(
  * (the lowering does this).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are MaxPool only (integer compare, no float cast).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_pool(
@@ -1501,7 +1588,8 @@ HIP_KERNEL_API int hip_pool(
  * pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
@@ -1910,6 +1998,57 @@ HIP_KERNEL_API int hip_instance_norm(
     int64_t n,
     int64_t c,
     int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * BatchNormalization (inference)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean[c]) * rsqrt(var[c] + epsilon) + bias[c]
+ *
+ * Mean and variance are the supplied per-channel vectors. Input is
+ * (N, C, spatial) in row-major layout. Scale, bias, mean, and variance
+ * are length C.
+ *
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_batch_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    const void* mean,
+    const void* variance,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * GroupNorm (com.microsoft)
+ * =========================================================================
+ *
+ *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
+ *
+ * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
+ * activation 1 applies SiLU after the affine transform.
+ * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ */
+HIP_KERNEL_API int hip_group_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int activation,
     float epsilon,
     int hip_dtype);
 
