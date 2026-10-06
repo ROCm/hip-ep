@@ -88,6 +88,10 @@ inline void registerConvertToLLVMInterfaces(mlir::DialectRegistry &registry) {
   mlir::arith::registerConvertArithToLLVMInterface(registry);
   mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
   mlir::index::registerConvertIndexToLLVMInterface(registry);
+  mlir::ub::registerConvertUBToLLVMInterface(registry);
+  mlir::registerConvertComplexToLLVMInterface(registry);
+  mlir::registerConvertMathToLLVMInterface(registry);
+  mlir::vector::registerConvertVectorToLLVMInterface(registry);
 }
 
 /// Register all required dialects into a DialectRegistry.
