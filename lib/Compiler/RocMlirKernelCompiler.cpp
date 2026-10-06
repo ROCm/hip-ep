@@ -35,8 +35,13 @@
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
 // Headers only -- see loadHipGetDeviceProperties below for why the HIP runtime
-// is resolved at call time rather than linked.
-#include <hip/hip_runtime.h>
+// is resolved at call time rather than linked. Reached through rocMLIR's
+// portable wrapper, not <hip/hip_runtime.h> directly: HIP's headers use
+// GCC/Clang attribute syntax unguarded, and the LLVM headers above define
+// __has_attribute to 0, which steers HIP into a non-Clang vector-type fallback
+// that cl.exe cannot parse. The wrapper applies both workarounds around the
+// include and is exactly <hip/hip_runtime.h> on a Clang-based compiler.
+#include "mlir/Support/HipRuntime.h"
 #ifdef _WIN32
 // Declared rather than including <windows.h>, whose macros collide with the
 // MLIR/LLVM headers here. Same pattern as include/hip/debug_log.h.
