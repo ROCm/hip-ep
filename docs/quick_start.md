@@ -160,17 +160,13 @@ no manual dependency setup; the cold from-source LLVM build is the long pole
 (multi-hour).
 
 On Windows the host compiler is MSVC `cl.exe` and the generator is Ninja, which
-is what CI builds and therefore the configuration to prefer. Both come from the
-MSVC environment, so run this from an "x64 Native Tools Command Prompt for VS"
-(see "MSVC Environment Setup" above). Outside that environment there is no
-`ninja.exe`, and `build.py` falls back to the "Visual Studio 17 2022" generator,
-which locates MSVC on its own; that path does not cover the in-tree LLVM build
+is what CI builds. Both come from the MSVC environment, so run this from an
+"x64 Native Tools Command Prompt for VS" (see "MSVC Environment Setup" above).
+Outside that environment there is no `ninja.exe`, and `build.py` falls back to
+the "Visual Studio 17 2022" generator, which locates MSVC on its own; that path
+does not cover the in-tree LLVM build
 (`--cmake_extra_defines ENABLE_ROCMLIRTRITON=ON`), which needs a single-config
 generator.
-
-`--clang_cl` builds with TheRock's clang-cl and lld-link instead. Use it only
-to reproduce the clang-cl CI jobs: it downloads the pinned TheRock SDK for the
-compiler alone, and this project's own warning set is tuned for cl.exe.
 
 Run from the project root:
 
@@ -187,7 +183,6 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #                             cross-machine build+run -- the *target* GPU's arch
 #                             (e.g. from `offload-arch.exe` on that machine)
 #   --therock_dist <path>     reuse a local TheRock SDK (else auto-downloaded)
-#   --clang_cl                build with TheRock clang-cl instead of MSVC cl.exe
 #   --config RelWithDebInfo   build type (default Release)
 #   --skip_tests              skip the LIT tests (run by default after install)
 #   --clean                   remove build/ and install/

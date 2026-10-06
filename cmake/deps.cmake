@@ -400,13 +400,11 @@ if(ENABLE_ROCMLIRTRITON)
   set(MLIR_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   # rocMLIR's root CMakeLists rejects any Windows compiler that is not clang-cl
   # (it checks CMAKE_CXX_COMPILER_ID/SIMULATE_ID right after project()), which
-  # this project's default cl.exe toolchain fails. ROCMLIR_ALLOW_MSVC (added
+  # the cl.exe this project builds with fails. ROCMLIR_ALLOW_MSVC (added
   # upstream by ROCm/rocmlirTriton#538) opts out of that check and of the
   # pre-project() clang-cl/lld-link search, which as a subdirectory would fire
-  # too late to pick the compiler anyway. Scoped to real cl.exe so a clang-cl
-  # build (CI, and -DCMAKE_CXX_COMPILER=clang-cl locally) keeps rocMLIR's
-  # upstream-supported path unchanged.
-  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  # too late to pick the compiler anyway.
+  if(MSVC)
     set(ROCMLIR_ALLOW_MSVC ON CACHE BOOL "" FORCE)
   endif()
   if(NOT DEFINED rocmlirtriton_SOURCE_DIR)
@@ -454,7 +452,7 @@ if(ENABLE_ROCMLIRTRITON)
   # HandleLLVMOptions, so every diagnostic in its tree is fatal, and it layers
   # -Wshadow/-Wformat=2/-Wundef/-Wmissing-declarations on top of -Wall -Wextra.
   # GCC flags patterns Clang does not (-Wmaybe-uninitialized has no Clang
-  # equivalent), so the clang-cl build is clean while GCC fails on rocMLIR's own
+  # equivalent), so the Windows build is clean while GCC fails on rocMLIR's own
   # sources. Relax the promotion for this vendored subtree; the warnings still
   # print. Directory COMPILE_OPTIONS land after CMAKE_CXX_FLAGS -- where
   # HandleLLVMOptions puts -Werror -- so -Wno-error wins.
