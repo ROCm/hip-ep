@@ -21,7 +21,10 @@ namespace {
 //   %y = hip.qlinear_matmul(%ctx) ins(%a, %as, %az, %b, %bs, %bz, %ys, %yz :
 //            ...) outs(%init : tensor<1x3xui8>)
 //
-// Both operands are rank 2 and every scale and zero point is per-tensor.
+// Both operands are rank 2 with static shape, and every scale and zero
+// point is one f32 or matching 8-bit element. A dynamic parameter shape is
+// not lowered: wrap_qlinear_matmul rejects a count other than 1, and the
+// LLVM call ignores that status, so the output would stay uninitialized.
 // Rank other than 2, and per-row or per-column quantization, stay
 // onnx.QLinearMatMul. hip.qmatmul is a different op and is not produced here.
 static bool isEightBit(Type type) {
@@ -43,9 +46,8 @@ static LogicalResult checkPerTensor(PatternRewriter &rewriter, Operation *op,
     return reject(" scale must be f32");
   if (zpType.getElementType() != storage)
     return reject(" zero point type must match the quantized tensor");
-  if (!scaleType.hasStaticShape() || !zpType.hasStaticShape())
-    return success();
-  if (scaleType.getNumElements() == 1 && zpType.getNumElements() == 1)
+  if (scaleType.hasStaticShape() && zpType.hasStaticShape() &&
+      scaleType.getNumElements() == 1 && zpType.getNumElements() == 1)
     return success();
   return reject(" quantization must be per-tensor");
 }

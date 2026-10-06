@@ -4,8 +4,9 @@
 // onnx.QLinearMatMul -> hip.qlinear_matmul
 //
 // Covers the MobileNetV3 int8 form: uint8 [1, K] times int8 [K, N], scalar
-// scales and zero points. Rank other than 2 and per-column scales stay
-// onnx.QLinearMatMul.
+// scales and zero points. Rank other than 2, per-column scales, and dynamic
+// scale shapes stay onnx.QLinearMatMul. A rank-1 tensor of one element is
+// still per-tensor.
 //
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -54,6 +55,33 @@ module {
         : (tensor<1x2x4xui8>, tensor<f32>, tensor<ui8>, tensor<1x4x3xi8>,
            tensor<f32>, tensor<i8>, tensor<f32>, tensor<ui8>) -> tensor<1x2x3xui8>
     return %y : tensor<1x2x3xui8>
+  }
+
+  // CHECK-LABEL: func.func @qlinear_matmul_unit_scale
+  // CHECK: hip.qlinear_matmul
+  // CHECK-NOT: onnx.QLinearMatMul
+  func.func @qlinear_matmul_unit_scale(
+      %a: tensor<1x4xui8>, %as: tensor<1xf32>, %az: tensor<1xui8>,
+      %b: tensor<4x3xi8>, %bs: tensor<1xf32>, %bz: tensor<1xi8>,
+      %ys: tensor<1xf32>, %yz: tensor<1xui8>) -> tensor<1x3xui8> {
+    %y = "onnx.QLinearMatMul"(%a, %as, %az, %b, %bs, %bz, %ys, %yz)
+        : (tensor<1x4xui8>, tensor<1xf32>, tensor<1xui8>, tensor<4x3xi8>,
+           tensor<1xf32>, tensor<1xi8>, tensor<1xf32>, tensor<1xui8>)
+        -> tensor<1x3xui8>
+    return %y : tensor<1x3xui8>
+  }
+
+  // CHECK-LABEL: func.func @qlinear_matmul_dynamic_scale_rejected
+  // CHECK: onnx.QLinearMatMul
+  // CHECK-NOT: hip.qlinear_matmul
+  func.func @qlinear_matmul_dynamic_scale_rejected(
+      %a: tensor<1x4xui8>, %as: tensor<?xf32>, %az: tensor<ui8>,
+      %b: tensor<4x3xi8>, %bs: tensor<f32>, %bz: tensor<i8>,
+      %ys: tensor<f32>, %yz: tensor<ui8>) -> tensor<1x3xui8> {
+    %y = "onnx.QLinearMatMul"(%a, %as, %az, %b, %bs, %bz, %ys, %yz)
+        : (tensor<1x4xui8>, tensor<?xf32>, tensor<ui8>, tensor<4x3xi8>,
+           tensor<f32>, tensor<i8>, tensor<f32>, tensor<ui8>) -> tensor<1x3xui8>
+    return %y : tensor<1x3xui8>
   }
 
   // CHECK-LABEL: func.func @qlinear_matmul_per_column_rejected

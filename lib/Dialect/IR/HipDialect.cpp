@@ -819,6 +819,10 @@ static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
     return op.emitOpError()
            << name
            << " zero point element type must match the quantized tensor";
+  if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+      scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be a single element";
   return success();
 }
 
@@ -830,6 +834,19 @@ LogicalResult QLinearMatMulOp::verify() {
       !yType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
       yType.getRank() != 2)
     return emitOpError("a, b, and output must be rank 2");
+  if (!aType.hasStaticShape() || !bType.hasStaticShape() ||
+      !yType.hasStaticShape())
+    return emitOpError("a, b, and output must have static shapes");
+
+  int64_t m = aType.getDimSize(0);
+  int64_t k = aType.getDimSize(1);
+  int64_t n = bType.getDimSize(1);
+  if (m < 1 || k < 1 || n < 1)
+    return emitOpError("M, K, and N must be positive");
+  if (bType.getDimSize(0) != k)
+    return emitOpError("b rows must equal a columns");
+  if (yType.getDimSize(0) != m || yType.getDimSize(1) != n)
+    return emitOpError("output shape must be [M, N]");
 
   if (!isEightBitInt(aType.getElementType()) ||
       !isEightBitInt(bType.getElementType()) ||
