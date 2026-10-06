@@ -22,7 +22,23 @@ add_library(LibHipCompiler STATIC
 # kernels but never fills in hip.rocmlir's kernel_binary, and every dispatch
 # fails at hipModuleLoadData.
 if(ENABLE_ROCMLIRTRITON)
-  target_sources(LibHipCompiler PRIVATE RocMlirKernelCompiler.cpp)
+  # RocMlirAutotune.cpp replaces the default perfConfig choice with a
+  # benchmarked winner. It sits here rather than in hip-rocmlir-compiler for
+  # the same reason RocMlirKernelCompiler.cpp does: otherwise the EP can only
+  # ever compile position 0 of the tuning space. It resolves HIP at call time
+  # (see the file header), so it adds no import-table dependency.
+  target_sources(LibHipCompiler PRIVATE
+    RocMlirKernelCompiler.cpp
+    RocMlirAutotune.cpp
+  )
+  # Benchmarking calls HIP host APIs, so the file compiles to a stub unless
+  # this build both permits them and knows the runtime library name to resolve
+  # them from. Published rather than left implicit because hip-rocmlir-compiler
+  # has to key its own autotune flag off what was actually built here: keying
+  # it off BUILD_MOCK_RUNTIME let the tool offer tuning the library had stubbed
+  # out, then fail as though the machine had no GPU.
+  set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE OFF CACHE INTERNAL
+      "RocMlirAutotune.cpp compiled its real implementation, not its stub")
   # rocMLIR/Triton's per-library static archives have circular dependencies,
   # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
   # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
@@ -86,6 +102,10 @@ if(ENABLE_ROCMLIRTRITON)
     if(_hip_runtime_name)
       target_compile_definitions(LibHipCompiler PRIVATE
         "HIPDNN_HIP_RUNTIME_LIB=\"${_hip_runtime_name}\"")
+      # Matches RocMlirAutotune.cpp's guard: HIPDNN_EP_LINK_HIP_HOST for the
+      # headers, HIPDNN_HIP_RUNTIME_LIB for the call-time lookup.
+      set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE ON CACHE INTERNAL
+          "RocMlirAutotune.cpp compiled its real implementation, not its stub")
     else()
       message(STATUS "[onnx-hipdnn-ep] HIP runtime library name unknown; "
                      "rocMLIR arch will come from HIP_ARCHITECTURES")
