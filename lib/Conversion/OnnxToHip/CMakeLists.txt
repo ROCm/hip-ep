@@ -258,6 +258,7 @@ add_library(OnnxToHip STATIC
   PoolConversion.cpp
   ResizeConversion.cpp
   QLinearConvConversion.cpp
+  QLinearMatMulConversion.cpp
   UpsampleConversion.cpp
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp

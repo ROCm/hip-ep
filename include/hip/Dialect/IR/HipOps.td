@@ -5559,6 +5559,56 @@ def Hip_QLinearConvOp : Hip_DpsOp<"qlinear_conv",
   }];
 }
 
+// Native onnx.QLinearMatMul. Distinct from hip.qmatmul, which fuses
+// DequantizeLinear + MatMul + QuantizeLinear.
+def Hip_QLinearMatMulOp : Hip_DpsOp<"qlinear_matmul",
+                                    /*traits=*/[],
+                                    /*outsAccessor=*/"Output",
+                                    /*autoReify=*/1,
+                                    /*autoInfer=*/1,
+                                    /*declareInfer=*/1> {
+  let summary = "ONNX QLinearMatMul";
+  let description = [{
+    Rank-2 8-bit matrix product with the ONNX QLinearMatMul quantization:
+
+      acc = matmul(a - a_zp, b - b_zp)
+      y = saturate(round(acc * a_scale * b_scale / y_scale) + y_zp)
+
+    `a` is [M, K], `b` is [K, N], and `y` is [M, N]. All three shapes are
+    static. Scales and zero points are a single f32 scale and a matching
+    8-bit zero point. The integer product accumulates in int64, then one f32
+    scale is applied with rintf (round to nearest, ties to even).
+
+    This op is not hip.qmatmul. hip.qmatmul fuses a QDQ chain and does not
+    accept onnx.QLinearMatMul.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$a,
+    Hip_TensorOrMemRef:$a_scale,
+    Hip_TensorOrMemRef:$a_zero_point,
+    Hip_TensorOrMemRef:$b,
+    Hip_TensorOrMemRef:$b_scale,
+    Hip_TensorOrMemRef:$b_zero_point,
+    Hip_TensorOrMemRef:$y_scale,
+    Hip_TensorOrMemRef:$y_zero_point,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $a `,` $a_scale `,` $a_zero_point `,`
+        $b `,` $b_scale `,` $b_zero_point `,` $y_scale `,` $y_zero_point `:`
+        type($a) `,` type($a_scale) `,` type($a_zero_point) `,`
+        type($b) `,` type($b_scale) `,` type($b_zero_point) `,`
+        type($y_scale) `,` type($y_zero_point) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_QLpNormalizationOp : Hip_DpsOp<"qlpnormalization",
                                        /*traits=*/[],
                                        /*outsAccessor=*/"Output",

@@ -1829,6 +1829,40 @@ int wrap_qlinear_conv(
   return 0;
 }
 
+int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
+                        const void *a_zero_point, const void *b,
+                        const void *b_scale, const void *b_zero_point,
+                        const void *y_scale, const void *y_zero_point, void *y,
+                        int64_t m, int64_t k, int64_t n, int64_t a_dtype,
+                        int64_t b_dtype, int64_t y_dtype, int64_t a_scale_count,
+                        int64_t b_scale_count, int64_t y_scale_count,
+                        int64_t a_zp_count, int64_t b_zp_count,
+                        int64_t y_zp_count) {
+  (void)a;
+  (void)a_scale;
+  (void)a_zero_point;
+  (void)b;
+  (void)b_scale;
+  (void)b_zero_point;
+  (void)y_scale;
+  (void)y_zero_point;
+  (void)y;
+  (void)b_dtype;
+  (void)y_dtype;
+  (void)a_scale_count;
+  (void)b_scale_count;
+  (void)y_scale_count;
+  (void)a_zp_count;
+  (void)b_zp_count;
+  (void)y_zp_count;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlinear_matmul M=%lld K=%lld N=%lld %s\n",
+             (long long)m, (long long)k, (long long)n,
+             hipdnn_ep_datatype_name(a_dtype));
+  return 0;
+}
+
 int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
                           int64_t num_elements, int64_t norm_num_elements,
                           int64_t data_type, float input_scale,

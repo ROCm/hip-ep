@@ -321,6 +321,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
   populateQLinearConvConversionPatterns(patterns, ctx);
+  populateQLinearMatMulConversionPatterns(patterns, ctx);
   populateUpsampleConversionPatterns(patterns, ctx);
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
