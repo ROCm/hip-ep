@@ -443,9 +443,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
-  // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
-  // Normalize them to native onnx.QuantizeLinear / onnx.DequantizeLinear so
-  // that QdqConversion below can lower them; nothing downstream matches the
+  // MorphiZen imports com.microsoft Q/DQ and the fused QLinear* function ops
+  // as onnx.Custom. Normalize Q/DQ to native onnx.QuantizeLinear /
+  // onnx.DequantizeLinear, and decompose QLinearAdd / QLinearMul /
+  // QLinearConcat / QLinearGlobalAveragePool into native ONNX ops, so that
+  // QdqConversion below can lower them; nothing downstream matches the
   // onnx.Custom spelling.
   {
     mlir::RewritePatternSet customQdqPatterns(ctx);
