@@ -279,8 +279,8 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
       return rewriter.notifyMatchFailure(
           outer, "dynamic dimensions are not known to match");
 
-    mlir::Value siluInit = silu.getOutput();
-    mlir::Value sigmoidInit = sigmoid.getY();
+    mlir::Operation *siluInitDef = silu.getOutput().getDefiningOp();
+    mlir::Operation *sigmoidInitDef = sigmoid.getY().getDefiningOp();
     mlir::Value siluResult = silu->getResult(0);
     mlir::Value sigmoidResult = sigmoid->getResult(0);
     retargetShapeQueries(rewriter, siluResult, gate);
@@ -293,13 +293,14 @@ struct SwigluFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
     rewriter.eraseOp(sigmoid);
     // Drop a destination that exists only to feed an erased op. A producer
     // with side effects, such as a call that records, stays in the graph.
-    auto eraseIfDead = [&](mlir::Value value) {
-      mlir::Operation *def = value.getDefiningOp();
+    // Both destinations may come from one producer, which must be erased once.
+    auto eraseIfDead = [&](mlir::Operation *def) {
       if (def && mlir::isOpTriviallyDead(def))
         rewriter.eraseOp(def);
     };
-    eraseIfDead(siluInit);
-    eraseIfDead(sigmoidInit);
+    eraseIfDead(siluInitDef);
+    if (sigmoidInitDef != siluInitDef)
+      eraseIfDead(sigmoidInitDef);
     return mlir::success();
   }
 };
