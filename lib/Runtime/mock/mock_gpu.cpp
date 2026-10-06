@@ -1194,6 +1194,20 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pow\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_pow(num_elements=%lld, data_type=%s(%lld), "
+             "exponent=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, exponent);
+  return 0;
+}
+
 int wrap_swish(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha) {
   if (!state) {

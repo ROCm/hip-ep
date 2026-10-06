@@ -25,24 +25,53 @@
 namespace mlir {
 namespace hip {
 
-mlir::LogicalResult
-buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
-                mlir::Value context, mlir::Value query, mlir::Value key,
-                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
-                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
-                float scale, bool noCausal, mlir::RankedTensorType outputType,
-                mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType) {
+mlir::LogicalResult buildHipGqaCall(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter, mlir::Value context,
+    mlir::Value query, mlir::Value key, mlir::Value value, mlir::Value pastKey,
+    mlir::Value pastValue, mlir::Value seqlensK, mlir::Value totalSeqLen,
+    int64_t numHeads, float scale, bool noCausal,
+    mlir::RankedTensorType outputType, mlir::RankedTensorType presentKeyType,
+    mlir::RankedTensorType presentValueType, mlir::Value attentionBias) {
   mlir::Location loc = op->getLoc();
 
-  // DPS init buffers.  Derive dynamic dims of present_* from past_* when
-  // available (same buffer shape after concat), otherwise from query (size
-  // unused at compile time for the static-shape Whisper case).
+  // DPS init buffers. present_* follows past_* when a cache is concatenated
+  // in place. With no past, a rank-4 BNSH buffer is filled from a rank-3 BSH
+  // query: batch is dim 0 and sequence is dim 2. Same-index tensor.dim would
+  // read the query's hidden size as the sequence extent.
+  auto makePresentInit = [&](mlir::RankedTensorType presentType,
+                             mlir::Value past) -> mlir::FailureOr<mlir::Value> {
+    mlir::Value source = past ? past : query;
+    auto sourceType = mlir::dyn_cast<mlir::RankedTensorType>(source.getType());
+    const bool bshQuery = !past && sourceType && sourceType.getRank() == 3 &&
+                          presentType.getRank() == 4;
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t dimIdx : llvm::seq<int64_t>(presentType.getRank())) {
+      if (!presentType.isDynamicDim(dimIdx))
+        continue;
+      int64_t srcDim = dimIdx;
+      if (bshQuery) {
+        if (dimIdx == 0)
+          srcDim = 0;
+        else if (dimIdx == 2)
+          srcDim = 1;
+        else
+          return mlir::failure();
+      }
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, source, srcDim));
+    }
+    return mlir::Value(
+        mlir::tensor::EmptyOp::create(rewriter, loc, presentType.getShape(),
+                                      presentType.getElementType(), dynSizes));
+  };
+
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(rewriter, loc, presentKeyType,
-                                                 pastKey ? pastKey : query);
-  mlir::Value presentValueInit = createEmptyTensor(
-      rewriter, loc, presentValueType, pastValue ? pastValue : query);
+  auto presentKeyInitOr = makePresentInit(presentKeyType, pastKey);
+  auto presentValueInitOr = makePresentInit(presentValueType, pastValue);
+  if (mlir::failed(presentKeyInitOr) || mlir::failed(presentValueInitOr))
+    return mlir::failure();
+  mlir::Value presentKeyInit = *presentKeyInitOr;
+  mlir::Value presentValueInit = *presentValueInitOr;
 
   llvm::SmallVector<mlir::Type> resultTypes = {outputType, presentKeyType,
                                                presentValueType};
@@ -59,31 +88,33 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     operands.push_back(pastValue);
   operands.push_back(seqlensK);
   operands.push_back(totalSeqLen);
+  if (attentionBias)
+    operands.push_back(attentionBias);
   operands.push_back(outputInit);
   operands.push_back(presentKeyInit);
   operands.push_back(presentValueInit);
 
   // segmentSizes order MUST match HipOps.td Hip_GqaOp argument order.
   llvm::SmallVector<int32_t> segmentSizes;
-  segmentSizes.push_back(1);                 // ctx
-  segmentSizes.push_back(1);                 // query
-  segmentSizes.push_back(1);                 // key
-  segmentSizes.push_back(1);                 // value
-  segmentSizes.push_back(pastKey ? 1 : 0);   // past_key
-  segmentSizes.push_back(pastValue ? 1 : 0); // past_value
-  segmentSizes.push_back(1);                 // seqlens_k
-  segmentSizes.push_back(1);                 // total_seq_len
-  segmentSizes.push_back(0);                 // cos_cache
-  segmentSizes.push_back(0);                 // sin_cache
-  segmentSizes.push_back(0);                 // position_ids
-  segmentSizes.push_back(0);                 // attention_bias
-  segmentSizes.push_back(0);                 // head_sink
-  segmentSizes.push_back(0);                 // k_scale
-  segmentSizes.push_back(0);                 // v_scale
-  segmentSizes.push_back(1);                 // output
-  segmentSizes.push_back(1);                 // present_key
-  segmentSizes.push_back(1);                 // present_value
-  segmentSizes.push_back(0);                 // output_qk
+  segmentSizes.push_back(1);                     // ctx
+  segmentSizes.push_back(1);                     // query
+  segmentSizes.push_back(1);                     // key
+  segmentSizes.push_back(1);                     // value
+  segmentSizes.push_back(pastKey ? 1 : 0);       // past_key
+  segmentSizes.push_back(pastValue ? 1 : 0);     // past_value
+  segmentSizes.push_back(1);                     // seqlens_k
+  segmentSizes.push_back(1);                     // total_seq_len
+  segmentSizes.push_back(0);                     // cos_cache
+  segmentSizes.push_back(0);                     // sin_cache
+  segmentSizes.push_back(0);                     // position_ids
+  segmentSizes.push_back(attentionBias ? 1 : 0); // attention_bias
+  segmentSizes.push_back(0);                     // head_sink
+  segmentSizes.push_back(0);                     // k_scale
+  segmentSizes.push_back(0);                     // v_scale
+  segmentSizes.push_back(1);                     // output
+  segmentSizes.push_back(1);                     // present_key
+  segmentSizes.push_back(1);                     // present_value
+  segmentSizes.push_back(0);                     // output_qk
 
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(

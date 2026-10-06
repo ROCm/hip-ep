@@ -94,6 +94,10 @@ packed `__half2` path for fp16 rows of even width.
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
 | `QLinearConv` | `hip.qlinear_conv` | `qlinear_conv_kernel.hip` |
+| `QLinearAdd` (`com.microsoft`) | `hip.qadd` | decomposed, then QDQ fusion |
+| `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
+| `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
+| `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is

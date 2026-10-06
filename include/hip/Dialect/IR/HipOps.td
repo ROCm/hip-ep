@@ -2524,7 +2524,8 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
-    Applies the ONNX Swish activation element-wise.
+    Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
+    is the same formula; its alpha defaults to 1.702 rather than 1.
 
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
@@ -2615,6 +2616,40 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_PowOp : Hip_DpsOp<"pow"> {
+  let summary = "Element-wise power with a compile-time scalar exponent";
+  let description = [{
+    Computes Y = X ^ exponent element-wise. The exponent is a compile-time
+    scalar baked into the op. Integer exponents that decompose to Mul, and
+    the exponents 0.5, -0.5, and -1, are rewritten before this op is created.
+
+    A negative base with a non-integer exponent yields NaN.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.pow(%ctx) ins(%x : memref<4x8xf32, 1>)
+                  outs(%y : memref<4x8xf32, 1>)
+                  {exponent = 2.2 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F64Attr:$exponent
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -4867,10 +4902,12 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
-    upsample-and-downsample patterns.  Resamples the trailing spatial axes of
-    an `(N, C, D_1, ..., D_k)` input onto an `(N, C, O_1, ..., O_k)` output
-    grid.  The leading two dims (N, C) must be unchanged at runtime — i.e.
-    we only resize spatial axes.
+    upsample-and-downsample patterns.  The runtime kernel takes a copied prefix
+    of at most two axes and a trailing window of at most three.  Channels-first
+    `(N, C, H, W)` uses that prefix and window `(H, W)`.  Channels-last
+    `(N, H, W, C)` uses prefix `(N)`, an empty channel slot, and window
+    `(H, W, C)`; the channel extent is unchanged, so that axis is copied.
+    Rank is 3, 4, or 5.
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
@@ -4884,7 +4921,7 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
       * nearest_mode in {"round_prefer_floor"}      — encoded as i64
         - 0 = round_prefer_floor (only used when mode=nearest)
 
-    Per-axis scale is recovered at runtime from the input/output spatial
+    Per-axis scale is recovered at runtime from the window's input and output
     extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
     appear as operands here — they were resolved at compile time into the
     output type that the upstream importer produced.
