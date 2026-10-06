@@ -70,7 +70,10 @@
 #include "CrashHandler.h"
 
 #if HIP_ROCMLIR_AUTOTUNE
-#include <hip/hip_runtime.h>
+// rocMLIR's portable wrapper rather than <hip/hip_runtime.h>: the LLVM headers
+// above define __has_attribute to 0, which sends HIP into a vector-type
+// fallback cl.exe cannot parse. See lib/Compiler/RocMlirKernelCompiler.cpp.
+#include "mlir/Support/HipRuntime.h"
 #endif
 
 #include <algorithm>
