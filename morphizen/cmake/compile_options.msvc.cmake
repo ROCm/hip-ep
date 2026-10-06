@@ -70,10 +70,39 @@
 # - https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info
 # - https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html
 
+# `/Qspectre` is an MSVC-cl-only flag; clang-cl (CMAKE_CXX_COMPILER_ID
+# "Clang" with an MSVC-like frontend) does not implement it and, under /WX,
+# treats it as an unused-argument error. Only pass it to genuine MSVC cl.exe.
+set(_morphizen_spectre_option "")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  set(_morphizen_spectre_option /Qspectre)
+endif()
+
+# This flag set is tuned for MSVC cl.exe /W4 /WX. clang-cl accepts the same
+# switches but its /W4 maps to clang diagnostics that emit warnings MSVC never
+# produces, so /WX turns MSVC-nonexistent diagnostics into hard errors when the
+# Windows toolchain is clang-cl (e.g. an external LLVM used to build this EP).
+# Silence the clang-cl-only categories so /WX still guards genuine issues
+# without failing on diagnostics that have no MSVC equivalent.
+set(_morphizen_clangcl_suppressions "")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(_morphizen_clangcl_suppressions
+      -Wno-unused-private-field # MSVC has no equivalent to -Wunused-private-field
+      -Wno-microsoft-cast       # Win32 FARPROC<->void* casts; MSVC allows them
+      -Wno-deprecated-copy      # implicit copy ctor w/ user copy-assign; no MSVC warning
+      -Wno-infinite-recursion   # clang-only static check; MSVC does not diagnose
+      -Wno-tautological-undefined-compare # reference-vs-null checks; MSVC allows
+      -Wno-c++20-extensions     # captured structured bindings etc.; MSVC allows in C++17
+      -Wno-unused-function      # static/anon-namespace fns unused in some TUs; MSVC C4505 differs
+      -Wno-unused-const-variable # unused file-scope const; no equivalent MSVC error
+      -Wno-unused-lambda-capture # MSVC does not diagnose unused lambda captures
+  )
+endif()
+
 set(MORPHIZEN_COMPILER_OPTIONS
   /Zc:__cplusplus #
   # /Zi # REMOVED: Use RelWithDebInfo build type instead of hardcoding debug symbols
-  /Qspectre # enable Spectre mitigations, required by MS
+  ${_morphizen_spectre_option} # enable Spectre mitigations (MSVC cl.exe only)
   # /ZH:SHA_256 # REMOVED: Only useful with /Zi flag
   /guard:cf # Control Flow Guard
   /sdl # Security Development Lifecycle
@@ -107,6 +136,7 @@ set(MORPHIZEN_COMPILER_OPTIONS
   # requiring CMake >= 3.5) while maintaining our strict /W4 warning level.
   /wd4996
   /utf-8
+  ${_morphizen_clangcl_suppressions} # no-op on MSVC cl.exe; see above
   CACHE STRING "Compiler options for Morphizen"
 )
 
