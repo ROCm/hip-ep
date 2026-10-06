@@ -13,6 +13,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Operation | Backend or lowering |
 |---|---|
 | Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly |
+| NhwcConv (`com.microsoft`) | Rank-4 NHWC activations and `[M, kH, kW, C/group]` weights are transposed into `hip.conv` and the result is transposed back |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
 | Einsum | Binary contraction decomposed to Transpose + MatMul (hipBLASLt); static shapes |
