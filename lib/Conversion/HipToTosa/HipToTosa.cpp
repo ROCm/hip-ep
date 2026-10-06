@@ -8,6 +8,7 @@
 
 #include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/SmallVector.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/Dialect/Tosa/IR/TosaOps.h>
@@ -107,6 +108,20 @@ static Value sliceTo(Value input, ArrayRef<int64_t> shape,
                                          rewriter.getIndexTensorAttr(shape));
   return tosa::SliceOp::create(rewriter, loc, type.clone(shape), input, start,
                                size);
+}
+
+// Same as sliceTo, but the crop is allowed to start off the origin.
+static Value sliceAt(Value input, ArrayRef<int64_t> start,
+                     ArrayRef<int64_t> size,
+                     ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  auto shapeType = tosa::shapeType::get(rewriter.getContext(), size.size());
+  auto startConst = tosa::ConstShapeOp::create(
+      rewriter, loc, shapeType, rewriter.getIndexTensorAttr(start));
+  auto sizeConst = tosa::ConstShapeOp::create(
+      rewriter, loc, shapeType, rewriter.getIndexTensorAttr(size));
+  return tosa::SliceOp::create(rewriter, loc, type.clone(size), input,
+                               startConst, sizeConst);
 }
 
 static SmallVector<int64_t> getI64Values(ArrayAttr attrs) {
@@ -358,6 +373,158 @@ Value createSplatFloat(ConversionPatternRewriter &rewriter, Location loc,
       rewriter, loc, type,
       DenseElementsAttr::get(type, rewriter.getFloatAttr(elemType, ap)));
 }
+
+// ONNX CausalConvWithState / hip.causal_conv_with_state is Concat(past, x) +
+// depthwise Conv + Slice(present). TOSA has no causal or 1-D depthwise op, so
+// the same expansion is spelled with tosa.concat (or a zero past),
+// tosa.depthwise_conv2d (length as W, H=1), and tosa.slice.
+//
+//   Before (channels-first, k=4):
+//     %y, %s = hip.causal_conv_with_state(%x, %w, %b, %past)
+//         : tensor<1x64x128xf16>, tensor<1x64x3xf16>
+//   After:
+//     %p = tosa.concat %past, %x {axis = 2}
+//         : tensor<1x64x131xf16>
+//     %s = tosa.slice %p  // last k-1 = 3 along the length
+//     %y = NCHW<->NHWC around tosa.depthwise_conv2d, then optional SiLU
+//
+// present_state is the last (k-1) values of the concatenated sequence, which
+// is the ONNX contract including the short-input / zero-pad case. k=1 makes
+// that tensor empty, which TOSA forbids, so it is rejected.
+struct CausalConvWithStateConverter final
+    : public OpConversionPattern<CausalConvWithStateOp> {
+  using OpConversionPattern<CausalConvWithStateOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(CausalConvWithStateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 2)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    if (op.getNdim() != 1)
+      return rewriter.notifyMatchFailure(op, "only 1-D causal conv is TOSA");
+
+    Location loc = op.getLoc();
+    auto inType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
+    auto wType = dyn_cast<RankedTensorType>(adaptor.getWeight().getType());
+    auto yType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto sType = dyn_cast<RankedTensorType>(op.getResult(1).getType());
+    if (!inType || !wType || !yType || !sType || !inType.hasStaticShape() ||
+        !wType.hasStaticShape() || !yType.hasStaticShape() ||
+        !sType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (inType.getRank() != 3 || wType.getRank() != 3 || yType.getRank() != 3 ||
+        sType.getRank() != 3)
+      return rewriter.notifyMatchFailure(op, "expected rank-3 1-D tensors");
+    if (wType.getDimSize(1) != 1)
+      return rewriter.notifyMatchFailure(op,
+                                         "weight must be depthwise [C,1,k]");
+
+    Type elemType = yType.getElementType();
+    Type accType;
+    if (elemType.isF16() || elemType.isBF16() || elemType.isF32())
+      accType = rewriter.getF32Type();
+    else
+      return rewriter.notifyMatchFailure(op, "only f16, bf16, and f32");
+    if (inType.getElementType() != elemType ||
+        wType.getElementType() != elemType)
+      return rewriter.notifyMatchFailure(op, "element types must match");
+
+    int64_t channels = wType.getDimSize(0);
+    int64_t k = wType.getDimSize(2);
+    int64_t stateLen = k - 1;
+    if (stateLen <= 0)
+      return rewriter.notifyMatchFailure(
+          op, "k=1 present_state is an empty TOSA tensor");
+
+    bool channelsLast = op.getChannelsLast();
+    int64_t batch = inType.getDimSize(0);
+    int64_t length = channelsLast ? inType.getDimSize(1) : inType.getDimSize(2);
+    int64_t inChannels =
+        channelsLast ? inType.getDimSize(2) : inType.getDimSize(1);
+    if (inChannels != channels || yType.getShape() != inType.getShape() ||
+        sType.getShape() != ArrayRef<int64_t>({batch, channels, stateLen}))
+      return rewriter.notifyMatchFailure(op, "incompatible conv shapes");
+
+    StringRef activation = op.getActivation();
+    if (activation != "none" && activation != "silu" && activation != "swish")
+      return rewriter.notifyMatchFailure(op, "unsupported fused activation");
+
+    Value nchw = adaptor.getInput();
+    if (channelsLast)
+      nchw = transposeTo(nchw, {batch, channels, length}, {0, 2, 1}, rewriter,
+                         loc);
+
+    Value past = adaptor.getPastState();
+    if (past) {
+      auto pastType = dyn_cast<RankedTensorType>(past.getType());
+      if (!pastType || pastType.getShape() != sType.getShape() ||
+          pastType.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "incompatible past_state");
+    } else {
+      past = tosa::ConstOp::create(
+          rewriter, loc, sType,
+          DenseElementsAttr::get(sType, rewriter.getZeroAttr(elemType)));
+    }
+
+    int64_t paddedLen = stateLen + length;
+    auto paddedType =
+        RankedTensorType::get({batch, channels, paddedLen}, elemType);
+    Value padded = tosa::ConcatOp::create(rewriter, loc, paddedType,
+                                          ValueRange{past, nchw},
+                                          rewriter.getI32IntegerAttr(2));
+    Value present = sliceAt(padded, {0, 0, length}, {batch, channels, stateLen},
+                            rewriter, loc);
+
+    Value bias = adaptor.getBias();
+    if (bias) {
+      auto biasType = dyn_cast<RankedTensorType>(bias.getType());
+      if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1 ||
+          biasType.getElementType() != elemType ||
+          (biasType.getDimSize(0) != channels && biasType.getDimSize(0) != 1))
+        return rewriter.notifyMatchFailure(op, "incompatible bias tensor");
+    } else {
+      auto biasType = RankedTensorType::get({channels}, elemType);
+      bias = tosa::ConstOp::create(
+          rewriter, loc, biasType,
+          DenseElementsAttr::get(biasType, rewriter.getZeroAttr(elemType)));
+    }
+
+    Value inputNhwc =
+        reshapeTo(padded, {batch, channels, 1, paddedLen}, rewriter);
+    inputNhwc = transposeTo(inputNhwc, {batch, 1, paddedLen, channels},
+                            {0, 2, 3, 1}, rewriter, loc);
+    Value weightTosa = transposeTo(adaptor.getWeight(), {1, k, channels},
+                                   {1, 2, 0}, rewriter, loc);
+    weightTosa = reshapeTo(weightTosa, {1, k, channels, 1}, rewriter);
+
+    auto nhwcOutType =
+        RankedTensorType::get({batch, 1, length, channels}, elemType);
+    Value conv =
+        tosa::DepthwiseConv2DOp::create(
+            rewriter, loc, nhwcOutType, inputNhwc, weightTosa, bias,
+            rewriter.getDenseI64ArrayAttr({0, 0, 0, 0}),
+            rewriter.getDenseI64ArrayAttr({1, 1}),
+            rewriter.getDenseI64ArrayAttr({1, 1}), TypeAttr::get(accType))
+            .getResult();
+    Value nchwOut = transposeTo(conv, {batch, channels, 1, length},
+                                {0, 3, 1, 2}, rewriter, loc);
+    nchwOut = reshapeTo(nchwOut, {batch, channels, length}, rewriter);
+
+    if (activation == "silu" || activation == "swish") {
+      Value sigmoid = tosa::SigmoidOp::create(
+          rewriter, loc,
+          RankedTensorType::get({batch, channels, length}, elemType), nchwOut);
+      nchwOut = tosa::MulOp::create(rewriter, loc, nchwOut.getType(), nchwOut,
+                                    sigmoid, createZeroMulShift(rewriter, loc));
+    }
+
+    Value y = nchwOut;
+    if (channelsLast)
+      y = transposeTo(y, yType.getShape(), {0, 2, 1}, rewriter, loc);
+    rewriter.replaceOp(op, {y, present});
+    return success();
+  }
+};
 
 // Multiply by a scalar that ONNX carries as an f32 attribute. hipBLASLt scales
 // in f32 even when the data is f16 or bf16 (scaleType = HIP_R_32F while
@@ -2685,6 +2852,251 @@ struct ExtractSliceConverter final
   }
 };
 
+struct StaticConcatMatch {
+  RankedTensorType resultType;
+  int64_t axis;
+  SmallVector<Value> inputs;
+  SmallVector<tensor::InsertSliceOp> inserts;
+  tensor::EmptyOp init;
+};
+
+static std::optional<StaticConcatMatch>
+matchStaticConcat(tensor::InsertSliceOp root) {
+  // Only claim the last insertion. Earlier insertions remain legal until the
+  // root rewrite replaces the complete chain.
+  if (llvm::any_of(root->getUsers(), [&](Operation *user) {
+        auto next = dyn_cast<tensor::InsertSliceOp>(user);
+        return next && next.getDest() == root.getResult();
+      }))
+    return std::nullopt;
+
+  auto resultType = dyn_cast<RankedTensorType>(root.getResult().getType());
+  if (!resultType || !resultType.hasStaticShape() ||
+      llvm::any_of(resultType.getShape(), [](int64_t dim) { return dim <= 0; }))
+    return std::nullopt;
+
+  SmallVector<tensor::InsertSliceOp> inserts;
+  Value dest = root.getResult();
+  while (auto insert = dest.getDefiningOp<tensor::InsertSliceOp>()) {
+    if (insert.getResult().getType() != resultType)
+      return std::nullopt;
+    inserts.push_back(insert);
+    dest = insert.getDest();
+  }
+  auto init = dest.getDefiningOp<tensor::EmptyOp>();
+  if (!init || init.getType() != resultType || inserts.size() < 2)
+    return std::nullopt;
+  std::reverse(inserts.begin(), inserts.end());
+
+  int64_t rank = resultType.getRank();
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    int64_t expectedOffset = 0;
+    SmallVector<Value> inputs;
+    bool valid = true;
+    for (tensor::InsertSliceOp insert : inserts) {
+      auto sourceType =
+          dyn_cast<RankedTensorType>(insert.getSource().getType());
+      if (!sourceType || !sourceType.hasStaticShape() ||
+          sourceType.getRank() != rank ||
+          sourceType.getElementType() != resultType.getElementType()) {
+        valid = false;
+        break;
+      }
+
+      for (int64_t dim = 0; dim < rank; ++dim) {
+        auto offset = getConstantIntValue(insert.getMixedOffsets()[dim]);
+        auto size = getConstantIntValue(insert.getMixedSizes()[dim]);
+        auto stride = getConstantIntValue(insert.getMixedStrides()[dim]);
+        int64_t sourceDim = sourceType.getDimSize(dim);
+        int64_t wantedOffset = dim == axis ? expectedOffset : 0;
+        if (sourceDim <= 0 || offset != wantedOffset || size != sourceDim ||
+            stride != 1 ||
+            (dim != axis && sourceDim != resultType.getDimSize(dim))) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid)
+        break;
+      expectedOffset += sourceType.getDimSize(axis);
+      inputs.push_back(insert.getSource());
+    }
+
+    if (valid && expectedOffset == resultType.getDimSize(axis))
+      return StaticConcatMatch{resultType, axis, std::move(inputs),
+                               std::move(inserts), init};
+  }
+  return std::nullopt;
+}
+
+struct InsertSliceConcatConverter final
+    : public OpConversionPattern<tensor::InsertSliceOp> {
+  using OpConversionPattern<tensor::InsertSliceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::InsertSliceOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<StaticConcatMatch> match = matchStaticConcat(op);
+    if (!match)
+      return rewriter.notifyMatchFailure(
+          op, "expected a static contiguous concat insertion chain");
+
+    Value concat = tosa::ConcatOp::create(
+        rewriter, op.getLoc(), match->resultType, match->inputs,
+        rewriter.getI32IntegerAttr(match->axis));
+    rewriter.replaceOp(op, concat);
+
+    // Remove the now-dead decomposition from the root back to tensor.empty.
+    for (size_t i = match->inserts.size() - 1; i-- > 0;)
+      if (match->inserts[i]->use_empty())
+        rewriter.eraseOp(match->inserts[i]);
+    if (match->init->use_empty())
+      rewriter.eraseOp(match->init);
+    return success();
+  }
+};
+
+// onnx.Shape / Size / Identity / ConstantOfShape are not 1-1 TOSA ops
+// (except Identity → tosa.identity). After convert-onnx-to-hip they arrive
+// as:
+//   Identity          SSA forward, or a same-type tensor.cast
+//   Shape (static)    arith.constant dims + tensor.from_elements
+//   Size (static)     arith.constant rank-0 i64; hip.size is the dynamic path
+//   ConstantOfShape   arith.constant splat, or tensor.splat
+// Fold those residues to tosa.const / tosa.identity so a rock.kernel can
+// absorb them. Runtime shape queries (tensor.dim, dynamic hip.size) stay
+// unconverted: TOSA has no shape-of.
+//
+// TOSA number tensors cannot have a zero extent (`tensor<0xi64>`). Leave
+// those as arith.constant / tensor.from_elements / tensor.splat; Reduce
+// empty-axes identity uses exactly that type.
+bool hasPositiveStaticExtents(RankedTensorType type) {
+  return type && type.hasStaticShape() &&
+         llvm::all_of(type.getShape(), [](int64_t d) { return d > 0; });
+}
+
+bool isTosaExpressibleTensorConst(arith::ConstantOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  return hasPositiveStaticExtents(type) &&
+         isa<DenseElementsAttr>(op.getValue());
+}
+
+bool isTosaExpressibleFromElements(tensor::FromElementsOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  if (!hasPositiveStaticExtents(type))
+    return false;
+  return llvm::all_of(op.getElements(),
+                      [](Value v) { return matchPattern(v, m_Constant()); });
+}
+
+bool isTosaExpressibleSplat(tensor::SplatOp op) {
+  auto type = dyn_cast<RankedTensorType>(op.getType());
+  if (!hasPositiveStaticExtents(type) || !op.getDynamicSizes().empty())
+    return false;
+  return matchPattern(op.getInput(), m_Constant());
+}
+
+Value emitTosaConst(ConversionPatternRewriter &rewriter, Location loc,
+                    RankedTensorType type, ElementsAttr values) {
+  return tosa::ConstOp::create(rewriter, loc, type, values);
+}
+
+struct TensorConstConverter final
+    : public OpConversionPattern<arith::ConstantOp> {
+  using OpConversionPattern<arith::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::ConstantOp op, OpAdaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleTensorConst(op))
+      return rewriter.notifyMatchFailure(op, "expected a static dense tensor");
+    auto type = cast<RankedTensorType>(op.getType());
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         cast<ElementsAttr>(op.getValue())));
+    return success();
+  }
+};
+
+struct FromElementsConverter final
+    : public OpConversionPattern<tensor::FromElementsOp> {
+  using OpConversionPattern<tensor::FromElementsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::FromElementsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleFromElements(op))
+      return rewriter.notifyMatchFailure(
+          op, "expected a static from_elements of constants");
+    auto type = cast<RankedTensorType>(op.getType());
+    SmallVector<Attribute> elems;
+    elems.reserve(adaptor.getElements().size());
+    for (Value v : adaptor.getElements()) {
+      Attribute attr;
+      if (!matchPattern(v, m_Constant(&attr)))
+        return rewriter.notifyMatchFailure(op, "element is not a constant");
+      elems.push_back(attr);
+    }
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         DenseElementsAttr::get(type, elems)));
+    return success();
+  }
+};
+
+struct SplatConverter final : public OpConversionPattern<tensor::SplatOp> {
+  using OpConversionPattern<tensor::SplatOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(tensor::SplatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleSplat(op))
+      return rewriter.notifyMatchFailure(op,
+                                         "expected a static constant splat");
+    auto type = cast<RankedTensorType>(op.getType());
+    Attribute attr;
+    if (!matchPattern(adaptor.getInput(), m_Constant(&attr)))
+      return rewriter.notifyMatchFailure(op, "splat input is not a constant");
+    TypedAttr typed = dyn_cast<TypedAttr>(attr);
+    if (!typed)
+      return rewriter.notifyMatchFailure(op, "splat input is not a typed attr");
+    rewriter.replaceOp(op, emitTosaConst(rewriter, op.getLoc(), type,
+                                         DenseElementsAttr::get(type, typed)));
+    return success();
+  }
+};
+
+// hip.size is the dynamic OnnxToHip path. A static input still folds to
+// tosa.const(prod(shape)), matching SizeToConstant. Dynamic dims cannot
+// be read in TOSA.
+struct SizeConverter final : public OpConversionPattern<SizeOp> {
+  using OpConversionPattern<SizeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SizeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    auto inputType = dyn_cast<RankedTensorType>(adaptor.getX().getType());
+    if (!resultType || !resultType.hasStaticShape() || !inputType ||
+        !inputType.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (resultType.getRank() != 0 || !resultType.getElementType().isInteger(64))
+      return rewriter.notifyMatchFailure(op, "result must be tensor<i64>");
+
+    int64_t n = 1;
+    for (int64_t d : inputType.getShape()) {
+      if (d < 0)
+        return rewriter.notifyMatchFailure(op, "expected a static shape");
+      n *= d;
+    }
+    auto attr = DenseElementsAttr::get(
+        resultType, rewriter.getIntegerAttr(rewriter.getI64Type(), n));
+    rewriter.replaceOp(op,
+                       emitTosaConst(rewriter, op.getLoc(), resultType, attr));
+    return success();
+  }
+};
+
 Value transposePerm(Value input, ArrayRef<int32_t> perm,
                     ConversionPatternRewriter &rewriter, Location loc) {
   auto inTy = cast<RankedTensorType>(input.getType());
@@ -3671,6 +4083,129 @@ struct GatherConverter final : public OpConversionPattern<GatherOp> {
     Value gathered =
         tosa::GatherOp::create(rewriter, loc, gatheredTy, values, indices);
     rewriter.replaceOp(op, reshapeTo(gathered, resultTy.getShape(), rewriter));
+    return success();
+  }
+};
+
+// TOSA has no one_hot. Expand static OneHot to broadcasted elementwise ops:
+//
+//   canonical = indices < 0 ? indices + depth : indices
+//   output = select(canonical == [0, ..., depth - 1], on, off)
+//
+// The index and class tensors are reshaped and tiled to the output shape.
+// Values outside [-depth, depth - 1] compare unequal to every class and
+// therefore produce the off value, matching hip_one_hot.
+//
+// Before:
+//   %y = hip.one_hot(%ctx)
+//          ins(%indices, %depth, %values : tensor<2xi64>, tensor<i64>,
+//                                             tensor<2xf32>)
+//          outs(%init : tensor<2x4xf32>) : tensor<2x4xf32>
+// After:
+//   %canonical = tosa.select (tosa.greater 0, %indices),
+//                            (tosa.add %indices, 4), %indices
+//   %classes = tosa.const [0, 1, 2, 3]
+//   %pred = tosa.equal (tiled %canonical), (tiled %classes)
+//   %y = tosa.select %pred, %on, %off
+struct OneHotConverter final : public OpConversionPattern<OneHotOp> {
+  using OpConversionPattern<OneHotOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(OneHotOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected tensor mode");
+
+    auto indicesTy = dyn_cast<RankedTensorType>(adaptor.getIndices().getType());
+    auto depthTy = dyn_cast<RankedTensorType>(adaptor.getDepth().getType());
+    auto valuesTy = dyn_cast<RankedTensorType>(adaptor.getValues().getType());
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!indicesTy || !depthTy || !valuesTy || !resultTy ||
+        !indicesTy.hasStaticShape() || !depthTy.hasStaticShape() ||
+        !valuesTy.hasStaticShape() || !resultTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
+    if (!isa<IntegerType>(indicesTy.getElementType()) ||
+        !isa<IntegerType>(depthTy.getElementType()))
+      return rewriter.notifyMatchFailure(op,
+                                         "indices and depth must be integer");
+    if (valuesTy.getRank() != 1 || valuesTy.getDimSize(0) != 2)
+      return rewriter.notifyMatchFailure(op, "values must have shape [2]");
+    if (valuesTy.getElementType() != resultTy.getElementType())
+      return rewriter.notifyMatchFailure(op, "values and result types differ");
+    if (resultTy.getRank() != indicesTy.getRank() + 1)
+      return rewriter.notifyMatchFailure(
+          op, "result rank must be indices rank plus one");
+
+    int64_t axis = op.getAxis();
+    if (axis < 0)
+      axis += resultTy.getRank();
+    if (axis < 0 || axis >= resultTy.getRank())
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    SmallVector<int64_t> expectedShape;
+    expectedShape.reserve(resultTy.getRank());
+    expectedShape.append(indicesTy.getShape().begin(),
+                         indicesTy.getShape().begin() + axis);
+    int64_t depth = resultTy.getDimSize(axis);
+    expectedShape.push_back(depth);
+    expectedShape.append(indicesTy.getShape().begin() + axis,
+                         indicesTy.getShape().end());
+    if (depth <= 0 || expectedShape != resultTy.getShape())
+      return rewriter.notifyMatchFailure(op, "invalid static OneHot shape");
+    if (llvm::any_of(resultTy.getShape(), [](int64_t dim) { return dim <= 0; }))
+      return rewriter.notifyMatchFailure(op, "expected positive extents");
+
+    Location loc = op.getLoc();
+    auto indexElemTy = cast<IntegerType>(indicesTy.getElementType());
+    SmallVector<int64_t> indexShape(resultTy.getShape().begin(),
+                                    resultTy.getShape().end());
+    indexShape[axis] = 1;
+    Value indices = reshapeTo(adaptor.getIndices(), indexShape, rewriter);
+
+    auto expandedIndicesTy = RankedTensorType::get(indexShape, indexElemTy);
+    Value zero = createSplatInt(rewriter, loc, expandedIndicesTy, 0);
+    Value depthSplat = createSplatInt(rewriter, loc, expandedIndicesTy, depth);
+    auto indexPredTy = RankedTensorType::get(indexShape, rewriter.getI1Type());
+    Value isNegative =
+        tosa::GreaterOp::create(rewriter, loc, indexPredTy, zero, indices);
+    Value wrapped = tosa::AddOp::create(rewriter, loc, expandedIndicesTy,
+                                        indices, depthSplat);
+    indices = tosa::SelectOp::create(rewriter, loc, expandedIndicesTy,
+                                     isNegative, wrapped, indices);
+
+    SmallVector<int64_t> indexMultiples(resultTy.getRank(), 1);
+    indexMultiples[axis] = depth;
+    indices = tileMultiples(indices, indexMultiples, resultTy.getShape(),
+                            rewriter, loc);
+
+    SmallVector<int64_t> classShape(resultTy.getRank(), 1);
+    classShape[axis] = depth;
+    auto classTy = RankedTensorType::get(classShape, indexElemTy);
+    SmallVector<APInt> classValues;
+    classValues.reserve(depth);
+    for (int64_t i = 0; i < depth; ++i)
+      classValues.emplace_back(indexElemTy.getWidth(), i);
+    Value classes = tosa::ConstOp::create(
+        rewriter, loc, classTy, DenseElementsAttr::get(classTy, classValues));
+
+    SmallVector<int64_t> classMultiples(resultTy.getShape().begin(),
+                                        resultTy.getShape().end());
+    classMultiples[axis] = 1;
+    classes = tileMultiples(classes, classMultiples, resultTy.getShape(),
+                            rewriter, loc);
+
+    auto predTy =
+        RankedTensorType::get(resultTy.getShape(), rewriter.getI1Type());
+    Value pred = tosa::EqualOp::create(rewriter, loc, predTy, indices, classes);
+
+    SmallVector<int64_t> scalarShape(resultTy.getRank(), 1);
+    Value off =
+        reshapeTo(sliceOffsetSize(adaptor.getValues(), {0}, {1}, rewriter, loc),
+                  scalarShape, rewriter);
+    Value on =
+        reshapeTo(sliceOffsetSize(adaptor.getValues(), {1}, {1}, rewriter, loc),
+                  scalarShape, rewriter);
+    rewriter.replaceOpWithNewOp<tosa::SelectOp>(op, resultTy, pred, on, off);
     return success();
   }
 };
@@ -6546,16 +7081,19 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
     // fails.
     ConversionTarget conversion(*ctx);
     conversion.addLegalDialect<tosa::TosaDialect, func::FuncDialect>();
+    // NonZero intentionally remains legal (unconverted): supported TOSA has
+    // no ordered prefix scan or data-dependent result extent, while
+    // hip.nonzero returns both compacted [rank, N] indices and the runtime N.
     conversion.addIllegalOp<
-        ConvOp, MatmulOp, GemmOp, TransposeOp, AddOp, SubOp, MinOp, MaxOp,
-        MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp,
-        TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, GeluOp,
-        BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp, LeakyReluOp,
-        MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp, QuantizeLinearOp,
-        DequantizeLinearOp, MatMulNBitsOp, GatherOp, GatherElementsOp,
-        GatherNDOp, GridSampleOp, RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp,
-        RoundOp, ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp,
-        SkipRmsNormOp>();
+        ConvOp, CausalConvWithStateOp, MatmulOp, GemmOp, TransposeOp, AddOp,
+        SubOp, MinOp, MaxOp, MulOp, DivOp, AbsOp, NegOp, CeilOp, FloorOp, ExpOp,
+        LogOp, SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
+        SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp,
+        LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
+        GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp, RangeOp,
+        RopeOp, GqaOp, MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp,
+        LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -6627,6 +7165,16 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    conversion.addDynamicallyLegalOp<tensor::InsertSliceOp>(
+        [](tensor::InsertSliceOp op) { return !matchStaticConcat(op); });
+    conversion.addDynamicallyLegalOp<arith::ConstantOp>(
+        [](arith::ConstantOp op) { return !isTosaExpressibleTensorConst(op); });
+    conversion.addDynamicallyLegalOp<tensor::FromElementsOp>(
+        [](tensor::FromElementsOp op) {
+          return !isTosaExpressibleFromElements(op);
+        });
+    conversion.addDynamicallyLegalOp<tensor::SplatOp>(
+        [](tensor::SplatOp op) { return !isTosaExpressibleSplat(op); });
     // Neither op is a FuseROCMlir anchor or a pointwise op, so neither reaches
     // this pass from buildRocMlirPipeline today -- only from a hand-written
     // rock.kernel. Declining therefore leaves the op in place rather than
@@ -6653,11 +7201,13 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
     RewritePatternSet patterns(ctx);
     patterns.add<
-        ConvConverter, MatMulConverter, GemmConverter, TransposeConverter,
-        TileConverter, PadConverter, ResizeConverter, ConstantConverter,
-        ExpandConverter, ReshapeConverter<tensor::CollapseShapeOp>,
+        ConvConverter, CausalConvWithStateConverter, MatMulConverter,
+        GemmConverter, TransposeConverter, TileConverter, PadConverter,
+        ResizeConverter, ConstantConverter, ExpandConverter,
+        ReshapeConverter<tensor::CollapseShapeOp>,
         ReshapeConverter<tensor::ExpandShapeOp>, ExtractSliceConverter,
-        DivConverter, BinaryConverter<AddOp, tosa::AddOp>,
+        InsertSliceConcatConverter, DivConverter,
+        BinaryConverter<AddOp, tosa::AddOp>,
         BinaryConverter<SubOp, tosa::SubOp>,
         BinaryConverter<MinOp, tosa::MinimumOp>,
         BinaryConverter<MaxOp, tosa::MaximumOp>,
@@ -6695,9 +7245,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
         GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
-        GridSampleConverter, RangeConverter, RopeConverter, GqaConverter,
-        MhaConverter, RmsNormConverter, LayerNormConverter,
-        InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        GridSampleConverter, SizeConverter, TensorConstConverter,
+        FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
+        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
+        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
