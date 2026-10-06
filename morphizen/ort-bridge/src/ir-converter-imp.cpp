@@ -142,14 +142,23 @@ OrtStatus *IRConverterImp::convert_graph(morphizen::Graph &graph) const {
 
 OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph inputs to ONNX format";
-  // Get inputs from the ORT graph
+  // IR version 3 lists every initializer in graph.input as well. Those names
+  // are constants, imported below. Binding them as function arguments first
+  // makes add_constant_initialized_tensor reject the name as already in use.
+  std::unordered_set<std::string> initializer_names;
+  for (const OrtValueInfo *initializer : graph_.initializers()) {
+    initializer_names.emplace(Ort::ConstValueInfo(initializer).GetName());
+  }
   auto inputs = graph_.inputs();
   auto new_inputs = std::vector<morphizen::NodeArg *>();
   new_inputs.reserve(inputs.size());
   for (const OrtValueInfo *input : inputs) {
-    // Create ValueInfo wrapper for the input
-    auto value_info =
-        Ort::ConstValueInfo(input); // Create ONNX ValueInfoProto for the input
+    auto value_info = Ort::ConstValueInfo(input);
+    if (initializer_names.count(value_info.GetName()) != 0) {
+      MY_LOG(3) << "Skipping initializer listed as graph input: "
+                << value_info.GetName();
+      continue;
+    }
     morphizen::NodeArg *node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
@@ -157,7 +166,7 @@ OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
     MY_LOG(3) << "Added input: " << value_info.GetName();
   }
   morphizen_cxx::GraphRef(graph).set_inputs(new_inputs);
-  MY_LOG(2) << "Converted " << inputs.size() << " inputs";
+  MY_LOG(2) << "Converted " << new_inputs.size() << " inputs";
   return nullptr;
 }
 
