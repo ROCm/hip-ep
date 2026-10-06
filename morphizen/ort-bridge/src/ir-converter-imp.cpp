@@ -142,19 +142,24 @@ OrtStatus *IRConverterImp::convert_graph(morphizen::Graph &graph) const {
 
 OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph inputs to ONNX format";
-  // IR version 3 lists every initializer in graph.input as well. Those names
-  // are constants, imported below. Binding them as function arguments first
-  // makes add_constant_initialized_tensor reject the name as already in use.
-  std::unordered_set<std::string> initializer_names;
-  for (const OrtValueInfo *initializer : graph_.initializers()) {
-    initializer_names.emplace(Ort::ConstValueInfo(initializer).GetName());
+  // IR versions before 4 list every initializer in graph.input as well. Those
+  // names are constants, imported below. Binding them as function arguments
+  // first makes add_constant_initialized_tensor reject the name as already in
+  // use. IR version 4 and later use a shared name as an overridable input
+  // whose initializer is only the default, so those stay function arguments.
+  std::unordered_set<std::string> legacy_initializer_names;
+  if (graph_.ir_version() < 4) {
+    for (const OrtValueInfo *initializer : graph_.initializers()) {
+      legacy_initializer_names.emplace(
+          Ort::ConstValueInfo(initializer).GetName());
+    }
   }
   auto inputs = graph_.inputs();
   auto new_inputs = std::vector<morphizen::NodeArg *>();
   new_inputs.reserve(inputs.size());
   for (const OrtValueInfo *input : inputs) {
     auto value_info = Ort::ConstValueInfo(input);
-    if (initializer_names.count(value_info.GetName()) != 0) {
+    if (legacy_initializer_names.count(value_info.GetName()) != 0) {
       MY_LOG(3) << "Skipping initializer listed as graph input: "
                 << value_info.GetName();
       continue;
