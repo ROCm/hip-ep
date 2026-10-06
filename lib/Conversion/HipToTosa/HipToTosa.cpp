@@ -6,6 +6,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/SmallVector.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
@@ -20,6 +21,7 @@
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Matchers.h>
 #include <mlir/IR/PatternMatch.h>
+#include <mlir/IR/SymbolTable.h>
 #include <mlir/Pass/Pass.h>
 #include <mlir/Transforms/DialectConversion.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
@@ -94,6 +96,35 @@ static Value transposeTo(Value input, ArrayRef<int64_t> shape,
   auto type = cast<RankedTensorType>(input.getType());
   return tosa::TransposeOp::create(rewriter, loc, type.clone(shape), input,
                                    rewriter.getDenseI32ArrayAttr(permutation));
+}
+
+// Swap the trailing two dimensions, leaving any leading batch dims in place.
+static Value transposeTrailingDims(Value input,
+                                   ConversionPatternRewriter &rewriter,
+                                   Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  int64_t rank = type.getRank();
+  SmallVector<int32_t> permutation;
+  for (int64_t d = 0; d < rank; ++d)
+    permutation.push_back(static_cast<int32_t>(d));
+  std::swap(permutation[rank - 2], permutation[rank - 1]);
+  SmallVector<int64_t> shape(type.getShape());
+  std::swap(shape[rank - 2], shape[rank - 1]);
+  return transposeTo(input, shape, permutation, rewriter, loc);
+}
+
+// Zero-pad `input` by `padding`, given as [before, after] per dimension.
+static Value zeroPadTo(Value input, ArrayRef<int64_t> padding,
+                       ArrayRef<int64_t> shape,
+                       ConversionPatternRewriter &rewriter, Location loc) {
+  auto type = cast<RankedTensorType>(input.getType());
+  Type elemType = type.getElementType();
+  auto zeroType = RankedTensorType::get({1}, elemType);
+  Value zero = tosa::ConstOp::create(
+      rewriter, loc, zeroType,
+      DenseElementsAttr::get(zeroType, rewriter.getZeroAttr(elemType)));
+  return tosa::PadOp::create(rewriter, loc, type.clone(shape), input,
+                             createConstShape(rewriter, loc, padding), zero);
 }
 
 // Crop `input` to `shape`, anchored at the origin, via tosa.slice.
@@ -179,13 +210,20 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     ArrayRef<int64_t> inputShape = inputType.getShape();
     ArrayRef<int64_t> weightShape = weightType.getShape();
     ArrayRef<int64_t> resultShape = resultType.getShape();
-    // tosa.conv2d has no grouped form (weight IC must equal input C). Depthwise
-    // is a separate op and is not handled here.
-    if (op.getGroup() != 1)
+    // Standard TOSA conv2d is ungrouped (weight IC == input C). rocMLIR
+    // accepts an optional discardable `group` attribute and passes it to
+    // rock.conv, which covers both ordinary grouped convolution and ONNX
+    // depthwise (group == C, weight IC == 1).
+    int64_t group = op.getGroup();
+    if (group < 1)
+      return rewriter.notifyMatchFailure(op, "expected a positive group");
+    if (inputShape[1] % group != 0 || resultShape[1] % group != 0)
       return rewriter.notifyMatchFailure(
-          op, "grouped convolution has no TOSA conv2d spelling");
-    if (inputShape[0] != resultShape[0] || weightShape[1] != inputShape[1] ||
-        weightShape[0] != resultShape[1])
+          op, "input/output channels must be divisible by group");
+    if (weightShape[1] != inputShape[1] / group)
+      return rewriter.notifyMatchFailure(
+          op, "weight input channels must equal C / group");
+    if (inputShape[0] != resultShape[0] || weightShape[0] != resultShape[1])
       return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
 
     SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
@@ -280,6 +318,7 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
         rewriter, op.getLoc(), nhwkType, input, weight, bias, tosaPads,
         rewriter.getDenseI64ArrayAttr(strides),
         rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+    conv->setAttr("group", rewriter.getI64IntegerAttr(group));
 
     rewriter.replaceOp(op, transposeTo(conv.getResult(), resultShape,
                                        {0, 3, 1, 2}, rewriter, op.getLoc()));
@@ -299,10 +338,6 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     if (op.getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected tensor mode");
 
-    // tosa.matmul is a plain A @ B; transposes must have been folded away.
-    if (op.getTransA() != 0 || op.getTransB() != 0)
-      return rewriter.notifyMatchFailure(op, "transA/transB unsupported");
-
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "expected a static ranked tensor");
@@ -311,30 +346,72 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     auto bType = dyn_cast<RankedTensorType>(adaptor.getB().getType());
     if (!aType || !aType.hasStaticShape() || !bType || !bType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "operands not static ranked");
-    if (aType.getRank() < 2 || bType.getRank() != 2)
-      return rewriter.notifyMatchFailure(
-          op, "only [..,M,K] x [K,N] (rank-2 B) is supported");
+    if (aType.getRank() < 2 || bType.getRank() < 2)
+      return rewriter.notifyMatchFailure(op,
+                                         "operands must be at least rank 2");
+
+    // tosa.matmul is a plain A @ B, so a transposed operand has to become a
+    // real tosa.transpose of its trailing two dims, the way GemmConverter
+    // already does for its rank-2 case. Only the dimension lookups move here;
+    // the transposes themselves are materialized further down, once every
+    // bail-out is behind us, so the collapse below still sees A[.., M, K] and
+    // B[.., K, N]. Leading dims are untouched by the swap either way.
+    bool transA = op.getTransA() != 0;
+    bool transB = op.getTransB() != 0;
+
+    ArrayRef<int64_t> aShape = aType.getShape();
+    ArrayRef<int64_t> bShape = bType.getShape();
+    int64_t k = aShape[aShape.size() - (transA ? 2 : 1)];
+    int64_t n = bShape[bShape.size() - (transB ? 2 : 1)];
+    if (bShape[bShape.size() - (transB ? 1 : 2)] != k)
+      return rewriter.notifyMatchFailure(op, "inner dimensions disagree");
 
     // tosa.matmul requires rank-3 operands with *equal* batch sizes -- it does
-    // not broadcast a size-1 batch against a larger one. hip.matmul here has an
-    // unbatched (rank-2) B, so instead of broadcasting B's batch up to A's,
-    // collapse all of A's leading dims and M into a single dimension:
-    //
-    //   A[.., M, K] -> [1, prod(..)*M, K]
-    //   B[K, N]     -> [1, K, N]
-    //   matmul      -> [1, prod(..)*M, N]
-    //   result      -> [.., M, N]   (original result shape)
-    ArrayRef<int64_t> aShape = aType.getShape();
-    int64_t k = aShape.back();
-    int64_t collapsedM = 1;
-    for (int64_t d : aShape.drop_back())
-      collapsedM *= d;
-    int64_t n = bType.getShape().back();
+    // not broadcast a size-1 batch against a larger one. Both shapes below
+    // reach rank 3 without needing it, but which dimension absorbs A's leading
+    // dims differs, so they cannot be spelled as one case.
+    int64_t batch = 1;
+    int64_t m = aShape[aShape.size() - (transA ? 1 : 2)];
+    if (bType.getRank() == 2) {
+      // B is the same matrix for every batch element, so flattening A's
+      // leading dims into M leaves the arithmetic untouched and avoids
+      // broadcasting B's batch up to A's:
+      //
+      //   A[.., M, K] -> [1, prod(..)*M, K]
+      //   B[K, N]     -> [1, K, N]
+      //   matmul      -> [1, prod(..)*M, N]
+      //   result      -> [.., M, N]   (original result shape)
+      for (int64_t d : aShape.drop_back(2))
+        m *= d;
+    } else {
+      // A batched B -- attention's Q@K^T and attn@V, where every (batch, head)
+      // pair has its own matrix -- cannot be flattened into M that way. The
+      // leading dims collapse into tosa.matmul's batch dimension instead,
+      // which needs them to agree on both sides, as there is no broadcast to
+      // fall back on:
+      //
+      //   A[.., M, K] -> [prod(..), M, K]
+      //   B[.., K, N] -> [prod(..), K, N]
+      //   matmul      -> [prod(..), M, N]
+      //   result      -> [.., M, N]   (original result shape)
+      if (aType.getRank() != bType.getRank() ||
+          aShape.drop_back(2) != bShape.drop_back(2))
+        return rewriter.notifyMatchFailure(op, "batch dimensions disagree");
+      for (int64_t d : aShape.drop_back(2))
+        batch *= d;
+    }
 
-    Value a = reshapeTo(adaptor.getA(), {1, collapsedM, k}, rewriter);
-    Value b = reshapeTo(adaptor.getB(), {1, k, n}, rewriter);
+    Value aVal =
+        transA ? transposeTrailingDims(adaptor.getA(), rewriter, op.getLoc())
+               : adaptor.getA();
+    Value bVal =
+        transB ? transposeTrailingDims(adaptor.getB(), rewriter, op.getLoc())
+               : adaptor.getB();
 
-    auto matmulType = resultType.clone({1, collapsedM, n});
+    Value a = reshapeTo(aVal, {batch, m, k}, rewriter);
+    Value b = reshapeTo(bVal, {batch, k, n}, rewriter);
+
+    auto matmulType = resultType.clone({batch, m, n});
     // The quant-info builder appends the (zero) zero-point operands that
     // tosa.matmul requires for float inputs.
     Value matmul =
@@ -1728,7 +1805,8 @@ RankedTensorType keepdimsReduceType(RankedTensorType dataType, int32_t axis) {
 }
 
 // TOSA has no reduce_mean. Scale by 1/N then reduce_sum on one axis
-// (keepdims=1). Used by hip.reduce_mean and by RMS/LN over several axes.
+// (keepdims=1). Used by hip.global_pool average mode, hip.reduce_mean, and
+// RMS/LN over several axes.
 FailureOr<Value> emitTosaKeepdimsReduceMean(Value data, int32_t axis,
                                             ConversionPatternRewriter &rewriter,
                                             Location loc, Operation *op) {
@@ -1889,25 +1967,6 @@ LogicalResult matchHipReduce(Operation *op, Value data, Value axes,
   keepdimsOut = match.keepdims;
   identity = match.identity;
   return success();
-}
-
-// The element types this pass can actually put through TOSA.
-//
-// Both are allow-lists rather than "everything except the type we know is
-// broken". Tosa_FloatTensor is AnyFloat and Tosa_Int is any signless or
-// unsigned integer, so f64, f80, f128, the float8 variants, i4 and i128 all
-// satisfy the op verifiers while nothing downstream can lower them -- and
-// onnx.ReduceL2 explicitly permits f64 input. The float set is the one
-// GemmConverter above already uses; the integer set names the widths ONNX
-// produces.
-static bool isTosaExpressibleFloat(Type elementType) {
-  return elementType.isF16() || elementType.isBF16() || elementType.isF32();
-}
-
-static bool isTosaExpressibleInt(Type elementType) {
-  return elementType.isSignlessInteger(1) || elementType.isSignlessInteger(8) ||
-         elementType.isSignlessInteger(16) ||
-         elementType.isSignlessInteger(32) || elementType.isSignlessInteger(64);
 }
 
 // ONNX reductions accept unsigned element types and OnnxToHip preserves them,
@@ -2116,6 +2175,9 @@ struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
 constexpr StringLiteral kRockCustomOpDomain = "rocmlir";
 constexpr StringLiteral kRockUnsignedCast = "unsigned_cast";
 constexpr StringLiteral kRockFpToIntCast = "fp_to_int_cast";
+constexpr int64_t kPoolAverage = 0;
+constexpr int64_t kPoolMax = 1;
+constexpr int64_t kPoolLp = 2;
 
 Value emitTosaCast(ConversionPatternRewriter &rewriter, Location loc,
                    Value input, Type resElemType) {
@@ -2484,6 +2546,133 @@ struct QuantizeLinearConverter final
   }
 };
 
+FailureOr<Value> emitKeepdimsReduceMax(Value data, int32_t axis,
+                                       ConversionPatternRewriter &rewriter,
+                                       Location loc, Operation *op) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected static ranked data");
+  if (axis < 0 || axis >= dataType.getRank())
+    return rewriter.notifyMatchFailure(op, "reduce axis out of range");
+  auto reducedTy = keepdimsReduceType(dataType, axis);
+  return tosa::ReduceMaxOp::create(rewriter, loc, reducedTy, data,
+                                   rewriter.getI32IntegerAttr(axis))
+      .getResult();
+}
+
+FailureOr<Value> emitKeepdimsReduceSum(Value data, int32_t axis,
+                                       ConversionPatternRewriter &rewriter,
+                                       Location loc, Operation *op) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType || !dataType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "expected static ranked data");
+  if (axis < 0 || axis >= dataType.getRank())
+    return rewriter.notifyMatchFailure(op, "reduce axis out of range");
+  auto reducedTy = keepdimsReduceType(dataType, axis);
+  return tosa::ReduceSumOp::create(rewriter, loc, reducedTy, data,
+                                   rewriter.getI32IntegerAttr(axis))
+      .getResult();
+}
+
+// Reduce every spatial axis [2, rank) keepdims. Global pooling is NCHW with
+// spatial dims collapsed to 1.
+FailureOr<Value> reduceSpatialAxes(
+    Value input, ConversionPatternRewriter &rewriter, Location loc,
+    Operation *op,
+    llvm::function_ref<FailureOr<Value>(Value, int32_t)> reduceOne) {
+  auto ty = dyn_cast<RankedTensorType>(input.getType());
+  if (!ty || !ty.hasStaticShape() || ty.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "global pool expects a static rank >= 3 tensor");
+  Value cur = input;
+  for (int64_t a : llvm::seq<int64_t>(2, ty.getRank())) {
+    FailureOr<Value> next = reduceOne(cur, static_cast<int32_t>(a));
+    if (failed(next))
+      return failure();
+    cur = *next;
+  }
+  return cur;
+}
+
+// Global pooling is a keepdims reduction over every spatial axis, which TOSA
+// spells out; only the element type limits it.
+bool isTosaExpressibleGlobalPool(GlobalPoolOp op) {
+  if (op.getNumResults() != 1)
+    return false;
+  auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inTy || !outTy || !inTy.hasStaticShape() || !outTy.hasStaticShape())
+    return false;
+  if (inTy.getElementType() != outTy.getElementType() ||
+      inTy.getRank() != outTy.getRank() || inTy.getRank() < 3)
+    return false;
+  if (inTy.getDimSize(0) != outTy.getDimSize(0) ||
+      inTy.getDimSize(1) != outTy.getDimSize(1))
+    return false;
+  for (int64_t i : llvm::seq<int64_t>(2, outTy.getRank()))
+    if (outTy.getDimSize(i) != 1)
+      return false;
+
+  int64_t mode = op.getMode();
+  if (mode == kPoolMax)
+    return isa<FloatType, IntegerType>(inTy.getElementType());
+  if (mode == kPoolLp && op.getP() <= 0)
+    return false;
+  // The reduce-mean scale and the LP powers both need a float tensor.
+  return (mode == kPoolAverage || mode == kPoolLp) &&
+         isa<FloatType>(inTy.getElementType());
+}
+
+struct GlobalPoolConverter final : public OpConversionPattern<GlobalPoolOp> {
+  using OpConversionPattern<GlobalPoolOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(GlobalPoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleGlobalPool(op))
+      return rewriter.notifyMatchFailure(op, "no TOSA reduction spelling");
+
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Value input = adaptor.getInput();
+    auto inTy = cast<RankedTensorType>(input.getType());
+    Location loc = op.getLoc();
+    int64_t mode = op.getMode();
+    FailureOr<Value> y;
+    if (mode == kPoolAverage) {
+      y = reduceSpatialAxes(input, rewriter, loc, op, [&](Value v, int32_t a) {
+        return emitTosaKeepdimsReduceMean(v, a, rewriter, loc, op);
+      });
+    } else if (mode == kPoolMax) {
+      y = reduceSpatialAxes(input, rewriter, loc, op, [&](Value v, int32_t a) {
+        return emitKeepdimsReduceMax(v, a, rewriter, loc, op);
+      });
+    } else {
+      Value abs = tosa::AbsOp::create(rewriter, loc, inTy, input);
+      Value pSplat =
+          createSplatFloat(rewriter, loc, inTy, static_cast<double>(op.getP()));
+      Value powered = tosa::PowOp::create(rewriter, loc, inTy, abs, pSplat);
+      FailureOr<Value> summed = reduceSpatialAxes(
+          powered, rewriter, loc, op, [&](Value v, int32_t a) {
+            return emitKeepdimsReduceSum(v, a, rewriter, loc, op);
+          });
+      if (failed(summed))
+        return failure();
+      auto sumTy = cast<RankedTensorType>((*summed).getType());
+      double invP = 1.0 / static_cast<double>(op.getP());
+      Value invPSplat = createSplatFloat(rewriter, loc, sumTy, invP);
+      y = tosa::PowOp::create(rewriter, loc, sumTy, *summed, invPSplat)
+              .getResult();
+    }
+    if (failed(y))
+      return failure();
+    if ((*y).getType() != resultTy)
+      return rewriter.notifyMatchFailure(
+          op, "global pool result shape disagrees with the reduced tensor");
+    rewriter.replaceOp(op, *y);
+    return success();
+  }
+};
+
 int64_t normalizeNormAxis(int64_t axis, int64_t rank) {
   if (axis < 0)
     axis += rank;
@@ -2675,6 +2864,231 @@ struct RmsNormConverter final : public OpConversionPattern<RmsNormOp> {
     if (failed(y))
       return failure();
     rewriter.replaceOp(op, *y);
+    return success();
+  }
+};
+
+// Geometry of the 2D TOSA pool that implements a hip.pool, normalized to NCHW.
+struct TosaPoolWindow {
+  SmallVector<int64_t, 2> kernel;
+  SmallVector<int64_t, 2> stride;
+  SmallVector<int64_t, 2> padBefore;
+  SmallVector<int64_t, 2> padAfter;
+  SmallVector<int64_t, 2> crop;
+  // Rank-4 NCHW shapes the pool runs on. A 1D pool is reshaped to these.
+  SmallVector<int64_t, 4> inShape;
+  SmallVector<int64_t, 4> outShape;
+  // tosa.avg_pool2d always divides by the window's in-bounds coverage of its
+  // own pad attribute, which is ONNX count_include_pad=0. The other two
+  // divisors instead need the padding materialized as explicit zeros, leaving
+  // the pool unpadded so it divides by the full kernel volume: that is
+  // count_include_pad=1 directly, and for LP it makes the pad cells
+  // contribute 0 to the window sum, as ONNX requires.
+  bool materializePad = false;
+};
+
+// TOSA pooling is 2D, undilated, and has no indices output, so only part of
+// hip.pool's ONNX-shaped configuration space has a TOSA spelling. The rest has
+// no entry here and stays a hip.pool that ends the fusion chain.
+std::optional<TosaPoolWindow> getTosaPoolWindow(PoolOp op) {
+  // MaxPool's Indices result has no TOSA equivalent.
+  if (op.getNumResults() != 1)
+    return std::nullopt;
+  auto inTy = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inTy || !outTy || !inTy.hasStaticShape() || !outTy.hasStaticShape())
+    return std::nullopt;
+  if (inTy.getElementType() != outTy.getElementType() ||
+      inTy.getRank() != outTy.getRank())
+    return std::nullopt;
+
+  int64_t mode = op.getPoolMode();
+  Type elemType = inTy.getElementType();
+  if (mode == kPoolMax) {
+    if (!isa<FloatType, IntegerType>(elemType))
+      return std::nullopt;
+  } else if (mode == kPoolAverage || mode == kPoolLp) {
+    // The f32 accumulator and LP's tosa.pow both need a float tensor.
+    if (!isa<FloatType>(elemType))
+      return std::nullopt;
+    if (mode == kPoolLp && op.getP() <= 0)
+      return std::nullopt;
+  } else {
+    return std::nullopt;
+  }
+  // ceil_mode puts the output past what `pads` describes, and TOSA has no
+  // column-major indices.
+  if (op.getCeilMode() != 0 || op.getStorageOrder() != 0)
+    return std::nullopt;
+
+  int64_t spatialRank = inTy.getRank() - 2;
+  // TOSA has no 3D pooling.
+  if (spatialRank != 1 && spatialRank != 2)
+    return std::nullopt;
+  SmallVector<int64_t> kernel = getI64Values(op.getKernelShape());
+  SmallVector<int64_t> stride = getI64Values(op.getStrides());
+  SmallVector<int64_t> pads = getI64Values(op.getPads());
+  SmallVector<int64_t> dilations = getI64Values(op.getDilations());
+  if (kernel.size() != size_t(spatialRank) ||
+      stride.size() != size_t(spatialRank) ||
+      dilations.size() != size_t(spatialRank) ||
+      pads.size() != size_t(2 * spatialRank))
+    return std::nullopt;
+  // TOSA pooling windows are dense.
+  if (llvm::any_of(dilations, [](int64_t d) { return d != 1; }))
+    return std::nullopt;
+
+  TosaPoolWindow window;
+  window.crop = {0, 0};
+  window.materializePad =
+      mode == kPoolLp || (mode == kPoolAverage && op.getCountIncludePad() != 0);
+  if (spatialRank == 1) {
+    // Pool a 1D window as a 2D one over a unit leading spatial dim.
+    window.kernel = {1, kernel[0]};
+    window.stride = {1, stride[0]};
+    window.padBefore = {0, pads[0]};
+    window.padAfter = {0, pads[1]};
+    window.inShape = {inTy.getDimSize(0), inTy.getDimSize(1), 1,
+                      inTy.getDimSize(2)};
+    window.outShape = {outTy.getDimSize(0), outTy.getDimSize(1), 1,
+                       outTy.getDimSize(2)};
+  } else {
+    window.kernel = {kernel[0], kernel[1]};
+    window.stride = {stride[0], stride[1]};
+    window.padBefore = {pads[0], pads[1]};
+    window.padAfter = {pads[2], pads[3]};
+    window.inShape.assign(inTy.getShape().begin(), inTy.getShape().end());
+    window.outShape.assign(outTy.getShape().begin(), outTy.getShape().end());
+  }
+  if (window.inShape[0] != window.outShape[0] ||
+      window.inShape[1] != window.outShape[1])
+    return std::nullopt;
+
+  // ONNX floors the output size, dropping a trailing partial window, while
+  // TOSA requires the window arithmetic to divide exactly. Absorb the
+  // remainder the way ConvConverter does: shrink the trailing pad, and crop
+  // the input for whatever the pad cannot cover. Either way only elements no
+  // remaining window reads are removed, so the trailing window keeps the pad
+  // overlap -- and therefore the AVERAGE divisor -- that ONNX gives it.
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    if (window.kernel[dim] < 1 || window.stride[dim] < 1)
+      return std::nullopt;
+    if (window.padBefore[dim] < 0 || window.padAfter[dim] < 0)
+      return std::nullopt;
+    int64_t inputSize = window.inShape[dim + 2];
+    int64_t span = inputSize - 1 + window.padBefore[dim] +
+                   window.padAfter[dim] - (window.kernel[dim] - 1);
+    if (span < 0)
+      return std::nullopt;
+    int64_t remainder = span % window.stride[dim];
+    int64_t fromPad = std::min(window.padAfter[dim], remainder);
+    window.padAfter[dim] -= fromPad;
+    window.crop[dim] = remainder - fromPad;
+    if (window.crop[dim] >= inputSize)
+      return std::nullopt;
+    if ((span - remainder) / window.stride[dim] + 1 != window.outShape[dim + 2])
+      return std::nullopt;
+  }
+  return window;
+}
+
+bool isTosaExpressiblePool(PoolOp op) {
+  return getTosaPoolWindow(op).has_value();
+}
+
+struct PoolConverter final : public OpConversionPattern<PoolOp> {
+  using OpConversionPattern<PoolOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(PoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    std::optional<TosaPoolWindow> window = getTosaPoolWindow(op);
+    if (!window)
+      return rewriter.notifyMatchFailure(op, "no TOSA pooling spelling");
+
+    Location loc = op.getLoc();
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    Type elemType = resultTy.getElementType();
+    int64_t mode = op.getPoolMode();
+    ArrayRef<int64_t> inShape = window->inShape;
+    ArrayRef<int64_t> outShape = window->outShape;
+
+    Value input = adaptor.getInput();
+    if (resultTy.getRank() != 4)
+      input = reshapeTo(input, inShape, rewriter);
+
+    // tosa.max_pool2d / avg_pool2d are NHWC; hip.pool is ONNX's NCHW.
+    // rocMLIR folds these transposes into layout metadata.
+    Value nhwc =
+        transposeTo(input, {inShape[0], inShape[2], inShape[3], inShape[1]},
+                    {0, 2, 3, 1}, rewriter, loc);
+    SmallVector<int64_t> nhwcShape = {inShape[0], inShape[2] - window->crop[0],
+                                      inShape[3] - window->crop[1], inShape[1]};
+    if (window->crop[0] != 0 || window->crop[1] != 0)
+      nhwc = sliceTo(nhwc, nhwcShape, rewriter, loc);
+
+    SmallVector<int64_t, 2> padBefore = window->padBefore;
+    SmallVector<int64_t, 2> padAfter = window->padAfter;
+    if (window->materializePad &&
+        (padBefore[0] || padBefore[1] || padAfter[0] || padAfter[1])) {
+      nhwcShape[1] += padBefore[0] + padAfter[0];
+      nhwcShape[2] += padBefore[1] + padAfter[1];
+      nhwc = zeroPadTo(
+          nhwc,
+          {0, 0, padBefore[0], padAfter[0], padBefore[1], padAfter[1], 0, 0},
+          nhwcShape, rewriter, loc);
+      padBefore = {0, 0};
+      padAfter = {0, 0};
+    }
+
+    // LP is pow(sum(pow(|x|, p)), 1/p), and TOSA's only windowed sum is the
+    // average, so the window mean is scaled back up by the kernel volume.
+    auto nhwcInTy = cast<RankedTensorType>(nhwc.getType());
+    double p = static_cast<double>(op.getP());
+    if (mode == kPoolLp) {
+      Value abs = tosa::AbsOp::create(rewriter, loc, nhwcInTy, nhwc);
+      nhwc = tosa::PowOp::create(rewriter, loc, nhwcInTy, abs,
+                                 createSplatFloat(rewriter, loc, nhwcInTy, p));
+    }
+
+    auto nhwcOutTy =
+        resultTy.clone({outShape[0], outShape[2], outShape[3], outShape[1]});
+    auto padAttr = rewriter.getDenseI64ArrayAttr(
+        {padBefore[0], padAfter[0], padBefore[1], padAfter[1]});
+    Value pooled;
+    if (mode == kPoolMax) {
+      pooled =
+          tosa::MaxPool2dOp::create(
+              rewriter, loc, nhwcOutTy, nhwc, window->kernel, window->stride,
+              ArrayRef<int64_t>{padBefore[0], padAfter[0], padBefore[1],
+                                padAfter[1]},
+              tosa::NanPropagationMode::PROPAGATE)
+              .getResult();
+    } else {
+      Type accType = elemType.isF64() ? elemType : rewriter.getF32Type();
+      pooled = tosa::AvgPool2dOp::create(
+                   rewriter, loc, nhwcOutTy, nhwc,
+                   rewriter.getDenseI64ArrayAttr(window->kernel),
+                   rewriter.getDenseI64ArrayAttr(window->stride), padAttr,
+                   TypeAttr::get(accType))
+                   .getResult();
+    }
+    if (mode == kPoolLp) {
+      double volume =
+          static_cast<double>(window->kernel[0] * window->kernel[1]);
+      Value sum = tosa::MulOp::create(
+          rewriter, loc, nhwcOutTy, pooled,
+          createSplatFloat(rewriter, loc, nhwcOutTy, volume),
+          createZeroMulShift(rewriter, loc));
+      pooled = tosa::PowOp::create(
+          rewriter, loc, nhwcOutTy, sum,
+          createSplatFloat(rewriter, loc, nhwcOutTy, 1.0 / p));
+    }
+
+    Value result = transposeTo(pooled, outShape, {0, 3, 1, 2}, rewriter, loc);
+    if (resultTy.getRank() != 4)
+      result = reshapeTo(result, resultTy.getShape(), rewriter);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -3789,6 +4203,10 @@ struct ConstantConverter final : public OpConversionPattern<hip::ConstantOp> {
 //                   n = OUT, d = IN, offset = 0
 //   half_pixel      in = (o + 0.5) * IN/OUT - 0.5
 //                   n = 2*OUT, d = 2*IN, offset = IN - OUT
+//   pytorch_half_pixel
+//                   same as half_pixel when OUT > 1. When OUT == 1 the only
+//                   output sample is input coordinate 0:
+//                   n = 1, d = 1, offset = 0
 //   align_corners   in = o * (IN-1)/(OUT-1)
 //                   n = OUT-1, d = IN-1, offset = 0
 //
@@ -3827,6 +4245,19 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
     p.scaleN = outExtent - 1;
     p.scaleD = inExtent - 1;
     p.offset = 0;
+    break;
+  case 3: // pytorch_half_pixel
+    // OUT == 1 samples input coordinate 0. Otherwise the ONNX map is the
+    // half_pixel one, so the integer triple matches case 0.
+    if (outExtent == 1) {
+      p.scaleN = 1;
+      p.scaleD = 1;
+      p.offset = 0;
+      break;
+    }
+    p.scaleN = 2 * outExtent;
+    p.scaleD = 2 * inExtent;
+    p.offset = inExtent - outExtent;
     break;
   default:
     return std::nullopt;
@@ -6678,6 +7109,366 @@ struct MhaConverter final : public OpConversionPattern<MultiHeadAttentionOp> {
   }
 };
 
+// TOSA has no scan op. For a constant axis and static extent, spell cumsum as
+// one prefix reduction per output position followed by a concat.
+bool isTosaExpressibleCumSum(CumSumOp op) {
+  if (op.getNumResults() != 1)
+    return false;
+  auto inputTy = dyn_cast<RankedTensorType>(op.getX().getType());
+  auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inputTy || !resultTy || !inputTy.hasStaticShape() ||
+      inputTy != resultTy || inputTy.getRank() < 1)
+    return false;
+  SmallVector<int64_t, 1> axisValues;
+  if (!extractConstantInts(op.getAxis(), axisValues) || axisValues.size() != 1)
+    return false;
+  int64_t axis = axisValues.front();
+  if (axis < 0)
+    axis += inputTy.getRank();
+  if (axis < 0 || axis >= inputTy.getRank() || inputTy.getDimSize(axis) <= 0)
+    return false;
+  Type elemTy = inputTy.getElementType();
+  return isa<FloatType>(elemTy) ||
+         (isa<IntegerType>(elemTy) &&
+          cast<IntegerType>(elemTy).isSignlessInteger(32));
+}
+
+struct CumSumConverter final : public OpConversionPattern<CumSumOp> {
+  using OpConversionPattern<CumSumOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(CumSumOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isTosaExpressibleCumSum(op))
+      return rewriter.notifyMatchFailure(
+          op, "requires static tensor mode and one constant axis");
+
+    auto resultTy = cast<RankedTensorType>(op.getResult(0).getType());
+    SmallVector<int64_t, 1> axisValues;
+    (void)extractConstantInts(op.getAxis(), axisValues);
+    int64_t axis = axisValues.front();
+    if (axis < 0)
+      axis += resultTy.getRank();
+
+    Location loc = op.getLoc();
+    Value input = adaptor.getX();
+    if (op.getReverse())
+      input = tosa::ReverseOp::create(rewriter, loc, resultTy, input,
+                                      static_cast<uint32_t>(axis));
+
+    SmallVector<int64_t> pieceShape(resultTy.getShape().begin(),
+                                    resultTy.getShape().end());
+    pieceShape[axis] = 1;
+    auto pieceTy = RankedTensorType::get(pieceShape, resultTy.getElementType());
+    Value zero = tosa::ConstOp::create(
+        rewriter, loc, pieceTy,
+        DenseElementsAttr::get(
+            pieceTy, rewriter.getZeroAttr(resultTy.getElementType())));
+
+    SmallVector<Value> pieces;
+    int64_t extent = resultTy.getDimSize(axis);
+    pieces.reserve(extent);
+    for (int64_t i = 0; i < extent; ++i) {
+      int64_t prefix = op.getExclusive() ? i : i + 1;
+      if (prefix == 0) {
+        pieces.push_back(zero);
+        continue;
+      }
+      SmallVector<int64_t> prefixShape(resultTy.getShape().begin(),
+                                       resultTy.getShape().end());
+      prefixShape[axis] = prefix;
+      Value slice = sliceTo(input, prefixShape, rewriter, loc);
+      pieces.push_back(tosa::ReduceSumOp::create(
+          rewriter, loc, pieceTy, slice,
+          rewriter.getI32IntegerAttr(static_cast<int32_t>(axis))));
+    }
+
+    Value result = pieces.size() == 1
+                       ? pieces.front()
+                       : tosa::ConcatOp::create(rewriter, loc, resultTy, pieces,
+                                                static_cast<uint32_t>(axis))
+                             .getResult();
+    if (op.getReverse())
+      result = tosa::ReverseOp::create(rewriter, loc, resultTy, result,
+                                       static_cast<uint32_t>(axis));
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+// Clone an outlined HIP control-flow function into a TOSA region. The first
+// function argument is !hip.context; the rest correspond to region inputs.
+LogicalResult
+cloneOutlinedFuncIntoTosaRegion(func::FuncOp func, Region &region,
+                                Value context, ValueRange regionInputs,
+                                ConversionPatternRewriter &rewriter) {
+  if (!func || func.isDeclaration() || !func.getBody().hasOneBlock())
+    return failure();
+  Block &source = func.getBody().front();
+  if (source.getNumArguments() != regionInputs.size() + 1 ||
+      !isa<ContextType>(source.getArgument(0).getType()))
+    return failure();
+  auto returnOp = dyn_cast<func::ReturnOp>(source.getTerminator());
+  if (!returnOp)
+    return failure();
+
+  SmallVector<Type> argTypes;
+  SmallVector<Location> argLocs;
+  argTypes.reserve(regionInputs.size());
+  argLocs.reserve(regionInputs.size());
+  for (Value input : regionInputs) {
+    argTypes.push_back(input.getType());
+    argLocs.push_back(func.getLoc());
+  }
+  while (!region.empty())
+    rewriter.eraseBlock(&region.front());
+  Block *block = rewriter.createBlock(&region, region.end(), argTypes, argLocs);
+  // SingleBlockImplicitTerminator inserts an empty tosa.yield on createBlock.
+  if (block->mightHaveTerminator())
+    rewriter.eraseOp(block->getTerminator());
+
+  IRMapping mapping;
+  mapping.map(source.getArgument(0), context);
+  for (auto [arg, mapped] :
+       llvm::zip(source.getArguments().drop_front(), block->getArguments()))
+    mapping.map(arg, mapped);
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToEnd(block);
+  for (Operation &nested : source.without_terminator())
+    rewriter.clone(nested, mapping);
+  SmallVector<Value> yielded;
+  for (Value value : returnOp.getOperands())
+    yielded.push_back(mapping.lookupOrDefault(value));
+  tosa::YieldOp::create(rewriter, func.getLoc(), yielded);
+  // The outlined callee is a private func without rock.kernel, so this pass
+  // never runs on it. Convert the cloned hip.* ops here with the same
+  // patterns that fire in the kernel body.
+  return rewriter.legalize(&region);
+}
+
+struct IfConverter final : public OpConversionPattern<IfOp> {
+  using OpConversionPattern<IfOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(IfOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != op.getNumOutputs())
+      return rewriter.notifyMatchFailure(op, "requires tensor mode");
+    if (llvm::any_of(op.getResultTypes(),
+                     [](Type type) { return !isa<RankedTensorType>(type); }))
+      return rewriter.notifyMatchFailure(op, "requires tensor results");
+
+    auto thenFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getThenFuncAttr());
+    auto elseFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getElseFuncAttr());
+    if (!thenFunc || !elseFunc)
+      return rewriter.notifyMatchFailure(op, "outlined branch not found");
+
+    SmallVector<Value> inputs(adaptor.getCaptures().begin(),
+                              adaptor.getCaptures().end());
+    auto validBranch = [&](func::FuncOp branch) {
+      if (branch.isDeclaration() || !branch.getBody().hasOneBlock())
+        return false;
+      Block &block = branch.getBody().front();
+      if (block.getNumArguments() != inputs.size() + 1 ||
+          !isa<ContextType>(block.getArgument(0).getType()))
+        return false;
+      for (auto [arg, input] :
+           llvm::zip(block.getArguments().drop_front(), inputs))
+        if (arg.getType() != input.getType())
+          return false;
+      auto ret = dyn_cast<func::ReturnOp>(block.getTerminator());
+      return ret && ret.getOperandTypes() == op.getResultTypes();
+    };
+    if (!validBranch(thenFunc) || !validBranch(elseFunc))
+      return rewriter.notifyMatchFailure(
+          op, "branches must match captures and result types");
+
+    Location loc = op.getLoc();
+    // tosa.cond_if requires a size-1 condition tensor.
+    auto condTy = RankedTensorType::get({1}, rewriter.getI1Type());
+    Value cond = tensor::FromElementsOp::create(rewriter, loc, condTy,
+                                                ValueRange{adaptor.getCond()});
+    auto tosaIf =
+        tosa::IfOp::create(rewriter, loc, op.getResultTypes(), cond, inputs);
+
+    if (failed(cloneOutlinedFuncIntoTosaRegion(thenFunc, tosaIf.getThenGraph(),
+                                               adaptor.getCtx(), inputs,
+                                               rewriter)) ||
+        failed(cloneOutlinedFuncIntoTosaRegion(elseFunc, tosaIf.getElseGraph(),
+                                               adaptor.getCtx(), inputs,
+                                               rewriter))) {
+      rewriter.eraseOp(tosaIf);
+      return rewriter.notifyMatchFailure(
+          op, "branches must take context plus all captures");
+    }
+
+    rewriter.replaceOp(op, tosaIf.getResults());
+    return success();
+  }
+};
+
+static Value scalarToTensor(Value scalar, Type elementType, Location loc,
+                            ConversionPatternRewriter &rewriter) {
+  auto tensorTy = RankedTensorType::get({}, elementType);
+  if (scalar.getType() != elementType)
+    scalar = arith::IndexCastOp::create(rewriter, loc, elementType, scalar);
+  return tensor::FromElementsOp::create(rewriter, loc, tensorTy,
+                                        ValueRange{scalar});
+}
+
+struct LoopConverter final : public OpConversionPattern<LoopOp> {
+  using OpConversionPattern<LoopOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(LoopOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != op.getNumLoopCarried())
+      return rewriter.notifyMatchFailure(op, "requires tensor mode");
+    if (llvm::any_of(adaptor.getVInit(), [](Value value) {
+          return !isa<RankedTensorType>(value.getType());
+        }))
+      return rewriter.notifyMatchFailure(op, "requires carried tensors");
+
+    auto bodyFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        op, op.getBodyFuncAttr());
+    if (!bodyFunc || bodyFunc.isDeclaration() ||
+        !bodyFunc.getBody().hasOneBlock())
+      return rewriter.notifyMatchFailure(op, "outlined body not found");
+    Block &source = bodyFunc.getBody().front();
+    auto returnOp = dyn_cast<func::ReturnOp>(source.getTerminator());
+    if (!returnOp)
+      return rewriter.notifyMatchFailure(op, "body must end in func.return");
+
+    unsigned numCarried = op.getNumLoopCarried();
+    unsigned numCaptures = adaptor.getCaptures().size();
+    if (source.getNumArguments() != 3 + numCarried + numCaptures ||
+        !isa<ContextType>(source.getArgument(0).getType()))
+      return rewriter.notifyMatchFailure(op,
+                                         "outlined body signature mismatch");
+    bool passthrough = op.getCondIsPassthrough();
+    if (returnOp.getNumOperands() != numCarried + (passthrough ? 0 : 1))
+      return rewriter.notifyMatchFailure(op, "body result count mismatch");
+    for (unsigned i = 0; i < numCarried; ++i)
+      if (source.getArgument(3 + i).getType() !=
+          adaptor.getVInit()[i].getType())
+        return rewriter.notifyMatchFailure(op, "carried type mismatch");
+    unsigned capturesStart = 3 + numCarried;
+    for (unsigned i = 0; i < numCaptures; ++i)
+      if (source.getArgument(capturesStart + i).getType() !=
+          adaptor.getCaptures()[i].getType())
+        return rewriter.notifyMatchFailure(op, "capture type mismatch");
+
+    Location loc = op.getLoc();
+    Type i64Ty = rewriter.getI64Type();
+    // The outlined body declares iter as tensor<i64> and cond_in as
+    // tensor<i1> (see LoopOutline.cpp). Carry them at that same rank so
+    // cloning the body maps its arguments to identically typed values.
+    auto scalarI64Ty = RankedTensorType::get({}, i64Ty);
+    auto scalarI1Ty = RankedTensorType::get({}, rewriter.getI1Type());
+    Value zeroIter = tosa::ConstOp::create(
+        rewriter, loc, scalarI64Ty,
+        DenseElementsAttr::get(scalarI64Ty, rewriter.getI64IntegerAttr(0)));
+    Value maxTrip =
+        scalarToTensor(adaptor.getMaxTripCount(), i64Ty, loc, rewriter);
+    Value cond;
+    if (Value condInit = adaptor.getCondInit())
+      cond = scalarToTensor(condInit, rewriter.getI1Type(), loc, rewriter);
+    else
+      cond = tosa::ConstOp::create(
+          rewriter, loc, scalarI1Ty,
+          DenseElementsAttr::get(scalarI1Ty, rewriter.getBoolAttr(true)));
+
+    // A body that spells iter/cond_in differently would have its arguments
+    // mapped to mistyped values when it is cloned below.
+    if (source.getArgument(1).getType() != scalarI64Ty ||
+        source.getArgument(2).getType() != scalarI1Ty)
+      return rewriter.notifyMatchFailure(
+          op, "body iter/cond must be tensor<i64>/tensor<i1>");
+
+    SmallVector<Value> inputs = {zeroIter, maxTrip, cond};
+    llvm::append_range(inputs, adaptor.getVInit());
+    llvm::append_range(inputs, adaptor.getCaptures());
+    SmallVector<Type> resultTypes;
+    llvm::transform(inputs, std::back_inserter(resultTypes),
+                    [](Value value) { return value.getType(); });
+    auto whileOp = tosa::WhileOp::create(rewriter, loc, resultTypes, inputs,
+                                         ArrayRef<NamedAttribute>{});
+
+    auto addRegionBlock = [&](Region &region) {
+      SmallVector<Location> argLocs(resultTypes.size(), loc);
+      while (!region.empty())
+        rewriter.eraseBlock(&region.front());
+      Block *block =
+          rewriter.createBlock(&region, region.end(), resultTypes, argLocs);
+      if (block->mightHaveTerminator())
+        rewriter.eraseOp(block->getTerminator());
+      return block;
+    };
+
+    // cond_graph: current condition && iter < max_trip_count.
+    Block *condBlock = addRegionBlock(whileOp.getCondGraph());
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(condBlock);
+      Value underTrip = tosa::GreaterOp::create(rewriter, loc, scalarI1Ty,
+                                                condBlock->getArgument(1),
+                                                condBlock->getArgument(0));
+      Value keepGoing = tosa::LogicalAndOp::create(
+          rewriter, loc, scalarI1Ty, underTrip, condBlock->getArgument(2));
+      tosa::YieldOp::create(rewriter, loc, ValueRange{keepGoing});
+    }
+
+    Block *bodyBlock = addRegionBlock(whileOp.getBodyGraph());
+    IRMapping mapping;
+    mapping.map(source.getArgument(0), adaptor.getCtx());
+    mapping.map(source.getArgument(1), bodyBlock->getArgument(0));
+    mapping.map(source.getArgument(2), bodyBlock->getArgument(2));
+    for (unsigned i = 0; i < numCarried; ++i)
+      mapping.map(source.getArgument(3 + i), bodyBlock->getArgument(3 + i));
+    for (unsigned i = 0; i < numCaptures; ++i)
+      mapping.map(source.getArgument(capturesStart + i),
+                  bodyBlock->getArgument(capturesStart + i));
+
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToEnd(bodyBlock);
+      for (Operation &nested : source.without_terminator())
+        rewriter.clone(nested, mapping);
+      SmallVector<Value> outlinedResults;
+      for (Value value : returnOp.getOperands())
+        outlinedResults.push_back(mapping.lookupOrDefault(value));
+
+      unsigned carriedStart = passthrough ? 0 : 1;
+      Value nextCond =
+          passthrough ? bodyBlock->getArgument(2) : outlinedResults.front();
+      Value one = tosa::ConstOp::create(
+          rewriter, loc, scalarI64Ty,
+          DenseElementsAttr::get(scalarI64Ty, rewriter.getI64IntegerAttr(1)));
+      Value nextIter = tosa::AddOp::create(rewriter, loc, scalarI64Ty,
+                                           bodyBlock->getArgument(0), one);
+      SmallVector<Value> yielded = {nextIter, bodyBlock->getArgument(1),
+                                    nextCond};
+      for (unsigned i = 0; i < numCarried; ++i)
+        yielded.push_back(outlinedResults[carriedStart + i]);
+      for (unsigned i = 0; i < numCaptures; ++i)
+        yielded.push_back(bodyBlock->getArgument(capturesStart + i));
+      tosa::YieldOp::create(rewriter, loc, yielded);
+    }
+
+    if (failed(rewriter.legalize(&whileOp.getCondGraph())) ||
+        failed(rewriter.legalize(&whileOp.getBodyGraph())))
+      return rewriter.notifyMatchFailure(
+          op, "failed to convert the outlined loop body");
+
+    rewriter.replaceOp(
+        op, whileOp.getResults().slice(/*start=*/3, /*length=*/numCarried));
+    return success();
+  }
+};
+
 // ---------------------------------------------------------------------------
 // hip.qmoe
 // ---------------------------------------------------------------------------
@@ -7092,17 +7883,19 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
         QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
         GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp, RangeOp,
-        RopeOp, GqaOp, MultiHeadAttentionOp, RoundOp, ModOp, AtanOp, RmsNormOp,
-        LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        RopeOp, GqaOp, MultiHeadAttentionOp, IfOp, LoopOp, RoundOp, ModOp,
+        AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
     // requires every remaining op to be legal -- the framework does not DCE
     // this pre-existing op on its own. Mark it legal so conversion succeeds;
     // the canonicalizer that follows this pass removes the dead empty.
-    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp>();
+    conversion.addLegalOp<ub::PoisonOp, tensor::EmptyOp, arith::IndexCastOp>();
     conversion.addDynamicallyLegalOp<ExpandOp>(
         [](ExpandOp op) { return !isTosaExpressibleExpand(op); });
+    conversion.addDynamicallyLegalOp<CumSumOp>(
+        [](CumSumOp op) { return !isTosaExpressibleCumSum(op); });
     // The comparison, logical and sign ops are claimed by element type rather
     // than outright, so a boolean carried as ui8 or an unsigned comparison --
     // both of which OnnxToHip produces and the runtime lowering handles --
@@ -7165,6 +7958,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         [](tensor::ExpandShapeOp op) { return !isStaticReshape(op); });
     conversion.addDynamicallyLegalOp<tensor::ExtractSliceOp>(
         [](tensor::ExtractSliceOp op) { return !isTosaExpressibleSlice(op); });
+    conversion.addDynamicallyLegalOp<PoolOp>(
+        [](PoolOp op) { return !isTosaExpressiblePool(op); });
+    conversion.addDynamicallyLegalOp<GlobalPoolOp>(
+        [](GlobalPoolOp op) { return !isTosaExpressibleGlobalPool(op); });
     conversion.addDynamicallyLegalOp<tensor::InsertSliceOp>(
         [](tensor::InsertSliceOp op) { return !matchStaticConcat(op); });
     conversion.addDynamicallyLegalOp<arith::ConstantOp>(
@@ -7247,8 +8044,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
         GridSampleConverter, SizeConverter, TensorConstConverter,
         FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
-        RopeConverter, GqaConverter, MhaConverter, RmsNormConverter,
-        LayerNormConverter, InstanceNormConverter, SkipRmsNormConverter>(ctx);
+        RopeConverter, GqaConverter, MhaConverter, CumSumConverter, IfConverter,
+        LoopConverter, RmsNormConverter, LayerNormConverter,
+        InstanceNormConverter, SkipRmsNormConverter, GlobalPoolConverter,
+        PoolConverter>(ctx);
 
     if (failed(applyPartialConversion(funcOp, conversion, std::move(patterns))))
       signalPassFailure();
