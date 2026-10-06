@@ -124,9 +124,21 @@ def update_submodules():
 
 
 def default_generator():
-    # Like ONNX Runtime: on Windows default to the Visual Studio generator so
-    # CMake locates MSVC itself (no vcvarsall sourcing); Ninja elsewhere.
-    return "Visual Studio 17 2022" if IS_WINDOWS else "Ninja"
+    # Ninja everywhere it is available, which on Windows means any developer
+    # shell: VS ships ninja.exe and the Windows CI jobs already pass
+    # `--cmake_generator Ninja`, so this makes the default the configuration
+    # that is actually exercised. It also matters for the in-tree LLVM build
+    # (ENABLE_ROCMLIRTRITON), where cmake/deps.cmake consumes single-config
+    # build-tree paths such as ${CMAKE_BINARY_DIR}/lib/cmake/mlir that a
+    # multi-config generator does not produce.
+    #
+    # Outside a developer shell there is no ninja, so fall back to the Visual
+    # Studio generator, which locates MSVC itself. Pinned to 2022 (VS 17)
+    # rather than probed: that is the toolset CI builds with, and the dependency
+    # set is not yet green on VS 18. Pass --cmake_generator to override.
+    if IS_WINDOWS and not have_tool("ninja"):
+        return "Visual Studio 17 2022"
+    return "Ninja"
 
 
 def check_toolchain(generator):
@@ -140,7 +152,7 @@ def check_toolchain(generator):
         # the caller having loaded the MSVC environment (run from an "x64 Native
         # Tools Command Prompt for VS"), exactly as ONNX Runtime's build expects.
         if generator == "Ninja" and not have_tool("cl"):
-            log.warning(
+            raise BuildError(
                 "cl.exe not on PATH; for the Ninja generator on Windows run from "
                 "an 'x64 Native Tools Command Prompt for VS' (or pass "
                 "--cmake_generator 'Visual Studio 17 2022')."
@@ -228,105 +240,16 @@ def detect_hip_arch():
 
 
 # ---------------------------------------------------------------------------
-# Windows LLVM host toolchain (TheRock clang-cl + lld-link)
-#
-# rocmlirTriton (ENABLE_ROCMLIRTRITON) hard-requires a clang-cl compiler and an
-# lld-link linker on Windows -- it FATAL_ERRORs on MSVC cl.exe. That toolchain
-# must exist BEFORE cmake project(), so it cannot be the in-tree LLVM this build
-# may produce. We therefore always source it from TheRock, which ships lld-link
-# and a clang that acts as clang-cl once named clang-cl.exe (clang selects its
-# driver mode from argv[0]). Using TheRock's clang as the host compiler also
-# lets hip-config resolve compiler-rt natively, so no HIP_CXX_COMPILER override
-# is needed. TheRock must be resolved here (build.py), not in cmake/deps.cmake,
-# because deps.cmake runs after project() -- too late to pick the compiler.
-# ---------------------------------------------------------------------------
-
-
-def _dep_entry(name):
-    """Return (url, hash_or_basename) for a `name;url;hash` row in deps.txt."""
-    txt = (REPO / "cmake" / "deps.txt").read_text(encoding="utf-8")
-    for line in txt.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        cols = s.split(";")
-        if cols and cols[0] == name:
-            return (cols[1] if len(cols) > 1 else ""), (
-                cols[2] if len(cols) > 2 else ""
-            )
-    return "", ""
-
-
-def _download_therock(build_dir, dest):
-    """Download + extract the pinned TheRock Windows SDK into dest.
-
-    Mirrors cmake/deps.cmake: the archive basename is passed to tar with a
-    WORKING_DIRECTORY so the drive-letter colon isn't misread as a remote host,
-    and --strip-components=1 flattens the single top-level directory.
-    """
-    url_base, base = _dep_entry("therock_windows")
-    if not url_base or not base:
-        raise BuildError("therock_windows entry missing from cmake/deps.txt")
-    build_dir = Path(build_dir)
-    build_dir.mkdir(parents=True, exist_ok=True)
-    tgz = build_dir / f"{base}.tar.gz"
-    if not tgz.exists():
-        import urllib.request
-
-        url = f"{url_base}/{base}.tar.gz"
-        log.info(f"downloading TheRock SDK: {url}")
-        try:
-            urllib.request.urlretrieve(url, tgz)
-        except Exception as exc:  # noqa: BLE001 - surface a clean build error
-            if tgz.exists():
-                tgz.unlink()
-            raise BuildError(
-                f"TheRock download failed ({exc}). Pass --therock_dist to use a "
-                "local SDK instead."
-            ) from exc
-    dest = Path(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-    log.info(f"extracting TheRock SDK into {dest} ...")
-    run_subprocess(
-        ["tar", "-xzf", f"{base}.tar.gz", "-C", str(dest), "--strip-components=1"],
-        cwd=str(build_dir),
-    )
-
-
-def provision_windows_toolchain(args, build_dir):
-    """Resolve a complete clang-cl + lld-link toolchain from TheRock.
-
-    Returns (c_compiler, cxx_compiler, therock_dist) as forward-slash strings.
-    RMT derives CMAKE_LINKER (lld-link) from the compiler directory, so we only
-    need to point the compiler at TheRock's bin, where lld-link.exe already
-    lives -- we still verify it so the failure is a clear message here rather
-    than a cryptic RMT one.
-    """
-    dist = args.therock_dist.strip() or os.environ.get("THEROCK_DIST", "").strip()
-    dist = Path(dist) if dist else Path(build_dir) / "_therock"
-    if not (dist / "bin").is_dir():
-        step("Provision Windows toolchain (TheRock clang-cl + lld-link)")
-        _download_therock(build_dir, dist)
-    bindir = dist / "bin"
-    clang = bindir / "clang.exe"
-    clang_cl = bindir / "clang-cl.exe"
-    lld_link = bindir / "lld-link.exe"
-    if not lld_link.exists():
-        raise BuildError(f"lld-link.exe not found in TheRock dist: {bindir}")
-    if not clang_cl.exists():
-        if not clang.exists():
-            raise BuildError(f"clang.exe not found in TheRock dist: {bindir}")
-        # clang picks its driver mode from argv[0]; a copy named clang-cl.exe is
-        # a genuine clang-cl and must sit next to clang.exe so it finds its
-        # resource dir (../lib/clang).
-        log.info(f"creating clang-cl shim: {clang_cl.name} <- {clang.name}")
-        shutil.copy2(clang, clang_cl)
-    log.info(f"Windows host toolchain: {clang_cl} (+ {lld_link.name})")
-    return clang_cl.as_posix(), clang_cl.as_posix(), dist.as_posix()
-
-
-# ---------------------------------------------------------------------------
 # Configure / build / install (deps resolved by cmake/deps.cmake)
+#
+# The Windows host compiler is MSVC cl.exe, which is what this project's own
+# sources are written for (morphizen/cmake/compile_options.msvc.cmake tunes
+# /W4 /WX for it). CMake picks it up from the environment, so there is nothing
+# to provision: name no CMAKE_*_COMPILER and either let the Visual Studio
+# generator locate it or run Ninja from a developer shell. rocMLIR used to
+# block this -- it FATAL_ERRORed on cl.exe right after project() -- until
+# ROCm/rocmlirTriton#538 added the ROCMLIR_ALLOW_MSVC opt-out that
+# cmake/deps.cmake now sets.
 # ---------------------------------------------------------------------------
 
 
@@ -352,18 +275,8 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
     else:
         cmd.append("-DBUILD_MOCK_RUNTIME=OFF")
         cmd.append(f"-DHIP_ARCHITECTURES={hip_arch}")
-        therock_dist = args.therock_dist
-        # On Windows, source the mandatory clang-cl + lld-link from TheRock
-        # (see provision_windows_toolchain) unless the caller pinned their own
-        # compiler. This keeps one consistent host toolchain across both the
-        # external-LLVM (CI) and in-tree-LLVM builds.
-        user_defs = {d.split("=", 1)[0] for d in args.cmake_extra_defines}
-        if IS_WINDOWS and not {"CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"} & user_defs:
-            cc, cxx, dist = provision_windows_toolchain(args, build_dir)
-            cmd += [f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}"]
-            therock_dist = therock_dist or dist
-        if therock_dist:
-            cmd.append(f"-DTHEROCK_DIST={therock_dist}")
+        if args.therock_dist:
+            cmd.append(f"-DTHEROCK_DIST={args.therock_dist}")
     if IS_WINDOWS:
         cmd.append("-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded")
     if have_tool("sccache"):
