@@ -34,6 +34,29 @@ func.func @swiglu_canonical(%ctx: !hip.context, %gate: tensor<8x16xf16>,
 
 // -----
 
+// One tensor.empty feeds both the sigmoid and the inner multiply. It becomes
+// dead after the fusion and must be erased exactly once.
+// CHECK-LABEL: func.func @swiglu_shared_init
+// CHECK: tensor.empty
+// CHECK-NOT: tensor.empty
+// CHECK-NOT: hip.sigmoid
+// CHECK-NOT: hip.mul
+// CHECK: hip.swiglu
+func.func @swiglu_shared_init(%ctx: !hip.context, %gate: tensor<8x16xf16>,
+                              %up: tensor<8x16xf16>) -> tensor<8x16xf16> {
+  %e0 = tensor.empty() : tensor<8x16xf16>
+  %s = hip.sigmoid(%ctx) ins(%gate : tensor<8x16xf16>)
+       outs(%e0 : tensor<8x16xf16>) : tensor<8x16xf16>
+  %a = hip.mul(%ctx) ins(%gate, %s : tensor<8x16xf16>, tensor<8x16xf16>)
+       outs(%e0 : tensor<8x16xf16>) -> tensor<8x16xf16>
+  %e2 = tensor.empty() : tensor<8x16xf16>
+  %y = hip.mul(%ctx) ins(%a, %up : tensor<8x16xf16>, tensor<8x16xf16>)
+       outs(%e2 : tensor<8x16xf16>) -> tensor<8x16xf16>
+  return %y : tensor<8x16xf16>
+}
+
+// -----
+
 // Both multiplies commuted relative to the export.
 // CHECK-LABEL: func.func @swiglu_commuted
 // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[GATE:.*]]: tensor<4x32xf32>, %[[UP:.*]]: tensor<4x32xf32>)
