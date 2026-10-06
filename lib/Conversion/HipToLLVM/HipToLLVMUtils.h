@@ -80,6 +80,7 @@ inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
+inline constexpr const char *kWrapLRN = "wrap_lrn";           // hip.lrn
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus

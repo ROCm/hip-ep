@@ -1326,6 +1326,13 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
 
+// Local response normalization across channels (axis 1). spatial is the
+// product of dimensions after the channel axis. data_type is
+// HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
+             int64_t channels, int64_t spatial, int64_t size, double alpha,
+             double beta, double bias, int64_t data_type);
+
 // Swish activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // alpha: sigmoid input scale (default 1.0 per ONNX spec)

@@ -144,6 +144,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     BiasGeluOp::attachInterface<HipDstBufferizableModel<BiasGeluOp>>(*ctx);
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
+    LRNOp::attachInterface<HipDstBufferizableModel<LRNOp>>(*ctx);
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);

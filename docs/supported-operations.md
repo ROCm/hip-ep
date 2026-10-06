@@ -112,6 +112,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
+| LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |
 | Clip | Decomposed to Max + Min |
 | HardSigmoid | Decomposed to Mul + Add + Clip (`alpha` defaults to 0.2, `beta` to 0.5). f16 and f32 only; bf16 and f64 are left to another EP, since the emitted elementwise ops have no runtime path for them |
 | MaxPool | Custom HIP kernel (f16/bf16/f32/f64, and i8/ui8) |

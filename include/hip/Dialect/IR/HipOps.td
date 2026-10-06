@@ -2521,6 +2521,48 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
+def Hip_LRNOp : Hip_DpsOp<"lrn"> {
+  let summary = "Local response normalization across channels";
+  let description = [{
+    ONNX LRN. For X[n, c, d1, ..., dk] the window is the channels
+
+      max(0, c - floor((size - 1) / 2)) through
+      min(C - 1, c + ceil((size - 1) / 2))
+
+    inclusive. square_sum is the sum of squares in that window, and
+
+      Y = X / (bias + alpha / size * square_sum) ^ beta
+
+    Rank is at least 2. Axis 0 is the batch and axis 1 is the channel.
+    The element type is f16, bf16, f32, or f64.
+
+    Example:
+    ```mlir
+    hip.lrn(%ctx) ins(%x : memref<1x64x56x56xf32, 1>)
+                  outs(%y : memref<1x64x56x56xf32, 1>)
+                  {size = 5 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F64Attr, "0.0001">:$alpha,
+    DefaultValuedAttr<F64Attr, "0.75">:$beta,
+    DefaultValuedAttr<F64Attr, "1.0">:$bias,
+    I64Attr:$size
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{

@@ -252,6 +252,44 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
+             int64_t channels, int64_t spatial, int64_t size, double alpha,
+             double beta, double bias, int64_t data_type) {
+  OP_PROFILE(
+      "lrn",
+      [&] {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%lldx%lldx%lld,size=%lld", (long long)n,
+                 (long long)channels, (long long)spatial, (long long)size);
+        return std::string(buf);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_lrn: null argument\n");
+    return -1;
+  }
+  if (n < 0 || channels < 0 || spatial < 0 || size < 1) {
+    fprintf(stderr, "[REAL] wrap_lrn: invalid geometry\n");
+    return -1;
+  }
+
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_lrn: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int result = hip_lrn(stream, input, output, n, channels, spatial, size, alpha,
+                       beta, bias, hip_dtype);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_lrn: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+  return 0;
+}
+
 int wrap_swish(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha) {
   OP_PROFILE(
