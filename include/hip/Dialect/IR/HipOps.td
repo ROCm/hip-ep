@@ -5503,6 +5503,62 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
   }];
 }
 
+// Native onnx.QLinearConv. Distinct from hip.qconv, which is the W4A16 1x1
+// DequantizeLinear + Conv + QuantizeLinear fusion.
+def Hip_QLinearConvOp : Hip_DpsOp<"qlinear_conv",
+                                  /*traits=*/[],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/1,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
+  let summary = "ONNX QLinearConv";
+  let description = [{
+    8-bit grouped 2D convolution with the ONNX QLinearConv quantization:
+
+      acc = conv(x - x_zp, w - w_zp) + B
+      y = saturate(round(acc * x_scale * w_scale / y_scale) + y_zp)
+
+    Bias is optional, int32, and already quantized at scale `x_scale * w_scale`
+    with zero point 0. Input and output scales and zero points are per-tensor.
+    Weight scale and zero point are per-tensor or per output channel.
+
+    This op is not hip.qconv. hip.qconv fuses a W4A16 QDQ chain and only
+    implements a 1x1 unit-stride convolution.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$input_scale,
+    Hip_TensorOrMemRef:$input_zero_point,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$weight_scale,
+    Hip_TensorOrMemRef:$weight_zero_point,
+    Hip_TensorOrMemRef:$output_scale,
+    Hip_TensorOrMemRef:$output_zero_point,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $input_scale `,` $input_zero_point `,`
+        $weights `,` $weight_scale `,` $weight_zero_point `,` $output_scale `,`
+        $output_zero_point (`,` $bias^)? `:`
+        type($input) `,` type($input_scale) `,` type($input_zero_point) `,`
+        type($weights) `,` type($weight_scale) `,` type($weight_zero_point) `,`
+        type($output_scale) `,` type($output_zero_point) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_QLpNormalizationOp : Hip_DpsOp<"qlpnormalization",
                                        /*traits=*/[],
                                        /*outsAccessor=*/"Output",
