@@ -270,6 +270,7 @@ add_library(OnnxToHip STATIC
   LeakyReluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
+  HardSigmoidConversion.cpp
 )
 
 if(TARGET HipPdllPatterns)

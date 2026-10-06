@@ -602,6 +602,15 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 
+/// Pre-lowering pattern set: decompose `onnx.HardSigmoid` into
+/// `onnx.Mul` / `onnx.Add` / `onnx.Clip`, which then flow through their own
+/// ONNX→HIP converters in `convertComputeOps`. Lives in the pre-lowering loop
+/// for the same reason as PowDecompose: the emitted onnx.* primitives are only
+/// picked up because that loop runs to a fixed point. See
+/// HardSigmoidConversion.cpp.
+void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
 /// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /
 /// Div). Lives in the pre-lowering loop next to FastGeluFusion /

@@ -574,6 +574,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
+        populateHardSigmoidConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;
         mlir::GreedyRewriteConfig preLoweringConfig;
         preLoweringConfig.setStrictness(
