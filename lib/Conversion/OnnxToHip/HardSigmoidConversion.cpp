@@ -7,6 +7,10 @@
 // ONNX HardSigmoid: y = max(0, min(1, alpha*x + beta)), with alpha defaulting
 // to 0.2 and beta to 0.5.
 //
+// f16 and f32 only, which is narrower than the ONNX op. The decomposition is
+// what constrains it: the emitted elementwise primitives have no bf16 or f64
+// runtime path. See the element-type check below.
+//
 // Decomposed into ONNX primitives rather than given a HIP op of its own: Mul,
 // Add and Clip all already lower, and Clip's own decomposition is hip.max then
 // hip.min -- exactly the clamp this needs. A dedicated op would add a kernel
@@ -73,10 +77,23 @@ struct HardSigmoidDecompose : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "onnx.HardSigmoid expects a float element type");
 
+    // The ONNX op also admits bf16 and f64, but the primitives emitted below
+    // lower to wrap_elementwise, which implements ADD/MUL/MIN/MAX for f16 and
+    // f32 only and has no fallback for anything else (elementwise.cpp). Those
+    // two types are deliberately left unconverted: that way they are rejected
+    // while still in the compiler and can go to another EP, instead of being
+    // accepted here and failing in the kernel at inference time. Widening this
+    // gate requires the runtime support first.
+    if (!elemType.isF16() && !elemType.isF32())
+      return rewriter.notifyMatchFailure(
+          op, "onnx.HardSigmoid lowers only f16 and f32 element types");
+
     // ONNX schema defaults, applied when the attribute is absent. The schema
-    // types both as float, so these are binary32 literals widened to double:
-    // on an f64 tensor a plain `0.2` would be the binary64 value, which is not
-    // the number ONNX specifies.
+    // types both as float, so these are binary32 literals widened to double
+    // rather than plain binary64 ones. f16 and f32 round to the same value
+    // either way, so the distinction is not observable through the types
+    // accepted above; it is written this way so the constant is already the
+    // number ONNX specifies if the gate is ever widened to f64.
     double alpha = static_cast<double>(0.2f);
     double beta = static_cast<double>(0.5f);
     if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))

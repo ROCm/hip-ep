@@ -102,23 +102,36 @@ module {
     return %y : tensor<1x16xf16>
   }
 
-  // f64 with both attributes defaulted. ONNX types alpha/beta as float, so the
-  // default must be the binary32 value widened to f64, not the binary64 0.2 --
-  // the two differ from the 9th significant digit, and only f64 can observe it.
-  func.func @test_hard_sigmoid_f64_defaults(%input: tensor<2x4xf64>)
+  // f64 and bf16 are both in the ONNX op's type set, but the primitives this
+  // decomposes to have no elementwise runtime path for them, so the pattern
+  // declines and leaves the op in place for the rest of the pipeline to
+  // reject. Converting them instead would move the failure from compile time,
+  // where the node can still go to another EP, into the kernel at inference
+  // time. Pinned here so the element-type gate is not widened before the
+  // runtime support exists.
+  func.func @test_hard_sigmoid_f64_unconverted(%input: tensor<2x4xf64>)
       -> tensor<2x4xf64> {
-    // CHECK-LABEL: func.func @test_hard_sigmoid_f64_defaults
+    // CHECK-LABEL: func.func @test_hard_sigmoid_f64_unconverted
     %y = "onnx.HardSigmoid"(%input)
         : (tensor<2x4xf64>) -> tensor<2x4xf64>
 
-    // CHECK-NOT: onnx.HardSigmoid
-    // CHECK: hip.constant {{.*}}value = dense<0.20000000298023224> : tensor<f64>
-    // CHECK: hip.mul
-    // CHECK: hip.constant {{.*}}value = dense<5.000000e-01> : tensor<f64>
-    // CHECK: hip.add
-    // CHECK: hip.max
-    // CHECK: hip.min
+    // CHECK: onnx.HardSigmoid
+    // CHECK-NOT: hip.mul
+    // CHECK-NOT: hip.add
 
     return %y : tensor<2x4xf64>
+  }
+
+  func.func @test_hard_sigmoid_bf16_unconverted(%input: tensor<2x4xbf16>)
+      -> tensor<2x4xbf16> {
+    // CHECK-LABEL: func.func @test_hard_sigmoid_bf16_unconverted
+    %y = "onnx.HardSigmoid"(%input)
+        : (tensor<2x4xbf16>) -> tensor<2x4xbf16>
+
+    // CHECK: onnx.HardSigmoid
+    // CHECK-NOT: hip.mul
+    // CHECK-NOT: hip.add
+
+    return %y : tensor<2x4xbf16>
   }
 }
