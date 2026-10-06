@@ -1147,6 +1147,26 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
 
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
+
+// RandomNormalLike. `shape` is the output rank's sizes, including dynamic
+// dims filled in by the HIP-to-LLVM lowering. The input tensor is not
+// passed: only its shape was copied onto the output. `mean_bits` and
+// `scale_bits` are the IEEE-754 bit patterns of the f32 attributes.
+// `seed_bits` is the f32 bit pattern of the ONNX seed when `has_seed` is
+// non-zero; otherwise the runtime picks a clock seed for this call.
+// `data_type` is HIPDNN_EP_DATATYPE_* and must be a float type.
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,
@@ -1303,9 +1323,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
@@ -1381,6 +1402,21 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
                                 void *bias, void *output, int64_t n, int64_t c,
                                 int64_t spatial, int64_t data_type,
                                 float epsilon);
+
+// BatchNormalization inference:
+//   y = scale * (x - mean) / sqrt(var + epsilon) + B
+// Mean and variance are supplied per-channel vectors. Input is (N, C, ...).
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type, float epsilon);
+
+// com.microsoft GroupNorm. channels_last 0 is NCHW, 1 is NHWC.
+// activation 0 is none, 1 is SiLU after the affine transform.
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
@@ -1712,6 +1748,11 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+// Element-wise IsNaN. `data_type` is the floating-point INPUT type. The
+// output is always one byte per element (0 or 1), matching ONNX bool as
+// consumed by wrap_where.
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type);
 
 // ONNX NonZero wrapper.
 // Returns the indices of the non-zero elements of `input` in row-major
