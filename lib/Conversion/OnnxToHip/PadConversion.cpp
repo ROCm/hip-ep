@@ -115,7 +115,11 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
         .getResult();
   }
 
-  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+  // Reached only for a dynamic result, where the per-axis math needs the input
+  // rank. An unranked input cannot supply one.
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!dataType)
+    return rewriter.notifyMatchFailure(op, "pad.unranked_data");
   int64_t rank = dataType.getRank();
 
   // Build the axis -> pad-index map. By default every axis is padded in
@@ -207,6 +211,23 @@ struct PadToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    // The opset<10 schema carries `pads` as an attribute and arrives with
+    // `data` alone, so operand 1 does not exist; reading it anyway walks off
+    // the operand list. PadLegacyAttrsToOperands normally rewrites that form
+    // before conversion, and reaching here with one operand means it declined.
+    // Checked before anything else, including getContextArg, so a malformed op
+    // is turned away before any IR exists.
+    if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "pad.arity");
+
+    // A result with no rank gives the output buffer no shape to be built from.
+    // An export whose shape inference gave up reaches conversion like this, and
+    // the cast below would otherwise reinterpret the type unchecked.
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "pad.unranked_result");
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -226,9 +247,6 @@ struct PadToHip : public mlir::RewritePattern {
     mlir::Value axes = nullptr;
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
-
-    auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
     // Compile-time pads/axes stamped by the pre-lowering PadShapeFold pattern
     // while the producer was still generic ONNX. Their presence lets
