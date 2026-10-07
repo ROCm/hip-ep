@@ -42,8 +42,21 @@ if(ENABLE_ROCMLIRTRITON)
     # It resolves transitively today, but through the rocMLIR closure -- name
     # it so a standard MLIR dependency does not hinge on that.
     MLIRFuncTransforms
-    "${_rocmlir_link_closure}"
   )
+  # The rocMLIR/Triton closure is linked PRIVATE, not PUBLIC, on purpose. Many
+  # of its Triton members are CMake OBJECT libraries (add_triton_object), whose
+  # INTERFACE $<TARGET_OBJECTS> are absorbed into any STATIC library that links
+  # them. Linked PRIVATE, the objects are bundled into libLibHipCompiler.a once
+  # and exposed to consumers only as $<LINK_ONLY> link dependencies, so the
+  # several WHOLE_ARCHIVE'd plugin archives that link LibHipCompiler
+  # (HipCInterface, custom-op-mlir, level-1-pass) no longer each bundle their
+  # own copy of the Triton objects. Linked PUBLIC, those copies collide at the
+  # final EP link with the object libraries' direct expansion and with each
+  # other, producing duplicate-symbol errors. Consumers still resolve the
+  # symbols on demand from libLibHipCompiler.a (as the Windows STATIC-library
+  # build already does); only compile-time include propagation is dropped,
+  # which hip-rocmlir-compiler restores by naming the closure itself.
+  target_link_libraries(LibHipCompiler PRIVATE "${_rocmlir_link_closure}")
   # Same name as the CMake option deliberately: one flag for the whole
   # feature, rather than a separate macro that can drift out of sync with it.
   target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
