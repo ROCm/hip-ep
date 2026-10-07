@@ -35,14 +35,23 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::RankedTensorType presentValueType) {
   mlir::Location loc = op->getLoc();
 
-  // DPS init buffers.  Derive dynamic dims of present_* from past_* when
-  // available (same buffer shape after concat), otherwise from query (size
-  // unused at compile time for the static-shape Whisper case).
+  mlir::FailureOr<GqaSequenceExtents> sequenceExtents =
+      resolveGqaSequenceExtents(rewriter, loc, op, totalSeqLen, pastKey,
+                                pastValue, presentKeyType, presentValueType);
+  if (mlir::failed(sequenceExtents))
+    return rewriter.notifyMatchFailure(
+        op, "cannot derive the hip.gqa sequence extents");
+
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(rewriter, loc, presentKeyType,
-                                                 pastKey ? pastKey : query);
-  mlir::Value presentValueInit = createEmptyTensor(
-      rewriter, loc, presentValueType, pastValue ? pastValue : query);
+  mlir::FailureOr<mlir::Value> presentKeyInit =
+      createGqaPresentEmpty(rewriter, loc, presentKeyType, query, key,
+                            sequenceExtents->presentKey, numHeads, numHeads);
+  mlir::FailureOr<mlir::Value> presentValueInit =
+      createGqaPresentEmpty(rewriter, loc, presentValueType, query, value,
+                            sequenceExtents->presentValue, numHeads, numHeads);
+  if (mlir::failed(presentKeyInit) || mlir::failed(presentValueInit))
+    return rewriter.notifyMatchFailure(
+        op, "cannot derive the hip.gqa present-cache destination shape");
 
   llvm::SmallVector<mlir::Type> resultTypes = {outputType, presentKeyType,
                                                presentValueType};
@@ -60,8 +69,8 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   operands.push_back(seqlensK);
   operands.push_back(totalSeqLen);
   operands.push_back(outputInit);
-  operands.push_back(presentKeyInit);
-  operands.push_back(presentValueInit);
+  operands.push_back(*presentKeyInit);
+  operands.push_back(*presentValueInit);
 
   // segmentSizes order MUST match HipOps.td Hip_GqaOp argument order.
   llvm::SmallVector<int32_t> segmentSizes;

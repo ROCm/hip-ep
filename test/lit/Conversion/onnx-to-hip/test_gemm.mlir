@@ -68,6 +68,56 @@ module {
     return %output : tensor<1x5120xf16>
   }
 
+  // --- Cases 4-7: dynamic M/N source mapping for every transpose pair ---
+  func.func @test_gemm_dynamic_00(%a: tensor<?x4xf16>, %b: tensor<4x?xf16>) -> tensor<?x?xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output = "onnx.Gemm"(%a, %b, %none) : (tensor<?x4xf16>, tensor<4x?xf16>, none) -> tensor<?x?xf16>
+    return %output : tensor<?x?xf16>
+  }
+  // CHECK-LABEL: func.func @test_gemm_dynamic_00
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<4x?xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK: tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf16>
+
+  func.func @test_gemm_dynamic_10(%a: tensor<4x?xf16>, %b: tensor<4x?xf16>) -> tensor<?x?xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output = "onnx.Gemm"(%a, %b, %none) {transA = 1 : si64} : (tensor<4x?xf16>, tensor<4x?xf16>, none) -> tensor<?x?xf16>
+    return %output : tensor<?x?xf16>
+  }
+  // CHECK-LABEL: func.func @test_gemm_dynamic_10
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<4x?xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<4x?xf16>)
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C1]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK: tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf16>
+
+  func.func @test_gemm_dynamic_01(%a: tensor<?x4xf16>, %b: tensor<?x4xf16>) -> tensor<?x?xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output = "onnx.Gemm"(%a, %b, %none) {transB = 1 : si64} : (tensor<?x4xf16>, tensor<?x4xf16>, none) -> tensor<?x?xf16>
+    return %output : tensor<?x?xf16>
+  }
+  // CHECK-LABEL: func.func @test_gemm_dynamic_01
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK: tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf16>
+
+  func.func @test_gemm_dynamic_11(%a: tensor<4x?xf16>, %b: tensor<?x4xf16>, %c: tensor<?xf16>) -> tensor<?x?xf16> {
+    %output = "onnx.Gemm"(%a, %b, %c) {transA = 1 : si64, transB = 1 : si64} : (tensor<4x?xf16>, tensor<?x4xf16>, tensor<?xf16>) -> tensor<?x?xf16>
+    return %output : tensor<?x?xf16>
+  }
+  // CHECK-LABEL: func.func @test_gemm_dynamic_11
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<4x?xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4xf16>
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C1]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK: tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf16>
+
   // Dummy entry point required by generateModuleMetadata.
   func.func @main_graph(%arg0: tensor<1x5120xf16>, %arg1: tensor<5120x5120xf16>, %arg2: tensor<5120xf16>) -> tensor<1x5120xf16> {
     return %arg0 : tensor<1x5120xf16>

@@ -113,7 +113,8 @@ struct NonZeroToHip : public mlir::RewritePattern {
     mlir::Value countInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, countType.getShape(), countType.getElementType());
 
-    // hip.nonzero is multi-result (autoInfer=0): pass explicit result types.
+    // hip.nonzero is multi-result and does not use the single-result inference
+    // family, so pass explicit result types.
     auto hipOp = mlir::hip::NonZeroOp::create(
         rewriter, loc, mlir::TypeRange{resultType, countType}, context,
         op->getOperand(0), yInit, countInit,

@@ -19,42 +19,47 @@ module {
   }
 
   // keepdims = 1: reduced dim is kept as size 1
-  func.func @test_reduce_max_keepdims(%data: tensor<1x128xi64>, %axes: tensor<i64>) -> tensor<1x1xi64> {
+  func.func @test_reduce_max_keepdims(%data: tensor<1x128xi64>) -> tensor<1x1xi64> {
     // CHECK-LABEL: func.func @test_reduce_max_keepdims
-    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<1x128xi64>, %[[AXES:.*]]: tensor<i64>) -> tensor<1x1xi64>
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<1x128xi64>) -> tensor<1x1xi64>
 
-    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<1x128xi64>, tensor<i64>) -> tensor<1x1xi64>
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<1x128xi64>, tensor<1xi64>) -> tensor<1x1xi64>
 
+    // CHECK: %[[AXES:.*]] = arith.constant dense<1> : tensor<1xi64>
     // CHECK: tensor.empty() : tensor<1x1xi64>
-    // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<i64>) outs({{.*}} : tensor<1x1xi64>)
+    // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<1xi64>) outs({{.*}} : tensor<1x1xi64>)
     // CHECK-NOT: hip.alloc
 
     return %output : tensor<1x1xi64>
   }
 
   // keepdims = 0: reduced dim is dropped from output shape
-  func.func @test_reduce_max_no_keepdims(%data: tensor<4x8xi64>, %axes: tensor<i64>) -> tensor<4xi64> {
+  func.func @test_reduce_max_no_keepdims(%data: tensor<4x8xi64>) -> tensor<4xi64> {
     // CHECK-LABEL: func.func @test_reduce_max_no_keepdims
-    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<4x8xi64>, %[[AXES:.*]]: tensor<i64>) -> tensor<4xi64>
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<4x8xi64>) -> tensor<4xi64>
 
-    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<4x8xi64>, tensor<i64>) -> tensor<4xi64>
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
+    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<4x8xi64>, tensor<1xi64>) -> tensor<4xi64>
 
+    // CHECK: %[[AXES:.*]] = arith.constant dense<1> : tensor<1xi64>
     // CHECK: tensor.empty() : tensor<4xi64>
-    // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<4x8xi64>, tensor<i64>) outs({{.*}} : tensor<4xi64>) {keepdims = 0 : i64}
+    // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<4x8xi64>, tensor<1xi64>) outs({{.*}} : tensor<4xi64>) {keepdims = 0 : i64, normalized_axes = array<i64: 1>}
     // CHECK-NOT: hip.alloc
 
     return %output : tensor<4xi64>
   }
 
-  // Dynamic shape test
-  func.func @reduce_max_dynamic(%data: tensor<?x?x512xf32>, %axes: tensor<i64>) -> tensor<?x?xf32> {
-    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf32>, tensor<i64>) -> tensor<?x?xf32>
+  // Dynamic input extents with compile-time axes.
+  func.func @reduce_max_dynamic(%data: tensor<?x?x512xf32>) -> tensor<?x?xf32> {
+    %axes = arith.constant dense<[2]> : tensor<1xi64>
+    %output = "onnx.ReduceMax"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<?x?x512xf32>, tensor<1xi64>) -> tensor<?x?xf32>
     return %output : tensor<?x?xf32>
   }
 
   // CHECK-LABEL: func.func @reduce_max_dynamic
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf32>, %[[AXES:.*]]: tensor<i64>) -> tensor<?x?xf32>
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf32>) -> tensor<?x?xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
-  // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf32>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
+  // CHECK: hip.reduce_max(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x512xf32>, tensor<1xi64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64, normalized_axes = array<i64: 2>}
   // CHECK-NOT: hip.alloc
 }

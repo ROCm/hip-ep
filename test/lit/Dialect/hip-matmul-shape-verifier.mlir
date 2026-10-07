@@ -46,7 +46,7 @@ func.func @matmul_dynamic_batch(%ctx: !hip.context,
 // -----
 
 // CHECK-LABEL: func.func @matmul_dynamic_k
-// CHECK:         hip.matmul
+// CHECK: hip.matmul
 func.func @matmul_dynamic_k(%ctx: !hip.context,
                             %a: memref<2x?xf16, 1>,
                             %b: memref<?x8xf16, 1>,
@@ -54,6 +54,52 @@ func.func @matmul_dynamic_k(%ctx: !hip.context,
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x?xf16, 1>, memref<?x8xf16, 1>)
     outs(%c : memref<2x8xf16, 1>)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @matmul_dynamic_k_one_sided
+// CHECK: hip.matmul
+func.func @matmul_dynamic_k_one_sided(%ctx: !hip.context,
+                                      %a: memref<2x?xf16, 1>,
+                                      %b: memref<4x8xf16, 1>,
+                                      %c: memref<2x8xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x?xf16, 1>, memref<4x8xf16, 1>)
+    outs(%c : memref<2x8xf16, 1>)
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @matmul_dynamic_batch_two_axes
+// CHECK: hip.matmul
+func.func @matmul_dynamic_batch_two_axes(%ctx: !hip.context,
+                                         %a: memref<?x?x4x16xf16, 1>,
+                                         %b: memref<?x?x16x32xf16, 1>,
+                                         %c: memref<?x?x4x32xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<?x?x4x16xf16, 1>, memref<?x?x16x32xf16, 1>)
+    outs(%c : memref<?x?x4x32xf16, 1>)
+  return
+}
+
+// -----
+
+// Whole-matrix broadcast of A across B's batches, with a dynamic batch extent.
+// A's batch extents are all statically 1, so A uses stride 0 regardless of what
+// the dynamic output batch turns out to be.
+
+// CHECK-LABEL: func.func @matmul_dynamic_batch_broadcast_a
+// CHECK:         hip.matmul
+func.func @matmul_dynamic_batch_broadcast_a(%ctx: !hip.context,
+                                            %a: memref<1x1x4x16xf16, 1>,
+                                            %b: memref<?x8x16x32xf16, 1>,
+                                            %c: memref<?x8x4x32xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<1x1x4x16xf16, 1>, memref<?x8x16x32xf16, 1>)
+    outs(%c : memref<?x8x4x32xf16, 1>)
   return
 }
 
@@ -76,7 +122,7 @@ func.func @matmul_m_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
                              %c: memref<3x8xf16, 1>) {
-  // expected-error @below {{dim 0 of result #0 mismatch: expected 2}}
+  // expected-error @below {{dim 0 of result mismatch: expected 2}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4xf16, 1>, memref<4x8xf16, 1>)
     outs(%c : memref<3x8xf16, 1>)
@@ -89,7 +135,7 @@ func.func @matmul_n_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
                              %c: memref<2x9xf16, 1>) {
-  // expected-error @below {{dim 1 of result #0 mismatch: expected 8}}
+  // expected-error @below {{dim 1 of result mismatch: expected 8}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4xf16, 1>, memref<4x8xf16, 1>)
     outs(%c : memref<2x9xf16, 1>)
@@ -115,7 +161,7 @@ func.func @matmul_rank_mismatch(%ctx: !hip.context,
                                 %a: memref<2x4x8xf16, 1>,
                                 %b: memref<8x16xf16, 1>,
                                 %c: memref<4x16xf16, 1>) {
-  // expected-error @below {{rank mismatch on result #0: expected rank 3}}
+  // expected-error @below {{rank mismatch on result: expected rank 3}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4x8xf16, 1>, memref<8x16xf16, 1>)
     outs(%c : memref<4x16xf16, 1>)
@@ -135,4 +181,34 @@ func.func @matmul_tensor_mode_static(%ctx: !hip.context,
     ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
     outs(%c : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
+}
+
+// -----
+
+func.func @matmul_partial_batch_broadcast(%ctx: !hip.context,
+                                          %a: memref<2x1x4x8xf16, 1>,
+                                          %b: memref<1x3x8x16xf16, 1>,
+                                          %c: memref<2x3x4x16xf16, 1>) {
+  // expected-error @+1 {{matmul partial per-axis batch broadcast is not supported by the strided-batch runtime}}
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x1x4x8xf16, 1>, memref<1x3x8x16xf16, 1>)
+    outs(%c : memref<2x3x4x16xf16, 1>)
+  return
+}
+
+// -----
+
+// A runtime value of A.batch=[2,1] is a partial broadcast and is rejected by
+// the runtime wrapper's matrix-count guard; A.batch=[2,3] is representable.
+// CHECK-LABEL: func.func @matmul_runtime_checked_dynamic_batch
+// CHECK: hip.matmul
+func.func @matmul_runtime_checked_dynamic_batch(
+    %ctx: !hip.context,
+    %a: memref<2x?x4x8xf16, 1>,
+    %b: memref<2x3x8x16xf16, 1>,
+    %c: memref<2x3x4x16xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x?x4x8xf16, 1>, memref<2x3x8x16xf16, 1>)
+    outs(%c : memref<2x3x4x16xf16, 1>)
+  return
 }
