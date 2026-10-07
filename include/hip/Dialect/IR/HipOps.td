@@ -641,32 +641,6 @@ def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
   }];
 }
 
-def Hip_PointwiseOp : Hip_DpsOp<"pointwise"> {
-  let summary = "Outlined pointwise subgraph dispatch";
-  let description = [{
-    Dispatches to an outlined `func.func` (referenced by `$kernel`) that holds a
-    fused chain of pointwise operations. The op is a staging form produced by
-    the RocMlir fusion patterns: a lone pointwise op is first outlined into a
-    `hip.pointwise`, predecessor pointwise ops are folded into its function, and
-    an anchor op (matmul/conv/gemm) finally absorbs the whole thing into a
-    `hip.rocmlir`. Same destination-passing shape as `hip.rocmlir`, without the
-    rock-kernel binary/launch attributes.
-  }];
-  let arguments = (ins
-    FlatSymbolRefAttr:$kernel,
-    Hip_ContextType:$ctx,
-    Variadic<Hip_TensorOrMemRef>:$inputs,
-    Hip_TensorOrMemRef:$output
-  );
-
-  let assemblyFormat = [{
-    `(` $ctx `)` $kernel `ins` `(` $inputs `:`
-    type($inputs) `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^ )?
-  }];
-}
-
 // ===== MIOpen DNN Operations =================================================
 
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
