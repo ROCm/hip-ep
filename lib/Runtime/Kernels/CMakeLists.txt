@@ -47,6 +47,7 @@ set(_kernel_sources
     hip/bias_gelu_kernel.hip
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
+    hip/lrn_kernel.hip
     hip/trilu_kernel.hip
     hip/swish_kernel.hip
     hip/pow_kernel.hip
