@@ -270,6 +270,7 @@ add_library(OnnxToHip STATIC
   IfOutline.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
+  LRNConversion.cpp
   TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp

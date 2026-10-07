@@ -791,6 +791,22 @@ HIP_KERNEL_API int hip_trilu(
     int hip_dtype);
 
 /* =========================================================================
+ * Local Response Normalization
+ * =========================================================================
+ *
+ * ONNX LRN across channels. n is the batch, channels is axis 1, and spatial
+ * is the product of the remaining dimensions. size is the channel window.
+ * Supports HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success, non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_lrn(void *stream, const void *input, void *output,
+                           int64_t n, int64_t channels, int64_t spatial,
+                           int64_t size, double alpha, double beta, double bias,
+                           int hip_dtype);
+
+/* =========================================================================
  * Swish Activation
  * =========================================================================
  *

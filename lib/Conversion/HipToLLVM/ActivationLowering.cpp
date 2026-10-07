@@ -245,6 +245,85 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
   }
 };
 
+// hip.lrn(ctx, input, output) {size, alpha, beta, bias}
+//   -> wrap_lrn(state, input, output, n, c, spatial, size, alpha, beta, bias,
+//               data_type)
+// Channel axis is 1. spatial is the product of the remaining dimensions.
+struct LRNOpLowering : public ConvertOpToLLVMPattern<LRNOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(LRNOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    auto createF64Const = [&](double value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                      rewriter.getF64FloatAttr(value));
+    };
+
+    auto outputType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!outputType || outputType.getRank() < 2)
+      return op.emitError("hip.lrn output must be a memref of rank >= 2");
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType != HIPDNN_EP_DATATYPE_FLOAT &&
+        dataType != HIPDNN_EP_DATATYPE_HALF &&
+        dataType != HIPDNN_EP_DATATYPE_BFLOAT16 &&
+        dataType != HIPDNN_EP_DATATYPE_DOUBLE)
+      return op.emitError(
+          "hip.lrn element type must be f16, bf16, f32, or f64");
+
+    Value outputDesc = adaptor.getOutput();
+    MemRefDescriptor desc(outputDesc);
+    auto dimSize = [&](int64_t dimIdx) -> Value {
+      if (outputType.isDynamicDim(dimIdx))
+        return desc.size(rewriter, loc, dimIdx);
+      return createI64Const(outputType.getDimSize(dimIdx));
+    };
+
+    Value n = dimSize(0);
+    Value channels = dimSize(1);
+    Value spatial = createI64Const(1);
+    for (int64_t dimIdx : llvm::seq<int64_t>(2, outputType.getRank()))
+      spatial = LLVM::MulOp::create(rewriter, loc, spatial, dimSize(dimIdx));
+
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                        i64Type, i64Type, i64Type, f64Type,
+                                        f64Type, f64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapLRN, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 11> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(outputDesc, rewriter, loc),
+        n,
+        channels,
+        spatial,
+        createI64Const(op.getSize()),
+        createF64Const(op.getAlpha().convertToDouble()),
+        createF64Const(op.getBeta().convertToDouble()),
+        createF64Const(op.getBias().convertToDouble()),
+        createI64Const(dataType)};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.swish(ctx, input, output)
 //   -> wrap_swish(state, input, output, num_elements, data_type, alpha)
 // Supports static and dynamic shapes and the complete ONNX Swish type set.
@@ -481,7 +560,7 @@ struct MiopenSoftmaxOpLowering
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-               SwishOpLowering, PowOpLowering, SiluOpLowering,
+               LRNOpLowering, SwishOpLowering, PowOpLowering, SiluOpLowering,
                MiopenSoftmaxOpLowering>(converter);
 }
 

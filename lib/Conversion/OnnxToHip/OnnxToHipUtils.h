@@ -467,6 +467,8 @@ void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateLRNConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateTriluConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateSwishConversionPatterns(RewritePatternSet &patterns,

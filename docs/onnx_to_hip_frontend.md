@@ -132,6 +132,7 @@ runtime coverage.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `Relu` | `hip.max` against a 0-D zero | `wrap_elementwise` |
+| `LRN` | `hip.lrn` | `lrn_kernel.hip`. Rank >= 2, channel axis 1, f16/bf16/f32/f64 |
 
 ### Softmax
 
