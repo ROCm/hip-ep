@@ -26,14 +26,20 @@ struct HipResizeLaunch {
 
 // The window is the shortest suffix that contains every statically resized
 // axis. Axes before it are the copied prefix and must number at most 2.
-// A dynamic axis is legal when both sides are dynamic. In the prefix the
+// A dynamic axis is legal when both sides are dynamic. A static input with a
+// dynamic output is rejected: the output extent is not in either type.
+// `hostExtents` allows that pair only after conversion has a host index for
+// the output extent (a constant, or a synchronized read of a `sizes` element).
+// Callers that pass `hostExtents` record the resulting launch on the op;
+// lowering would otherwise reject the same memref types. In the prefix the
 // output copies the input extent. In the window, conversion fills the output
-// extent from a constant scale and lowering reads it from the memref
-// descriptor. When nothing is statically resized, a trailing static channel
-// after a dynamic axis is channels-last (prefix is N). Otherwise the copied
-// prefix is the leading two axes.
+// extent and lowering reads it from the memref descriptor. When nothing is
+// statically resized, a trailing static channel after a dynamic axis is
+// channels-last (prefix is N). Otherwise the copied prefix is the leading
+// two axes.
 inline std::optional<HipResizeLaunch>
-planHipResizeLaunch(ShapedType inputType, ShapedType outputType) {
+planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
+                    bool hostExtents = false) {
   if (!inputType.hasRank() || !outputType.hasRank())
     return std::nullopt;
   const int64_t rank = inputType.getRank();
@@ -44,9 +50,12 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType) {
   auto axis = [&](int64_t i) -> std::optional<AxisKind> {
     const bool inDyn = inputType.isDynamicDim(i);
     const bool outDyn = outputType.isDynamicDim(i);
+    if (inDyn && outDyn)
+      return AxisKind::Dynamic;
+    if (hostExtents && !inDyn && outDyn)
+      return AxisKind::Resized;
     if (inDyn || outDyn)
-      return (inDyn && outDyn) ? std::optional<AxisKind>(AxisKind::Dynamic)
-                               : std::nullopt;
+      return std::nullopt;
     return inputType.getDimSize(i) == outputType.getDimSize(i)
                ? AxisKind::Copied
                : AxisKind::Resized;

@@ -54,8 +54,23 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    std::optional<HipResizeLaunch> launch =
-        planHipResizeLaunch(inputType, outputType);
+    // A sizes-vector resize records the launch it already proved. The memref
+    // types alone still show a static input extent beside a dynamic output
+    // extent, which planHipResizeLaunch rejects.
+    std::optional<HipResizeLaunch> launch;
+    if (auto prefixAttr = op->getAttrOfType<IntegerAttr>("prefix_count")) {
+      auto spatialAttr = op->getAttrOfType<IntegerAttr>("spatial_rank");
+      if (!spatialAttr)
+        return rewriter.notifyMatchFailure(op, "missing spatial_rank");
+      int64_t prefix = prefixAttr.getInt();
+      int64_t spatial = spatialAttr.getInt();
+      if (prefix < 0 || prefix > 2 || spatial < 1 || spatial > 3 ||
+          prefix + spatial != outputType.getRank())
+        return rewriter.notifyMatchFailure(op, "invalid resize launch");
+      launch = HipResizeLaunch{prefix, spatial};
+    } else {
+      launch = planHipResizeLaunch(inputType, outputType);
+    }
     if (!launch)
       return rewriter.notifyMatchFailure(
           op, "expected a copied prefix of at most 2 axes and a trailing "

@@ -42,8 +42,15 @@ namespace {
 // dynamic, `scales` must be a compile-time constant (a hip.constant /
 // arith.constant, possibly behind a cast).  A copied prefix axis must have
 // scale 1 and copies `tensor.dim` when that dim is dynamic.  Any other
-// positive scale is floor(input_dim * scale) in f64, then index.  `sizes` is
-// not consulted.  No GPU readback.
+// positive scale is floor(input_dim * scale) in f64, then index.
+//
+// When `scales` is absent, operand `sizes` supplies the output extents.  A
+// compile-time constant vector is written into the result type.  A runtime
+// vector is not a shape record: each element is read with
+// `hip.readback_scalar` (device-to-host copy and stream sync) and that host
+// index sizes `tensor.empty`.  A static input extent paired with one of those
+// dynamic outputs is resized only because the index exists; the launch is
+// saved on the op so lowering does not reject the memref types.
 //
 // Compile-time work:
 //   * decode the three string attributes into i64 enums baked onto the
@@ -152,6 +159,79 @@ static mlir::Value floorScaledDim(mlir::OpBuilder &b, mlir::Location loc,
   return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), floored);
 }
 
+/// Constant extents, or `kDynamic` when the element is only available by
+/// reading the sizes tensor. Does not build IR: a later plan failure must
+/// leave the onnx op untouched.
+static std::optional<llvm::SmallVector<int64_t>>
+classifyHostSizes(mlir::Value sizes, int64_t rank) {
+  if (!sizes || isAbsent(sizes))
+    return std::nullopt;
+  sizes = unwrapCast(sizes);
+  auto sizesType = mlir::dyn_cast<mlir::RankedTensorType>(sizes.getType());
+  if (!sizesType || sizesType.getRank() != 1 || !sizesType.hasStaticShape() ||
+      sizesType.getNumElements() != rank ||
+      !sizesType.getElementType().isInteger())
+    return std::nullopt;
+  llvm::SmallVector<int64_t> extents(rank, mlir::ShapedType::kDynamic);
+  if (mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(sizes)) {
+    if (!dense.getElementType().isInteger() ||
+        static_cast<int64_t>(dense.getNumElements()) != rank)
+      return std::nullopt;
+    int64_t axis = 0;
+    for (mlir::APInt entry : dense.getValues<mlir::APInt>()) {
+      if (!entry.isStrictlyPositive() || entry.getSignificantBits() > 63)
+        return std::nullopt;
+      extents[axis++] = entry.getSExtValue();
+    }
+  }
+  return extents;
+}
+
+/// One host `index` per axis of a rank-1 integer `sizes` tensor. A dense
+/// constant stays a host constant. Anything else is a synchronized read of
+/// that element: after Concat lowering the payload is a buffer, and
+/// `tensor.dim` of it is the length, not the extent.
+static std::optional<llvm::SmallVector<mlir::Value>>
+readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc, mlir::Value context,
+                    mlir::Value sizes, int64_t rank) {
+  if (!sizes || isAbsent(sizes))
+    return std::nullopt;
+  sizes = unwrapCast(sizes);
+  auto sizesType = mlir::dyn_cast<mlir::RankedTensorType>(sizes.getType());
+  if (!sizesType || sizesType.getRank() != 1 || !sizesType.hasStaticShape() ||
+      sizesType.getNumElements() != rank ||
+      !sizesType.getElementType().isInteger())
+    return std::nullopt;
+
+  llvm::SmallVector<mlir::Value> indexes;
+  if (mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(sizes)) {
+    if (!dense.getElementType().isInteger() ||
+        static_cast<int64_t>(dense.getNumElements()) != rank)
+      return std::nullopt;
+    for (mlir::APInt entry : dense.getValues<mlir::APInt>()) {
+      if (!entry.isStrictlyPositive() || entry.getSignificantBits() > 63)
+        return std::nullopt;
+      indexes.push_back(
+          mlir::arith::ConstantIndexOp::create(b, loc, entry.getSExtValue()));
+    }
+    return indexes;
+  }
+
+  auto sliceType = mlir::RankedTensorType::get({1}, sizesType.getElementType());
+  mlir::SmallVector<mlir::OpFoldResult, 1> one{b.getIndexAttr(1)};
+  mlir::SmallVector<mlir::OpFoldResult, 1> strides{b.getIndexAttr(1)};
+  for (int64_t axis : llvm::seq<int64_t>(rank)) {
+    mlir::SmallVector<mlir::OpFoldResult, 1> offsets{b.getIndexAttr(axis)};
+    mlir::Value slice = mlir::tensor::ExtractSliceOp::create(
+        b, loc, sliceType, sizes, offsets, one, strides);
+    mlir::Value raw = mlir::hip::ReadbackScalarOp::create(
+        b, loc, sizesType.getElementType(), context, slice);
+    indexes.push_back(
+        mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), raw));
+  }
+  return indexes;
+}
+
 static mlir::Value copyAxisExtent(mlir::OpBuilder &b, mlir::Location loc,
                                   mlir::Value input,
                                   mlir::RankedTensorType inputType,
@@ -205,13 +285,11 @@ struct ResizeToHip : public mlir::RewritePattern {
           op, "Resize runtime supports only matching float types");
 
     // Channels-last rank 4 fits the existing kernel: the batch is the prefix,
-    // and (H, W, C) is the trailing window.  See planHipResizeLaunch.
+    // and (H, W, C) is the trailing window.  See planHipResizeLaunch. A
+    // sizes vector can still match when this type-only plan rejects a static
+    // input extent paired with a dynamic output extent.
     std::optional<HipResizeLaunch> launch =
         planHipResizeLaunch(inputType, outputType);
-    if (!launch)
-      return rewriter.notifyMatchFailure(
-          op, "Resize does not fit a copied prefix of at most 2 axes and a "
-              "trailing window of at most 3");
 
     // ===== Decode string attrs to enum-like i64 values =====================
 
@@ -288,79 +366,155 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
 
+    auto emitResize = [&](mlir::RankedTensorType resultType,
+                          mlir::ValueRange dynSizes,
+                          const std::optional<HipResizeLaunch> &stamped)
+        -> mlir::LogicalResult {
+      mlir::Value init =
+          mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                        resultType.getElementType(), dynSizes);
+      auto hipOp =
+          mlir::hip::ResizeOp::create(rewriter, loc, resultType, context, input,
+                                      init, modeAttr, coordAttr, nearestAttr);
+      if (stamped) {
+        hipOp->setAttr("prefix_count",
+                       rewriter.getI64IntegerAttr(stamped->prefixCount));
+        hipOp->setAttr("spatial_rank",
+                       rewriter.getI64IntegerAttr(stamped->spatialRank));
+      }
+      mlir::Value result = hipOp.getResult(0);
+      if (result.getType() != outputType)
+        result =
+            mlir::tensor::CastOp::create(rewriter, loc, outputType, result);
+      rewriter.replaceOp(op, result);
+      return mlir::success();
+    };
+
     // A static window already has its extents in the result type, so scales
     // may be a runtime value.  The kernel recovers scale = in_dim / out_dim.
     // A dynamic window extent is filled from a compile-time constant scale.
-    bool windowDynamic = false;
-    for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
-      if (outputType.isDynamicDim(launch->prefixCount + i))
-        windowDynamic = true;
-
+    // This path is unchanged for every resize the type-only plan accepts.
+    bool scalesPath = false;
     llvm::SmallVector<mlir::Value> dynSizes;
-    if (!windowDynamic) {
-      for (int64_t i : llvm::seq<int64_t>(launch->prefixCount)) {
-        if (outputType.isDynamicDim(i))
-          dynSizes.push_back(
-              mlir::tensor::DimOp::create(rewriter, loc, input, i));
-      }
-    } else {
-      mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
-      llvm::SmallVector<double> scaleVec;
-      if (!foldScales(scales, rank, scaleVec))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: dynamic output spatial dims require a compile-time "
-                "constant scales vector");
-      for (int64_t axis : llvm::seq<int64_t>(launch->prefixCount)) {
-        if (scaleVec[axis] != 1.0)
-          return rewriter.notifyMatchFailure(
-              op, "Resize: only spatial-axis resampling supported "
-                  "(copied prefix scale must be 1)");
-      }
-      for (double scale : scaleVec) {
-        if (!(scale > 0.0) || !std::isfinite(scale))
-          return rewriter.notifyMatchFailure(op, "Resize: non-positive scale");
-      }
-
-      for (int64_t axis : llvm::seq<int64_t>(rank)) {
-        if (inputType.isDynamicDim(axis) || outputType.isDynamicDim(axis))
-          continue;
-        double scale = scaleVec[axis];
-        int64_t expected = inputType.getDimSize(axis);
-        if (scale != 1.0) {
-          double prod = static_cast<double>(expected) * scale;
-          if (!(prod > 0.0))
-            return rewriter.notifyMatchFailure(op,
-                                               "Resize: non-positive scale");
-          expected = static_cast<int64_t>(std::floor(prod));
+    if (launch) {
+      bool windowDynamic = false;
+      for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
+        if (outputType.isDynamicDim(launch->prefixCount + i))
+          windowDynamic = true;
+      if (!windowDynamic) {
+        for (int64_t i : llvm::seq<int64_t>(launch->prefixCount)) {
+          if (outputType.isDynamicDim(i))
+            dynSizes.push_back(
+                mlir::tensor::DimOp::create(rewriter, loc, input, i));
         }
-        if (expected != outputType.getDimSize(axis))
-          return rewriter.notifyMatchFailure(
-              op, "Resize: scale disagrees with static output extent");
-      }
-
-      for (int64_t axis : llvm::seq<int64_t>(rank)) {
-        if (!outputType.isDynamicDim(axis))
-          continue;
-        double scale = scaleVec[axis];
-        mlir::Value extent =
-            scale == 1.0
-                ? copyAxisExtent(rewriter, loc, input, inputType, axis)
-                : floorScaledDim(rewriter, loc, input, inputType, axis, scale);
-        if (!extent)
-          return rewriter.notifyMatchFailure(
-              op, "Resize: output extent is not host-computable");
-        dynSizes.push_back(extent);
+        scalesPath = true;
+      } else {
+        mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
+        llvm::SmallVector<double> scaleVec;
+        if (foldScales(scales, rank, scaleVec)) {
+          for (int64_t axis : llvm::seq<int64_t>(launch->prefixCount)) {
+            if (scaleVec[axis] != 1.0)
+              return rewriter.notifyMatchFailure(
+                  op, "Resize: only spatial-axis resampling supported "
+                      "(copied prefix scale must be 1)");
+          }
+          for (double scale : scaleVec) {
+            if (!(scale > 0.0) || !std::isfinite(scale))
+              return rewriter.notifyMatchFailure(op,
+                                                 "Resize: non-positive scale");
+          }
+          for (int64_t axis : llvm::seq<int64_t>(rank)) {
+            if (inputType.isDynamicDim(axis) || outputType.isDynamicDim(axis))
+              continue;
+            double scale = scaleVec[axis];
+            int64_t expected = inputType.getDimSize(axis);
+            if (scale != 1.0) {
+              double prod = static_cast<double>(expected) * scale;
+              if (!(prod > 0.0))
+                return rewriter.notifyMatchFailure(
+                    op, "Resize: non-positive scale");
+              expected = static_cast<int64_t>(std::floor(prod));
+            }
+            if (expected != outputType.getDimSize(axis))
+              return rewriter.notifyMatchFailure(
+                  op, "Resize: scale disagrees with static output extent");
+          }
+          for (int64_t axis : llvm::seq<int64_t>(rank)) {
+            if (!outputType.isDynamicDim(axis))
+              continue;
+            double scale = scaleVec[axis];
+            mlir::Value extent =
+                scale == 1.0
+                    ? copyAxisExtent(rewriter, loc, input, inputType, axis)
+                    : floorScaledDim(rewriter, loc, input, inputType, axis,
+                                     scale);
+            if (!extent)
+              return rewriter.notifyMatchFailure(
+                  op, "Resize: output extent is not host-computable");
+            dynSizes.push_back(extent);
+          }
+          scalesPath = true;
+        }
       }
     }
+    if (scalesPath)
+      return emitResize(outputType, dynSizes, std::nullopt);
 
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, outputType.getShape(),
-                                      outputType.getElementType(), dynSizes);
-    auto hipOp =
-        mlir::hip::ResizeOp::create(rewriter, loc, outputType, context, input,
-                                    init, modeAttr, coordAttr, nearestAttr);
-    rewriter.replaceOp(op, hipOp.getResult(0));
-    return mlir::success();
+    mlir::Value sizes = operands.size() > 3 ? operands[3] : mlir::Value();
+    std::optional<llvm::SmallVector<int64_t>> classified =
+        classifyHostSizes(sizes, rank);
+    if (!classified)
+      return rewriter.notifyMatchFailure(
+          op, launch ? "Resize: dynamic output spatial dims require a "
+                       "compile-time constant scales vector or a sizes vector"
+                     : "Resize does not fit a copied prefix of at most 2 axes "
+                       "and a trailing window of at most 3");
+
+    llvm::SmallVector<int64_t> refinedShape;
+    llvm::SmallVector<int64_t> dynamicAxes;
+    for (int64_t axis : llvm::seq<int64_t>(rank)) {
+      int64_t extent = (*classified)[axis];
+      bool known = extent != mlir::ShapedType::kDynamic;
+      if (known && !outputType.isDynamicDim(axis) &&
+          outputType.getDimSize(axis) != extent)
+        return rewriter.notifyMatchFailure(
+            op, "Resize: sizes disagrees with static output extent");
+      // A constant extent of a static input axis is written into the type, so
+      // the type-only plan still applies and no readback is required. A
+      // runtime extent stays dynamic; its host index is the readback.
+      if (known && !inputType.isDynamicDim(axis)) {
+        refinedShape.push_back(extent);
+        continue;
+      }
+      if (!outputType.isDynamicDim(axis)) {
+        refinedShape.push_back(outputType.getDimSize(axis));
+        continue;
+      }
+      refinedShape.push_back(mlir::ShapedType::kDynamic);
+      dynamicAxes.push_back(axis);
+    }
+    auto refinedType =
+        mlir::RankedTensorType::get(refinedShape, outputType.getElementType());
+    std::optional<HipResizeLaunch> typeLaunch =
+        planHipResizeLaunch(inputType, refinedType);
+    std::optional<HipResizeLaunch> hostLaunch =
+        planHipResizeLaunch(inputType, refinedType, /*hostExtents=*/true);
+    if (!typeLaunch && !hostLaunch)
+      return rewriter.notifyMatchFailure(
+          op, "Resize: sizes vector does not fit a copied prefix of at most "
+              "2 axes and a trailing window of at most 3");
+
+    std::optional<llvm::SmallVector<mlir::Value>> sizeIndexes =
+        readHostSizeIndexes(rewriter, loc, context, sizes, rank);
+    if (!sizeIndexes)
+      return rewriter.notifyMatchFailure(
+          op, "Resize: sizes vector is not readable");
+    llvm::SmallVector<mlir::Value> sizeDynSizes;
+    for (int64_t axis : dynamicAxes)
+      sizeDynSizes.push_back((*sizeIndexes)[axis]);
+    // Every dynamic dim of refinedType has a host index in sizeDynSizes.
+    return emitResize(refinedType, sizeDynSizes,
+                      typeLaunch ? std::nullopt : hostLaunch);
   }
 };
 
