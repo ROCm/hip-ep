@@ -4891,7 +4891,12 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear
     as operands.  A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
-    any other scale is floor(input_dim * scale)).
+    any other scale is floor(input_dim * scale)).  When `scales` is absent, a
+    rank-1 integer `sizes` vector supplies the extents: a constant vector is
+    written into the result type, and a runtime vector is read back to host
+    indexes that size the output.  That launch may be saved as `prefix_count`
+    and `spatial_rank` when a static input extent is paired with a dynamic
+    output extent.
 
     Uses destination-passing style: the output buffer is provided.
 

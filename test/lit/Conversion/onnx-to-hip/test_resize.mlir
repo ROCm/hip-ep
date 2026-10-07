@@ -197,4 +197,68 @@ module {
     // CHECK: return
     return %y : tensor<?x3x?x?xf16>
   }
+
+  // Test 9: constant sizes. Extents are written into the type, so the
+  // type-only plan applies and nothing is read back.
+  func.func @test_resize_constant_sizes(%arg0: tensor<1x3x16x16xf32>)
+      -> tensor<1x3x32x32xf32> {
+    // CHECK-LABEL: func.func @test_resize_constant_sizes
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %sizes = "onnx.Constant"() {value = dense<[1, 3, 32, 32]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x3x16x16xf32>, none, none, tensor<4xi64>)
+        -> tensor<1x3x32x32xf32>
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK-NOT: onnx.Resize
+    // CHECK: tensor.empty() : tensor<1x3x32x32xf32>
+    // CHECK: hip.resize
+    // CHECK-NOT: prefix_count
+    // CHECK: return
+    return %y : tensor<1x3x32x32xf32>
+  }
+
+  // Test 10: runtime sizes. Each element is a host index before tensor.empty.
+  // Static input extents beside dynamic outputs need the saved launch.
+  func.func @test_resize_runtime_sizes(%arg0: tensor<?x3x1024x1024xf32>,
+                                       %sizes: tensor<4xi64>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_runtime_sizes
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel",
+         nearest_mode = "floor"}
+        : (tensor<?x3x1024x1024xf32>, none, none, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.readback_scalar
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
+    // CHECK-SAME: tensor<?x?x?x?xf32>
+    // CHECK: hip.resize
+    // CHECK-SAME: prefix_count = 1
+    // CHECK-SAME: spatial_rank = 3
+    // CHECK: return
+    return %y : tensor<?x?x?x?xf32>
+  }
+
+  // Test 11: a runtime sizes vector that resizes the leading axes does not
+  // fit the copied prefix. The op stays onnx.Resize.
+  func.func @test_resize_runtime_sizes_prefix_rejected(
+      %arg0: tensor<1x3x8x8xf32>, %sizes: tensor<4xi64>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_resize_runtime_sizes_prefix_rejected
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "nearest", coordinate_transformation_mode = "asymmetric"}
+        : (tensor<1x3x8x8xf32>, none, none, tensor<4xi64>)
+        -> tensor<?x?x?x?xf32>
+    // CHECK: onnx.Resize
+    // CHECK-NOT: hip.resize
+    // CHECK: return
+    return %y : tensor<?x?x?x?xf32>
+  }
 }
