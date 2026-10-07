@@ -1,93 +1,31 @@
 //===- RocMlirFusion.pdll -------------------------------------------------===//
 //
-// PDLL match surface for the three composable RocMlir fusion rewrites. The
-// greedy driver sequences them to collapse an anchor + pointwise chain into a
-// single `hip.rocmlir` dispatch, tail first:
+// PDLL match surface for RocMlir anchor+pointwise fusion.
 //
-//   OutlinePointwiseOp      a chain-terminal pointwise op -> hip.pointwise
-//                           (its own outlined func.func).
-//   FusePointwiseOp         a pointwise op feeding a hip.pointwise is inlined
-//                           into that dispatch's function.
-//   FuseRocMlirAnchorOp     a matmul/conv/gemm feeding a hip.pointwise is
-//                           inlined and relabelled a rock kernel -> hip.rocmlir.
-//   OutlineRocMlirAnchorOp  a matmul/conv/gemm with no pointwise chain to fold
-//                           into is outlined straight to its own hip.rocmlir.
+// A single pattern matches a fusable anchor (matmul/conv/gemm) and hands it to
+// one native rewrite that walks the trailing chain of pointwise consumers,
+// outlines the whole subgraph into a rock-kernel func.func, and replaces it
+// with a `hip.rocmlir` dispatch. The variable-length chain walk and func
+// outlining cannot be expressed declaratively, so the rewrite body is a
+// one-line trampoline into RocMlirFusion.cpp.
 //
-// Only the match (root + result-free constraints) is declarative. Each native
-// Constraint/Rewrite is a one-line trampoline into RocMlirFusion.cpp, where the
-// func.func creation/editing lives. `mlir-pdll -x cpp` turns this file into a
-// compilable translation unit (RocMlirFusion.pdll.h.inc) that registers each
-// trampoline automatically — no embedded bytecode, no manual registration.
+// `mlir-pdll -x cpp` compiles this file into RocMlirFusion.pdll.h.inc and
+// registers the trampolines by name automatically.
 //===----------------------------------------------------------------------===//
 
 // Native helpers (defined in RocMlirFusion.cpp, declared in RocMlirFusion.h).
-Constraint IsPointwiseOp(op: Op) [{
-  return ::mlir::success(::mlir::hip::rocmlir::isPointwiseOp(op));
-}];
-Constraint IsPointwiseChainTerminus(op: Op) [{
-  return ::mlir::success(::mlir::hip::rocmlir::isPointwiseChainTerminus(op));
-}];
-Constraint HasSinglePointwiseConsumer(op: Op) [{
-  return ::mlir::success(::mlir::hip::rocmlir::hasSinglePointwiseConsumer(op));
-}];
 Constraint IsFusableRocMlirAnchor(op: Op) [{
   return ::mlir::success(::mlir::hip::rocmlir::isFusableRocMlirAnchor(op));
 }];
-Constraint IsRocMlirAnchorTerminus(op: Op) [{
-  return ::mlir::success(::mlir::hip::rocmlir::isRocMlirAnchorTerminus(op));
+
+Rewrite OutlineRocMlirSubgraph(op: Op) [{
+  ::mlir::hip::rocmlir::outlineRocMlirSubgraph(rewriter, op);
 }];
 
-Rewrite OutlinePointwise(op: Op) [{
-  ::mlir::hip::rocmlir::outlinePointwise(rewriter, op);
-}];
-Rewrite FusePointwiseIntoConsumer(op: Op) [{
-  ::mlir::hip::rocmlir::fusePointwiseIntoConsumer(rewriter, op);
-}];
-Rewrite FuseAnchorIntoConsumer(op: Op) [{
-  ::mlir::hip::rocmlir::fuseAnchorIntoConsumer(rewriter, op);
-}];
-Rewrite OutlineRocMlirAnchor(op: Op) [{
-  ::mlir::hip::rocmlir::outlineRocMlirAnchor(rewriter, op);
-}];
-
-// A pointwise op whose consumer is not fusable: extract it into hip.pointwise.
-Pattern OutlinePointwiseOp with benefit(1) {
-  let root = op<>;
-  IsPointwiseChainTerminus(root);
-  rewrite root with {
-    OutlinePointwise(root);
-  };
-}
-
-// A pointwise op feeding a hip.pointwise: inline it into that function. Higher
-// benefit than outlining so a fusable predecessor folds in rather than being
-// outlined on its own first.
-Pattern FusePointwiseOp with benefit(2) {
-  let root = op<>;
-  IsPointwiseOp(root);
-  HasSinglePointwiseConsumer(root);
-  rewrite root with {
-    FusePointwiseIntoConsumer(root);
-  };
-}
-
-// An anchor op feeding a hip.pointwise: inline it and emit hip.rocmlir.
-Pattern FuseRocMlirAnchorOp with benefit(2) {
+Pattern FuseRocMlirAnchor with benefit(1) {
   let root = op<>;
   IsFusableRocMlirAnchor(root);
-  HasSinglePointwiseConsumer(root);
   rewrite root with {
-    FuseAnchorIntoConsumer(root);
-  };
-}
-
-// An anchor op with no pointwise consumer to fold into: outline it directly as
-// its own hip.rocmlir. An anchor that feeds a pointwise op is excluded by the
-// constraint and handled by FuseRocMlirAnchorOp once the consumer is outlined.
-Pattern OutlineRocMlirAnchorOp with benefit(1) {
-  let root = op<>;
-  IsRocMlirAnchorTerminus(root);
-  rewrite root with {
-    OutlineRocMlirAnchor(root);
+    OutlineRocMlirSubgraph(root);
   };
 }

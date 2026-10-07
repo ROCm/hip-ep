@@ -5,8 +5,8 @@
 
 //===- RocMlirFusion.h ----------------------------------------------------===//
 //
-// Declarations for the native constraints/rewrites referenced by
-// RocMlirFusion.pdll and the entry point that adds the generated patterns to a
+// Declarations for the native constraint/rewrite referenced by
+// RocMlirFusion.pdll and the entry point that adds the generated pattern to a
 // RewritePatternSet. Implementations live in RocMlirFusion.cpp; the .pdll file
 // contains only one-line trampolines into these functions.
 //===----------------------------------------------------------------------===//
@@ -18,20 +18,15 @@
 
 namespace mlir::hip::rocmlir {
 
-// --- native PDL constraints (result-free; match surface only) ---------------
-bool isPointwiseOp(Operation *op);
-bool isPointwiseChainTerminus(Operation *op);
-bool hasSinglePointwiseConsumer(Operation *op);
+// Fusable anchor: matmul/conv/gemm, first operand is hip.context, all tensor
+// operands statically shaped.
 bool isFusableRocMlirAnchor(Operation *op);
-bool isRocMlirAnchorTerminus(Operation *op);
 
-// --- native PDL rewrites ----------------------------------------------------
-void outlinePointwise(PatternRewriter &rewriter, Operation *op);
-void fusePointwiseIntoConsumer(PatternRewriter &rewriter, Operation *op);
-void fuseAnchorIntoConsumer(PatternRewriter &rewriter, Operation *op);
-void outlineRocMlirAnchor(PatternRewriter &rewriter, Operation *op);
+// Walks the trailing pointwise chain of `anchor`, outlines the subgraph into a
+// rock-kernel func.func, and replaces it with a hip.rocmlir dispatch.
+void outlineRocMlirSubgraph(PatternRewriter &rewriter, Operation *anchor);
 
-// Adds the three generated PDLL patterns (RocMlirFusion.pdll) to `patterns`.
+// Adds the generated PDLL pattern (RocMlirFusion.pdll) to `patterns`.
 void populateRocMlirFusionPatterns(RewritePatternSet &patterns);
 
 } // namespace mlir::hip::rocmlir
