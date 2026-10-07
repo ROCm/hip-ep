@@ -301,8 +301,7 @@ jobs:
           python3 build.py \
             --config Release \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
-            --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install" \
-            --cmake_extra_defines ENABLE_ROCMLIRTRITON=ON
+            --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
 
       # -----------------------------------------------------------------------
       # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the

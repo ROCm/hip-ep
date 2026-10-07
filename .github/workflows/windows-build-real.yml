@@ -140,8 +140,7 @@ jobs:
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            --cmake_extra_defines ENABLE_ROCMLIRTRITON=ON
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
