@@ -337,6 +337,8 @@ void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateNhwcConvConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
