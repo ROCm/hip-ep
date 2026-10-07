@@ -192,8 +192,8 @@ classifyHostSizes(mlir::Value sizes, int64_t rank) {
 /// that element: after Concat lowering the payload is a buffer, and
 /// `tensor.dim` of it is the length, not the extent.
 static std::optional<llvm::SmallVector<mlir::Value>>
-readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc,
-                    mlir::Value context, mlir::Value sizes, int64_t rank) {
+readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc, mlir::Value context,
+                    mlir::Value sizes, int64_t rank) {
   if (!sizes || isAbsent(sizes))
     return std::nullopt;
   sizes = unwrapCast(sizes);
@@ -211,14 +211,13 @@ readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc,
     for (mlir::APInt entry : dense.getValues<mlir::APInt>()) {
       if (!entry.isStrictlyPositive() || entry.getSignificantBits() > 63)
         return std::nullopt;
-      indexes.push_back(mlir::arith::ConstantIndexOp::create(
-          b, loc, entry.getSExtValue()));
+      indexes.push_back(
+          mlir::arith::ConstantIndexOp::create(b, loc, entry.getSExtValue()));
     }
     return indexes;
   }
 
-  auto sliceType =
-      mlir::RankedTensorType::get({1}, sizesType.getElementType());
+  auto sliceType = mlir::RankedTensorType::get({1}, sizesType.getElementType());
   mlir::SmallVector<mlir::OpFoldResult, 1> one{b.getIndexAttr(1)};
   mlir::SmallVector<mlir::OpFoldResult, 1> strides{b.getIndexAttr(1)};
   for (int64_t axis : llvm::seq<int64_t>(rank)) {
@@ -227,8 +226,8 @@ readHostSizeIndexes(mlir::OpBuilder &b, mlir::Location loc,
         b, loc, sliceType, sizes, offsets, one, strides);
     mlir::Value raw = mlir::hip::ReadbackScalarOp::create(
         b, loc, sizesType.getElementType(), context, slice);
-    indexes.push_back(mlir::arith::IndexCastOp::create(
-        b, loc, b.getIndexType(), raw));
+    indexes.push_back(
+        mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), raw));
   }
   return indexes;
 }
@@ -371,12 +370,12 @@ struct ResizeToHip : public mlir::RewritePattern {
                           mlir::ValueRange dynSizes,
                           const std::optional<HipResizeLaunch> &stamped)
         -> mlir::LogicalResult {
-      mlir::Value init = mlir::tensor::EmptyOp::create(
-          rewriter, loc, resultType.getShape(), resultType.getElementType(),
-          dynSizes);
-      auto hipOp = mlir::hip::ResizeOp::create(
-          rewriter, loc, resultType, context, input, init, modeAttr, coordAttr,
-          nearestAttr);
+      mlir::Value init =
+          mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                        resultType.getElementType(), dynSizes);
+      auto hipOp =
+          mlir::hip::ResizeOp::create(rewriter, loc, resultType, context, input,
+                                      init, modeAttr, coordAttr, nearestAttr);
       if (stamped) {
         hipOp->setAttr("prefix_count",
                        rewriter.getI64IntegerAttr(stamped->prefixCount));
@@ -385,7 +384,8 @@ struct ResizeToHip : public mlir::RewritePattern {
       }
       mlir::Value result = hipOp.getResult(0);
       if (result.getType() != outputType)
-        result = mlir::tensor::CastOp::create(rewriter, loc, outputType, result);
+        result =
+            mlir::tensor::CastOp::create(rewriter, loc, outputType, result);
       rewriter.replaceOp(op, result);
       return mlir::success();
     };
@@ -420,8 +420,8 @@ struct ResizeToHip : public mlir::RewritePattern {
           }
           for (double scale : scaleVec) {
             if (!(scale > 0.0) || !std::isfinite(scale))
-              return rewriter.notifyMatchFailure(
-                  op, "Resize: non-positive scale");
+              return rewriter.notifyMatchFailure(op,
+                                                 "Resize: non-positive scale");
           }
           for (int64_t axis : llvm::seq<int64_t>(rank)) {
             if (inputType.isDynamicDim(axis) || outputType.isDynamicDim(axis))
@@ -493,8 +493,8 @@ struct ResizeToHip : public mlir::RewritePattern {
       refinedShape.push_back(mlir::ShapedType::kDynamic);
       dynamicAxes.push_back(axis);
     }
-    auto refinedType = mlir::RankedTensorType::get(
-        refinedShape, outputType.getElementType());
+    auto refinedType =
+        mlir::RankedTensorType::get(refinedShape, outputType.getElementType());
     std::optional<HipResizeLaunch> typeLaunch =
         planHipResizeLaunch(inputType, refinedType);
     std::optional<HipResizeLaunch> hostLaunch =
@@ -507,7 +507,8 @@ struct ResizeToHip : public mlir::RewritePattern {
     std::optional<llvm::SmallVector<mlir::Value>> sizeIndexes =
         readHostSizeIndexes(rewriter, loc, context, sizes, rank);
     if (!sizeIndexes)
-      return rewriter.notifyMatchFailure(op, "Resize: sizes vector is not readable");
+      return rewriter.notifyMatchFailure(
+          op, "Resize: sizes vector is not readable");
     llvm::SmallVector<mlir::Value> sizeDynSizes;
     for (int64_t axis : dynamicAxes)
       sizeDynSizes.push_back((*sizeIndexes)[axis]);
