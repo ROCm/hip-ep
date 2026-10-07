@@ -1781,6 +1781,18 @@ void LeakyReluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// TriluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TriluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void TriluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SwishOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
