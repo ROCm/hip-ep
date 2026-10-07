@@ -22,6 +22,9 @@ struct SoftmaxToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
                               mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -30,7 +33,10 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(
+        op, "Softmax expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
@@ -53,6 +59,9 @@ struct SigmoidToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 SigmoidToHip::matchAndRewrite(mlir::Operation *op,
                               mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -61,7 +70,10 @@ SigmoidToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(
+        op, "Sigmoid expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp =
       mlir::hip::SigmoidOp::create(rewriter, loc, context, input, init);
@@ -82,6 +94,9 @@ struct TanhToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 TanhToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -113,6 +128,9 @@ struct SoftplusToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 SoftplusToHip::matchAndRewrite(mlir::Operation *op,
                                mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -121,7 +139,10 @@ SoftplusToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(
+        op, "Softplus expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp =
       mlir::hip::SoftplusOp::create(rewriter, loc, context, input, init);
@@ -142,6 +163,9 @@ struct GeluToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 GeluToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -150,7 +174,10 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op,
+                                       "Gelu expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Extract and validate approximate attribute from ONNX op (default to "none")
@@ -198,6 +225,9 @@ MicrosoftGeluToHip::matchAndRewrite(mlir::Operation *op,
   if (op->getNumOperands() != 1 || op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(
         op, "com.microsoft Gelu expects 1 input and 1 result");
+
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))

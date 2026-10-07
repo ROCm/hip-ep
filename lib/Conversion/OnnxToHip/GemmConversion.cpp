@@ -18,6 +18,9 @@ struct GemmToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (mlir::failed(requireRankedOperands(op, rewriter)))
+      return mlir::failure();
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();

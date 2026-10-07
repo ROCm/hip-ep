@@ -34,6 +34,9 @@ struct ConvTransposeToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
                                     mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();

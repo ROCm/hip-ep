@@ -41,6 +41,11 @@ struct ReduceMeanToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
                                  mlir::PatternRewriter &rewriter) const {
+  // Operands only: an unranked RESULT is expected here and recovered by
+  // inferReduceResultType below, which needs the ranked `data` to do it.
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();

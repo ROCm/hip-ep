@@ -36,6 +36,11 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
     return mlir::success();
   }
 
+  // After the identity path, which forwards its operand unchanged and so is
+  // indifferent to rank.
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();

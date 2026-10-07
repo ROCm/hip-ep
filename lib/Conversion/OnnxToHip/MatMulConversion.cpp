@@ -22,6 +22,9 @@ struct MatMulToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 MatMulToHip::matchAndRewrite(mlir::Operation *op,
                              mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -31,7 +34,10 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value a = op->getOperand(0);
   mlir::Value b = op->getOperand(1);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op,
+                                       "MatMul expects a ranked tensor result");
 
   int64_t transA = 0;
   int64_t transB = 0;

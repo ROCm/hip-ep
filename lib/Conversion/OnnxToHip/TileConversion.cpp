@@ -17,6 +17,9 @@ struct TileToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (mlir::failed(requireRankedOperands(op, rewriter)))
+      return mlir::failure();
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -27,7 +30,10 @@ struct TileToHip : public mlir::RewritePattern {
     mlir::Value repeats = op->getOperand(1);
 
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op,
+                                         "Tile expects a ranked tensor result");
 
     // Trust shape inference: output rank == input rank, dims may be dynamic.
     // Use input as the source for any dynamic dim sizes.

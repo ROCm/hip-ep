@@ -42,6 +42,9 @@ struct SubToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 AddToHip::matchAndRewrite(mlir::Operation *op,
                           mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -51,7 +54,9 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value a = op->getOperand(0);
   mlir::Value b = op->getOperand(1);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "Add expects a ranked result");
 
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
@@ -68,6 +73,9 @@ AddToHip::matchAndRewrite(mlir::Operation *op,
 mlir::LogicalResult
 MulToHip::matchAndRewrite(mlir::Operation *op,
                           mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -77,7 +85,9 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value a = op->getOperand(0);
   mlir::Value b = op->getOperand(1);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "Mul expects a ranked result");
 
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
@@ -94,6 +104,9 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
 mlir::LogicalResult
 SubToHip::matchAndRewrite(mlir::Operation *op,
                           mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -103,7 +116,9 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value lhs = op->getOperand(0);
   mlir::Value rhs = op->getOperand(1);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "Sub expects a ranked result");
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {lhs, rhs});
   if (mlir::failed(initOrFailure))

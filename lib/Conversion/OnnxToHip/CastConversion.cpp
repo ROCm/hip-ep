@@ -22,6 +22,9 @@ struct CastToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 CastToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(requireRankedOperands(op, rewriter)))
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -30,7 +33,10 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op,
+                                       "Cast expects a ranked tensor result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Map MLIR element type to ONNX DataType enum
