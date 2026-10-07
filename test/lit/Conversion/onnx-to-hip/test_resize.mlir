@@ -234,7 +234,7 @@ module {
         : (tensor<?x3x1024x1024xf32>, none, none, tensor<4xi64>)
         -> tensor<?x?x?x?xf32>
     // CHECK-NOT: onnx.Resize
-    // CHECK: hip.readback_scalar
+    // CHECK-COUNT-4: hip.readback_scalar
     // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}})
     // CHECK-SAME: tensor<?x?x?x?xf32>
     // CHECK: hip.resize
