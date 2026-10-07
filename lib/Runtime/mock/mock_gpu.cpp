@@ -1179,6 +1179,24 @@ int wrap_softplus(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_trilu(RuntimeState *state, void *input, void *output,
+               int64_t input_elements, int64_t num_elements, int64_t rows,
+               int64_t cols, int64_t k, int64_t upper, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_trilu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_trilu(input_elements=%lld, num_elements=%lld, "
+             "rows=%lld, cols=%lld, k=%lld, upper=%lld, data_type=%s(%lld))\n",
+             (long long)input_elements, (long long)num_elements,
+             (long long)rows, (long long)cols, (long long)k, (long long)upper,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  (void)input;
+  (void)output;
+  return 0;
+}
+
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha) {
   if (!state) {

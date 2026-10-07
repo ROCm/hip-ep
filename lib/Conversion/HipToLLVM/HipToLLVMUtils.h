@@ -80,6 +80,7 @@ inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
+inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
@@ -435,6 +436,8 @@ void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateTriluLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,

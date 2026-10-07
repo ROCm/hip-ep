@@ -775,6 +775,21 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
+/* Keep the upper or lower triangle of each rows x cols matrix packed in a
+ * contiguous row-major buffer. upper != 0 keeps col - row >= diagonal.
+ * input_elements is num_elements, or 1 to broadcast input[0]. */
+HIP_KERNEL_API int hip_trilu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t input_elements,
+    int64_t num_elements,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal,
+    int64_t upper,
+    int hip_dtype);
+
 /* =========================================================================
  * Swish Activation
  * =========================================================================

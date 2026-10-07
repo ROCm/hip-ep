@@ -2521,6 +2521,37 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
+def Hip_TriluOp : Hip_DpsOp<"trilu"> {
+  let summary = "Keep the upper or lower triangle of the last two dimensions";
+  let description = [{
+    ONNX Trilu. For an input of shape [*, N, M], element (row, col) of each
+    matrix is kept when upper != 0 and col - row >= k, or when upper == 0 and
+    col - row <= k. Every other element is zero. k defaults to 0 and upper
+    defaults to 1 (upper triangle, matching ONNX).
+
+    Example:
+    ```mlir
+    hip.trilu(%ctx) ins(%x : memref<1x4x4xf32, 1>)
+                    outs(%y : memref<1x4x4xf32, 1>)
+                    {k = 0 : i64, upper = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<SI64Attr, "0">:$k,
+    DefaultValuedAttr<SI64Attr, "1">:$upper
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
