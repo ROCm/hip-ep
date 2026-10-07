@@ -47,13 +47,17 @@ set(_kernel_sources
     hip/bias_gelu_kernel.hip
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
+    hip/trilu_kernel.hip
     hip/swish_kernel.hip
+    hip/pow_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
     hip/qmatmul_kernel.hip
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
+    hip/qlinear_conv_kernel.hip
+    hip/qlinear_matmul_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less

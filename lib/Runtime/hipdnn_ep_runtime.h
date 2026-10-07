@@ -1082,6 +1082,38 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                int64_t weight_bits, int64_t bias_dtype, float input_scale,
                int64_t input_zp, float output_scale, int64_t output_zp);
 
+// Native onnx.QLinearConv. 8-bit NCHW convolution with optional int32 bias.
+// Input and output scales/zero-points are per-tensor (count == 1). Weight
+// scale and zero point are per-tensor or one value per output channel.
+// bias is nullable; bias_dtype is HIPDNN_EP_DATATYPE_INT32 when it is present
+// and HIPDNN_EP_DATATYPE_UNSUPPORTED otherwise. pad_* are the begin pads.
+int wrap_qlinear_conv(
+    RuntimeState *state, const void *input, const void *input_scale,
+    const void *input_zero_point, const void *weights, const void *weight_scale,
+    const void *weight_zero_point, const void *output_scale,
+    const void *output_zero_point, const void *bias, void *output,
+    int64_t batch, int64_t in_channels, int64_t out_channels, int64_t height_in,
+    int64_t width_in, int64_t height_out, int64_t width_out, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h,
+    int64_t pad_w, int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t input_dtype, int64_t weight_dtype, int64_t output_dtype,
+    int64_t bias_dtype, int64_t input_scale_count, int64_t weight_scale_count,
+    int64_t output_scale_count, int64_t input_zp_count, int64_t weight_zp_count,
+    int64_t output_zp_count);
+
+// Native onnx.QLinearMatMul. Rank-2 8-bit product, a is [M, K], b is [K, N],
+// y is [M, N]. Scales and zero points are per-tensor (count == 1). Dtypes are
+// HIPDNN_EP_DATATYPE_INT8 or UINT8.
+int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
+                        const void *a_zero_point, const void *b,
+                        const void *b_scale, const void *b_zero_point,
+                        const void *y_scale, const void *y_zero_point, void *y,
+                        int64_t m, int64_t k, int64_t n, int64_t a_dtype,
+                        int64_t b_dtype, int64_t y_dtype, int64_t a_scale_count,
+                        int64_t b_scale_count, int64_t y_scale_count,
+                        int64_t a_zp_count, int64_t b_zp_count,
+                        int64_t y_zp_count);
+
 // Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
 // Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
 int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
@@ -1294,11 +1326,22 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
 
+// Trilu: keep the upper (upper != 0) or lower triangle of each [rows, cols]
+// matrix. data_type is HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_trilu(RuntimeState *state, void *input, void *output,
+               int64_t input_elements, int64_t num_elements, int64_t rows,
+               int64_t cols, int64_t k, int64_t upper, int64_t data_type);
+
 // Swish activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // alpha: sigmoid input scale (default 1.0 per ONNX spec)
 int wrap_swish(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha);
+
+// Element-wise power with a compile-time scalar exponent: y = x^exponent.
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent);
 
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])

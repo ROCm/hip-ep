@@ -1179,6 +1179,24 @@ int wrap_softplus(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_trilu(RuntimeState *state, void *input, void *output,
+               int64_t input_elements, int64_t num_elements, int64_t rows,
+               int64_t cols, int64_t k, int64_t upper, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_trilu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_trilu(input_elements=%lld, num_elements=%lld, "
+             "rows=%lld, cols=%lld, k=%lld, upper=%lld, data_type=%s(%lld))\n",
+             (long long)input_elements, (long long)num_elements,
+             (long long)rows, (long long)cols, (long long)k, (long long)upper,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  (void)input;
+  (void)output;
+  return 0;
+}
+
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha) {
   if (!state) {
@@ -1191,6 +1209,20 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type, alpha);
 
+  return 0;
+}
+
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pow\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_pow(num_elements=%lld, data_type=%s(%lld), "
+             "exponent=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, exponent);
   return 0;
 }
 
@@ -1761,6 +1793,91 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
              (long long)batch, (long long)in_channels, (long long)out_channels,
              (long long)spatial_size, hipdnn_ep_datatype_name(activation_dtype),
              hipdnn_ep_datatype_name(weight_dtype), (long long)weight_bits);
+  return 0;
+}
+
+int wrap_qlinear_conv(
+    RuntimeState *state, const void *input, const void *input_scale,
+    const void *input_zero_point, const void *weights, const void *weight_scale,
+    const void *weight_zero_point, const void *output_scale,
+    const void *output_zero_point, const void *bias, void *output,
+    int64_t batch, int64_t in_channels, int64_t out_channels, int64_t height_in,
+    int64_t width_in, int64_t height_out, int64_t width_out, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h,
+    int64_t pad_w, int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t input_dtype, int64_t weight_dtype, int64_t output_dtype,
+    int64_t bias_dtype, int64_t input_scale_count, int64_t weight_scale_count,
+    int64_t output_scale_count, int64_t input_zp_count, int64_t weight_zp_count,
+    int64_t output_zp_count) {
+  (void)input;
+  (void)input_scale;
+  (void)input_zero_point;
+  (void)weights;
+  (void)weight_scale;
+  (void)weight_zero_point;
+  (void)output_scale;
+  (void)output_zero_point;
+  (void)bias;
+  (void)output;
+  (void)bias_dtype;
+  (void)input_scale_count;
+  (void)weight_scale_count;
+  (void)output_scale_count;
+  (void)input_zp_count;
+  (void)weight_zp_count;
+  (void)output_zp_count;
+  (void)pad_h;
+  (void)pad_w;
+  (void)dilation_h;
+  (void)dilation_w;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlinear_conv N=%lld Cin=%lld Cout=%lld "
+             "Hout=%lld Wout=%lld k=%lld g=%lld %s\n",
+             (long long)batch, (long long)in_channels, (long long)out_channels,
+             (long long)height_out, (long long)width_out, (long long)kernel_h,
+             (long long)group, hipdnn_ep_datatype_name(input_dtype));
+  (void)width_in;
+  (void)height_in;
+  (void)kernel_w;
+  (void)stride_h;
+  (void)stride_w;
+  (void)weight_dtype;
+  (void)output_dtype;
+  return 0;
+}
+
+int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
+                        const void *a_zero_point, const void *b,
+                        const void *b_scale, const void *b_zero_point,
+                        const void *y_scale, const void *y_zero_point, void *y,
+                        int64_t m, int64_t k, int64_t n, int64_t a_dtype,
+                        int64_t b_dtype, int64_t y_dtype, int64_t a_scale_count,
+                        int64_t b_scale_count, int64_t y_scale_count,
+                        int64_t a_zp_count, int64_t b_zp_count,
+                        int64_t y_zp_count) {
+  (void)a;
+  (void)a_scale;
+  (void)a_zero_point;
+  (void)b;
+  (void)b_scale;
+  (void)b_zero_point;
+  (void)y_scale;
+  (void)y_zero_point;
+  (void)y;
+  (void)b_dtype;
+  (void)y_dtype;
+  (void)a_scale_count;
+  (void)b_scale_count;
+  (void)y_scale_count;
+  (void)a_zp_count;
+  (void)b_zp_count;
+  (void)y_zp_count;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlinear_matmul M=%lld K=%lld N=%lld %s\n",
+             (long long)m, (long long)k, (long long)n,
+             hipdnn_ep_datatype_name(a_dtype));
   return 0;
 }
 

@@ -309,6 +309,8 @@ void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populatePowConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
@@ -335,6 +337,8 @@ void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateNhwcConvConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
@@ -463,6 +467,8 @@ void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateTriluConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateSwishConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateClipConversionPatterns(RewritePatternSet &patterns,
@@ -471,6 +477,10 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateQLinearConvConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+void populateQLinearMatMulConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
@@ -597,6 +607,15 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 /// ProjectorOpsRewrites.cpp.
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.HardSigmoid` into
+/// `onnx.Mul` / `onnx.Add` / `onnx.Clip`, which then flow through their own
+/// ONNX→HIP converters in `convertComputeOps`. Lives in the pre-lowering loop
+/// for the same reason as PowDecompose: the emitted onnx.* primitives are only
+/// picked up because that loop runs to a fixed point. See
+/// HardSigmoidConversion.cpp.
+void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
 /// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /

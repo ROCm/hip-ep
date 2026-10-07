@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `NhwcConv` (`com.microsoft`) | transpose + `hip.conv` | rank-4 NHWC; static weights `[M, kH, kW, C/group]` are permuted at compile time |
 | `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
@@ -93,10 +94,29 @@ packed `__half2` path for fp16 rows of even width.
 |---|---|---|
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
+| `QLinearConv` | `hip.qlinear_conv` | `qlinear_conv_kernel.hip` |
+| `QLinearAdd` (`com.microsoft`) | `hip.qadd` | decomposed, then QDQ fusion |
+| `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
+| `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
+| `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
+| `QLinearMatMul` | `hip.qlinear_matmul` | `qlinear_matmul_kernel.hip` |
 
-Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
-shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
-tensor is per-axis along `axis`, and `block_size > 0` is blocked.
+`QLinearMatMul` is the native ONNX op: rank-2 8-bit `a` of shape `[M, K]` times
+`b` of shape `[K, N]`, with per-tensor f32 scales and zero points. `hip.qmatmul`
+is a different op, the DequantizeLinear + MatMul + QuantizeLinear fusion, and
+does not accept `QLinearMatMul`. Rank other than 2, f16 or bf16 scales, and
+per-row or per-column quantization, stay `onnx.QLinearMatMul`.
+
+`QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
+windows, and an optional int32 bias. Input and output quantization is
+per-tensor. Weight quantization is per-tensor or per output channel. `auto_pad`
+must be `NOTSET`. `hip.qconv` is a different op, the W4A16 1x1 QDQ fusion, and
+does not accept `QLinearConv`.
+
+QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
+int4/uint4. Granularity comes from the shape of `scale` rather than a flag: a
+single element is per-tensor, a 1-D tensor is per-axis along `axis`, and
+`block_size > 0` is blocked.
 
 int4/uint4 imports as an 8-bit element type at the logical element count, two
 values per byte, so the width travels as a `packed_int4` marker rather than in
@@ -159,6 +179,7 @@ runtime coverage.
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
 | `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
 | `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
+| `HardSigmoid` | `hip.mul` + `hip.add` + `hip.max` + `hip.min` | Clip(alpha*x + beta, 0, 1); decomposed pre-lowering; f16/f32 only |
 
 Unmapped ops default to `hip.<OpType>`.
 

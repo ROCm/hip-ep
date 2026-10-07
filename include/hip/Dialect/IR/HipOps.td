@@ -2521,6 +2521,37 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   }];
 }
 
+def Hip_TriluOp : Hip_DpsOp<"trilu"> {
+  let summary = "Keep the upper or lower triangle of the last two dimensions";
+  let description = [{
+    ONNX Trilu. For an input of shape [*, N, M], element (row, col) of each
+    matrix is kept when upper != 0 and col - row >= k, or when upper == 0 and
+    col - row <= k. Every other element is zero. k defaults to 0 and upper
+    defaults to 1 (upper triangle, matching ONNX).
+
+    Example:
+    ```mlir
+    hip.trilu(%ctx) ins(%x : memref<1x4x4xf32, 1>)
+                    outs(%y : memref<1x4x4xf32, 1>)
+                    {k = 0 : i64, upper = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<SI64Attr, "0">:$k,
+    DefaultValuedAttr<SI64Attr, "1">:$upper
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
@@ -2616,6 +2647,40 @@ def Hip_SqrtOp : Hip_DpsOp<"sqrt", /*traits=*/[],
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
     `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_PowOp : Hip_DpsOp<"pow"> {
+  let summary = "Element-wise power with a compile-time scalar exponent";
+  let description = [{
+    Computes Y = X ^ exponent element-wise. The exponent is a compile-time
+    scalar baked into the op. Integer exponents that decompose to Mul, and
+    the exponents 0.5, -0.5, and -1, are rewritten before this op is created.
+
+    A negative base with a non-integer exponent yields NaN.
+
+    Uses destination-passing style: the output buffer is provided as an
+    argument. The runtime kernel supports f16, f32, bf16, and f64.
+
+    Example:
+    ```mlir
+    hip.pow(%ctx) ins(%x : memref<4x8xf32, 1>)
+                  outs(%y : memref<4x8xf32, 1>)
+                  {exponent = 2.2 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F64Attr:$exponent
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
@@ -5470,6 +5535,112 @@ def Hip_QConvOp : Hip_DpsOp<"qconv",
         $weight_zero_points (`,` $bias^)? `:`
         type($input) `,` type($weights) `,` type($weight_scales) `,`
         type($weight_zero_points) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// Native onnx.QLinearConv. Distinct from hip.qconv, which is the W4A16 1x1
+// DequantizeLinear + Conv + QuantizeLinear fusion.
+def Hip_QLinearConvOp : Hip_DpsOp<"qlinear_conv",
+                                  /*traits=*/[],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/1,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
+  let summary = "ONNX QLinearConv";
+  let description = [{
+    8-bit grouped 2D convolution with the ONNX QLinearConv quantization:
+
+      acc = conv(x - x_zp, w - w_zp) + B
+      y = saturate(round(acc * x_scale * w_scale / y_scale) + y_zp)
+
+    Bias is optional, int32, and already quantized at scale `x_scale * w_scale`
+    with zero point 0. Input and output scales and zero points are per-tensor.
+    Weight scale and zero point are per-tensor or per output channel.
+
+    This op is not hip.qconv. hip.qconv fuses a W4A16 QDQ chain and only
+    implements a 1x1 unit-stride convolution.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$input_scale,
+    Hip_TensorOrMemRef:$input_zero_point,
+    Hip_TensorOrMemRef:$weights,
+    Hip_TensorOrMemRef:$weight_scale,
+    Hip_TensorOrMemRef:$weight_zero_point,
+    Hip_TensorOrMemRef:$output_scale,
+    Hip_TensorOrMemRef:$output_zero_point,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $input_scale `,` $input_zero_point `,`
+        $weights `,` $weight_scale `,` $weight_zero_point `,` $output_scale `,`
+        $output_zero_point (`,` $bias^)? `:`
+        type($input) `,` type($input_scale) `,` type($input_zero_point) `,`
+        type($weights) `,` type($weight_scale) `,` type($weight_zero_point) `,`
+        type($output_scale) `,` type($output_zero_point) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// Native onnx.QLinearMatMul. Distinct from hip.qmatmul, which fuses
+// DequantizeLinear + MatMul + QuantizeLinear.
+def Hip_QLinearMatMulOp : Hip_DpsOp<"qlinear_matmul",
+                                    /*traits=*/[],
+                                    /*outsAccessor=*/"Output",
+                                    /*autoReify=*/1,
+                                    /*autoInfer=*/1,
+                                    /*declareInfer=*/1> {
+  let summary = "ONNX QLinearMatMul";
+  let description = [{
+    Rank-2 8-bit matrix product with the ONNX QLinearMatMul quantization:
+
+      acc = matmul(a - a_zp, b - b_zp)
+      y = saturate(round(acc * a_scale * b_scale / y_scale) + y_zp)
+
+    `a` is [M, K], `b` is [K, N], and `y` is [M, N]. All three shapes are
+    static. Scales and zero points are a single f32 scale and a matching
+    8-bit zero point. The integer product accumulates in int64, then one f32
+    scale is applied with rintf (round to nearest, ties to even).
+
+    This op is not hip.qmatmul. hip.qmatmul fuses a QDQ chain and does not
+    accept onnx.QLinearMatMul.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$a,
+    Hip_TensorOrMemRef:$a_scale,
+    Hip_TensorOrMemRef:$a_zero_point,
+    Hip_TensorOrMemRef:$b,
+    Hip_TensorOrMemRef:$b_scale,
+    Hip_TensorOrMemRef:$b_zero_point,
+    Hip_TensorOrMemRef:$y_scale,
+    Hip_TensorOrMemRef:$y_zero_point,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $a `,` $a_scale `,` $a_zero_point `,`
+        $b `,` $b_scale `,` $b_zero_point `,` $y_scale `,` $y_zero_point `:`
+        type($a) `,` type($a_scale) `,` type($a_zero_point) `,`
+        type($b) `,` type($b_scale) `,` type($b_zero_point) `,`
+        type($y_scale) `,` type($y_zero_point) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

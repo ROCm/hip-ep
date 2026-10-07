@@ -332,6 +332,81 @@ HIP_KERNEL_API int hip_qconv(
     float inv_output_scale, int64_t output_zp);
 
 /* =========================================================================
+ * QLinearConv (native ONNX, 8-bit grouped NCHW)
+ * =========================================================================
+ *
+ * y = saturate(round((conv(x - x_zp, w - w_zp) + B) * x_scale * w_scale
+ *                    / y_scale) + y_zp)
+ *
+ * Distinct from hip_qconv, which is the W4A16 1x1 fusion. Dtypes are
+ * HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. weight_scale_count / weight_zp_count are
+ * 1 (per-tensor) or out_channels (per output channel). bias is nullable int32.
+ * Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_conv(
+    void* stream,
+    const void* input,
+    const void* input_scale,
+    const void* input_zero_point,
+    const void* weights,
+    const void* weight_scale,
+    const void* weight_zero_point,
+    const void* output_scale,
+    const void* output_zero_point,
+    const void* bias,
+    void* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t out_channels,
+    int64_t height_in,
+    int64_t width_in,
+    int64_t height_out,
+    int64_t width_out,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
+    int64_t group,
+    int input_dtype,
+    int weight_dtype,
+    int output_dtype,
+    int64_t weight_scale_count,
+    int64_t weight_zp_count);
+
+/* =========================================================================
+ * QLinearMatMul (native ONNX, rank-2 8-bit)
+ * =========================================================================
+ *
+ * y = saturate(round(matmul(a - a_zp, b - b_zp) * a_scale * b_scale
+ *                    / y_scale) + y_zp)
+ *
+ * a is [M, K], b is [K, N], y is [M, N]. Distinct from hip_qmatmul, which is
+ * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. Scales and
+ * zero points are per-tensor. Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_qlinear_matmul(
+    void* stream,
+    const void* a,
+    const void* a_scale,
+    const void* a_zero_point,
+    const void* b,
+    const void* b_scale,
+    const void* b_zero_point,
+    const void* y_scale,
+    const void* y_zero_point,
+    void* y,
+    int64_t m,
+    int64_t k,
+    int64_t n,
+    int a_dtype,
+    int b_dtype,
+    int y_dtype);
+
+/* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
  * =========================================================================
  *
@@ -700,6 +775,21 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
+/* Keep the upper or lower triangle of each rows x cols matrix packed in a
+ * contiguous row-major buffer. upper != 0 keeps col - row >= diagonal.
+ * input_elements is num_elements, or 1 to broadcast input[0]. */
+HIP_KERNEL_API int hip_trilu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t input_elements,
+    int64_t num_elements,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal,
+    int64_t upper,
+    int hip_dtype);
+
 /* =========================================================================
  * Swish Activation
  * =========================================================================
@@ -712,6 +802,20 @@ HIP_KERNEL_API int hip_leaky_relu(
  */
 HIP_KERNEL_API int hip_swish(void *stream, const void *input, void *output,
                              int64_t num_elements, int hip_dtype, double alpha);
+
+/* =========================================================================
+ * Element-wise power
+ * =========================================================================
+ *
+ * y = pow(x, exponent), with exponent a host scalar. Supports
+ * HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64. A negative base with a non-integer exponent yields NaN.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_pow(void *stream, const void *input, void *output,
+                           int64_t num_elements, int hip_dtype,
+                           double exponent);
 
 /* =========================================================================
  * Softplus activation

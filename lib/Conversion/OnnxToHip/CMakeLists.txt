@@ -168,6 +168,7 @@ add_library(OnnxToHip STATIC
   TransposeConversion.cpp
   ElementwiseConversion.cpp
   PowerConversion.cpp
+  PowConversion.cpp
   ActivationConversion.cpp
   BiasGeluConversion.cpp
   FastGeluConversion.cpp
@@ -180,6 +181,7 @@ add_library(OnnxToHip STATIC
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
@@ -256,6 +258,8 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  QLinearConvConversion.cpp
+  QLinearMatMulConversion.cpp
   UpsampleConversion.cpp
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
@@ -266,8 +270,10 @@ add_library(OnnxToHip STATIC
   IfOutline.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
+  TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
+  HardSigmoidConversion.cpp
 )
 
 if(TARGET HipPdllPatterns)
