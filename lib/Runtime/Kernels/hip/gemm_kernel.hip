@@ -1121,13 +1121,14 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
   constexpr bool k16 = std::is_same<T, _Float16>::value ||
                        std::is_same<T, __hip_bfloat16>::value;
   if constexpr (k16) {
-    /* transA multi-row GEMV: B streamed once for all M rows (any M < 16).
-     * wave64 reaches here with transA and M >= 16 too: that keeps the kn /
-     * scalar kernels. */
+    /* Multi-row GEMV: B streamed once for all M rows (transA any M < 16;
+     * NT 2 <= M < 16 unless HIPDNN_EP_GEMM_GEMV_MR=0). wave64 reaches here
+     * with transA and M >= 16 too: that keeps the kn / scalar kernels. */
+    static const bool mr_on = gemmEnvInt("HIPDNN_EP_GEMM_GEMV_MR", 1) != 0;
     /* Tiny problems (N*K < 64K) stay on the one-row kernels: launch-bound,
      * where the multi-row kernels' fixed cost loses. */
     const bool mr_big = static_cast<size_t>(N) * K >= (size_t{1} << 16);
-    if (transB && M < 16 && mr_big && transA) {
+    if (transB && M < 16 && mr_big && (transA || (M >= 2 && mr_on))) {
 #define GEMM_GEMV_MR(TA, MR, TN)                                               \
   hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_mr_nt_kernel<T, TA, MR, TN>),   \
                      dim3((N + TN - 1) / TN), dim3(128), 0, s, A, B, C, Y, M, \
@@ -1141,7 +1142,10 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
     else                                                                       \
       GEMM_GEMV_MR(TA, 16, 4);                                                 \
   } while (0)
-      GEMM_GEMV_MR_ALL(true);
+      if (transA)
+        GEMM_GEMV_MR_ALL(true);
+      else
+        GEMM_GEMV_MR_ALL(false);
 #undef GEMM_GEMV_MR_ALL
 #undef GEMM_GEMV_MR
       CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-mr M=%d N=%d K=%d ta=%d\n", M, N,

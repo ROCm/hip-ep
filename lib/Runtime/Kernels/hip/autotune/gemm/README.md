@@ -113,6 +113,9 @@ re-measured with the rule in place.
   into LDS, no transpose copy. 512x1024x1024 TN fp16 29.6 -> 0.043 ms
   (hipBLASLt 0.052). transA with M < 16 takes the multi-row GEMV (B = [N, K])
   or the B = [K, N] GEMV.
+- **NT M = 2..15** takes the multi-row GEMV (B streamed once for all M
+  rows) instead of WMMA with 1-15 live rows of a 16-row fragment:
+  fp16 4x4096^2 0.142 -> 0.048 ms, 8x14336x4096 4.06 -> 1.14.
 
 | env | default | effect |
 |---|---|---|
@@ -123,6 +126,7 @@ re-measured with the rule in place.
 | `HIPDNN_EP_GEMM_PADROW` | 0 | 1 = per-call row-padded copy of B on K%1024 shapes |
 | `HIPDNN_EP_GEMM_WMMA_TA_CFG` | -1 | pin a `kWmmaTa` index (transA WMMA) |
 | `HIPDNN_EP_GEMM_GEMV_KN_CFG` | -1 | pin the B = [K, N] GEMV column tile: 0 = 128, 1 = 64, 2 = 32 |
+| `HIPDNN_EP_GEMM_GEMV_MR` | 1 | 0 sends NT M = 2..15 back to WMMA |
 
 ## Measurement protocol (plan.md §4 / `hip-kernel-perf-measurement` skill)
 
