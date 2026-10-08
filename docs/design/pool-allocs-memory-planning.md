@@ -82,6 +82,14 @@ operations introduced by strided-metadata expansion.
 
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
+For `memref.collapse_shape`, a constant-axis query becomes the product of the
+source dimensions in that axis's reassociation group. A singleton group uses
+its source dimension directly. Further dimension folds can recover explicit
+subview sizes or expand-shape operands. This removes false dependencies on
+late buffer views without changing their offsets or strides. Dynamic-axis
+queries remain unchanged. The rule uses descriptor sizes, not frontend names
+or tensor payload reads.
+
 The following CSE removes repeated size queries exposed by late allocation and
 view rewrites. Canonicalization then folds identities exposed by CSE, such as
 `select(c, d, d) -> d`. Folding must precede pool planning to recover reuse:
@@ -104,6 +112,17 @@ block size and visited operand edges.
 
 These preconditions preserve correctness when omitted, but omission may create
 more dominance domains and increase peak memory.
+
+Pre-conversion Reshape shape-provenance dataflow is an earlier pool-quality
+optimization for dynamic vision graphs. One function-level sparse analysis
+shares Shape/Gather/Slice/Concat payload facts across consumers and canonicalizes
+Add/MatMul/Cast dimension roots before ONNX constants become carriers. Dense
+carrier targets remain compile-time visible to Reshape conversion and bypass
+this runtime-payload provenance path. The analysis replaces fully proven
+runtime-derived target payloads with host scalar SSA, giving broadcast
+reification, CSE, and buffer reuse a canonical root dimension. Conflicting
+control-flow joins and unknown or device-produced target shapes deliberately
+keep the synchronized fallback.
 
 Pre-bufferization `hip-resolve-tensor-dims` serves a related purpose for tensor reshape chains. It lets upstream reification and canonicalization reduce `tensor.dim` queries before they become memref-level size arithmetic. Coverage of standard tensor reshape operations requires `tensor::registerInferTypeOpInterfaceExternalModels` on the dialect registry.
 
