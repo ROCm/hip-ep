@@ -1,0 +1,75 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+# The model families, in the order they are listed on site/docs/models/index.md
+# and in the docs sidebar. One entry per family page under site/docs/models/.
+#
+# Three things have to agree for a family to appear, and nothing checks them:
+#
+#   1. an entry here,
+#   2. a page at site/docs/models/<slug>.md carrying `family: <slug>`,
+#   3. at least one model in _data/models.yml with that `family`.
+#
+# A family with (1) and (2) but no models renders an empty page. Models with a
+# `family` that has no entry here are simply not linked from anywhere.
+#
+# Order is by how much of the matrix the family covers, largest first, so the
+# list opens with the families worth browsing rather than with the ones that
+# are a single model. It is hand-kept rather than computed, because the count
+# is not the only thing that decides it -- a one-model family that people look
+# for by name still belongs above one they do not.
+#
+# `blurb` is one sentence, and it describes the family rather than any one
+# model. Anything that is true of only one version belongs in that model's
+# `tagline` in models.yml, or in the prose at the top of the family page.
+
+- slug: qwen
+  name: Qwen
+  vendor: Alibaba
+  blurb: >-
+    The widest family in the matrix, and the one with the most versions in it:
+    two Qwen2.5 text models, and five Qwen3.x vision-language models spanning
+    dense decoders, sparse mixtures of experts and Gated DeltaNet.
+
+- slug: gemma
+  name: Gemma
+  vendor: Google
+  blurb: >-
+    Vision-language across three sizes, from a 4B dense decoder at the small
+    end of the matrix to a 26B sparse mixture of experts.
+
+- slug: gpt-oss
+  name: GPT-OSS
+  vendor: OpenAI
+  blurb: >-
+    Two sparse mixture-of-experts text models, and the reason the matrix has a
+    120B entry at all: both read a few billion parameters per token whatever
+    their total size.
+
+- slug: llama
+  name: Llama
+  vendor: Meta
+  blurb: >-
+    The dense decoder everything else is compared against, and the shape most
+    of the ecosystem's tooling assumes.
+
+- slug: deepseek
+  name: DeepSeek
+  vendor: DeepSeek
+  blurb: >-
+    A reasoning model distilled into a Llama-shaped 70B decoder — the largest
+    dense graph the release is validated on.
+
+- slug: mistral
+  name: Mistral
+  vendor: Mistral AI
+  blurb: >-
+    A 7B dense instruction model, and the smallest text model in the matrix.
+
+- slug: phi
+  name: Phi
+  vendor: Microsoft
+  blurb: >-
+    A 14B dense decoder trained for reasoning, at a size that fits alongside
+    other work on the same GPU.

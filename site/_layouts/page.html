@@ -1,0 +1,29 @@
+---
+layout: default
+---
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+{%- endcomment -%}
+
+{%- comment -%}
+The landing page and any page opting in with `full_width: true` lay out their
+own <section> elements. Everything else gets the narrow prose column.
+{%- endcomment -%}
+{% if page.permalink == '/' or page.full_width %}
+{{ content }}
+{% else %}
+<section class="section">
+  <div class="section__inner section__inner--narrow">
+    {% if page.title %}
+    <header class="page-header">
+      <h1 class="headline-md">{{ page.title }}</h1>
+      {% if page.description %}<p class="lede">{{ page.description | replace: '%VERSION%', site.hip_ep_version }}</p>{% endif %}
+    </header>
+    {% endif %}
+    <div class="prose">
+      {{ content }}
+    </div>
+  </div>
+</section>
+{% endif %}
