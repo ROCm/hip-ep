@@ -248,26 +248,21 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 
 ```bash
 cd ..  # Go to workspace directory (sibling of hip-ep)
-git clone -b v0.16.0 https://github.com/microsoft/onnxruntime-genai.git
+# Clone with full history: `git apply --3way` below needs the blob each PR was
+# prepared from, which lives at that PR's merge base.
+git clone -b v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-# gemma-4 unified support: OGA PR 2286, plus onnxruntime-extensions PR 1091 on
-# top of the extensions commit that cmake/deps.txt pins.
-curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2286.diff -o /tmp/oga-2286.diff
-git apply --whitespace=nowarn /tmp/oga-2286.diff
-
-IFS=';' read -r _ EXT_REPO EXT_SHA < <(grep '^onnxruntime_extensions;' cmake/deps.txt)
-EXT_SRC=$(cd .. && pwd)/onnxruntime-extensions
-git init -q "$EXT_SRC"
-git -C "$EXT_SRC" fetch -q --depth 1 "$EXT_REPO" "$EXT_SHA"
-git -C "$EXT_SRC" checkout -q FETCH_HEAD
-curl -fsSL https://github.com/microsoft/onnxruntime-extensions/pull/1091.diff -o /tmp/ext-1091.diff
-git -C "$EXT_SRC" apply --whitespace=nowarn --exclude='test/*' /tmp/ext-1091.diff
+for pr in 2685 2691; do
+  curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
+    -o "/tmp/oga-${pr}.diff"
+  git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
+done
 ```
 
-> **Note**: the upstream tag + PR list are pinned in CI via `OGA_VERSION`,
-> `OGA_PR_PATCHES` and `EXTENSIONS_PR_PATCHES` in
+> **Note**: the upstream tag + PR list are pinned in CI via `OGA_VERSION` and
+> `OGA_PR_PATCHES` in
 > [`.github/workflows/windows-deps.yml`](../.github/workflows/windows-deps.yml);
 > match those for byte-for-byte reproducibility.
 
@@ -292,8 +287,7 @@ python build.py \
   --build_dir ../build/onnxruntime-genai \
   --cmake_extra_defines \
     CMAKE_C_COMPILER_LAUNCHER=sccache \
-    CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-    FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS="$(cygpath -m "$EXT_SRC")"
+    CMAKE_CXX_COMPILER_LAUNCHER=sccache
 ```
 
 This produces three artifacts under `../build/onnxruntime-genai/Release/`:
@@ -372,7 +366,7 @@ python python/examples/run_onnx.py /path/to/model.onnx
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
-(v0.16.0, DeviceType AMDGPU) this is the AMD GPU umbrella
+(v0.17.0, DeviceType AMDGPU) this is the AMD GPU umbrella
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
@@ -497,7 +491,7 @@ present there too.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.16.0) the
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0) the
 EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
 {"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build-real.yml`).

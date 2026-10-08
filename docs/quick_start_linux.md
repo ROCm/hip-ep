@@ -111,33 +111,27 @@ cp build/Linux/Release/libonnxruntime*.so* "$ORT_HOME/lib/"
 
 ```bash
 cd ..
-git clone --branch v0.16.0 https://github.com/microsoft/onnxruntime-genai.git
+# Clone with full history: `git apply --3way` below needs the blob each PR was
+# prepared from, which lives at that PR's merge base.
+git clone --branch v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-# gemma-4 unified support: OGA PR 2286, plus onnxruntime-extensions PR 1091 on
-# top of the extensions commit that cmake/deps.txt pins.
-curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2286.diff -o /tmp/oga-2286.diff
-git apply --whitespace=nowarn /tmp/oga-2286.diff
-
-IFS=';' read -r _ EXT_REPO EXT_SHA < <(grep '^onnxruntime_extensions;' cmake/deps.txt)
-EXT_SRC=$(cd .. && pwd)/onnxruntime-extensions
-git init -q "$EXT_SRC"
-git -C "$EXT_SRC" fetch -q --depth 1 "$EXT_REPO" "$EXT_SHA"
-git -C "$EXT_SRC" checkout -q FETCH_HEAD
-curl -fsSL https://github.com/microsoft/onnxruntime-extensions/pull/1091.diff -o /tmp/ext-1091.diff
-git -C "$EXT_SRC" apply --whitespace=nowarn --exclude='test/*' /tmp/ext-1091.diff
+for pr in 2685 2691; do
+  curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
+    -o "/tmp/oga-${pr}.diff"
+  git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
+done
 ```
 
 **Build:**
 
 ```bash
 python3 build.py --config Release --ort_home "$ORT_HOME" --no_telemetry \
-  --build_wheel --skip_tests --skip_examples --parallel \
-  --cmake_extra_defines FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS="$EXT_SRC"
+  --build_wheel --skip_tests --skip_examples --parallel
 ```
 
-The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.16.0-cp310-cp310-linux_x86_64.whl`.
+The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.17.0-cp310-cp310-linux_x86_64.whl`.
 
 #### 3. Install both wheels
 
@@ -399,7 +393,7 @@ prebuilt package to get it.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.16.0)
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0)
 the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`);
 the prebuilt package bundles the umbrella libs.
 
