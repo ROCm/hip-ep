@@ -21,6 +21,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Transpose | Custom HIP kernel |
 | Mul | Custom HIP kernel |
 | Add | Custom HIP kernel |
+| ImageScaler | Decomposed to `hip.mul`, or `hip.add` then `hip.mul` when the per-channel bias is non-zero. NCHW only; bias broadcasts as `1xCx1x1`. |
 | Softmax | Custom HIP kernel |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |

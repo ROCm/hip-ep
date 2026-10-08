@@ -269,6 +269,7 @@ add_library(OnnxToHip STATIC
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
+  ImageScalerConversion.cpp
   LeakyReluConversion.cpp
   LRNConversion.cpp
   TriluConversion.cpp
