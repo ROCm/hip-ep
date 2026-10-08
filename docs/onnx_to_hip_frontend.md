@@ -148,6 +148,7 @@ runtime coverage.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `Add` | `hip.add` | `wrap_elementwise` |
+| `ImageScaler` | `hip.mul`, or `hip.add` then `hip.mul` | `wrap_elementwise` |
 | `Mul` | `hip.mul` | `wrap_elementwise` |
 | `Sub` | `hip.sub` | `wrap_elementwise_sub` |
 

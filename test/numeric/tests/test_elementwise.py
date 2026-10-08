@@ -338,3 +338,52 @@ class TestElementwiseMulBroadcast:
 
         actual, expected = model_runner.run_sample(model, [lhs, rhs])
         compare_outputs(actual, expected, atol=1e-6)
+
+
+def _make_image_scaler_model(dtype, shape, scale, bias):
+    """NCHW ImageScaler.
+
+    Current ``onnx`` releases no longer register this legacy op, so the
+    checker in ``make_model_from_nodes`` rejects it. ORT still loads the
+    opset-1 form used by opset-7 models such as TinyYOLOv2.
+    """
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, shape)
+    y = helper.make_tensor_value_info("Y", tp, shape)
+    node = helper.make_node(
+        "ImageScaler",
+        ["X"],
+        ["Y"],
+        scale=float(scale),
+        bias=[float(v) for v in bias],
+    )
+    graph = helper.make_graph([node], "test_graph", [x], [y])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 7)])
+
+
+class TestImageScaler:
+    @pytest.mark.parametrize(
+        "dtype,scale,bias",
+        [
+            # TinyYOLOv2 preprocessor: scale = 1/255, zero bias.
+            (np.float32, 1.0 / 255.0, [0.0, 0.0, 0.0]),
+            (np.float32, 2.0, [0.0, 0.25, -0.5]),
+            (np.float16, 0.5, [0.0, 1.0, -1.0]),
+        ],
+    )
+    def test_nchw(self, model_runner, dtype, scale, bias):
+        shape = [1, len(bias), 8, 8]
+        model = _make_image_scaler_model(dtype, shape, scale, bias)
+
+        rng = np.random.default_rng(7)
+        image = rng.uniform(0, 1, shape).astype(dtype)
+        channel_bias = np.asarray(bias, dtype=dtype).reshape(1, -1, 1, 1)
+        expected_np = (
+            np.float32(scale)
+            * (image.astype(np.float32) + channel_bias.astype(np.float32))
+        ).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [image])
+        atol = 1e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=atol)
+        compare_outputs(expected, expected_np, atol=atol)
