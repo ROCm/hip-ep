@@ -89,6 +89,35 @@ heuristic is robust; the sweep exists to populate the durable LUT offline.
 `HIPDNN_EP_GEMM_AUTOTUNE=0` disables the sweep entirely and uses the static
 occupancy heuristic, for perf isolation.
 
+## Launch-side rules (applied after the config is resolved, not in the LUT)
+
+The LUT stores a tile geometry; `launchWmma` may still remap it at launch. These
+rules were measured on gfx1151 (halo13) with `bench3` (normal mode, idle-GPU
+gate before every entry, alternating rounds, slower-of-two for ours). They exist
+because the current LUT was measured without them; drop them once the LUT is
+re-measured with the rule in place.
+
+- **K%1024 alias rule** (NT fp16/bf16, both row strides a multiple of 1024
+  elements): M-first raster (8 M-tiles per group; 16 on the 128-row BK=64
+  tile when there are >= 16 M-tiles and 16 A panels fit 16 MB) + StaggerU +
+  PGR2 on BK=32 tiles, with remaps WT4x4 BK32 -> WT4x2, BK16 -> BK64,
+  128x256 -> 256x128 (M >= 256), non-PGR2 BK32 -> 128x128 WT4x2 (M >= 128),
+  M >= 1024 -> 128x128 WT4x2 BK64. The raster + StaggerU + PGR2 part is what
+  hipBLASLt does on these shapes (104 of its 129 picks on the 34-shape table
+  are PGR2). fp16 1024x4096^2 1.007 ms, 2048x4096^2 1.853, 4096x4096^2 3.85
+  (before: 1.83 / 2.47 / 4.37 with the per-call padrow copy; hipBLASLt
+  0.89-1.00 / 1.87 / 3.74).
+- **Padrow** is opt-in only (`HIPDNN_EP_GEMM_PADROW=1`): the padded copy of B
+  is made on every call (there is no weight cache and no hit-rate guard).
+
+| env | default | effect |
+|---|---|---|
+| `HIPDNN_EP_GEMM_ALIASK` | 1 | 0 disables the K%1024 alias rule (A/B only) |
+| `HIPDNN_EP_GEMM_SWIZZLE` | 0 | non-zero overrides the raster width; < 0 = M-first groups of -N M-tiles |
+| `HIPDNN_EP_GEMM_STAGGER` | NT 1, NN 0 | StaggerU on/off (start-K offset per tile) |
+| `HIPDNN_EP_GEMM_STAGGER_U` / `_BYTES` / `_MAP` | 32 / 256 / 0 | number of offsets / step in bytes / 0 M-tile, 1 N-tile, 2 serial |
+| `HIPDNN_EP_GEMM_PADROW` | 0 | 1 = per-call row-padded copy of B on K%1024 shapes |
+
 ## Measurement protocol (plan.md §4 / `hip-kernel-perf-measurement` skill)
 
 Every tuner (not just `tuneWmma`) now shares two helpers in `gemm_kernel.hip`:
