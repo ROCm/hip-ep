@@ -52,7 +52,22 @@ module {
     return
   }
 
-  // Test 4: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
+  // Test 4: dynamic H/W. Those extents are read from the memref descriptor.
+  func.func @resize_dynamic_spatial_f16(
+      %ctx: !hip.context,
+      %x: memref<?x3x?x?xf16, 1>,
+      %y: memref<?x3x?x?xf16, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_spatial_f16
+    hip.resize(%ctx) ins(%x : memref<?x3x?x?xf16, 1>)
+                     outs(%y : memref<?x3x?x?xf16, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0}
+    // CHECK: llvm.extractvalue %{{.*}}[3, 2]
+    // CHECK: llvm.extractvalue %{{.*}}[3, 3]
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 5: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
   // The channel extent is unchanged, so that window axis is copied.
   func.func @resize_nhwc_static_f32(
       %ctx: !hip.context,
@@ -63,6 +78,24 @@ module {
                      outs(%y : memref<1x32x32x3xf32, 1>)
                      {mode = 1, coord_transform = 0, nearest_mode = 0}
     // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 6: static input extents with a dynamic output. The type-only plan
+  // rejects this pair; prefix_count and spatial_rank are the launch chosen
+  // once each output extent had a host index.
+  func.func @resize_host_sizes_f32(
+      %ctx: !hip.context,
+      %x: memref<?x3x1024x1024xf32, 1>,
+      %y: memref<?x?x?x?xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_host_sizes_f32
+    hip.resize(%ctx) ins(%x : memref<?x3x1024x1024xf32, 1>)
+                     outs(%y : memref<?x?x?x?xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 2,
+                      prefix_count = 1, spatial_rank = 3}
+    // CHECK: llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
     return
   }
 }

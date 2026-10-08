@@ -15,15 +15,16 @@ namespace {
 //===----------------------------------------------------------------------===//
 //
 // The kernel takes a copied prefix (N, C) and a trailing window of
-// spatial_rank axes (1..3).  planHipResizeLaunch chooses
-// that split from which extents change:
+// spatial_rank axes (1..3).  planHipResizeLaunch chooses that split from
+// which extents change:
 //
 //   NCHW  1x3x16x16 -> 1x3x32x32 : N, C,     spatial_rank=2, (H, W)
 //   NHWC  1x16x16x3 -> 1x32x32x3 : N, C=1,   spatial_rank=3, (H, W, C)
 //
 // An empty prefix slot is the constant 1, so it does not add a tensor axis.
-// A window axis whose extents match is copied.  Dynamic prefix dims are read
-// from the memref descriptor.
+// A window axis whose extents match is copied.  Dynamic prefix dims and
+// dynamic window dims are read from the memref descriptor.  The kernel
+// recovers per-axis scale from those extents.
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
@@ -53,8 +54,23 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
-    std::optional<HipResizeLaunch> launch =
-        planHipResizeLaunch(inputType, outputType);
+    // A sizes-vector resize records the launch it already proved. The memref
+    // types alone still show a static input extent beside a dynamic output
+    // extent, which planHipResizeLaunch rejects.
+    std::optional<HipResizeLaunch> launch;
+    if (auto prefixAttr = op->getAttrOfType<IntegerAttr>("prefix_count")) {
+      auto spatialAttr = op->getAttrOfType<IntegerAttr>("spatial_rank");
+      if (!spatialAttr)
+        return rewriter.notifyMatchFailure(op, "missing spatial_rank");
+      int64_t prefix = prefixAttr.getInt();
+      int64_t spatial = spatialAttr.getInt();
+      if (prefix < 0 || prefix > 2 || spatial < 1 || spatial > 3 ||
+          prefix + spatial != outputType.getRank())
+        return rewriter.notifyMatchFailure(op, "invalid resize launch");
+      launch = HipResizeLaunch{prefix, spatial};
+    } else {
+      launch = planHipResizeLaunch(inputType, outputType);
+    }
     if (!launch)
       return rewriter.notifyMatchFailure(
           op, "expected a copied prefix of at most 2 axes and a trailing "
