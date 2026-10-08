@@ -2184,21 +2184,23 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
  * GEMV, replacing the dequant-ALU-bound fp path. Requires bits==4, K%32==0.
- *   A          : fp16 activation [K]  (batch==M==1, row-major)
+ * M > 1 blocks rows so the packed weight is read (and unpacked) once for the
+ * whole tile, which is what a speculative verify pass needs.
+ *   A          : fp16 activations [M, K]  (batch==1, row-major)
  *   B          : packed int4 weights  [N, K/2]
  *   scales     : fp16 [N, ceil(K/block_size)]
  *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
  *                nullptr for the symmetric (default zp=8) path
- *   out        : fp16 [N]
- *   a_qb_scratch    : >= K bytes (int8), caller/session-owned
- *   a_scale_scratch : >= ceil(K/block_size) floats, caller/session-owned
+ *   out        : fp16 [M, N]
+ *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
+ *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
  * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     void* stream,
     const void* A, const void* B, const void* scales, const void* zp_u8,
     const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by

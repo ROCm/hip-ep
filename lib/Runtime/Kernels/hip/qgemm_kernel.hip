@@ -58,6 +58,15 @@
 
 #include <hip/hip_runtime.h>
 
+// v_wmma_i32_16x16x16_iu8 is a gfx11 instruction: gfx12 renames the builtin and
+// the host pass has no AMDGPU builtins at all. __has_builtin is target-aware
+// here, so it gates the device code; qgemm_device_has_wmma() gates dispatch.
+#if defined(__has_builtin) &&                                                      __has_builtin(__builtin_amdgcn_wmma_i32_16x16x16_iu8_w32)
+#define QGEMM_HAS_WMMA 1
+#else
+#define QGEMM_HAS_WMMA 0
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -953,6 +962,272 @@ __global__ __launch_bounds__(kTiledBlock) void qgemm_tiled_kernel(
 // interleave.
 
 // One block per (n-tile, m-tile, k slice).
+
+// ---------------------------------------------------------------------------
+// WMMA W4 path.
+//
+// v_wmma_i32_16x16x16_iu8 retires a whole 16x16x16 int8 matrix product per
+// instruction, and measures ~54 int8-TOPS on gfx1151 against ~27 for
+// v_dot4_i32_iu8. The dot4 kernels above already run near their own issue
+// ceiling, so doubling the instruction is the only remaining factor-level gain
+// for prefill.
+//
+// Fragment layout for wave32, measured rather than taken from a diagram:
+//   A operand  lane L supplies A[L % 16][k = 0..15], duplicated across the two
+//              half-waves
+//   B operand  lane L supplies column L % 16 over k = 0..15 -- for the model's
+//              [N, K] weights that is just row n = L % 16
+//   D accum    lane L element e holds D[2 * e + L / 16][L % 16]
+//
+// Both operands want sixteen k-consecutive values of one row, which is how A
+// and the packed int4 weights are already stored: no transpose, no repack.
+//
+// The accumulator's row ownership does not line up with the A fragment's,
+// which is why row_a is summed per lane and then passed through LDS, while
+// col_b -- whose column ownership does line up -- stays in registers.
+typedef int32_t QGemmV4i __attribute__((ext_vector_type(4)));
+typedef int32_t QGemmV8i __attribute__((ext_vector_type(8)));
+
+constexpr int kWmmaFrag = 16; // v_wmma_i32_16x16x16_iu8 is 16x16x16
+constexpr int kWmmaWave = 32;
+constexpr int kWmmaTileK = 32; // two WMMA k steps staged per round
+constexpr int kWmmaTileM = 128;
+constexpr int kWmmaTileN = 64;
+constexpr int kWmmaMFrag = kWmmaTileM / kWmmaFrag;      // 8
+constexpr int kWmmaNFrag = kWmmaTileN / kWmmaFrag;      // 4
+// Padded so a fragment read stays one 16-byte LDS access while consecutive
+// rows do not start on the same bank group.
+constexpr int kWmmaARowStride = kWmmaTileK + 16;        // 48
+constexpr int kWmmaChunk = 8;                           // values per staged chunk
+constexpr int kWmmaASlots = kWmmaTileM * (kWmmaTileK / kWmmaChunk);
+constexpr int kWmmaBSlots = kWmmaTileN * (kWmmaTileK / kWmmaChunk);
+
+// Below this the k loop is too short to amortize the staging pipeline and the
+// path loses to the dot4 kernels -- by 24% at K=128 and 87% at K=32 for
+// N=2048, while every K from 256 up wins.
+constexpr int64_t kWmmaMinK = 256;
+// A long k loop covers the extra barrier traffic of a wider block and profits
+// from the waves; a short one does not. Measured against cold weights at
+// N=2048: 8 waves is 9% ahead at K=8192 and behind at K=3072.
+constexpr int64_t kWmmaWideBlockMinK = 4096;
+// Grid size from which WMMA is preferred over split-K. Swept at M=128: WMMA
+// wins from N=640 (10 blocks) upward, and smaller grids could not be measured
+// because split-K cannot be switched off for them.
+constexpr int64_t kWmmaMinBlocksVsSplitK = 10;
+
+// Sign-extend four int4 weights held one per byte. The value is (x ^ 8) - 8,
+// but subtracting 8 borrows across byte boundaries, so bias by 0x78 -- which
+// keeps every byte under 0x100 -- and strip the resulting +0x80 with an xor.
+// Three instructions for four weights.
+__device__ __forceinline__ int32_t qgemm_sext_nib4(uint32_t x) {
+  return static_cast<int32_t>(((x ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u);
+}
+
+// Eight packed int4 weights -> eight int8 lanes in k order, as two dwords.
+__device__ __forceinline__ void qgemm_wmma_unpack_w4x8(uint32_t p, int32_t &lo,
+                                                       int32_t &hi) {
+  // Masking splits the nibbles into even and odd k, so both halves have to be
+  // interleaved back into k order -- one v_perm_b32 apiece.
+  const uint32_t ev = qgemm_sext_nib4(p & 0x0F0F0F0Fu);        // k 0,2,4,6
+  const uint32_t od = qgemm_sext_nib4((p >> 4) & 0x0F0F0F0Fu); // k 1,3,5,7
+  lo = static_cast<int32_t>(__builtin_amdgcn_perm(od, ev, 0x05010400u));
+  hi = static_cast<int32_t>(__builtin_amdgcn_perm(od, ev, 0x07030602u));
+}
+
+template <int kWmmaWaves>
+__global__ __launch_bounds__(kWmmaWaves * kWmmaWave) void
+qgemm_tiled_wmma_w4_kernel(
+    const uint16_t *__restrict__ A, const uint8_t *__restrict__ B,
+    uint16_t *__restrict__ Y, int64_t N, int64_t K, QGemmRequant requant,
+    bool need_row_a, bool need_col_b) {
+#if !QGEMM_HAS_WMMA
+  // gfx12 spells the builtin differently and the host pass has no AMDGPU
+  // builtins, so the body only exists where it can be built. Dispatch is held
+  // off any such target by qgemm_device_has_wmma().
+  (void)A; (void)B; (void)Y; (void)N; (void)K;
+  (void)requant; (void)need_row_a; (void)need_col_b;
+#else
+  constexpr int kWmmaBlock = kWmmaWaves * kWmmaWave;
+  constexpr int kWmmaMPerWave = kWmmaMFrag / kWmmaWaves;
+  constexpr int kWmmaARepeats = (kWmmaASlots + kWmmaBlock - 1) / kWmmaBlock;
+  constexpr int kWmmaBRepeats = (kWmmaBSlots + kWmmaBlock - 1) / kWmmaBlock;
+
+  const int tid = threadIdx.x;
+  const int lane = tid % kWmmaWave;
+  const int wave = tid / kWmmaWave;
+  const int frag_row = lane % kWmmaFrag; // this lane's A row / B column
+  const int64_t m_base = static_cast<int64_t>(blockIdx.y) * kWmmaTileM;
+  const int64_t n_base = static_cast<int64_t>(blockIdx.x) * kWmmaTileN;
+
+  __shared__ __align__(16)
+      QGemmByte a_lds[kPlaneLo + 1][kWmmaTileM][kWmmaARowStride];
+  __shared__ __align__(16) QGemmByte b_lds[kWmmaTileN][kWmmaTileK];
+  __shared__ int32_t row_a_lds[kWmmaTileM][kPlaneLo + 1];
+
+  QGemmV8i acc[kWmmaMPerWave][kWmmaNFrag][kPlaneLo + 1];
+#pragma unroll
+  for (int i = 0; i < kWmmaMPerWave; ++i)
+#pragma unroll
+    for (int j = 0; j < kWmmaNFrag; ++j)
+#pragma unroll
+      for (int p = 0; p <= kPlaneLo; ++p)
+#pragma unroll
+        for (int e = 0; e < 8; ++e) acc[i][j][p][e] = 0;
+
+  int32_t row_a[kWmmaMPerWave][kPlaneLo + 1] = {};
+  int32_t col_b[kWmmaNFrag] = {};
+
+  // The tile's global loads are issued a full tile ahead, so their latency
+  // overlaps the previous tile's WMMAs instead of stalling the LDS stores.
+  QGemmV4i packed_a[kWmmaARepeats];
+  uint32_t packed_b[kWmmaBRepeats];
+  auto load_tile = [&](int64_t k0) {
+#pragma unroll
+    for (int r = 0; r < kWmmaARepeats; ++r) {
+      const int slot = tid + r * kWmmaBlock;
+      const int row = slot / (kWmmaTileK / kWmmaChunk);
+      const int chunk = slot % (kWmmaTileK / kWmmaChunk);
+      packed_a[r] = *reinterpret_cast<const QGemmV4i *>(
+          A + (m_base + row) * K + k0 + chunk * kWmmaChunk);
+    }
+#pragma unroll
+    for (int r = 0; r < kWmmaBRepeats; ++r) {
+      const int slot = tid + r * kWmmaBlock;
+      const int row = slot / (kWmmaTileK / kWmmaChunk);
+      const int chunk = slot % (kWmmaTileK / kWmmaChunk);
+      packed_b[r] = *reinterpret_cast<const uint32_t *>(
+          B + (((n_base + row) * K + k0 + chunk * kWmmaChunk) >> 1));
+    }
+  };
+  load_tile(0);
+
+  for (int64_t k0 = 0; k0 < K; k0 += kWmmaTileK) {
+#pragma unroll
+    for (int r = 0; r < kWmmaARepeats; ++r) {
+      const int slot = tid + r * kWmmaBlock;
+      const int row = slot / (kWmmaTileK / kWmmaChunk);
+      const int chunk = slot % (kWmmaTileK / kWmmaChunk);
+      // Splitting uint16 activations into byte planes is a pure byte shuffle,
+      // so one v_perm_b32 per plane does it. Reading the loaded vector back
+      // through a uint16_t * would alias, and the compiler mis-schedules that.
+      int32_t hi[2], lo[2];
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const uint32_t w0 = static_cast<uint32_t>(packed_a[r][h * 2 + 0]);
+        const uint32_t w1 = static_cast<uint32_t>(packed_a[r][h * 2 + 1]);
+        hi[h] =
+            static_cast<int32_t>(__builtin_amdgcn_perm(w1, w0, 0x07050301u));
+        lo[h] =
+            static_cast<int32_t>(__builtin_amdgcn_perm(w1, w0, 0x06040200u));
+      }
+      *reinterpret_cast<int2 *>(&a_lds[kPlaneHi][row][chunk * kWmmaChunk]) =
+          make_int2(hi[0], hi[1]);
+      *reinterpret_cast<int2 *>(&a_lds[kPlaneLo][row][chunk * kWmmaChunk]) =
+          make_int2(lo[0], lo[1]);
+    }
+#pragma unroll
+    for (int r = 0; r < kWmmaBRepeats; ++r) {
+      const int slot = tid + r * kWmmaBlock;
+      const int row = slot / (kWmmaTileK / kWmmaChunk);
+      const int chunk = slot % (kWmmaTileK / kWmmaChunk);
+      int32_t w0, w1;
+      qgemm_wmma_unpack_w4x8(packed_b[r], w0, w1);
+      *reinterpret_cast<int2 *>(&b_lds[row][chunk * kWmmaChunk]) =
+          make_int2(w0, w1);
+    }
+    __syncthreads();
+    // The staging registers are spent, so the next tile can claim them while
+    // the WMMAs below cover the round trip.
+    if (k0 + kWmmaTileK < K) load_tile(k0 + kWmmaTileK);
+
+#pragma unroll
+    for (int ks = 0; ks < kWmmaTileK / kWmmaFrag; ++ks) {
+      QGemmV4i a_frag[kWmmaMPerWave][kPlaneLo + 1];
+#pragma unroll
+      for (int i = 0; i < kWmmaMPerWave; ++i) {
+        const int row = (wave * kWmmaMPerWave + i) * kWmmaFrag + frag_row;
+#pragma unroll
+        for (int p = 0; p <= kPlaneLo; ++p)
+          a_frag[i][p] = *reinterpret_cast<const QGemmV4i *>(
+              &a_lds[p][row][ks * kWmmaFrag]);
+      }
+      QGemmV4i b_frag[kWmmaNFrag];
+#pragma unroll
+      for (int j = 0; j < kWmmaNFrag; ++j)
+        b_frag[j] = *reinterpret_cast<const QGemmV4i *>(
+            &b_lds[j * kWmmaFrag + frag_row][ks * kWmmaFrag]);
+
+#pragma unroll
+      for (int i = 0; i < kWmmaMPerWave; ++i)
+#pragma unroll
+        for (int j = 0; j < kWmmaNFrag; ++j)
+#pragma unroll
+          for (int p = 0; p <= kPlaneLo; ++p)
+            // A's byte planes are unsigned, the int4 weights are signed --
+            // the same pair of sign flags hipdnn_dot4 takes.
+            acc[i][j][p] = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+                false, a_frag[i][p], true, b_frag[j], acc[i][j][p], false);
+
+      // Block-uniform branches, so the skipped sums cost nothing when the
+      // corresponding zero point is 0.
+      if (need_row_a) {
+#pragma unroll
+        for (int i = 0; i < kWmmaMPerWave; ++i)
+#pragma unroll
+          for (int p = 0; p <= kPlaneLo; ++p)
+#pragma unroll
+            for (int w = 0; w < 4; ++w)
+              row_a[i][p] = hipdnn_dot4<false, false>(a_frag[i][p][w], kOnes4,
+                                                     row_a[i][p]);
+      }
+      if (need_col_b) {
+#pragma unroll
+        for (int j = 0; j < kWmmaNFrag; ++j)
+#pragma unroll
+          for (int w = 0; w < 4; ++w)
+            col_b[j] =
+                hipdnn_dot4<true, false>(b_frag[j][w], kOnes4, col_b[j]);
+      }
+    }
+    __syncthreads();
+  }
+
+  // A lane holds the row sum for the row it supplied to the A fragment, not
+  // for the rows it owns in the accumulator, so route them through LDS. The
+  // two half-waves hold duplicates; only the first writes.
+  if (need_row_a && lane < kWmmaFrag) {
+#pragma unroll
+    for (int i = 0; i < kWmmaMPerWave; ++i) {
+      const int row = (wave * kWmmaMPerWave + i) * kWmmaFrag + frag_row;
+#pragma unroll
+      for (int p = 0; p <= kPlaneLo; ++p) row_a_lds[row][p] = row_a[i][p];
+    }
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int i = 0; i < kWmmaMPerWave; ++i) {
+#pragma unroll
+    for (int e = 0; e < 8; ++e) {
+      const int row =
+          (wave * kWmmaMPerWave + i) * kWmmaFrag + 2 * e + lane / kWmmaFrag;
+      const int64_t m = m_base + row;
+      const int64_t row_sum =
+          need_row_a ? qgemm_combine(row_a_lds[row]) : int64_t{0};
+#pragma unroll
+      for (int j = 0; j < kWmmaNFrag; ++j) {
+        const int64_t n = n_base + j * kWmmaFrag + frag_row;
+        const int32_t planes[kPlaneLo + 1] = {acc[i][j][kPlaneHi][e],
+                                              acc[i][j][kPlaneLo][e]};
+        Y[m * N + n] = qgemm_requant<uint16_t>(qgemm_combine(planes), row_sum,
+                                               col_b[j], m, n, requant);
+      }
+    }
+  }
+#endif // QGEMM_HAS_WMMA
+}
+
+
 template <typename TA, typename TB>
 __global__ __launch_bounds__(kTiledBlock) void qgemm_splitk_partial_kernel(
     const TA *__restrict__ A, const uint8_t *__restrict__ B,
@@ -1097,17 +1372,100 @@ __device__ void qgemm_gemv_nk_columns(const TA *__restrict__ A,
     p_row_a = 0;
   };
 
-  for (int64_t k = k_begin + static_cast<int64_t>(lane) * kStep;
-       k + kStep <= k_end; k += kStride) {
+  // Decode reads every weight once per token, so this loop is bandwidth bound
+  // and the width of the load is what it lives on. A dword per column per step
+  // leaves it issuing four narrow loads where one 16-byte load would do; the
+  // wide phase below covers whole 16-byte strides and the narrow phase keeps
+  // the remainder, so no divisibility is assumed about K or a split-K slice.
+  constexpr int kWideStep = 128 / kBits; // logical values per 16-byte load
+  constexpr int64_t kWideStride = static_cast<int64_t>(kGemvNkLanes) * kWideStep;
+  constexpr int kDwordStep = 32 / kBits; // logical values per dword
+
+  const int64_t span = k_end - k_begin;
+  // A 16-byte load needs the column base and the lane's own offset aligned;
+  // both follow from the byte stride of a column and the slice's start.
+  const bool wide_ok =
+      ((static_cast<int64_t>(kGemvNkLanes) * kWideStep * kBits / 8) % 16) == 0 &&
+      ((k_begin * kBits / 8) % 16) == 0 &&
+      (reinterpret_cast<uintptr_t>(B) % 16) == 0 && col_offsets[0] % 16 == 0 &&
+      col_offsets[kCols - 1] % 16 == 0;
+  const int64_t k_mid =
+      wide_ok ? k_begin + (span / kWideStride) * kWideStride : k_begin;
+
+  // Step pointers rather than recompute an int64 offset per column per
+  // iteration. The address arithmetic costs more latency than the
+  // multiply-accumulates it feeds, and none of it depends on anything the loop
+  // body produces.
+  constexpr int64_t kWideByteStep = kWideStride * kBits / 8;
+  const int64_t k_wide0 = k_begin + static_cast<int64_t>(lane) * kWideStep;
+  const uint8_t *bp[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    bp[c] = B + col_offsets[c] + k_wide0 * kBits / 8;
+  const TA *ap = A + k_wide0;
+
+  for (int64_t k = k_wide0; k < k_mid;
+       k += kWideStride, ap += kWideStride) {
+    uint4 packed[kCols];
+#pragma unroll
+    for (int c = 0; c < kCols; ++c) {
+      packed[c] = *reinterpret_cast<const uint4 *>(bp[c]);
+      bp[c] += kWideByteStep;
+    }
+
+#pragma unroll
+    for (int d = 0; d < 4; ++d) {
+      uint32_t w[kCols];
+#pragma unroll
+      for (int c = 0; c < kCols; ++c)
+        w[c] = (d == 0)   ? packed[c].x
+               : (d == 1) ? packed[c].y
+               : (d == 2) ? packed[c].z
+                          : packed[c].w;
+#pragma unroll
+      for (int j = 0; j < kDwordStep; ++j) {
+        const int32_t a_val = static_cast<int32_t>(ap[d * kDwordStep + j]);
+        if (need_row_a)
+          p_row_a += a_val;
+#pragma unroll
+        for (int c = 0; c < kCols; ++c) {
+          const int32_t b_val = qgemm_gemv_unpack<kBits, TB>(w[c], j);
+          p_acc[c] += a_val * b_val;
+          if (need_col_b)
+            p_col_b[c] += b_val;
+        }
+      }
+    }
+
+    // One wide step carries four dwords' worth of terms, so it consumes four
+    // of the accumulator's headroom before a fold is due.
+    folded += 4;
+    if (folded >= kFold) {
+      fold();
+      folded = 0;
+    }
+  }
+
+  constexpr int64_t kNarrowByteStep = kStride * kBits / 8;
+  const int64_t k_narrow0 = k_mid + static_cast<int64_t>(lane) * kStep;
+  const uint8_t *np[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    np[c] = B + col_offsets[c] + k_narrow0 * kBits / 8;
+  const TA *nap = A + k_narrow0;
+
+  for (int64_t k = k_narrow0; k + kStep <= k_end;
+       k += kStride, nap += kStride) {
     uint32_t packed[kCols];
 #pragma unroll
-    for (int c = 0; c < kCols; ++c)
-      packed[c] = *reinterpret_cast<const uint32_t *>(B + col_offsets[c] +
-                                                      k * kBits / 8);
+    for (int c = 0; c < kCols; ++c) {
+      packed[c] = *reinterpret_cast<const uint32_t *>(np[c]);
+      np[c] += kNarrowByteStep;
+    }
 
 #pragma unroll
     for (int j = 0; j < kStep; ++j) {
-      const int32_t a_val = static_cast<int32_t>(A[k + j]);
+      const int32_t a_val = static_cast<int32_t>(nap[j]);
       if (need_row_a)
         p_row_a += a_val;
 #pragma unroll
@@ -1305,6 +1663,42 @@ int qgemm_device_cu_count() {
   return count;
 }
 
+// The WMMA path is compiled only where the gfx11 builtin exists, so on any
+// other target the kernel body is empty and must never be dispatched.
+bool qgemm_device_has_wmma() {
+  static const bool has = [] {
+    int device = 0;
+    if (hipGetDevice(&device) != hipSuccess)
+      return false;
+    hipDeviceProp_t props;
+    if (hipGetDeviceProperties(&props, device) != hipSuccess)
+      return false;
+    const std::string arch(props.gcnArchName);
+    return arch.rfind("gfx11", 0) == 0;
+  }();
+  return has;
+}
+
+int qgemm_tiled_wmma_config() {
+  static const int config = [] {
+    std::string raw;
+#ifdef _WIN32
+    char *value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "HIPDNN_QGEMM_TILED_WMMA_CONFIG") == 0 &&
+        value) {
+      raw = value;
+      free(value);
+    }
+#else
+    if (const char *value = getenv("HIPDNN_QGEMM_TILED_WMMA_CONFIG"))
+      raw = value;
+#endif
+    return (raw == "0" || raw == "off" || raw == "OFF") ? 0 : 1;
+  }();
+  return config;
+}
+
 size_t qgemm_gemv_scratch_bytes(int64_t N) {
   return static_cast<size_t>(2 * N + 1) * sizeof(int64_t);
 }
@@ -1385,7 +1779,7 @@ int qgemm_gemv_launch(const QGemmArgs &g, const QGemmRequant &requant,
 // Column groups per block, and how many of them a block carries. Four waves
 // keeps the tail waste under a wave on the narrow shapes while still giving
 // the scheduler whole-block granularity.
-constexpr int kGemvNkCols = 4;
+constexpr int kGemvNkCols = 2;
 constexpr int kGemvNkWaves = 4;
 constexpr int kGemvNkGroup = kGemvNkCols * kGemvNkWaves;
 
@@ -1733,6 +2127,40 @@ int qgemm_launch_tiled(const QGemmArgs &g, const QGemmRequant &requant,
   bool use_splitk = plan.enabled && g.workspace && g.workspace_bytes >= scratch;
 
   (void)hipGetLastError();
+
+  // uint16 activations against packed int4 weights already stored [N, K] is the
+  // only combination this kernel handles; everything else falls through to the
+  // paths below untouched. It also beats split-K once its own grid is large
+  // enough to spread over the device -- 12% at N=640 rising to 33% at N=1024,
+  // M=128 -- so it takes those shapes too.
+  constexpr bool kWmmaTypesMatch =
+      std::is_same_v<TA, uint16_t> && std::is_same_v<TB, int8_t> &&
+      std::is_same_v<TY, uint16_t>;
+  if constexpr (kWmmaTypesMatch) {
+    const int64_t wmma_blocks = (g.N / kWmmaTileN) * (g.M / kWmmaTileM);
+    if ((!use_splitk || wmma_blocks >= kWmmaMinBlocksVsSplitK) &&
+        qgemm_device_has_wmma() && qgemm_tiled_wmma_config() == 1 &&
+        !g.trans_a && g.trans_b && g.b_bits == 4 &&
+        (g.M % kWmmaTileM) == 0 && (g.N % kWmmaTileN) == 0 &&
+        (g.K % kWmmaTileK) == 0 && g.K >= kWmmaMinK &&
+        (reinterpret_cast<uintptr_t>(g.A) % 16) == 0 &&
+        (reinterpret_cast<uintptr_t>(g.B) % 4) == 0) {
+      const dim3 grid(static_cast<unsigned>(g.N / kWmmaTileN),
+                      static_cast<unsigned>(g.M / kWmmaTileM));
+      const auto *wa = reinterpret_cast<const uint16_t *>(a_ptr);
+      auto *wy = reinterpret_cast<uint16_t *>(y_ptr);
+      if (g.K >= kWmmaWideBlockMinK)
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<8>), grid,
+                           dim3(8 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
+                           g.K, requant, need_row_a, need_col_b);
+      else
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(qgemm_tiled_wmma_w4_kernel<4>), grid,
+                           dim3(4 * kWmmaWave), 0, g.stream, wa, g.B, wy, g.N,
+                           g.K, requant, need_row_a, need_col_b);
+      return static_cast<int>(hipGetLastError());
+    }
+  }
+
   if (use_splitk &&
       hipMemsetAsync(g.workspace, 0, scratch, g.stream) != hipSuccess) {
     // Half-zeroed accumulators would corrupt the result, so drop to the

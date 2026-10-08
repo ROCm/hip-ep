@@ -232,6 +232,9 @@ if(BUILD_HIP_UNIT_TESTS)
 
   # MLIR dialect/pass unit tests (plain main; GPU-free injected-I/O coverage).
   add_subdirectory(test/unit)
+
+  # Kernel compile-time guards (GPU-free; device-kernel arch-gating invariants).
+  add_subdirectory(lib/Runtime/Kernels/test/lds_barrier_arch_gate)
 endif()
 
 # These GPU kernel tests are standalone package artifacts: their small,
