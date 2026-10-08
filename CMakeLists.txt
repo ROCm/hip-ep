@@ -182,6 +182,25 @@ include(AddMLIR)
 # add_subdirectory(lib)/(tools)/(test) so plugin packages can register.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
 
+# ==============================================================================
+# CREST — Chez Scheme / MLIR integration library
+# ==============================================================================
+if(DEFINED CREST_SOURCE_DIR)
+  message(STATUS "Using local CREST from: ${CREST_SOURCE_DIR}")
+  add_subdirectory(${CREST_SOURCE_DIR} ${CMAKE_BINARY_DIR}/crest)
+  include_directories(${CREST_SOURCE_DIR}/include)
+  include_directories(${CMAKE_BINARY_DIR}/crest/include)
+else()
+  include(FetchContent)
+  FetchContent_Declare(
+    crest
+    GIT_REPOSITORY https://github.com/wcy123/crest.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(crest)
+endif()
+
 llvm_map_components_to_libnames(llvm_libs Support Core)
 
 # (schemas is added earlier, before lib/Runtime/Kernels, which consumes the

@@ -30,6 +30,7 @@ add_dependencies(OnnxToHipsr
 
 target_link_libraries(OnnxToHipsr PUBLIC
   HipsrDialectIR
+  CrestBindings
   OnnxDialectIR
   MLIRPass
   MLIRTransforms
