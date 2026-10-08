@@ -285,7 +285,8 @@ not in the default map because it is shared; on gemma4 decode it is `gqa`'s
 decomposed attention (proved by `-PerfOps gqa` matching SQTT only with it), and
 `--map gqa+=gemm` says so. On gpt-oss `gqa` has its own flash-decode kernels and
 `gemm` is the fp16 `lm_head` and router `MatMul`s, so it is `--map matmul=gemm`
-(1.92 dispatches per call: the routers' hipBLASLt GEMM plus its bias kernel).
+(1.92 dispatches per call: each router is a split-K GEMM plus its `PostGSU`
+reduction; the router bias is a separate `Add`).
 Unmapped families are listed so none is silently dropped.
 
 A failed check prints the op's per-family counts. Some are genuine: on gemma4
