@@ -18,5 +18,7 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
 therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
-therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.11.0
+## Linux 7.13 includes zstd symbol isolation for compressed HIP fat binaries:
+## https://github.com/ROCm/TheRock/pull/4251
+therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.13.0
 migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;migraphx-sdk-windows-1217ce1d
