@@ -61,6 +61,55 @@ module {
     return %y : tensor<1x4x16x16xf16>
   }
 
+  // Opset 7-8 stores scales as an f32 attribute. Nearest 2x, static NCHW.
+  func.func @upsample_nearest_scales_attr(%arg0: tensor<1x128x56x56xf32>)
+      -> tensor<1x128x112x112xf32> {
+    // CHECK-LABEL: func.func @upsample_nearest_scales_attr
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x128x56x56xf32>)
+    %y = "onnx.Upsample"(%arg0) {mode = "nearest",
+        scales = [1.000000e+00 : f32, 1.000000e+00 : f32,
+                  2.000000e+00 : f32, 2.000000e+00 : f32]}
+        : (tensor<1x128x56x56xf32>) -> tensor<1x128x112x112xf32>
+    // CHECK-NOT: onnx.Upsample
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x112x112xf32>
+    // CHECK: hip.resize(%[[CTX]]) ins(%[[X]] : tensor<1x128x56x56xf32>)
+    // CHECK-SAME: outs(%[[INIT]] : tensor<1x128x112x112xf32>)
+    // mode=0 (nearest), coord_transform=1 (asymmetric), nearest_mode=2 (floor)
+    // CHECK-SAME: coord_transform = 1
+    // CHECK-SAME: mode = 0
+    // CHECK-SAME: nearest_mode = 2
+    return %y : tensor<1x128x112x112xf32>
+  }
+
+  // Same attribute form, linear mode.
+  func.func @upsample_linear_scales_attr(%arg0: tensor<1x4x8x8xf32>)
+      -> tensor<1x4x16x16xf32> {
+    // CHECK-LABEL: func.func @upsample_linear_scales_attr
+    %y = "onnx.Upsample"(%arg0) {mode = "linear",
+        scales = [1.000000e+00 : f32, 1.000000e+00 : f32,
+                  2.000000e+00 : f32, 2.000000e+00 : f32]}
+        : (tensor<1x4x8x8xf32>) -> tensor<1x4x16x16xf32>
+    // CHECK-NOT: onnx.Upsample
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 1
+    // CHECK-SAME: mode = 1
+    // CHECK-SAME: nearest_mode = 2
+    return %y : tensor<1x4x16x16xf32>
+  }
+
+  // Attribute scales that do not produce the result shape stay unconverted.
+  func.func @upsample_scales_attr_mismatch(%arg0: tensor<1x4x8x8xf32>)
+      -> tensor<1x4x16x16xf32> {
+    // CHECK-LABEL: func.func @upsample_scales_attr_mismatch
+    %y = "onnx.Upsample"(%arg0) {mode = "nearest",
+        scales = [1.000000e+00 : f32, 1.000000e+00 : f32,
+                  3.000000e+00 : f32, 3.000000e+00 : f32]}
+        : (tensor<1x4x8x8xf32>) -> tensor<1x4x16x16xf32>
+    // CHECK: onnx.Upsample
+    // CHECK-NOT: hip.resize
+    return %y : tensor<1x4x16x16xf32>
+  }
+
   // Rank 2 is not a spatial NCHW resize. Leave it unconverted.
   func.func @upsample_rank2(%arg0: tensor<8x8xf32>, %scales: tensor<2xf32>)
       -> tensor<16x16xf32> {
