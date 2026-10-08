@@ -1782,6 +1782,18 @@ void FastGeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// PReluOp: ins(x, slope), outs(output). slope broadcasts onto x.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PReluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // LeakyReluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

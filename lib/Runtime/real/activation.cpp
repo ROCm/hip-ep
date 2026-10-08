@@ -252,6 +252,40 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_prelu(RuntimeState *state, void *x, void *slope, void *output,
+               const int64_t *x_shape, int64_t x_rank,
+               const int64_t *slope_shape, int64_t slope_rank,
+               const int64_t *out_shape, int64_t out_rank, int64_t data_type) {
+  OP_PROFILE(
+      "prelu",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "rank=%lld", (long long)out_rank);
+        return std::string(b);
+      },
+      state);
+  if (!state || !x || !slope || !output) {
+    fprintf(stderr, "[REAL] wrap_prelu: null argument\n");
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr, "[REAL] wrap_prelu: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  int result = hip_prelu(stream, x, slope, output, x_shape, x_rank, slope_shape,
+                         slope_rank, out_shape, out_rank, hip_dtype);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_prelu: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+  return 0;
+}
+
 int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
              int64_t channels, int64_t spatial, int64_t size, double alpha,
              double beta, double bias, int64_t data_type) {

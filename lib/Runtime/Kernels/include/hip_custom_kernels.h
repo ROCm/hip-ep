@@ -775,6 +775,13 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
+/* PRelu: y = x >= 0 ? x : slope * x. slope broadcasts onto x. */
+HIP_KERNEL_API int hip_prelu(void *stream, const void *x, const void *slope,
+                             void *output, const int64_t *x_shape,
+                             int64_t x_rank, const int64_t *slope_shape,
+                             int64_t slope_rank, const int64_t *out_shape,
+                             int64_t out_rank, int hip_dtype);
+
 /* Keep the upper or lower triangle of each rows x cols matrix packed in a
  * contiguous row-major buffer. upper != 0 keeps col - row >= diagonal.
  * input_elements is num_elements, or 1 to broadcast input[0]. */

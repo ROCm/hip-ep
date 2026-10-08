@@ -1212,6 +1212,28 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_prelu(RuntimeState *state, void *x, void *slope, void *output,
+               const int64_t *x_shape, int64_t x_rank,
+               const int64_t *slope_shape, int64_t slope_rank,
+               const int64_t *out_shape, int64_t out_rank, int64_t data_type) {
+  (void)x;
+  (void)slope;
+  (void)output;
+  (void)x_shape;
+  (void)slope_shape;
+  (void)out_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_prelu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_prelu(x_rank=%lld, slope_rank=%lld, out_rank=%lld, "
+             "data_type=%s(%lld))\n",
+             (long long)x_rank, (long long)slope_rank, (long long)out_rank,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  return 0;
+}
+
 int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
              int64_t channels, int64_t spatial, int64_t size, double alpha,
              double beta, double bias, int64_t data_type) {
