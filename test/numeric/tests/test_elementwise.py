@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for elementwise operations: Sub, Mul, Add.
+"""Tests for elementwise operations: Sub, Mul, Add, Sum.
 
 The Llama-3.1-8B-fixed model uses:
   Sub: [1, 1] - [1] (broadcast) in the attention mask subgraph
@@ -338,3 +338,49 @@ class TestElementwiseMulBroadcast:
 
         actual, expected = model_runner.run_sample(model, [lhs, rhs])
         compare_outputs(actual, expected, atol=1e-6)
+
+
+def _make_sum_model(dtype, shapes: list[list[int]], out_shape: list[int]):
+    """Build an onnx.Sum model. Each shape is one variadic input."""
+    tp = np_to_onnx_type(dtype)
+    names = []
+    inputs = []
+    for i, shape in enumerate(shapes):
+        name = f"X{i}"
+        names.append(name)
+        inputs.append(helper.make_tensor_value_info(name, tp, shape))
+    out = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node("Sum", names, ["Y"])
+    return make_model_from_nodes([node], inputs, [out])
+
+
+class TestElementwiseSum:
+    """Residual adds in opset-7 ResNet-50 are binary onnx.Sum of equal shapes."""
+
+    def test_residual_f32(self, model_runner):
+        shape = [1, 4, 8, 8]
+        model = _make_sum_model(np.float32, [shape, shape], shape)
+        rng = np.random.default_rng(7)
+        xs = [rng.uniform(-2, 2, shape).astype(np.float32) for _ in range(2)]
+        actual, expected = model_runner.run_sample(model, xs)
+        compare_outputs(actual, expected, atol=0)
+
+    def test_broadcast_f16(self, model_runner):
+        out_shape = [1, 4, 8, 8]
+        slope = [1, 4, 1, 1]
+        model = _make_sum_model(np.float16, [out_shape, slope], out_shape)
+        rng = np.random.default_rng(8)
+        xs = [
+            rng.uniform(-2, 2, out_shape).astype(np.float16),
+            rng.uniform(-2, 2, slope).astype(np.float16),
+        ]
+        actual, expected = model_runner.run_sample(model, xs)
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
+
+    def test_three_inputs(self, model_runner):
+        shape = [2, 4]
+        model = _make_sum_model(np.float32, [shape, shape, shape], shape)
+        rng = np.random.default_rng(9)
+        xs = [rng.uniform(-2, 2, shape).astype(np.float32) for _ in range(3)]
+        actual, expected = model_runner.run_sample(model, xs)
+        compare_outputs(actual, expected, atol=0)

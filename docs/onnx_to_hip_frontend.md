@@ -148,6 +148,7 @@ runtime coverage.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `Add` | `hip.add` | `wrap_elementwise` |
+| `Sum` | `hip.add` chain | Decomposed to `onnx.Add` after Gelu fusion. Variadic, NumPy broadcast |
 | `Mul` | `hip.mul` | `wrap_elementwise` |
 | `Sub` | `hip.sub` | `wrap_elementwise_sub` |
 
