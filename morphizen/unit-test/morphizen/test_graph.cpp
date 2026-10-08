@@ -343,6 +343,49 @@ TEST_F(GraphTest, TryFuseConstantGraphOutput) {
   std::filesystem::remove(path);
 }
 
+// An isolated node with an absent optional input ({nullptr, nullptr}) must
+// not abort try_fuse. That is the MLIR form of an unconnected ONNX operand;
+// naming it used to CHECK-fail in node_arg_get_name.
+TEST_F(GraphTest, TryFuseIsolatedNodeWithOptionalInput) {
+  auto path = CMAKE_CURRENT_BINARY_PATH /
+              std::filesystem::path("optional_island_test.onnx");
+  std::vector<std::pair<std::string, int64_t>> opset = {{"", 17}};
+  auto model = morphizen_cxx::Model::create(path, opset);
+  auto graph = model->main_graph();
+
+  std::vector<std::optional<morphizen_cxx::NodeArgConstRef>> input = {
+      graph.new_node_arg("input", {1, 8},
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+  std::vector<std::optional<morphizen_cxx::NodeArgConstRef>> compute_out = {
+      graph.new_node_arg("compute_out", {1, 8},
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+  graph.add_node("relu_0", "", "Relu", "", {input[0]}, {compute_out[0]},
+                 morphizen::NodeAttributesBuilder().build());
+
+  auto orphan_out = graph.new_node_arg(
+      "orphan_out", {1, 8}, ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
+  auto attrs = morphizen::NodeAttributesBuilder().build();
+  MORPHIZEN_ORT_API(graph_add_node)
+  (graph, "orphan", "Relu", "", {nullptr}, {orphan_out.ptr()}, *attrs, "");
+
+  graph.set_inputs({input[0].value()});
+  graph.set_outputs({compute_out[0].value()});
+  graph.resolve();
+
+  auto [meta_def, error] = morphizen_cxx::graph_try_fuse(
+      graph, "optional_island", {"input"}, {"compute_out"}, {}, "CUSTOM");
+
+  ASSERT_TRUE(meta_def != nullptr) << error.comments;
+
+  std::vector<std::string> fused_nodes{meta_def->nodes().begin(),
+                                       meta_def->nodes().end()};
+  EXPECT_NE(std::find(fused_nodes.begin(), fused_nodes.end(), "orphan_out"),
+            fused_nodes.end())
+      << "isolated node should be absorbed into the fused body";
+
+  std::filesystem::remove(path);
+}
+
 TEST_F(GraphTest, NewConstantInitializer) {
 #ifdef MORPHIZEN_ENABLE_BOOST
   auto SAMPLE_ONNX = CMAKE_CURRENT_BINARY_PATH / "sample.onnx";

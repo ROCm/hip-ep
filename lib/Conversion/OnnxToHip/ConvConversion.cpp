@@ -50,8 +50,10 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value bias = hasBias ? op->getOperand(2) : nullptr;
 
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!resultType || !inputType)
+    return rewriter.notifyMatchFailure(op, "Conv requires ranked tensors");
 
   // Ranks 3 through 5 (1D, 2D, 3D). The upper bound is the runtime's: wrap_conv
   // carries three per-axis slots and rejects a larger spatial_rank, and

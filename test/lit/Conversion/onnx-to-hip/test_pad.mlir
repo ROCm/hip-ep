@@ -31,6 +31,16 @@ module {
   // CHECK-LABEL: func.func @pad_constant_with_cval
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
 
+  // Opset <= 10: one data operand, pad amounts in the pads attribute.
+  // CHECK-LABEL: func.func @pad_attribute
+  // CHECK: %[[PADS:.*]] = hip.constant {{.*}}dense<[0, 0, 4, 4, 0, 0, 4, 4]> : tensor<8xi64>{{.*}} : tensor<8xi64>
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, %[[PADS]] : tensor<1x3x224x224xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x232x232xf32>) {mode = "reflect"}
+  func.func @pad_attribute(%data: tensor<1x3x224x224xf32>) -> tensor<1x3x232x232xf32> {
+    %r = "onnx.Pad"(%data) {mode = "reflect", pads = [0, 0, 4, 4, 0, 0, 4, 4], value = 0.000000e+00 : f32}
+        : (tensor<1x3x224x224xf32>) -> tensor<1x3x232x232xf32>
+    return %r : tensor<1x3x232x232xf32>
+  }
+
   // Reflect mode is non-default, so it stays in the attr-dict.
   func.func @pad_reflect(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
