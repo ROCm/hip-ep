@@ -116,6 +116,10 @@ re-measured with the rule in place.
 - **NT M = 2..15** takes the multi-row GEMV (B streamed once for all M
   rows) instead of WMMA with 1-15 live rows of a 16-row fragment:
   fp16 4x4096^2 0.142 -> 0.048 ms, 8x14336x4096 4.06 -> 1.14.
+- **NN** (B = [K, N]) has no LUT points: M < 16 takes the B = [K, N] GEMV,
+  M >= 128 with K%64 == 0 the 128x64 WT4x2 BK=64 tile instead of
+  `pickWmmaHeuristic`: fp16 1x4096^2 0.203 -> 0.051 ms, 2048x4096^2
+  3.65 -> 2.05.
 
 | env | default | effect |
 |---|---|---|
@@ -126,7 +130,7 @@ re-measured with the rule in place.
 | `HIPDNN_EP_GEMM_PADROW` | 0 | 1 = per-call row-padded copy of B on K%1024 shapes |
 | `HIPDNN_EP_GEMM_WMMA_TA_CFG` | -1 | pin a `kWmmaTa` index (transA WMMA) |
 | `HIPDNN_EP_GEMM_GEMV_KN_CFG` | -1 | pin the B = [K, N] GEMV column tile: 0 = 128, 1 = 64, 2 = 32 |
-| `HIPDNN_EP_GEMM_GEMV_MR` | 1 | 0 sends NT M = 2..15 back to WMMA |
+| `HIPDNN_EP_GEMM_GEMV_MR` | 1 | 0 sends NT M = 2..15 back to WMMA and NN M < 16 back to the one-row NN GEMV |
 
 ## Measurement protocol (plan.md §4 / `hip-kernel-perf-measurement` skill)
 

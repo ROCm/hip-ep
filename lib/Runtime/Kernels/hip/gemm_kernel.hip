@@ -1152,10 +1152,15 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
                                K, transA);
       return hipGetLastError() == hipSuccess ? 0 : 1;
     }
-    if (!transB && mr_big && transA) {
+    if (!transB && mr_big && (transA || mr_on)) {
       /* B = [K, N]: 8 columns per thread, 16-byte B loads, split-K in the
-       * block (transA any M). */
-      launchGemvKn<T, true>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+       * block (transA any M; NN M < 16 unless HIPDNN_EP_GEMM_GEMV_MR=0). */
+      if (transA)
+        launchGemvKn<T, true>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                              cDim1);
+      else
+        launchGemvKn<T, false>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                               cDim1);
       return hipGetLastError() == hipSuccess ? 0 : 1;
     }
   }
@@ -2429,6 +2434,18 @@ static int tuneWmma(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
      * `online` mode, whose purpose is to generate the offline LUT under
      * controlled conditions -- see HIPDNN_GEMM_AUTOTUNE_MODE. */
     best = pickWmmaHeuristic(M, N, K);
+    /* NN (B = [K, N]) has no LUT points and the TN-tuned heuristic picks the
+     * wide 128x128 / 128x256 BK32 tiles, which re-read the strided B rows per
+     * K-step. The 4-wave 128x64 BK64 tile (cfg 128x64 wt=4x2 bk=64) reads a
+     * 64-row x 128 B B-panel per K-tile instead; forced A/B on gfx1151, normal
+     * mode, slower of 2 rounds: 2048x4096x4096 fp16 3.67 -> 2.03 ms, bf16
+     * 3.67 -> 2.07; 128x4096x4096 fp16 0.212 -> 0.165, bf16 0.215 -> 0.149.
+     * Drop once the LUT carries NN points. */
+    if (!TransB && M >= 128 && (K % 64) == 0) {
+      const int nn = findWmmaCfg(128, 64, 4, 2, 8, 1, 64);
+      if (wmmaApplies(kWmma[nn], M, N, K))
+        best = nn;
+    }
     CUSTOM_KERNELS_DEBUG_LOG(
         "[gemm] wmma heuristic M=%d N=%d K=%d tb=%d -> cfg[%d] %dx%d wt=%dx%d "
         "sw=%d sk=%d bk=%d\n",
