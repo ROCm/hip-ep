@@ -264,19 +264,27 @@ __global__ void bucket_tokens_kernel(
     int32_t* __restrict__ expert_offsets,
     int32_t* __restrict__ sorted_token_ids,
     __half* __restrict__ sorted_weights,
+    int32_t* __restrict__ pair_to_sorted,
+    int32_t* __restrict__ row_groups,
+    int32_t* __restrict__ row_group_count,
+    uint32_t* __restrict__ fc1_queue_head,
+    uint32_t* __restrict__ fc2_queue_head,
     int num_tokens,
     int k,
-    int num_experts) {
+    int num_experts,
+    int row_group_size) {
   int eid = static_cast<int>(threadIdx.x);
-  if (eid >= num_experts) return;
+  const bool active = eid < num_experts;
 
   // Pass 1: count occurrences of this eid across all (token, slot) pairs.
   int local_count = 0;
   int total_pairs = num_tokens * k;
-  for (int i = 0; i < total_pairs; i++) {
-    if (expert_indices[i] == eid) local_count++;
+  if (active) {
+    for (int i = 0; i < total_pairs; i++) {
+      if (expert_indices[i] == eid) local_count++;
+    }
+    expert_counts[eid] = local_count;
   }
-  expert_counts[eid] = local_count;
 
   __syncthreads();
 
@@ -296,16 +304,45 @@ __global__ void bucket_tokens_kernel(
   // Pass 3: scatter (token_id, weight) pairs into the sorted layout.
   // Iterate (t, s) in the same order as the host loop being replaced so the
   // per-expert ordering is bit-identical (matters for scatter_add reductions).
-  int write_pos = expert_offsets[eid];
-  for (int t = 0; t < num_tokens; t++) {
-    for (int s = 0; s < k; s++) {
-      int idx = t * k + s;
-      if (expert_indices[idx] == eid) {
-        sorted_token_ids[write_pos] = t;
-        sorted_weights[write_pos] = expert_weights[idx];
-        write_pos++;
+  if (active) {
+    int write_pos = expert_offsets[eid];
+    for (int t = 0; t < num_tokens; t++) {
+      for (int s = 0; s < k; s++) {
+        int idx = t * k + s;
+        if (expert_indices[idx] == eid) {
+          sorted_token_ids[write_pos] = t;
+          sorted_weights[write_pos] = expert_weights[idx];
+          if (pair_to_sorted) pair_to_sorted[idx] = write_pos;
+          write_pos++;
+        }
       }
     }
+  }
+
+  __syncthreads();
+
+  // The ragged path additionally emits adaptive row groups and resets both
+  // persistent work queues. Descriptors are
+  // {expert,row_begin,row_count,reserved}; the ragged MatMul selects its
+  // stage-specific task kind so FC1 and FC2 are not coupled here.
+  if (eid == 0 && row_groups && row_group_count && fc1_queue_head &&
+      fc2_queue_head) {
+    int group = 0;
+    for (int expert = 0; expert < num_experts; ++expert) {
+      const int begin = expert_offsets[expert];
+      const int end = expert_offsets[expert + 1];
+      for (int row = begin; row < end; row += row_group_size) {
+        const int rows = min(row_group_size, end - row);
+        row_groups[group * 4 + 0] = expert;
+        row_groups[group * 4 + 1] = row;
+        row_groups[group * 4 + 2] = rows;
+        row_groups[group * 4 + 3] = 0;
+        ++group;
+      }
+    }
+    *row_group_count = group;
+    *fc1_queue_head = 0;
+    *fc2_queue_head = 0;
   }
 }
 
@@ -538,13 +575,74 @@ extern "C" int hip_qmoe_bucket_tokens(
                      static_cast<int32_t*>(expert_counts),
                      static_cast<int32_t*>(expert_offsets),
                      static_cast<int32_t*>(sorted_token_ids),
-                     static_cast<__half*>(sorted_weights),
+                     static_cast<__half*>(sorted_weights), nullptr, nullptr,
+                     nullptr, nullptr, nullptr,
                      static_cast<int>(num_tokens), static_cast<int>(k),
-                     static_cast<int>(num_experts));
+                     static_cast<int>(num_experts), 0);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_qmoe_bucket_tokens failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_qmoe_bucket_tokens_ragged(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* pair_to_sorted,
+    void* row_groups,
+    void* row_group_count,
+    void* fc1_queue_head,
+    void* fc2_queue_head,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t row_group_size,
+    int64_t element_size_bytes) {
+  if (!stream || !expert_indices || !expert_weights || !expert_counts ||
+      !expert_offsets || !sorted_token_ids || !sorted_weights ||
+      !pair_to_sorted || !row_groups || !row_group_count || !fc1_queue_head ||
+      !fc2_queue_head) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_bucket_tokens_ragged: null required "
+            "argument\n");
+    return -1;
+  }
+  if (num_tokens <= 0 || num_experts <= 0 || num_experts > 1024 || k <= 0 ||
+      k > kMaxK || row_group_size != 64 || element_size_bytes != 2) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_bucket_tokens_ragged: invalid shape, "
+            "dtype, or row_group_size\n");
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
+  hipLaunchKernelGGL(
+      bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
+      static_cast<const int32_t*>(expert_indices),
+      static_cast<const __half*>(expert_weights),
+      static_cast<int32_t*>(expert_counts),
+      static_cast<int32_t*>(expert_offsets),
+      static_cast<int32_t*>(sorted_token_ids),
+      static_cast<__half*>(sorted_weights),
+      static_cast<int32_t*>(pair_to_sorted),
+      static_cast<int32_t*>(row_groups),
+      static_cast<int32_t*>(row_group_count),
+      static_cast<uint32_t*>(fc1_queue_head),
+      static_cast<uint32_t*>(fc2_queue_head), static_cast<int>(num_tokens),
+      static_cast<int>(k), static_cast<int>(num_experts),
+      static_cast<int>(row_group_size));
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_bucket_tokens_ragged failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }
