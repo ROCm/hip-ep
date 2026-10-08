@@ -4995,9 +4995,15 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
         - 0 = round_prefer_floor (only used when mode=nearest)
 
     Per-axis scale is recovered at runtime from the window's input and output
-    extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
-    appear as operands here — they were resolved at compile time into the
-    output type that the upstream importer produced.
+    extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear
+    as operands.  A dynamic window extent is filled in at conversion from a
+    compile-time constant `scales` vector (scale 1 copies the input dim;
+    any other scale is floor(input_dim * scale)).  When `scales` is absent, a
+    rank-1 integer `sizes` vector supplies the extents: a constant vector is
+    written into the result type, and a runtime vector is read back to host
+    indexes that size the output.  That launch may be saved as `prefix_count`
+    and `spatial_rank` when a static input extent is paired with a dynamic
+    output extent.
 
     Uses destination-passing style: the output buffer is provided.
 
