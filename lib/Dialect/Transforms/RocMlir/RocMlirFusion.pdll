@@ -1,0 +1,31 @@
+//===- RocMlirFusion.pdll -------------------------------------------------===//
+//
+// PDLL match surface for RocMlir anchor+pointwise fusion.
+//
+// A single pattern matches a fusable anchor (matmul/conv/gemm) and hands it to
+// one native rewrite that walks the trailing chain of pointwise consumers,
+// outlines the whole subgraph into a rock-kernel func.func, and replaces it
+// with a `hip.rocmlir` dispatch. The variable-length chain walk and func
+// outlining cannot be expressed declaratively, so the rewrite body is a
+// one-line trampoline into RocMlirFusion.cpp.
+//
+// `mlir-pdll -x cpp` compiles this file into RocMlirFusion.pdll.h.inc and
+// registers the trampolines by name automatically.
+//===----------------------------------------------------------------------===//
+
+// Native helpers (defined in RocMlirFusion.cpp, declared in RocMlirFusion.h).
+Constraint IsFusableRocMlirAnchor(op: Op) [{
+  return ::mlir::success(::mlir::hip::rocmlir::isFusableRocMlirAnchor(op));
+}];
+
+Rewrite OutlineRocMlirSubgraph(op: Op) [{
+  ::mlir::hip::rocmlir::outlineRocMlirSubgraph(rewriter, op);
+}];
+
+Pattern FuseRocMlirAnchor with benefit(1) {
+  let root = op<>;
+  IsFusableRocMlirAnchor(root);
+  rewrite root with {
+    OutlineRocMlirSubgraph(root);
+  };
+}

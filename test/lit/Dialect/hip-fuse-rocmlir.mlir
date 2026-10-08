@@ -238,3 +238,62 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
   return %r : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// Outlining is not conv-specific: a matmul (or gemm) anchor with no pointwise
+// consumer is extracted into its own hip.rocmlir kernel the same way.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[A:.*]]: tensor<4x8xf16>, %[[B:.*]]: tensor<8x16xf16>)
+// CHECK: %[[CTX:.*]] = ub.poison : !hip.context
+// CHECK: %[[E:.*]] = tensor.empty() : tensor<4x16xf16>
+// CHECK: %[[M:.*]] = hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] :
+// CHECK-SAME: outs(%[[E]] : tensor<4x16xf16>)
+// CHECK: return %[[M]]
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                      %b: tensor<8x16xf16>) -> tensor<4x16xf16> {
+  %e = tensor.empty() : tensor<4x16xf16>
+  // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<4x16xf16>
+  // CHECK: hip.rocmlir(%{{.*}}) @rocMlir{{[0-9]+}} ins({{.*}} : tensor<4x8xf16>, tensor<8x16xf16>) outs(%[[EMPTY]] : tensor<4x16xf16>)
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x8xf16>, tensor<8x16xf16>)
+      outs(%e : tensor<4x16xf16>) : tensor<4x16xf16>
+  return %m : tensor<4x16xf16>
+}
+
+// -----
+
+// A fusable anchor is a chain terminus whenever its consumer is not a pointwise
+// op to fold into -- including when that consumer is another anchor. Neither
+// conv feeds a pointwise, so each is outlined into its own hip.rocmlir and the
+// first dispatch feeds the second. Covers the OutlineRocMlirAnchorOp path (the
+// distinct, process-wide kernel ids rule out a single @rocMlir0 collision).
+
+// CHECK-DAG: func.func @{{rocMlir[0-9]+}}({{.*}}) -> tensor<1x16x4x4xf16> attributes {rock.arch = "gfx1151", rock.kernel}
+// CHECK-DAG: func.func @{{rocMlir[0-9]+}}({{.*}}) -> tensor<1x16x4x4xf16> attributes {rock.arch = "gfx1151", rock.kernel}
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-SAME: %[[IN:[a-z0-9_]+]]: tensor<1x8x4x4xf16>, %[[W0:[a-z0-9_]+]]: tensor<16x8x3x3xf16>, %[[B0:[a-z0-9_]+]]: tensor<16xf16>, %[[W1:[a-z0-9_]+]]: tensor<16x16x3x3xf16>, %[[B1:[a-z0-9_]+]]: tensor<16xf16>)
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w0: tensor<16x8x3x3xf16>, %b0: tensor<16xf16>,
+                      %w1: tensor<16x16x3x3xf16>, %b1: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %e0 = tensor.empty() : tensor<1x16x4x4xf16>
+  // The first conv's dispatch result is the second conv's data input.
+  // CHECK: %[[D0:.*]] = hip.rocmlir(%{{.*}}) @[[K0:rocMlir[0-9]+]] ins(%[[IN]], %[[W0]], %[[B0]] : tensor<1x8x4x4xf16>, tensor<16x8x3x3xf16>, tensor<16xf16>)
+  %c0 = hip.conv(%ctx) ins(%in, %w0, %b0 : tensor<1x8x4x4xf16>,
+                                           tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e0 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %e1 = tensor.empty() : tensor<1x16x4x4xf16>
+  // CHECK: hip.rocmlir(%{{.*}}) @[[K1:rocMlir[0-9]+]] ins(%[[D0]], %[[W1]], %[[B1]] : tensor<1x16x4x4xf16>, tensor<16x16x3x3xf16>, tensor<16xf16>)
+  %c1 = hip.conv(%ctx) ins(%c0, %w1, %b1 : tensor<1x16x4x4xf16>,
+                                           tensor<16x16x3x3xf16>, tensor<16xf16>)
+      outs(%e1 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c1 : tensor<1x16x4x4xf16>
+}
