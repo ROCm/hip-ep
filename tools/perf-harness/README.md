@@ -283,8 +283,10 @@ SQTT dispatches per call come out a near-integer: a fractional count means the
 family map is wrong, the capture window is off, or the build differs. `gemm` is
 not in the default map because it is shared; on gemma4 decode it is `gqa`'s
 decomposed attention (proved by `-PerfOps gqa` matching SQTT only with it), and
-`--map gqa+=gemm` says so. Unmapped families are listed so none is silently
-dropped.
+`--map gqa+=gemm` says so. On gpt-oss `gqa` has its own flash-decode kernels and
+`gemm` is the fp16 `lm_head` and router `MatMul`s, so it is `--map matmul=gemm`
+(1.92 dispatches per call: the routers' hipBLASLt GEMM plus its bias kernel).
+Unmapped families are listed so none is silently dropped.
 
 A failed check prints the op's per-family counts. Some are genuine: on gemma4
 12b, hipBLASLt picks a split-K GEMM for some layers' attention and adds a
@@ -325,6 +327,13 @@ much. Measured on gemma4 at 2K, same build, env and prompt for all three runs:
 |---|---|---|---|
 | 26B-A4B | 20.53 ms | 21.02 ms (+2.4%) | validated |
 | 12b | 44.28 ms | 52.84 ms (+19.3%) | shares only: `matmul_nbits` reads 41.8 ms by events *and* by SQTT, so both are inflated there and nothing here can say by how much |
+| gpt-oss-120b-proxy-L12 (`chunk_size` 512) | 10.86 ms | 10.56 ms (−2.8%) | validated; 16K 11.81 vs 11.45 ms. Two captures per context agree within 0.05 ms per component |
+
+The floor defaults to the 256 GB/s datasheet peak, which no kernel reaches. A
+grid-stride 16-byte read kernel on gfx1151 (Radeon 8060S) streams 235 GB/s
+mean, 240 best, flat from 256 MB to 2 GB; pass `--bw-gbs 235` to rank against
+what is reachable. At 256 GB/s gpt-oss's fp16 `lm_head` looks 0.55 ms short of
+its floor; at 235 it is at 97%, and only fewer bytes (quantising it) can move it.
 
 Two decode-floor terms were wrong before this and moved the 26B ranking:
 

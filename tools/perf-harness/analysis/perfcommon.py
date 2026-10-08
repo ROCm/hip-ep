@@ -90,6 +90,9 @@ class ModelSpec:
     full_head_dim: int = 0  # 0 -> same as head_dim
     # Some MoE models also carry a dense MLP per layer alongside the experts.
     dense_inter: int = 0  # 0 -> no dense MLP
+    # Asymmetric int4 exports carry a 4-bit zero point per block (two per byte)
+    # beside each fp16 scale: +n/(2*group_size) bytes, ~3% at group 32.
+    zero_points: bool = False
 
     @property
     def full_kv(self) -> int:
@@ -103,8 +106,9 @@ class ModelSpec:
         return n * 2
 
     def int4w(self, n: float) -> float:
-        """Packed int4 weights plus their fp16 scales."""
-        return n * 0.5 + n / self.group_size * 2
+        """Packed int4 weights plus their fp16 scales (and zero points)."""
+        zp = n / self.group_size / 2 if self.zero_points else 0.0
+        return n * 0.5 + n / self.group_size * 2 + zp
 
     @property
     def expert_weight_bytes(self) -> float:
@@ -651,6 +655,24 @@ PRESETS: dict[str, dict] = {
         # quantization_config in model_config.json sets "lm_head": false, and
         # the trace confirms it: the lm_head lands on `matmul`, not
         # `matmul_nbits`. The router does too.
+        lm_head_fp16=True,
+        router_fp16=True,
+    ),
+    # 12-layer proxy of openai/gpt-oss-120b, checked against model.onnx: the
+    # gpt-oss-20b shapes (hidden 2880, expert inter 2880, qkv 5120, o_proj
+    # k=4096, 64 q / 8 kv heads of 64) with 128 experts top-4, GQA windows
+    # alternating 128 / full (6 of each), and every int4 tensor asymmetric
+    # (qzeros / zero_points). The router ([2880,128]) and the lm_head
+    # ([2880,201088], 1.16 GB) are plain fp16 MatMuls, so the lm_head alone is
+    # over half the decode floor.
+    "gpt-oss-120b-proxy-l12": dict(
+        layers=12,
+        experts=128,
+        router_n=128,
+        topk=4,
+        full_attn_layers=6,
+        sliding_window=128,
+        zero_points=True,
         lm_head_fp16=True,
         router_fp16=True,
     ),
