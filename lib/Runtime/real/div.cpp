@@ -15,6 +15,8 @@
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
+#include <hip/hip_runtime.h>
+
 #include <cstdio>
 
 static int div_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
@@ -66,6 +68,12 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  void *host_output = output;
+  if (hipdnn_ep_copy_scratch_to_device(state, stream) != 0)
+    return -1;
+  lhs = hipdnn_ep_as_device_ptr(state, lhs);
+  rhs = hipdnn_ep_as_device_ptr(state, rhs);
+  output = hipdnn_ep_as_device_ptr(state, output);
 
   const bool lhs_eq_out =
       (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
@@ -123,6 +131,33 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
         hipdnn_ep_datatype_name(data_type));
   }
 
-  return hip_elementwise_div(stream, lhs_use, rhs_use, output, out_vol,
-                             hip_dtype);
+  const int64_t elem = hipdnn_ep_datatype_size(data_type);
+  size_t bytes = elem > 0 ? static_cast<size_t>(out_vol) * static_cast<size_t>(elem)
+                          : 0;
+  void *lhs_staged = nullptr;
+  void *rhs_staged = nullptr;
+  void *out_staged = nullptr;
+  void *lhs_k =
+      hipdnn_ep_ensure_device_ptr(stream, lhs_use, bytes, 1, &lhs_staged);
+  void *rhs_k =
+      hipdnn_ep_ensure_device_ptr(stream, rhs_use, bytes, 1, &rhs_staged);
+  void *out_k =
+      hipdnn_ep_ensure_device_ptr(stream, output, bytes, 0, &out_staged);
+  int rc = hip_elementwise_div(stream, lhs_k, rhs_k, out_k, out_vol, hip_dtype);
+  if (rc == 0 && out_staged) {
+    (void)hipMemcpyAsync(host_output, out_staged, bytes, hipMemcpyDeviceToHost,
+                         static_cast<hipStream_t>(stream));
+  } else if (rc == 0 && output != host_output && bytes > 0) {
+    hipdnn_ep_copy_scratch_from_device(state, stream, host_output, bytes);
+  }
+  if (lhs_staged || rhs_staged || out_staged) {
+    (void)hipStreamSynchronize(static_cast<hipStream_t>(stream));
+    if (lhs_staged)
+      (void)hipFree(lhs_staged);
+    if (rhs_staged)
+      (void)hipFree(rhs_staged);
+    if (out_staged)
+      (void)hipFree(out_staged);
+  }
+  return rc;
 }

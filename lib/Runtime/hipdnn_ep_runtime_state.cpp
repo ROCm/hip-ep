@@ -196,6 +196,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace = nullptr;
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
+  state->host_scratch_dev = nullptr;
   state->host_scratch_size = 0;
   // Start with no output allocator (null context + callback). The EP installs
   // one via hipdnn_ep_set_output_allocator before the first inference_compute,
@@ -242,6 +243,12 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->num_op_states = 0;
 
   int device_count = 0;
+  // Mapped host allocations are device-visible only when this flag is set
+  // before the context is created.
+  if (hipSetDeviceFlags(hipDeviceMapHost) != hipSuccess) {
+    fprintf(stderr, "hipSetDeviceFlags(hipDeviceMapHost) failed: %s\n",
+            hipGetErrorString(hipGetLastError()));
+  }
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
     fprintf(stderr, "Failed to get HIP device count or no devices available\n");
     free(state);
@@ -826,9 +833,14 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
 
-  // Free host-mapped scratch buffer (if allocated)
+  // Device mirror is a separate hipMalloc. Free it before the host buffer.
+  if (state->host_scratch_dev) {
+    HIP_CLEANUP(hipFree(state->host_scratch_dev));
+    state->host_scratch_dev = nullptr;
+  }
   if (state->host_scratch_base) {
     HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+    state->host_scratch_base = nullptr;
   }
 
   // Free memory pools (if allocated) — one hipFree per non-null domain — then
@@ -1196,12 +1208,12 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
   // scratch buffer that backs hip.get_host_scratch. One allocation per
   // function for all tiny host-fed scalars routed away from the GPU pool by
   // hip-materialize-host-scalars; grown only when shape changes increase the
-  // total demand; never shrinks. hipHostMalloc(hipHostMallocMapped) memory is
-  // host-writable AND GPU-readable via the device pointer mapping, so the
-  // same pointer can be stored into from host code and then read by
-  // subsequent GPU kernels.
+  // total demand; never shrinks. The returned host pointer is what generated
+  // memref.store / memref.load use. A separate hipMalloc mirror is what
+  // kernels receive: hipHostGetDevicePointer returns the host address here,
+  // and loading that address from a kernel page-faults.
   if (needed_size > state->host_scratch_size) {
-    if (state->host_scratch_base) {
+    if (state->host_scratch_base || state->host_scratch_dev) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
       fprintf(stderr,
@@ -1209,7 +1221,14 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
               "%zu -> %zu bytes (rare; first time this large)\n",
               state->host_scratch_size, needed_size);
       fflush(stderr);
-      HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+      if (state->host_scratch_dev) {
+        HIP_CLEANUP(hipFree(state->host_scratch_dev));
+        state->host_scratch_dev = nullptr;
+      }
+      if (state->host_scratch_base) {
+        HIP_CLEANUP(hipHostFree(state->host_scratch_base));
+        state->host_scratch_base = nullptr;
+      }
     }
     void *new_base = nullptr;
     if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
@@ -1219,13 +1238,141 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
               "(%zu -> %zu bytes)\n",
               state->host_scratch_size, needed_size);
       state->host_scratch_base = nullptr;
+      state->host_scratch_dev = nullptr;
+      state->host_scratch_size = 0;
+      return nullptr;
+    }
+    void *dev_base = nullptr;
+    if (hipMalloc(&dev_base, needed_size) != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_scratch_base: hipMalloc device mirror "
+              "failed (%zu bytes): %s\n",
+              needed_size, hipGetErrorString(hipGetLastError()));
+      HIP_CLEANUP(hipHostFree(new_base));
+      state->host_scratch_base = nullptr;
+      state->host_scratch_dev = nullptr;
       state->host_scratch_size = 0;
       return nullptr;
     }
     state->host_scratch_base = new_base;
+    state->host_scratch_dev = dev_base;
     state->host_scratch_size = needed_size;
+    if (hipdnn_ep_debug_enabled()) {
+      fprintf(stderr, "[REAL] host scratch host=%p dev=%p size=%zu\n", new_base,
+              dev_base, needed_size);
+    }
   }
   return state->host_scratch_base;
+}
+
+static bool host_scratch_offset(RuntimeState *state, const void *ptr,
+                                size_t *offset) {
+  if (!state || !ptr || !state->host_scratch_base ||
+      state->host_scratch_size == 0)
+    return false;
+  const auto *p = static_cast<const unsigned char *>(ptr);
+  const auto *base =
+      static_cast<const unsigned char *>(state->host_scratch_base);
+  const auto *end = base + state->host_scratch_size;
+  if (p < base || p >= end)
+    return false;
+  *offset = static_cast<size_t>(p - base);
+  return true;
+}
+
+int hipdnn_ep_copy_scratch_to_device(RuntimeState *state, void *stream) {
+  if (!state || !state->host_scratch_base || !state->host_scratch_dev ||
+      state->host_scratch_size == 0)
+    return 0;
+  hipError_t err = hipMemcpyAsync(
+      state->host_scratch_dev, state->host_scratch_base,
+      state->host_scratch_size, hipMemcpyHostToDevice,
+      static_cast<hipStream_t>(stream));
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_copy_scratch_to_device failed: %s\n",
+            hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
+}
+
+int hipdnn_ep_copy_scratch_from_device(RuntimeState *state, void *stream,
+                                       void *host_ptr, size_t bytes) {
+  size_t offset = 0;
+  if (!host_scratch_offset(state, host_ptr, &offset) ||
+      !state->host_scratch_dev || bytes == 0)
+    return 0;
+  if (offset >= state->host_scratch_size)
+    return -1;
+  size_t avail = state->host_scratch_size - offset;
+  if (bytes > avail)
+    bytes = avail;
+  hipError_t err = hipMemcpyAsync(
+      host_ptr, static_cast<unsigned char *>(state->host_scratch_dev) + offset,
+      bytes, hipMemcpyDeviceToHost, static_cast<hipStream_t>(stream));
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_copy_scratch_from_device failed: %s\n",
+            hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
+}
+
+void *hipdnn_ep_ensure_device_ptr(void *stream, void *ptr, size_t bytes,
+                                  int copy_to_device, void **staged) {
+  if (staged)
+    *staged = nullptr;
+  if (!ptr || bytes == 0)
+    return ptr;
+  hipPointerAttribute_t attr{};
+  hipError_t err = hipPointerGetAttributes(&attr, ptr);
+  (void)hipGetLastError();
+  if (err == hipSuccess &&
+      (attr.type == hipMemoryTypeDevice || attr.type == hipMemoryTypeManaged ||
+       attr.type == hipMemoryTypeUnified))
+    return ptr;
+  void *dev = nullptr;
+  if (hipMalloc(&dev, bytes) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_ensure_device_ptr: hipMalloc(%zu) failed: %s\n", bytes,
+            hipGetErrorString(hipGetLastError()));
+    return ptr;
+  }
+  if (copy_to_device) {
+    hipError_t cpy =
+        hipMemcpyAsync(dev, ptr, bytes, hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(stream));
+    if (cpy != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_ensure_device_ptr: H2D failed: %s\n",
+              hipGetErrorString(cpy));
+      (void)hipFree(dev);
+      return ptr;
+    }
+  }
+  if (staged)
+    *staged = dev;
+  if (hipdnn_ep_debug_enabled()) {
+    fprintf(stderr, "[REAL] staged host ptr %p -> %p (%zu bytes)\n", ptr, dev,
+            bytes);
+  }
+  return dev;
+}
+
+void *hipdnn_ep_as_device_ptr(RuntimeState *state, const void *ptr) {
+  if (!state || !ptr || !state->host_scratch_base || !state->host_scratch_dev ||
+      state->host_scratch_size == 0)
+    return const_cast<void *>(ptr);
+  const auto *p = static_cast<const unsigned char *>(ptr);
+  const auto *base =
+      static_cast<const unsigned char *>(state->host_scratch_base);
+  const auto *end = base + state->host_scratch_size;
+  if (p < base || p >= end)
+    return const_cast<void *>(ptr);
+  void *dev = static_cast<unsigned char *>(state->host_scratch_dev) + (p - base);
+  if (hipdnn_ep_debug_enabled()) {
+    fprintf(stderr, "[REAL] scratch ptr %p -> %p\n", ptr, dev);
+  }
+  return dev;
 }
 
 //===----------------------------------------------------------------------===//
