@@ -46,8 +46,10 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value bias = hasBias ? op->getOperand(2) : nullptr;
 
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!resultType || !inputType)
+    return rewriter.notifyMatchFailure(op, "Conv requires ranked tensors");
 
   // Rank 3 (1D), 4 (2D) and 5 (3D). A higher-benefit pattern (patch-embed
   // GEMM) still wins when it matches. Anything else, including rank 6+, stays

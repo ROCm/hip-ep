@@ -231,6 +231,45 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
+namespace {
+
+static bool hasUnrankedTensor(mlir::TypeRange types) {
+  return llvm::any_of(types, llvm::IsaPred<mlir::UnrankedTensorType>);
+}
+
+/// Declines ops whose rank is unknown on both sides.
+///
+/// Converters read ranks through `mlir::cast<RankedTensorType>`, which is
+/// unchecked in release builds and dereferences garbage on `tensor<*xT>`.
+/// Ranks the importer could not derive (see
+/// docs/design/unranked-tensor-handling.md) are only recoverable from the other
+/// side of the op: a ranked input for an unranked result (reductions) or a
+/// ranked result for unranked operands (Where). With neither, the op is left
+/// unconverted and reported, instead of being handed to a converter that would
+/// crash.
+struct UnrankedOpGuard : public mlir::RewritePattern {
+  explicit UnrankedOpGuard(std::unique_ptr<mlir::RewritePattern> inner)
+      : RewritePattern(inner->getRootKind()->getStringRef(),
+                       inner->getBenefit(), inner->getContext()),
+        inner(std::move(inner)) {
+    setDebugName(this->inner->getDebugName());
+    setHasBoundedRewriteRecursion(this->inner->hasBoundedRewriteRecursion());
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (hasUnrankedTensor(op->getOperandTypes()) &&
+        hasUnrankedTensor(op->getResultTypes()))
+      return rewriter.notifyMatchFailure(op, "operand and result are unranked");
+    return inner->matchAndRewrite(op, rewriter);
+  }
+
+  std::unique_ptr<mlir::RewritePattern> inner;
+};
+
+} // namespace
+
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
@@ -331,6 +370,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateFlattenConversionPatterns(patterns, ctx);
   populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
+
+  for (std::unique_ptr<mlir::RewritePattern> &pattern :
+       patterns.getNativePatterns())
+    pattern = std::make_unique<UnrankedOpGuard>(std::move(pattern));
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
