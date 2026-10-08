@@ -1326,6 +1326,14 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
 
+// PRelu: Y = X >= 0 ? X : slope * X. slope broadcasts onto X. Shape pointers
+// are host arrays of length rank (unused when rank is 0). data_type is
+// HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_prelu(RuntimeState *state, void *x, void *slope, void *output,
+               const int64_t *x_shape, int64_t x_rank,
+               const int64_t *slope_shape, int64_t slope_rank,
+               const int64_t *out_shape, int64_t out_rank, int64_t data_type);
+
 // Local response normalization across channels (axis 1). spatial is the
 // product of dimensions after the channel axis. data_type is
 // HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
