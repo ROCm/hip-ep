@@ -40,6 +40,9 @@ struct ExpandToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (mlir::failed(requireRankedOperands(op, rewriter)))
+      return mlir::failure();
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -50,7 +53,10 @@ struct ExpandToHip : public mlir::RewritePattern {
     mlir::Value shape = op->getOperand(1);
 
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(
+          op, "Expand expects a ranked tensor result");
     auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
     int64_t resultRank = resultType.getRank();

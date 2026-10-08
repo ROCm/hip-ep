@@ -8,12 +8,13 @@
 // tensor.expand_shape before collapse.
 //
 // Unranked tensors cannot become hip.add (verifier requires ranked operands),
-// so that case is a separate split-file that expects conversion to fail after
-// packing has already bailed.
+// so that case is a separate split-file. AddToHip refuses an unranked operand
+// up front, which leaves the onnx.Add live and reported as unconverted rather
+// than building an op the verifier then rejects.
 
 // RUN: split-file %s %t
 // RUN: hip-mlir-opt %t/static.mlir --hip-add-context-arg --convert-onnx-to-hip | FileCheck %t/static.mlir
-// RUN: not hip-mlir-opt %t/unranked.mlir --hip-add-context-arg --convert-onnx-to-hip 2>&1 | FileCheck %t/unranked.mlir
+// RUN: hip-mlir-opt %t/unranked.mlir --hip-add-context-arg --convert-onnx-to-hip | FileCheck %t/unranked.mlir
 
 //--- static.mlir
 module {
@@ -114,13 +115,16 @@ module {
   }
 
   // Packing requires a ranked static shape, so this is not collapsed. Compute
-  // conversion then emits hip.add, which rejects unranked operands.
+  // conversion then declines it too, because hip.add cannot take an unranked
+  // operand, so the onnx.Add survives the pass. The pass also names it on
+  // stderr as an unconverted op type, which is not checked here: lit's
+  // internal shell captures stderr separately from the FileCheck pipe.
   func.func @keep_unranked_lhs_add(
       %lhs: tensor<*xf32>,
       %rhs: tensor<2x3x4x5x6xf32>)
       -> tensor<2x3x4x5x6xf32> {
     // CHECK-NOT: tensor.collapse_shape
-    // CHECK: 'hip.add' op operand #{{.*}} must be ranked tensor or memref
+    // CHECK: "onnx.Add"
     %result = "onnx.Add"(%lhs, %rhs) :
         (tensor<*xf32>, tensor<2x3x4x5x6xf32>)
         -> tensor<2x3x4x5x6xf32>

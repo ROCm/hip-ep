@@ -187,6 +187,34 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
   return ctx;
 }
 
+/// Refuse a conversion when any tensor operand is unranked.
+///
+/// An export whose shape inference gave up reaches conversion carrying
+/// `tensor<*xT>`. The known producer is `onnx.Slice` with non-ascending `axes`
+/// (ORT's inference declines it, so every downstream tensor loses its shape),
+/// but any op ONNX cannot infer through does the same. Reading a rank or a
+/// shape off such a value has two bad outcomes: a `mlir::cast<
+/// RankedTensorType>` is unchecked under NDEBUG and reinterprets memory rather
+/// than asserting, and building a `hip.*` op from the value trips the
+/// verifier ("operand #N must be ranked tensor") far from the converter that
+/// did it. Refusing leaves the `onnx.*` op live, which `convertComputeOps`
+/// already reports as an unconverted op type.
+///
+/// Operands that are not tensors are ignored -- notably `!hip.context` and the
+/// `none` that `onnx.NoValue` supplies for an omitted optional input.
+///
+/// Results are deliberately NOT checked here: a few converters legitimately
+/// accept an unranked result and infer it (see `inferReduceResultType`). A
+/// converter that instead requires a ranked result should `dyn_cast` its own
+/// result type and refuse on null, as TanhToHip does.
+inline mlir::LogicalResult
+requireRankedOperands(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
+  for (mlir::Value operand : op->getOperands())
+    if (mlir::isa<mlir::UnrankedTensorType>(operand.getType()))
+      return rewriter.notifyMatchFailure(op, "unranked operand");
+  return mlir::success();
+}
+
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress

@@ -20,6 +20,12 @@ struct GatherToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    // An unranked `data` is not merely unusable here, it hangs the pass: the
+    // dim-copy loops below run to `dataType.getRank()`, and the unchecked cast
+    // of an unranked type yields a garbage count that the loop never reaches.
+    if (mlir::failed(requireRankedOperands(op, rewriter)))
+      return mlir::failure();
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return rewriter.notifyMatchFailure(op, "missing context argument");
@@ -35,7 +41,10 @@ struct GatherToHip : public mlir::RewritePattern {
 
     // Get result type
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(
+          op, "Gather expects a ranked tensor result");
     auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
     auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
 
