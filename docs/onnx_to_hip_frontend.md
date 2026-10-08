@@ -182,7 +182,7 @@ runtime coverage.
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
 | `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
-| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
+| `Upsample` | `hip.resize` | Schema 9 `scales` input and opset 7–8 `scales` attribute; asymmetric coordinates, nearest uses floor |
 | `HardSigmoid` | `hip.mul` + `hip.add` + `hip.max` + `hip.min` | Clip(alpha*x + beta, 0, 1); decomposed pre-lowering; f16/f32 only |
 
 Unmapped ops default to `hip.<OpType>`.
