@@ -109,6 +109,10 @@ re-measured with the rule in place.
   0.89-1.00 / 1.87 / 3.74).
 - **Padrow** is opt-in only (`HIPDNN_EP_GEMM_PADROW=1`): the padded copy of B
   is made on every call (there is no weight cache and no hit-rate guard).
+- **transA=1 WMMA** (`kWmmaTa`, `pickWmmaTa`): A is read as [K, M] straight
+  into LDS, no transpose copy. 512x1024x1024 TN fp16 29.6 -> 0.043 ms
+  (hipBLASLt 0.052). transA with M < 16 takes the multi-row GEMV (B = [N, K])
+  or the B = [K, N] GEMV.
 
 | env | default | effect |
 |---|---|---|
@@ -117,6 +121,8 @@ re-measured with the rule in place.
 | `HIPDNN_EP_GEMM_STAGGER` | NT 1, NN 0 | StaggerU on/off (start-K offset per tile) |
 | `HIPDNN_EP_GEMM_STAGGER_U` / `_BYTES` / `_MAP` | 32 / 256 / 0 | number of offsets / step in bytes / 0 M-tile, 1 N-tile, 2 serial |
 | `HIPDNN_EP_GEMM_PADROW` | 0 | 1 = per-call row-padded copy of B on K%1024 shapes |
+| `HIPDNN_EP_GEMM_WMMA_TA_CFG` | -1 | pin a `kWmmaTa` index (transA WMMA) |
+| `HIPDNN_EP_GEMM_GEMV_KN_CFG` | -1 | pin the B = [K, N] GEMV column tile: 0 = 128, 1 = 64, 2 = 32 |
 
 ## Measurement protocol (plan.md §4 / `hip-kernel-perf-measurement` skill)
 

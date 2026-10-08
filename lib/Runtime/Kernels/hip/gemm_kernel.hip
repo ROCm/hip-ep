@@ -370,6 +370,222 @@ __global__ void gemm_gemv_ta_kernel(const T *__restrict__ A, const T *__restrict
   gemmStoreY(Y, C, m, n, N, cDim0, cDim1, acc, alpha, beta);
 }
 
+/* 8 packed 16-bit elements (one 16-byte load) -> float. bf16 is the top
+ * half of an fp32, so it widens with a shift instead of a conversion. */
+template <typename T>
+__device__ __forceinline__ void gemmUnpack8(const u32x4 &v, float (&f)[8]) {
+  if constexpr (std::is_same<T, _Float16>::value) {
+    const _Float16 *h = reinterpret_cast<const _Float16 *>(&v);
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      f[i] = (float)h[i];
+  } else {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      f[2 * i] = __uint_as_float(v[i] << 16);
+      f[2 * i + 1] = __uint_as_float(v[i] & 0xffff0000u);
+    }
+  }
+}
+
+/* Multi-row NT GEMV (fp16/bf16, 2 <= M < 16, B = [N, K]): one block owns TN
+ * output columns for ALL M rows, so B -- the large operand -- is streamed
+ * once (16-byte loads, 8 k per thread per chunk) instead of once per row as
+ * in gemm_gemv_nt_kernel. TA=false: A is [M, K], each row's 8-k run is one
+ * 16-byte load (L2-resident, A is tiny). TA=true: A is [K, M]; for a chunk of
+ * KC k-rows the slice A[kc .. kc+KC)[0 .. M) is one contiguous run, copied to
+ * LDS with 16-byte loads and read back per (k, m). Requires M <= MR. */
+template <typename T, bool TA, int MR, int TN>
+__global__ void __launch_bounds__(128)
+    gemm_gemv_mr_nt_kernel(const T *__restrict__ A, const T *__restrict__ B,
+                           const T *__restrict__ C, T *__restrict__ Y, int M,
+                           int N, int K, float alpha, float beta, int cDim0,
+                           int cDim1) {
+  constexpr int WARP = HIPDNN_WAVE_SIZE;
+  constexpr int BLOCK = 128;
+  constexpr int KC = BLOCK * 8;
+  constexpr int NW = BLOCK / WARP;
+  __shared__ __align__(16) T smA[TA ? KC * MR : 8];
+  __shared__ float red[NW][MR * TN];
+  const int tid = threadIdx.x;
+  const int n0 = blockIdx.x * TN;
+
+  const T *brow[TN];
+#pragma unroll
+  for (int tn = 0; tn < TN; ++tn)
+    brow[tn] = B + static_cast<size_t>(n0 + tn < N ? n0 + tn : 0) * K;
+  const bool kvec = (K % 8) == 0;
+
+  float acc[MR][TN];
+#pragma unroll
+  for (int m = 0; m < MR; ++m)
+#pragma unroll
+    for (int tn = 0; tn < TN; ++tn)
+      acc[m][tn] = 0.0f;
+
+  for (int kc = 0; kc < K; kc += KC) {
+    const int klen = (K - kc < KC) ? K - kc : KC;
+    if constexpr (TA) {
+      /* kc*M*2 bytes = 2048*M*(kc/KC): every chunk start is 16-byte
+       * aligned. */
+      const T *src = A + static_cast<size_t>(kc) * M;
+      const int cnt = klen * M;
+      const int cnt8 = cnt / 8;
+      for (int i = tid; i < cnt8; i += BLOCK)
+        reinterpret_cast<u32x4 *>(smA)[i] =
+            reinterpret_cast<const u32x4 *>(src)[i];
+      for (int i = cnt8 * 8 + tid; i < cnt; i += BLOCK)
+        smA[i] = src[i];
+      __syncthreads();
+    }
+
+    const int k = tid * 8;
+    if (k < klen) {
+      const bool full = kvec && k + 8 <= klen;
+      float bf[TN][8];
+      if (full) {
+#pragma unroll
+        for (int tn = 0; tn < TN; ++tn)
+          gemmUnpack8<T>(*reinterpret_cast<const u32x4 *>(brow[tn] + kc + k),
+                         bf[tn]);
+      } else {
+#pragma unroll
+        for (int tn = 0; tn < TN; ++tn)
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            bf[tn][i] = (k + i < klen) ? GemmElem<T>::tof(brow[tn][kc + k + i])
+                                       : 0.0f;
+      }
+#pragma unroll
+      for (int m = 0; m < MR; ++m) {
+        if (m < M) {
+          float af[8];
+          if constexpr (TA) {
+#pragma unroll
+            for (int i = 0; i < 8; ++i)
+              af[i] = (k + i < klen) ? GemmElem<T>::tof(smA[(k + i) * M + m])
+                                     : 0.0f;
+          } else {
+            const T *arow = A + static_cast<size_t>(m) * K + kc + k;
+            if (full) {
+              gemmUnpack8<T>(*reinterpret_cast<const u32x4 *>(arow), af);
+            } else {
+#pragma unroll
+              for (int i = 0; i < 8; ++i)
+                af[i] = (k + i < klen) ? GemmElem<T>::tof(arow[i]) : 0.0f;
+            }
+          }
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+#pragma unroll
+            for (int tn = 0; tn < TN; ++tn)
+              acc[m][tn] = __fmaf_rn(af[i], bf[tn][i], acc[m][tn]);
+        }
+      }
+    }
+    if constexpr (TA)
+      __syncthreads();
+  }
+
+  const int lane = tid % WARP;
+  const int warp = tid / WARP;
+#pragma unroll
+  for (int m = 0; m < MR; ++m)
+#pragma unroll
+    for (int tn = 0; tn < TN; ++tn) {
+      float v = acc[m][tn];
+      for (int off = WARP >> 1; off > 0; off >>= 1)
+        v += __shfl_down(v, off);
+      if (lane == 0)
+        red[warp][m * TN + tn] = v;
+    }
+  __syncthreads();
+  if (tid < MR * TN) {
+    const int m = tid / TN;
+    const int n = n0 + tid % TN;
+    if (m < M && n < N) {
+      float v = 0.0f;
+#pragma unroll
+      for (int w = 0; w < NW; ++w)
+        v += red[w][tid];
+      gemmStoreY(Y, C, m, n, N, cDim0, cDim1, v, alpha, beta);
+    }
+  }
+}
+
+/* B = [K, N] GEMV (fp16/bf16, small M): each thread owns 8 consecutive output
+ * columns (one 16-byte B load per k-row) and a 1/KS share of K; the KS
+ * partial sums meet in LDS. A block covers MR rows, so B is re-read only
+ * ceil(M/MR) times. TA selects the A layout ([K, M] if set, else [M, K]). */
+template <typename T, bool TA, int MR, int BLOCK, int KS>
+__global__ void __launch_bounds__(BLOCK)
+    gemm_gemv_kn_kernel(const T *__restrict__ A, const T *__restrict__ B,
+                        const T *__restrict__ C, T *__restrict__ Y, int M,
+                        int N, int K, float alpha, float beta, int cDim0,
+                        int cDim1) {
+  constexpr int CG = BLOCK / KS;
+  __shared__ float red[KS][CG * 8];
+  const int tid = threadIdx.x;
+  const int cg = tid % CG;
+  const int ks = tid / CG;
+  const int nblk = blockIdx.x * CG * 8;
+  const int n0 = nblk + cg * 8;
+  const int m0 = blockIdx.y * MR;
+  const bool vec = (N % 8) == 0 && n0 + 8 <= N;
+
+  float acc[MR][8];
+#pragma unroll
+  for (int m = 0; m < MR; ++m)
+#pragma unroll
+    for (int e = 0; e < 8; ++e)
+      acc[m][e] = 0.0f;
+
+#pragma unroll 2
+  for (int k = ks; k < K; k += KS) {
+    float b[8];
+    const T *brow = B + static_cast<size_t>(k) * N + n0;
+    if (vec) {
+      gemmUnpack8<T>(*reinterpret_cast<const u32x4 *>(brow), b);
+    } else {
+#pragma unroll
+      for (int e = 0; e < 8; ++e)
+        b[e] = (n0 + e < N) ? GemmElem<T>::tof(brow[e]) : 0.0f;
+    }
+#pragma unroll
+    for (int m = 0; m < MR; ++m) {
+      if (m0 + m < M) {
+        const float a =
+            GemmElem<T>::tof(TA ? A[static_cast<size_t>(k) * M + m0 + m]
+                                : A[static_cast<size_t>(m0 + m) * K + k]);
+#pragma unroll
+        for (int e = 0; e < 8; ++e)
+          acc[m][e] = __fmaf_rn(a, b[e], acc[m][e]);
+      }
+    }
+  }
+
+#pragma unroll
+  for (int m = 0; m < MR; ++m) {
+    if (m0 + m >= M)
+      break;
+#pragma unroll
+    for (int e = 0; e < 8; ++e)
+      red[ks][cg * 8 + e] = acc[m][e];
+    __syncthreads();
+    for (int i = tid; i < CG * 8; i += BLOCK) {
+      const int n = nblk + i;
+      if (n < N) {
+        float v = 0.0f;
+#pragma unroll
+        for (int j = 0; j < KS; ++j)
+          v += red[j][i];
+        gemmStoreY(Y, C, m0 + m, n, N, cDim0, cDim1, v, alpha, beta);
+      }
+    }
+    __syncthreads();
+  }
+}
+
 struct GemvCfg {
   int threads;
   int tile_n;
@@ -850,11 +1066,95 @@ static int tuneGemvNn(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
   return best;
 }
 
+/* B = [K, N] GEMV launch (gemm_gemv_kn_kernel). {BLOCK, KS} ladder from
+ * wide (16 column groups x 8 columns per block) to narrow; the first entry
+ * that puts >= 80 blocks on the 40-CU part wins (decode N=4096 needs the
+ * narrow ones to fill the GPU). HIPDNN_EP_GEMM_GEMV_KN_CFG=<idx> forces one
+ * (A/B only). */
+template <typename T, bool TA, int MR>
+static void launchGemvKnMr(hipStream_t s, const T *A, const T *B, const T *C,
+                           T *Y, int M, int N, int K, float alpha, float beta,
+                           int cDim0, int cDim1) {
+  static constexpr int kCols[] = {128, 64, 32};
+  int id = gemmEnvInt("HIPDNN_EP_GEMM_GEMV_KN_CFG", -1);
+  if (id < 0 || id > 2) {
+    id = 2;
+    for (int i = 0; i < 2; ++i)
+      if (((N + kCols[i] - 1) / kCols[i]) * ((M + MR - 1) / MR) >= 80) {
+        id = i;
+        break;
+      }
+  }
+  const dim3 grid((N + kCols[id] - 1) / kCols[id], (M + MR - 1) / MR);
+#define GEMM_GEMV_KN(BLOCK, KS)                                                \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_kn_kernel<T, TA, MR, BLOCK, KS>), \
+                     grid, dim3(BLOCK), 0, s, A, B, C, Y, M, N, K, alpha, beta, \
+                     cDim0, cDim1)
+  if (id == 0)
+    GEMM_GEMV_KN(256, 16);
+  else if (id == 1)
+    GEMM_GEMV_KN(512, 64);
+  else
+    GEMM_GEMV_KN(512, 128);
+#undef GEMM_GEMV_KN
+  CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-kn M=%d N=%d K=%d ta=%d -> kn-cfg[%d]\n",
+                           M, N, K, TA ? 1 : 0, id);
+}
+
+template <typename T, bool TA>
+static void launchGemvKn(hipStream_t s, const T *A, const T *B, const T *C,
+                         T *Y, int M, int N, int K, float alpha, float beta,
+                         int cDim0, int cDim1) {
+  if (M == 1)
+    launchGemvKnMr<T, TA, 1>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+  else if (M <= 4)
+    launchGemvKnMr<T, TA, 4>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+  else
+    launchGemvKnMr<T, TA, 8>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+}
+
 template <typename T>
 static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
                          T *Y, int M, int N, int K, int transA, int transB,
                          float alpha, float beta, int cDim0, int cDim1) {
   (void)hipGetLastError();
+  constexpr bool k16 = std::is_same<T, _Float16>::value ||
+                       std::is_same<T, __hip_bfloat16>::value;
+  if constexpr (k16) {
+    /* transA multi-row GEMV: B streamed once for all M rows (any M < 16).
+     * wave64 reaches here with transA and M >= 16 too: that keeps the kn /
+     * scalar kernels. */
+    /* Tiny problems (N*K < 64K) stay on the one-row kernels: launch-bound,
+     * where the multi-row kernels' fixed cost loses. */
+    const bool mr_big = static_cast<size_t>(N) * K >= (size_t{1} << 16);
+    if (transB && M < 16 && mr_big && transA) {
+#define GEMM_GEMV_MR(TA, MR, TN)                                               \
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_mr_nt_kernel<T, TA, MR, TN>),   \
+                     dim3((N + TN - 1) / TN), dim3(128), 0, s, A, B, C, Y, M, \
+                     N, K, alpha, beta, cDim0, cDim1)
+#define GEMM_GEMV_MR_ALL(TA)                                                   \
+  do {                                                                         \
+    if (M <= 4)                                                                \
+      GEMM_GEMV_MR(TA, 4, 8);                                                  \
+    else if (M <= 8)                                                           \
+      GEMM_GEMV_MR(TA, 8, 8);                                                  \
+    else                                                                       \
+      GEMM_GEMV_MR(TA, 16, 4);                                                 \
+  } while (0)
+      GEMM_GEMV_MR_ALL(true);
+#undef GEMM_GEMV_MR_ALL
+#undef GEMM_GEMV_MR
+      CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-mr M=%d N=%d K=%d ta=%d\n", M, N,
+                               K, transA);
+      return hipGetLastError() == hipSuccess ? 0 : 1;
+    }
+    if (!transB && mr_big && transA) {
+      /* B = [K, N]: 8 columns per thread, 16-byte B loads, split-K in the
+       * block (transA any M). */
+      launchGemvKn<T, true>(s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1);
+      return hipGetLastError() == hipSuccess ? 0 : 1;
+    }
+  }
   if (transA) {
     dim3 grid((N + 255) / 256, M);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_ta_kernel<T>), grid, dim3(256),
@@ -883,7 +1183,7 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
 
 
 template <int BM, int BN, int WT_M, int WT_N, bool TransB, typename T, int BK,
-          bool BC = true, bool DB = true, int PGR = 1>
+          bool BC = true, bool DB = true, int PGR = 1, bool TransA = false>
 __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
                                               const T *__restrict__ B,
                                               const T *__restrict__ C,
@@ -917,6 +1217,21 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   static_assert((K_STR * 2) % 16 == 0, "LDS stride 16B");
   static_assert(B_HPT >= 4 && B_HPT % 4 == 0, "B_HPT");
   static_assert(B_HPT <= 64, "pf_b cap");
+
+  /* TransA: A is stored [K, M] (lda = row stride of that layout, normally M).
+   * A thread loads TA_KR consecutive k-rows of one TA_MC-wide m vector (one
+   * 4/8/16-byte load per row) and writes the TA_MC transposed k-runs as packed
+   * TA_KR-half (8-byte) LDS stores, so the LDS tile keeps the [m][k] layout the
+   * WMMA fragment reads expect -- no 2-byte scalar ds_write. Consecutive
+   * threads take consecutive m vectors, so each row load is coalesced. */
+  constexpr int TA_KR = 4;
+  constexpr int TA_MC = (A_HPT / TA_KR >= 8) ? 8 : A_HPT / TA_KR;
+  constexpr int TA_NCH = TransA ? A_HPT / (TA_KR * TA_MC) : 1;
+  constexpr int TA_MG = BM / TA_MC;
+  static_assert(!TransA || (TA_MC == 2 || TA_MC == 4 || TA_MC == 8), "TA_MC");
+  static_assert(!TransA || (BK % TA_KR == 0 && BM % TA_MC == 0 &&
+                            TA_NCH * TA_KR * TA_MC == A_HPT),
+                "TransA chunking");
   /* NBUF LDS buffers: 2 = double-buffered (default, hides global-load latency
    * behind compute); 1 = single-buffered, half the LDS so two workgroups fit
    * per CU and hide the K-loop barriers across each other -- a win for large
@@ -1015,6 +1330,23 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   const T *b_src_nt = B + static_cast<size_t>(b_n_g) * ldb + k_first +
                       b_k8; /* TransB=1 [N,K] */
 
+  int ta_m[TA_NCH];
+  int ta_k[TA_NCH];
+  const T *ta_src[TA_NCH];
+  if constexpr (TransA) {
+#pragma unroll
+    for (int c = 0; c < TA_NCH; ++c) {
+      const int q = tid + c * THR;
+      ta_m[c] = (q % TA_MG) * TA_MC;
+      ta_k[c] = (q / TA_MG) * TA_KR;
+      ta_src[c] = A + static_cast<size_t>(k_first + ta_k[c]) * lda + row0 +
+                  ta_m[c];
+    }
+  }
+  /* Vector A loads need every row start TA_MC-aligned (BC path only; the
+   * launcher keeps lda%8==0 for BC=false). */
+  const bool ta_vec = (lda % TA_MC) == 0;
+
   float8 acc[WT_M][WT_N];
 #pragma unroll
   for (int i = 0; i < WT_M; ++i)
@@ -1031,6 +1363,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   static_assert(PGR == 1 || PGR == 2, "PGR");
   constexpr int NSLOT = PGR;
   uint32_t pf_a[NSLOT][A_NCH][A_CH / 2];
+  uint32_t pf_ta[NSLOT][TA_NCH][TA_KR][TA_MC / 2];
   u32x4 pf_b[NSLOT][8];
   alignas(16) T pf_nn[N_CH];
 
@@ -1039,21 +1372,37 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
     /* After the last tile of the range the source pointers wrap back to
      * k_begin (a no-op without stagger: nothing is loaded after the last tile). */
     const int adv = (k0 + BK >= k_end) ? (BK - span) : BK;
+    if constexpr (TransA) {
 #pragma unroll
-    for (int c = 0; c < A_NCH; ++c) {
-      if constexpr (!BC) {
-        /* Tile fully covers M and K%BK==0: no row/K bounds check. */
-        if constexpr (A_CH == 8)
-          *reinterpret_cast<u32x4 *>(pf_a[S][c]) =
-              *reinterpret_cast<const u32x4 *>(a_src[c]);
-        else
-          *reinterpret_cast<u32x2 *>(pf_a[S][c]) =
-              *reinterpret_cast<const u32x2 *>(a_src[c]);
-      } else {
-        const int row = row0 + a_row[c];
-        const int k = k0 + a_koff[c];
-        const bool ok = (row < M) && (k + A_CH <= K);
-        if (ok) {
+      for (int c = 0; c < TA_NCH; ++c) {
+        const int m = row0 + ta_m[c];
+#pragma unroll
+        for (int r = 0; r < TA_KR; ++r) {
+          const T *src = ta_src[c] + static_cast<size_t>(r) * lda;
+          const int k = k0 + ta_k[c] + r;
+          if (!BC || (ta_vec && k < K && m + TA_MC <= M)) {
+            if constexpr (TA_MC == 8)
+              *reinterpret_cast<u32x4 *>(pf_ta[S][c][r]) =
+                  *reinterpret_cast<const u32x4 *>(src);
+            else if constexpr (TA_MC == 4)
+              *reinterpret_cast<u32x2 *>(pf_ta[S][c][r]) =
+                  *reinterpret_cast<const u32x2 *>(src);
+            else
+              pf_ta[S][c][r][0] = *reinterpret_cast<const uint32_t *>(src);
+          } else {
+#pragma unroll
+            for (int e = 0; e < TA_MC; ++e)
+              reinterpret_cast<T *>(pf_ta[S][c][r])[e] =
+                  (k < K && m + e < M) ? src[e] : (T)0;
+          }
+        }
+        ta_src[c] += static_cast<ptrdiff_t>(adv) * lda;
+      }
+    } else {
+#pragma unroll
+      for (int c = 0; c < A_NCH; ++c) {
+        if constexpr (!BC) {
+          /* Tile fully covers M and K%BK==0: no row/K bounds check. */
           if constexpr (A_CH == 8)
             *reinterpret_cast<u32x4 *>(pf_a[S][c]) =
                 *reinterpret_cast<const u32x4 *>(a_src[c]);
@@ -1061,21 +1410,33 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             *reinterpret_cast<u32x2 *>(pf_a[S][c]) =
                 *reinterpret_cast<const u32x2 *>(a_src[c]);
         } else {
+          const int row = row0 + a_row[c];
+          const int k = k0 + a_koff[c];
+          const bool ok = (row < M) && (k + A_CH <= K);
+          if (ok) {
+            if constexpr (A_CH == 8)
+              *reinterpret_cast<u32x4 *>(pf_a[S][c]) =
+                  *reinterpret_cast<const u32x4 *>(a_src[c]);
+            else
+              *reinterpret_cast<u32x2 *>(pf_a[S][c]) =
+                  *reinterpret_cast<const u32x2 *>(a_src[c]);
+          } else {
 #pragma unroll
-          for (int e = 0; e < A_CH / 2; ++e)
-            pf_a[S][c][e] = 0;
-          if (row < M) {
+            for (int e = 0; e < A_CH / 2; ++e)
+              pf_a[S][c][e] = 0;
+            if (row < M) {
 #pragma unroll
-            for (int e = 0; e < A_CH; ++e) {
-              const int kk = k + e;
-              const T v =
-                  (kk < K) ? A[static_cast<size_t>(row) * lda + kk] : (T)0;
-              reinterpret_cast<T *>(pf_a[S][c])[e] = v;
+              for (int e = 0; e < A_CH; ++e) {
+                const int kk = k + e;
+                const T v =
+                    (kk < K) ? A[static_cast<size_t>(row) * lda + kk] : (T)0;
+                reinterpret_cast<T *>(pf_a[S][c])[e] = v;
+              }
             }
           }
         }
+        a_src[c] += adv;
       }
-      a_src[c] += adv;
     }
 
     if constexpr (TransB) {
@@ -1170,15 +1531,39 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
         smB[buf][nn_n + e][nn_k] = pf_nn[e];
     }
 
+    if constexpr (TransA) {
+      /* Transpose TA_KR x TA_MC in registers: column j of the loaded rows is
+       * half (j&1) of word j/2 in each row; pack rows (0,1) and (2,3). */
 #pragma unroll
-    for (int c = 0; c < A_NCH; ++c) {
-      T *dst = &smA[buf][a_row[c]][a_koff[c]];
-      if constexpr (A_CH == 8)
-        *reinterpret_cast<u32x4 *>(dst) =
-            *reinterpret_cast<const u32x4 *>(pf_a[S][c]);
-      else
-        *reinterpret_cast<u32x2 *>(dst) =
-            *reinterpret_cast<const u32x2 *>(pf_a[S][c]);
+      for (int c = 0; c < TA_NCH; ++c) {
+#pragma unroll
+        for (int j = 0; j < TA_MC; ++j) {
+          const uint32_t w0 = pf_ta[S][c][0][j / 2];
+          const uint32_t w1 = pf_ta[S][c][1][j / 2];
+          const uint32_t w2 = pf_ta[S][c][2][j / 2];
+          const uint32_t w3 = pf_ta[S][c][3][j / 2];
+          u32x2 v;
+          if (j & 1) {
+            v[0] = (w0 >> 16) | (w1 & 0xffff0000u);
+            v[1] = (w2 >> 16) | (w3 & 0xffff0000u);
+          } else {
+            v[0] = (w0 & 0xffffu) | (w1 << 16);
+            v[1] = (w2 & 0xffffu) | (w3 << 16);
+          }
+          *reinterpret_cast<u32x2 *>(&smA[buf][ta_m[c] + j][ta_k[c]]) = v;
+        }
+      }
+    } else {
+#pragma unroll
+      for (int c = 0; c < A_NCH; ++c) {
+        T *dst = &smA[buf][a_row[c]][a_koff[c]];
+        if constexpr (A_CH == 8)
+          *reinterpret_cast<u32x4 *>(dst) =
+              *reinterpret_cast<const u32x4 *>(pf_a[S][c]);
+        else
+          *reinterpret_cast<u32x2 *>(dst) =
+              *reinterpret_cast<const u32x2 *>(pf_a[S][c]);
+      }
     }
   };
 
@@ -1390,7 +1775,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   ((BM / (WM * 16)) * (BN / (WN * 16)) * 32)
 
 template <int BM, int BN, int WT_M, int WT_N, bool TransB, typename T, int BK,
-          bool BC = true, bool DB = true, int PGR = 1>
+          bool BC = true, bool DB = true, int PGR = 1, bool TransA = false>
 __global__ __attribute__((amdgpu_flat_work_group_size(
     GEMM_WG_SZ(BM, BN, WT_M, WT_N), GEMM_WG_SZ(BM, BN, WT_M, WT_N))))
 __attribute__((amdgpu_waves_per_eu(2, 8)))
@@ -1399,7 +1784,7 @@ void gemm_wmma_kernel(const T *__restrict__ A, const T *__restrict__ B,
                       int K, float alpha, float beta, int cDim0, int cDim1,
                       int swizzle_n, float *__restrict__ sk_acc, int ldb,
                       int n_base, int lda, int stag) {
-  GemmWmmaImpl<BM, BN, WT_M, WT_N, TransB, T, BK, BC, DB, PGR>(
+  GemmWmmaImpl<BM, BN, WT_M, WT_N, TransB, T, BK, BC, DB, PGR, TransA>(
       A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1, swizzle_n, sk_acc, ldb,
       n_base, lda, stag);
 }
@@ -2194,6 +2579,87 @@ static int launchWmmaGemm(hipStream_t s, const T *A, const T *B, const T *C,
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
 
+/* transA=1 fp16/bf16, M >= 16: WMMA with A stored [K, M]. GemmWmmaImpl's
+ * TransA staging transposes A into the usual [m][k] LDS tile with packed
+ * stores; B is either layout. A small fixed tile ladder (no LUT entry exists
+ * for transA): the largest tile that still puts >= ~40 workgroups on the
+ * 40-CU part, then smaller ones. HIPDNN_EP_GEMM_WMMA_TA_CFG=<idx> forces a
+ * table entry (A/B only). */
+static constexpr WmmaCfg kWmmaTa[] = {
+    {128, 128, 2, 4, 8, 1, 32},
+    {64, 128, 2, 2, 8, 1, 32},
+    {128, 64, 2, 2, 8, 1, 32},
+    {64, 64, 2, 2, 8, 1, 32},
+};
+static constexpr int kNumWmmaTa =
+    static_cast<int>(sizeof(kWmmaTa) / sizeof(kWmmaTa[0]));
+
+static int pickWmmaTa(int M, int N) {
+  const int forced = gemmEnvInt("HIPDNN_EP_GEMM_WMMA_TA_CFG", -1);
+  if (forced >= 0 && forced < kNumWmmaTa)
+    return forced;
+  for (int i = 0; i < kNumWmmaTa - 1; ++i) {
+    const WmmaCfg &c = kWmmaTa[i];
+    if (((M + c.bm - 1) / c.bm) * ((N + c.bn - 1) / c.bn) >= 40)
+      return i;
+  }
+  return kNumWmmaTa - 1;
+}
+
+template <typename T, bool TransB>
+static void launchWmmaTa(int id, hipStream_t s, const T *A, const T *B,
+                         const T *C, T *Y, int M, int N, int K, float alpha,
+                         float beta, int cDim0, int cDim1) {
+  const WmmaCfg c = kWmmaTa[id];
+  const int th = (c.bm / (c.wt_m * 16)) * (c.bn / (c.wt_n * 16)) * 32;
+  const int stag = gemmStaggerParam(c.bk, static_cast<int>(sizeof(T)), TransB);
+  /* The BC=false fast path needs whole tiles and 16-byte-aligned A rows
+   * (lda = M, TA_MC <= 8 halves). */
+  const bool bc = !(M % c.bm == 0 && N % c.bn == 0 && K % c.bk == 0 &&
+                    M % 8 == 0);
+  const dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm, 1);
+  const dim3 block(th);
+#define GEMM_WMMA_TA_ONE(BM, BN, WM, WN)                                       \
+  if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN) {              \
+    if (bc)                                                                    \
+      hipLaunchKernelGGL(                                                      \
+          HIP_KERNEL_NAME(gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, 32,      \
+                                           true, true, 1, true>),              \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
+          c.swizzle_n, nullptr, K, 0, M, stag);                                \
+    else                                                                       \
+      hipLaunchKernelGGL(                                                      \
+          HIP_KERNEL_NAME(gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, 32,      \
+                                           false, true, 1, true>),             \
+          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
+          c.swizzle_n, nullptr, K, 0, M, stag);                                \
+  } else
+  GEMM_WMMA_TA_ONE(128, 128, 2, 4)
+  GEMM_WMMA_TA_ONE(64, 128, 2, 2)
+  GEMM_WMMA_TA_ONE(128, 64, 2, 2)
+  GEMM_WMMA_TA_ONE(64, 64, 2, 2) {}
+#undef GEMM_WMMA_TA_ONE
+}
+
+template <typename T>
+static int launchWmmaGemmTa(hipStream_t s, const T *A, const T *B, const T *C,
+                            T *Y, int M, int N, int K, int transB, float alpha,
+                            float beta, int cDim0, int cDim1) {
+  (void)hipGetLastError();
+  const int id = pickWmmaTa(M, N);
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[gemm] wmma transA M=%d N=%d K=%d tb=%d -> ta-cfg[%d] %dx%d wt=%dx%d\n",
+      M, N, K, transB, id, kWmmaTa[id].bm, kWmmaTa[id].bn, kWmmaTa[id].wt_m,
+      kWmmaTa[id].wt_n);
+  if (transB)
+    launchWmmaTa<T, true>(id, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                          cDim1);
+  else
+    launchWmmaTa<T, false>(id, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                           cDim1);
+  return hipGetLastError() == hipSuccess ? 0 : 1;
+}
+
 /* =========================================================================
  * fp32 / fp64 tiled FMA (no WMMA). Also serves wave64 fp16/bf16 (no WMMA on
  * that hardware). Templated on tile geometry (Stage A8): BM/BN/BK/TM/TN pick
@@ -2785,6 +3251,9 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     auto *b = static_cast<const T *>(B);
     auto *c = static_cast<const T *>(C);
     auto *y = static_cast<T *>(Y);
+    if (transA && M >= kWmmaM && !wave64)
+      return launchWmmaGemmTa<T>(s, a, b, c, y, M, N, K, transB, alpha, beta,
+                                 cDim0, cDim1);
     if (M < kWmmaM || transA)
       return launchSmallM<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                              beta, cDim0, cDim1);
@@ -2817,6 +3286,9 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
     auto *b = static_cast<const T *>(B);
     auto *c = static_cast<const T *>(C);
     auto *y = static_cast<T *>(Y);
+    if (transA && M >= kWmmaM && !wave64)
+      return launchWmmaGemmTa<T>(s, a, b, c, y, M, N, K, transB, alpha, beta,
+                                 cDim0, cDim1);
     if (M < kWmmaM || transA)
       return launchSmallM<T>(s, a, b, c, y, M, N, K, transA, transB, alpha,
                              beta, cDim0, cDim1);
