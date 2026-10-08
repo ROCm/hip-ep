@@ -643,6 +643,27 @@ void ConvertOnnxToHipPass::runOnOperation() {
             << "convert-onnx-to-hip: pre-lowering round loop hit kMaxRounds="
             << kMaxRounds << " without quiescence";
     }
+    // onnx.Sum is variadic elementwise addition. Gelu fusion above matches
+    // the Sums it needs; what remains becomes a chain of onnx.Add so the
+    // existing hip.add lowering applies. Rank>4 Adds created here missed
+    // the pack pass inside the loop, so pack once more before constants
+    // are rewritten.
+    {
+      mlir::RewritePatternSet sumPatterns(ctx);
+      populateSumConversionPatterns(sumPatterns, ctx);
+      mlir::GreedyRewriteConfig sumConfig;
+      sumConfig.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(sumPatterns), sumConfig)))
+        return signalPassFailure();
+      mlir::RewritePatternSet packPatterns(ctx);
+      populatePackBroadcastTo4DPatterns(packPatterns, ctx);
+      mlir::GreedyRewriteConfig packConfig;
+      packConfig.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(packPatterns), packConfig)))
+        return signalPassFailure();
+    }
     // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can still
     // see the original `onnx.Constant` (or `onnx.Shape`) as the shape input.
     // Roots on `onnx.ConstantOfShape`, disjoint from the pre-lowering
