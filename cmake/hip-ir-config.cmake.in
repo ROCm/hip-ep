@@ -1,0 +1,63 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+#
+# CMake package config for `hip-ir`: the HIP dialect, consumed standalone.
+#
+#   find_package(hip-ir 1.0 CONFIG REQUIRED)
+#   target_link_libraries(mylib PUBLIC hip::HipDialectIR)
+#
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(HIP_IR_VERSION        "@HIP_IR_VERSION@")
+set(HIP_IR_LLVM_VERSION   "@LLVM_PACKAGE_VERSION@")
+set(HIP_IR_BUILD_LLVM_DIR "@LLVM_DIR@")
+set(HIP_IR_BUILD_MLIR_DIR "@MLIR_DIR@")
+
+# --- MLIR / LLVM ----------------------------------------------------------
+# HipDialect.h includes mlir/* and HipDialectIR links MLIR PUBLIC, so MLIR must
+# resolve before the targets file is read. Honour the consumer's choice of
+# toolchain; fall back to the one hip-ir was built against.
+if(NOT LLVM_DIR AND HIP_IR_BUILD_LLVM_DIR)
+  set(LLVM_DIR "${HIP_IR_BUILD_LLVM_DIR}")
+endif()
+if(NOT MLIR_DIR AND HIP_IR_BUILD_MLIR_DIR)
+  set(MLIR_DIR "${HIP_IR_BUILD_MLIR_DIR}")
+endif()
+
+find_dependency(LLVM CONFIG)
+find_dependency(MLIR CONFIG)
+
+# Static MLIR libs plus TableGen'd dialect registries are neither ABI- nor
+# ODR-safe across LLVM versions. A mismatch surfaces as undefined
+# mlir::detail::TypeIDResolver symbols at link time, or as a dialect
+# registering twice at runtime. Fail here, where the message is actionable.
+if(NOT LLVM_PACKAGE_VERSION VERSION_EQUAL HIP_IR_LLVM_VERSION)
+  message(FATAL_ERROR
+    "hip-ir ${HIP_IR_VERSION} was built against LLVM/MLIR ${HIP_IR_LLVM_VERSION}, "
+    "but this project resolved LLVM ${LLVM_PACKAGE_VERSION}.\n"
+    "  LLVM_DIR = ${LLVM_DIR}\n"
+    "  MLIR_DIR = ${MLIR_DIR}\n"
+    "Point at the matching toolchain, or build hip-ir from a hip-ep checkout.")
+endif()
+
+# --- Targets --------------------------------------------------------------
+if(NOT TARGET hip::HipDialectIR)
+  include("${CMAKE_CURRENT_LIST_DIR}/hip-ir-targets.cmake")
+endif()
+
+# --- Paths ----------------------------------------------------------------
+set_and_check(HIP_IR_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+
+# The .td sources ship alongside the headers so downstreams can run their own
+# mlir_tablegen against the HIP ops. HipOps.td includes its siblings by the
+# "hip/Dialect/IR/..." path, so this must be on the TableGen include path:
+#   list(APPEND LLVM_TABLEGEN_FLAGS "-I${HIP_IR_TABLEGEN_INCLUDE_DIR}")
+set(HIP_IR_TABLEGEN_INCLUDE_DIR "${HIP_IR_INCLUDE_DIR}")
+
+set(HIP_IR_LIBRARIES hip::HipDialectIR)
+
+check_required_components(hip-ir)
