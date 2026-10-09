@@ -6,7 +6,7 @@
 //===----------------------------------------------------------------------===//
 // Fused FA-2 WMMA prefill kernel for com.microsoft.MultiHeadAttention.
 //
-// Replaces the decomposed hipBLASLt pipeline (Q/K/V transpose -> score GEMM ->
+// Alternative to the decomposed pipeline (Q/K/V transpose -> score GEMM ->
 // softmax -> value GEMM -> O transpose) that materializes the full fp32 score
 // matrix S[B,N,Sq,Skv] in global memory. For the Qwen VLM vision encoder
 // (B=1, N=16, Sq=Skv=7296, H=72) that matrix is ~3.4 GB and the op is entirely
