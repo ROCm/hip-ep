@@ -149,6 +149,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged.
 - Keep shape machinery internal: only `infer*`/`reify*` rules belong in `HipShapeUtils.h`, while dimension maps and static folds stay file-static. Frontend-neutral conversion helper bodies belong in `HipConversionUtils.cpp`; `OnnxToHipUtils` retains ONNX import semantics and pattern-facing templates.
 - Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.
+- MatMul and Gemm share static shape validation across conversion, verification, and reification. Unknown extents are not proofs of equality. The existing lowering carries one contraction K; MatMul takes its batch count from A and selects B's batch stride. Do not describe these compile-time checks as runtime validation or change the runtime ABI as part of a shape-only refactor.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
 ### Allocation and memory planning
