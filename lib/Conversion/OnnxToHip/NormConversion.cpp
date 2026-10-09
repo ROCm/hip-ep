@@ -697,7 +697,10 @@ InstanceNormToHip::matchAndRewrite(mlir::Operation *op,
     epsValue = a.getValue();
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType)
+    return rewriter.notifyMatchFailure(
+        op, "InstanceNormalization requires a ranked result");
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
 
   auto hipOp = mlir::hip::InstanceNormOp::create(

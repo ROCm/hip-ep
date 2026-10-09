@@ -181,6 +181,7 @@ add_library(OnnxToHip STATIC
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
@@ -269,6 +270,8 @@ add_library(OnnxToHip STATIC
   IfOutline.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
+  LRNConversion.cpp
+  TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
   HardSigmoidConversion.cpp

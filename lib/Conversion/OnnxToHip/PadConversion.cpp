@@ -211,13 +211,15 @@ struct PadToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // The opset<10 schema carries `pads` as an attribute and arrives with
+    // The opset<11 schema carries `pads` as an attribute and arrives with
     // `data` alone, so operand 1 does not exist; reading it anyway walks off
     // the operand list. PadLegacyAttrsToOperands normally rewrites that form
     // before conversion, and reaching here with one operand means it declined.
-    // Checked before anything else, including getContextArg, so a malformed op
-    // is turned away before any IR exists.
-    if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+    // The modern schema has at most four operands, and anything past index 3
+    // would be dropped silently below. Checked before anything else, including
+    // getContextArg, so a malformed op is turned away before any IR exists.
+    if (op->getNumOperands() < 2 || op->getNumOperands() > 4 ||
+        op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "pad.arity");
 
     // A result with no rank gives the output buffer no shape to be built from.

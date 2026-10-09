@@ -1796,6 +1796,55 @@ void LeakyReluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// LRNOp: channel-window normalization, ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LRNOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void LRNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LRNOp::verify() {
+  auto inType = dyn_cast<ShapedType>(getInput().getType());
+  auto outType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inType || !outType || !inType.hasRank() || !outType.hasRank() ||
+      inType.getRank() < 2 || inType.getRank() != outType.getRank())
+    return emitOpError(
+        "input and output must have the same rank of at least 2");
+
+  for (int64_t dim : llvm::seq<int64_t>(inType.getRank())) {
+    if (inType.isDynamicDim(dim) || outType.isDynamicDim(dim))
+      continue;
+    if (inType.getDimSize(dim) != outType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+
+  Type elemType = inType.getElementType();
+  if (elemType != outType.getElementType() ||
+      (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32() &&
+       !elemType.isF64()))
+    return emitOpError("input and output must be f16, bf16, f32, or f64");
+  if (getSize() < 1)
+    return emitOpError("size must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TriluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TriluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void TriluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SwishOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

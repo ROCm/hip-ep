@@ -1412,6 +1412,9 @@ void MLIRGraph::canonicalize_optional_outputs() {
   // that has no users (not consumed by other ops, not in onnx.Return) is an
   // unused optional output and should be typed as `none`.
   // This avoids allocating dummy buffers for unused intermediate values.
+  // Result #0 is never rewritten: morphizen identifies a node by its first
+  // output NodeArg (node_get_first_output_name), so a none-typed result #0
+  // (e.g. TopK whose Values are unused) leaves the node without an identity.
   auto *ctx = entry_block_->getParentOp()->getContext();
   auto noneType = mlir::NoneType::get(ctx);
   mlir::OpBuilder builder(ctx);
@@ -1431,7 +1434,7 @@ void MLIRGraph::canonicalize_optional_outputs() {
     if (op->getNumResults() <= 1)
       return;
     bool has_unused = false;
-    for (auto result : op->getResults()) {
+    for (auto result : op->getResults().drop_front()) {
       if (result.use_empty() && !terminator_operands.contains(result) &&
           !mlir::isa<mlir::NoneType>(result.getType())) {
         has_unused = true;
@@ -1447,7 +1450,8 @@ void MLIRGraph::canonicalize_optional_outputs() {
     llvm::SmallVector<unsigned> unused_indices;
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
       auto result = op->getResult(i);
-      if (result.use_empty() && !terminator_operands.contains(result) &&
+      if (i > 0 && result.use_empty() &&
+          !terminator_operands.contains(result) &&
           !mlir::isa<mlir::NoneType>(result.getType())) {
         newTypes.push_back(noneType);
         unused_indices.push_back(i);

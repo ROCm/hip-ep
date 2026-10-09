@@ -30,7 +30,9 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "unranked cast result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
   // Map MLIR element type to ONNX DataType enum

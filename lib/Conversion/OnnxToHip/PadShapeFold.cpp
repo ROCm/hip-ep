@@ -144,16 +144,18 @@ struct PadLegacyAttrsToOperands : public mlir::RewritePattern {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "pad.not_legacy_arity");
 
-    auto padsAttr = op->getAttrOfType<mlir::ArrayAttr>("pads");
-    if (!padsAttr)
-      return rewriter.notifyMatchFailure(op, "pad.legacy_pads_missing");
-
     llvm::SmallVector<int64_t> padsVec;
-    for (mlir::Attribute entry : padsAttr) {
-      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(entry);
-      if (!intAttr)
-        return rewriter.notifyMatchFailure(op, "pad.legacy_pads_not_ints");
-      padsVec.push_back(intAttr.getValue().getSExtValue());
+    if (auto dense = op->getAttrOfType<mlir::DenseI64ArrayAttr>("pads")) {
+      padsVec.assign(dense.asArrayRef().begin(), dense.asArrayRef().end());
+    } else if (auto array = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
+      for (mlir::Attribute entry : array) {
+        auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(entry);
+        if (!intAttr)
+          return rewriter.notifyMatchFailure(op, "pad.legacy_pads_not_ints");
+        padsVec.push_back(intAttr.getValue().getSExtValue());
+      }
+    } else {
+      return rewriter.notifyMatchFailure(op, "pad.legacy_pads_missing");
     }
 
     // The legacy layout is [begin...; end...] over every axis, so the entry
@@ -166,6 +168,28 @@ struct PadLegacyAttrsToOperands : public mlir::RewritePattern {
     if (static_cast<int64_t>(padsVec.size()) != 2 * dataType.getRank())
       return rewriter.notifyMatchFailure(op, "pad.legacy_pads_arity");
 
+    // `value` is the legacy spelling of the `constant_value` operand, and only
+    // `constant` mode reads it. Positive zero is the default on both sides, so
+    // a +0.0 or absent attribute needs no operand at all. Anything else,
+    // including -0.0, has to be materialized in the data's element type to
+    // keep the fill bit-exact.
+    std::optional<llvm::APFloat> fill;
+    mlir::FloatType fillType;
+    if (auto valueAttr = op->getAttrOfType<mlir::FloatAttr>("value")) {
+      if (!valueAttr.getValue().isPosZero()) {
+        fillType = mlir::dyn_cast<mlir::FloatType>(dataType.getElementType());
+        if (!fillType)
+          return rewriter.notifyMatchFailure(op, "pad.legacy_value_not_float");
+        fill = valueAttr.getValue();
+        bool losesInfo = false;
+        fill->convert(fillType.getFloatSemantics(),
+                      llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+      }
+    }
+
+    // Every check that can decline is above this line: the pre-lowering loop
+    // retries ops whose patterns fail, so a decline after inserting constants
+    // would leave dead ones behind on each round.
     mlir::Location loc = op->getLoc();
     llvm::SmallVector<mlir::Value> operands{data};
 
@@ -181,28 +205,14 @@ struct PadLegacyAttrsToOperands : public mlir::RewritePattern {
       operands.push_back(rewriter.create(cst)->getResult(0));
     }
 
-    // `value` is the legacy spelling of the `constant_value` operand, and only
-    // `constant` mode reads it. Zero is the default on both sides, so a zero or
-    // absent attribute needs no operand at all; a non-zero one has to be
-    // materialized in the data's element type to keep the fill exact.
-    if (auto valueAttr = op->getAttrOfType<mlir::FloatAttr>("value")) {
-      if (!valueAttr.getValue().isZero()) {
-        auto floatTy =
-            mlir::dyn_cast<mlir::FloatType>(dataType.getElementType());
-        if (!floatTy)
-          return rewriter.notifyMatchFailure(op, "pad.legacy_value_not_float");
-        llvm::APFloat fill = valueAttr.getValue();
-        bool losesInfo = false;
-        fill.convert(floatTy.getFloatSemantics(),
-                     llvm::APFloat::rmNearestTiesToEven, &losesInfo);
-        auto scalarType = mlir::RankedTensorType::get({}, floatTy);
-        mlir::OperationState cst(loc, "onnx.Constant");
-        cst.addTypes(scalarType);
-        cst.addAttribute("value",
-                         mlir::DenseElementsAttr::get(
-                             scalarType, llvm::ArrayRef<llvm::APFloat>{fill}));
-        operands.push_back(rewriter.create(cst)->getResult(0));
-      }
+    if (fill) {
+      auto scalarType = mlir::RankedTensorType::get({}, fillType);
+      mlir::OperationState cst(loc, "onnx.Constant");
+      cst.addTypes(scalarType);
+      cst.addAttribute("value",
+                       mlir::DenseElementsAttr::get(
+                           scalarType, llvm::ArrayRef<llvm::APFloat>{*fill}));
+      operands.push_back(rewriter.create(cst)->getResult(0));
     }
 
     // Carry everything except the two attributes that just became operands, so

@@ -775,6 +775,37 @@ HIP_KERNEL_API int hip_leaky_relu(
     int hip_dtype,
     double alpha);
 
+/* Keep the upper or lower triangle of each rows x cols matrix packed in a
+ * contiguous row-major buffer. upper != 0 keeps col - row >= diagonal.
+ * input_elements is num_elements, or 1 to broadcast input[0]. */
+HIP_KERNEL_API int hip_trilu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t input_elements,
+    int64_t num_elements,
+    int64_t rows,
+    int64_t cols,
+    int64_t diagonal,
+    int64_t upper,
+    int hip_dtype);
+
+/* =========================================================================
+ * Local Response Normalization
+ * =========================================================================
+ *
+ * ONNX LRN across channels. n is the batch, channels is axis 1, and spatial
+ * is the product of the remaining dimensions. size is the channel window.
+ * Supports HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
+ * HIP_DTYPE_FLOAT64.
+ *
+ * Returns: 0 on success, non-zero hipError_t on failure.
+ */
+HIP_KERNEL_API int hip_lrn(void *stream, const void *input, void *output,
+                           int64_t n, int64_t channels, int64_t spatial,
+                           int64_t size, double alpha, double beta, double bias,
+                           int hip_dtype);
+
 /* =========================================================================
  * Swish Activation
  * =========================================================================
@@ -2567,10 +2598,14 @@ HIP_KERNEL_API int hip_dequantize_linear(
     int in_dtype,                // hip_dtype_t
     int scale_dtype,
     int out_dtype,
-    // Value width of input and zero_point: 8 or 16 to agree with in_dtype, or
-    // 4 for ONNX INT4/UINT4. At 4 in_dtype supplies only the signedness and
-    // both buffers hold ceil(numel/2) bytes, two values per byte, low nibble
-    // first, over the flattened row-major sequence. input_shape stays logical.
+    // Value width of input and zero_point: 8, 16, or 32 to agree with
+    // in_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 in_dtype supplies only the
+    // signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // input_shape stays logical.
     int in_bits);
 
 /* =========================================================================

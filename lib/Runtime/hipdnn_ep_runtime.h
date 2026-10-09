@@ -1326,6 +1326,19 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
 
+// Local response normalization across channels (axis 1). spatial is the
+// product of dimensions after the channel axis. data_type is
+// HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
+             int64_t channels, int64_t spatial, int64_t size, double alpha,
+             double beta, double bias, int64_t data_type);
+
+// Trilu: keep the upper (upper != 0) or lower triangle of each [rows, cols]
+// matrix. data_type is HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_trilu(RuntimeState *state, void *input, void *output,
+               int64_t input_elements, int64_t num_elements, int64_t rows,
+               int64_t cols, int64_t k, int64_t upper, int64_t data_type);
+
 // Swish activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // alpha: sigmoid input scale (default 1.0 per ONNX spec)
@@ -1584,11 +1597,14 @@ int wrap_dequantize_linear(
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
-    // Value width of `input` and `zero_point`: 8 or 16 to match input_dtype,
-    // or 4 for ONNX INT4/UINT4. At 4 the dtype supplies only the signedness
-    // and both buffers hold ceil(numel/2) bytes, two values per byte, low
-    // nibble first, over the flattened row-major sequence. `input_shape`
-    // stays logical either way.
+    // Value width of `input` and `zero_point`: 8, 16, or 32 to match
+    // input_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 the dtype supplies only
+    // the signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // `input_shape` stays logical either way.
     int64_t input_bits);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
