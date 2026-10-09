@@ -96,6 +96,10 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+# Opt-in interface for the packaging CI: default OFF, so builds that do not ask
+# for the standalone kernel unit-test executables never configure them.
+option(BUILD_HIP_KERNEL_UNIT_TESTS
+  "Build standalone GPU kernel unit-test executables for packaging (opt-in; Windows, real runtime)" OFF)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
