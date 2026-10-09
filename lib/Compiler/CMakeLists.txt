@@ -15,6 +15,103 @@ add_library(LibHipCompiler STATIC
   StaticPlugins.cpp
 )
 
+# rocMLIR kernel compilation. Attached here rather than to
+# hip-rocmlir-compiler so that everything linking LibHipCompiler -- including
+# hipgpu.dll, which picks it up transitively through morphizen-core-static --
+# can compile rock.kernel funcs in process. Without it the EP can outline
+# kernels but never fills in hip.rocmlir's kernel_binary, and every dispatch
+# fails at hipModuleLoadData.
+if(ENABLE_ROCMLIRTRITON)
+  target_sources(LibHipCompiler PRIVATE RocMlirKernelCompiler.cpp)
+  # rocMLIR/Triton's per-library static archives have circular dependencies,
+  # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
+  # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
+  # automatically and do not support the feature.
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
+  else()
+    set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
+  endif()
+  target_link_libraries(LibHipCompiler PUBLIC
+    HipToTosa
+    # rocMLIR/Triton reference this MLIR extension (registerInlinerExtension)
+    # but it is a leaf target not pulled in transitively by the rock/triton
+    # closure.
+    MLIRFuncInlinerExtension
+    # CompilerDriver's rocMLIR arm calls createDuplicateFunctionEliminationPass.
+    # It resolves transitively today, but through the rocMLIR closure -- name
+    # it so a standard MLIR dependency does not hinge on that.
+    MLIRFuncTransforms
+  )
+  # The rocMLIR/Triton closure is linked PRIVATE, not PUBLIC, on purpose. Many
+  # of its Triton members are CMake OBJECT libraries (add_triton_object), whose
+  # INTERFACE $<TARGET_OBJECTS> are absorbed into any STATIC library that links
+  # them. Linked PRIVATE, the objects are bundled into libLibHipCompiler.a once
+  # and exposed to consumers only as $<LINK_ONLY> link dependencies, so the
+  # several WHOLE_ARCHIVE'd plugin archives that link LibHipCompiler
+  # (HipCInterface, custom-op-mlir, level-1-pass) no longer each bundle their
+  # own copy of the Triton objects. Linked PUBLIC, those copies collide at the
+  # final EP link with the object libraries' direct expansion and with each
+  # other, producing duplicate-symbol errors. Consumers still resolve the
+  # symbols on demand from libLibHipCompiler.a (as the Windows STATIC-library
+  # build already does); only compile-time include propagation is dropped,
+  # which hip-rocmlir-compiler restores by naming the closure itself.
+  target_link_libraries(LibHipCompiler PRIVATE "${_rocmlir_link_closure}")
+  # Same name as the CMake option deliberately: one flag for the whole
+  # feature, rather than a separate macro that can drift out of sync with it.
+  target_compile_definitions(LibHipCompiler PUBLIC ENABLE_ROCMLIRTRITON=1)
+
+  # resolveRocMlirArch asks the live GPU which chip to build for; a code object
+  # for the wrong chip fails at module load. Headers only, no hip::host link:
+  # hip-compiler links this library but only compiles, and a load-time HIP
+  # import stops it starting where no driver is installed.
+  if(HIPDNN_EP_LINK_HIP_HOST)
+    find_package(hip CONFIG REQUIRED)
+    target_include_directories(LibHipCompiler SYSTEM PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_INCLUDE_DIRECTORIES>)
+    # Definitions as well as includes: the HIP headers #error out unless
+    # __HIP_PLATFORM_AMD__ is set, and hip::host is what normally supplies it.
+    target_compile_definitions(LibHipCompiler PRIVATE
+      $<TARGET_PROPERTY:hip::host,INTERFACE_COMPILE_DEFINITIONS>)
+    target_compile_definitions(LibHipCompiler PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+    target_link_libraries(LibHipCompiler PRIVATE ${CMAKE_DL_LIBS})
+    # Real library name for the on-demand load, not a literal: Windows ships a
+    # version-suffixed amdhip64_<major>.dll. Unknown means no device query.
+    set(_hip_runtime_name "")
+    if(TARGET hip::amdhip64)
+      set(_hip_runtime_loc "")
+      get_target_property(_hip_runtime_cfgs hip::amdhip64 IMPORTED_CONFIGURATIONS)
+      foreach(_cfg IN LISTS _hip_runtime_cfgs)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION_${_cfg})
+        if(_hip_runtime_loc)
+          break()
+        endif()
+      endforeach()
+      # IMPORTED_CONFIGURATIONS is optional, and a package that sets only the
+      # unqualified location would otherwise lose the device query entirely.
+      if(NOT _hip_runtime_loc)
+        get_target_property(_hip_runtime_loc hip::amdhip64 IMPORTED_LOCATION)
+      endif()
+      if(_hip_runtime_loc)
+        get_filename_component(_hip_runtime_name "${_hip_runtime_loc}" NAME)
+      endif()
+    endif()
+    if(_hip_runtime_name)
+      target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_HIP_RUNTIME_LIB=\"${_hip_runtime_name}\"")
+    else()
+      message(STATUS "[onnx-hipdnn-ep] HIP runtime library name unknown; "
+                     "rocMLIR arch will come from HIP_ARCHITECTURES")
+    endif()
+  endif()
+  # Last resort when there is no device to ask: whatever this build targets.
+  if(HIP_ARCHITECTURES)
+    list(GET HIP_ARCHITECTURES 0 _rocmlir_default_arch)
+    target_compile_definitions(LibHipCompiler PRIVATE
+      "HIPDNN_ROCMLIR_DEFAULT_ARCH=\"${_rocmlir_default_arch}\"")
+  endif()
+endif()
+
 # When hipBLASLt is disabled, the model link must not add -lhipblaslt
 # (CompilerDriver gates that behind this define).
 if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
@@ -49,6 +146,10 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRTargetLLVMIRExport
   MLIRIndexToLLVM
   MLIRControlFlowToLLVM
+  MLIRUBToLLVM
+  MLIRComplexToLLVM
+  MLIRMathToLLVM
+  MLIRVectorToLLVM
   HipSchemasLib
 )
 
