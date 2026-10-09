@@ -143,3 +143,36 @@ cached selection — to stderr. Unlike `HIPDNN_MATMUL_LUT_LOG` (which only cover
 the offline-table lookup that `online` mode skips), this shows what the sweep
 actually picked, so an `online` run can be diffed against the shipped table.
 `HIPDNN_EP_DEBUG=1` still enables these lines too (plus everything else).
+
+## Future: migrating to the shared `HipdnnDType` vocabulary (documented, not done)
+
+`gemm`'s LUT went through the same design review this round (see
+`../gemm/plan.md` §1 D2 and `../gemm/README.md`) and landed on an explicit
+three-field dtype key (`act_dtype`/`wts_dtype`/`out_dtype` from
+`../common/hipdnn_dtype.fbs`) instead of a private per-op enum. This op has
+two of the same problems today, and the fix is the same shape:
+
+1. **`MatmulNbitsBits{B4,B8,B3,B2}` only describes the weights.** Replace it
+   with `wts_dtype: HipdnnDType` (`U4` / `I8` / `U3` / `U2`), the same field
+   `gemm` uses, so both ops share one append-only vocabulary instead of each
+   growing its own.
+2. **Activation dtype is smuggled into the phase enum.** `Decode = 2` really
+   means "fp16 GEMV"; `DecodeDp4a = 3` really means "W4A8 integer dot
+   product" (`matmul_nbits_autotune.fbs`). Every new `(activation, weight
+   width)` combination today needs a new phase — adding u2/u3/i8 activations
+   would combinatorially explode the phase enum. Splitting the concerns
+   fixes this: phase stays `Prefill` / `Decode` only, and activation dtype
+   moves into its own `act_dtype` field (`Decode` becomes `act=F16`,
+   `DecodeDp4a` becomes `act=I8`). u2/u3/i8 then arrive as ordinary new
+   `wts_dtype` values — no new phase, no new point layout.
+
+**The migration itself needs no GPU re-measurement.** Today's
+`(phase, bits)` pairs map one-to-one onto `(phase, act_dtype, wts_dtype)`
+under the split above, so it is a `schema_version` bump plus rebuilding
+`lut/<arch>.json` from the *existing* sweep logs (or the existing `.fb`'s
+points, decoded once) through the new field mapping — not a new sweep.
+
+This section documents the path; it is **not implemented this round** (the
+gemm dtype-vocabulary job's scope was gemm only, see the HANDOFF for
+`gemm_lut_dtype_gfx1151`). Do this migration as its own follow-up so it gets
+its own Stage-A-style code review and regression pass, same as gemm did.
