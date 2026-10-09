@@ -23,6 +23,7 @@
 #define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -75,6 +76,50 @@ int SizeClassIndex(size_t size) noexcept {
   return -1;
 }
 
+constexpr size_t kPageSize = 4096;
+
+// Capacity for a large request that is growing. The 1/32 headroom is the
+// reuse span: a KV tensor that is 64 MiB at a 16 K context grows 4096 bytes
+// per token, so one capacity covers the next 512 tokens. It matches the
+// finest size-class step, so a grown buffer wastes no larger a fraction than
+// a pooled one.
+constexpr size_t LargeCapacity(size_t size) noexcept {
+  const size_t want = size + size / 32;
+  return (want + kPageSize - 1) / kPageSize * kPageSize;
+}
+
+// Checked at compile time because returning less than the request would
+// overflow the buffer.
+constexpr bool LargeCapacityHolds() {
+  for (size_t n = 16ull << 20; n <= 16ull << 30; n += n / 8) {
+    const size_t c = LargeCapacity(n);
+    if (c < n + n / 32 || c > n + n / 32 + kPageSize) {
+      return false;
+    }
+  }
+  return true;
+}
+static_assert(LargeCapacityHolds(),
+              "LargeCapacity must cover the request with its growth headroom "
+              "and waste at most one page beyond it");
+static_assert(LargeCapacity(64ull << 20) - (64ull << 20) >= 512 * 4096,
+              "one capacity must span 512 tokens of a KV tensor that is "
+              "64 MiB at a 16 K context");
+
+// Hand a batch of buffers back to the driver with pool_mutex_ released:
+// hipHostFree unpins pages and is as heavyweight as the hipHostMalloc that
+// pinned them, so holding the lock would serialize every other allocation
+// behind it.
+void ReleaseToDriver(const std::vector<void *> &buffers, int device_id) {
+  if (buffers.empty()) {
+    return;
+  }
+  ScopedDevice _(device_id);
+  for (void *p : buffers) {
+    (void)hipHostFree(p);
+  }
+}
+
 int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr) {
     return -1;
@@ -107,6 +152,87 @@ HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
   GetStats = nullptr;
 }
 
+// A capacity the model has just grown past cannot serve this request or any
+// later one, so its idle buffers are dead weight. A tensor growing step by
+// step retires the capacities within 1/16 below it, twice the reuse
+// tolerance, without reaching a smaller tensor still cycling. A request that
+// continues no live buffer, such as a KV cache extended by a multi-token
+// append, has jumped past every smaller capacity at once; were one of them
+// still cycling, dropping it costs a single re-pin.
+void HipGpuAllocator::DropOutgrown(size_t size, bool grown,
+                                   std::vector<void *> &out) {
+  auto it = large_free_.lower_bound(grown ? size - size / 16 : 0);
+  while (it != large_free_.end() && it->first < size) {
+    for (void *ptr : it->second.free) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+    it = large_free_.erase(it);
+  }
+}
+
+// Release capacities nothing is cycling through any more. An active bucket is
+// touched once per free and once per hit for every buffer in circulation, so
+// four times the peak live count is two turnarounds of slack: a cycling bucket
+// never ages out, a one-off capacity goes stale within a couple of inferences.
+void HipGpuAllocator::TrimLarge(std::vector<void *> &out) {
+  const uint64_t slack =
+      4 * static_cast<uint64_t>(std::max<size_t>(peak_live_count_, 1));
+  if (large_ops_ <= slack) {
+    return;
+  }
+  const uint64_t cutoff = large_ops_ - slack;
+  for (auto it = large_free_.begin(); it != large_free_.end();) {
+    if (it->second.last_used >= cutoff) {
+      ++it;
+      continue;
+    }
+    for (void *ptr : it->second.free) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+    it = large_free_.erase(it);
+  }
+}
+
+// Maintained on the pool-hit path too, not just on driver allocations.
+void HipGpuAllocator::NoteLargeCheckedOut(void *ptr, size_t requested,
+                                          bool grown) {
+  large_live_[ptr] = LargeLive{requested, grown};
+  ++live_requested_[requested];
+  if (grown) {
+    ++grown_live_count_;
+  }
+  peak_live_count_ = std::max(peak_live_count_, large_live_.size());
+}
+
+// A tensor that is re-created one step longer each inference, such as a KV
+// cache without a shared past/present buffer, is requested while its previous
+// version is still checked out and a sliver smaller: at most 1/64, which is a
+// 256-token append at a 16 K context. Equal sizes do not count, so a set of
+// same-shaped tensors allocated together never qualifies.
+bool HipGpuAllocator::ReplacesLiveBuffer(size_t size) const {
+  auto it = live_requested_.lower_bound(size - size / 64);
+  return it != live_requested_.end() && it->first < size;
+}
+
+// The converse, for a buffer being freed: some checked-out request replaced
+// it. Its headroom can serve that tensor's next version.
+bool HipGpuAllocator::ReplacedByLiveBuffer(size_t requested) const {
+  auto it = live_requested_.upper_bound(requested);
+  return it != live_requested_.end() && it->first - it->first / 64 <= requested;
+}
+
+void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
+  for (auto &entry : large_free_) {
+    for (void *ptr : entry.second.free) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+  }
+  large_free_.clear();
+}
+
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
@@ -115,28 +241,59 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   auto *self = static_cast<HipGpuAllocator *>(this_);
 
   const int cls = SizeClassIndex(size);
+  // Bytes to allocate on a miss: the class capacity for a pooled request, and
+  // for a large one either the exact size or a grown capacity depending on
+  // whether it replaces a live buffer or a grown buffer has been reused.
+  size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
+  bool grown = false;
+  std::vector<void *> stale;
 
-  // Fast path: reuse a pooled buffer with no driver call. Only requests that
-  // map to a size class (<= 16 MB) are pooled; any buffer in that class fits
-  // (they are all the class capacity). Large requests (cls < 0, > 16 MB) are
-  // never pooled — they are allocated at exact size and released straight back
-  // to the driver in FreeImpl, so a one-off huge transient can't pin memory.
-  if (cls >= 0) {
+  // Fast path: reuse a buffer with no driver call. A size class holds buffers
+  // all at the class capacity, so any of them fits. A large request takes the
+  // smallest retained capacity that covers it, provided that capacity is no
+  // larger than a grown allocation for this request would get: a buffer is
+  // then reusable by every request from the size it was grown for up to its
+  // capacity, and never by a much smaller one.
+  {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    auto &fl = self->free_lists_[cls];
-    if (!fl.empty()) {
-      void *ptr = fl.back();
-      fl.pop_back();
-      return ptr;
+    if (cls >= 0) {
+      auto &fl = self->free_lists_[cls];
+      if (!fl.empty()) {
+        void *ptr = fl.back();
+        fl.pop_back();
+        return ptr;
+      }
+    } else {
+      ++self->large_ops_;
+      auto it = self->large_free_.lower_bound(size);
+      if (it != self->large_free_.end() && it->first <= LargeCapacity(size)) {
+        void *ptr = it->second.free.back();
+        it->second.free.pop_back();
+        it->second.last_used = self->large_ops_;
+        // A request that does not grow from a live buffer may still fit, but
+        // it does not count as grown, so it cannot keep the pool alive after
+        // the growing tensors are gone.
+        grown = self->ReplacesLiveBuffer(size);
+        self->grown_reused_ |= grown;
+        self->NoteLargeCheckedOut(ptr, size, grown);
+        if (it->second.free.empty()) {
+          self->large_free_.erase(it);
+        }
+        return ptr;
+      }
+      grown = self->ReplacesLiveBuffer(size);
+      if (grown || self->grown_reused_) {
+        alloc_size = LargeCapacity(size);
+      }
+      self->DropOutgrown(size, grown, stale);
+      // Here rather than in FreeImpl so that path keeps a single exit and
+      // cannot drop a buffer from ptr_to_size_ without unpinning it.
+      self->TrimLarge(stale);
     }
   }
+  ReleaseToDriver(stale, self->device_id_);
 
   ScopedDevice _(self->device_id_);
-
-  // Cold miss: allocate. Pooled requests are rounded up to the full class
-  // capacity so the buffer is reusable by any later request in the same class;
-  // large requests are allocated at their exact size.
-  const size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
 
   // On AMD APU iGPU (the only hardware MorphiZen EP currently targets) the
   // GPU shares physical memory with the CPU, so we use hipHostMalloc(Mapped)
@@ -157,6 +314,21 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   hipError_t err = hipHostMalloc(&ptr, alloc_size,
                                  hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
+    // The large pool may be sitting on pinned pages this allocation could use,
+    // and failing while holding reclaimable memory would be worse than not
+    // pooling at all.
+    std::vector<void *> drained;
+    {
+      std::lock_guard<std::mutex> lk(self->pool_mutex_);
+      self->DrainLarge(drained);
+    }
+    if (!drained.empty()) {
+      ReleaseToDriver(drained, self->device_id_);
+      err = hipHostMalloc(&ptr, alloc_size,
+                          hipHostMallocMapped | hipHostMallocCoherent);
+    }
+  }
+  if (err != hipSuccess) {
     LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
                << alloc_size << " bytes (device " << self->device_id_
                << "): " << hipGetErrorString(err);
@@ -165,6 +337,9 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     self->ptr_to_size_[ptr] = alloc_size;
+    if (cls < 0) {
+      self->NoteLargeCheckedOut(ptr, size, grown);
+    }
   }
   return ptr;
 }
@@ -174,30 +349,56 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
     return;
   }
   auto *self = static_cast<HipGpuAllocator *>(this_);
+  // Only ever holds p: this path never evicts.
+  std::vector<void *> to_release;
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     auto it = self->ptr_to_size_.find(p);
-    if (it != self->ptr_to_size_.end()) {
-      // The stored size is the class capacity for pooled buffers (so
-      // SizeClassIndex recovers the class) and the exact size for large ones.
-      const int cls = SizeClassIndex(it->second);
-      if (cls >= 0) {
-        // Pooled small/medium buffer (<= 16 MB): return to its free list for
-        // reuse; do NOT release to the driver here. Stays tracked in
-        // ptr_to_size_ so the destructor can release it. Safe to reuse without
-        // a stream sync: see the pool comment in the header.
-        self->free_lists_[cls].push_back(p);
-        return;
+    if (it == self->ptr_to_size_.end()) {
+      // Defensive: a pointer we never handed out. Release rather than leak.
+      to_release.push_back(p);
+    } else if (const int cls = SizeClassIndex(it->second); cls >= 0) {
+      // Pooled small/medium buffer (<= 16 MB): return to its free list for
+      // reuse; do NOT release to the driver here. Stays tracked in
+      // ptr_to_size_ so the destructor can release it. Safe to reuse without
+      // a stream sync: see the pool comment in the header.
+      self->free_lists_[cls].push_back(p);
+    } else {
+      const size_t capacity = it->second;
+      ++self->large_ops_;
+      bool keep = false;
+      if (auto live = self->large_live_.find(p);
+          live != self->large_live_.end()) {
+        const bool grown = live->second.grown;
+        keep = grown || self->ReplacedByLiveBuffer(live->second.requested);
+        auto req = self->live_requested_.find(live->second.requested);
+        if (--req->second == 0) {
+          self->live_requested_.erase(req);
+        }
+        self->large_live_.erase(live);
+        if (grown) {
+          --self->grown_live_count_;
+        }
       }
-      // Large buffer (> 16 MB): never pooled. Stop tracking it and release it
-      // to the driver below (outside the lock — hipHostFree is heavyweight).
-      self->ptr_to_size_.erase(it);
+
+      if (!keep || self->grown_live_count_ == 0) {
+        self->ptr_to_size_.erase(it);
+        to_release.push_back(p);
+      } else {
+        auto &bucket = self->large_free_[capacity];
+        bucket.free.push_back(p);
+        bucket.last_used = self->large_ops_;
+      }
+      if (self->grown_live_count_ == 0 && !self->large_free_.empty()) {
+        // No grown buffer is checked out: the growing tensors were released or
+        // replaced by ones that did not grow from them, so nothing will ask
+        // for these capacities again.
+        self->DrainLarge(to_release);
+        self->peak_live_count_ = self->large_live_.size();
+      }
     }
-    // Fall through for a large buffer, or for a pointer we never handed out
-    // (defensive): in both cases release directly so we don't leak.
   }
-  ScopedDevice _(self->device_id_);
-  (void)hipHostFree(p);
+  ReleaseToDriver(to_release, self->device_id_);
 }
 
 HipGpuAllocator::~HipGpuAllocator() {
@@ -217,6 +418,7 @@ HipGpuAllocator::~HipGpuAllocator() {
   for (auto &fl : free_lists_) {
     fl.clear();
   }
+  large_free_.clear();
   ptr_to_size_.clear();
 }
 
