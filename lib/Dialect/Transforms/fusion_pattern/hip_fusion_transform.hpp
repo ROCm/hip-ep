@@ -538,7 +538,11 @@ isHipPerAxisQuantizedWeight(mlir::PatternRewriter &, mlir::PDLResultList &,
   // apart -- a packed 4-bit operand keeps 8-bit storage and its logical
   // element count -- so the marker convert-onnx-to-hip carried over from
   // constant lowering is what decides.
-  if (dq.getPackedInt4() != packedAttr.getValue())
+  // The marker names 4-bit packing; any other packed width matches neither.
+  const int64_t packedBits = dq.getPackedBits();
+  if (packedBits != 0 && packedBits != 4)
+    return mlir::failure();
+  if ((packedBits == 4) != packedAttr.getValue())
     return mlir::failure();
   return mlir::success(
       isPerSliceQuantizedWeight(dq, rankAttr.getInt(), axisAttr.getInt()));
@@ -737,8 +741,9 @@ extractHipQdqValueBits(mlir::PatternRewriter &rewriter,
   // A packed operand keeps its logical element count and an 8-bit element
   // type, so the type cannot report the value width; the marker
   // convert-onnx-to-hip carried over from constant lowering is what can.
+  const int64_t packedBits = dq.getPackedBits();
   results.push_back(rewriter.getI64IntegerAttr(
-      dq.getPackedInt4() ? 4 : static_cast<int64_t>(intType.getWidth())));
+      packedBits ? packedBits : static_cast<int64_t>(intType.getWidth())));
   return mlir::success();
 }
 
