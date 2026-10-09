@@ -1609,8 +1609,11 @@ static int gqa_forward_hipblaslt(
       past_len = 0;
     } else {
       total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
+      // A first prompt shorter than the window: no past, as in
+      // gqa_forward_fused. The causal mask takes past_len and the scores span
+      // total_seq keys, so padding rows attend to the prompt alone.
+      past_len = total_seq > sq ? total_seq - sq : 0;
+      if (total_seq < 1 || past_len + sq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(stderr,
                 "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
