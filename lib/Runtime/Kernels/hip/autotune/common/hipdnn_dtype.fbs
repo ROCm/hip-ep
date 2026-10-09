@@ -1,0 +1,28 @@
+// Shared dtype vocabulary for hipdnn-ep offline autotune LUTs (gemm today;
+// matmul_nbits is meant to include this same file later -- see
+// autotune/gemm/plan.md §3 for that migration).
+//
+// One enum, one place, consumed by every op's .fbs / loader.cpp / update_lut.py
+// so the numbering can never drift between them.
+//
+// Rule: only append; never renumber or reuse a value, even one that turns out
+// to be wrong -- an already-compiled .fb in the field encodes the old numbers.
+
+namespace hipdnn_ep.common.fbs;
+
+enum HipdnnDType : ubyte {
+  Any = 0,      // a memset field reads as "unclassified" and is rejected at load
+  F32 = 1,
+  F16 = 2,
+  BF16 = 3,
+  F64 = 4,
+  I32 = 5,
+  I8 = 6,
+  U8 = 7,
+  I4 = 8,
+  U4 = 9,
+  U3 = 10,
+  U2 = 11,
+  F8E4M3 = 12,
+  F8E5M2 = 13,
+}

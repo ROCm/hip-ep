@@ -92,6 +92,22 @@
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32((a), (b), (c))
 #endif
 
+/* bf16 16x16x16 WMMA: same gfx11 vs gfx12-style split as f16. gfx1151
+ * (RDNA 3.5) exposes the original encoding. */
+#if defined(__HIP_DEVICE_COMPILE__) &&                                        \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32)
+#  define HIPDNN_HAS_WMMA_BF16 1
+#  define HIPDNN_WMMA_F32_16X16X16_BF16(a, b, c)                              \
+     __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32((a), (b), (c))
+#elif defined(__HIP_DEVICE_COMPILE__) &&                                      \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12)
+#  define HIPDNN_HAS_WMMA_BF16 1
+#  define HIPDNN_WMMA_F32_16X16X16_BF16(a, b, c)                              \
+     __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12((a), (b), (c))
+#else
+#  define HIPDNN_HAS_WMMA_BF16 0
+#endif
+
 #if defined(__HIPCC__)
 /* __device__/__forceinline__ come from hip_runtime.h; some callers (e.g.
  * matmul_nbits_kernel.hip) include this header before it, so pull it in here
