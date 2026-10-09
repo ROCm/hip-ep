@@ -1,7 +1,7 @@
 # GQA flash prefill test -- fp16 KV cache
 
 Standalone `hipcc`-only test for the fused FA-2 WMMA prefill kernels
-(`sq > 1`; the runtime selects v5/v7/v8 by head_dim). No CMake, no EP build.
+(`sq > 1`; the runtime selects v6/v7/v8 by head_dim and KV-group size). No CMake, no EP build.
 Entirely self-contained: inputs and the CPU fp32 reference are generated
 in-process, no python, no data files, no `example/common/`.
 
@@ -19,7 +19,7 @@ make clean
 
 ## Shape coverage (3 tiers)
 
-`test_gqa_prefill.cpp`'s `main()` has an explicit `cases[]` array (39 rows,
+`test_gqa_prefill.cpp`'s `main()` has an explicit `cases[]` array (56 rows,
 each commented with why it exists) -- a hand-picked set of (categorical
 situation, typical shape) pairs. Rows 0-28 are
 the original real-model/sink/window matrix (typical `sq` of 512/1000/2048,
@@ -32,17 +32,18 @@ causal attention) is now multithreaded over `(batch, query-head)` pairs so
 this wider range -- especially the 2 `sq=8192` rows -- stays inside the
 shared ~30 min tier3 budget. `COVERAGE=1|2|3` (default 3, `make test
 COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) picks a fixed index subset of that
-array (`kTier1` 12 rows, `kTier2` 30 rows, tier3 all 39) chosen so tier1
+array (`kTier1` 17 rows, `kTier2` 47 rows, tier3 all 56) chosen so tier1
 still touches every `D`(64/128/256)/sink-mode/window-on-off/chunked-prefill
-(`past>0`)/must-decline value, plus 2 of the cheap `sq=128` rows; tier2 adds
-all 8 `sq=128` rows (cheap) but deliberately excludes the 2 expensive
+(`past>0`)/must-decline value and every prefill kernel route, plus 2 of the
+cheap `sq=128` rows; tier2 adds all 8 `sq=128` rows (cheap) and all the
+routing rows but deliberately excludes the 2 expensive
 `sq=8192` rows (tier3-only, a budget trade-off). At startup the exe prints
-`coverage=N -> running <n>/39 gqa_prefill cases`. No human edits a shape
+`coverage=N -> running <n>/56 gqa_prefill cases`. No human edits a shape
 list -- there is no `shapes.csv` or `gen_data.py` in this leaf.
 
 The original 29 cases (rows 0-28) cover:
-- Real model geometries: Qwen3.6-35B-A3B (d=256, v8 kernel), gpt-oss-20b
-  (d=64, v5), Llama-3.2-1B (d=64, v5), Llama-3.1-8B (d=128, v7).
+- Real model geometries: Qwen3.6-35B-A3B (d=256), gpt-oss-20b (d=64),
+  Llama-3.2-1B (d=64) and Llama-3.1-8B (d=128), all on the v6 kernel.
 - Sequence lengths including one (`sq=1000`) deliberately off the 16-row Q
   tile / 16-key KV tile boundary, to exercise partial tiles.
 - Attention-sink variants: none, per-head sink tensor, smooth-softmax, and
@@ -55,13 +56,20 @@ The original 29 cases (rows 0-28) cover:
   equal full attention), window==1 (degenerate, each query sees itself),
   window combined with the sink, and the full gpt-oss sliding-layer
   configuration (window + sink tensor + smooth together).
-- Window at d==128 (prefill v7 path), which does implement it.
+- Window at d==128, which the v6 path implements.
 
 Rows 29-38 (widened coverage) add: short (`sq=128`) prompts across
 qwen3.6-d256, gpt_oss-20b, llama-3.1-8b, gpt_oss-sink, gpt_oss-win,
 gpt_oss-both, llama-win-d128, and the d128-sink-must-decline case; plus 2
 long pure-prefill (`sq=8192`, `past=0`) rows at D=64 (gpt_oss-20b) and D=128
 (llama-3.1-8b).
+
+Rows 39-55 walk the prefill kernel routing (the same rule as
+`real/gqa.cpp`): d=256 on v6 at 4 heads per block (Qwen3.6 16/2, Qwen3 16/4)
+and at 3 (Qwen3.8 24/4), Gemma-3 8/4 on v8, a d=256 window that must be
+declined, d=128 groups not divisible by 4 on v7 (Qwen3-1.7B, Llama-3.2-3B,
+Qwen2.5-7B, Llama-2-7B), and d=128 sliding windows on v6 (Mistral-7B, plus
+Qwen2.5 and Qwen3 groups not divisible by 4).
 
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
 exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
