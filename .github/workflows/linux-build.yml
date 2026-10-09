@@ -288,6 +288,16 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
 
+      # Require DF_1_NODELETE and the plugin entry points. No GPU: constructors
+      # must not touch a device.
+      - name: Check libhipgpu.so ELF contract
+        run: |
+          set -euo pipefail
+          BUILD="${{ runner.workspace }}/build/$(basename "$PWD")"
+          THEROCK="$BUILD/_therock"
+          export LD_LIBRARY_PATH="${THEROCK}/lib:${THEROCK}/lib/llvm/lib:${THEROCK}/llvm/lib:${LD_LIBRARY_PATH:-}"
+          ctest --test-dir "$BUILD" -C Release -R '^HipGpuElfContract$' --output-on-failure
+
       # -----------------------------------------------------------------------
       # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the
       # ort-install prefix as ORT_HOME. Kept out of
