@@ -598,6 +598,23 @@ static constexpr GemvCfg kGemvNt[] = {
 static constexpr int kNumGemvNt =
     static_cast<int>(sizeof(kGemvNt) / sizeof(kGemvNt[0]));
 
+template <typename X> struct GemmNoDeduce {
+  using type = X;
+};
+
+/* One launch site per kernel signature, instead of a hipLaunchKernelGGL
+ * expansion per kernel instance: callers pick the instance, this launches it.
+ * The kernel pointer alone fixes the argument types. A null fn fails the
+ * launch, which the caller's hipGetLastError() reports. */
+template <typename... P>
+static void launchGemmKernel(void (*fn)(P...), dim3 grid, dim3 block,
+                             hipStream_t s,
+                             typename GemmNoDeduce<P>::type... args) {
+  void *ptrs[] = {&args...};
+  (void)hipLaunchKernel(reinterpret_cast<const void *>(fn), grid, block, ptrs,
+                        0, s);
+}
+
 template <typename T>
 static void launchGemvNt(int id, hipStream_t s, const T *A, const T *B,
                            const T *C, T *Y, int M, int N, int K, float alpha,
@@ -605,11 +622,10 @@ static void launchGemvNt(int id, hipStream_t s, const T *A, const T *B,
   const GemvCfg c = kGemvNt[id];
   dim3 grid((N + c.tile_n - 1) / c.tile_n, M);
   dim3 block(c.threads);
+  decltype(&gemm_gemv_nt_kernel<T, 32, 1>) fn = nullptr;
 #define GEMM_GEMV_NT(ID, BS, TN)                                               \
   case ID:                                                                     \
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_nt_kernel<T, BS, TN>), grid,  \
-                       block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,  \
-                       cDim1);                                                 \
+    fn = gemm_gemv_nt_kernel<T, BS, TN>;                                       \
     break
   switch (id) {
     GEMM_GEMV_NT(0, 32, 1);
@@ -624,9 +640,11 @@ static void launchGemvNt(int id, hipStream_t s, const T *A, const T *B,
     GEMM_GEMV_NT(9, 512, 4);
     GEMM_GEMV_NT(10, 512, 8);
   default:
-    break;
+    return;
   }
 #undef GEMM_GEMV_NT
+  launchGemmKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                   cDim1);
 }
 
 /* NN decode config table (Stage A7): one axis, the block/thread count -- the
@@ -647,11 +665,10 @@ static void launchGemvNn(int id, hipStream_t s, const T *A, const T *B,
                           float beta, int cDim0, int cDim1) {
   const int threads = kGemvNn[id].threads;
   dim3 grid((N + threads - 1) / threads, M);
+  decltype(&gemm_gemv_nn_kernel<T, 32>) fn = nullptr;
 #define GEMM_GEMV_NN(ID, BS)                                                 \
   case ID:                                                                   \
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_nn_kernel<T, BS>), grid,    \
-                       dim3(BS), 0, s, A, B, C, Y, M, N, K, alpha, beta,     \
-                       cDim0, cDim1);                                        \
+    fn = gemm_gemv_nn_kernel<T, BS>;                                         \
     break
   switch (id) {
     GEMM_GEMV_NN(0, 32);
@@ -660,9 +677,11 @@ static void launchGemvNn(int id, hipStream_t s, const T *A, const T *B,
     GEMM_GEMV_NN(3, 256);
     GEMM_GEMV_NN(4, 512);
   default:
-    break;
+    return;
   }
 #undef GEMM_GEMV_NN
+  launchGemmKernel(fn, grid, dim3(threads), s, A, B, C, Y, M, N, K, alpha,
+                   beta, cDim0, cDim1);
 }
 
 static int gemmEnvInt(const char *name, int defv) {
@@ -1086,17 +1105,11 @@ static void launchGemvKnMr(hipStream_t s, const T *A, const T *B, const T *C,
       }
   }
   const dim3 grid((N + kCols[id] - 1) / kCols[id], (M + MR - 1) / MR);
-#define GEMM_GEMV_KN(BLOCK, KS)                                                \
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_kn_kernel<T, TA, MR, BLOCK, KS>), \
-                     grid, dim3(BLOCK), 0, s, A, B, C, Y, M, N, K, alpha, beta, \
-                     cDim0, cDim1)
-  if (id == 0)
-    GEMM_GEMV_KN(256, 16);
-  else if (id == 1)
-    GEMM_GEMV_KN(512, 64);
-  else
-    GEMM_GEMV_KN(512, 128);
-#undef GEMM_GEMV_KN
+  const auto fn = id == 0   ? gemm_gemv_kn_kernel<T, TA, MR, 256, 16>
+                  : id == 1 ? gemm_gemv_kn_kernel<T, TA, MR, 512, 64>
+                            : gemm_gemv_kn_kernel<T, TA, MR, 512, 128>;
+  launchGemmKernel(fn, grid, dim3(id == 0 ? 256 : 512), s, A, B, C, Y, M, N, K,
+                   alpha, beta, cDim0, cDim1);
   CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-kn M=%d N=%d K=%d ta=%d -> kn-cfg[%d]\n",
                            M, N, K, TA ? 1 : 0, id);
 }
@@ -1129,25 +1142,16 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
      * where the multi-row kernels' fixed cost loses. */
     const bool mr_big = static_cast<size_t>(N) * K >= (size_t{1} << 16);
     if (transB && M < 16 && mr_big && (transA || (M >= 2 && mr_on))) {
-#define GEMM_GEMV_MR(TA, MR, TN)                                               \
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemm_gemv_mr_nt_kernel<T, TA, MR, TN>),   \
-                     dim3((N + TN - 1) / TN), dim3(128), 0, s, A, B, C, Y, M, \
-                     N, K, alpha, beta, cDim0, cDim1)
-#define GEMM_GEMV_MR_ALL(TA)                                                   \
-  do {                                                                         \
-    if (M <= 4)                                                                \
-      GEMM_GEMV_MR(TA, 4, 8);                                                  \
-    else if (M <= 8)                                                           \
-      GEMM_GEMV_MR(TA, 8, 8);                                                  \
-    else                                                                       \
-      GEMM_GEMV_MR(TA, 16, 4);                                                 \
-  } while (0)
-      if (transA)
-        GEMM_GEMV_MR_ALL(true);
-      else
-        GEMM_GEMV_MR_ALL(false);
-#undef GEMM_GEMV_MR_ALL
+      /* (MR, TN) = (4, 8) for M <= 4, (8, 8) for M <= 8, else (16, 4). */
+#define GEMM_GEMV_MR(TA)                                                       \
+  (M <= 4   ? gemm_gemv_mr_nt_kernel<T, TA, 4, 8>                              \
+   : M <= 8 ? gemm_gemv_mr_nt_kernel<T, TA, 8, 8>                              \
+            : gemm_gemv_mr_nt_kernel<T, TA, 16, 4>)
+      const auto fn = transA ? GEMM_GEMV_MR(true) : GEMM_GEMV_MR(false);
 #undef GEMM_GEMV_MR
+      const int tn = M <= 8 ? 8 : 4;
+      launchGemmKernel(fn, dim3((N + tn - 1) / tn), dim3(128), s, A, B, C, Y,
+                       M, N, K, alpha, beta, cDim0, cDim1);
       CUSTOM_KERNELS_DEBUG_LOG("[gemm] gemv-mr M=%d N=%d K=%d ta=%d\n", M, N,
                                K, transA);
       return hipGetLastError() == hipSuccess ? 0 : 1;
@@ -1912,23 +1916,6 @@ static WmmaKernel<T> wmmaKernel(bool bc, bool db) {
   return nullptr;
 }
 
-/* One launch site for every gemm_wmma_kernel instance, instead of a
- * hipLaunchKernelGGL expansion per instance. A null fn (no instance for the
- * requested tile) fails the launch, which the caller's hipGetLastError()
- * reports. */
-template <typename T>
-static void launchWmmaKernel(WmmaKernel<T> fn, dim3 grid, dim3 block,
-                             hipStream_t s, const T *A, const T *B, const T *C,
-                             T *Y, int M, int N, int K, float alpha, float beta,
-                             int cDim0, int cDim1, int swizzle_n, float *sk_acc,
-                             int ldb, int n_base, int lda, int stag) {
-  void *args[] = {&A,     &B,     &C,         &Y,      &M,   &N,
-                  &K,     &alpha, &beta,      &cDim0,  &cDim1, &swizzle_n,
-                  &sk_acc, &ldb,  &n_base,    &lda,    &stag};
-  (void)hipLaunchKernel(reinterpret_cast<const void *>(fn), grid, block, args,
-                        0, s);
-}
-
 static bool wmmaApplies(const WmmaCfg &c, int M, int N, int K) {
   if (c.bn < 64 && N > 2 * c.bn)
     return false;
@@ -2351,7 +2338,7 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   GEMM_WMMA_TRY(128, 128, 2, 4, 16)
   GEMM_WMMA_TRY(64, 128, 2, 4, 16) {}
 #undef GEMM_WMMA_TRY
-  launchWmmaKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+  launchGemmKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
                    cDim1, sw_eff, skp, ldb, 0, lda_eff, stag);
 
   if (sk > 1 && skp) {
@@ -2625,7 +2612,7 @@ static void launchWmmaTa(int id, hipStream_t s, const T *A, const T *B,
   GEMM_WMMA_TA_ONE(128, 64, 2, 2)
   GEMM_WMMA_TA_ONE(64, 64, 2, 2) {}
 #undef GEMM_WMMA_TA_ONE
-  launchWmmaKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+  launchGemmKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
                    cDim1, c.swizzle_n, nullptr, K, 0, M, stag);
 }
 
@@ -2775,37 +2762,17 @@ static int launchTiledFma(int id, hipStream_t s, const T *A, const T *B,
   dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm);
   dim3 block(c.threads);
 
+  decltype(&gemm_tiled_fma_kernel<T, false, false, 64, 64, 16, 4, 4, 256>) fn =
+      nullptr;
 #define GEMM_TILEDFMA_ONE(BM, BN, BK, TM, TN, THR)                            \
-  do {                                                                       \
-    if (!transA && !transB)                                                  \
-      hipLaunchKernelGGL(                                                    \
-          HIP_KERNEL_NAME(                                                   \
-              gemm_tiled_fma_kernel<T, false, false, BM, BN, BK, TM, TN,     \
-                                    THR>),                                   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
-          cDim1);                                                            \
-    else if (!transA && transB)                                              \
-      hipLaunchKernelGGL(                                                    \
-          HIP_KERNEL_NAME(                                                   \
-              gemm_tiled_fma_kernel<T, false, true, BM, BN, BK, TM, TN,      \
-                                    THR>),                                   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
-          cDim1);                                                            \
-    else if (transA && !transB)                                              \
-      hipLaunchKernelGGL(                                                    \
-          HIP_KERNEL_NAME(                                                   \
-              gemm_tiled_fma_kernel<T, true, false, BM, BN, BK, TM, TN,      \
-                                    THR>),                                   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
-          cDim1);                                                            \
-    else                                                                     \
-      hipLaunchKernelGGL(                                                    \
-          HIP_KERNEL_NAME(                                                   \
-              gemm_tiled_fma_kernel<T, true, true, BM, BN, BK, TM, TN,       \
-                                    THR>),                                   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,        \
-          cDim1);                                                            \
-  } while (0)
+  fn = transA ? (transB ? gemm_tiled_fma_kernel<T, true, true, BM, BN, BK, TM, \
+                                                TN, THR>                      \
+                        : gemm_tiled_fma_kernel<T, true, false, BM, BN, BK,   \
+                                                TM, TN, THR>)                 \
+              : (transB ? gemm_tiled_fma_kernel<T, false, true, BM, BN, BK,   \
+                                                TM, TN, THR>                  \
+                        : gemm_tiled_fma_kernel<T, false, false, BM, BN, BK,  \
+                                                TM, TN, THR>)
 
 #define GEMM_TILEDFMA_TRY(BM, BN, BK, TM, TN, THR)                            \
   if (c.bm == BM && c.bn == BN && c.bk == BK && c.tm == TM && c.tn == TN &&   \
@@ -2827,6 +2794,8 @@ static int launchTiledFma(int id, hipStream_t s, const T *A, const T *B,
   }
 #undef GEMM_TILEDFMA_TRY
 #undef GEMM_TILEDFMA_ONE
+  launchGemmKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                   cDim1);
 
   return hipGetLastError() == hipSuccess ? 0 : 1;
 }
