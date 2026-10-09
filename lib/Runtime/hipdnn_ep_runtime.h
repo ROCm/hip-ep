@@ -1870,13 +1870,12 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
-// Today this is a stub: the OnnxToHip decompose pattern handles the common
-// case (compile-time constant starts/ends/axes/steps with positive unit
-// stride) by rewriting onnx.Slice to tensor.extract_slice, so this runtime
-// entry is only called for non-constant-indices or negative-step Slices.
-// The stub only logs its parameters and returns success — models that
-// exercise it will produce incorrect Slice output but will still link and
-// run end-to-end for IR-shape debugging.
+// The OnnxToHip decompose pattern handles the common case (compile-time
+// constant starts/ends/axes/steps with positive stride) by rewriting
+// onnx.Slice to tensor.extract_slice. This entry is only called for
+// non-constant-indices or negative-step Slices. Index tensors stay on the
+// device; the kernel applies ONNX clamp/axis mapping without a host
+// stream sync.
 //
 // axes / steps may be nullptr when the corresponding optional input is absent.
 int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,

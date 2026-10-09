@@ -19,6 +19,10 @@ static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
                                                 resultType.getDimSize(axis));
   }
 
+  // Readback is only for sizing tensor.empty. wrap_top_k no longer D2Hs K;
+  // the kernel loads it. A second sync here is required because the alloc
+  // extent must be a host index.
+
   auto kType = mlir::cast<mlir::RankedTensorType>(k.getType());
   if (kType.getRank() == 0) {
     mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, k);

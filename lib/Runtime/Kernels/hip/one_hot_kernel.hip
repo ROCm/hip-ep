@@ -4,6 +4,16 @@
  *
  * ONNX OneHot: fill output with off_value, then write on_value at index
  * positions along the inserted axis.
+ *
+ * Before: wrap_one_hot D2H'd `depth` and launch_one_hot D2H'd `values`,
+ *         each with a hipStreamSynchronize, then passed the host scalars
+ *         as kernel args.
+ * After:  no host wait. Fill/scatter load `values[0]` / `values[1]` from
+ *         device (once per block). Depth is the inserted output axis
+ *         extent — OneHotToHip sizes tensor.empty to the real depth
+ *         (static, or via hip.readback_scalar when depth is dynamic) —
+ *         so output_shape[axis] is the ONNX depth used for negative-index
+ *         wrap and out-of-range skips.
  */
 
 #include "hip_custom_kernels.h"
@@ -19,7 +29,6 @@ constexpr int kMaxRank = 8;
 
 struct OneHotGeom {
   int64_t axis;
-  int64_t depth;
   int64_t indices_rank;
   int64_t output_rank;
   int64_t ishape[kMaxRank];
@@ -29,7 +38,12 @@ struct OneHotGeom {
 
 template <typename T>
 __global__ void one_hot_fill_kernel(T *__restrict__ output, int64_t num_elements,
-                                    T off_value) {
+                                    const T *__restrict__ values) {
+  __shared__ T off_value;
+  if (threadIdx.x == 0)
+    off_value = values[0];
+  __syncthreads();
+
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_elements)
@@ -39,18 +53,25 @@ __global__ void one_hot_fill_kernel(T *__restrict__ output, int64_t num_elements
 
 template <typename T, typename IdxT>
 __global__ void one_hot_scatter_kernel(const IdxT *__restrict__ indices,
-                                       T on_value, T *__restrict__ output,
+                                       const T *__restrict__ values,
+                                       T *__restrict__ output,
                                        int64_t num_indices, OneHotGeom geom) {
+  __shared__ T on_value;
+  if (threadIdx.x == 0)
+    on_value = values[1];
+  __syncthreads();
+
   int64_t tid =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= num_indices)
     return;
 
+  const int64_t depth = geom.oshape[geom.axis];
   int64_t idx_val = static_cast<int64_t>(indices[tid]);
-  if (idx_val < -geom.depth || idx_val >= geom.depth)
+  if (idx_val < -depth || idx_val >= depth)
     return;
   if (idx_val < 0)
-    idx_val += geom.depth;
+    idx_val += depth;
 
   int64_t coords[kMaxRank] = {0};
   int64_t rem = tid;
@@ -74,30 +95,22 @@ __global__ void one_hot_scatter_kernel(const IdxT *__restrict__ indices,
 
 template <typename T, typename IdxT>
 static int launch_one_hot(void *stream, const void *indices, const void *values,
-                          void *output, int64_t axis, int64_t depth,
-                          int64_t indices_rank, int64_t output_rank,
-                          const int64_t *indices_shape,
+                          void *output, int64_t axis, int64_t indices_rank,
+                          int64_t output_rank, const int64_t *indices_shape,
                           const int64_t *output_shape, int64_t num_indices,
                           int64_t num_output_elements) {
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
+  const T *values_dev = static_cast<const T *>(values);
 
-  T host_values[2] = {};
-  hipMemcpyAsync(host_values, values, 2 * sizeof(T), hipMemcpyDeviceToHost,
-                 hip_stream);
-  hipError_t err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-  T off_value = host_values[0];
-  T on_value = host_values[1];
-
+  (void)hipGetLastError();
   if (num_output_elements > 0) {
     int fill_grid = static_cast<int>(
         (num_output_elements + kBlockSize - 1) / kBlockSize);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(one_hot_fill_kernel<T>),
                      dim3(fill_grid), dim3(kBlockSize), 0, hip_stream,
-                     static_cast<T *>(output), num_output_elements, off_value);
-    err = hipGetLastError();
+                     static_cast<T *>(output), num_output_elements, values_dev);
+    hipError_t err = hipGetLastError();
     if (err != hipSuccess)
       return static_cast<int>(err);
   }
@@ -107,7 +120,6 @@ static int launch_one_hot(void *stream, const void *indices, const void *values,
 
   OneHotGeom geom{};
   geom.axis = axis;
-  geom.depth = depth;
   geom.indices_rank = indices_rank;
   geom.output_rank = output_rank;
   for (int64_t i = 0; i < indices_rank; ++i)
@@ -120,11 +132,12 @@ static int launch_one_hot(void *stream, const void *indices, const void *values,
 
   int scatter_grid =
       static_cast<int>((num_indices + kBlockSize - 1) / kBlockSize);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(HIP_KERNEL_NAME(one_hot_scatter_kernel<T, IdxT>),
                    dim3(scatter_grid), dim3(kBlockSize), 0, hip_stream,
-                   static_cast<const IdxT *>(indices), on_value,
+                   static_cast<const IdxT *>(indices), values_dev,
                    static_cast<T *>(output), num_indices, geom);
-  err = hipGetLastError();
+  hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] one_hot_scatter_kernel launch failed: %s\n",
             hipGetErrorString(err));
@@ -135,19 +148,18 @@ static int launch_one_hot(void *stream, const void *indices, const void *values,
 
 template <typename T>
 static int dispatch_indices(void *stream, const void *indices, const void *values,
-                            void *output, int64_t axis, int64_t depth,
-                            int64_t indices_rank, int64_t output_rank,
-                            const int64_t *indices_shape,
+                            void *output, int64_t axis, int64_t indices_rank,
+                            int64_t output_rank, const int64_t *indices_shape,
                             const int64_t *output_shape, int64_t num_indices,
                             int64_t num_output_elements,
                             int indices_element_size_bytes) {
   if (indices_element_size_bytes == 4) {
     return launch_one_hot<T, int32_t>(
-        stream, indices, values, output, axis, depth, indices_rank, output_rank,
+        stream, indices, values, output, axis, indices_rank, output_rank,
         indices_shape, output_shape, num_indices, num_output_elements);
   }
   return launch_one_hot<T, int64_t>(
-      stream, indices, values, output, axis, depth, indices_rank, output_rank,
+      stream, indices, values, output, axis, indices_rank, output_rank,
       indices_shape, output_shape, num_indices, num_output_elements);
 }
 
@@ -157,13 +169,16 @@ extern "C" int hip_one_hot(
     void *stream, const void *indices, const void *depth, const void *values,
     void *output, int64_t axis, int64_t indices_rank, int64_t output_rank,
     const int64_t *indices_shape, const int64_t *output_shape,
-    int64_t num_indices, int64_t num_output_elements, int64_t depth_scalar,
-    int element_size_bytes, int indices_element_size_bytes) {
+    int64_t num_indices, int64_t num_output_elements, int element_size_bytes,
+    int indices_element_size_bytes) {
+  // Depth lives in output_shape[axis]; the device pointer is unused.
   (void)depth;
   if (!indices || !values || !output || !indices_shape || !output_shape)
     return -1;
   if (indices_rank < 0 || indices_rank > 7 || output_rank <= indices_rank ||
       output_rank > 8)
+    return -1;
+  if (axis < 0 || axis >= output_rank)
     return -1;
   if (indices_element_size_bytes != 4 && indices_element_size_bytes != 8)
     return -1;
@@ -171,31 +186,31 @@ extern "C" int hip_one_hot(
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_one_hot: axis=%lld, depth=%lld, idx_rank=%lld, "
       "out_rank=%lld, num_idx=%lld, num_out=%lld, elem=%d\n",
-      (long long)axis, (long long)depth_scalar, (long long)indices_rank,
+      (long long)axis, (long long)output_shape[axis], (long long)indices_rank,
       (long long)output_rank, (long long)num_indices,
       (long long)num_output_elements, element_size_bytes);
 
   switch (element_size_bytes) {
   case 1:
     return dispatch_indices<uint8_t>(
-        stream, indices, values, output, axis, depth_scalar, indices_rank,
-        output_rank, indices_shape, output_shape, num_indices,
-        num_output_elements, indices_element_size_bytes);
+        stream, indices, values, output, axis, indices_rank, output_rank,
+        indices_shape, output_shape, num_indices, num_output_elements,
+        indices_element_size_bytes);
   case 2:
     return dispatch_indices<uint16_t>(
-        stream, indices, values, output, axis, depth_scalar, indices_rank,
-        output_rank, indices_shape, output_shape, num_indices,
-        num_output_elements, indices_element_size_bytes);
+        stream, indices, values, output, axis, indices_rank, output_rank,
+        indices_shape, output_shape, num_indices, num_output_elements,
+        indices_element_size_bytes);
   case 4:
     return dispatch_indices<uint32_t>(
-        stream, indices, values, output, axis, depth_scalar, indices_rank,
-        output_rank, indices_shape, output_shape, num_indices,
-        num_output_elements, indices_element_size_bytes);
+        stream, indices, values, output, axis, indices_rank, output_rank,
+        indices_shape, output_shape, num_indices, num_output_elements,
+        indices_element_size_bytes);
   case 8:
     return dispatch_indices<uint64_t>(
-        stream, indices, values, output, axis, depth_scalar, indices_rank,
-        output_rank, indices_shape, output_shape, num_indices,
-        num_output_elements, indices_element_size_bytes);
+        stream, indices, values, output, axis, indices_rank, output_rank,
+        indices_shape, output_shape, num_indices, num_output_elements,
+        indices_element_size_bytes);
   default:
     fprintf(stderr,
             "[custom_kernels] hip_one_hot: unsupported element_size=%d\n",

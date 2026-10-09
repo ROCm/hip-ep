@@ -1298,11 +1298,14 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
-HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
-                             void* indices, int64_t axis, int64_t largest,
-                             int64_t sorted, int64_t rank,
-                             const int64_t* x_shape, int64_t k,
-                             int element_size_bytes);
+/* TopK: K stays on device. Thread 0 loads the INT64 scalar and builds
+ * output strides; K > 256 sets device_error_flag (nullable).
+ */
+HIP_KERNEL_API int hip_top_k(void* stream, const void* data, const void* k,
+                             void* values, void* indices, int64_t axis,
+                             int64_t largest, int64_t sorted, int64_t rank,
+                             const int64_t* x_shape, int element_size_bytes,
+                             void* device_error_flag);
 
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
@@ -1336,6 +1339,11 @@ HIP_KERNEL_API int hip_compress(
     size_t workspace_bytes,
     int element_size_bytes);
 
+/* OneHot: no host D2H. Kernels load values[0]/values[1] on device.
+ * Depth is output_shape[axis] (the inserted axis extent). `depth` is
+ * unused and may be null from the kernel's point of view; wrap_one_hot
+ * still passes the graph tensor for ABI stability.
+ */
 HIP_KERNEL_API int hip_one_hot(
     void* stream,
     const void* indices,
@@ -1349,7 +1357,6 @@ HIP_KERNEL_API int hip_one_hot(
     const int64_t* output_shape,
     int64_t num_indices,
     int64_t num_output_elements,
-    int64_t depth_scalar,
     int element_size_bytes,
     int indices_element_size_bytes);
 
@@ -1699,44 +1706,36 @@ HIP_KERNEL_API int hip_gather_nd(
  * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
  * graph-constant (or have negative steps).
  *
- * The host wrapper D2Hs the (typically tiny) index tensors and resolves
- * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
- * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
- * one thread per output element and computes:
+ * Index tensors stay on the device. Thread 0 of each block applies the
+ * ONNX-13+ negative-index / clamp / default-axes / default-steps rules
+ * into shared memory; copy threads then compute:
  *
  *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
  *     output[out_idx] = input[in_offset]
  *
- * `step[d]` may be negative; correctness relies on the host wrapper
- * having already resolved start / end to absolute positions per ONNX's
- * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
+ * `step[d]` may be negative. When the resolved logical extent on an axis
+ * is smaller than `output_shape_host[d]` (SliceToHip over-allocation),
+ * positions in the tail are filled with zero. Invalid runtime indices
+ * set `device_error_flag` (nullable) without a host stream sync.
  *
  * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
  *
- * Supported dtypes: f16, f32, i32, i64.
+ * Supported dtypes: f16, f32, i32, i64. INT64 index tensors only.
  */
 HIP_KERNEL_API int hip_slice(
     void* stream,
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,     /* physical alloc shape       */
-    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
-                                             may be NULL, in which case the
-                                             kernel treats it as identical to
-                                             output_shape_host (i.e. no
-                                             over-alloc; entire physical
-                                             buffer is filled by the slice).
-                                             When set and logical[d] <
-                                             output_shape[d] for some d,
-                                             positions in the over-allocated
-                                             tail are filled with zero — the
-                                             host wrapper does not need to
-                                             pre-memset the buffer.        */
-    const int64_t* starts_per_axis_host,  /* length = rank */
-    const int64_t* steps_per_axis_host,   /* length = rank */
+    const int64_t* output_shape_host, /* physical alloc shape */
+    const int64_t* starts_dev,        /* INT64, length K */
+    const int64_t* ends_dev,          /* INT64, length K */
+    const int64_t* axes_dev,          /* INT64, length K, nullable */
+    const int64_t* steps_dev,         /* INT64, length K, nullable */
+    int64_t starts_num_elements,      /* K */
     int rank,
-    int hip_dtype);
+    int hip_dtype,
+    void* device_error_flag);         /* GPU int*, nullable */
 
 /* =========================================================================
  * ScatterND (ONNX-13+ with optional `reduction`)
@@ -1820,10 +1819,9 @@ HIP_KERNEL_API int hip_nonzero(
  * =========================================================================
  *
  * One thread per (outer, inner) slice; each thread sequentially scans
- * `axis_size` elements with stride `inner`. The host wrapper decomposes
- *   outer = product(shape[:axis]); axis_size = shape[axis];
- *   inner = product(shape[axis+1:])
- * and synchronously D2H-reads the axis scalar.
+ * `axis_size` elements with stride `inner`. Axis stays on the device:
+ * the launch grid is num_elements (upper bound on slices) and thread 0
+ * splits data_shape. Out-of-range axis sets device_error_flag.
  *
  * FP16 accumulates in float to avoid precision loss for long axes.
  */
@@ -1831,12 +1829,15 @@ HIP_KERNEL_API int hip_cumsum(
     void* stream,
     const void* x,
     void* y,
-    int64_t outer,
-    int64_t axis_size,
-    int64_t inner,
+    const int64_t* data_shape,
+    int64_t data_rank,
+    int64_t num_elements,
+    const void* axis,
+    int axis_elem_bytes,
     int hip_dtype,
     int exclusive,
-    int reverse);
+    int reverse,
+    void* device_error_flag);
 
 /* =========================================================================
  * Pad (constant / reflect / edge / wrap)
@@ -1846,11 +1847,9 @@ HIP_KERNEL_API int hip_cumsum(
  * either copy input or fill from the pad_value depending on mode.
  *
  * `pad_mode`:    0 = Constant, 1 = Reflect, 2 = Edge, 3 = Wrap.
- * `lower_pads_host`: per-dim begin pad (length = rank), already filtered
- *                    by the `axes` attribute (defaults to 0 for unaffected
- *                    dims). Upper bound implied by output_shape.
- * `pad_value_host` : host pointer to a scalar of the data type (used only
- *                    when pad_mode == Constant). May be null -> default 0.
+ * pads / axes stay on the device; thread 0 maps ONNX-18 pads onto per-dim
+ * lower_pads (defaults to 0). constant_value is a device scalar used only
+ * for Constant mode (null -> 0). Invalid axes set device_error_flag.
  */
 HIP_KERNEL_API int hip_pad(
     void* stream,
@@ -1858,11 +1857,15 @@ HIP_KERNEL_API int hip_pad(
     void* output,
     const int64_t* input_shape_host,
     const int64_t* output_shape_host,
-    const int64_t* lower_pads_host,
+    const int64_t* pads_dev,
+    const int64_t* axes_dev,
+    int64_t pads_num_elements,
+    int64_t n_axes,
     int rank,
     int hip_dtype,
     int pad_mode,
-    const void* pad_value_host);
+    const void* constant_value_dev,
+    void* device_error_flag);
 
 /* =========================================================================
  * LayerNormalization (ONNX-17)
