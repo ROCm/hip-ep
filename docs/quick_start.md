@@ -118,8 +118,8 @@ FlatBuffers does not conflict with ours.
 
 ```bash
 cd ..  # Go to workspace directory (parent of project root)
-# Recommend a release branch such as rel-1.25.1
-git clone -b rel-1.25.1 https://github.com/Microsoft/onnxruntime.git
+# Pin must match cmake/deps.txt (currently v1.30.0).
+git clone -b v1.30.0 https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 ```
 
@@ -147,7 +147,7 @@ ls $LOCAL_DIR/lib/cmake/onnxruntime/
 
 ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # Should see one wheel matching your Python version, e.g.
-# onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
+# onnxruntime_directml-1.30.0-cp314-cp314-win_amd64.whl
 ```
 
 ### 2. Build hip-ep

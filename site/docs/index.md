@@ -93,7 +93,7 @@ against a specific ABI.
 | Component | Version |
 |---|---|
 | HIP EP | `{{ site.hip_ep_version }}` |
-| ONNX Runtime | `1.27.0` |
+| ONNX Runtime | `1.30.0` |
 | ONNX Runtime GenAI (OGA) | `0.14.0` + AMDGPU integration [PR 2194](https://github.com/microsoft/onnxruntime-genai/pull/2194) |
 
 The full dependency set — including LLVM/MLIR/LLD, protobuf, flatbuffers, ONNX Runtime,
