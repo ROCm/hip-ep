@@ -647,6 +647,75 @@ extern "C" int hip_qmoe_bucket_tokens_ragged(
   return static_cast<int>(err);
 }
 
+// ---------------------------------------------------------------------------
+// Device-side row tiles for the grouped expert GEMM. Experts with
+// 0 < count <= split_rows get tiles of rows_small rows, larger ones tiles of
+// rows_big, each as (expert, row0, rows) in ascending expert order. Counts are
+// staged in LDS so the serial scan on thread 0 never waits on global memory.
+// ---------------------------------------------------------------------------
+__global__ void qmoe_build_row_tiles_kernel(
+    const int32_t* __restrict__ expert_counts, int num_experts, int split_rows,
+    int rows_small, int rows_big, int32_t* __restrict__ tiles_small,
+    int32_t* __restrict__ num_small, int32_t* __restrict__ tiles_big,
+    int32_t* __restrict__ num_big) {
+  extern __shared__ int32_t tile_base[];  // [2][num_experts]
+  for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
+    const int c = expert_counts[e];
+    tile_base[e] = (c > 0 && c <= split_rows) ? (c + rows_small - 1) / rows_small : 0;
+    tile_base[num_experts + e] = c > split_rows ? (c + rows_big - 1) / rows_big : 0;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int s = 0, b = 0;
+    for (int e = 0; e < num_experts; e++) {
+      const int ns = tile_base[e], nb = tile_base[num_experts + e];
+      tile_base[e] = s;
+      tile_base[num_experts + e] = b;
+      s += ns;
+      b += nb;
+    }
+    *num_small = s;
+    *num_big = b;
+  }
+  __syncthreads();
+  for (int e = threadIdx.x; e < num_experts; e += blockDim.x) {
+    const int c = expert_counts[e];
+    if (c <= 0) continue;
+    const bool small = c <= split_rows;
+    const int rows = small ? rows_small : rows_big;
+    int32_t* out = (small ? tiles_small : tiles_big) +
+                   3 * tile_base[(small ? 0 : num_experts) + e];
+    for (int r0 = 0; r0 < c; r0 += rows, out += 3) {
+      out[0] = e;
+      out[1] = r0;
+      out[2] = min(rows, c - r0);
+    }
+  }
+}
+
+extern "C" int hip_qmoe_build_row_tiles(
+    void* stream, const void* expert_counts, int64_t num_experts,
+    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
+    void* num_small, void* tiles_big, void* num_big) {
+  if (num_experts <= 0 || split_rows < 0 || rows_small <= 0 || rows_big <= 0)
+    return -1;
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const size_t shmem = 2 * static_cast<size_t>(num_experts) * sizeof(int32_t);
+  hipLaunchKernelGGL(qmoe_build_row_tiles_kernel, dim3(1), dim3(kBlock), shmem,
+                     s, static_cast<const int32_t*>(expert_counts),
+                     static_cast<int>(num_experts), static_cast<int>(split_rows),
+                     static_cast<int>(rows_small), static_cast<int>(rows_big),
+                     static_cast<int32_t*>(tiles_small),
+                     static_cast<int32_t*>(num_small),
+                     static_cast<int32_t*>(tiles_big),
+                     static_cast<int32_t*>(num_big));
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_build_row_tiles failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 // ===========================================================================
 // Fused decode QMoE: 4 kernels per layer (fc1, swiglu, fc2, reduce).
 // Eliminates the bucket_tokens + D2H + hipStreamSynchronize + host expert
