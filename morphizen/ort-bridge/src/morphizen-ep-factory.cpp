@@ -6,6 +6,7 @@
 
 #include "./morphizen-ep-factory.hpp"
 #include "./morphizen-ep.hpp"
+#include "./morphizen-hip-device-select.hpp"
 #include "./ort-api-version.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
@@ -13,6 +14,9 @@
 #include <glog/logging.h>
 #include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>
+
+#include <mutex>
+#include <string>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
@@ -136,6 +140,30 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
           vendor_id != factory->vendor_id_) {
         continue;
       }
+      const OrtKeyValuePairs *hw_metadata =
+          factory->ort_api.HardwareDevice_Metadata(hardware_device);
+      auto hw_value = [&](const char *key) -> const char * {
+        const char *v = hw_metadata
+                            ? factory->ort_api.GetKeyValue(hw_metadata, key)
+                            : nullptr;
+        return v ? v : "-";
+      };
+      MY_LOG(1) << "GetSupportedDevices: AMD GPU DxgiAdapterNumber="
+                << hw_value("DxgiAdapterNumber")
+                << " LUID=" << hw_value("LUID");
+      // Checked from the environment only: HIP itself must not be loaded
+      // while ORT enumerates devices.
+      static std::once_flag filter_warning_once;
+      std::call_once(filter_warning_once, [] {
+        const std::string filters = DescribeHipDeviceFilterEnv();
+        if (!filters.empty()) {
+          LOG(WARNING) << "MorphiZen EP: HIP device filtering is set ("
+                       << filters
+                       << "). The HIP runtime hides every AMD GPU these "
+                          "exclude; a session placed on a hidden GPU fails "
+                          "to find a HIP device.";
+        }
+      });
     }
     // these can be returned as nullptr if you have nothing to add.
     OrtKeyValuePairs *ep_metadata = nullptr;
@@ -175,7 +203,7 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
       if (!factory->gpu_memory_info_) {
         OrtMemoryInfo *raw = nullptr;
         auto *st = factory->ort_api.CreateMemoryInfo_V2(
-            "MorphiZen", OrtMemoryInfoDeviceType_GPU,
+            kHipGpuMemoryInfoName, OrtMemoryInfoDeviceType_GPU,
             /*vendor*/ factory->vendor_id_,
             /*device_id*/ 0, OrtDeviceMemoryType_DEFAULT,
             /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
@@ -188,7 +216,7 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
       if (!factory->gpu_host_accessible_memory_info_) {
         OrtMemoryInfo *raw = nullptr;
         auto *st = factory->ort_api.CreateMemoryInfo_V2(
-            "MorphiZen host accessible", OrtMemoryInfoDeviceType_GPU,
+            kHipHostAccessibleMemoryInfoName, OrtMemoryInfoDeviceType_GPU,
             /*vendor*/ factory->vendor_id_,
             /*device_id*/ 0, OrtDeviceMemoryType_HOST_ACCESSIBLE,
             /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);

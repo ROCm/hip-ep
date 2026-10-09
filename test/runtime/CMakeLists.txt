@@ -37,6 +37,19 @@ add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 
+# HIP device selection of the EP's ORT allocator. The source is HIP- and
+# ORT-free by design, so it builds natively with no SDK.
+add_executable(test-hip-device-select
+    test_hip_device_select.cpp
+    ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src/morphizen-hip-device-select.cpp
+)
+target_compile_features(test-hip-device-select PRIVATE cxx_std_17)
+target_include_directories(test-hip-device-select PRIVATE
+    ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src
+)
+add_test(NAME HipDeviceSelectUnitTest COMMAND test-hip-device-select)
+set_target_properties(test-hip-device-select PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's

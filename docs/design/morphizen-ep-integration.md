@@ -284,3 +284,4 @@ compile-time machinery is already loaded.
 - [constant-handling-design.md](constant-handling-design.md) — constants file format, write order, and runtime upload
 - [compiler-runtime-contract.md](compiler-runtime-contract.md) — `model_metadata` schema; how metadata is embedded in `model.dll`
 - [compilation-options.md](compilation-options.md) — `CompilationOptionsT` fields and CLI mapping
+- [hip-device-selection.md](hip-device-selection.md) — how the ORT allocator picks the HIP device, and HIP last-error hygiene at EP boundaries
