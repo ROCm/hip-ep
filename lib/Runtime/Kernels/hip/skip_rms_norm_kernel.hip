@@ -40,6 +40,7 @@
 #include <hip/hip_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 
 static constexpr int kSkipRmsNormBlockSize = 256;
 
@@ -65,22 +66,31 @@ __device__ inline float skip_block_sum(float partial, float *s_reduce) {
 // One block per row. blockDim.x == kSkipRmsNormBlockSize.
 // `bias` and `sum_out` may be null. VEC2 requires an even norm_size and
 // 4-byte aligned bases on every non-null pointer; the launcher checks both.
-template <typename T, bool VEC2>
+// Each tensor has its own element type (bias shares skip's) so the fp32
+// residual stream of an fp16 model can be normalized without separate Casts.
+template <typename TIn, typename TSkip, typename TG, typename TOut,
+          typename TSum, bool VEC2>
 __global__ void
-hip_skip_rms_norm_kernel(const T *__restrict__ input,
-                         const T *__restrict__ skip,
-                         const T *__restrict__ gamma,
-                         const T *__restrict__ bias, T *__restrict__ output,
-                         T *__restrict__ sum_out, int64_t outer,
-                         int64_t norm_size, float epsilon) {
+hip_skip_rms_norm_kernel(const TIn *__restrict__ input,
+                         const TSkip *__restrict__ skip,
+                         const TG *__restrict__ gamma,
+                         const TSkip *__restrict__ bias,
+                         TOut *__restrict__ output, TSum *__restrict__ sum_out,
+                         int64_t outer, int64_t norm_size, float epsilon) {
+  static_assert(!VEC2 || (std::is_same<TIn, __half>::value &&
+                          std::is_same<TSkip, __half>::value &&
+                          std::is_same<TG, __half>::value &&
+                          std::is_same<TOut, __half>::value &&
+                          std::is_same<TSum, __half>::value),
+                "the packed body is fp16-only");
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
 
-  const T *x_row = input + row * norm_size;
-  const T *s_row = skip + row * norm_size;
-  T *y_row = output + row * norm_size;
-  T *sum_row = sum_out ? sum_out + row * norm_size : nullptr;
+  const TIn *x_row = input + row * norm_size;
+  const TSkip *s_row = skip + row * norm_size;
+  TOut *y_row = output + row * norm_size;
+  TSum *sum_row = sum_out ? sum_out + row * norm_size : nullptr;
 
   __shared__ float s_reduce[kSkipRmsNormBlockSize];
   __shared__ float s_inv_rms;
@@ -217,20 +227,23 @@ __device__ inline float4 row_round(const __half *, float4 v) {
 
 // One block per row. blockDim.x == kSkipRmsNormBlockSize, norm_size % 4 == 0,
 // norm_size / 4 <= MAXV * blockDim.x. `bias` and `sum_out` may be null.
-template <typename T, int MAXV>
+// Per-tensor element types as in hip_skip_rms_norm_kernel.
+template <typename TIn, typename TSkip, typename TG, typename TOut,
+          typename TSum, int MAXV>
 __global__ __launch_bounds__(kSkipRmsNormBlockSize) void
-hip_skip_rms_norm_row_kernel(const T *__restrict__ input,
-                             const T *__restrict__ skip,
-                             const T *__restrict__ gamma,
-                             const T *__restrict__ bias, T *__restrict__ output,
-                             T *__restrict__ sum_out, int64_t norm_size,
+hip_skip_rms_norm_row_kernel(const TIn *__restrict__ input,
+                             const TSkip *__restrict__ skip,
+                             const TG *__restrict__ gamma,
+                             const TSkip *__restrict__ bias,
+                             TOut *__restrict__ output,
+                             TSum *__restrict__ sum_out, int64_t norm_size,
                              float epsilon) {
   constexpr int kWaves = kSkipRmsNormBlockSize / 32;
   __shared__ float s_wave[kWaves];
   const int64_t base = static_cast<int64_t>(blockIdx.x) * norm_size;
   const int64_t norm4 = norm_size / 4;
-  const T *x = input + base;
-  const T *s = skip + base;
+  const TIn *x = input + base;
+  const TSkip *s = skip + base;
 
   float4 t[MAXV];
   float ss = 0.f;
@@ -269,7 +282,7 @@ hip_skip_rms_norm_row_kernel(const T *__restrict__ input,
   const float inv_rms =
       rsqrtf(tot / static_cast<float>(norm_size) + epsilon);
 
-  T *y = output + base;
+  TOut *y = output + base;
 #pragma unroll
   for (int v = 0; v < MAXV; v++) {
     const int64_t i = threadIdx.x + static_cast<int64_t>(v) * blockDim.x;
@@ -282,7 +295,8 @@ hip_skip_rms_norm_row_kernel(const T *__restrict__ input,
   }
 }
 
-template <typename T>
+template <typename TIn, typename TSkip, typename TG, typename TOut,
+          typename TSum>
 inline bool skip_row_eligible(const void *input, const void *skip,
                               const void *gamma, const void *bias,
                               const void *output, const void *sum_out,
@@ -290,14 +304,16 @@ inline bool skip_row_eligible(const void *input, const void *skip,
   if (norm_size % 4 != 0 ||
       norm_size / 4 > static_cast<int64_t>(kRowMaxVec) * kSkipRmsNormBlockSize)
     return false;
-  auto aligned = [](const void *p) {
-    return p == nullptr || (reinterpret_cast<uintptr_t>(p) % (4 * sizeof(T))) == 0;
+  auto aligned = [](const void *p, size_t elem) {
+    return p == nullptr || (reinterpret_cast<uintptr_t>(p) % (4 * elem)) == 0;
   };
-  return aligned(input) && aligned(skip) && aligned(gamma) && aligned(bias) &&
-         aligned(output) && aligned(sum_out);
+  return aligned(input, sizeof(TIn)) && aligned(skip, sizeof(TSkip)) &&
+         aligned(gamma, sizeof(TG)) && aligned(bias, sizeof(TSkip)) &&
+         aligned(output, sizeof(TOut)) && aligned(sum_out, sizeof(TSum));
 }
 
-template <typename T>
+template <typename TIn, typename TSkip, typename TG, typename TOut,
+          typename TSum>
 inline void launch_skip_row(hipStream_t stream, const void *input,
                             const void *skip, const void *gamma,
                             const void *bias, void *output, void *sum_out,
@@ -309,12 +325,13 @@ inline void launch_skip_row(hipStream_t stream, const void *input,
   dim3 block(kSkipRmsNormBlockSize);
 #define SKIP_ROW_CASE(V)                                                       \
   case V:                                                                      \
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_skip_rms_norm_row_kernel<T, V>),    \
-                       grid, block, 0, stream, static_cast<const T *>(input),  \
-                       static_cast<const T *>(skip),                           \
-                       static_cast<const T *>(gamma),                          \
-                       static_cast<const T *>(bias), static_cast<T *>(output), \
-                       static_cast<T *>(sum_out), norm_size, epsilon);         \
+    hipLaunchKernelGGL(                                                        \
+        HIP_KERNEL_NAME(                                                       \
+            hip_skip_rms_norm_row_kernel<TIn, TSkip, TG, TOut, TSum, V>),      \
+        grid, block, 0, stream, static_cast<const TIn *>(input),               \
+        static_cast<const TSkip *>(skip), static_cast<const TG *>(gamma),      \
+        static_cast<const TSkip *>(bias), static_cast<TOut *>(output),         \
+        static_cast<TSum *>(sum_out), norm_size, epsilon);                     \
     break;
   switch (maxv) {
     SKIP_ROW_CASE(1)
@@ -347,6 +364,75 @@ inline bool skip_can_vectorize(const void *input, const void *skip,
          aligned(output) && aligned(sum_out);
 }
 
+// Kernel choice for one dtype combination: the register-resident row kernel
+// when the row fits and every tensor is 4-element aligned, else the two-pass
+// kernel (packed fp16 body when everything is fp16 and 2-element aligned).
+template <typename TIn, typename TSkip, typename TG, typename TOut,
+          typename TSum>
+int launch_skip_rms_norm(hipStream_t stream, const void *input,
+                         const void *skip, const void *gamma, const void *bias,
+                         void *output, void *sum_out, int64_t outer,
+                         int64_t norm_size, float epsilon) {
+  // Clear any error left sticky by a prior kernel whose launcher didn't check
+  // its own status, so the hipGetLastError() below attributes a failure to THIS
+  // launch only.
+  (void)hipGetLastError();
+
+  constexpr bool kAllHalf = std::is_same<TIn, __half>::value &&
+                            std::is_same<TSkip, __half>::value &&
+                            std::is_same<TG, __half>::value &&
+                            std::is_same<TOut, __half>::value &&
+                            std::is_same<TSum, __half>::value;
+  const bool row = skip_row_eligible<TIn, TSkip, TG, TOut, TSum>(
+      input, skip, gamma, bias, output, sum_out, norm_size);
+  const bool vec2 = kAllHalf && !row &&
+                    skip_can_vectorize(input, skip, gamma, bias, output,
+                                       sum_out, norm_size);
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_skip_rms_norm: elem bytes in/skip/gamma/out/sum="
+      "%d/%d/%d/%d/%d, outer=%lld, norm_size=%lld, bias=%s, sum_out=%s, "
+      "kernel=%s\n",
+      (int)sizeof(TIn), (int)sizeof(TSkip), (int)sizeof(TG), (int)sizeof(TOut),
+      (int)sizeof(TSum), (long long)outer, (long long)norm_size,
+      bias ? "yes" : "null", sum_out ? "yes" : "null",
+      row ? "row" : (vec2 ? "two-pass vec2" : "two-pass"));
+
+  if (row) {
+    launch_skip_row<TIn, TSkip, TG, TOut, TSum>(stream, input, skip, gamma,
+                                                bias, output, sum_out, outer,
+                                                norm_size, epsilon);
+  } else {
+    dim3 grid(static_cast<unsigned int>(outer));
+    dim3 block(kSkipRmsNormBlockSize);
+    auto args = [&](auto kernel) {
+      hipLaunchKernelGGL(kernel, grid, block, 0, stream,
+                         static_cast<const TIn *>(input),
+                         static_cast<const TSkip *>(skip),
+                         static_cast<const TG *>(gamma),
+                         static_cast<const TSkip *>(bias),
+                         static_cast<TOut *>(output),
+                         static_cast<TSum *>(sum_out), outer, norm_size,
+                         epsilon);
+    };
+    if constexpr (kAllHalf) {
+      if (vec2)
+        args(hip_skip_rms_norm_kernel<TIn, TSkip, TG, TOut, TSum, true>);
+      else
+        args(hip_skip_rms_norm_kernel<TIn, TSkip, TG, TOut, TSum, false>);
+    } else {
+      args(hip_skip_rms_norm_kernel<TIn, TSkip, TG, TOut, TSum, false>);
+    }
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_skip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 } // namespace
 
 extern "C" int hip_skip_rms_norm(void *stream, const void *input,
@@ -357,95 +443,41 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
                                  int hip_dtype) {
   if (outer <= 0 || norm_size <= 0)
     return 0;
-
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  dim3 grid(static_cast<unsigned int>(outer));
-  dim3 block(kSkipRmsNormBlockSize);
+  if (hip_dtype == HIP_DTYPE_FLOAT16)
+    return launch_skip_rms_norm<__half, __half, __half, __half, __half>(
+        hip_stream, input, skip, gamma, bias, output, input_skip_bias_sum,
+        outer, norm_size, epsilon);
+  if (hip_dtype == HIP_DTYPE_FLOAT32)
+    return launch_skip_rms_norm<float, float, float, float, float>(
+        hip_stream, input, skip, gamma, bias, output, input_skip_bias_sum,
+        outer, norm_size, epsilon);
+  fprintf(stderr, "[custom_kernels] hip_skip_rms_norm: unsupported dtype=%d\n",
+          hip_dtype);
+  return -1;
+}
 
-  // Clear any error left sticky by a prior kernel whose launcher didn't check
-  // its own status, so the hipGetLastError() below attributes a failure to THIS
-  // launch only.
-  (void)hipGetLastError();
-
-  const bool row_f16 =
-      hip_dtype == HIP_DTYPE_FLOAT16 &&
-      skip_row_eligible<__half>(input, skip, gamma, bias, output,
-                                input_skip_bias_sum, norm_size);
-  const bool row_f32 =
-      hip_dtype == HIP_DTYPE_FLOAT32 &&
-      skip_row_eligible<float>(input, skip, gamma, bias, output,
-                               input_skip_bias_sum, norm_size);
-  if (row_f16 || row_f32) {
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_skip_rms_norm: row kernel dtype=%d, outer=%lld, "
-        "norm_size=%lld, bias=%s, sum_out=%s\n",
-        hip_dtype, (long long)outer, (long long)norm_size,
-        bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null");
-    if (row_f16)
-      launch_skip_row<__half>(hip_stream, input, skip, gamma, bias, output,
-                              input_skip_bias_sum, outer, norm_size, epsilon);
-    else
-      launch_skip_row<float>(hip_stream, input, skip, gamma, bias, output,
-                             input_skip_bias_sum, outer, norm_size, epsilon);
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess)
-      fprintf(stderr, "[custom_kernels] hip_skip_rms_norm launch failed: %s\n",
-              hipGetErrorString(err));
-    return static_cast<int>(err);
-  }
-
-  const bool vec2 = (hip_dtype == HIP_DTYPE_FLOAT16) &&
-                    skip_can_vectorize(input, skip, gamma, bias, output,
-                                       input_skip_bias_sum, norm_size);
-
-  CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_skip_rms_norm: dtype=%d, outer=%lld, "
-      "norm_size=%lld, epsilon=%f, bias=%s, sum_out=%s, vec2=%s\n",
-      hip_dtype, (long long)outer, (long long)norm_size, epsilon,
-      bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null",
-      vec2 ? "yes" : "no");
-
-  if (hip_dtype == HIP_DTYPE_FLOAT16) {
-    if (vec2) {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half, true>), grid, block,
-          0, hip_stream, static_cast<const __half *>(input),
-          static_cast<const __half *>(skip),
-          static_cast<const __half *>(gamma),
-          static_cast<const __half *>(bias), static_cast<__half *>(output),
-          static_cast<__half *>(input_skip_bias_sum), outer, norm_size,
-          epsilon);
-    } else {
-      hipLaunchKernelGGL(
-          HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half, false>), grid, block,
-          0, hip_stream, static_cast<const __half *>(input),
-          static_cast<const __half *>(skip),
-          static_cast<const __half *>(gamma),
-          static_cast<const __half *>(bias), static_cast<__half *>(output),
-          static_cast<__half *>(input_skip_bias_sum), outer, norm_size,
-          epsilon);
-    }
-  } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<float, false>),
-                       grid, block, 0, hip_stream,
-                       static_cast<const float *>(input),
-                       static_cast<const float *>(skip),
-                       static_cast<const float *>(gamma),
-                       static_cast<const float *>(bias),
-                       static_cast<float *>(output),
-                       static_cast<float *>(input_skip_bias_sum), outer,
-                       norm_size, epsilon);
-  } else {
-    fprintf(stderr,
-            "[custom_kernels] hip_skip_rms_norm: unsupported dtype=%d\n",
-            hip_dtype);
-    return -1;
-  }
-
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    fprintf(stderr, "[custom_kernels] hip_skip_rms_norm launch failed: %s\n",
-            hipGetErrorString(err));
-  }
-  return static_cast<int>(err);
+extern "C" int hip_skip_rms_norm_mixed(
+    void *stream, const void *input, const void *skip, const void *gamma,
+    const void *bias, void *output, void *input_skip_bias_sum, int64_t outer,
+    int64_t norm_size, float epsilon, int input_dtype, int skip_dtype,
+    int gamma_dtype, int output_dtype, int sum_dtype) {
+  if (input_dtype == skip_dtype && input_dtype == gamma_dtype &&
+      input_dtype == output_dtype && input_dtype == sum_dtype)
+    return hip_skip_rms_norm(stream, input, skip, gamma, bias, output,
+                             input_skip_bias_sum, outer, norm_size, epsilon,
+                             input_dtype);
+  if (outer <= 0 || norm_size <= 0)
+    return 0;
+  if (input_dtype == HIP_DTYPE_FLOAT32 && skip_dtype == HIP_DTYPE_FLOAT16 &&
+      gamma_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_FLOAT16 &&
+      sum_dtype == HIP_DTYPE_FLOAT32)
+    return launch_skip_rms_norm<float, __half, __half, __half, float>(
+        static_cast<hipStream_t>(stream), input, skip, gamma, bias, output,
+        input_skip_bias_sum, outer, norm_size, epsilon);
+  fprintf(stderr,
+          "[custom_kernels] hip_skip_rms_norm_mixed: unsupported dtypes "
+          "in/skip/gamma/out/sum=%d/%d/%d/%d/%d\n",
+          input_dtype, skip_dtype, gamma_dtype, output_dtype, sum_dtype);
+  return -1;
 }

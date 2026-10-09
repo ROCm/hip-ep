@@ -1393,6 +1393,16 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
 
+// Same op with an element size per tensor (bias shares skip's); emitted only
+// when they differ, e.g. an fp32 residual with fp16 skip/gamma/output. A
+// sum_element_size is ignored when input_skip_bias_sum is nullptr.
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon);
+
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)

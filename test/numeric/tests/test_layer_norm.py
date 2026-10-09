@@ -107,6 +107,41 @@ def _make_skip_simplified_layer_norm_model(
     return model
 
 
+def _make_fp32_residual_skip_norm_model(input_shape: list[int]):
+    """gpt-oss residual layout: fp32 residual, everything else fp16 with Casts.
+
+    Y = Cast_f16(SSLN(res32, Cast_f32(skip16), Cast_f32(gamma16)).output)
+    Y3 = the fp32 residual sum, which feeds the next layer's norm.
+    """
+    hidden = input_shape[-1]
+    R = helper.make_tensor_value_info("R", TensorProto.FLOAT, input_shape)
+    S = helper.make_tensor_value_info("S", TensorProto.FLOAT16, input_shape)
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, input_shape)
+    Y3 = helper.make_tensor_value_info("Y3", TensorProto.FLOAT, input_shape)
+
+    rng = np.random.default_rng(89)
+    gamma = rng.uniform(0.5, 1.5, [hidden]).astype(np.float16)
+    nodes = [
+        helper.make_node("Cast", ["S"], ["S32"], to=TensorProto.FLOAT),
+        helper.make_node("Cast", ["gamma"], ["G32"], to=TensorProto.FLOAT),
+        helper.make_node(
+            "SkipSimplifiedLayerNormalization",
+            ["R", "S32", "G32"],
+            ["Y32", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        ),
+        helper.make_node("Cast", ["Y32"], ["Y"], to=TensorProto.FLOAT16),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [R, S],
+        [Y, Y3],
+        initializers=[numpy_helper.from_array(gamma, name="gamma")],
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
 def _make_skip_layer_norm_model(input_shape: list[int]):
     """Build a standard com.microsoft.SkipLayerNormalization ONNX model (f16).
 
@@ -333,6 +368,23 @@ class TestSkipSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=1e-5 if dtype == np.float32 else 2e-3)
+
+    @pytest.mark.parametrize(
+        "seq_len,hidden", [(1, 2880), (128, 2880), (3, 8200), (2, 33)]
+    )
+    def test_skip_simplified_layer_norm_fp32_residual(
+        self, model_runner, seq_len, hidden
+    ):
+        """Cast -> fp32 SSLN -> Cast as gpt-oss exports it (Casts folded in)."""
+        input_shape = [1, seq_len, hidden]
+        model = _make_fp32_residual_skip_norm_model(input_shape)
+
+        rng = np.random.default_rng(61)
+        res = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [res, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
 
     @pytest.mark.parametrize("hidden", [8192, 8200])
     def test_skip_simplified_layer_norm_wide_row(self, model_runner, hidden):
