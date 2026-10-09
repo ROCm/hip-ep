@@ -615,8 +615,13 @@ static int gqa_forward_fused(
       past_len = 0;
     } else {
       total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      past_len = total_seq - sq;
-      if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
+      // A first prompt shorter than the window holds its tokens in rows
+      // 0..seqlens_k with padding after them and no past, which is how ORT
+      // reads a padded first prompt. The kernels clamp the same way when they
+      // derive the past from seqlens_k on the device. All sq rows are still
+      // appended, so they have to fit.
+      past_len = total_seq > sq ? total_seq - sq : 0;
+      if (total_seq < 1 || past_len + sq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(
             stderr,
