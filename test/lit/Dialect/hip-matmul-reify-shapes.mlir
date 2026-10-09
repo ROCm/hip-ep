@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
+// RUN: hip-mlir-opt --test-hip-whole-shape-dim-reify %s | FileCheck %s
 
 // What this file tests
 // --------------------
@@ -26,7 +26,7 @@
 // dynamic ones. A bug in reify's dynamic-dim source-picking (wrong
 // operand chosen, wrong local dim index, or a malformed `tensor.dim`
 // emitted) is therefore invisible to the pass test. Upstream's
-// `--resolve-shaped-type-result-dims` materializes every `OpFoldResult`
+// `--test-hip-whole-shape-dim-reify` materializes every `OpFoldResult`
 // — static and dynamic — into IR that FileCheck can inspect, exposing
 // those bugs. The upstream pass is used here purely as a generic
 // producer-contract validator; it is not part of the production

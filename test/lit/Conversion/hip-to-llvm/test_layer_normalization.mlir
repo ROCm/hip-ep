@@ -8,6 +8,7 @@
 // Test cases:
 // 1. Static shape: 1x128x4096 f16, with bias, output only
 // 2. Dynamic shape: ?x?x512 f16, with bias, output only
+// 3. Axis=1 with Mean/InvStdDev output buffers
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -48,6 +49,26 @@ module {
     // CHECK: llvm.mul
     // CHECK: llvm.extractvalue {{.*}}[3, 1]
     // CHECK: llvm.mul
+    // CHECK: llvm.call @wrap_layer_normalization
+    return
+  }
+
+  // --- Case 3: optional stats outputs and non-default axis ---
+  func.func @layer_norm_stats(
+      %ctx: !hip.context,
+      %input: memref<2x3x4xf16, 1>,
+      %scale: memref<3x4xf16, 1>,
+      %output: memref<2x3x4xf16, 1>,
+      %mean: memref<2x1x1xf32, 1>,
+      %inv_std: memref<2x1x1xf32, 1>) {
+    // CHECK-LABEL: llvm.func @layer_norm_stats
+    hip.layer_norm(%ctx)
+        ins(%input, %scale : memref<2x3x4xf16, 1>, memref<3x4xf16, 1>)
+        outs(%output, %mean, %inv_std :
+             memref<2x3x4xf16, 1>, memref<2x1x1xf32, 1>,
+             memref<2x1x1xf32, 1>)
+        {axis = 1 : i64, epsilon = 9.99999974E-6 : f32,
+         stash_type = 1 : i64}
     // CHECK: llvm.call @wrap_layer_normalization
     return
   }
