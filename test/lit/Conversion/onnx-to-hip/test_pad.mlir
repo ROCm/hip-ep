@@ -139,4 +139,105 @@ module {
   // CHECK: arith.index_cast %{{.*}} : i64 to index
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
   // CHECK: hip.pad
+
+  // Legacy opset<11 schema: `pads` rides as an attribute and `data` is the
+  // only operand. Nothing upgrades opsets in this pipeline, so a tf2onnx
+  // opset-9 export arrives in exactly this shape; PadLegacyAttrsToOperands
+  // materializes the constant and the ordinary operand-form conversion takes
+  // over. Reading operand 1 without that rewrite walks off the operand list.
+  func.func @pad_legacy_attrs(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "reflect", pads = [1, 1, 1, 1]} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_attrs
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "reflect"}
+
+  // The legacy `value` attribute is the older spelling of `constant_value`, so
+  // a non-zero fill has to become the cval operand rather than be dropped.
+  func.func @pad_legacy_value(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = [1, 1, 1, 1], value = 2.500000e+00 : f32} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_value
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+
+  // A zero fill is the default on both schemas, so it needs no cval operand.
+  func.func @pad_legacy_zero_value(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = [1, 1, 1, 1], value = 0.000000e+00 : f32} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_zero_value
+  // CHECK-NOT: cval
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>)
+
+  // `pads` carries two entries per axis, so a short attribute is malformed.
+  // Refusing it here keeps the output-shape math from indexing past its end;
+  // the op stays as onnx.Pad instead of converting.
+  func.func @pad_legacy_short_pads(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = [1, 1]} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_short_pads
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
+
+  // An export whose shape inference gave up reaches conversion with no rank on
+  // the result, which gives the output buffer no shape to be built from. The
+  // op is left alone rather than reinterpreting the type.
+  func.func @pad_unranked_result(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<*xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, none, none) -> tensor<*xf32>
+    return %r : tensor<*xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_unranked_result
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
+
+  // -0.0 is not the default fill: the sign survives into padded cells, so it
+  // has to become a cval operand like any other non-default value.
+  func.func @pad_legacy_neg_zero_value(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = [1, 1, 1, 1], value = -0.000000e+00 : f32} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_neg_zero_value
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+
+  // `pads` may also arrive as a dense i64 array rather than an ArrayAttr.
+  func.func @pad_legacy_dense_pads(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
+    %r = "onnx.Pad"(%data) {mode = "edge", pads = array<i64: 1, 1, 1, 1>} : (tensor<3x4xf32>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_dense_pads
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "edge"}
+
+  // A non-zero fill on integer data cannot be materialized. The rewrite has
+  // to decline before it creates the pads constant, not after.
+  func.func @pad_legacy_int_value(%data: tensor<3x4xi32>) -> tensor<5x6xi32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = [1, 1, 1, 1], value = 1.000000e+00 : f32} : (tensor<3x4xi32>) -> tensor<5x6xi32>
+    return %r : tensor<5x6xi32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_int_value
+  // CHECK-NOT: onnx.Constant
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
+
+  // The modern schema has at most four operands; a fifth would be dropped
+  // silently, so the op is left unconverted instead.
+  func.func @pad_too_many_operands(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %extra: tensor<1xi64>) -> tensor<5x6xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none, %extra) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, none, none, tensor<1xi64>) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_too_many_operands
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
 }

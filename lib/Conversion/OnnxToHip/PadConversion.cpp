@@ -115,7 +115,11 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
         .getResult();
   }
 
-  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+  // Reached only for a dynamic result, where the per-axis math needs the input
+  // rank. An unranked input cannot supply one.
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!dataType)
+    return rewriter.notifyMatchFailure(op, "pad.unranked_data");
   int64_t rank = dataType.getRank();
 
   // Build the axis -> pad-index map. By default every axis is padded in
@@ -207,6 +211,25 @@ struct PadToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    // The opset<11 schema carries `pads` as an attribute and arrives with
+    // `data` alone, so operand 1 does not exist; reading it anyway walks off
+    // the operand list. PadLegacyAttrsToOperands normally rewrites that form
+    // before conversion, and reaching here with one operand means it declined.
+    // The modern schema has at most four operands, and anything past index 3
+    // would be dropped silently below. Checked before anything else, including
+    // getContextArg, so a malformed op is turned away before any IR exists.
+    if (op->getNumOperands() < 2 || op->getNumOperands() > 4 ||
+        op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "pad.arity");
+
+    // A result with no rank gives the output buffer no shape to be built from.
+    // An export whose shape inference gave up reaches conversion like this, and
+    // the cast below would otherwise reinterpret the type unchecked.
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "pad.unranked_result");
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -214,43 +237,7 @@ struct PadToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
     mlir::Value data = op->getOperand(0);
-    // Opset <= 10 stores pad amounts in the `pads` attribute and has no pads
-    // operand. Later opsets pass a 1-D int64 tensor. Reading operand 1 when
-    // it is absent is an out-of-bounds access.
-    mlir::Value pads;
-    if (op->getNumOperands() >= 2) {
-      pads = op->getOperand(1);
-    } else {
-      llvm::SmallVector<int64_t> amounts;
-      bool haveAmounts = false;
-      if (auto dense = op->getAttrOfType<mlir::DenseI64ArrayAttr>("pads")) {
-        amounts.assign(dense.asArrayRef().begin(), dense.asArrayRef().end());
-        haveAmounts = true;
-      } else if (auto array = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
-        haveAmounts = true;
-        for (mlir::Attribute attr : array) {
-          auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr);
-          if (!intAttr) {
-            haveAmounts = false;
-            break;
-          }
-          amounts.push_back(intAttr.getValue().getSExtValue());
-        }
-      }
-      if (!haveAmounts)
-        return rewriter.notifyMatchFailure(
-            op, "Pad has no pads operand and no pads attribute");
-      auto padsType = mlir::RankedTensorType::get(
-          {static_cast<int64_t>(amounts.size())}, rewriter.getI64Type());
-      // wrap_pad reads `pads` from device memory, so this must be an
-      // onnx.Constant (lowered to a device hip.constant), not arith.constant.
-      mlir::OperationState padsState(loc, "onnx.Constant");
-      padsState.addTypes(padsType);
-      padsState.addAttribute("value",
-                             mlir::DenseElementsAttr::get(
-                                 padsType, llvm::ArrayRef<int64_t>(amounts)));
-      pads = rewriter.create(padsState)->getResult(0);
-    }
+    mlir::Value pads = op->getOperand(1);
 
     auto isNone = [](mlir::Value v) -> bool {
       return v && mlir::isa<mlir::NoneType>(v.getType());
@@ -262,11 +249,6 @@ struct PadToHip : public mlir::RewritePattern {
     mlir::Value axes = nullptr;
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
-
-    auto resultType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(op, "Pad requires a ranked result");
 
     // Compile-time pads/axes stamped by the pre-lowering PadShapeFold pattern
     // while the producer was still generic ONNX. Their presence lets
