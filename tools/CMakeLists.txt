@@ -5,7 +5,11 @@
 
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
-add_subdirectory(hip-rocmlir-compiler)
+# hip-rocmlir-compiler links the rocMLIR (rocmlirTriton) C++ API directly, so it
+# is only built when that dependency is present in-tree.
+if(ENABLE_ROCMLIRTRITON)
+  add_subdirectory(hip-rocmlir-compiler)
+endif()
 
 # hip-inspect parses the IR with `llvm::parseBitcodeFile` and reads
 # the `@__metadata_json` global directly -- no JIT, no GPU dependency.
