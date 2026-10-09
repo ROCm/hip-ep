@@ -162,7 +162,7 @@ func.func @qgemm_per_channel_w4(%ctx: !hip.context,
       ins(%b, %b_scale : tensor<16x32xi8>, tensor<16xf32>)
       zero_point(%b_zp : tensor<16xi8>)
       outs(%e1 : tensor<16x32xf32>)
-      {axis = 0 : i64, block_size = 0 : i64, packed_int4} : tensor<16x32xf32>
+      {axis = 0 : i64, block_size = 0 : i64, packed_bits = 4 : i64} : tensor<16x32xf32>
 
   %e2 = tensor.empty() : tensor<16xf32>
   %dq_c = hip.dequantize_linear(%ctx)
