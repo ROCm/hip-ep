@@ -215,9 +215,11 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
+  populateEinsumConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
   populatePowerConversionPatterns(patterns, ctx);
+  populatePowConversionPatterns(patterns, ctx);
   populateActivationConversionPatterns(patterns, ctx);
   populateBiasGeluConversionPatterns(patterns, ctx);
   populateFastGeluConversionPatterns(patterns, ctx);
@@ -230,6 +232,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateOneHotConversionPatterns(patterns, ctx);
   populateGatherElementsConversionPatterns(patterns, ctx);
   populateTopKConversionPatterns(patterns, ctx);
+  populateArgMaxConversionPatterns(patterns, ctx);
+  populateRandomNormalLikeConversionPatterns(patterns, ctx);
   populateScatterElementsConversionPatterns(patterns, ctx);
   populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
@@ -257,6 +261,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateReduceMinConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
   populateMaxConversionPatterns(patterns, ctx);
+  populateIsNaNConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
   populateCosConversionPatterns(patterns, ctx);
   populateErfConversionPatterns(patterns, ctx);
@@ -295,9 +300,12 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateClipConversionPatterns(patterns, ctx);
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
+  populateQLinearConvConversionPatterns(patterns, ctx);
+  populateUpsampleConversionPatterns(patterns, ctx);
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
+  populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
@@ -437,10 +445,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
-  // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
-  // Normalize them to native onnx.QuantizeLinear / onnx.DequantizeLinear so
-  // that QdqConversion below can lower them; nothing downstream matches the
-  // onnx.Custom spelling.
+  // MorphiZen imports com.microsoft Q/DQ and the fused QLinear* function ops
+  // as onnx.Custom. Normalize Q/DQ, and decompose QLinearAdd / QLinearMul /
+  // QLinearConcat / QLinearGlobalAveragePool into native ONNX ops, before
+  // PDLL so the existing QDQ fusion patterns can match the graph.
   {
     mlir::RewritePatternSet customQdqPatterns(ctx);
     populateCustomQdqCanonicalizationPatterns(customQdqPatterns, ctx);
@@ -530,6 +538,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
+        populateHardSigmoidConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;
         mlir::GreedyRewriteConfig preLoweringConfig;
         preLoweringConfig.setStrictness(

@@ -7,8 +7,7 @@
 // Norm conversions (ONNX -> HIP dialect).
 //
 // All Norm-family operators live here so they share helpers and so the file
-// layout makes it obvious where to plug in future variants (BatchNorm,
-// GroupNorm, InstanceNorm, ...).
+// layout makes it obvious where to plug in future variants.
 //
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
@@ -17,6 +16,8 @@
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
+//   - onnx.BatchNormalization (inference)               -> hip.batch_norm
+//   - onnx.Custom(GroupNorm, com.microsoft)             -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -342,14 +343,17 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 /// bias, distinct from SkipSimplifiedLayerNormalization (which is RMS norm and
 /// maps to hip.skip_rms_norm). No fused hip op exists for the standard-LN skip
 /// variant, so we compose:
-///   sum    = input + skip               (hip.add)
+///   biased = input + bias               (hip.add, only when bias is present)
+///   sum    = biased + skip              (hip.add)
 ///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
 ///   output[3] (input_skip_bias_sum) = sum           (the pre-norm residual)
 ///
 /// MS spec (com.microsoft.SkipLayerNormalization):
 ///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
-///                 Whisper uses exactly 4 (input, skip, gamma, beta) with no
-///                 5th input-bias, so input_skip_bias_sum = input + skip.
+///                 The optional bias is added to input before the skip, and
+///                 that sum is input_skip_bias_sum. Whisper uses exactly 4
+///                 inputs (no bias), so the sum is input + skip. Stable
+///                 Diffusion's text encoder uses all 5.
 ///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
 ///                  Whisper consumes output[0] and output[3]; mean/inv_std are
 ///                  emitted as None and never materialized.
@@ -400,13 +404,9 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value gamma = op->getOperand(2);
   // beta (output bias for the LayerNorm) is optional.
   mlir::Value beta = getOptionalOperand(op, 3);
-  // 5th input is an optional bias added to `input` BEFORE the skip add (so it
-  // also feeds input_skip_bias_sum). Whisper does not use it; reject if present
-  // so we never silently drop it.
+  // 5th input is an optional bias added to `input` BEFORE the skip add, so it
+  // also feeds input_skip_bias_sum. It broadcasts on the trailing axis.
   mlir::Value inputBias = getOptionalOperand(op, 4);
-  if (inputBias)
-    return rewriter.notifyMatchFailure(
-        op, "5-input SkipLayerNormalization (input-bias) not supported");
 
   // Epsilon (default 1e-5 per MS spec).
   llvm::APFloat epsValue(9.99999974E-6f);
@@ -415,10 +415,19 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
-  // === 1. sum = input + skip (this is also output[3] input_skip_bias_sum) ===
+  // === 1. sum = (input + bias) + skip. This is output[3]. ==================
+  // Dynamic extents live on `input`; the bias is a static trailing vector, so
+  // the empty tensor is sized from the input.
+  mlir::Value biasedInput = input;
+  if (inputBias) {
+    mlir::Value biasInit = createEmptyTensor(rewriter, loc, inputType, input);
+    biasedInput = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
+                                           input, inputBias, biasInit)
+                      .getResult(0);
+  }
   mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
   mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                             input, skip, sumInit)
+                                             biasedInput, skip, sumInit)
                         .getResult(0);
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
@@ -472,7 +481,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
       replacements.push_back(mlir::Value{}); // mean / inv_std -> None
       continue;
     }
-    // The last real (non-None) result is input_skip_bias_sum = input + skip.
+    // The last real (non-None) result is input_skip_bias_sum.
     replacements.push_back(sum);
   }
 
@@ -698,13 +707,220 @@ InstanceNormToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// onnx.BatchNormalization (inference) -> hip.batch_norm
+//===----------------------------------------------------------------------===//
+
+/// ONNX BatchNormalization (schema 15), inference only:
+///   inputs:  X (N,C,...), scale (C), B (C), input_mean (C), input_var (C)
+///   attrs:   epsilon (default 1e-5); momentum is ignored
+///   output:  Y, same shape as X
+///
+///   Y = scale * (X - input_mean) / sqrt(input_var + epsilon) + B
+///
+/// training_mode != 0, and the three-result training form, stay unconverted.
+struct BatchNormToHip : public mlir::RewritePattern {
+  BatchNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.BatchNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+BatchNormToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  if (auto trainingMode = op->getAttrOfType<mlir::IntegerAttr>("training_mode"))
+    if (trainingMode.getInt() != 0)
+      return rewriter.notifyMatchFailure(
+          op, "BatchNormalization training_mode is not supported");
+
+  if (op->getNumOperands() != 5 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization inference expects 5 operands and 1 result");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+  mlir::Value mean = op->getOperand(3);
+  mlir::Value variance = op->getOperand(4);
+  if (mlir::isa<mlir::NoneType>(input.getType()) ||
+      mlir::isa<mlir::NoneType>(scale.getType()) ||
+      mlir::isa<mlir::NoneType>(bias.getType()) ||
+      mlir::isa<mlir::NoneType>(mean.getType()) ||
+      mlir::isa<mlir::NoneType>(variance.getType()))
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization inference requires X, scale, B, mean, and var");
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 2)
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization requires ranked input of rank >= 2");
+
+  auto channelVector = [&](mlir::Value value) {
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
+    if (!type || type.getRank() != 1 ||
+        type.getElementType() != inputType.getElementType())
+      return false;
+    if (type.hasStaticShape() && !inputType.isDynamicDim(1) &&
+        type.getDimSize(0) != inputType.getDimSize(1))
+      return false;
+    return true;
+  };
+  if (!channelVector(scale) || !channelVector(bias) || !channelVector(mean) ||
+      !channelVector(variance))
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization scale, B, mean, and var must be 1-D of length "
+            "C and the same element type as X");
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = a.getValue();
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (outputType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "BatchNormalization result element type must match X");
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  auto hipOp = mlir::hip::BatchNormOp::create(
+      rewriter, loc, context, input, scale, bias, mean, variance, outputInit,
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// onnx.Custom(GroupNorm, com.microsoft) -> hip.group_norm
+//===----------------------------------------------------------------------===//
+
+/// com.microsoft GroupNorm:
+///   inputs:  X, gamma (C), beta (C)
+///   attrs:   groups (required), activation (required, 0 none / 1 SiLU),
+///            channels_last (default 1, NHWC), epsilon (default 1e-5)
+///   output:  same shape as X
+///
+///   y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+///   mean/var are per (N, group). activation 1 applies SiLU after the affine
+///   transform. channels_last 0 is NCHW (channel axis 1); 1 is NHWC (last
+///   axis).
+struct GroupNormToHip : public mlir::RewritePattern {
+  GroupNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+GroupNormToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GroupNorm")
+    return rewriter.notifyMatchFailure(op, "not a GroupNorm operation");
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for GroupNorm");
+
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNorm expects 3 operands (X, gamma, beta) and 1 result");
+
+  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("groups");
+  if (!groupsAttr)
+    return rewriter.notifyMatchFailure(op, "GroupNorm requires groups");
+  int64_t groups = groupsAttr.getValue().getSExtValue();
+  if (groups <= 0)
+    return rewriter.notifyMatchFailure(op, "GroupNorm groups must be positive");
+
+  auto activationAttr = op->getAttrOfType<mlir::IntegerAttr>("activation");
+  if (!activationAttr)
+    return rewriter.notifyMatchFailure(op, "GroupNorm requires activation");
+  int64_t activation = activationAttr.getValue().getSExtValue();
+  if (activation != 0 && activation != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNorm activation must be 0 (none) or 1 (SiLU)");
+
+  int64_t channelsLast = 1;
+  if (auto channelsLastAttr =
+          op->getAttrOfType<mlir::IntegerAttr>("channels_last"))
+    channelsLast = channelsLastAttr.getValue().getSExtValue();
+  if (channelsLast != 0 && channelsLast != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNorm channels_last must be 0 (NCHW) or 1 (NHWC)");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNorm requires ranked input of rank >= 3");
+
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+  if (!scaleType || scaleType.getRank() != 1 || !biasType ||
+      biasType.getRank() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNorm gamma and beta must be 1-D of length C");
+
+  int64_t channelAxis = channelsLast ? inputType.getRank() - 1 : 1;
+  if (!inputType.isDynamicDim(channelAxis)) {
+    int64_t channels = inputType.getDimSize(channelAxis);
+    if (channels % groups != 0)
+      return rewriter.notifyMatchFailure(
+          op, "GroupNorm channel extent is not divisible by groups");
+    if (scaleType.hasStaticShape() && scaleType.getDimSize(0) != channels)
+      return rewriter.notifyMatchFailure(
+          op, "GroupNorm gamma length must equal the channel extent");
+    if (biasType.hasStaticShape() && biasType.getDimSize(0) != channels)
+      return rewriter.notifyMatchFailure(
+          op, "GroupNorm beta length must equal the channel extent");
+  }
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto epsAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = epsAttr.getValue();
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  auto hipOp = mlir::hip::GroupNormOp::create(
+      rewriter, loc, context, input, scale, bias, outputInit,
+      rewriter.getI64IntegerAttr(groups),
+      rewriter.getI64IntegerAttr(activation),
+      rewriter.getI64IntegerAttr(channelsLast),
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip>(ctx);
+               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
 }
 
 } // namespace hip

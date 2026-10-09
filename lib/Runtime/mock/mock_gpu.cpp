@@ -834,6 +834,42 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
   return 0;
 }
 
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type) {
+  (void)output;
+  (void)shape;
+  (void)mean_bits;
+  (void)scale_bits;
+  (void)seed_bits;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_random_normal_like\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_random_normal_like(rank=%lld, has_seed=%lld, "
+             "data_type=%lld)\n",
+             (long long)rank, (long long)has_seed, (long long)data_type);
+  return 0;
+}
+
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type) {
+  (void)data;
+  (void)indices;
+  (void)data_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "
+             "select_last_index=%lld, rank=%lld, data_type=%lld)\n",
+             (long long)axis, (long long)keepdims, (long long)select_last_index,
+             (long long)rank, (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
@@ -1155,6 +1191,20 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
              (long long)data_type, alpha);
 
+  return 0;
+}
+
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pow\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_pow(num_elements=%lld, data_type=%s(%lld), "
+             "exponent=%f)\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, exponent);
   return 0;
 }
 
@@ -1728,6 +1778,57 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
   return 0;
 }
 
+int wrap_qlinear_conv(
+    RuntimeState *state, const void *input, const void *input_scale,
+    const void *input_zero_point, const void *weights, const void *weight_scale,
+    const void *weight_zero_point, const void *output_scale,
+    const void *output_zero_point, const void *bias, void *output,
+    int64_t batch, int64_t in_channels, int64_t out_channels, int64_t height_in,
+    int64_t width_in, int64_t height_out, int64_t width_out, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h,
+    int64_t pad_w, int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t input_dtype, int64_t weight_dtype, int64_t output_dtype,
+    int64_t bias_dtype, int64_t input_scale_count, int64_t weight_scale_count,
+    int64_t output_scale_count, int64_t input_zp_count, int64_t weight_zp_count,
+    int64_t output_zp_count) {
+  (void)input;
+  (void)input_scale;
+  (void)input_zero_point;
+  (void)weights;
+  (void)weight_scale;
+  (void)weight_zero_point;
+  (void)output_scale;
+  (void)output_zero_point;
+  (void)bias;
+  (void)output;
+  (void)bias_dtype;
+  (void)input_scale_count;
+  (void)weight_scale_count;
+  (void)output_scale_count;
+  (void)input_zp_count;
+  (void)weight_zp_count;
+  (void)output_zp_count;
+  (void)pad_h;
+  (void)pad_w;
+  (void)dilation_h;
+  (void)dilation_w;
+  if (!state)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_qlinear_conv N=%lld Cin=%lld Cout=%lld "
+             "Hout=%lld Wout=%lld k=%lld g=%lld %s\n",
+             (long long)batch, (long long)in_channels, (long long)out_channels,
+             (long long)height_out, (long long)width_out, (long long)kernel_h,
+             (long long)group, hipdnn_ep_datatype_name(input_dtype));
+  (void)width_in;
+  (void)height_in;
+  (void)kernel_w;
+  (void)stride_h;
+  (void)stride_w;
+  (void)weight_dtype;
+  (void)output_dtype;
+  return 0;
+}
+
 int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
                           int64_t num_elements, int64_t norm_num_elements,
                           int64_t data_type, float input_scale,
@@ -1836,6 +1937,20 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   }
   MOCK_PRINT("[MOCK] wrap_not(num_elements=%lld, data_type=%lld)\n",
              (long long)num_elements, (long long)data_type);
+  return 0;
+}
+
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_isnan\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_isnan(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  (void)input;
+  (void)output;
   return 0;
 }
 
@@ -2303,6 +2418,51 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
              "data_type=%lld, epsilon=%f)\n",
              (long long)n, (long long)c, (long long)spatial,
              (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)output;
+  return 0;
+}
+
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type,
+                             float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_batch_normalization\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_batch_normalization(n=%lld, c=%lld, spatial=%lld, "
+             "data_type=%lld, epsilon=%f)\n",
+             (long long)n, (long long)c, (long long)spatial,
+             (long long)data_type, epsilon);
+  (void)input;
+  (void)scale;
+  (void)bias;
+  (void)mean;
+  (void)variance;
+  (void)output;
+  return 0;
+}
+
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_group_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT(
+      "[MOCK] wrap_group_norm(n=%lld, c=%lld, spatial=%lld, groups=%lld, "
+      "channels_last=%lld, activation=%lld, data_type=%lld, epsilon=%f)\n",
+      (long long)n, (long long)c, (long long)spatial, (long long)groups,
+      (long long)channels_last, (long long)activation, (long long)data_type,
+      epsilon);
   (void)input;
   (void)scale;
   (void)bias;

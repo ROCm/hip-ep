@@ -59,6 +59,9 @@ inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
+inline constexpr const char *kWrapBatchNormalization =
+    "wrap_batch_normalization";
+inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
@@ -66,6 +69,8 @@ inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
+inline constexpr const char *kWrapArgMax = "wrap_arg_max";
+inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
 inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
@@ -76,6 +81,7 @@ inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
+inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -111,6 +117,7 @@ inline constexpr const char *kWrapOr = "wrap_or";
 inline constexpr const char *kWrapAnd = "wrap_and";
 inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
+inline constexpr const char *kWrapIsNaN = "wrap_isnan";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";
@@ -145,6 +152,7 @@ inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQGemm = "wrap_qgemm";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
+inline constexpr const char *kWrapQLinearConv = "wrap_qlinear_conv";
 inline constexpr const char *kWrapQLpNormalization = "wrap_qlpnormalization";
 inline constexpr const char *kWrapQSigmoid = "wrap_qsigmoid";
 // Synchronize the stream and read a device i32 scalar back to the host
@@ -434,6 +442,10 @@ void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateArgMaxLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateRandomNormalLikeLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
@@ -539,6 +551,8 @@ void populateQGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateQLinearConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateQLpNormalizationLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateQSigmoidLoweringPatterns(const LLVMTypeConverter &converter,

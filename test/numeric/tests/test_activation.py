@@ -4,7 +4,7 @@
 #
 
 """Tests for activation / unary operations: Sigmoid, Tanh, Sqrt, Reciprocal,
-Softplus, Swish."""
+Softplus, Swish, and com.microsoft QuickGelu."""
 
 import numpy as np
 import pytest
@@ -221,5 +221,36 @@ class TestSwish:
         rng = np.random.default_rng(29)
         x = rng.uniform(-8, 8, [4, 17]).astype(dtype)
 
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)
+
+
+def _make_quick_gelu_model(dtype, shape: list[int], alpha=None):
+    """com.microsoft.QuickGelu: y = x * sigmoid(alpha * x), alpha default 1.702."""
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, shape)
+    y = helper.make_tensor_value_info("Y", tp, shape)
+    attrs = {} if alpha is None else {"alpha": float(alpha)}
+    node = helper.make_node("QuickGelu", ["X"], ["Y"], domain="com.microsoft", **attrs)
+    return make_model_from_nodes(
+        [node], [x], [y], extra_opsets=[helper.make_opsetid("com.microsoft", 1)]
+    )
+
+
+class TestMicrosoftQuickGelu:
+    """com.microsoft.QuickGelu lowers to hip.swish."""
+
+    @pytest.mark.parametrize(
+        "dtype,alpha,atol,rtol",
+        [
+            (np.float16, None, 2e-3, 2e-3),
+            (np.float16, 1.702, 2e-3, 2e-3),
+            (np.float32, 0.5, 1e-5, 1e-5),
+        ],
+    )
+    def test_quick_gelu(self, model_runner, dtype, alpha, atol, rtol):
+        model = _make_quick_gelu_model(dtype, [4, 17], alpha)
+        rng = np.random.default_rng(31)
+        x = rng.uniform(-8, 8, [4, 17]).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=atol, rtol=rtol)

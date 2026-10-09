@@ -48,13 +48,16 @@ set(_kernel_sources
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
     hip/swish_kernel.hip
+    hip/pow_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
     hip/qmatmul_kernel.hip
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
+    hip/qlinear_conv_kernel.hip
     hip/elementwise_unary_kernel.hip
+    hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
@@ -63,6 +66,8 @@ set(_kernel_sources
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
     hip/instance_norm_kernel.hip
+    hip/batch_norm_kernel.hip
+    hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
@@ -70,6 +75,8 @@ set(_kernel_sources
     hip/gather_kernel.hip
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
+    hip/arg_max_kernel.hip
+    hip/random_normal_like_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip

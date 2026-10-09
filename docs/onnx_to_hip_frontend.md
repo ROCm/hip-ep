@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
 
@@ -65,10 +66,12 @@ existing `--convert-hip-to-llvm` pipeline.
 |---|---|---|
 | `LayerNormalization` | `hip.layer_norm` | custom HIP kernel |
 | `InstanceNormalization` | `hip.instance_norm` | custom HIP kernel |
+| `BatchNormalization` | `hip.batch_norm` | custom HIP kernel; inference only |
+| `GroupNorm` (`com.microsoft`) | `hip.group_norm` | `group_norm_kernel.hip` |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
-| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, custom HIP kernels |
+| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, including the optional input bias |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
@@ -90,10 +93,22 @@ packed `__half2` path for fp16 rows of even width.
 |---|---|---|
 | `QuantizeLinear` | `hip.quantize_linear` | `qdq_kernel.hip` |
 | `DequantizeLinear` | `hip.dequantize_linear` | `qdq_kernel.hip` |
+| `QLinearConv` | `hip.qlinear_conv` | `qlinear_conv_kernel.hip` |
+| `QLinearAdd` (`com.microsoft`) | `hip.qadd` | decomposed, then QDQ fusion |
+| `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
+| `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
+| `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
 
-Storage is int8/uint8/int16/uint16 plus int4/uint4. Granularity comes from the
-shape of `scale` rather than a flag: a single element is per-tensor, a 1-D
-tensor is per-axis along `axis`, and `block_size > 0` is blocked.
+`QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
+windows, and an optional int32 bias. Input and output quantization is
+per-tensor. Weight quantization is per-tensor or per output channel. `auto_pad`
+must be `NOTSET`. `hip.qconv` is a different op, the W4A16 1x1 QDQ fusion, and
+does not accept `QLinearConv`.
+
+QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
+int4/uint4. Granularity comes from the shape of `scale` rather than a flag: a
+single element is per-tensor, a 1-D tensor is per-axis along `axis`, and
+`block_size > 0` is blocked.
 
 int4/uint4 imports as an 8-bit element type at the logical element count, two
 values per byte, so the width travels as a `packed_int4` marker rather than in
@@ -154,6 +169,9 @@ runtime coverage.
 | `Div` | `hip.div` | Element-wise division |
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
+| `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
+| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
+| `HardSigmoid` | `hip.mul` + `hip.add` + `hip.max` + `hip.min` | Clip(alpha*x + beta, 0, 1); decomposed pre-lowering; f16/f32 only |
 
 Unmapped ops default to `hip.<OpType>`.
 
