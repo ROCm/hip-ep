@@ -1172,6 +1172,19 @@ int wrap_swish(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
+                int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_swiglu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_swiglu(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
