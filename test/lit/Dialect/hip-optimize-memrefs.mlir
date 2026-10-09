@@ -51,10 +51,11 @@ func.func @static_reuse_same_type(
 // CHECK:         hip.matmul
 // CHECK:         %[[OTHER:.*]] = memref.alloc(){{.*}}: memref<2x64x64xf32>
 // CHECK:         hip.mul
+// CHECK:         %[[INPUT:.*]] = memref.reinterpret_cast %[[OTHER]]
 // CHECK-NOT:     memref.alloc()
-// CHECK:         %[[CAST:.*]] = memref.reinterpret_cast %[[BIG]]
-// CHECK:         hip.miopen.softmax{{.*}}outs(%[[CAST]] :
-// CHECK:         return %[[CAST]]
+// CHECK:         %[[OUTPUT:.*]] = memref.reinterpret_cast %[[BIG]]
+// CHECK:         hip.miopen.softmax{{.*}}ins(%[[INPUT]]{{.*}}outs(%[[OUTPUT]] :
+// CHECK:         return %[[OUTPUT]]
 func.func @bytesize_reuse_reinterpret_cast(
     %ctx: !hip.context,
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
@@ -64,8 +65,11 @@ func.func @bytesize_reuse_reinterpret_cast(
   hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.mul(%ctx) ins(%alloc0, %s : memref<2x64x64xf32>, memref<f32, strided<[], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
+  %input = memref.reinterpret_cast %alloc1
+      to offset: [0], sizes: [64], strides: [1]
+      : memref<2x64x64xf32> to memref<64xf32>
   %alloc2 = memref.alloc() : memref<64xf32>
-  hip.miopen.softmax(%ctx) ins(%alloc1 : memref<2x64x64xf32>) outs(%alloc2 : memref<64xf32>)
+  hip.miopen.softmax(%ctx) ins(%input : memref<64xf32>) outs(%alloc2 : memref<64xf32>)
   return %alloc2 : memref<64xf32>
 }
 

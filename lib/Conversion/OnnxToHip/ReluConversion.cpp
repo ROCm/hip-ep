@@ -83,13 +83,16 @@ struct ReluToHipMax : public mlir::RewritePattern {
 
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    // Init tensor for DPS output. Use `x` as the shape source so dynamic
-    // dims of the result are tied to the same SSA values as `x` (the scalar
-    // zero has rank 0 and carries no dim info).
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
+    // `hip.max` reifies its result as the broadcast of both operands, so build
+    // the destination with the same helper. The rank-0 zero contributes no
+    // extent, leaving `x`'s own dims.
+    mlir::FailureOr<mlir::Value> init =
+        createBroadcastEmptyTensor(rewriter, loc, resultType, {x, zero});
+    if (mlir::failed(init))
+      return mlir::failure();
 
-    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, resultType, context, x,
-                                          zero, init);
+    auto maxOp =
+        mlir::hip::MaxOp::create(rewriter, loc, context, x, zero, *init);
     rewriter.replaceOp(op, maxOp->getResult(0));
     return mlir::success();
   }
