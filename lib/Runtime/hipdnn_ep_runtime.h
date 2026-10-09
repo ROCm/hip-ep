@@ -415,9 +415,16 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Runtime error flag (set by kernels, observed at the inference_compute
+// boundary). Intended for operators that detect runtime-invalid inputs on GPU
+// (e.g. Range delta==0) and need to propagate an error code back through
+// main_graph.
+//
+// The flag is hipHostMallocMapped. Kernels receive the device mapping from
+// hipdnn_ep_state_get_error_flag_device_ptr. reset writes 0 on the host.
+// read_and_clear loads that host address and clears it; it does not sync.
+// inference_compute calls it only after hipdnn_ep_stream_sync, which is what
+// makes the kernel store visible.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
