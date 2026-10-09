@@ -67,7 +67,7 @@ def _make_simplified_layer_norm_model(
 
 
 def _make_skip_simplified_layer_norm_model(
-    input_shape: list[int], dtype: np.dtype = np.float16
+    input_shape: list[int], dtype: np.dtype = np.float16, with_bias: bool = False
 ):
     """Build a SkipSimplifiedLayerNormalization ONNX model.
 
@@ -82,11 +82,16 @@ def _make_skip_simplified_layer_norm_model(
 
     rng = np.random.default_rng(88)
     scale_data = rng.uniform(0.5, 1.5, [hidden]).astype(dtype)
-    scale_init = numpy_helper.from_array(scale_data, name="scale")
+    initializers = [numpy_helper.from_array(scale_data, name="scale")]
+    inputs = ["X", "skip", "scale"]
+    if with_bias:
+        bias_data = rng.uniform(-0.5, 0.5, [hidden]).astype(dtype)
+        initializers.append(numpy_helper.from_array(bias_data, name="bias"))
+        inputs.append("bias")
 
     node = helper.make_node(
         "SkipSimplifiedLayerNormalization",
-        ["X", "skip", "scale"],
+        inputs,
         ["Y", "", "", "Y3"],
         domain="com.microsoft",
         epsilon=1e-5,
@@ -96,7 +101,7 @@ def _make_skip_simplified_layer_norm_model(
         [node],
         [X, skip],
         [Y, Y3],
-        initializers=[scale_init],
+        initializers=initializers,
         extra_opsets=[ms_opset],
     )
     return model
@@ -294,6 +299,53 @@ class TestSkipSimplifiedLayerNorm:
 
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=1e-5)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_skip_simplified_layer_norm_gpt_oss_shape(
+        self, model_runner, seq_len, dtype
+    ):
+        """gpt-oss residual norm: hidden 2880, run in fp32 by the export."""
+        input_shape = [1, seq_len, 2880]
+        model = _make_skip_simplified_layer_norm_model(input_shape, dtype)
+
+        rng = np.random.default_rng(58)
+        x = rng.uniform(-2, 2, input_shape).astype(dtype)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5 if dtype == np.float32 else 2e-3)
+
+    @pytest.mark.parametrize(
+        "dtype,hidden",
+        [(np.float16, 2880), (np.float32, 2880), (np.float16, 8200), (np.float16, 33)],
+    )
+    def test_skip_simplified_layer_norm_bias(self, model_runner, dtype, hidden):
+        """4-input form, through the row kernel (2880) and both fallbacks."""
+        input_shape = [1, 3, hidden]
+        model = _make_skip_simplified_layer_norm_model(
+            input_shape, dtype, with_bias=True
+        )
+
+        rng = np.random.default_rng(60)
+        x = rng.uniform(-2, 2, input_shape).astype(dtype)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(dtype)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=1e-5 if dtype == np.float32 else 2e-3)
+
+    @pytest.mark.parametrize("hidden", [8192, 8200])
+    def test_skip_simplified_layer_norm_wide_row(self, model_runner, hidden):
+        """Either side of the register-resident row kernel's width limit."""
+        input_shape = [1, 2, hidden]
+        model = _make_skip_simplified_layer_norm_model(input_shape)
+
+        rng = np.random.default_rng(59)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=2e-3)
 
 
 # ---------------------------------------------------------------------------
