@@ -21,6 +21,24 @@ if(NOT WIN32)
   return()
 endif()
 
+# The leaves convert fp16 <-> fp32 on the host, which clang lowers to
+# compiler-rt calls (__extendhfsf2 / __truncsfhf2). hip::host carries
+# clang_rt.builtins only when HIP_CXX_COMPILER is clang, and here it is MSVC,
+# so ask hipcc for the library the way hip-config-amd.cmake asks clang.
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E env HIPCC_VERBOSE=0
+          ${HIPCC_EXECUTABLE} -print-libgcc-file-name --rtlib=compiler-rt
+  OUTPUT_VARIABLE _kernel_ut_clang_rt
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE _kernel_ut_clang_rt_result
+)
+file(TO_CMAKE_PATH "${_kernel_ut_clang_rt}" _kernel_ut_clang_rt)
+if(NOT _kernel_ut_clang_rt_result EQUAL 0 OR NOT EXISTS "${_kernel_ut_clang_rt}")
+  message(FATAL_ERROR
+    "Kernel package UTs need clang_rt.builtins, but ${HIPCC_EXECUTABLE} "
+    "-print-libgcc-file-name returned '${_kernel_ut_clang_rt}'")
+endif()
+
 function(add_kernel_package_ut arch executable_name source_file)
   set(kernel_target custom_kernels_${arch})
   if(NOT TARGET ${kernel_target})
@@ -56,6 +74,7 @@ function(add_kernel_package_ut arch executable_name source_file)
       ${ut_options}
     LINK_LIBRARIES
       ${kernel_target}
+      ${_kernel_ut_clang_rt}
     OFFLOAD_ARCHS
       ${arch}
   )
