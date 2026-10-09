@@ -32,11 +32,15 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 | `opt_level` | `int` | `2` | LLVM optimization level (0–3) |
 | `verbose` | `bool` | `false` | Enable verbose diagnostic output |
 | `constants_file` | `string` | `"constants.bin"` | Filename (relative to the `FileSystem` root) where constant weight data is written during compilation and read back at `inference_init` time. See [constant-handling-design.md](constant-handling-design.md). |
-| `output_mode` | `OutputMode` enum | `LLVM_IR` | Per-model artifact format. `LLVM_IR` (default) emits OS-portable LLVM IR (serialized as `.bc`), JIT-loaded in-process by `LlvmIrJit`. `NATIVE` emits a per-OS native `.dll`/`.so` (runtime merged at producer time, linked via `DLLLinker`) loaded via `morphizen::Plugin` (`LoadLibrary`/`dlopen`). See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md). |
+| `output_mode` | `OutputMode` enum | `LLVM_IR` | Per-model artifact format. `LLVM_IR` (default) emits OS-portable LLVM IR (serialized as `.bc`), JIT-loaded in-process by `LlvmIrJit`. `NATIVE` emits a per-OS native `.dll`/`.so` (runtime merged at producer time, linked via `DLLLinker`) loaded via `morphizen::Plugin` (`LoadLibrary`/`dlopen`). `NATIVE` requires the CMake option `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS` (default `OFF`). See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md). |
 
 The default `LLVM_IR` format produces a single OS-portable `.bc` consumed by
 `LlvmIrJit`. The opt-in `NATIVE` format is per-OS and is intended for
 internal benchmarking/dev (the signed-DLL policy keeps it out of production).
+It is compiled in only when CMake is configured with
+`-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON`. Otherwise `artifact_format=NATIVE`
+throws `std::runtime_error` at session setup, and loading an EPContext whose
+`artifact_format` is `NATIVE` throws the same way.
 The EP records the chosen format in the EPContext metadata
 (`mlir_metadata::Metadata.artifact_format`) and selects the matching loader at
 session creation.

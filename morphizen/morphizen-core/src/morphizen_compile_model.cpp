@@ -1090,6 +1090,24 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
       set_ort_status(1, e.what());
     }
     return {};
+  } catch (const std::runtime_error &e) {
+    // hip-ep throws this when artifact_format=NATIVE is requested from a
+    // build configured without HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS. Fail the
+    // session instead of taking the skip-subgraph path below.
+    const std::string msg = e.what();
+    if (msg.find("HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS") != std::string::npos) {
+      LOG(ERROR) << msg;
+      if (set_ort_status) {
+        set_ort_status(1, e.what());
+      }
+      return {};
+    }
+    if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
+      LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();
+    } else {
+      LOG(INFO) << " catch exception : " << e.what();
+      abort();
+    }
   } catch (const std::exception &e) {
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();

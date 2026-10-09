@@ -161,9 +161,15 @@ else()
   message(STATUS "LLVM/MLIR not found; building from source (${DEP_HASH_llvm})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
   # lib/Runtime gets a version-matched clang for runtime bitcode with no
-  # external dependency. Kept identical to the CI LLVM build so the prefix that
-  # CI caches (find_package path) and this fallback produce equivalent toolsets.
-  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  # external dependency. lld is only needed for the opt-in native artifact
+  # path (HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS). Kept identical to the CI LLVM
+  # build, aside from that lld gate, so the prefix that CI caches
+  # (find_package path) and this fallback produce equivalent toolsets.
+  if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+    set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  else()
+    set(LLVM_ENABLE_PROJECTS "clang;mlir" CACHE STRING "" FORCE)
+  endif()
   set(LLVM_TARGETS_TO_BUILD "X86" CACHE STRING "" FORCE)
   set(LLVM_ENABLE_RTTI ON CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)

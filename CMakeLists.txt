@@ -97,6 +97,13 @@ option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+# Native .dll/.so artifacts (DLLLinker + in-process lld on Windows). Off by
+# default so hipgpu does not carry the native linker. artifact_format=NATIVE
+# throws at runtime unless this is ON. Declared before deps.cmake so a
+# from-source LLVM build can omit the lld project.
+option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
+  OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
 # cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
@@ -123,6 +130,14 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
   message(FATAL_ERROR
     "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
+
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  message(STATUS "Native artifacts: ON")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=1)
+else()
+  message(STATUS "Native artifacts: OFF")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=0)
 endif()
 
 # FlatBuffers schemas (HipSchemas). Added here rather than with the other
