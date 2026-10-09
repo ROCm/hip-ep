@@ -9,63 +9,25 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Min -> hip.min (via MIOpen miopenOpTensor with miopenTensorOpMin)
+/// Lower variadic `onnx.Min` to pairwise `hip.min` operations.
 ///
-/// Handles variadic inputs by pairwise chaining:
-///   min(a, b, c) = min(min(a, b), c)
-/// Single input is identity (pass through).
+/// Before:
+///   %r = "onnx.Min"(%a, %b, %c) : (...) -> tensor<2x3xf32>
+/// After:
+///   %ab_init = tensor.empty() : tensor<2x3xf32>
+///   %ab = hip.min ... outs(%ab_init : tensor<2x3xf32>)
+///   %abc_init = tensor.empty() : tensor<2x3xf32>
+///   %r = hip.min ... outs(%abc_init : tensor<2x3xf32>)
 struct MinToHip : public mlir::RewritePattern {
   MinToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Min", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+                  mlir::PatternRewriter &rewriter) const override {
+    return lowerVariadicBroadcastChain<mlir::hip::MinOp>(op, rewriter);
+  }
 };
-
-mlir::LogicalResult
-MinToHip::matchAndRewrite(mlir::Operation *op,
-                          mlir::PatternRewriter &rewriter) const {
-  unsigned numInputs = op->getNumOperands();
-  if (numInputs == 0)
-    return rewriter.notifyMatchFailure(op, "Min requires at least 1 input");
-
-  // Single input: identity
-  if (numInputs == 1) {
-    rewriter.replaceOp(op, op->getOperand(0));
-    return mlir::success();
-  }
-
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
-  mlir::Location loc = op->getLoc();
-
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
-  // Pairwise chaining: accumulate = min(accumulate, next_input)
-  mlir::Value accumulate = op->getOperand(0);
-  for (unsigned i = 1; i < numInputs; ++i) {
-    mlir::Value rhs = op->getOperand(i);
-    auto accType = mlir::cast<mlir::RankedTensorType>(accumulate.getType());
-    mlir::RankedTensorType stepResultType =
-        (i == numInputs - 1) ? resultType : accType;
-
-    mlir::FailureOr<mlir::Value> initOrFailure = createBroadcastEmptyTensor(
-        rewriter, loc, stepResultType, {accumulate, rhs});
-    if (mlir::failed(initOrFailure))
-      return rewriter.notifyMatchFailure(
-          op, "Min: no ranked operand spans dynamic result dim");
-    auto minOp = mlir::hip::MinOp::create(rewriter, loc, context, accumulate,
-                                          rhs, *initOrFailure);
-    accumulate = minOp->getResult(0);
-  }
-
-  rewriter.replaceOp(op, accumulate);
-  return mlir::success();
-}
 
 } // namespace
 
