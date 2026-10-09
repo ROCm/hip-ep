@@ -10,7 +10,9 @@
 
 #if !defined(HIPDNN_LUT_LINKED_EXTERNALLY) && !defined(HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS)
 namespace hipdnn_ep { namespace gemm_autotune {
-Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
+Result resolve(const Request&, WmmaValidator, GemvValidator, TiledFmaValidator, void*) {
+  return {};
+}
 Stats stats() { return {}; }
 } }
 #elif defined(HIPDNN_LUT_LINKED_EXTERNALLY)
