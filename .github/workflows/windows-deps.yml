@@ -31,7 +31,7 @@ env:
   ONNXRUNTIME_VERSION: "1.30.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  OGA_PR_PATCHES: "2194 2674"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
