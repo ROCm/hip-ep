@@ -295,7 +295,7 @@ jobs:
           set -euo pipefail
           BUILD="${{ runner.workspace }}/build/$(basename "$PWD")"
           THEROCK="$BUILD/_therock"
-          export LD_LIBRARY_PATH="${THEROCK}/lib:${THEROCK}/lib/llvm/lib:${THEROCK}/llvm/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${THEROCK}/lib:${LD_LIBRARY_PATH:-}"
           ctest --test-dir "$BUILD" -C Release -R '^HipGpuElfContract$' --output-on-failure
 
       # -----------------------------------------------------------------------
