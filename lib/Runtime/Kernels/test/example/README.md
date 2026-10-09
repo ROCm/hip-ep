@@ -39,8 +39,11 @@ python build.py --config Release --cmake_generator Ninja ^
   --cmake_extra_defines BUILD_HIP_KERNEL_UNIT_TESTS=ON
 ```
 
-The executables are part of the default build and are installed by the normal
-install step. For every entry in `HIP_ARCHITECTURES` the install prefix gets:
+Once enabled, the executables are part of the default build and are installed
+by the normal install step. For every entry in `HIP_ARCHITECTURES` the install
+prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
+`custom_kernels_<arch>.dll`. With the CI's `gfx11-generic;gfx1170` that is
+`kernel-tests/gfx11-generic/` and `kernel-tests/gfx1170/`:
 
 ```
 <install>/bin/
@@ -72,7 +75,7 @@ run the controller from that `bin` directory:
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
-| `--arch` | `gfxNNNN`, `gfx11-generic`, ... | detected from GPU 0 | Which `kernel-tests/<arch>/` to run. If that ISA has no directory but belongs to a generic target that does (`gfx1100`–`gfx1103`, `gfx1150`–`gfx1153` → `gfx11-generic`; `gfx1200`/`gfx1201` → `gfx12-generic`), the controller uses the generic one. That is what a `HIP_ARCHITECTURES=gfx11-generic;...` build installs. `gfx1170` is not a `gfx11-generic` member and needs its own directory. |
+| `--arch` | `gfxNNNN`, `gfx11-generic`, ... | detected from GPU 0 | Which `kernel-tests/<arch>/` to run. Picked by the same rule the EP uses to load `custom_kernels_<arch>.dll` (`genericTargetFor()` in `backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`): the ISA's own directory first, then its generic target's. So on the CI package a gfx1151 runs `kernel-tests/gfx11-generic/` and a gfx1170 runs `kernel-tests/gfx1170/`, the same DLLs the EP loads there. `gfx1170` is not a `gfx11-generic` member. |
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 

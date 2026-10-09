@@ -69,35 +69,46 @@ static std::string detectedArch() {
   return arch.substr(0, suffix);
 }
 
-// A package built for a family-generic ISA (HIP_ARCHITECTURES=gfx11-generic)
-// has kernel-tests/gfx11-generic but no kernel-tests/gfx1151, so a device ISA
-// with no directory of its own falls back to the generic target it belongs to.
-// Members follow LLVM's AMDGPU generic processors; gfx1170 is not a
-// gfx11-generic member and keeps its own directory.
+// kernel-tests/<arch> is named after the HIP_ARCHITECTURES entry, like
+// custom_kernels_<arch>.dll, so the directory is picked by the rule the EP uses
+// to pick the DLL (LlvmIrJit.cpp): the device ISA first, then its generic
+// target. Mirrors genericTargetFor() in
+// backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp; keep them in sync.
 struct GenericTarget {
   const char* generic;
   const char* members[8];
 };
 
 static const GenericTarget kGenericTargets[] = {
+    {"gfx9-generic",
+     {"gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"}},
+    {"gfx9-4-generic", {"gfx942", "gfx950"}},
+    {"gfx10-1-generic", {"gfx1010", "gfx1011", "gfx1012", "gfx1013"}},
+    {"gfx10-3-generic",
+     {"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035",
+      "gfx1036"}},
     {"gfx11-generic",
      {"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
       "gfx1152", "gfx1153"}},
     {"gfx12-generic", {"gfx1200", "gfx1201"}},
 };
 
+static std::string genericTargetFor(const std::string& arch) {
+  for (const GenericTarget& target : kGenericTargets) {
+    for (const char* member : target.members) {
+      if (member && arch == member) return target.generic;
+    }
+  }
+  return {};
+}
+
 static fs::path leafDirectory(const fs::path& bin, const std::string& arch) {
   const fs::path exact = bin / "kernel-tests" / arch;
   if (fs::is_directory(exact)) return exact;
-  for (const GenericTarget& target : kGenericTargets) {
-    for (const char* member : target.members) {
-      if (member && arch == member) {
-        const fs::path generic = bin / "kernel-tests" / target.generic;
-        return fs::is_directory(generic) ? generic : exact;
-      }
-    }
-  }
-  return exact;
+  const std::string generic = genericTargetFor(arch);
+  if (generic.empty()) return exact;
+  const fs::path generic_dir = bin / "kernel-tests" / generic;
+  return fs::is_directory(generic_dir) ? generic_dir : exact;
 }
 
 static bool setEnvironment(const char* name, const std::string& value) {
