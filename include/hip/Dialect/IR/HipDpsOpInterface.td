@@ -12,27 +12,27 @@ include "mlir/Interfaces/DestinationStyleOpInterface.td"
 def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
   let description = [{
     Marker interface for HIP destination-passing-style compute ops. Carries
-    a single shared default `reifyResultShapes` body that walks
-    `DestinationStyleOpInterface::getDpsInits()` and lifts each init
-    operand's runtime shape via `tensor::getMixedSizes` (tensor mode) or
-    `memref::getMixedSizes` (memref mode). Ops with a tighter shape
-    contract -- e.g. matmul where the result shape can be computed from
-    `A.shape[-2]` / `B.shape[-1]` rather than from the outs operand -- opt
-    out by setting `autoReify=0` on `Hip_DpsOp` and providing a per-op
-    override.
+    a single shared default `reifyResultShapes` body. In tensor mode it walks
+    `DestinationStyleOpInterface::getDpsInits()` and lifts each init operand's
+    runtime shape via `tensor::getMixedSizes`, producing exactly one vector per
+    SSA result. In memref mode the operation has no SSA results, so reification
+    succeeds with an empty list. Ops with a tighter shape contract -- e.g.
+    matmul where the result shape can be computed from `A.shape[-2]` /
+    `B.shape[-1]` rather than from the outs operand -- select a manual-reify
+    family and provide a per-op override.
 
     The interface owns the default body in a sibling `.cpp` file, and
     the per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes` is
-    a 3-line dispatcher auto-emitted from `Hip_DpsOp`'s
-    `extraClassDefinition`.
+    a three-line dispatcher emitted by the operation's behavior family.
   }];
 
   let cppNamespace = "::mlir::hip";
 
   let extraClassDeclaration = [{
-    /// Default reify implementation. Returns a per-result vector of
-    /// `OpFoldResult` -- static dims as `IntegerAttr`, dynamic dims as
-    /// `tensor.dim` / `memref.dim` of the corresponding outs operand.
+    /// Default reify implementation. In tensor mode, returns a per-result
+    /// vector of `OpFoldResult` -- static dims as `IntegerAttr`, dynamic dims
+    /// as `tensor.dim` of the corresponding outs operand. In memref mode,
+    /// returns success with no vectors because the op has no SSA results.
     /// Folds through `tensor.cast` because `tensor::DimOp::fold` peels
     /// casts (via `foldTensorCast`) and the `DimOfCastOp` canonicalizer
     /// rewrites `dim(cast(x), i)` into `dim(x, i)`. As a result, chained
