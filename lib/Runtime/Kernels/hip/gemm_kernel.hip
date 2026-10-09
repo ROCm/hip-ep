@@ -1244,16 +1244,9 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
   /* NBUF LDS buffers: 2 = double-buffered (default, hides global-load latency
    * behind compute); 1 = single-buffered, half the LDS so two workgroups fit
    * per CU and hide the K-loop barriers across each other -- a win for large
-   * LDS-bound tiles (256x128) where double-buffer caps occupancy at 1 WG/CU. */
-  /* Double-buffer only when it actually fits in the 64 KB LDS. launchWmma picks
-   * db=false for any tile whose double-buffered LDS is too big, so it is always
-   * launched single-buffered -- but the dispatch macro still instantiates that
-   * tile's dead DB=true variant. Without this cap, a large tile (e.g. a 256-wide
-   * BK=64 tile at 108 KB double-buffered) fails the static_assert at compile
-   * time even though it is never launched double-buffered. Falling NBUF back to
-   * 1 keeps it compilable and never changes a launched tile (the runtime db flag
-   * matches this predicate). */
-  constexpr int NBUF = (DB && (BM + BN) * K_STR * 2 * 2 <= 65536) ? 2 : 1;
+   * LDS-bound tiles (256x128) where double-buffer caps occupancy at 1 WG/CU.
+   * launchWmma instantiates DB=true only for tiles that fit (wmmaCanDb). */
+  constexpr int NBUF = DB ? 2 : 1;
   static_assert(NBUF * (BM + BN) * K_STR * 2 <= 65536, "LDS 64KB");
 
   __shared__ __align__(16) T smA[NBUF][BM][K_STR];
@@ -1863,14 +1856,77 @@ static constexpr WmmaCfg kWmma[] = {
 static constexpr int kNumWmma =
     static_cast<int>(sizeof(kWmma) / sizeof(kWmma[0]));
 
-/* BK=32 tiles instantiated with PGR2 (GEMM_WMMA_TRY_PGR in launchWmma). */
-static bool wmmaHasPgr2(const WmmaCfg &c) {
-  if (c.bk != 32)
-    return false;
-  return (c.bm == 128 && c.bn == 128 && c.wt_m == 2 && c.wt_n == 4) ||
-         (c.bm == 256 && c.bn == 128 && c.wt_m == 4 && c.wt_n == 2) ||
-         (c.bm == 128 && c.bn == 128 && c.wt_m == 4 && c.wt_n == 2) ||
-         (c.bm == 128 && c.bn == 256 && c.wt_m == 4 && c.wt_n == 2);
+/* BK=32 tiles with a PGR2 instance (NT only; the alias rule sets pgr2). Not
+ * the WT 4x4 tiles: their PGR2 instance spills (scratch > 0). */
+static constexpr bool wmmaHasPgr2(int bm, int bn, int wt_m, int wt_n, int bk) {
+  return bk == 32 && ((bm == 128 && bn == 128 && wt_m == 2 && wt_n == 4) ||
+                      (bm == 256 && bn == 128 && wt_m == 4 && wt_n == 2) ||
+                      (bm == 128 && bn == 128 && wt_m == 4 && wt_n == 2) ||
+                      (bm == 128 && bn == 256 && wt_m == 4 && wt_n == 2));
+}
+
+/* LDS buffering a tile can launch with; launchWmma's runtime choice and the
+ * instances it compiles both use these. Single-buffer (2 WG/CU) once the
+ * double-buffered LDS exceeds 48 KB: co-resident workgroups hide the K-loop
+ * barrier, which wins while the B/A loads hit the 2 MB L2. Below that the tile
+ * already reaches useful occupancy, so it keeps the latency-hiding double
+ * buffer. BK=64 tiles up to 56 KB (BM+BN = 192) can take either: when the
+ * streaming footprint spills L2 (large pow2-K weight, e.g. the 128 MB B of
+ * 8192x8192) the exposed DRAM latency makes the double buffer win despite
+ * 1 WG/CU. */
+static constexpr int wmmaDbLds(int bm, int bn, int bk) {
+  return 2 * (bm + bn) * (bk + 8) * 2;
+}
+static constexpr bool wmmaCanDb(int bm, int bn, int bk) {
+  return wmmaDbLds(bm, bn, bk) <= 49152 ||
+         (bk == 64 && wmmaDbLds(bm, bn, bk) <= 57344);
+}
+static constexpr bool wmmaCanSb(int bm, int bn, int bk) {
+  return wmmaDbLds(bm, bn, bk) > 49152;
+}
+
+template <typename T>
+using WmmaKernel = void (*)(const T *, const T *, const T *, T *, int, int, int,
+                            float, float, int, int, int, float *, int, int, int,
+                            int);
+
+/* The gemm_wmma_kernel instance for one tile. Only the DB variants the tile
+ * can launch with are instantiated. */
+template <int BM, int BN, int WM, int WN, bool TransB, typename T, int BK,
+          int PG = 1, bool TransA = false>
+static WmmaKernel<T> wmmaKernel(bool bc, bool db) {
+  if constexpr (wmmaCanDb(BM, BN, BK)) {
+    if (db)
+      return bc ? gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, true,
+                                   PG, TransA>
+                : gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, true,
+                                   PG, TransA>;
+  }
+  if constexpr (wmmaCanSb(BM, BN, BK)) {
+    if (!db)
+      return bc ? gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, false,
+                                   PG, TransA>
+                : gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, false,
+                                   PG, TransA>;
+  }
+  return nullptr;
+}
+
+/* One launch site for every gemm_wmma_kernel instance, instead of a
+ * hipLaunchKernelGGL expansion per instance. A null fn (no instance for the
+ * requested tile) fails the launch, which the caller's hipGetLastError()
+ * reports. */
+template <typename T>
+static void launchWmmaKernel(WmmaKernel<T> fn, dim3 grid, dim3 block,
+                             hipStream_t s, const T *A, const T *B, const T *C,
+                             T *Y, int M, int N, int K, float alpha, float beta,
+                             int cDim0, int cDim1, int swizzle_n, float *sk_acc,
+                             int ldb, int n_base, int lda, int stag) {
+  void *args[] = {&A,     &B,     &C,         &Y,      &M,   &N,
+                  &K,     &alpha, &beta,      &cDim0,  &cDim1, &swizzle_n,
+                  &sk_acc, &ldb,  &n_base,    &lda,    &stag};
+  (void)hipLaunchKernel(reinterpret_cast<const void *>(fn), grid, block, args,
+                        0, s);
 }
 
 static bool wmmaApplies(const WmmaCfg &c, int M, int N, int K) {
@@ -2172,7 +2228,8 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
       c.bm = 256;
       c.bn = 128;
     }
-    if (c.bk == 32 && M >= 128 && !wmmaHasPgr2(c))
+    if (c.bk == 32 && M >= 128 &&
+        !wmmaHasPgr2(c.bm, c.bn, c.wt_m, c.wt_n, c.bk))
       c = WmmaCfg{128, 128, 4, 2, c.swizzle_n, 1, 32};
     if (c.bk == 32 && M >= 1024 && (K % 64) == 0)
       c = WmmaCfg{128, 128, 4, 2, c.swizzle_n, 1, 64};
@@ -2231,107 +2288,31 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   }
   dim3 block(th);
 
-  /* Single-buffer (DB=false) when double-buffered LDS would exceed ~48 KB, so
-   * two workgroups fit per CU and hide the K-loop barriers across each other.
-   * Below that the tile already reaches useful occupancy, so keep the
-   * latency-hiding double buffer. */
-  const int db_lds = 2 * (c.bm + c.bn) * (c.bk + 8) * 2;
-  /* Single-buffer (2 WG/CU) is the default: it hides the K-loop barrier across
-   * co-resident workgroups and wins when the B/A loads hit the 2 MB L2. But once
-   * the streaming footprint spills L2 (large pow2-K weight, e.g. the 128 MB B of
-   * 8192x8192), the now-exposed DRAM load latency dominates and the latency-
-   * hiding double buffer wins despite dropping to 1 WG/CU -- provided it still
-   * fits in 64 KB LDS. Only the 128x64 BK=64 tile (used for pow2 K>=8192) lands
-   * in the 49-57 KB double-buffer window; larger tiles stay single. */
+  /* LDS buffering: see wmmaCanDb / wmmaCanSb. */
   const bool spills_l2 = static_cast<size_t>(N) * K * 2 > (96ull << 20);
-  const bool db =
-      db_lds <= 49152 || (c.bk == 64 && db_lds <= 57344 && spills_l2);
+  const bool db = wmmaCanDb(c.bm, c.bn, c.bk) &&
+                  (!wmmaCanSb(c.bm, c.bn, c.bk) || spills_l2);
 
-  /* Sub-launches. Normally one launch covering the whole [M,N] grid with a
-   * single compile-time BC. When only N is ragged (M,K tile-aligned, no
-   * split-K), launch ceil(N/BN) FULL tiles all on the fast BC=false path: the
-   * B-load is already N-safe (b_valid reads a dummy row for the column
-   * overhang) and the store masks cc>=N (a cheap epilogue compare). Measured on
-   * vision mlp-up N=4304 M=512: the old interior+ragged-edge split was 0.185 ms
-   * (a separate ragged-edge launch costs more than a full extra tile); one
-   * BC=false launch of 34 full tiles matches the aligned N=4352 (0.141 ms) --
-   * i.e. the N%BN!=0 tax disappears. */
-  struct SubLaunch {
-    dim3 grid;
-    bool bc;
-    int nb;
-  };
-  SubLaunch subs[2];
-  int nsub;
-  const int my = (M + c.bm - 1) / c.bm;
-  const bool n_ragged = (N % c.bn) != 0;
-  if (sk == 1 && n_ragged && (M % c.bm == 0) && (K % c.bk == 0)) {
-    subs[0] = SubLaunch{dim3((N + c.bn - 1) / c.bn, my, 1), false, 0};
-    nsub = 1;
-  } else {
-    const bool bc =
-        !(M % c.bm == 0 && N % c.bn == 0 && K % c.bk == 0) || sk > 1;
-    subs[0] =
-        SubLaunch{dim3((N + c.bn - 1) / c.bn, my, sk > 1 ? sk : 1), bc, 0};
-    nsub = 1;
-  }
+  /* One launch over the whole [M,N] grid. BC (bounds-checked loads) is needed
+   * only for a ragged M or K, or split-K: a ragged N alone runs full tiles on
+   * the fast BC=false path, since the B-load reads a dummy row for the column
+   * overhang and the store masks cc >= N. Measured on vision mlp-up N=4304
+   * M=512: one BC=false launch of 34 full tiles matches the aligned N=4352
+   * (0.141 ms; a separate ragged-edge launch was 0.185 ms). */
+  const bool bc = sk > 1 || M % c.bm != 0 || K % c.bk != 0;
+  const dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm,
+                  sk > 1 ? sk : 1);
 
-#define GEMM_WMMA_ONE(BM, BN, WM, WN, BK)                                      \
-  GEMM_WMMA_ONE_P(BM, BN, WM, WN, BK, 1)
-
-#define GEMM_WMMA_ONE_P(BM, BN, WM, WN, BK, PG)                                \
-  do {                                                                         \
-    if (bc && db)                                                              \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(                                                     \
-              gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, true, PG>),    \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb, lda_eff, stag);                                               \
-    else if (bc && !db)                                                        \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(                                                     \
-              gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, true, false, PG>),   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb, lda_eff, stag);                                               \
-    else if (!bc && db)                                                        \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(                                                     \
-              gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, true, PG>),   \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb, lda_eff, stag);                                               \
-    else                                                                       \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(                                                     \
-              gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, BK, false, false, PG>),  \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          sw_eff, skp, ldb, nb, lda_eff, stag);                                               \
-  } while (0)
-
+  WmmaKernel<T> fn = nullptr;
 #define GEMM_WMMA_TRY(BM, BN, WM, WN, BK)                                      \
   if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN &&              \
       c.bk == BK) {                                                            \
-    GEMM_WMMA_ONE(BM, BN, WM, WN, BK);                                         \
-  } else
-
-  /* BK=32 tile with a PGR2 instance (NT only; the alias rule sets pgr2).
-   * Not the WT 4x4 tiles: their PGR2 instance spills (scratch > 0). */
-#define GEMM_WMMA_TRY_PGR(BM, BN, WM, WN)                                      \
-  if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN &&              \
-      c.bk == 32) {                                                            \
-    if constexpr (TransB) {                                                    \
+    fn = wmmaKernel<BM, BN, WM, WN, TransB, T, BK>(bc, db);                    \
+    if constexpr (TransB && wmmaHasPgr2(BM, BN, WM, WN, BK)) {                 \
       if (pgr2)                                                                \
-        GEMM_WMMA_ONE_P(BM, BN, WM, WN, 32, 2);                                \
-      else                                                                     \
-        GEMM_WMMA_ONE(BM, BN, WM, WN, 32);                                     \
-    } else {                                                                   \
-      GEMM_WMMA_ONE(BM, BN, WM, WN, 32);                                       \
+        fn = wmmaKernel<BM, BN, WM, WN, TransB, T, BK, 2>(bc, db);             \
     }                                                                          \
   } else
-
-  for (int sidx = 0; sidx < nsub; ++sidx) {
-    const dim3 grid = subs[sidx].grid;
-    const bool bc = subs[sidx].bc;
-    const int nb = subs[sidx].nb;
 
   /* BK=64 tiles */
   GEMM_WMMA_TRY(64, 128, 2, 4, 64)
@@ -2355,29 +2336,23 @@ static void launchWmma(int id, hipStream_t s, const T *A, const T *B,
   GEMM_WMMA_TRY(64, 32, 2, 1, 32)
   GEMM_WMMA_TRY(128, 32, 2, 1, 32)
   /* BK=32 WT_N=4 */
-  GEMM_WMMA_TRY_PGR(128, 128, 2, 4)
+  GEMM_WMMA_TRY(128, 128, 2, 4, 32)
   GEMM_WMMA_TRY(64, 128, 2, 4, 32)
   GEMM_WMMA_TRY(128, 256, 2, 4, 32)
   /* BK=32 WT_M=4 (high Matrix-Core:LDS ratio) */
-  GEMM_WMMA_TRY_PGR(256, 128, 4, 2)
+  GEMM_WMMA_TRY(256, 128, 4, 2, 32)
   GEMM_WMMA_TRY(128, 128, 4, 4, 32)
-  GEMM_WMMA_TRY_PGR(128, 128, 4, 2)
-  GEMM_WMMA_TRY_PGR(128, 256, 4, 2)
+  GEMM_WMMA_TRY(128, 128, 4, 2, 32)
+  GEMM_WMMA_TRY(128, 256, 4, 2, 32)
   GEMM_WMMA_TRY(256, 128, 4, 4, 32)
   GEMM_WMMA_TRY(128, 64, 4, 2, 32)
-  GEMM_WMMA_TRY(128, 128, 4, 4, 16)
   /* BK=16 (K%16==0, K%32!=0) */
   GEMM_WMMA_TRY(256, 128, 4, 2, 16)
   GEMM_WMMA_TRY(128, 128, 2, 4, 16)
-  GEMM_WMMA_TRY(64, 128, 2, 4, 16)
-  {
-    GEMM_WMMA_ONE(128, 128, 2, 2, 32);
-  }
-  } /* sub-launch loop */
-#undef GEMM_WMMA_TRY_PGR
+  GEMM_WMMA_TRY(64, 128, 2, 4, 16) {}
 #undef GEMM_WMMA_TRY
-#undef GEMM_WMMA_ONE_P
-#undef GEMM_WMMA_ONE
+  launchWmmaKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                   cDim1, sw_eff, skp, ldb, 0, lda_eff, stag);
 
   if (sk > 1 && skp) {
     const int total = M * N;
@@ -2640,26 +2615,18 @@ static void launchWmmaTa(int id, hipStream_t s, const T *A, const T *B,
                     M % 8 == 0);
   const dim3 grid((N + c.bn - 1) / c.bn, (M + c.bm - 1) / c.bm, 1);
   const dim3 block(th);
+  WmmaKernel<T> fn = nullptr;
 #define GEMM_WMMA_TA_ONE(BM, BN, WM, WN)                                       \
   if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN) {              \
-    if (bc)                                                                    \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, 32,      \
-                                           true, true, 1, true>),              \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, nullptr, K, 0, M, stag);                                \
-    else                                                                       \
-      hipLaunchKernelGGL(                                                      \
-          HIP_KERNEL_NAME(gemm_wmma_kernel<BM, BN, WM, WN, TransB, T, 32,      \
-                                           false, true, 1, true>),             \
-          grid, block, 0, s, A, B, C, Y, M, N, K, alpha, beta, cDim0, cDim1,   \
-          c.swizzle_n, nullptr, K, 0, M, stag);                                \
+    fn = wmmaKernel<BM, BN, WM, WN, TransB, T, 32, 1, true>(bc, true);         \
   } else
   GEMM_WMMA_TA_ONE(128, 128, 2, 4)
   GEMM_WMMA_TA_ONE(64, 128, 2, 2)
   GEMM_WMMA_TA_ONE(128, 64, 2, 2)
   GEMM_WMMA_TA_ONE(64, 64, 2, 2) {}
 #undef GEMM_WMMA_TA_ONE
+  launchWmmaKernel(fn, grid, block, s, A, B, C, Y, M, N, K, alpha, beta, cDim0,
+                   cDim1, c.swizzle_n, nullptr, K, 0, M, stag);
 }
 
 template <typename T>
