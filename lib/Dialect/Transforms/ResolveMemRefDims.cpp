@@ -5,9 +5,9 @@
 //===- ResolveMemRefDims.cpp - Post-bufferize `memref.dim` resolver ------===//
 //
 // `--hip-resolve-memref-dims`: fold `memref.dim` of a view op (`subview` /
-// `expand_shape` / `collapse_shape` / `view`) to a dim of the root buffer --
-// ultimately `memref.dim` of a function argument.  Post-bufferize twin of
-// `--hip-resolve-tensor-dims`: it re-applies the reify-based `memref` dim folds
+// `expand_shape` / `collapse_shape` / `view`) to source dimensions or explicit
+// size operands. Post-bufferize twin of `--hip-resolve-tensor-dims`: it
+// re-applies the reify-based `memref` dim folds
 // once the memref views exist (they are created during bufferization and by
 // `--hip-promote-strided-operands`, i.e. after resolve-tensor-dims ran).
 //
@@ -40,6 +40,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir::hip {
 
@@ -47,6 +48,44 @@ namespace mlir::hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
+
+/// A collapsed dimension is the product of its source reassociation group.
+/// CollapseShapeOp does not implement the shape reification interfaces used
+/// below. Resolve only its dimension query; keep the view and its strides.
+///
+/// Before:
+///   %view = memref.collapse_shape %src [[0], [1, 2]]
+///       : memref<?x?x4xf32> into memref<?x?xf32>
+///   %size = memref.dim %view, %c1 : memref<?x?xf32>
+/// After:
+///   %dim = memref.dim %src, %c1 : memref<?x?x4xf32>
+///   %size = arith.muli %dim, %c4 : index
+struct DimOfCollapseShape final : OpRewritePattern<memref::DimOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  void initialize() { setHasBoundedRewriteRecursion(); }
+
+  LogicalResult matchAndRewrite(memref::DimOp op,
+                                PatternRewriter &rewriter) const override {
+    auto collapse = op.getSource().getDefiningOp<memref::CollapseShapeOp>();
+    std::optional<int64_t> index = op.getConstantIndex();
+    if (!collapse || !index || *index < 0 ||
+        *index >= collapse.getType().getRank())
+      return failure();
+
+    auto group = collapse.getReassociationIndices()[*index];
+    Location loc = op.getLoc();
+    Value size = rewriter.createOrFold<memref::DimOp>(loc, collapse.getSrc(),
+                                                      group.front());
+    for (int64_t sourceDim : llvm::drop_begin(group)) {
+      Value dim = rewriter.createOrFold<memref::DimOp>(loc, collapse.getSrc(),
+                                                       sourceDim);
+      size = rewriter.createOrFold<arith::MulIOp>(loc, size, dim);
+    }
+    rewriter.replaceOp(op, size);
+    return success();
+  }
+};
 
 struct ResolveMemRefDimsPass final
     : public impl::ResolveMemRefDimsPassBase<ResolveMemRefDimsPass> {
@@ -67,6 +106,7 @@ void ResolveMemRefDimsPass::runOnOperation() {
   // `dim(view) -> ... -> dim(%arg)` down to the function argument.
   memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
   memref::populateResolveShapedTypeResultDimsPatterns(patterns);
+  patterns.add<DimOfCollapseShape>(ctx);
 
   // Compose the chain with the `memref.dim` canonicalisers only -- NOT the
   // view ops' own patterns: fold the dim queries, leave the views intact
