@@ -69,6 +69,37 @@ static std::string detectedArch() {
   return arch.substr(0, suffix);
 }
 
+// A package built for a family-generic ISA (HIP_ARCHITECTURES=gfx11-generic)
+// has kernel-tests/gfx11-generic but no kernel-tests/gfx1151, so a device ISA
+// with no directory of its own falls back to the generic target it belongs to.
+// Members follow LLVM's AMDGPU generic processors; gfx1170 is not a
+// gfx11-generic member and keeps its own directory.
+struct GenericTarget {
+  const char* generic;
+  const char* members[8];
+};
+
+static const GenericTarget kGenericTargets[] = {
+    {"gfx11-generic",
+     {"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
+      "gfx1152", "gfx1153"}},
+    {"gfx12-generic", {"gfx1200", "gfx1201"}},
+};
+
+static fs::path leafDirectory(const fs::path& bin, const std::string& arch) {
+  const fs::path exact = bin / "kernel-tests" / arch;
+  if (fs::is_directory(exact)) return exact;
+  for (const GenericTarget& target : kGenericTargets) {
+    for (const char* member : target.members) {
+      if (member && arch == member) {
+        const fs::path generic = bin / "kernel-tests" / target.generic;
+        return fs::is_directory(generic) ? generic : exact;
+      }
+    }
+  }
+  return exact;
+}
+
 static bool setEnvironment(const char* name, const std::string& value) {
   if (SetEnvironmentVariableA(name, value.c_str())) return true;
   std::fprintf(stderr, "failed to set %s: %lu\n", name, GetLastError());
@@ -144,12 +175,14 @@ int main(int argc, char** argv) {
   }
 
   const fs::path bin = executableDirectory();
-  const fs::path leaf_dir = bin / "kernel-tests" / arch;
+  const fs::path leaf_dir = leafDirectory(bin, arch);
   if (!fs::is_directory(leaf_dir)) {
     std::fprintf(stderr, "no packaged kernel tests for %s at %s\n", arch.c_str(),
                  leaf_dir.string().c_str());
     return 2;
   }
+  std::printf("Running %s kernel tests from %s\n", arch.c_str(),
+              leaf_dir.string().c_str());
 
   const fs::path out_dir = bin / "out";
   fs::create_directories(out_dir);

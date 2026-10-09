@@ -2,36 +2,152 @@
 
 This folder contains the source for standalone HIP kernel unit tests.
 
-For CI/package testing, the full hip-ep CMake build creates one small,
-leaf-specific executable per test and installs it under
-`bin/kernel-tests/<arch>/`.  Each executable dynamically links the installed
-`custom_kernels_<arch>.dll`, so the GPU kernels and autotune resolver are
-compiled and packaged exactly once.  Run an installed test from `bin/` (so the
-shared DLL is on the Windows DLL search path), for example:
+There are two ways to build and run them:
+
+- **Standalone development**: the leaf Makefiles (`make test`, see "Uniform make
+  API" below). That path compiles the selected kernel source itself.
+- **Packaging CI**: the hip-ep CMake build, opt-in, described next. Nothing in
+  this section is built unless the configure step asks for it.
+
+## Packaging CI: standalone kernel-test executables (opt-in)
+
+The hip-ep CMake build can produce these tests as standalone executables for a
+packaging or GPU CI to run. This is an **opt-in interface**: the option defaults
+to `OFF`, and no hip-ep workflow turns it on.
+
+Each leaf becomes one small executable per kernel ISA. It compiles only its
+host driver and dynamically links `custom_kernels_<arch>.dll`, so the GPU
+kernels and the autotune tables are compiled and packaged exactly once, in the
+same DLL production uses.
+
+### Enable and build
+
+| Requirement | Value |
+|---|---|
+| CMake option | `-DBUILD_HIP_KERNEL_UNIT_TESTS=ON` (default `OFF`) |
+| Platform | Windows. On Linux the directory is skipped with a status message. |
+| Runtime | Real runtime (`-DBUILD_MOCK_RUNTIME=OFF`, which `build.py` sets when not building the mock). The executables link `custom_kernels_<arch>`. |
+
+With `build.py`, pass it as one more `--cmake_extra_defines` (the flag is
+repeatable):
 
 ```
-.\kernel-tests\gfx1151\hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
+python build.py --config Release --cmake_generator Ninja ^
+  --hip_arch "gfx11-generic;gfx1170" ^
+  --cmake_prefix_path "<ort-install>;<llvm-install>" ^
+  --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON ^
+  --cmake_extra_defines BUILD_HIP_KERNEL_UNIT_TESTS=ON
 ```
 
-Use the package entry point to run the complete suite and aggregate every
-leaf's result in `bin/out/results.csv`:
+The executables are part of the default build and are installed by the normal
+install step. For every entry in `HIP_ARCHITECTURES` the install prefix gets:
 
 ```
-.\hipdnn-kernel-ut.exe --mode lookup --coverage 3
+<install>/bin/
+  hipdnn-kernel-ut.exe                          # suite controller (one)
+  custom_kernels_<arch>.dll                     # installed already, one per arch
+  kernel-tests/<arch>/
+    hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe
+    hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16.exe
+    hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe
+    hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
+    hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe
 ```
 
-Its two modes match the production kernel behavior:
+### Run (on a machine with a supported AMD GPU)
 
-- `lookup` (default) reads the FB already embedded in
-  `custom_kernels_<arch>.dll`; a test executable never carries a second FB.
-  If that DLL has no compatible table, it falls through to autotune.
-- `autotune` bypasses the table and selects production's `online` mode.  The
-  name translation is only at the test command line; `online` remains the
-  kernel ABI spelling.
+Copy `<install>/bin` to the GPU machine. At minimum that is
+`hipdnn-kernel-ut.exe`, every `custom_kernels_*.dll` and `kernel-tests/`. Then
+run the controller from that `bin` directory:
 
-The leaf Makefiles remain available for standalone kernel development.  That
-direct-build path intentionally compiles the selected kernel source itself;
-it is not the CI/package path.
+```
+.\hipdnn-kernel-ut.exe --mode lookup --coverage 1
+```
+
+| Option | Values | Default | Meaning |
+|---|---|---|---|
+| `--arch` | `gfxNNNN`, `gfx11-generic`, ... | detected from GPU 0 | Which `kernel-tests/<arch>/` to run. If that ISA has no directory but belongs to a generic target that does (`gfx1100`–`gfx1103`, `gfx1150`–`gfx1153` → `gfx11-generic`; `gfx1200`/`gfx1201` → `gfx12-generic`), the controller uses the generic one. That is what a `HIP_ARCHITECTURES=gfx11-generic;...` build installs. `gfx1170` is not a `gfx11-generic` member and needs its own directory. |
+| `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
+| `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
+
+The controller runs the 11 leaves serially, with `bin` as the working
+directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
+`[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
+`Combined report: <path>`.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Every leaf passed. |
+| `1` | At least one leaf failed or could not be launched. |
+| `2` | Bad argument, no GPU detected, or no packaged tests for that arch. |
+
+The report is `bin/out/results.csv`, truncated at the start of each run.
+Header `op,leaf,arch,mode,shape,config,time_ms,relL2,verdict`: one row per case
+from the leaves (format in "`out/results.csv`" below), plus one row per leaf
+with `shape=suite`, `config=suite-total` and that leaf's `PASS`/`FAIL` in
+`verdict`. A failing CI job is diagnosed from this file: filter
+`verdict == FAIL`.
+
+To run a single leaf by hand, also start it from `bin`:
+
+```
+.\kernel-tests\gfx11-generic\hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp16.exe --coverage 1
+```
+
+When `BUILD_TESTING` is on, each leaf is also registered with CTest under the
+labels `gpu;kernel-ut;<arch>` (run from the build tree, e.g.
+`ctest --test-dir <build> -L kernel-ut`).
+
+### Wiring it into GitHub Actions (suggested)
+
+Build job (hosted runner, no GPU): turn the option on, then put the
+executables into the package the GPU job downloads.
+
+```yaml
+- name: Build hip-ep
+  shell: bash
+  run: |
+    python build.py ... \
+      --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+      --cmake_extra_defines BUILD_HIP_KERNEL_UNIT_TESTS=ON
+
+- name: Stage GPU test package
+  shell: bash
+  run: |
+    # hipdnn-kernel-ut.exe and custom_kernels_*.dll sit in install/bin/
+    # next to the EP; copy them with the rest of bin/ as today, then:
+    cp -a "${{ runner.workspace }}/install/bin/kernel-tests" staging/bin/
+```
+
+Optionally fail the build job early if a leaf is missing:
+`staging/bin/kernel-tests/<arch>/<leaf>.exe` must exist for every arch in
+`HIP_ARCHITECTURES` and every leaf listed above.
+
+GPU job (self-hosted runner), after downloading the package to
+`gpu-test-package/`:
+
+```yaml
+- name: Run kernel unit tests (GPU)
+  shell: cmd
+  working-directory: gpu-test-package/bin
+  run: hipdnn-kernel-ut.exe --mode lookup --coverage 1
+
+- name: Upload kernel unit-test report
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: kernel-ut-results
+    path: gpu-test-package/bin/out/results.csv
+```
+
+The step fails on any non-zero exit code. The uploaded `results.csv` shows
+which op, leaf and shape failed.
 
 Repo-relative paths only. `HIP_SDK` and `OFFLOAD` come from the command line.
 

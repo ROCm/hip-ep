@@ -312,3 +312,13 @@ set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_
 # in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so
 # the host-side declarations stay in lockstep with the kernel TUs that
 # implement them.
+
+# Standalone kernel unit-test executables for the packaging CI (opt-in,
+# BUILD_HIP_KERNEL_UNIT_TESTS, default OFF). Their drivers link the
+# custom_kernels_<arch> targets above instead of recompiling any .hip file.
+# Added from this directory rather than the top level because hip::host and
+# the hip_utils.cmake variables (HIP_INCLUDE_DIR, ...) are directory-scoped:
+# a sibling directory of this one cannot see them.
+if(BUILD_HIP_KERNEL_UNIT_TESTS)
+    add_subdirectory(test/example)
+endif()
