@@ -26,9 +26,9 @@ module {
   // C is rank 1, so it normalizes to [1, 32] and broadcasts along M; the two
   // extents are what tell the kernel which of its indices to drop. The
   // per-channel pointers are null, which is how the runtime picks the
-  // per-tensor path.
+  // per-tensor path. live_seqlens is absent, so every row is computed.
   //
-  // The full 25-parameter ABI, matching wrap_qgemm in
+  // The full 26-parameter ABI, matching wrap_qgemm in
   // lib/Runtime/hipdnn_ep_runtime.h:
   //   7 ptr : state, A, B, C, B_scales, B_zero_points, Y
   //   3 i64 : M, N, K
@@ -37,6 +37,7 @@ module {
   //   3 i64 : b_bits, c_dim0, c_dim1
   //   2 f32 : M_ab, M_c
   //   4 i64 : A/B/C/Y_zero_point
+  //   1 ptr : live_seqlens
   //
   // CHECK-LABEL: llvm.func @test_qgemm_per_tensor(
   // CHECK:      %[[CDIM0:.*]] = llvm.mlir.constant(1 : i64) : i64
@@ -67,7 +68,8 @@ module {
   // CHECK-NEXT: %[[BZP:.*]] = llvm.mlir.constant(3 : i64) : i64
   // CHECK-NEXT: %[[CZP:.*]] = llvm.mlir.constant(-2 : i64) : i64
   // CHECK-NEXT: %[[YZP:.*]] = llvm.mlir.constant(7 : i64) : i64
-  // CHECK-NEXT: llvm.call @wrap_qgemm(%{{.*}}, %[[APTR]], %[[BPTR]], %[[CPTR]], %[[BSPTR]], %[[BZPTR]], %[[YPTR]], %[[M]], %[[N]], %[[K]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[CDT]], %[[YDT]], %[[BBITS]], %[[CDIM0]], %[[CDIM1]], %[[MAB]], %[[MC]], %[[AZP]], %[[BZP]], %[[CZP]], %[[YZP]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64) -> i32
+  // CHECK-NEXT: %[[LIVE:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: llvm.call @wrap_qgemm(%{{.*}}, %[[APTR]], %[[BPTR]], %[[CPTR]], %[[BSPTR]], %[[BZPTR]], %[[YPTR]], %[[M]], %[[N]], %[[K]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[CDT]], %[[YDT]], %[[BBITS]], %[[CDIM0]], %[[CDIM1]], %[[MAB]], %[[MC]], %[[AZP]], %[[BZP]], %[[CZP]], %[[YZP]], %[[LIVE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, !llvm.ptr) -> i32
   func.func @test_qgemm_per_tensor(%ctx: !hip.context,
                                    %A: memref<64x128xi8, 1>,
                                    %B: memref<32x128xi8, 1>,
@@ -133,7 +135,8 @@ module {
   // CHECK-NEXT: %[[BZP:.*]] = llvm.mlir.constant(0 : i64) : i64
   // CHECK-NEXT: %[[CZP:.*]] = llvm.mlir.constant(0 : i64) : i64
   // CHECK-NEXT: %[[YZP:.*]] = llvm.mlir.constant(32768 : i64) : i64
-  // CHECK-NEXT: llvm.call @wrap_qgemm(%{{.*}}, %[[APTR]], %[[BPTR]], %[[CPTR]], %[[BSPTR]], %[[BZPTR]], %[[YPTR]], %[[M]], %[[N]], %[[K]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[CDT]], %[[YDT]], %[[BBITS]], %[[CDIM0]], %[[CDIM1]], %[[MAB]], %[[MC]], %[[AZP]], %[[BZP]], %[[CZP]], %[[YZP]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64) -> i32
+  // CHECK-NEXT: %[[LIVE:.*]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK-NEXT: llvm.call @wrap_qgemm(%{{.*}}, %[[APTR]], %[[BPTR]], %[[CPTR]], %[[BSPTR]], %[[BZPTR]], %[[YPTR]], %[[M]], %[[N]], %[[K]], %[[TRANSA]], %[[TRANSB]], %[[ADT]], %[[BDT]], %[[CDT]], %[[YDT]], %[[BBITS]], %[[CDIM0]], %[[CDIM1]], %[[MAB]], %[[MC]], %[[AZP]], %[[BZP]], %[[CZP]], %[[YZP]], %[[LIVE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, !llvm.ptr) -> i32
   func.func @test_qgemm_per_channel_w4(%ctx: !hip.context,
                                        %A: memref<?x32xui16, 1>,
                                        %B: memref<16x32xi8, 1>,
@@ -147,6 +150,31 @@ module {
         {A_scale = 2.500000e-01 : f32, A_zero_point = 32768 : i64,
          B_bits = 4 : i64,
          Y_scale = 5.000000e-01 : f32, Y_zero_point = 32768 : i64,
+         transB = 1 : i64}
+    return
+  }
+
+  // live_rows passes the seqlens_k buffer through as the trailing pointer; the
+  // kernel reads it on device, so the lowering emits no host load. seqlens_k is
+  // rank 1 here only so its descriptor type tells it apart from A, B and Y.
+  //
+  // CHECK-LABEL: llvm.func @test_qgemm_live_rows(
+  // CHECK:      llvm.extractvalue %{{.*}}[1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+  // CHECK-NEXT: %[[LIVE:.*]] = llvm.addrspacecast
+  // CHECK-NOT:  llvm.load
+  // CHECK:      llvm.call @wrap_qgemm({{.*}}, %[[LIVE]]) : ({{.*}}, i64, !llvm.ptr) -> i32
+  func.func @test_qgemm_live_rows(%ctx: !hip.context,
+                                  %A: memref<128x32xi8, 1>,
+                                  %B: memref<16x32xi8, 1>,
+                                  %L: memref<1xi32, 1>,
+                                  %Y: memref<128x16xi8, 1>) {
+    hip.qgemm(%ctx)
+        ins(%A, %B : memref<128x32xi8, 1>, memref<16x32xi8, 1>)
+        live_rows(%L : memref<1xi32, 1>)
+        outs(%Y : memref<128x16xi8, 1>)
+        {A_scale = 2.500000e-01 : f32, A_zero_point = 0 : i64,
+         B_scale = 1.250000e-01 : f32,
+         Y_scale = 5.000000e-01 : f32, Y_zero_point = 0 : i64,
          transB = 1 : i64}
     return
   }
