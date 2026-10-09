@@ -5,6 +5,28 @@
 
 message(STATUS "Building Conversion Libraries")
 
+# Frontend-neutral helpers shared by conversions targeting the HIP dialect.
+add_library(HipConversionUtils STATIC
+  HipConversionUtils.cpp
+)
+
+add_dependencies(HipConversionUtils
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+)
+
+target_link_libraries(HipConversionUtils PUBLIC
+  HipDialectIR
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRTensorDialect
+  MLIRIR
+  MLIRSupport
+)
+
+set_target_properties(HipConversionUtils PROPERTIES FOLDER "mlir/Conversion")
+
 add_subdirectory(OnnxToHip)
 add_subdirectory(OnnxToHipsr)
 add_subdirectory(OnnxToHipDNN)
