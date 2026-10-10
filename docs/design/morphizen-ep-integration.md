@@ -54,7 +54,17 @@ exported symbols:
 
 The Windows `.def` and ELF version script export exactly those names. MorphiZen
 C++ APIs, generated protobuf classes, and the statically-linked compiler stay
-internal to the DSO; ORT never links `hipgpu.lib`.
+internal to the DSO; ORT never links `hipgpu.lib`. On ELF the DSO is also linked
+with `-z nodelete`, so `dlclose` does not unmap it. ORT's plugin registration
+probes `GetProvider`, closes the library when that symbol is absent, and opens
+it again for `CreateEpFactories`. The version script's `local: *` removes the
+`STB_GNU_UNIQUE` exports that previously kept the mapping alive across that
+close. Unmapping here drops `libamd_comgr.so` while the process's `libLLVM`
+stays loaded, and the second open registers `spirv-expand-step` again.
+`HipGpuElfContract` (`test/runtime/test_hipgpu_elf_contract.cpp`) checks
+that `libhipgpu.so` carries `DF_1_NODELETE` and that the two plugin entry
+points resolve. The comgr loader marks `libamd_comgr.so` `NODELETE` itself, so
+a `dlopen`/`dlclose` cycle cannot reconstruct the `spirv-expand-step` abort.
 
 The two contracts specific to this project are described below.
 
