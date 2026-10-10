@@ -173,6 +173,24 @@ jobs:
             echo "OK: $(basename "$KERNEL_DLL") present"
           done
 
+          # Standalone kernel unit tests (BUILD_HIP_KERNEL_UNIT_TESTS, on by default).
+          # hipdnn-kernel-ut.exe already came with install/bin/*.exe; its leaves
+          # live in install/bin/kernel-tests/<arch>/. Staged so a GPU job can run
+          # the controller from bin/; this workflow does not run them.
+          if [ ! -f staging/bin/hipdnn-kernel-ut.exe ]; then
+            echo "ERROR: hipdnn-kernel-ut.exe missing from install/bin/"
+            exit 1
+          fi
+          cp -a "${{ runner.workspace }}/install/bin/kernel-tests" staging/bin/
+          for arch in "${HIP_ARCHS[@]}"; do
+            n=$(ls staging/bin/kernel-tests/"$arch"/hipdnn-kernel-ut-*.exe 2>/dev/null | wc -l)
+            if [ "$n" -eq 0 ]; then
+              echo "ERROR: no kernel unit-test executables in kernel-tests/$arch/"
+              exit 1
+            fi
+            echo "OK: kernel-tests/$arch has $n kernel unit-test executables"
+          done
+
           # Import libraries that get bundled into the MorphiZen JIT-linker
           # path. Kept as a glob so the set evolves with the install rules
           # without touching this workflow each time.
