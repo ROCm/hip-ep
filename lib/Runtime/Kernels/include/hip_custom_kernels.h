@@ -541,6 +541,10 @@ HIP_KERNEL_API int hip_elementwise_binary_bcast(
  * rejected by the host wrapper.
  *
  * Output type is always uint8 (1-byte bool).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_INT8,
+ * HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16, HIP_DTYPE_INT32,
+ * HIP_DTYPE_INT64.
  */
 HIP_KERNEL_API int hip_elementwise_equal(
     void* stream,
