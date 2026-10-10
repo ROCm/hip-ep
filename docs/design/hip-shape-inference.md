@@ -233,6 +233,29 @@ Do not confuse the two dim-resolution surfaces:
 
 ## Pipeline placement
 
+### Reshape shape entries
+
+ONNX Reshape conversion keeps host shape scalars through static tensor casts,
+rank-zero/rank-one views, and constant slice/insert paths. The lookup is bounded
+and stops at unknown producers. Unknown payloads still use synchronized
+`hip.readback_scalar` operations.
+
+A tensor dimension is nonnegative. A non-narrowing index cast or a selection
+of nonnegative values preserves that fact. Such an entry cannot be the ONNX
+`-1` sentinel. Conversion skips inference for that entry and omits the element
+count and division when no entry can be `-1`. This keeps unnecessary late shape
+dependencies out of allocation sizes. Real `-1` requests, zero substitution,
+and `allowzero` retain their existing rules. Exact broadcast sizing is unchanged.
+
+Compute conversion can visit Reshape before its shape producers. A final walk
+forwards host-built shape entries and removes impossible `-1` comparisons.
+The normal canonicalizer then removes unused inference arithmetic. This walk
+does not run general folding or change the pipeline order.
+
+The changes run within `convert-onnx-to-hip`; they do not add a pass.
+
+### Pass order
+
 [pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Transforms/Pipelines.cpp`; the relevant segment is:
 
 ```text
