@@ -10,6 +10,10 @@
 *.cc  text working-tree-encoding=UTF-8
 *.md  text working-tree-encoding=UTF-8
 
+# Dependency patches are applied with git apply, which rejects CRLF hunks. Keep
+# them byte-exact so an autocrlf=true checkout (Windows runners) leaves them LF.
+.github/patches/** -text
+
 # Cursor agent skills/scripts: LF in repo so Linux pre-commit (licenseheaders)
 # does not rewrite line endings on every CI run.
 .cursor/** text eol=lf working-tree-encoding=UTF-8
