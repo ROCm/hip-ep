@@ -30,8 +30,11 @@ env:
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.30.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.14.0"
-  OGA_PR_PATCHES: "2194"
+  OGA_VERSION: "0.17.0"
+  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
+  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
+  # key. Remove a PR once it lands in the pinned OGA release.
+  OGA_PR_PATCHES: "2685 2691 2705"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -483,7 +486,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -546,7 +549,9 @@ jobs:
           ref: v${{ env.OGA_VERSION }}
           path: source-oga
           submodules: true
-          fetch-depth: 1
+          # Full history: `git apply --3way` below resolves each hunk against the
+          # blob the PR was prepared from, which lives at the PR's merge base.
+          fetch-depth: 0
           show-progress: false
 
       - name: Apply OGA PR patches
@@ -561,22 +566,25 @@ jobs:
             Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           }
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
-          git config user.email "ci@rocm.amd.com"
-          git config user.name "ROCm CI"
+          # pull/<n>.diff is the PR's net diff against its merge base. Replaying
+          # pull/<n>.patch with `git am` drops the conflict resolution of any
+          # "merge main" commit in the PR.
+          # --3way is required, not an optimization: a PR branched off main
+          # carries context lines that main has since edited but the pinned tag
+          # has not, and a plain apply rejects those hunks. The merge keeps the
+          # tag's version of every line the PR did not touch, so unrelated main
+          # commits stay out; a hunk needing code absent from the tag conflicts
+          # and fails the step. Tests are excluded because OGA does not build
+          # them and their fixtures do conflict.
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
-            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
-            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
+            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.diff"
+            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.diff"
             Write-Host "Fetching $url"
             Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
             Write-Host "Applying PR #$pr"
-            git am --3way --whitespace=nowarn $tmp
+            git apply --whitespace=nowarn --3way --exclude='test/*' $tmp
             if ($LASTEXITCODE -ne 0) {
-              git am --abort
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }
           }
@@ -598,15 +606,21 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
+          # turns the option off for mobile targets, so on desktop --skip_tests
+          # skips *running* the tests while still building them. This job needs
+          # only the DLL, model_benchmark and the wheel.
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
             --use_dml \
+            --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
+              ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
