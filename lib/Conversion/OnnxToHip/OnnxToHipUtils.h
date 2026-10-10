@@ -406,6 +406,9 @@ void populateShapeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+/// Simplify host shape values after their ONNX producers are converted.
+void simplifyReshapeShapeComputations(func::FuncOp funcOp);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
