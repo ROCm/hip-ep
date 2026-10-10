@@ -18,6 +18,7 @@ add_dependencies(HipConversionUtils
 
 target_link_libraries(HipConversionUtils PUBLIC
   HipDialectIR
+  MLIRArithUtils
   MLIRFuncDialect
   MLIRTensorDialect
   MLIRIR

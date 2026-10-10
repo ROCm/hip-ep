@@ -46,8 +46,7 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "onnx.Where lowering expects a ranked tensor result");
 
-  // Validate static broadcasting through the shared rule while preserving
-  // conversion's existing dynamic extent selection.
+  // Use the shared broadcast rule to size the destination.
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
   if (mlir::failed(initOrFailure))

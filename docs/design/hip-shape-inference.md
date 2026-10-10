@@ -160,15 +160,20 @@ Reification is per result: `reifyResultShapes` returns one shape vector for ever
 Converter destination construction and result reification are two views of one
 shape rule. `HipShapeUtils` therefore separates pure `infer*` helpers, which
 validate static shapes without a builder, from `reify*` helpers, which may
-materialize index SSA only after validation succeeds.
+insert index SSA into the input IR only after validation succeeds.
 
-A reifier must validate every precondition before touching the builder.
+A reifier must validate every precondition before changing the input IR.
+If folding can expose a conflict, build speculative operations in a detached
+block and insert them through the caller's builder only on success.
 Failure must leave the IR unchanged, including when the valid result shape is
 rank zero; `FailureOr` distinguishes that empty success from failure.
-Conversion-side destination builders in `HipConversionUtils.cpp` validate
-through the same pure shape rule and check imported static result metadata
-before creating `tensor.empty`. Conversion retains its existing dynamic
-extent-source policy. Shape interfaces use exact broadcast reification.
+Broadcast destination construction in `HipConversionUtils.cpp` uses the same
+reifier as result-shape queries. For two dynamic extents, both use
+`select(lhs == 1, rhs, lhs)`. This keeps the allocated size consistent with
+the reported result shape, including through reshape and bufferization.
+The builder checks folded extents against the imported result type before it
+inserts new operations. Variadic Min/Max conversion retains the complete new
+chain in a detached block until every pair succeeds.
 Imported and inferred extents follow standard
 shaped-type compatibility: a dynamic extent on either side is compatible,
 while unequal static extents are contradictions.
@@ -291,6 +296,8 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |
+| `test/lit/Conversion/onnx-to-hip/test_broadcast_destination_consistency.mlir` | Equal allocation and reified extents through collapse and bufferization |
+| `test/lit/Conversion/onnx-to-hip/test_broadcast_folded_failure_atomicity.mlir` | No partial destination or variadic chain after a folded shape conflict |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |

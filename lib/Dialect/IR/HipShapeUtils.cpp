@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Traits.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
@@ -82,8 +83,8 @@ broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
     return failure();
   }
 
-  // Under the multidirectional broadcast precondition, a dynamic extent paired
-  // with a known non-unit extent must be either 1 or that known extent.
+  // For a valid broadcast, the dynamic extent must be 1 or the known extent.
+  // This also applies when the known extent is 0.
   if (lhsStatic)
     return *lhsStatic == 1 ? rhs : lhs;
   if (rhsStatic)
@@ -100,9 +101,8 @@ broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
 
 } // namespace
 
-/// NumPy-broadcast result shape of `shapes` (right-aligned) from static extents
-/// only. Folds `OpTrait::util::getBroadcastedShape` pairwise so static
-/// broadcast validation is identical to the matmul batch path.
+/// Infer the right-aligned broadcast shape from static extents.
+/// Use the upstream rule shared with matmul batch inference.
 FailureOr<SmallVector<int64_t>>
 mlir::hip::inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
                                function_ref<InFlightDiagnostic()> emitError) {
@@ -127,9 +127,8 @@ mlir::hip::inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
 
 namespace mlir::hip::detail {
 
-/// NumPy-broadcast result shape from already-reified operand shapes. Callers
-/// must have validated broadcastability against the static shapes first, since
-/// this materializes index SSA as it folds.
+/// Merge reified operand shapes with the NumPy broadcast rule.
+/// A folded extent can expose a conflict. Discard new operations on failure.
 FailureOr<SmallVector<OpFoldResult>>
 reifyBroadcastShape(OpBuilder &b, Location loc,
                     ArrayRef<SmallVector<OpFoldResult>> inputShapes,
@@ -312,20 +311,23 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
     }
     staticShapes.push_back(operandType.getShape());
   }
-  // Validate broadcastability before emitting any `tensor.dim`, so a failure
-  // leaves the IR unchanged (see the contract in HipShapeUtils.h).
+  // Reject conflicts visible in the types before reifying dynamic dimensions.
   if (failed(mlir::hip::inferBroadcastShape(staticShapes, emitError)))
     return failure();
+
+  // A dynamic dimension can fold to a constant and expose a later conflict.
+  // Keep speculative operations detached until all dimensions are compatible.
+  Block pending;
+  OpBuilder shapeBuilder(b.getContext());
+  shapeBuilder.setInsertionPointToEnd(&pending);
 
   SmallVector<SmallVector<OpFoldResult>> shapes;
   shapes.reserve(operands.size());
   for (size_t i : llvm::seq<size_t>(0, operands.size())) {
     Value operand = operands[i];
     bool reused = false;
-    // Reuse the first mixed shape for repeated SSA operands (e.g. x*x) so
-    // broadcastDim sees identical OpFoldResults and emits no redundant
-    // tensor.dim/cmpi/select chain. Broadcast arity is normally 2-3, so a
-    // linear scan is simpler than maintaining a side map.
+    // Reuse the shape for repeated operands to avoid redundant selections.
+    // A linear scan is sufficient for the usual two or three operands.
     for (size_t j : llvm::seq<size_t>(0, i)) {
       if (operand == operands[j]) {
         shapes.push_back(shapes[j]);
@@ -335,9 +337,20 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
     }
     if (reused)
       continue;
-    shapes.push_back(tensor::getMixedSizes(b, loc, operand));
+    shapes.push_back(tensor::getMixedSizes(shapeBuilder, loc, operand));
   }
-  return detail::reifyBroadcastShape(b, loc, shapes, emitError);
+  auto result =
+      detail::reifyBroadcastShape(shapeBuilder, loc, shapes, emitError);
+  if (failed(result))
+    return failure();
+
+  // Insert in dependency order. Notify the caller's listener only on success.
+  while (!pending.empty()) {
+    Operation *op = &pending.front();
+    op->remove();
+    b.insert(op);
+  }
+  return result;
 }
 
 bool mlir::hip::parseDenseIntElements(DenseElementsAttr dense,

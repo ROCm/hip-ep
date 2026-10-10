@@ -8,8 +8,11 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/Block.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 
@@ -46,43 +49,39 @@ FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
       !isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
     return failure();
 
-  // Preserve conversion's existing dynamic extent selection. Shape interfaces
-  // use reifyBroadcastResultShape for exact runtime broadcast extents.
-  int64_t resultRank = resultType.getRank();
-  llvm::SmallVector<Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
+  // Use the same extents for the destination and result shape queries.
+  // Before: empty(dim(a, 0)) for a: tensor<?xf32>, b: tensor<?xf32>.
+  // After:  empty(select(dim(a, 0) == 1, dim(b, 0), dim(a, 0))).
+  // A folded extent can contradict the imported result type. Keep all new
+  // operations detached until these checks pass.
+  Block pending;
+  OpBuilder shapeBuilder(builder.getContext());
+  shapeBuilder.setInsertionPointToEnd(&pending);
+  auto shape = reifyBroadcastResultShape(shapeBuilder, loc, operands,
+                                         [&] { return emitError(loc); });
+  if (failed(shape))
+    return failure();
 
-    Value chosen;
-    int64_t chosenDim = -1;
-    Value fallback;
-    int64_t fallbackDim = -1;
-    for (Value operand : operands) {
-      auto type = dyn_cast<RankedTensorType>(operand.getType());
-      int64_t offset = resultRank - type.getRank();
-      if (dimIdx < offset)
-        continue;
-      int64_t operandDim = dimIdx - offset;
-      if (!fallback) {
-        fallback = operand;
-        fallbackDim = operandDim;
-      }
-      if (!type.isDynamicDim(operandDim) && type.getDimSize(operandDim) == 1)
-        continue;
-      chosen = operand;
-      chosenDim = operandDim;
-      break;
-    }
-    if (!chosen) {
-      chosen = fallback;
-      chosenDim = fallbackDim;
-    }
-    if (!chosen)
+  llvm::SmallVector<Value> dynSizes;
+  for (auto [extent, inferred] :
+       llvm::zip_equal(resultType.getShape(), *shape)) {
+    auto constant = getConstantIntValue(inferred);
+    if (constant && (*constant < 0 ||
+                     (!ShapedType::isDynamic(extent) && extent != *constant)))
       return failure();
-    dynSizes.push_back(tensor::DimOp::create(builder, loc, chosen, chosenDim));
+    if (ShapedType::isDynamic(extent))
+      dynSizes.push_back(
+          getValueOrCreateConstantIndexOp(shapeBuilder, loc, inferred));
   }
-  return Value(tensor::EmptyOp::create(builder, loc, resultType, dynSizes));
+  Value result =
+      tensor::EmptyOp::create(shapeBuilder, loc, resultType, dynSizes);
+  // Insert through the caller's builder to notify its listener.
+  while (!pending.empty()) {
+    Operation *op = &pending.front();
+    op->remove();
+    builder.insert(op);
+  }
+  return result;
 }
 
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter) {

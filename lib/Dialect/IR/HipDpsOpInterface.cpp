@@ -4,12 +4,10 @@
  */
 //===- HipDpsOpInterface.cpp - HipDpsOp default reify body ----------------===//
 //
-// Single shared default `reifyResultShapes` body for HIP DPS ops. In tensor
-// mode, walks `DestinationStyleOpInterface::getDpsInits()` and lifts each
-// init's runtime shape via `tensor::getMixedSizes`. In memref mode there are
-// no SSA results, so it returns an empty reified-result list.
-// Ops that need a tighter contract select a manual-reify family and provide a
-// per-op override in `HipReifyResultShapesImpl.cpp`.
+// The shared reifier queries DPS destination shapes with tensor::getMixedSizes.
+// It returns one vector per tensor result and an empty list for memref
+// operations. Operations with other shape rules override this body in
+// HipReifyResultShapesImpl.cpp.
 //
 // See `docs/design/hip-shape-inference.md` for the design rationale and
 // the recipe for wiring a new op (or a new shape category) into the
@@ -39,10 +37,8 @@ HipDpsOp::reifyResultShapes(OpBuilder &b,
   auto dpsOp = cast<DestinationStyleOpInterface>(op);
   Operation::operand_range inits = dpsOp.getDpsInits();
 
-  // Bufferized DPS ops write through destination memrefs and have no SSA
-  // results. The upstream interface contract is one vector per op result, so
-  // memref mode succeeds with an empty list rather than reporting destination
-  // memref shapes as nonexistent result shapes.
+  // Return one shape vector per SSA result, as the upstream interface requires.
+  // Memref operations write to destinations and have no SSA results.
   reified.clear();
   if (op->getNumResults() == 0)
     return success();
