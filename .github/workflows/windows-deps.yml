@@ -606,6 +606,10 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
+          # turns the option off for mobile targets, so on desktop --skip_tests
+          # skips *running* the tests while still building them. This job needs
+          # only the DLL, model_benchmark and the wheel.
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
@@ -616,6 +620,7 @@ jobs:
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
+              ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
 

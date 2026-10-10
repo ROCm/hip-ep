@@ -369,6 +369,10 @@ jobs:
           fi
           cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
           cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
+          # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
+          # turns the option off for mobile targets, so on desktop --skip_tests
+          # skips *running* the tests while still building them. This job needs
+          # only the shared library, model_benchmark and the wheel.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
@@ -378,6 +382,7 @@ jobs:
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
+              ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
           mkdir -p "$ART"
