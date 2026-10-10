@@ -84,7 +84,7 @@ To build them yourself from source, follow the steps below.
 
 #### 1. Build ONNX Runtime from source
 ```bash
-git clone --branch v1.30.0 https://github.com/microsoft/onnxruntime.git
+git clone --branch v1.27.0 https://github.com/microsoft/onnxruntime.git
 cd onnxruntime
 python3 -m venv .venv
 source .venv/bin/activate
@@ -93,7 +93,7 @@ pip install numpy packaging requests wheel setuptools
   --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF
 ```
 
-The wheel lands at `build/Linux/Release/dist/onnxruntime-1.30.0-cp310-cp310-linux_x86_64.whl`
+The wheel lands at `build/Linux/Release/dist/onnxruntime-1.27.0-cp310-cp310-linux_x86_64.whl`
 (filename varies by Python version).
 
 #### 2. Build OGA (`onnxruntime-genai`) from source
@@ -150,8 +150,8 @@ OGA_WHEEL=$(find onnxruntime-genai/build/Linux/Release/wheel -name 'onnxruntime_
 python3 -m pip install --ignore-requires-python "$ORT_WHEEL" "$OGA_WHEEL"
 ```
 
-`--ignore-requires-python` is needed because the ONNX Runtime wheel
-metadata can declare `Requires-Python: >=3.11` even when the wheel was built
+`--ignore-requires-python` is needed because ONNX Runtime 1.27.0's own wheel
+metadata incorrectly declares `Requires-Python: >=3.11` despite being built
 and tagged for `cp310`.
 
 Verify:
