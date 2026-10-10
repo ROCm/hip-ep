@@ -19,6 +19,7 @@ NUMPY_TO_ONNX_TYPE = {
     np.int64: TensorProto.INT64,
     np.int32: TensorProto.INT32,
     np.int16: TensorProto.INT16,
+    np.uint16: TensorProto.UINT16,
     np.int8: TensorProto.INT8,
     np.uint8: TensorProto.UINT8,
     np.bool_: TensorProto.BOOL,
