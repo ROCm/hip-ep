@@ -244,7 +244,6 @@ module {
 // CHECK-NEXT: %[[ID0:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x?x?xf16>
 // CHECK-NEXT: %[[IDC0:.*]] = arith.index_cast %[[ID0]] : index to i64
 // CHECK-NEXT: %[[R0:.*]] = arith.select %[[ISZ0]], %[[IDC0]], %[[E0]] : i64
-// CHECK-NEXT: arith.cmpi sgt, %[[R0]], %[[C1I]] : i64
 // ... and entry 1 against input dim 1: the dim index tracks the entry index
 // rather than being pinned to one dim.
 // CHECK: tensor.extract_slice %[[SHAPE]][1] [1] [1]
@@ -258,7 +257,10 @@ module {
 // divisor.
 // CHECK: tensor.extract_slice %[[SHAPE]][3] [1] [1]
 // CHECK: %[[E3:.*]] = hip.readback_scalar
-// CHECK-NEXT: arith.cmpi sgt, %[[E3]], %[[C1I]] : i64
+// The divisor uses resolved dimensions after all entries are read.
+// CHECK: arith.cmpi sgt, %[[R0]], %[[CZ]] : i64
+// CHECK: arith.cmpi sgt, %[[R1]], %[[CZ]] : i64
+// CHECK: arith.cmpi sgt, %[[E3]], %[[CZ]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
 // CHECK-NEXT: %[[ISM0:.*]] = arith.cmpi eq, %[[R0]], %[[CM1]] : i64
 // CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM0]], %[[INF]], %[[R0]] : i64
@@ -276,10 +278,11 @@ module {
 // CHECK-LABEL: func.func @test_reshape_dyn_allowzero
 // CHECK-SAME: %[[DATA:[^:]*]]: tensor<?x?x?xf16>, %[[SHAPE:[^:]*]]: tensor<4xi64>
 // CHECK-DAG: %[[CM1:.*]] = arith.constant -1 : i64
+// CHECK-DAG: %[[CZ:.*]] = arith.constant 0 : i64
 // CHECK-DAG: %[[C1I:.*]] = arith.constant 1 : i64
 // CHECK: tensor.extract_slice %[[SHAPE]][0] [1] [1]
 // CHECK: %[[E0:.*]] = hip.readback_scalar
-// CHECK-NEXT: arith.cmpi sgt, %[[E0]], %[[C1I]] : i64
+// CHECK: arith.cmpi sgt, %[[E0]], %[[CZ]] : i64
 // CHECK: %[[INF:.*]] = arith.divsi
 // CHECK-NEXT: %[[ISM:.*]] = arith.cmpi eq, %[[E0]], %[[CM1]] : i64
 // CHECK-NEXT: %[[F0:.*]] = arith.select %[[ISM]], %[[INF]], %[[E0]] : i64
