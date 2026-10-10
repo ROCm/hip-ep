@@ -1980,6 +1980,29 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip_skip_rms_norm with a dtype per tensor (bias shares skip's). Besides the
+ * all-equal case, which forwards to hip_skip_rms_norm, the supported
+ * combination is input FLOAT32, skip FLOAT16, gamma FLOAT16, output FLOAT16,
+ * sum FLOAT32: an fp32 residual stream in an fp16 model, with the Casts on
+ * skip, gamma and output folded in. Pass sum_dtype = input_dtype when
+ * input_skip_bias_sum is null. Returns -1 for any other combination. */
+HIP_KERNEL_API int hip_skip_rms_norm_mixed(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int input_dtype,
+    int skip_dtype,
+    int gamma_dtype,
+    int output_dtype,
+    int sum_dtype);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
