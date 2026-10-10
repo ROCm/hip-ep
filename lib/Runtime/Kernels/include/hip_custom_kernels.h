@@ -2184,6 +2184,47 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
     int64_t block_size,
     int64_t element_size_bytes);
 
+/* int4 x fp16 GEMM over a ragged batch of expert row slices (MoE prefill),
+ * fp16 activations and fp32 accumulation. Streams each weight once straight
+ * into WMMA fragments instead of staging it through LDS, which is what bounds
+ * the general WMMA tile at small M. One launch covers every expert, driven by
+ * a device-side row-tile list so nothing is read back.
+ *   A / output         : fp16 rows packed back-to-back in expert order; expert
+ *                        e's rows start at expert_row_offsets[e] (int32,
+ *                        device). A is [rows, K], output [rows, N].
+ *   B, scales          : expert-major MatMulNBits layout
+ *                        ([E, N, ceil(K/bs)*bs/2] packed, fp16 [E, N, ceil(K/bs)])
+ *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
+ *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
+ *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
+ *                        bit-identical results.
+ *   bias               : fp16 [E, N] or nullptr
+ *   row_tiles          : int32 [max_row_tiles][3] = (expert, row0, rows) with
+ *                        rows <= tile_rows (hip_qmoe_build_row_tiles)
+ *   num_row_tiles      : int32 device scalar, valid entries of row_tiles
+ *   max_row_tiles      : host-side upper bound on *num_row_tiles (grid size)
+ *   tile_rows          : tile height the list was built with; cfg < 0 picks
+ *                        the default config for it, and a cfg whose row tile
+ *                        is shorter returns -1.
+ * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0, power-of-two
+ * block_size >= 32 and K small enough for one workgroup per column tile
+ * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
+ * -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
+    void* stream, int cfg,
+    const void* A, const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_smallm_grouped accepts this shape and tile
+ * height (same cfg rule), else 0. Lets a caller commit to the device-side
+ * grouped flow before issuing any of it. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -2579,6 +2620,19 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
     int64_t k,
     int64_t row_group_size,
     int64_t element_size_bytes);
+
+/* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
+ * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
+ * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
+ * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
+ * order; num_small / num_big are int32 device scalars receiving the counts.
+ * Capacity the caller must provide: tiles_small holds at most
+ * sum over small experts of ceil(count / rows_small), tiles_big
+ * total_rows / rows_big + (number of experts above split_rows). */
+HIP_KERNEL_API int hip_qmoe_build_row_tiles(
+    void* stream, const void* expert_counts, int64_t num_experts,
+    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
+    void* num_small, void* tiles_big, void* num_big);
 
 /* One-launch ragged W4A16 MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps

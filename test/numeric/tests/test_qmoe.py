@@ -236,3 +236,34 @@ class TestQMoE:
 
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("seq_len", [2, 37, 512])
+    def test_qmoe_gpt_oss_shape_skewed_routing(self, model_runner, seq_len):
+        """GPT-OSS-20B shapes with routing skewed toward low expert ids, so
+        expert slices range from a single row to hundreds of rows. Prefill
+        cuts experts of <= 16 rows into one tile and larger ones into several
+        32-row tiles; this covers both kinds, an expert spanning many tiles,
+        and the routed-pair reduction over unevenly filled experts.
+        """
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            HIDDEN,
+            INTERMEDIATE,
+            NUM_EXPERTS,
+            TOP_K,
+            BLOCK_SIZE,
+        )
+
+        rng = np.random.default_rng(8)
+        x = rng.uniform(-1, 1, [1, seq_len, HIDDEN]).astype(np.float16)
+        skew = np.linspace(3.0, -3.0, NUM_EXPERTS)
+        router = (rng.standard_normal([seq_len, NUM_EXPERTS]) * 1.2 + skew).astype(
+            np.float16,
+        )
+        # A tie at the k-th logit makes the expert choice backend-defined.
+        ranked = -np.sort(-router.astype(np.float32), axis=1)
+        assert not (ranked[:, TOP_K - 1] == ranked[:, TOP_K]).any()
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
