@@ -82,8 +82,8 @@ namespace {
 /// `OpFoldResult` is a constant integer, the constant replaces it.
 /// Returns true iff at least one dim moved from `kDynamic` to static.
 ///
-/// Precondition: the complete reification has passed
-/// `validateReifiedResultShapes`, including rank and static-extent checks.
+/// Call validateReifiedResultShapes first to check all ranks and static
+/// extents.
 static bool composeRefinedShape(ArrayRef<int64_t> cur,
                                 ArrayRef<OpFoldResult> reif,
                                 SmallVectorImpl<int64_t> &out) {
@@ -101,9 +101,8 @@ static bool composeRefinedShape(ArrayRef<int64_t> cur,
   return refined;
 }
 
-/// Validate every result slot before the pass mutates a result or DPS init.
-/// A malformed successful reifier is an op-author/compiler defect, so diagnose
-/// it and fail in release builds rather than relying on assertions.
+/// Check every result before changing a result type or DPS destination.
+/// Report invalid reifier output and fail the pass in all build modes.
 static LogicalResult
 validateReifiedResultShapes(Operation *op,
                             const ReifiedRankedShapedTypeDims &reified) {

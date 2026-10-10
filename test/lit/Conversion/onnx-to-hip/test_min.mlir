@@ -70,8 +70,13 @@ module {
   // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
   // CHECK-DAG: %[[A0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?xf32>
   // CHECK-DAG: %[[A1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
-  // CHECK-NOT: arith.select
-  // CHECK: %[[INIT:.*]] = tensor.empty(%[[A0]], %[[A1]]) : tensor<?x?xf32>
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<?x?xf32>
+  // CHECK: %[[ISONE0:.*]] = arith.cmpi eq, %[[A0]], %[[C1]] : index
+  // CHECK: %[[SIZE0:.*]] = arith.select %[[ISONE0]], %[[B0]], %[[A0]] : index
+  // CHECK: %[[ISONE1:.*]] = arith.cmpi eq, %[[A1]], %[[C1]] : index
+  // CHECK: %[[SIZE1:.*]] = arith.select %[[ISONE1]], %[[B1]], %[[A1]] : index
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[SIZE0]], %[[SIZE1]]) : tensor<?x?xf32>
   // CHECK: hip.min(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>)
 
   // --- Case 5: rank-5 against a rank-0 scalar, packed to the 4-D path ---

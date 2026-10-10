@@ -12,15 +12,14 @@
 namespace mlir {
 namespace hip {
 
-/// Return whether an imported ranked type is compatible with a pure inferred
-/// shape. A dynamic extent on either side is compatible; unequal static
-/// extents are contradictions.
+/// Check an imported ranked type against an inferred shape.
+/// A dynamic extent is compatible with any extent. Static extents must match.
 bool isResultTypeCompatibleWithInferredShape(
     RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
 
-/// Validate against the shared NumPy broadcast shape rule, then build a
-/// tensor.empty using the established conversion-time extent source policy.
-/// This builder does not materialize exact dynamic broadcast merges.
+/// Build a tensor.empty with the exact NumPy broadcast shape.
+/// Keep the imported result type and encoding. Reject known shape conflicts.
+/// On failure, leave the IR unchanged.
 FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
                                             RankedTensorType resultType,
                                             ValueRange operands);

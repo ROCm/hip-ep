@@ -28,10 +28,9 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 //   - ReifyRankedShapedTypeOpInterface (decl; body auto-emitted below)
 //   - Variadic<AnyRankedTensor>:$result_tensors (empty in memref mode)
 //
-// Shape behavior is selected by named family subclasses below rather than by
-// boolean and string-body parameters on this structural root. Simple families
-// emit fixed forwarding methods; semantic long-tail ops implement reification
-// in `HipReifyResultShapesImpl.cpp`.
+// Select shape behavior with the named families below.
+// Shared families generate forwarding methods. Operations with other rules
+// implement reification in HipReifyResultShapesImpl.cpp.
 class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hip_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
@@ -45,8 +44,8 @@ class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
 
-// Adds the single-result DPS inference convention: tensor mode returns the
-// typed outs operand, while memref mode has no SSA result.
+// Infer the single tensor result type from the destination type.
+// Memref operations have no SSA results.
 class Hip_DpsOp_WithInfer<string mnemonic,
                           string outsAccessor = "Output",
                           list<Trait> traits = []> :
@@ -74,8 +73,7 @@ class Hip_DpsOp_WithInfer<string mnemonic,
   let extraClassDefinition = inferClassDefinition;
 }
 
-// Uses the shared HipDpsOpInterface implementation to lift the runtime shape
-// from destination operands.
+// Query destination shapes through the shared HipDpsOpInterface implementation.
 class Hip_DpsOp_AutoReify<string mnemonic, list<Trait> traits = []> :
     Hip_DpsOp<mnemonic, traits> {
   code reifyClassDefinition = [{
@@ -89,8 +87,7 @@ class Hip_DpsOp_AutoReify<string mnemonic, list<Trait> traits = []> :
   let extraClassDefinition = reifyClassDefinition;
 }
 
-// Combines the two common generated methods without exposing independent
-// behavior switches to leaf operations.
+// Generate both type inference and destination-shape reification.
 class Hip_DpsOp_AutoReifyInfer<string mnemonic,
                                string outsAccessor = "Output",
                                list<Trait> traits = []> :
@@ -729,9 +726,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 
 // ===== hipBLASLt ops =========================================================
 
-// Matmul selects a manual-reify/generated-infer family: reification recovers
-// M/K/N from operand shapes in `HipReifyResultShapesImpl.cpp`, while the
-// generated `inferReturnTypes` body reads the typed outs operand.
+// Matmul reifies shapes from input dimensions in HipReifyResultShapesImpl.cpp.
+// The generated type inference reads the destination type.
 def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{

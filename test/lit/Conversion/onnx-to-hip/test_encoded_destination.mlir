@@ -17,3 +17,18 @@ func.func @main_graph(
        tensor<2xf32, #encoding>) -> tensor<2xf32, #encoding>
   return %result : tensor<2xf32, #encoding>
 }
+
+// Keep the encoding when the destination needs a runtime broadcast selection.
+// CHECK-LABEL: func.func @dynamic_encoding
+// CHECK: %[[SIZE:.*]] = arith.select
+// CHECK: %[[INIT:.*]] = tensor.empty(%[[SIZE]]) : tensor<?xf32, #test.encoding>
+// CHECK: hip.where
+// CHECK-SAME: outs(%[[INIT]] : tensor<?xf32, #test.encoding>)
+func.func @dynamic_encoding(
+    %cond: tensor<i1>, %x: tensor<?xf32, #encoding>,
+    %y: tensor<?xf32, #encoding>) -> tensor<?xf32, #encoding> {
+  %result = "onnx.Where"(%cond, %x, %y) :
+      (tensor<i1>, tensor<?xf32, #encoding>,
+       tensor<?xf32, #encoding>) -> tensor<?xf32, #encoding>
+  return %result : tensor<?xf32, #encoding>
+}

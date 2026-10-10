@@ -29,17 +29,11 @@ def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
   let cppNamespace = "::mlir::hip";
 
   let extraClassDeclaration = [{
-    /// Default reify implementation. In tensor mode, returns a per-result
-    /// vector of `OpFoldResult` -- static dims as `IntegerAttr`, dynamic dims
-    /// as `tensor.dim` of the corresponding outs operand. In memref mode,
-    /// returns success with no vectors because the op has no SSA results.
-    /// Folds through `tensor.cast` because `tensor::DimOp::fold` peels
-    /// casts (via `foldTensorCast`) and the `DimOfCastOp` canonicalizer
-    /// rewrites `dim(cast(x), i)` into `dim(x, i)`. As a result, chained
-    /// refinement still recovers already-narrowed dims even across the
-    /// per-op refinement barrier (a `tensor.cast` on non-DPS-init uses)
-    /// inserted by `--hip-infer-shapes`. The cast peel is performed by
-    /// the folder/canonicalizer, not by `--hip-infer-shapes` itself.
+    /// Return one shape vector per tensor result, using its DPS destination.
+    /// Keep static extents as attributes. Query dynamic extents with tensor.dim.
+    /// Memref operations have no SSA results, so return an empty list.
+    /// Tensor folding and canonicalization can resolve dimensions through casts.
+    /// The shape-refinement pass does not remove these casts itself.
     ::mlir::LogicalResult reifyResultShapes(
         ::mlir::OpBuilder &b,
         ::mlir::ReifiedRankedShapedTypeDims &reifiedReturnShapes);

@@ -161,10 +161,10 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 /// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
 constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 
-/// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
-/// broadcasting HIP ops. Every intermediate result type comes from that
-/// pair's shared broadcast shape; only the final step must match the imported
-/// ONNX result type.
+/// Lower a variadic ONNX operation to a chain of binary HIP operations.
+/// Use each pair's broadcast shape for its intermediate result type.
+/// Keep the imported result type at the final step.
+/// On failure, leave the IR unchanged.
 template <typename HipOpTy>
 mlir::LogicalResult
 lowerVariadicBroadcastChain(mlir::Operation *op,
@@ -215,7 +215,7 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
 
-  // Infer the complete pairwise chain before reification emits any shape SSA.
+  // Check all static shapes before creating operations.
   llvm::SmallVector<llvm::SmallVector<int64_t>> stepStaticShapes;
   llvm::SmallVector<int64_t> accumulatedShape(inputTypes.front().getShape());
   for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
@@ -237,6 +237,11 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
   if (mlir::failed(context))
     return mlir::failure();
 
+  // A later pair can expose a folded shape conflict. Keep the complete chain
+  // detached so a failed match cannot leave an earlier pair in the IR.
+  mlir::Block pending;
+  mlir::OpBuilder chainBuilder(rewriter.getContext());
+  chainBuilder.setInsertionPointToEnd(&pending);
   mlir::Value accumulate = op->getOperand(0);
   for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
     mlir::Value rhs = op->getOperand(i);
@@ -246,18 +251,24 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
                 : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
                                               resultType.getElementType(),
                                               resultType.getEncoding());
-    auto init = createBroadcastEmptyTensor(rewriter, loc, stepResultType,
+    auto init = createBroadcastEmptyTensor(chainBuilder, loc, stepResultType,
                                            {accumulate, rhs});
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
           op, llvm::Twine(opName) +
                   " result type is incompatible with the broadcast shape");
 
-    accumulate = HipOpTy::create(rewriter, loc, stepResultType, *context,
+    accumulate = HipOpTy::create(chainBuilder, loc, stepResultType, *context,
                                  accumulate, rhs, *init)
                      ->getResult(0);
   }
 
+  // Notify the rewriter only after all pairs succeed.
+  while (!pending.empty()) {
+    mlir::Operation *created = &pending.front();
+    created->remove();
+    rewriter.insert(created);
+  }
   rewriter.replaceOp(op, accumulate);
   return mlir::success();
 }

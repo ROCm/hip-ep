@@ -114,15 +114,20 @@ module {
     return %output : tensor<7xf32>
   }
 
-  // Test 6: Conversion retains its existing dynamic extent selection.
-  // Exact dynamic broadcast reification is tested separately.
+  // Test 6: Merge all three extents before creating the destination.
   func.func @test_where_dynamic_unit_broadcast(
       %cond: tensor<?xi1>, %x: tensor<?xf16>, %y: tensor<?xf16>)
       -> tensor<?xf16> {
     // CHECK-LABEL: func.func @test_where_dynamic_unit_broadcast
+    // CHECK: %[[ONE:.*]] = arith.constant 1 : index
     // CHECK: %[[COND_DIM:.*]] = tensor.dim %[[COND:.*]], %{{.*}} : tensor<?xi1>
-    // CHECK-NOT: arith.select
-    // CHECK: tensor.empty(%[[COND_DIM]]) : tensor<?xf16>
+    // CHECK: %[[X_DIM:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?xf16>
+    // CHECK: %[[Y_DIM:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?xf16>
+    // CHECK: %[[C_IS_ONE:.*]] = arith.cmpi eq, %[[COND_DIM]], %[[ONE]] : index
+    // CHECK: %[[CX:.*]] = arith.select %[[C_IS_ONE]], %[[X_DIM]], %[[COND_DIM]] : index
+    // CHECK: %[[CX_IS_ONE:.*]] = arith.cmpi eq, %[[CX]], %[[ONE]] : index
+    // CHECK: %[[SIZE:.*]] = arith.select %[[CX_IS_ONE]], %[[Y_DIM]], %[[CX]] : index
+    // CHECK: tensor.empty(%[[SIZE]]) : tensor<?xf16>
 
     %output = "onnx.Where"(%cond, %x, %y) :
         (tensor<?xi1>, tensor<?xf16>, tensor<?xf16>) -> tensor<?xf16>
