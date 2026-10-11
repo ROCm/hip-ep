@@ -93,9 +93,10 @@ namespace {
 
 struct AllocInfo {
   memref::AllocOp allocOp;
-  unsigned defIndex;      ///< sequential index of the alloc op in the block
-  unsigned lastUseIndex;  ///< highest index of any (transitive) user
-  int64_t staticByteSize; ///< >0 for static shapes, 0 for dynamic
+  unsigned defIndex;        ///< sequential index of the alloc op in the block
+  unsigned lastUseIndex;    ///< highest index of any (transitive) user
+  int64_t staticByteSize;   ///< >0 for static shapes, 0 for dynamic
+  int64_t staticByteFactor; ///< element bytes times all static dimensions
 };
 
 /// True when two allocs' [def, lastUse] intervals overlap.
@@ -103,16 +104,14 @@ static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
 }
 
-/// Compile-time byte coefficient: element bytes times all static dimensions.
-/// For dynamic memrefs, multiplying this coefficient by the ordered dynamic
-/// size operands yields the runtime byte size.
-static int64_t staticFactorBytes(MemRefType type) {
-  int64_t staticElems = 1;
+/// Compile-time byte coefficient for a possibly-dynamic memref.
+static FailureOr<int64_t> getStaticByteFactor(MemRefType type) {
+  int64_t factor = getElementByteWidth(type);
   for (int64_t dim : type.getShape())
     if (!ShapedType::isDynamic(dim))
-      staticElems *= dim;
-  return static_cast<int64_t>(
-      llvm::divideCeil(staticElems * type.getElementTypeBitWidth(), 8));
+      if (llvm::MulOverflow(factor, dim, factor))
+        return failure();
+  return factor;
 }
 
 /// Max-load lower bound: the peak sum of `sizeOf` over members live at a single
@@ -516,7 +515,7 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   auto computeKey = [](AllocInfo &info) {
     MemRefType type = info.allocOp.getType();
     auto dynSizes = info.allocOp.getDynamicSizes();
-    int64_t staticFactor = staticFactorBytes(type);
+    int64_t staticFactor = info.staticByteFactor;
     SmallVector<Value, 2> dynOperands;
     unsigned dynIdx = 0;
     for (int64_t dim : type.getShape())
@@ -732,7 +731,23 @@ void PoolAllocsPass::runOnOperation() {
     info.defIndex = opIndex[&op];
     info.lastUseIndex = findLastAliasedUseIndex(result, aliasAnalysis, block,
                                                 opIndex, blockSize);
-    info.staticByteSize = getStaticByteSize(allocOp.getType());
+    MemRefType type = allocOp.getType();
+    FailureOr<int64_t> staticFactor = getStaticByteFactor(type);
+    if (failed(staticFactor)) {
+      allocOp.emitError("HIP pool byte-size coefficient overflows int64");
+      return signalPassFailure();
+    }
+    info.staticByteFactor = *staticFactor;
+    if (type.hasStaticShape()) {
+      FailureOr<int64_t> staticByteSize = getStaticByteSize(type);
+      if (failed(staticByteSize)) {
+        allocOp.emitError("HIP pool byte size overflows int64");
+        return signalPassFailure();
+      }
+      info.staticByteSize = *staticByteSize;
+    } else {
+      info.staticByteSize = 0;
+    }
     LLVM_DEBUG(llvm::dbgs() << "  alloc " << allocOp << " [" << info.defIndex
                             << ", " << info.lastUseIndex << "] "
                             << info.staticByteSize << " bytes\n");
@@ -894,10 +909,8 @@ void PoolAllocsPass::runOnOperation() {
       for (const DynGroup &g : groups)
         for (const auto &[info, unitOffset] : g.assignments)
           members.push_back(info);
-      int64_t dynLbUnits = maxConcurrentLoad(members, [](const AllocInfo *i) {
-        memref::AllocOp op = i->allocOp; // copy handle to drop constness
-        return staticFactorBytes(op.getType());
-      });
+      int64_t dynLbUnits = maxConcurrentLoad(
+          members, [](const AllocInfo *i) { return i->staticByteFactor; });
       int64_t dynFrag = coefficientComparable ? dynPoolUnits - dynLbUnits : 0;
       if (!groups.empty()) {
         if (coefficientComparable) {
