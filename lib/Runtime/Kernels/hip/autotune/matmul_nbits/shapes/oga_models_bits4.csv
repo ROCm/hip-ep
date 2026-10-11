@@ -88,7 +88,9 @@ google-gemma-4-26B-A4B-it-FP16W4-qmoe,2816,262144,4,32,1,1
 google-gemma-4-26B-A4B-it-FP16W4-qmoe,4096,2816,4,32,1,25
 google-gemma-4-26B-A4B-it-FP16W4-qmoe,4304,1152,4,32,1,27
 google-gemma-4-26B-A4B-it-FP16W4-qmoe,8192,2816,4,32,1,5
+gpt-oss-120b-w-uint4-pergroup-asym-awq-fp16-ssln-fp32-onnx-prune-lm-head,2880,2880,4,32,1,36
 gpt-oss-120b-w-uint4-pergroup-asym-awq-fp16-ssln-fp32-onnx-prune-lm-head,2880,5120,4,32,1,36
+gpt-oss-120b-w-uint4-pergroup-asym-awq-fp16-ssln-fp32-onnx-prune-lm-head,2880,5760,4,32,1,36
 gpt-oss-120b-w-uint4-pergroup-asym-awq-fp16-ssln-fp32-onnx-prune-lm-head,4096,2880,4,32,1,36
 gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,2880,32,4,32,0,24
 gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head,2880,5120,4,32,0,24
