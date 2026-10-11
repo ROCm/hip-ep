@@ -15,6 +15,83 @@ from onnx.compose import add_prefix, merge_graphs
 
 _PIPELINE_PREFIXES = ("emb_", "dec_", "head_")
 DEFAULT_EXTERNAL_DATA = "merged.data"
+FULL_KV_SEQUENCE_DIM = "max_seq_len"
+SLIDING_KV_SEQUENCE_DIM = "max_seq_len_sliding"
+
+
+def _node_int_attribute(node: onnx.NodeProto, name: str, default: int) -> int:
+    attr = next((attr for attr in node.attribute if attr.name == name), None)
+    return int(helper.get_attribute_value(attr)) if attr is not None else default
+
+
+def normalize_gqa_kv_cache_shapes(graph: onnx.GraphProto) -> int:
+    """Set each GQA KV-cache sequence dimension from its attention attributes.
+
+    ``local_window_size`` controls the attention span, while
+    ``sliding_window_cache=1`` opts into an EP-managed compact cache. Only the
+    combination denotes a window-sized cache; local attention without cache
+    compaction still uses the full ``max_seq_len`` capacity.
+    """
+    tensor_dims: dict[str, str] = {}
+    for node in graph.node:
+        if node.op_type != "GroupQueryAttention":
+            continue
+
+        is_sliding_cache = (
+            _node_int_attribute(node, "local_window_size", -1) > 0
+            and _node_int_attribute(node, "sliding_window_cache", 0) == 1
+        )
+        sequence_dim = (
+            SLIDING_KV_SEQUENCE_DIM if is_sliding_cache else FULL_KV_SEQUENCE_DIM
+        )
+
+        # GQA inputs 3/4 are past K/V and outputs 1/2 are present K/V.
+        kv_names = [*node.input[3:5], *node.output[1:3]]
+        for tensor_name in kv_names:
+            if not tensor_name:
+                continue
+            previous_dim = tensor_dims.setdefault(tensor_name, sequence_dim)
+            if previous_dim != sequence_dim:
+                raise ValueError(
+                    f"KV tensor {tensor_name!r} is shared by GQA nodes with "
+                    "incompatible sliding-window cache attributes"
+                )
+
+    changed = 0
+    for value_info in list(graph.input) + list(graph.output) + list(graph.value_info):
+        sequence_dim = tensor_dims.get(value_info.name)
+        if sequence_dim is None:
+            continue
+        shape = value_info.type.tensor_type.shape
+        if len(shape.dim) != 4:
+            raise ValueError(
+                f"GQA KV tensor {value_info.name!r} must be rank 4, "
+                f"got rank {len(shape.dim)}"
+            )
+        dim = shape.dim[2]
+        if dim.dim_param == sequence_dim and not dim.HasField("dim_value"):
+            continue
+        dim.ClearField("dim_value")
+        dim.dim_param = sequence_dim
+        changed += 1
+    return changed
+
+
+def normalize_gqa_kv_cache_shapes_file(model_path: Path) -> int:
+    """Normalize a merged model without loading or rewriting external weights."""
+    model = onnx.load(str(model_path), load_external_data=False)
+    changed = normalize_gqa_kv_cache_shapes(model.graph)
+    if not changed:
+        return 0
+
+    temp_path = model_path.with_name(f".{model_path.name}.shape-tmp")
+    try:
+        onnx.save_model(model, str(temp_path))
+        temp_path.replace(model_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return changed
 
 
 def _align_model_ir_version(model: onnx.ModelProto, ir_version: int) -> None:
