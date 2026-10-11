@@ -11,8 +11,8 @@ Follow the **model-compatibility** project skill (`.cursor/skills/model-compatib
    ```powershell
    & ".cursor/skills/model-compatibility/scripts/run_ep_compatibility_check.ps1" -ModelPath "<model.onnx>"
    ```
-   - Add `-VoePackageRoot "<path>"` when `$env:VOE_PACKAGE_ROOT` is not set.
-   - If you see `[VOE_NOT_CONFIGURED]`, use **AskQuestion**: provide VOE path (re-run with `-VoePackageRoot`) or skip dump (re-run with `-SkipDump`).
+   - Add `-HipEpPackageRoot "<path>"` when `$env:HIP_EP_PACKAGE_ROOT` is not set.
+   - If you see `[HIP_EP_NOT_CONFIGURED]`, use **AskQuestion**: provide the hip-ep package path (re-run with `-HipEpPackageRoot`) or skip the dump (re-run with `-SkipDump`, which verifies nothing).
 3. Read `<OutputDir>/model_compatibility_report.md` (OutputDir is auto-derived unless I pass `-OutputDir`).
-4. For every **unsupported** or **partial** operator, run the diagnose playbook in `.cursor/skills/model-compatibility/diagnose.md` before responding.
+4. For every **unsupported** or **partial** operator, run the diagnose playbook in `.cursor/skills/model-compatibility/diagnose.md` and tell me the constraint that blocked it, not just its name.
 5. Report using `.cursor/skills/model-compatibility/report_template.md` (status display: full→supported, partial→partial, unsupported→unsupported). Include supported-instance percentage in the summary line.
