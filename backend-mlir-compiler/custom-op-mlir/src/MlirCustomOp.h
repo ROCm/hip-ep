@@ -6,7 +6,7 @@
 #define MLIR_CUSTOM_OP_H
 
 #include "InferenceState.h"
-#include "metadata.pb.h"
+#include "metadata.hpp"
 #include "morphizen/morphizen.hpp"
 #include <memory>
 #include <optional>

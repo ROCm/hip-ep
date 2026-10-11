@@ -9,6 +9,7 @@
 #include "morphizen/util.hpp"
 #include <glog/logging.h>
 #include <morphizen/my_ort.h>
+#include <set>
 
 DEF_ENV_PARAM(DEBUG_NODE_BUILDER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_NODE_BUILDER) >= n)

@@ -11,8 +11,6 @@
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <glog/logging.h>
-#include <google/protobuf/message_lite.h>
-#include <google/protobuf/util/json_util.h>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
@@ -73,12 +71,6 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
   // Populate custom_op_domains_ once here so its lifetime is tied to this
   // factory instance instead of the process.
   CollectCustomOpDomains(custom_op_domains_);
-
-  morphizen::add_cleanup_function("protobuf shutdown", []() {
-#ifdef _WIN32
-    google::protobuf::ShutdownProtobufLibrary();
-#endif
-  });
 }
 const char *ORT_API_CALL
 MorphiZenEpFactory::GetNameImpl(const OrtEpFactory *this_ptr) noexcept {

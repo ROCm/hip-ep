@@ -8,8 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
-#include <google/protobuf/struct.pb.h>
-#include <google/protobuf/util/json_util.h>
+#include <morphizen-utils/json.hpp>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -35,8 +34,7 @@ static const char *get_default_config() {
   return nullptr;
 }
 
-static void JsonFileToMessage(const std::string &file_path,
-                              google::protobuf::Message *message) {
+static json::Json parse_json_file(const std::string &file_path) {
   std::ifstream input(file_path);
   if (!input.is_open()) {
     std::string error_message = "Failed to open file: " + file_path;
@@ -46,32 +44,18 @@ static void JsonFileToMessage(const std::string &file_path,
 
   std::string json_content((std::istreambuf_iterator<char>(input)),
                            std::istreambuf_iterator<char>());
-  google::protobuf::util::JsonParseOptions options;
-  auto status = google::protobuf::util::JsonStringToMessage(json_content,
-                                                            message, options);
-
-  if (!status.ok()) {
+  try {
+    return json::parse(json_content);
+  } catch (const json::ParseError &error) {
     std::string error_message =
-        "Failed to parse JSON: " + std::string(status.message().data());
+        "Failed to parse JSON: " + std::string(error.what());
     MY_LOG(1) << error_message;
     throw std::runtime_error(error_message);
   }
-
-  return; // Return the successful status
 }
 
-static std::unique_ptr<google::protobuf::Struct>
-get_protobuf_struct_from_config_file(const std::string &filename) {
-  std::ifstream f(filename);
-  // parse the json file into Struct message
-  auto config = std::make_unique<google::protobuf::Struct>();
-  JsonFileToMessage(filename, config.get());
-  return config;
-}
-
-static google::protobuf::Struct
-get_config_json(const onnxruntime::ProviderOptions &options) {
-  google::protobuf::Struct ret;
+static json::Json get_config_json(const onnxruntime::ProviderOptions &options) {
+  json::Json ret = json::Json::object();
   // update_log_level(options);
   auto morphizen_get_default_config_plugin =
       ::morphizen::Plugin::get(ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND));
@@ -115,12 +99,7 @@ get_config_json(const onnxruntime::ProviderOptions &options) {
   if (opt_config_file.has_value()) {
     MY_LOG(1) << " overwrite default config, read if from "
               << opt_config_file.value();
-    auto struct_from_config_file =
-        get_protobuf_struct_from_config_file(opt_config_file.value().string());
-    if (struct_from_config_file == nullptr) {
-      LOG(FATAL) << "failed to parse config file: " << opt_config_file.value();
-    }
-    ret = std::move(*struct_from_config_file);
+    ret = parse_json_file(opt_config_file.value().string());
   } else {
     MY_LOG(1) << "use default config";
     if (default_config == nullptr) {
@@ -135,12 +114,13 @@ get_config_json(const onnxruntime::ProviderOptions &options) {
         MY_LOG(2) << line;
       }
     }
-    auto status =
-        google::protobuf::util::JsonStringToMessage(default_config, &ret);
-    if (!status.ok()) {
+    try {
+      ret = json::parse(default_config);
+    } catch (const json::ParseError &error) {
       std::string err_msg =
           std::string{"failed to parse default config: "} + default_config;
-      err_msg += "\n" + status.ToString();
+      err_msg += "\n";
+      err_msg += error.what();
       LOG(FATAL) << err_msg;
     }
   }
@@ -150,16 +130,7 @@ get_config_json(const onnxruntime::ProviderOptions &options) {
 std::string get_config_json_str(const onnxruntime::ProviderOptions &options) {
   try {
     auto data = morphizen::get_config_json(options);
-    auto ret = std::string();
-    auto status = google::protobuf::util::MessageToJsonString(
-        data, &ret, google::protobuf::util::JsonPrintOptions());
-    if (!status.ok()) {
-      std::string err_msg =
-          std::string{"failed to convert config to json string: "} + ret;
-      err_msg += "\n" + status.ToString();
-      LOG(FATAL) << err_msg;
-    }
-    return ret;
+    return json::dump(data);
   } catch (const std::exception &e) {
     LOG(FATAL) << "Error: " << e.what() << std::endl;
     return "";

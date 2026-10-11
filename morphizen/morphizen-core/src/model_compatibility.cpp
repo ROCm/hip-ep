@@ -6,18 +6,10 @@
 
 #include "morphizen/custom_op_imp.hpp"
 #include "morphizen/env_config.hpp"
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4946)
-#endif
-#include "morphizen/model_compatibility.pb.h"
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
+#include "morphizen/messages.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "morphizen/plugin.hpp"
 #include <glog/logging.h>
-#include <google/protobuf/util/json_util.h>
 
 DEF_ENV_PARAM(DEBUG_MODEL_COMPATIBILITY, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MODEL_COMPATIBILITY) >= n)
@@ -89,14 +81,8 @@ extern "C" MORPHIZEN_DLL_SPEC const char *get_compiled_model_compatibility_info(
                  "available.";
   }
 
-  auto status = google::protobuf::util::MessageToJsonString(
-      compatibility_info_proto, &g_compiled_model_compatibility_info_result);
-  if (!status.ok()) {
-    MY_LOG(1) << " [MorphiZen EP][GetCompiledModelCompatibilityInfo] Failed to "
-                 "serialize ModelCompatibilityProto. Error: "
-              << status.message();
-    return g_compiled_model_compatibility_info_result.c_str();
-  }
+  g_compiled_model_compatibility_info_result =
+      json::dump(compatibility_info_proto.ToJson());
 
   MY_LOG(1) << " [MorphiZen EP][GetCompiledModelCompatibilityInfo] Compiled "
                "Model Compatibility Info: "
@@ -262,13 +248,14 @@ extern "C" MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
   }
 
   morphizen::ModelCompatibilityProto compatibility_proto;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      compatibility_info, &compatibility_proto);
-  if (!status.ok()) {
+  try {
+    compatibility_proto =
+        morphizen::ModelCompatibilityProto::FromJsonString(compatibility_info);
+  } catch (const json::ParseError &error) {
     MY_LOG(1)
         << " [MorphiZen EP][ValidateCompiledModelCompatibilityInfo] Failed "
            "to parse ModelCompatibilityProto. Error: "
-        << status.message() << ". Return NOT_APPLICABLE.";
+        << error.what() << ". Return NOT_APPLICABLE.";
     *model_compatibility = 0; // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
     return 0;
   }

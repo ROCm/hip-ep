@@ -10,14 +10,6 @@
 #include <ios>
 #include <morphizen/morphizen_ort_api.h>
 #include <sstream>
-#ifdef _WIN32
-#pragma warning(push)
-#pragma warning(disable : 4251)
-#endif
-#include <google/protobuf/text_format.h>
-#ifdef _WIN32
-#pragma warning(pop)
-#endif
 
 #include "./pass_imp.hpp"
 #include "morphizen/env_config.hpp"

@@ -3,10 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library")
-load("//scripts/bazel:collect_pb.bzl", "collect_pb")
-load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
 
 genrule(
@@ -14,158 +11,6 @@ genrule(
     outs = ["mem_binary_file.hpp.inc"],
     cmd = "$(location //morphizen-foundation:compress_binary_py) 0 $@",
     tools = ["//morphizen-foundation:compress_binary_py"],
-)
-# # Proto libraries for morphizen-core
-# No, it's **not a good practice** to combine all proto files into a single `proto_library` rule. Here's why:
-
-# ## **Best Practices for Proto Libraries:**
-
-# 1. **Separate concerns**: Each proto file should have its own `proto_library` rule
-# 2. **Granular dependencies**: Allows targets to depend only on what they need
-# 3. **Parallel compilation**: Bazel can compile different proto files in parallel
-# 4. **Better caching**: Changes to one proto don't invalidate others
-# 5. **Clearer dependency graph**: Makes it obvious which parts of the code depend on which protos
-# ## **Summary of Best Practices:**
-
-# ✅ **Keep separate proto_library rules** (what we have)
-# ✅ **Create convenience targets** for grouping (what we just added)
-# ✅ **Use granular dependencies** where possible
-# ❌ **Don't combine unrelated proto files** into one rule
-
-# This gives us:
-# - **Modularity**: Each proto can be built independently
-# - **Convenience**: Proto targets available when you need them
-# - **Performance**: Better parallelization and caching
-# - **Maintainability**: Clear separation of concerns
-
-# Now let's test if the morphizen-core package builds correctly:
-
-proto_library(
-    name = "anchor_point_proto",
-    srcs = ["src/anchor_point.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-proto_library(
-    name = "capability_proto",
-    srcs = ["src/capability.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-    deps = ["@protobuf//:struct_proto"],
-)
-
-proto_library(
-    name = "config_proto",
-    srcs = ["src/config.proto"],
-    deps = [":version_proto", "@protobuf//:struct_proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-proto_library(
-    name = "pass_context_proto",
-    strip_import_prefix = "src",
-    srcs = [":src/pass_context.proto"],
-    deps = [":capability_proto", ":config_proto", ":anchor_point_proto", ":version_proto"],
-    visibility = ["//visibility:public"],
-)
-
-
-proto_library(
-    name = "version_proto",
-    srcs = [":src/version.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-proto_library(
-    name = "model_compatibility_proto",
-    srcs = ["src/model_compatibility.proto"],
-    strip_import_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-# C++ proto libraries
-cc_proto_library(
-    name = "anchor_point_cc_proto",
-    deps = [":anchor_point_proto"],
-)
-
-cc_proto_library(
-    name = "capability_cc_proto",
-    deps = [":capability_proto"],
-)
-
-cc_proto_library(
-    name = "config_cc_proto",
-    deps = [":config_proto"],
-)
-
-cc_proto_library(
-    name = "pass_context_cc_proto",
-    deps = [":pass_context_proto"],
-)
-
-cc_proto_library(
-    name = "pattern_cc_proto",
-    deps = ["//morphizen-pattern:pattern_proto"],
-)
-
-cc_proto_library(
-    name = "version_cc_proto",
-    deps = [":version_proto"],
-)
-
-cc_proto_library(
-    name = "model_compatibility_cc_proto",
-    deps = [":model_compatibility_proto"],
-)
-
-
-# Convenience target to group all proto dependencies
-collect_pb(
-    name = "morphizen_proto_pb_h",
-    visibility = ["//visibility:public"],
-    srcs = [
-        ":anchor_point_cc_proto",
-        ":capability_cc_proto",
-        ":config_cc_proto",
-        ":model_compatibility_cc_proto",
-        ":pass_context_cc_proto",
-        ":pattern_cc_proto",
-        ":version_cc_proto",
-    ],
-    output_dir = "morphizen",
-    extensions = ".pb.h",
-)
-
-collect_pb(
-    name = "morphizen_proto_pb_cc",
-    visibility = ["//visibility:public"],
-    srcs = [
-        ":anchor_point_cc_proto",
-        ":capability_cc_proto",
-        ":config_cc_proto",
-        ":model_compatibility_cc_proto",
-        ":pass_context_cc_proto",
-        ":pattern_cc_proto",
-        ":version_cc_proto",
-    ],
-    output_dir = "morphizen",
-    extensions = ".pb.cc",
-)
-cc_library(
-    name = "morphizen_proto_lib",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":anchor_point_cc_proto",
-        ":capability_cc_proto",
-        ":config_cc_proto",
-        ":model_compatibility_cc_proto",
-        ":pass_context_cc_proto",
-        ":pattern_cc_proto",
-        ":version_cc_proto",
-    ],
 )
 # Generated files that would normally be created by CMake custom commands
 # Based on morphizen-core-static.cmake configuration
@@ -298,8 +143,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":morphizen-core-headers",
-        ":morphizen-core-proto-headers",
-        ":morphizen_proto_lib",
         "//morphizen-foundation",
         "//morphizen-graph:morphizen-graph",
         "//morphizen-pattern:morphizen-pattern",
@@ -310,7 +153,6 @@ cc_library(
         "@gsl",
         "@onnx//:onnx",
         "@onnxruntime//:onnxruntime_headers",
-        "@protobuf",
         "@zlib",
     ],
 )
@@ -355,7 +197,6 @@ cc_binary(
         "//morphizen-demo/level-1-pass-relu-dq:morphizen-level1-pass-relu-dq",
         "//morphizen-demo/custom-op-relu-dq:morphizen-custom-op-relu-dq",
         "@glog",
-        "@protobuf",
     ],
 )
 
@@ -375,11 +216,5 @@ cc_library(
     name = "morphizen-core-headers",
     hdrs = glob(["include/morphizen/*.hpp", "include/morphizen/*.h"]),
     strip_include_prefix = "include",
-    visibility = ["//visibility:public"],
-)
-cc_library(
-    name = "morphizen-core-proto-headers",
-    hdrs = [":morphizen_proto_pb_h"],
-    includes = ["."],  # exposes bazel-out/.../morphizen-core/ so morphizen/*.pb.h resolves
     visibility = ["//visibility:public"],
 )

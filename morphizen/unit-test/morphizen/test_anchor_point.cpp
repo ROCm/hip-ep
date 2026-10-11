@@ -11,8 +11,6 @@
 #include "gtest/gtest.h"
 #include <filesystem>
 #include <fstream>
-#include <google/protobuf/text_format.h>
-#include <google/protobuf/util/json_util.h>
 #include <memory>
 using namespace morphizen;
 
@@ -36,20 +34,12 @@ static std::unique_ptr<AnchorPoint>
 create(const std::filesystem::path &filename) {
 
   auto text = slurp_txt(filename);
-  // it is not safe to use AnchorPointProto directly across DLL boundary
-  // it is a strange error if
-  //
-  //    auto anchor_point = std::make_unique<AnchorPointProto>();
-  //
-  // AnchorPointProto::AnchorPointProto() is an inline function so that it is
-  // created inside morphizen_unit_test.exe,
-  // google::protobuf::TextFormat::ParseFromString() is defined in
-  // onnxruntime_vitisai_ep.dll, and output->Clear() would throw an exception.
-  //
-  //
   auto anchor_point = morphizen::AnchorPoint::create_proto();
-  CHECK(google::protobuf::TextFormat::ParseFromString(text, anchor_point.get()))
-      << "parse error: " << text;
+  try {
+    *anchor_point = AnchorPointProto::FromJsonString(text);
+  } catch (const json::ParseError &) {
+    CHECK(false) << "parse error: " << text;
+  }
   return AnchorPoint::create(*anchor_point);
 }
 

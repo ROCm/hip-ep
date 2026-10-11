@@ -14,8 +14,8 @@
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <algorithm>
 #include <cctype>
-#include <google/protobuf/util/json_util.h>
 #include <set>
+#include <unordered_set>
 
 // Determine default backend based on compile-time configuration
 #if MORPHIZEN_ENABLE_ONNX_BACKEND
@@ -402,8 +402,8 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
 }
 
 static void update_argument_indice(
-    const google::protobuf::RepeatedPtrField<std::string> &meta_def_args,
-    google::protobuf::RepeatedField<int32_t> *argument_indices,
+    const morphizen::ProtoList<std::string> &meta_def_args,
+    morphizen::ProtoList<int32_t> *argument_indices,
     const std::vector<const OrtValueInfo *> &node_value_infos) {
   CHECK_LE(meta_def_args.size(), node_value_infos.size());
   argument_indices->Clear();

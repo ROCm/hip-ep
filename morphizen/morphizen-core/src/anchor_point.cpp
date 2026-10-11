@@ -10,8 +10,8 @@
 #include "morphizen/node.hpp"
 #include "morphizen/util.hpp"
 #include <glog/logging.h>
-#include <google/protobuf/util/json_util.h>
 #include <iterator>
+#include <set>
 DEF_ENV_PARAM(DEBUG_ANCHOR_POINT, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_ANCHOR_POINT) >= n)
 
@@ -314,9 +314,9 @@ AnchorPoint::Description::Description(const std::string &op,
 AnchorPoint::Description
 AnchorPoint::Description::create_by_json(const std::string &anchor_point_json) {
   AnchorPointProto anchor_point_proto;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      anchor_point_json, &anchor_point_proto);
-  if (!status.ok()) {
+  try {
+    anchor_point_proto = AnchorPointProto::FromJsonString(anchor_point_json);
+  } catch (const json::ParseError &) {
     LOG(FATAL) << "cannot parse json string :" << anchor_point_json;
   }
   return Description{anchor_point_proto};
@@ -478,9 +478,7 @@ void AnchorPoint::insert_into_context(IPass &pass) const {
   auto &context = dynamic_cast<PassContextImp &>(*pass.get_context());
   auto origin_nodes = context.context_proto.mutable_origin_nodes();
   const auto &name_with_suffix = this->get_proto().name();
-  auto insert_it = origin_nodes->insert(
-      google::protobuf::MapPair<std::string, AnchorPointProto>{
-          name_with_suffix, this->get_proto()});
+  auto insert_it = origin_nodes->insert({name_with_suffix, this->get_proto()});
   CHECK(insert_it.second)
       << "duplicated node arg name: " << name_with_suffix
       << "original anchor point:\n"

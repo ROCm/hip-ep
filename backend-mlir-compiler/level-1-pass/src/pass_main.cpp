@@ -19,8 +19,7 @@
 #include <vector>
 
 // Protobuf
-#include "google/protobuf/util/json_util.h"
-#include "metadata.pb.h"
+#include "metadata.hpp"
 
 using namespace morphizen;
 using namespace morphizen_cxx;
@@ -210,10 +209,7 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
               << ", elem_type=" << output_proto->elem_type();
   }
 
-  std::string json;
-  auto status = google::protobuf::util::MessageToJsonString(metadata, &json);
-  CHECK(status.ok()) << "Failed to serialize metadata to JSON: "
-                     << status.ToString();
+  std::string json = metadata.ToJsonString();
 
   MY_LOG(1) << "Metadata JSON: " << json;
   return json;

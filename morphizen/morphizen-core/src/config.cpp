@@ -3,21 +3,9 @@
  * Licensed under the MIT License.
  */
 #include "config.hpp"
-#include "morphizen/config.pb.h"
 #include <algorithm>
 #include <set>
 
-#include <glog/logging.h>
-#ifdef _WIN32
-#pragma warning(push)
-#pragma warning(disable : 4251)
-#endif
-#include <google/protobuf/struct.pb.h>
-#include <google/protobuf/text_format.h>
-#include <google/protobuf/util/json_util.h>
-#ifdef _WIN32
-#pragma warning(pop)
-#endif
 #include "morphizen/env_config.hpp"
 #include "morphizen/pass_context.hpp"
 #include "morphizen/util.hpp"
@@ -26,6 +14,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <glog/logging.h>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
@@ -47,11 +36,13 @@ Config::Config(const std::string &file) {
   MY_LOG(1) << "read config from : " << file;
   auto text = slurp(file.c_str());
 
-  auto options = google::protobuf::util::JsonParseOptions();
-  options.ignore_unknown_fields = true;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      text, &config_proto_, options);
-  CHECK(status.ok()) << "cannot parse config.proto: " << file << "\n" << text;
+  try {
+    config_proto_ = ConfigProto::FromJsonString(text);
+  } catch (const json::ParseError &error) {
+    CHECK(false) << "cannot parse config: " << file << "\n"
+                 << error.what() << "\n"
+                 << text;
+  }
   MY_LOG(1) << "text = " << text;
 }
 
@@ -100,14 +91,12 @@ void Config::merge_config_proto(ConfigProto &config_proto,
   std::string json_str(json_config);
   // FIXME: This var name "cache_dir_msg" is misleading.
   ConfigProto cache_dir_msg;
-  auto options = google::protobuf::util::JsonParseOptions();
-  //  The approach here to processing non-standard fields
-  //  is conveluted.
-  options.ignore_unknown_fields = true;
-  auto status = google::protobuf::util::JsonStringToMessage(
-
-      json_str, &cache_dir_msg, options);
-  CHECK(status.ok()) << "cannot parse json string:" << json_str;
+  try {
+    cache_dir_msg = ConfigProto::FromJsonString(json_str);
+  } catch (const json::ParseError &error) {
+    CHECK(false) << "cannot parse json string:" << error.what() << "\n"
+                 << json_str;
+  }
   MY_LOG(2) << "json_str = " << json_str
             << " cache_dir_msg = " << cache_dir_msg.DebugString();
   config_proto.MergeFrom(cache_dir_msg);

@@ -20,7 +20,7 @@ if(COMMAND hipdnn_ep_apply_binary_compliance)
 endif()
 
 # Exclusive export list: ORT's plugin EP loader only resolves
-# CreateEpFactories and ReleaseEpFactory. Do not add MorphiZen C++ / protobuf
+# CreateEpFactories and ReleaseEpFactory. Do not add MorphiZen C++
 # symbols here -- they are linked internally (and would otherwise leak from
 # __declspec(dllexport) / default ELF visibility).
 if(MSVC)
@@ -96,4 +96,4 @@ DEBUG_TAR_CACHE=1
 "
 )
 
-target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )
+target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog)

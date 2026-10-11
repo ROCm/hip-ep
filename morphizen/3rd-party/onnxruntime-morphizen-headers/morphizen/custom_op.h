@@ -12,7 +12,7 @@ typedef struct OrtCustomOpDomain OrtCustomOpDomain;
 
 namespace morphizen {
 class PassContext;
-class MetaDefProto;
+struct MetaDefProto;
 class CustomOp;
 class ExecutionProvider {
 public:

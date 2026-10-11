@@ -2,10 +2,9 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
-#include "relu_dq.pb.h"
+#include "relu_dq_param.hpp"
 #include "relu_dq_pattern_json.hpp"
 #include <filesystem>
 #include <glog/logging.h>
@@ -63,9 +62,7 @@ struct Level1Dummy {
                 << "write file error " << ep_context_file_name;
             stream.reset(); // close file
             relu_dq_param.set_ep_context_file_size(sample_content.size());
-            auto relu_dq_json_str = std::string();
-            auto status = google::protobuf::util::MessageToJsonString(
-                relu_dq_param, &relu_dq_json_str);
+            auto relu_dq_json_str = relu_dq_param.ToJsonString();
             self->attach_meta_def_param(*meta_def, relu_dq_json_str.c_str());
             self->fuse(*graph, std::move(*meta_def));
           }

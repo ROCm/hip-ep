@@ -6,9 +6,6 @@ cmake_minimum_required(VERSION 3.29)
 
 message(STATUS "Configuring MLIR Compiler Backend")
 
-# Protobuf library for metadata serialization (must be built first)
-add_subdirectory(proto)
-
 # Level-1 Pass (MorphiZen integration - always build)
 add_subdirectory(level-1-pass)
 

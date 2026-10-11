@@ -5,15 +5,7 @@
 
 #pragma once
 
-#ifdef _WIN32
-#pragma warning(push)
-#pragma warning(                                                               \
-        disable : 4946 4267) // reinterpret_cast / size_t→int in protobuf
-#endif
-#include "morphizen/pass_context.pb.h"
-#ifdef _WIN32
-#pragma warning(pop)
-#endif
+#include "morphizen/messages.hpp"
 
 #include <filesystem>
 #include <gsl/span>

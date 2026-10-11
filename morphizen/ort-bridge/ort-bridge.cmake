@@ -60,7 +60,6 @@ target_link_libraries(ort-bridge
   morphizen::morphizen-graph  # ir-converter-imp.cpp uses graph wrappers
   morphizen-ort-api-ext  # Still needed by other components, also transitive via morphizen-graph
   morphizen-core-static
-  protobuf::libprotobuf
 )
 
 if(morphizen_ENABLE_HIP_GPU_ALLOCATOR)

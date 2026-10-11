@@ -11,8 +11,7 @@
 #include <glog/logging.h>
 
 // Protobuf headers
-#include "google/protobuf/util/json_util.h"
-#include "metadata.pb.h"
+#include "metadata.hpp"
 
 // Component headers
 #include "InferenceState.h"
@@ -179,7 +178,7 @@ TensorData marshal_input_tensors(OrtKernelContext *context,
 // preserving the caller-supplied output order. We resolve this by matching
 // output names between the two orderings.
 static std::vector<int> build_output_index_map(
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
+    const morphizen::ProtoList<mlir_metadata::Output> &outputs,
     const morphizen::MetaDefProto &meta_def) {
   std::vector<int> map(outputs.size());
   for (int i = 0; i < outputs.size(); ++i) {
@@ -214,11 +213,10 @@ mlir_metadata::Metadata parse_metadata_from_metadef(
 
   auto metadata_json = context->get_meta_def_param(*meta_def);
   mlir_metadata::Metadata metadata;
-  auto status =
-      google::protobuf::util::JsonStringToMessage(metadata_json, &metadata);
-
-  if (!status.ok()) {
-    LOG(FATAL) << "Failed to parse MLIR metadata: " << status.ToString();
+  try {
+    metadata = mlir_metadata::Metadata::FromJsonString(metadata_json);
+  } catch (const morphizen::json::ParseError &error) {
+    LOG(FATAL) << "Failed to parse MLIR metadata: " << error.what();
   }
 
   MY_LOG(1) << "Parsed metadata - Artifact filename: "
@@ -538,8 +536,7 @@ struct PendingD2H {
 // goes out of scope so `self` can never dangle.
 struct OutputAllocatorCtx {
   Ort::KernelContext *ctx = nullptr;
-  const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
-      nullptr;
+  const morphizen::ProtoList<mlir_metadata::Output> *outputs = nullptr;
   const std::vector<int> *output_index_map = nullptr;
   // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
   // Compute()): one GPU scratch buffer per output index for host outputs.

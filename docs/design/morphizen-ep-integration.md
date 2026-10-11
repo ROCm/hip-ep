@@ -53,8 +53,14 @@ exported symbols:
 - `ReleaseEpFactory`
 
 The Windows `.def` and ELF version script export exactly those names. MorphiZen
-C++ APIs, generated protobuf classes, and the statically-linked compiler stay
-internal to the DSO; ORT never links `hipgpu.lib`.
+C++ APIs and the statically-linked compiler stay internal to the DSO; ORT never
+links `hipgpu.lib`. The default `hipgpu` build does not link protobuf. Config,
+EP-context, and MLIR metadata are plain C++ structs serialized as JSON with
+protobuf field names (`provider_options`, `cache_key`). Existing `context.json`
+caches written by protobuf's JSON printer are not compatible and must be
+regenerated. `morphizen_ENABLE_ONNX_BACKEND` and
+`morphizen_ENABLE_ONNX_SCHEMA_SUPPORT` (both off by default) still fetch and
+link protobuf, because those paths parse ONNX `ModelProto`.
 
 The two contracts specific to this project are described below.
 
