@@ -73,10 +73,10 @@ func.func @refine_single_matmul(%ctx: !hip.context,
 // CHECK:         %[[E1:.*]] = tensor.empty() : tensor<2x8xf16>
 // CHECK:         %[[Y1:.*]] = hip.matmul
 // CHECK-SAME:      outs(%[[E1]] : tensor<2x8xf16>) : tensor<2x8xf16>
-// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y1]] : tensor<2x8xf16> to tensor<?x?xf16>
+// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y1]] : tensor<2x8xf16> to tensor<?x8xf16>
 // CHECK:         %[[E2:.*]] = tensor.empty() : tensor<2x16xf16>
 // CHECK:         %[[Y2:.*]] = hip.matmul
-// CHECK-SAME:      ins(%[[CAST]], %{{.*}} : tensor<?x?xf16>, tensor<8x16xf16>)
+// CHECK-SAME:      ins(%[[CAST]], %{{.*}} : tensor<?x8xf16>, tensor<8x16xf16>)
 // CHECK-SAME:      outs(%[[E2]] : tensor<2x16xf16>) : tensor<2x16xf16>
 func.func @refine_chained_matmul(%ctx: !hip.context,
                                  %a: tensor<2x4xf16>,
@@ -85,13 +85,13 @@ func.func @refine_chained_matmul(%ctx: !hip.context,
                                  %d1: index, %d2: index,
                                  %d3: index, %d4: index)
     -> tensor<?x?xf16> {
-  %e1 = tensor.empty(%d1, %d2) : tensor<?x?xf16>
+  %e1 = tensor.empty(%d1) : tensor<?x8xf16>
   %y1 = hip.matmul(%ctx)
     ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
-    outs(%e1 : tensor<?x?xf16>) : tensor<?x?xf16>
+    outs(%e1 : tensor<?x8xf16>) : tensor<?x8xf16>
   %e2 = tensor.empty(%d3, %d4) : tensor<?x?xf16>
   %y2 = hip.matmul(%ctx)
-    ins(%y1, %c : tensor<?x?xf16>, tensor<8x16xf16>)
+    ins(%y1, %c : tensor<?x8xf16>, tensor<8x16xf16>)
     outs(%e2 : tensor<?x?xf16>) : tensor<?x?xf16>
   return %y2 : tensor<?x?xf16>
 }
@@ -307,40 +307,34 @@ func.func @refine_matmul_nbits_from_attr(%ctx: !hip.context,
 // CHECK-SAME:                  outs(%[[E]] : tensor<128x256xf32>) : tensor<128x256xf32>
 // CHECK:         tensor.cast %[[Y]] : tensor<128x256xf32> to tensor<?x?xf32>
 func.func @refine_gemm_2d_from_inputs(%ctx: !hip.context,
-                                      %a: tensor<128x?xf32>,
-                                      %b: tensor<?x256xf32>,
+                                      %a: tensor<128x64xf32>,
+                                      %b: tensor<64x256xf32>,
                                       %dM: index, %dN: index)
     -> tensor<?x?xf32> {
   %e = tensor.empty(%dM, %dN) : tensor<?x?xf32>
   %y = hip.gemm(%ctx)
-    ins(%a, %b : tensor<128x?xf32>, tensor<?x256xf32>)
+    ins(%a, %b : tensor<128x64xf32>, tensor<64x256xf32>)
     outs(%e : tensor<?x?xf32>)
-    {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0 : i64, transB = 0 : i64}
+    {alpha = 1.0 : f32, beta = 1.0 : f32,
+     transA = 0 : i64, transB = 0 : i64}
     : tensor<?x?xf32>
   return %y : tensor<?x?xf32>
 }
 
 // -----
 
-// Same-shape unary ops (silu, sigmoid, softplus, gelu, reciprocal, sqrt,
-// not, cos, sin, neg, cast, sign, cumsum, scatter_nd) opt INTO the
-// shared `HipDpsOp` default reify (`autoReify=1`), which lifts each
-// output dim from the DPS `outs` operand's runtime shape. The DPS
-// contract pins `result.type == outs.type`, so the consumer-side pass
-// has signal to refine only when `outs` carries static dims that the
-// result type doesn't (rare in practice; the in-tree converters keep
-// `outs.type` aligned with the inferred ONNX result type from the
-// start). When `outs` is fully dynamic, the pass becomes a no-op for
-// these ops — `hip.cos` is the canonical example pinned here.
-// CHECK-LABEL: func.func @noop_on_cos_dynamic_outs
-// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// `Hip_DpsOp_SameShape` reifies from each op's named semantic source, not its
+// DPS init. Even a fully-dynamic init is refined when the source has a static
+// extent; `hip.cos` exercises the x/y accessor family here.
+// CHECK-LABEL: func.func @refine_cos_from_named_input
+// CHECK:         %[[E:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x4096xf32>
 // CHECK:         %[[Y:.*]] = hip.cos
-// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x?xf32>) : tensor<?x?x?xf32>
-// CHECK-NOT:     tensor.cast
-// CHECK:         return %[[Y]] : tensor<?x?x?xf32>
-func.func @noop_on_cos_dynamic_outs(%ctx: !hip.context,
-                                    %x: tensor<?x?x4096xf32>,
-                                    %d0: index, %d1: index, %d2: index)
+// CHECK-SAME:                  outs(%[[E]] : tensor<?x?x4096xf32>) : tensor<?x?x4096xf32>
+// CHECK:         %[[CAST:.*]] = tensor.cast %[[Y]] : tensor<?x?x4096xf32> to tensor<?x?x?xf32>
+// CHECK:         return %[[CAST]] : tensor<?x?x?xf32>
+func.func @refine_cos_from_named_input(%ctx: !hip.context,
+                                       %x: tensor<?x?x4096xf32>,
+                                       %d0: index, %d1: index, %d2: index)
     -> tensor<?x?x?xf32> {
   %e = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
   %y = hip.cos(%ctx)
@@ -539,7 +533,8 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
   %y = hip.reduce_sum(%ctx)
     ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
     outs(%e : tensor<?x?xf16>)
-    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64,
+     normalized_axes = array<i64: 1>}
     : tensor<?x?xf16>
   return %y : tensor<?x?xf16>
 }
@@ -567,7 +562,8 @@ func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
   %y = hip.reduce_mean(%ctx)
     ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
     outs(%e : tensor<?x?xf16>)
-    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64,
+     normalized_axes = array<i64: 1>}
     : tensor<?x?xf16>
   return %y : tensor<?x?xf16>
 }
@@ -575,7 +571,7 @@ func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
 // -----
 
 // `hip.pad` (along with tile, expand, slice, range) uses the shared
-// `Hip_DpsOp` auto-emit reify (`autoReify=1`) — the default walks
+// default-reify family — the generated dispatcher walks
 // `getDpsInits()` and lifts each output dim from the DPS `outs`
 // operand's runtime shape via `tensor::getMixedSizes`. Static dims
 // become `IndexAttr` (which the pass can use to tighten); dynamic
@@ -836,40 +832,33 @@ func.func @refine_gqa_multi_result_dps_out_fallback(
 
 // -----
 
-// `hip.layer_norm` is variadic-multi-result: 1, 2, or 3 outs (output
-// required; mean and inv_std optional, training-only). The default
-// `Hip_DpsOp::reifyResultShapes` body walks `getDpsInits()` regardless
-// of arity; this case exercises the full 3-out form so the variadic
-// iteration is covered (1-out covered implicitly by every Tier-2
-// fallback test).
-//
-// Same matching-dynamic-outs pattern as the gqa case above: pass walks
-// all 3 results, reify lifts dynamic outs, no narrowing happens, op
-// stays intact -- guards "Variadic outputs interpreted correctly".
+// `hip.layer_norm` is variadic-multi-result: Y has the input shape; Mean and
+// InvStdDev keep reduced axes as 1. For axis=-1 over rank 3, stats are
+// `[d0, d1, 1]`. This guards semantic multi-result reification.
 // CHECK-LABEL: func.func @refine_layer_norm_variadic_three_outs
 // CHECK:         %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf16>
-// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
-// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x1xf32>
+// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x1xf32>
 // CHECK:         %[[R:.*]]:3 = hip.layer_norm
 // CHECK-SAME:      outs(%[[E0]], %[[E1]], %[[E2]] :
-// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>)
 // CHECK:         return %[[R]]#0, %[[R]]#1, %[[R]]#2
 func.func @refine_layer_norm_variadic_three_outs(
     %ctx: !hip.context,
     %input: tensor<?x?x?xf16>,
     %scale: tensor<?xf16>,
     %d0: index, %d1: index, %d2: index)
-    -> (tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>) {
+    -> (tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>) {
   %e0 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
-  %e1 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
-  %e2 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x1xf32>
+  %e2 = tensor.empty(%d0, %d1) : tensor<?x?x1xf32>
   %r:3 = hip.layer_norm(%ctx)
     ins(%input, %scale : tensor<?x?x?xf16>, tensor<?xf16>)
     outs(%e0, %e1, %e2 :
-         tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+         tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>)
     {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
-    : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
-  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
+    : tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>
+  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>
 }
 
 // -----

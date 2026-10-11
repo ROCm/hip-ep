@@ -8,17 +8,15 @@
 //
 // This test suite validates:
 // - Custom ONNX op matching by function_name and domain_name
-// - Optional inputs handling (key, value, bias, mask, past KV, etc.)
-// - Optional outputs handling (present_key, present_value, qk)
+// - Runtime-supported separate rank-3 fp16 Q/K/V subset
 // - Attribute preservation (num_heads, scale, mask_filter_value,
 //   unidirectional)
-// - Tensor-first DPS: tensor.empty() for each output
+// - Tensor-first DPS: output shape comes from query
 //
 // Test cases:
 // 1. Basic self-attention with separate Q/K/V (single output)
 // 2. Cross-attention with explicit K/V from encoder (single output)
-// 3. With KV cache (past_key/past_value -> present_key/present_value)
-// 4. Causal masking (unidirectional = 1)
+// 3. Causal masking (unidirectional = 1)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -87,46 +85,7 @@ module {
   }
 
   // ===========================================================================
-  // Test 3: KV cache (past_key/past_value -> present_key/present_value)
-  // ===========================================================================
-  func.func @test_kv_cache(
-      %query: tensor<1x1x4096xf16>,
-      %key: tensor<1x1x4096xf16>,
-      %value: tensor<1x1x4096xf16>,
-      %bias: tensor<12288xf16>,
-      %key_padding_mask: tensor<1x128xi32>,
-      %attention_bias: tensor<1x32x1x128xf16>,
-      %past_key: tensor<1x32x127x128xf16>,
-      %past_value: tensor<1x32x127x128xf16>)
-      -> (tensor<1x1x4096xf16>, tensor<1x32x128x128xf16>, tensor<1x32x128x128xf16>) {
-
-    // CHECK-LABEL: func.func @test_kv_cache
-    // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
-
-    %out:3 = "onnx.Custom"(%query, %key, %value, %bias, %key_padding_mask,
-                           %attention_bias, %past_key, %past_value)
-        <{function_name = "MultiHeadAttention"}>
-        {domain_name = "com.microsoft",
-         num_heads = 32 : si64,
-         scale = 0.0883883461 : f32}
-        : (tensor<1x1x4096xf16>, tensor<1x1x4096xf16>, tensor<1x1x4096xf16>,
-           tensor<12288xf16>, tensor<1x128xi32>, tensor<1x32x1x128xf16>,
-           tensor<1x32x127x128xf16>, tensor<1x32x127x128xf16>)
-        -> (tensor<1x1x4096xf16>, tensor<1x32x128x128xf16>, tensor<1x32x128x128xf16>)
-
-    // Three tensor.empty() inits (output + present_key + present_value)
-    // CHECK: tensor.empty() : tensor<1x1x4096xf16>
-    // CHECK: tensor.empty() : tensor<1x32x128x128xf16>
-    // CHECK: tensor.empty() : tensor<1x32x128x128xf16>
-    // CHECK: hip.multi_head_attention(%[[CTX]])
-    // CHECK-SAME: ins(
-    // CHECK-SAME: num_heads = 32
-
-    return %out#0, %out#1, %out#2 : tensor<1x1x4096xf16>, tensor<1x32x128x128xf16>, tensor<1x32x128x128xf16>
-  }
-
-  // ===========================================================================
-  // Test 4: Causal self-attention (unidirectional = 1)
+  // Test 3: Causal self-attention (unidirectional = 1)
   // ===========================================================================
   func.func @test_causal(
       %query: tensor<1x128x4096xf16>,

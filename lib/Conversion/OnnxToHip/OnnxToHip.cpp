@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+#include "ShapeProvenanceAnalysis.h"
 
 #include "hip/debug_log.h"
 #include "hip/timing.h"
@@ -222,9 +223,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateBiasGeluConversionPatterns(patterns, ctx);
   populateFastGeluConversionPatterns(patterns, ctx);
   populateCastConversionPatterns(patterns, ctx);
-  populateReduceSumConversionPatterns(patterns, ctx);
-  populateReduceMeanConversionPatterns(patterns, ctx);
-  populateReduceL2ConversionPatterns(patterns, ctx);
+  populateReductionConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
   populateCompressConversionPatterns(patterns, ctx);
   populateOneHotConversionPatterns(patterns, ctx);
@@ -253,8 +252,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateRangeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);
-  populateReduceMaxConversionPatterns(patterns, ctx);
-  populateReduceMinConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
   populateMaxConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
@@ -271,7 +268,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populatePadConversionPatterns(patterns, ctx);
   populateTileConversionPatterns(patterns, ctx);
   populateExpandConversionPatterns(patterns, ctx);
-  populateReduceProdConversionPatterns(patterns, ctx);
   populateLessConversionPatterns(patterns, ctx);
   populateGreaterConversionPatterns(patterns, ctx);
   populateGreaterOrEqualConversionPatterns(patterns, ctx);
@@ -480,10 +476,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // All patterns are value-based and require literal values to remain on
     // `onnx.Constant` until the first carrier sweep below.
     // ExistingOps strictness is sufficient: the patterns either rewrite to
-    // tensor.* (Gather) or emit `onnx.*` ops. FastGelu (-> onnx.Gelu) and
-    // ReshapeShapeFold (roots on onnx.Reshape, only swaps its shape operand
-    // in place; the re-visit fails the "operand1 is onnx.Shape" guard) are
-    // convergent. ProjectorOpsRewrites emits NEW `onnx.*` ops (Reshape, Gemm,
+    // tensor.* (Gather) or emit `onnx.*` ops. FastGelu (-> onnx.Gelu) is
+    // convergent.
+    // ProjectorOpsRewrites emits NEW `onnx.*` ops (Reshape, Gemm,
     // ReduceMean, ...) that a subsequent round must visit (e.g. the
     // AveragePool decomposition's emitted Reshape feeds the next round's
     // ReduceMean handling), so the set is applied in a fixed-point loop until
@@ -520,11 +515,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateTransposeMatMulFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
-        populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
-        populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePackBroadcastTo4DPatterns(preLoweringPatterns, ctx);
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
+        populateConstantOfShapePreLoweringPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
@@ -551,18 +545,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
             << "convert-onnx-to-hip: pre-lowering round loop hit kMaxRounds="
             << kMaxRounds << " without quiescence";
     }
-    // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can still
-    // see the original `onnx.Constant` (or `onnx.Shape`) as the shape input.
-    // Roots on `onnx.ConstantOfShape`, disjoint from the pre-lowering
-    // patterns above (which root on `onnx.Gather` and `onnx.Tanh`), so
-    // ordering and pattern-set separation are both safe.
-    {
-      mlir::RewritePatternSet preFoldPatterns(ctx);
-      populateConstantOfShapeConversionPatterns(preFoldPatterns, ctx);
-      mlir::GreedyRewriteConfig cfg;
-      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-      if (mlir::failed(mlir::applyPatternsGreedily(
-              funcOp, std::move(preFoldPatterns), cfg)))
+    // Run one function-level solve over the quiesced generic ONNX IR while
+    // `onnx.Constant` values are still inline, before the first carrier sweep.
+    // Sparse dataflow shares producer facts across Reshapes and conservatively
+    // joins block arguments. Materialization stamps the proof contract consumed
+    // and revalidated if conversion reaches the dynamic runtime-shaped
+    // fallback.
+    if (hasEligibleReshapeShapeProvenanceCandidate(funcOp)) {
+      ShapeProvenanceAnalysis analysis(funcOp);
+      if (mlir::failed(analysis.run()) ||
+          mlir::failed(materializeReshapeShapeOperands(funcOp, analysis)))
         return signalPassFailure();
     }
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))

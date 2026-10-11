@@ -17,6 +17,7 @@ import lit.llvm
 # llvm_tools_dir must be set before lit.llvm.initialize() because LLVMConfig()
 # reads it immediately when constructed in lit.cfg.py.
 config.llvm_tools_dir = r"@LLVM_TOOLS_BINARY_DIR@"
+config.python_executable = r"@Python3_EXECUTABLE@"
 
 # hip_build_dir: base build directory; lit.cfg.py appends per-tool subdirs.
 config.hip_build_dir = r"@CMAKE_BINARY_DIR@"

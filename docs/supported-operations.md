@@ -88,7 +88,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
-| MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
+| MultiHeadAttention (`com.microsoft`) | GQA-routed decoder/cache forms; otherwise separate rank-3 fp16 Q/K/V with one output and no bias/mask/cache inputs |
 | Attention (`com.microsoft`) | Fused QKV split and GroupQueryAttention path for supported forms |
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
@@ -104,7 +104,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MaxPool | Custom HIP kernel |
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
-| Resize | Custom HIP kernel |
+| Resize | Custom HIP kernel; trailing 1D/2D/3D spatial resize with static output spatial extents; dynamic N/C pass through from input |
 | GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |

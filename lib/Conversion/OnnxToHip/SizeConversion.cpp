@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "hip/Dialect/IR/HipShapeUtilsShapeOps.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -65,7 +66,10 @@ struct SizeToConstantOrHipSize : public mlir::RewritePattern {
     // would indicate a malformed graph.
     if (!resultType.getElementType().isInteger(64))
       return rewriter.notifyMatchFailure(op, "result must have i64 elements");
-    if (resultType.getRank() != 0)
+    mlir::FailureOr<llvm::SmallVector<int64_t>> expectedShape =
+        mlir::hip::inferSizeShape();
+    if (mlir::failed(expectedShape) ||
+        resultType.getShape() != llvm::ArrayRef<int64_t>(*expectedShape))
       return rewriter.notifyMatchFailure(op, "result must be rank-0");
 
     mlir::Location loc = op->getLoc();
@@ -95,7 +99,7 @@ struct SizeToConstantOrHipSize : public mlir::RewritePattern {
     mlir::Value context = *ctxOrFailure;
 
     mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType(),
+        rewriter, loc, *expectedShape, resultType.getElementType(),
         mlir::ValueRange{});
 
     auto hipOp = mlir::hip::SizeOp::create(rewriter, loc, context,

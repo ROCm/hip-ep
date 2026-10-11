@@ -14,8 +14,12 @@
 
 #include "ReadbackScalar.h"
 
+#include "hip/Conversion/HipConversionUtils.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeUtilsBroadcast.h"
+#include "hip/Dialect/IR/HipShapeUtilsCommon.h"
+#include "hip/Dialect/IR/HipShapeUtilsReduction.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
 
@@ -27,6 +31,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -35,13 +40,22 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
-#define DEBUG_TYPE "convert-onnx-to-hip"
+#include <optional>
 
 namespace mlir {
 namespace hip {
+
+inline constexpr llvm::StringLiteral kHostShapeOperandAttr =
+    "hip.host_shape_operand";
+inline constexpr llvm::StringLiteral kHostShapeNoMinusOneAttr =
+    "hip.host_shape_no_minus_one";
+inline constexpr llvm::StringLiteral kHostShapeInputDimMapAttr =
+    "hip.host_shape_input_dim_map";
 
 //===----------------------------------------------------------------------===//
 // Helpers
@@ -65,127 +79,20 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
-/// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
-/// Mean / Prod / ...).
-///
-/// Usually this is just the op's own result type. The ONNX importer can,
-/// however, leave a reduction result UNRANKED (`tensor<*xT>`) when the input
-/// carries dynamic symbolic dims and the axes are not explicit -- e.g. Phi's
-/// `ReduceMax(position_ids)` feeding `GreaterOrEqual`. A bare
-/// `mlir::cast<RankedTensorType>` on an unranked type is unchecked in release
-/// builds and dereferences garbage -> crash. In that case, infer the result
-/// type from the (ranked) input + statically-known reduced axes + keepdims,
-/// per ONNX reduction shape semantics:
-///   keepdims=1: reduced axes become size 1, other dims preserved.
-///   keepdims=0: reduced axes are dropped.
-///
-/// \p reducedAxes          reduced axis indices (may be negative; normalized
-///                         here). For the all-axes default the caller passes
-///                         every axis; for a noop (empty axes) it passes none.
-/// \p axesStaticallyKnown  false when axes are only known at runtime, in which
-///                         case an unranked result cannot be inferred.
-/// Returns failure only when the result is unranked AND cannot be inferred
-/// (unranked/absent input type, or runtime-only axes).
-inline mlir::FailureOr<mlir::RankedTensorType>
-inferReduceResultType(mlir::Operation *op, mlir::Value data,
-                      llvm::ArrayRef<int64_t> reducedAxes,
-                      bool axesStaticallyKnown, int64_t keepdims) {
-  if (auto ranked =
-          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
-    return ranked;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!inputType || !axesStaticallyKnown)
-    return mlir::failure();
-  int64_t rank = inputType.getRank();
-  llvm::SmallVector<bool> reduced(rank, false);
-  for (int64_t a : reducedAxes)
-    reduced[a < 0 ? a + rank : a] = true;
-  llvm::SmallVector<int64_t> outShape;
-  for (int64_t i = 0; i < rank; ++i) {
-    if (reduced[i]) {
-      if (keepdims)
-        outShape.push_back(1);
-    } else {
-      outShape.push_back(inputType.getDimSize(i));
-    }
-  }
-  return mlir::RankedTensorType::get(outShape, inputType.getElementType());
-}
+/// Return the dense payload of a structurally valid compile-time tensor
+/// constant. Matching is intentionally limited to `arith.constant`, the exact
+/// generic `onnx.Constant` form needed by semantic pre-rewrites, and inline
+/// `hip.constant` carriers. Every dense payload type must match its result.
+mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value);
 
-/// Create a tensor.empty for a DPS init whose shape is the NumPy-style
-/// broadcast of \p operands. Operand shapes are right-aligned with the
-/// result. For each dynamic dimension of \p resultType, the size is taken
-/// from the first operand that truly contributes at that axis -- i.e. whose
-/// corresponding dim is not statically 1. Shorter-rank operands (left-padded
-/// with 1) and statically-1 dims are skipped. If every spanning operand is
-/// statically 1 at the axis, fall back to the first operand that spans it.
-///
-/// Use this for binary/multinary broadcast elementwise ops (Add, Mul, Where,
-/// ...). Do NOT use `createEmptyTensor(resultType, source)` when operands can
-/// disagree on which side supplies a dynamic extent (e.g. `[?x1] + [1x?] ->
-/// [?x?]` -- dim 0 from lhs, dim 1 from rhs).
-inline mlir::FailureOr<mlir::Value>
-createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::ValueRange operands) {
-  int64_t resultRank = resultType.getRank();
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
+/// Recognize \p value as a compile-time rank-0/rank-1 integer tensor.
+bool extractConstantIntTensor(
+    mlir::Value value, llvm::SmallVectorImpl<int64_t> &out,
+    std::optional<int64_t> expectedRank = std::nullopt);
 
-    mlir::Value chosen;
-    int64_t chosenDim = -1;
-    mlir::Value fallback;
-    int64_t fallbackDim = -1;
-    for (mlir::Value operand : operands) {
-      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
-      if (!t)
-        continue;
-      int64_t offset = resultRank - t.getRank();
-      if (dimIdx < offset)
-        continue;
-      int64_t operandDim = dimIdx - offset;
-      if (!fallback) {
-        fallback = operand;
-        fallbackDim = operandDim;
-      }
-      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
-        continue;
-      chosen = operand;
-      chosenDim = operandDim;
-      break;
-    }
-    if (!chosen) {
-      chosen = fallback;
-      chosenDim = fallbackDim;
-    }
-    if (!chosen)
-      return mlir::failure();
-    dynSizes.push_back(
-        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes));
-}
-
-/// Get !hip.context from function argument 0. Returns failure if the
-/// function has no arguments or the first argument is not !hip.context.
-inline mlir::FailureOr<mlir::Value>
-getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
-  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
-  if (!funcOp)
-    return rewriter.notifyMatchFailure(op, "not inside a function");
-  auto &entry = funcOp.getBody().front();
-  if (entry.getNumArguments() == 0)
-    return rewriter.notifyMatchFailure(op, "function has no arguments");
-  mlir::Value ctx = entry.getArgument(0);
-  if (!mlir::isa<mlir::hip::ContextType>(ctx.getType()))
-    return rewriter.notifyMatchFailure(op,
-                                       "first argument is not !hip.context");
-  return ctx;
-}
+/// Rank-1 convenience wrapper around `extractConstantIntTensor`.
+bool extractConstantIntVector(mlir::Value value,
+                              llvm::SmallVectorImpl<int64_t> &out);
 
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
@@ -228,6 +135,112 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 
 /// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
 constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
+
+/// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
+/// broadcasting HIP ops. Every intermediate result type comes from that
+/// pair's shared broadcast shape; only the final step must match the imported
+/// ONNX result type.
+template <typename HipOpTy>
+mlir::LogicalResult
+lowerVariadicBroadcastChain(mlir::Operation *op,
+                            mlir::PatternRewriter &rewriter) {
+  llvm::StringRef opName = op->getName().getStringRef();
+  unsigned numInputs = op->getNumOperands();
+  if (numInputs == 0)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires at least 1 input");
+
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires exactly 1 result");
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires a ranked result");
+
+  llvm::SmallVector<mlir::RankedTensorType> inputTypes;
+  inputTypes.reserve(numInputs);
+  for (mlir::Value input : op->getOperands()) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inputType)
+      return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                                 " requires ranked inputs");
+    if (inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " requires homogeneous input and result element types");
+    inputTypes.push_back(inputType);
+  }
+
+  if (numInputs == 1) {
+    if (!isResultTypeCompatibleWithInferredShape(resultType,
+                                                 inputTypes.front().getShape()))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the input shape");
+    mlir::Value replacement = op->getOperand(0);
+    if (replacement.getType() != resultType)
+      replacement = mlir::tensor::CastOp::create(rewriter, op->getLoc(),
+                                                 resultType, replacement)
+                        .getResult();
+    rewriter.replaceOp(op, replacement);
+    return mlir::success();
+  }
+
+  mlir::Location loc = op->getLoc();
+
+  // Infer the complete pairwise chain before reification emits any shape SSA.
+  llvm::SmallVector<llvm::SmallVector<int64_t>> stepStaticShapes;
+  llvm::SmallVector<int64_t> accumulatedShape(inputTypes.front().getShape());
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    llvm::SmallVector<llvm::ArrayRef<int64_t>> pairShapes{
+        accumulatedShape, inputTypes[i].getShape()};
+    auto stepShape = mlir::hip::inferBroadcastShape(
+        pairShapes, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+    accumulatedShape.assign(stepShape->begin(), stepShape->end());
+    stepStaticShapes.push_back(*stepShape);
+  }
+  if (!isResultTypeCompatibleWithInferredShape(resultType, accumulatedShape))
+    return rewriter.notifyMatchFailure(
+        op, llvm::Twine(opName) +
+                " result type is incompatible with the broadcast shape");
+
+  auto context = getContextArg(op, rewriter);
+  if (mlir::failed(context))
+    return mlir::failure();
+
+  mlir::Value accumulate = op->getOperand(0);
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    mlir::Value rhs = op->getOperand(i);
+    auto stepShape = mlir::hip::reifyBroadcastResultShape(
+        rewriter, loc, {accumulate, rhs}, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
+                                              resultType.getElementType(),
+                                              resultType.getEncoding());
+    auto init = createEmptyTensorFromReifiedShape(rewriter, loc, stepResultType,
+                                                  *stepShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the broadcast shape");
+
+    accumulate = HipOpTy::create(rewriter, loc, stepResultType, *context,
+                                 accumulate, rhs, *init)
+                     ->getResult(0);
+  }
+
+  rewriter.replaceOp(op, accumulate);
+  return mlir::success();
+}
 
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
@@ -279,6 +292,18 @@ readbackScalarToHostOrExtract(mlir::PatternRewriter &rewriter,
   return readbackScalarToHost(rewriter, loc, *ctx, rank0Tensor);
 }
 
+inline mlir::Value
+readbackScalarToIndexOrExtract(mlir::PatternRewriter &rewriter,
+                               mlir::Location loc, mlir::Operation *op,
+                               mlir::Value rank0Tensor) {
+  mlir::Value scalar =
+      readbackScalarToHostOrExtract(rewriter, loc, op, rank0Tensor);
+  if (scalar.getType().isIndex())
+    return scalar;
+  return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), scalar);
+}
+
 /// `readbackShapeEntryToHost` recovering !hip.context from `op`. Falls back to
 /// a bare `tensor.extract %shape[idx]` when there is no context arg.
 inline mlir::Value
@@ -295,7 +320,52 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
   return readbackShapeEntryToHost(rewriter, loc, *ctx, shape, idx);
 }
 
-// Pattern population functions (one per operator file)
+/// Dynamic sequence extents used by GQA destination construction.
+///
+/// A null field means the corresponding result dimension is static.
+struct GqaSequenceExtents {
+  mlir::Value logical;
+  mlir::Value presentKey;
+  mlir::Value presentValue;
+};
+
+/// Validate and materialize the payload-dependent GQA sequence extents.
+///
+/// When any dynamic present-cache or QK extent needs `total_seq_len`, this
+/// helper performs one synchronized readback and reuses the resulting
+/// nonnegative index. A dynamic present-cache extent is the unsigned maximum
+/// of that logical extent and its matching past-cache dim 2 when past exists;
+/// without past it is the logical extent directly. Optional QK always uses the
+/// logical extent, never cache capacity.
+///
+/// Pair/rank validation happens before any IR is emitted.
+mlir::FailureOr<GqaSequenceExtents>
+resolveGqaSequenceExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                          mlir::Operation *op, mlir::Value totalSeqLen,
+                          mlir::Value pastKey, mlir::Value pastValue,
+                          mlir::RankedTensorType presentKeyType,
+                          mlir::RankedTensorType presentValueType,
+                          mlir::RankedTensorType outputQkType = nullptr);
+
+/// Build an exact GQA present-cache destination in BNSH layout.
+///
+/// The caller supplies the sequence capacity resolved by
+/// `resolveGqaSequenceExtents`.
+/// Dynamic batch and head-size extents are derived from the query/KV operands;
+/// all static extents remain authoritative in `resultType`.
+mlir::FailureOr<mlir::Value>
+createGqaPresentEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                      mlir::RankedTensorType resultType, mlir::Value query,
+                      mlir::Value key, mlir::Value totalSeqExtent,
+                      int64_t numHeads, int64_t kvNumHeads);
+
+/// Build an exact optional GQA QK destination `[B, H, S_q, S_kv]`.
+mlir::FailureOr<mlir::Value>
+createGqaQkEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                 mlir::RankedTensorType resultType, mlir::Value query,
+                 mlir::Value totalSeqExtent, int64_t numHeads);
+
+// Pattern population functions.
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
@@ -312,12 +382,8 @@ void populateFastGeluConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
-void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
+void populateReductionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
-void populateReduceMeanConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
-void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
-                                        MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
@@ -380,10 +446,6 @@ void populateMinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMaxConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
-void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
-void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
-                                         MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
@@ -412,8 +474,6 @@ void populateTileConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateExpandConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
-void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
-                                          MLIRContext *ctx);
 void populateLessConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateGreaterConversionPatterns(RewritePatternSet &patterns,
@@ -430,6 +490,12 @@ void populateModConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateConstantOfShapeConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+/// Preserve the semantic scalar-consumer optimization and the special
+/// `onnx.Shape(static-tensor)` fold before compute conversion can rewrite their
+/// ONNX structure. Ordinary constant payloads are intentionally excluded and
+/// fold from dense hip.constant carriers during normal compute conversion.
+void populateConstantOfShapePreLoweringPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
@@ -492,32 +558,8 @@ void populateTransposeMatMulFoldPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
-/// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
-/// so the shape operand becomes an explicit
-/// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
-/// `tensor.reshape` fallback recover per-output-dim sizes when the result has
-/// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
-/// ignores its second operand and emits the same SSA dim twice — the [N, N]
-/// bug). Sibling of GatherShapeFold; must run while the producer is still a
-/// generic ONNX op, before lowerOnnxConstants creates its carrier. See
-/// ReshapeShapeFold.cpp.
-void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx);
-
-/// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
-/// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
-/// `hipdnn.pad_axes` attributes so PadConversion can compute the dynamic
-/// output shape from stable provenance attributes. Sibling of GatherShapeFold;
-/// runs while generic ONNX constants are still available, before carrier
-/// creation and the later standalone externalization. See PadShapeFold.cpp.
-void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
-                                  MLIRContext *ctx);
-
-/// Pre-lowering pattern set: stamp compile-time `onnx.Slice` starts/ends/axes/
-/// steps onto the op as `hipdnn.slice_*` attributes so SliceDecompose can
-/// rewrite to `tensor.extract_slice` after lowerOnnxConstants creates the
-/// operand carriers. Sibling of PadShapeFold; it runs while the generic ONNX
-/// constants are still directly matchable. See SliceShapeFold.cpp.
+/// Preserve compile-time Slice controls until the shared normalization layer
+/// replaces this pre-lowering fold.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 

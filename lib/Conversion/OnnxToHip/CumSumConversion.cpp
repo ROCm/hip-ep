@@ -28,9 +28,6 @@ struct CumSumToHip : public mlir::RewritePattern {
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-    // Output shape mirrors the data input shape.
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
-
     int64_t exclusive = 0;
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("exclusive"))
       exclusive = attr.getValue().getSExtValue();
@@ -38,8 +35,12 @@ struct CumSumToHip : public mlir::RewritePattern {
     if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("reverse"))
       reverse = attr.getValue().getSExtValue();
 
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, x);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "CumSum result type must match the data input shape");
     auto hipOp =
-        mlir::hip::CumSumOp::create(rewriter, loc, context, x, axis, init,
+        mlir::hip::CumSumOp::create(rewriter, loc, context, x, axis, *init,
                                     rewriter.getI64IntegerAttr(exclusive),
                                     rewriter.getI64IntegerAttr(reverse));
     rewriter.replaceOp(op, hipOp->getResult(0));

@@ -348,3 +348,55 @@ module {
   // CHECK-SAME: -> tensor<*xf16>
   // CHECK: return %[[CONCAT]] : tensor<*xf16>
 }
+
+// -----
+
+// A nonconstant cond_init may be produced by an earlier GPU op. It must cross
+// the synchronized scalar-readback boundary; tensor.extract would become an
+// unsafe host load after bufferization.
+module {
+  func.func @device_cond(%seed: tensor<i1>, %A: tensor<4xf32>) -> tensor<4xf32> {
+    %M = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
+    %cond_init = "onnx.Not"(%seed) : (tensor<i1>) -> tensor<i1>
+    %r = "onnx.Loop"(%M, %cond_init, %A) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>, %acc: tensor<4xf32>):
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<i1>) -> tensor<i1>
+      %acc_out = "onnx.Identity"(%acc) : (tensor<4xf32>) -> tensor<4xf32>
+      "onnx.Yield"(%cond_out, %acc_out) : (tensor<i1>, tensor<4xf32>) -> ()
+    }) : (tensor<i64>, tensor<i1>, tensor<4xf32>) -> tensor<4xf32>
+    return %r : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @device_cond
+  // CHECK-SAME: %[[CTX:[^,]+]]: !hip.context
+  // CHECK: %[[COND_TENSOR:.*]] = "onnx.Not"
+  // CHECK-NOT: tensor.extract
+  // CHECK: %[[COND:.*]] = hip.readback_scalar(%[[CTX]], %[[COND_TENSOR]] : tensor<i1>) -> i1
+  // CHECK: hip.loop(%[[CTX]], {{.*}}, %[[COND]])
+}
+
+// -----
+
+// Runtime ui8 BOOL storage is read back before its host-side conversion to i1.
+module {
+  func.func @runtime_ui8_cond(
+      %cond_init: tensor<ui8>, %A: tensor<4xf32>) -> tensor<4xf32> {
+    %M = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
+    %r = "onnx.Loop"(%M, %cond_init, %A) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<ui8>, %acc: tensor<4xf32>):
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<ui8>) -> tensor<ui8>
+      %acc_out = "onnx.Identity"(%acc) : (tensor<4xf32>) -> tensor<4xf32>
+      "onnx.Yield"(%cond_out, %acc_out) : (tensor<ui8>, tensor<4xf32>) -> ()
+    }) : (tensor<i64>, tensor<ui8>, tensor<4xf32>) -> tensor<4xf32>
+    return %r : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @runtime_ui8_cond
+  // CHECK-SAME: %[[CTX:[^,]+]]: !hip.context
+  // CHECK-SAME: %[[COND_TENSOR:[^,]+]]: tensor<ui8>
+  // CHECK-NOT: tensor.extract
+  // CHECK: %[[RAW:.*]] = hip.readback_scalar(%[[CTX]], %[[COND_TENSOR]] : tensor<ui8>) -> ui8
+  // CHECK: %[[SIGNLESS:.*]] = builtin.unrealized_conversion_cast %[[RAW]] : ui8 to i8
+  // CHECK: %[[COND:.*]] = arith.cmpi ne, %[[SIGNLESS]], %{{.*}} : i8
+  // CHECK: hip.loop(%[[CTX]], {{.*}}, %[[COND]])
+}

@@ -10,6 +10,8 @@
 // 1. convtranspose_basic   — standard deconv with bias (3x3 kernel, stride 1)
 // 2. convtranspose_stride2 — strided deconv (stride 2)
 // 3. convtranspose_dynamic — dynamic batch dim (tensor.dim + tensor.empty)
+// 4. convtranspose_dynamic_spatial — dynamic spatial formula
+// 5. convtranspose_dynamic_channels — output C from weights[1] * group
 //
 // All cases assert:
 // - context argument prepended
@@ -93,4 +95,56 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]]) : tensor<?x2x5x5xf32>
   // CHECK: hip.conv_transpose(%[[CTX]]) ins(%[[IN]], %[[W]] : tensor<?x1x3x3xf32>, tensor<1x2x3x3xf32>) outs(%[[INIT]] : tensor<?x2x5x5xf32>)
   // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 4. Dynamic batch + H. H' = 2 * (H - 1) + 3 = 2*H + 1; W'=7.
+  // --------------------------------------------------------------------------
+  func.func @convtranspose_dynamic_spatial(
+      %input: tensor<?x1x?x3xf32>,
+      %weights: tensor<1x2x3x3xf32>) -> tensor<?x2x?x7xf32> {
+    %output = "onnx.ConvTranspose"(%input, %weights) {
+      kernel_shape = [3, 3],
+      strides = [2, 2],
+      pads = [0, 0, 0, 0],
+      dilations = [1, 1],
+      output_padding = [0, 0],
+      group = 1 : i64
+    } : (tensor<?x1x?x3xf32>, tensor<1x2x3x3xf32>)
+        -> tensor<?x2x?x7xf32>
+    return %output : tensor<?x2x?x7xf32>
+  }
+
+  // CHECK-LABEL: func.func @convtranspose_dynamic_spatial
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[DIN:.*]]: tensor<?x1x?x3xf32>
+  // CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[DIN]], %{{.*}}
+  // CHECK-DAG: %[[H:.*]] = tensor.dim %[[DIN]], %{{.*}}
+  // CHECK: %[[H2:.*]] = arith.muli %[[H]], %{{.*}} : index
+  // CHECK: %[[HOUT:.*]] = arith.addi %[[H2]], %{{.*}} : index
+  // CHECK: %[[DINIT:.*]] = tensor.empty(%[[BATCH]], %[[HOUT]]) : tensor<?x2x?x7xf32>
+  // CHECK: hip.conv_transpose({{.*}}) outs(%[[DINIT]] : tensor<?x2x?x7xf32>)
+
+  // --------------------------------------------------------------------------
+  // 5. Dynamic output channels are weights[1] * group, not input C.
+  // --------------------------------------------------------------------------
+  func.func @convtranspose_dynamic_channels(
+      %input: tensor<1x2x3x3xf32>,
+      %weights: tensor<2x?x3x3xf32>) -> tensor<1x?x5x5xf32> {
+    %output = "onnx.ConvTranspose"(%input, %weights) {
+      kernel_shape = [3, 3],
+      strides = [1, 1],
+      pads = [0, 0, 0, 0],
+      dilations = [1, 1],
+      output_padding = [0, 0],
+      group = 2 : i64
+    } : (tensor<1x2x3x3xf32>, tensor<2x?x3x3xf32>)
+        -> tensor<1x?x5x5xf32>
+    return %output : tensor<1x?x5x5xf32>
+  }
+
+  // CHECK-LABEL: func.func @convtranspose_dynamic_channels
+  // CHECK-SAME: (%{{.*}}: !hip.context, %{{.*}}: tensor<1x2x3x3xf32>, %[[CWEIGHTS:.*]]: tensor<2x?x3x3xf32>
+  // CHECK: %[[WC:.*]] = tensor.dim %[[CWEIGHTS]], %{{.*}}
+  // CHECK: %[[OC:.*]] = arith.muli %[[WC]], %{{.*}} : index
+  // CHECK: %[[CINIT:.*]] = tensor.empty(%[[OC]]) : tensor<1x?x5x5xf32>
+  // CHECK: hip.conv_transpose({{.*}}) outs(%[[CINIT]] : tensor<1x?x5x5xf32>)
 }

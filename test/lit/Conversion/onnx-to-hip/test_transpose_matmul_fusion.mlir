@@ -63,10 +63,10 @@ module {
   // CHECK-SAME: transA = 1
 
   // Non-matching perm (full reverse on rank 3) must survive.
-  func.func @no_fold_full_reverse(%a: tensor<2x3x4xf16>, %b: tensor<2x3x4xf16>)
+  func.func @no_fold_full_reverse(%a: tensor<2x3x4xf16>, %b: tensor<3x4x2xf16>)
       -> tensor<2x3x3xf16> {
     %bt = "onnx.Transpose"(%b) {perm = dense<[2, 1, 0]> : tensor<3xi64>}
-        : (tensor<2x3x4xf16>) -> tensor<2x4x3xf16>
+        : (tensor<3x4x2xf16>) -> tensor<2x4x3xf16>
     %y = "onnx.MatMul"(%a, %bt)
         : (tensor<2x3x4xf16>, tensor<2x4x3xf16>) -> tensor<2x3x3xf16>
     return %y : tensor<2x3x3xf16>

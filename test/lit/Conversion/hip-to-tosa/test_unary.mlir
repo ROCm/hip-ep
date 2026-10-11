@@ -257,8 +257,8 @@ func.func @abs_not_a_kernel(%ctx: !hip.context, %x: tensor<2x8xf16>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Rejected forms, one per chunk. The pass marks the whole hip dialect illegal,
-// so these fail legalization rather than surviving in the output.
+// Rejected forms, one per chunk. Invalid HIP shapes fail verification; forms
+// unsupported by TOSA fail legalization rather than surviving in the output.
 //===----------------------------------------------------------------------===//
 
 // Dynamic shapes give the pattern no static shape to reason about.
@@ -273,13 +273,12 @@ func.func @dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf16>,
 
 // -----
 
-// TOSA unary ops carry SameOperandsAndResultShape, so an operand that would
-// have to broadcast to the result is not a 1-1 mapping. Unlike the binary ops
-// there is no size-1 broadcast to fall back on.
+// Unary ops preserve shape. HIP verification rejects implicit broadcasting
+// before TOSA conversion.
 func.func @shape_mismatch(%ctx: !hip.context, %x: tensor<1x1x32xf16>,
                           %init: tensor<1x128x32xf16>) -> tensor<1x128x32xf16>
     attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.exp'}}
+  // expected-error @+1 {{dim 1 of result mismatch: expected 1 [1, 1, 32] but outs has 128 [1, 128, 32]}}
   %r = hip.exp(%ctx) ins(%x : tensor<1x1x32xf16>)
                      outs(%init : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
   return %r : tensor<1x128x32xf16>

@@ -10,13 +10,15 @@ module {
 
   // ReduceProd with axes operand (opset 18+). Both keepdims=1 and
   // noop_with_empty_axes=0 are defaults, so they are elided from attr-dict.
-  func.func @reduce_prod_axes_operand(%data: tensor<3x2x2xf32>, %axes: tensor<1xi64>) -> tensor<3x1x2xf32> {
+  func.func @reduce_prod_axes_operand(%data: tensor<3x2x2xf32>) -> tensor<3x1x2xf32> {
+    %axes = arith.constant dense<[1]> : tensor<1xi64>
     %r = "onnx.ReduceProd"(%data, %axes) {keepdims = 1 : si64, noop_with_empty_axes = 0 : si64} : (tensor<3x2x2xf32>, tensor<1xi64>) -> tensor<3x1x2xf32>
     return %r : tensor<3x1x2xf32>
   }
 
   // CHECK-LABEL: func.func @reduce_prod_axes_operand
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x2x2xf32>, %[[A:.*]]: tensor<1xi64>)
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x2x2xf32>)
+  // CHECK: %[[A:.*]] = arith.constant dense<1> : tensor<1xi64>
   // CHECK: tensor.empty() : tensor<3x1x2xf32>
   // CHECK: hip.reduce_prod(%[[CTX]]) ins(%[[D]], %[[A]] : tensor<3x2x2xf32>, tensor<1xi64>) outs({{.*}} : tensor<3x1x2xf32>)
 
@@ -73,5 +75,5 @@ module {
   // CHECK-DAG: %[[A2:.*]] = arith.constant 2 : index
   // CHECK-DAG: %[[D2:.*]] = tensor.dim %[[D]], %[[A2]] : tensor<?x2x?xf32>
   // CHECK: tensor.empty(%[[D0]], %[[D2]]) : tensor<?x?xf32>
-  // CHECK: hip.reduce_prod({{.*}}) ins({{.*}}, {{.*}} : tensor<?x2x?xf32>, tensor<1xi64>) outs({{.*}} : tensor<?x?xf32>) {keepdims = 0 : i64
+  // CHECK: hip.reduce_prod({{.*}}) ins({{.*}}, {{.*}} : tensor<?x2x?xf32>, tensor<1xi64>) outs({{.*}} : tensor<?x?xf32>) {keepdims = 0 : i64, normalized_axes = array<i64: 1>
 }

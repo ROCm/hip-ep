@@ -30,8 +30,11 @@ struct NotToHip : public mlir::RewritePattern {
           op, "onnx.Not lowering expects a ranked tensor input");
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto hipOp = mlir::hip::NotOp::create(rewriter, loc, context, input, init);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Not result type must match the input shape");
+    auto hipOp = mlir::hip::NotOp::create(rewriter, loc, context, input, *init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

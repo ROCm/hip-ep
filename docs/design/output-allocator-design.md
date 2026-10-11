@@ -235,7 +235,7 @@ sequenceDiagram
     Note over DLL_MG: %M = memref.dim %input, 0
     DLL_MG->>RT: hipdnn_ep_alloc_output(state, out_idx, shape)
     RT->>CB: allocator->allocate(self, out_idx, shape, ...)
-    Note over CB: shape used verbatim — no present.*/share-buffer override<br/>(present dim already = past capacity via memref.dim %past_key)
+    Note over CB: shape used verbatim — no present.*/share-buffer override<br/>(present dim already = max(past capacity, logical total_seq_len))
     CB->>ORT: ctx.GetOutput(idx, shape)
     ORT-->>CB: OrtValue
     CB-->>RT: device_ptr (always GPU)
@@ -269,7 +269,7 @@ MlirCustomOp::Compute(context)
    │     │     ├─ hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem)   <-- OUTPUT ALLOC
    │     │     │  └─ output_allocator.cpp: forwards to alloc.allocate(self, ...)
    │     │     │     └─ output_allocate_cb(...)   noexcept
-   │     │     │        ├─ shape used verbatim (no override; present dim already = past capacity)
+   │     │     │        ├─ shape used verbatim (no override; present dim already = max(past, logical length))
    │     │     │        ├─ ctx.GetOutput(ort_idx, shape)   ORT returns pre-bound / fresh OrtValue
    │     │     │        ├─ octx.allocated[out_idx] = true
    │     │     │        └─ GPU output  -> return ORT ptr (zero-copy)
@@ -294,7 +294,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
 | 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute`, `set_output_allocator`) |
 | Callback + per-Compute ctx + host D2H | [MlirCustomOp.cpp](../../backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp) (`output_allocate_cb`, `OutputAllocatorCtx`, `compute_with_output_allocator`) |
-| Allocator KV-cache invariant guard (present dim ← `memref.dim %past_key`) | [test/lit/e2e/test_gqa_output_allocator_present_dim.mlir](../../test/lit/e2e/test_gqa_output_allocator_present_dim.mlir) |
+| Allocator KV-cache invariant guard (present dim ← `max(memref.dim %past_key, total_seq_len)`) | [test/lit/e2e/test_gqa_output_allocator_present_dim.mlir](../../test/lit/e2e/test_gqa_output_allocator_present_dim.mlir) |
 
 **Key design points (as built):**
 
@@ -304,7 +304,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 3. **Host-output D2H is EP-side and real-build-only.** The GPU scratch (one buffer per output index, grow-on-demand, reused across `Compute()`, freed in the dtor) and the `hipMemcpy` are under `#ifndef BUILD_MOCK_RUNTIME` (the EP only links `hip::host` in non-mock builds; mock writes host memory directly). The generated 2-arg `inference_compute` already ends in `hipdnn_ep_stream_sync`, so writes are complete on return and a plain **blocking** `hipMemcpy` D2H suffices — no extra stream sync.
 
-4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output`'s dynamic dims come from its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`.)
+4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output` sizes each dynamic `present.*` sequence dimension as `max(memref.dim %past_key, total_seq_len)`. Under OGA `past_present_share_buffer`, the past extent already **is** the `max_length` capacity, so `GetOutput` returns the pre-bound shared `OrtValue` and preserves `past == present`; a growing non-shared cache instead follows a larger logical `total_seq_len`. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`.)
 
 5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after the inference call returns, the EP checks that every output index in the metadata was served; if one was skipped it `LOG(FATAL)`s and names it. This catches the two graph shapes we don't support yet — an output that just passes a graph input straight through, and two outputs that share (alias) one buffer — and turns them into a clear error instead of handing ORT an unfilled buffer. None of the target models have either shape.
 

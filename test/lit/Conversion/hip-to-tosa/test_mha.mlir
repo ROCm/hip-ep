@@ -187,6 +187,24 @@ func.func @no_rock_kernel(%ctx: !hip.context, %q: tensor<1x4x16xf16>,
 
 // -----
 
+// CHECK-LABEL: func.func @mha_different_value_width
+// CHECK: tosa.matmul
+// CHECK: tosa.matmul
+// CHECK-SAME: -> tensor<2x4x4xf16>
+// CHECK-NOT: hip.multi_head_attention
+func.func @mha_different_value_width(
+    %ctx: !hip.context, %q: tensor<1x4x16xf16>,
+    %k: tensor<1x2x4x8xf16>, %v: tensor<1x2x4x4xf16>,
+    %out: tensor<1x4x8xf16>) -> tensor<1x4x8xf16>
+    attributes {rock.kernel} {
+  %r = hip.multi_head_attention(%ctx)
+      ins(%q, %k, %v : tensor<1x4x16xf16>, tensor<1x2x4x8xf16>, tensor<1x2x4x4xf16>)
+      outs(%out : tensor<1x4x8xf16>) {num_heads = 2 : i64} : tensor<1x4x8xf16>
+  return %r : tensor<1x4x8xf16>
+}
+
+// -----
+
 func.func @share_buffer_rejected(%ctx: !hip.context, %q: tensor<1x1x16xf16>,
                                  %k: tensor<1x1x16xf16>, %v: tensor<1x1x16xf16>,
                                  %past_k: tensor<1x2x4x8xf16>,

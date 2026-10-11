@@ -39,9 +39,12 @@ struct ExpToHip : public mlir::RewritePattern {
           op, "onnx.Exp lowering expects a ranked tensor input");
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Exp result type must match the input shape");
     auto hipOp = mlir::hip::ExpOp::create(rewriter, loc, resultType, context,
-                                          input, init);
+                                          input, *init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

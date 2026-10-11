@@ -51,6 +51,19 @@ module {
   // CHECK-LABEL: func.func @test_range_i64
   // CHECK: hip.range
 
+  func.func @test_range_i64_constant_dynamic_type() -> tensor<?xi64> {
+    %s = arith.constant dense<0> : tensor<i64>
+    %l = arith.constant dense<8> : tensor<i64>
+    %d = arith.constant dense<2> : tensor<i64>
+    %r = "onnx.Range"(%s, %l, %d) : (tensor<i64>, tensor<i64>, tensor<i64>) -> tensor<?xi64>
+    return %r : tensor<?xi64>
+  }
+  // CHECK-LABEL: func.func @test_range_i64_constant_dynamic_type
+  // CHECK: %[[COUNT:.*]] = arith.constant 4 : index
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: tensor.empty(%[[COUNT]]) : tensor<?xi64>
+  // CHECK: hip.range
+
   func.func @test_range_f64() -> tensor<4xf64> {
     %s = arith.constant dense<0.0> : tensor<f64>
     %l = arith.constant dense<4.0> : tensor<f64>

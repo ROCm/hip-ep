@@ -150,21 +150,24 @@ module {
   // CHECK: hip.conv(
   // CHECK-NOT: hip.causal_conv_with_state
 
-  // Dilation 2: the taps are not contiguous. ConvToHip declines a dilated 1D
-  // conv too, so this one stays an unconverted onnx.Conv -- the point here is
-  // only that the causal route does not claim it.
+  // Dilation 2: the taps are not contiguous, so the causal route declines.
+  // General Conv promotion preserves dilation [1, 2] and sizes the output as
+  // 750 + 4 - 2 * (5 - 1) = 746.
   func.func @guard_dilation2(%input: tensor<1x1024x750xf16>,
                              %weights: tensor<1024x1x5xf16>,
-                             %bias: tensor<1024xf16>) -> tensor<1x1024x742xf16> {
+                             %bias: tensor<1024xf16>) -> tensor<1x1024x746xf16> {
     %output = "onnx.Conv"(%input, %weights, %bias) {
       kernel_shape = [5], strides = [1], pads = [4, 0], dilations = [2],
       group = 1024 : i64
     } : (tensor<1x1024x750xf16>, tensor<1024x1x5xf16>, tensor<1024xf16>)
-      -> tensor<1x1024x742xf16>
-    return %output : tensor<1x1024x742xf16>
+      -> tensor<1x1024x746xf16>
+    return %output : tensor<1x1024x746xf16>
   }
 
   // CHECK-LABEL: func.func @guard_dilation2
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: hip.conv(
+  // CHECK-SAME: dilations = [1, 2]
   // CHECK-NOT: hip.causal_conv_with_state
 
   // group != C: a grouped, not depthwise, convolution.

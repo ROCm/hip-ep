@@ -30,9 +30,12 @@ struct CeilToHip : public mlir::RewritePattern {
           op, "onnx.Ceil lowering expects a ranked tensor input");
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Ceil result type must match the input shape");
     auto hipOp = mlir::hip::CeilOp::create(rewriter, loc, resultType, context,
-                                           input, init);
+                                           input, *init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

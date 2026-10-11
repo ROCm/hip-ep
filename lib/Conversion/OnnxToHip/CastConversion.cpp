@@ -31,8 +31,6 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-
   // Map MLIR element type to ONNX DataType enum
   mlir::Type targetType = resultType.getElementType();
   int64_t onnxDataType = 0;
@@ -59,10 +57,14 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   if (onnxDataType == 0)
     return rewriter.notifyMatchFailure(op, "unsupported cast target type");
 
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Cast result type must match the input shape");
   auto toAttr = rewriter.getI64IntegerAttr(onnxDataType);
 
   auto hipOp =
-      mlir::hip::CastOp::create(rewriter, loc, context, input, init, toAttr);
+      mlir::hip::CastOp::create(rewriter, loc, context, input, *init, toAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

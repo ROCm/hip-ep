@@ -74,47 +74,4 @@ module {
       : tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>
   }
 
-  // ===========================================================================
-  // Regression: 9-input MHA with an EMPTY past_sequence_length slot (slot 8 is
-  // none) MUST keep falling through to hip.multi_head_attention.  The branch-2
-  // hip.gqa dispatch is gated on the PRESENCE of the past_sequence_length
-  // operand (Task-9 surgery wires a real [1]-i32 tensor there); a graph that
-  // declares the slot but leaves it empty is not the post-surgery shared-buffer
-  // form and must take the legacy path.
-  // ===========================================================================
-  func.func @main_graph_no_past_seqlen(
-      %q:        tensor<1x1x1280xf16>,
-      %k:        tensor<1x1x1280xf16>,
-      %v:        tensor<1x1x1280xf16>,
-      %past_k:   tensor<1x20x448x64xf16>,
-      %past_v:   tensor<1x20x448x64xf16>)
-      -> (tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>) {
-
-    // CHECK-LABEL: func.func @main_graph_no_past_seqlen
-
-    %none1 = "onnx.NoValue"() {value} : () -> none
-    %none2 = "onnx.NoValue"() {value} : () -> none
-    %none3 = "onnx.NoValue"() {value} : () -> none
-    %none4 = "onnx.NoValue"() {value} : () -> none
-
-    // 9-input shape but slot 8 (past_sequence_length) is none.  Must NOT
-    // dispatch to branch-2 hip.gqa self-attn.
-    %out:3 = "onnx.Custom"(%q, %k, %v, %none1, %none2, %none3, %past_k, %past_v, %none4)
-        <{function_name = "MultiHeadAttention"}>
-        {domain_name = "com.microsoft",
-         num_heads = 20 : si64,
-         scale = 1.250000e-01 : f32,
-         unidirectional = 1 : si64,
-         mask_filter_value = -1.000000e+04 : f32}
-        : (tensor<1x1x1280xf16>, tensor<1x1x1280xf16>, tensor<1x1x1280xf16>,
-           none, none, none, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>,
-           none)
-        -> (tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>)
-
-    // CHECK: hip.multi_head_attention
-    // CHECK-NOT: hip.gqa
-
-    return %out#0, %out#1, %out#2
-      : tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>
-  }
 }
