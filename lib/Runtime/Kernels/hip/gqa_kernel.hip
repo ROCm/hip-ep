@@ -1638,8 +1638,9 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
 //
 // Constraints (asserted at launcher):
-//   - D must be 64, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=16 to keep
-//     the LDS tile ~16KB). The scalar kernel is otherwise D-generic.
+//   - D must be 64, 96, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=8 to keep
+//     the LDS tile small; D=96 -> EPT=3, see kPairSlots). The scalar kernel is
+//     otherwise D-generic.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
@@ -1702,12 +1703,23 @@ gqa_flash_decode_kernel(
   // Going further the wrong way in either direction is worse: BKV=32 costs 37%
   // on the 9B (halved residency), and BKV=4 costs 6% on the 35B (the tile stops
   // amortizing the per-tile __syncthreads and staging setup).
-  constexpr int BKV = (D >= 256) ? 8 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  //
+  // D=96 reaches this kernel only with an INT8 cache (fp16 D=96 runs
+  // gqa_flash_decode_d96_kernel) and takes the D=128 tile height.
+  constexpr int BKV = (D >= 256) ? 8
+                    : (D == 128 || D == 96) ? 32
+                                            : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
-  static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
+  // D=96 does not split evenly over a wave64 (CDNA) wave. Flash decode is
+  // never launched there (wrap_group_query_attention keeps the fused path off
+  // wave64), but the device pass still compiles it, so that instantiation
+  // traps instead of silently dropping a third of the row.
+  static_assert(D % WAVE_SIZE == 0 || WAVE_SIZE != 32,
+                "D must be a multiple of WAVE_SIZE");
   static_assert(EPT >= 1 && EPT <= 8, "EPT must be 1..8");
+  if constexpr (D % WAVE_SIZE != 0) __builtin_trap();
 
   const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
   const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
@@ -1746,6 +1758,23 @@ gqa_flash_decode_kernel(
   float* partial_dst = partials +
       flash_decode_partial_offset(batch, head_q, split_idx, H, K_SPLITS, D);
 
+  // Lane-to-element mapping. Even EPT gives each lane one contiguous run of
+  // EPT elements, read as __half2 / char2 pairs. An odd EPT (D=96 -> 3) cannot
+  // do that: a 3-element run starts on a 2-byte boundary for every odd lane,
+  // so the pair loads would be misaligned. There the first EPT-1 slots are a
+  // pair run over the leading (EPT-1)*WAVE_SIZE elements of the row and the
+  // last slot holds one element per lane of the tail; both stay coalesced and
+  // every lane stays busy. Slot e < kPairSlots is element
+  // lane_id * kPairSlots + e, the tail slot is element kTailBase + lane_id.
+  // The index is spelled out at each use rather than hoisted so the even-EPT
+  // instantiations keep the exact instruction stream they had before D=96.
+  // Flash-decode is a wave32 (RDNA) path only -- wrap_group_query_attention
+  // clears fused_supported on wave64 (hipdnn_device_is_wave64()) -- so on the
+  // wave64 device pass (D=64 -> EPT=1) this is dead code that must compile.
+  constexpr int kPairSlots = EPT & ~1;
+  constexpr bool kTailSlot = (EPT & 1);
+  constexpr int kTailBase  = kPairSlots * WAVE_SIZE;
+
   // Empty slice: write neutral identity so the merge ignores this split.
   // exp2(-INFINITY - global_m) == 0, so l/O contributions vanish.
   if (kv_start >= kv_end) {
@@ -1754,20 +1783,14 @@ gqa_flash_decode_kernel(
       partial_dst[1] = 0.0f;       // l
     }
     #pragma unroll
-    for (int e = 0; e < EPT; ++e)
-      partial_dst[2 + lane_id * EPT + e] = 0.0f;
+    for (int e = 0; e < kPairSlots; ++e)
+      partial_dst[2 + lane_id * kPairSlots + e] = 0.0f;
+    if constexpr (kTailSlot) partial_dst[2 + kTailBase + lane_id] = 0.0f;
     return;
   }
 
   // LDS tiles for K/V (shared across HPG=4 query heads for dedup). 16B-aligned
   // so the cooperative load can move 8 fp16 per float4 (see staging below).
-  // The __half2-vectorized staging below assumes an even EPT. Flash-decode is a
-  // wave32 (RDNA) path only -- wrap_group_query_attention clears fused_supported
-  // on wave64 (hipdnn_device_is_wave64()), so this invariant only needs to hold
-  // there. On wave64 (CDNA/MI350) D=64 yields EPT=1; the kernel is then dead
-  // code that must still compile, so exempt the wave64 device pass.
-  static_assert(EPT % 2 == 0 || WAVE_SIZE != 32,
-                "EPT must be even for __half2 vectorized loads (wave32)");
   // HpG==1 (MHA) runs a single wave per block, so the K/V tile in LDS is never
   // reused across waves -- staging is pure overhead (32KB LDS + a __syncthreads
   // every tile). Stream straight from global instead (kStage=false): the LDS
@@ -1791,12 +1814,18 @@ gqa_flash_decode_kernel(
     if constexpr (KV_I8) {
       const float* ks = k_scale + (size_t)head_kv * D;
       #pragma unroll
-      for (int e = 0; e < EPT; ++e)
-        Q_f[e] = __half2float(Q_ptr[lane_id * EPT + e]) * ks[lane_id * EPT + e];
+      for (int e = 0; e < kPairSlots; ++e)
+        Q_f[e] = __half2float(Q_ptr[lane_id * kPairSlots + e]) *
+                 ks[lane_id * kPairSlots + e];
+      if constexpr (kTailSlot)
+        Q_f[EPT - 1] = __half2float(Q_ptr[kTailBase + lane_id]) *
+                       ks[kTailBase + lane_id];
     } else {
       #pragma unroll
-      for (int e = 0; e < EPT; ++e)
-        Q_f[e] = __half2float(Q_ptr[lane_id * EPT + e]);
+      for (int e = 0; e < kPairSlots; ++e)
+        Q_f[e] = __half2float(Q_ptr[lane_id * kPairSlots + e]);
+      if constexpr (kTailSlot)
+        Q_f[EPT - 1] = __half2float(Q_ptr[kTailBase + lane_id]);
     }
   }
 
@@ -1879,20 +1908,25 @@ gqa_flash_decode_kernel(
           }
         } else {
           #pragma unroll
-          for (int e = 0; e < EPT; e += 2) {
-            const char2 kk =
-                *reinterpret_cast<const char2*>(&Kt[t * D + lane_id * EPT + e]);
+          for (int e = 0; e < kPairSlots; e += 2) {
+            const char2 kk = *reinterpret_cast<const char2*>(
+                &Kt[t * D + lane_id * kPairSlots + e]);
             dot_partial += Q_f[e] * (float)kk.x + Q_f[e + 1] * (float)kk.y;
           }
+          if constexpr (kTailSlot)
+            dot_partial += Q_f[EPT - 1] * (float)Kt[t * D + kTailBase + lane_id];
         }
       } else {
         #pragma unroll
-        for (int e = 0; e < EPT; e += 2) {
-          const __half2 kk =
-              *reinterpret_cast<const __half2*>(&Kt[t * D + lane_id * EPT + e]);
+        for (int e = 0; e < kPairSlots; e += 2) {
+          const __half2 kk = *reinterpret_cast<const __half2*>(
+              &Kt[t * D + lane_id * kPairSlots + e]);
           const float2 kf = __half22float2(kk);
           dot_partial += Q_f[e] * kf.x + Q_f[e + 1] * kf.y;
         }
+        if constexpr (kTailSlot)
+          dot_partial +=
+              Q_f[EPT - 1] * __half2float(Kt[t * D + kTailBase + lane_id]);
       }
       // Warp reduce across the wave -> all lanes hold the full dot.
 #pragma unroll
@@ -1920,22 +1954,28 @@ gqa_flash_decode_kernel(
           }
         } else {
           #pragma unroll
-          for (int e = 0; e < EPT; e += 2) {
-            const char2 vv =
-                *reinterpret_cast<const char2*>(&Vt[t * D + lane_id * EPT + e]);
+          for (int e = 0; e < kPairSlots; e += 2) {
+            const char2 vv = *reinterpret_cast<const char2*>(
+                &Vt[t * D + lane_id * kPairSlots + e]);
             O_acc[e]     = correction * O_acc[e]     + p * (float)vv.x;
             O_acc[e + 1] = correction * O_acc[e + 1] + p * (float)vv.y;
           }
+          if constexpr (kTailSlot)
+            O_acc[EPT - 1] = correction * O_acc[EPT - 1] +
+                             p * (float)Vt[t * D + kTailBase + lane_id];
         }
       } else {
         #pragma unroll
-        for (int e = 0; e < EPT; e += 2) {
-          const __half2 vv =
-              *reinterpret_cast<const __half2*>(&Vt[t * D + lane_id * EPT + e]);
+        for (int e = 0; e < kPairSlots; e += 2) {
+          const __half2 vv = *reinterpret_cast<const __half2*>(
+              &Vt[t * D + lane_id * kPairSlots + e]);
           const float2 vf = __half22float2(vv);
           O_acc[e]     = correction * O_acc[e]     + p * vf.x;
           O_acc[e + 1] = correction * O_acc[e + 1] + p * vf.y;
         }
+        if constexpr (kTailSlot)
+          O_acc[EPT - 1] = correction * O_acc[EPT - 1] +
+                           p * __half2float(Vt[t * D + kTailBase + lane_id]);
       }
       m_acc = m_new;
     }
@@ -1952,12 +1992,220 @@ gqa_flash_decode_kernel(
     // held in registers across the KV loop).
     const float* vs = v_scale + (size_t)head_kv * D;
     #pragma unroll
-    for (int e = 0; e < EPT; ++e)
-      partial_dst[2 + lane_id * EPT + e] = O_acc[e] * vs[lane_id * EPT + e];
+    for (int e = 0; e < kPairSlots; ++e)
+      partial_dst[2 + lane_id * kPairSlots + e] =
+          O_acc[e] * vs[lane_id * kPairSlots + e];
+    if constexpr (kTailSlot)
+      partial_dst[2 + kTailBase + lane_id] =
+          O_acc[EPT - 1] * vs[kTailBase + lane_id];
   } else {
     #pragma unroll
-    for (int e = 0; e < EPT; ++e)
-      partial_dst[2 + lane_id * EPT + e] = O_acc[e];
+    for (int e = 0; e < kPairSlots; ++e)
+      partial_dst[2 + lane_id * kPairSlots + e] = O_acc[e];
+    if constexpr (kTailSlot)
+      partial_dst[2 + kTailBase + lane_id] = O_acc[EPT - 1];
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// D=96 Split-K Decode Kernel (scalar, fp16 KV)
+//===----------------------------------------------------------------------===//
+// Drop-in producer of the same [B, H, K_SPLITS, D+2] partials as
+// gqa_flash_decode_kernel, used for fp16 D=96 decode (Phi-3-mini / Phi-3.5-mini
+// are D=96 MHA). The generic kernel at D=96 gives each lane 3 elements, so a
+// row costs a b32 + a u16 load per lane, one row of K and V is in flight per
+// wave, and every key pays a 5-step shuffle reduction on its own. Here:
+//   1. A wave scores two keys per step, one per 16-lane half; each lane holds
+//      6 fp16 (12 B) of the row, one b96 load. The reduction is 4 steps and
+//      serves both keys, and the halves swap scores so m / l stay wave-uniform.
+//   2. K/V rows are prefetched into a ring of register buffers (see kRing), so
+//      each wave keeps several row pairs in flight instead of one.
+// K/V stream straight from global for every HpG: the HpG waves of a block read
+// the same rows, which hit in cache, so there is no LDS tile and no barrier.
+//
+// Measured on gfx1151 against the generic kernel at D=96 (Phi-3-mini H32 G32,
+// B=1, best split count for each): 0.0233 -> 0.0096 ms at 512 keys,
+// 0.0517 -> 0.0322 ms at 2048, 0.304 -> 0.250 ms at 4096, 2.10 -> 1.89 ms at
+// 32768 (213 GB/s, the DRAM ceiling).
+//
+// The cross-lane steps use DPP row_xmask (xor within a 16-lane row) and
+// v_permlanex16 (swap the two rows of a wave32) on RDNA. Those are VALU
+// operand modifiers; __shfl_xor lowers to ds_bpermute, an LDS round trip that
+// sits on the per-key critical path five times over. Other archs (the kernel
+// only runs on wave32 RDNA but must compile everywhere) keep __shfl_xor.
+template <int MASK>
+__device__ __forceinline__ float d96_row_xor(float v) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  static_assert(MASK > 0 && MASK < 16, "row_xmask stays within a 16-lane row");
+  return __builtin_bit_cast(
+      float, __builtin_amdgcn_update_dpp(0, __builtin_bit_cast(int, v),
+                                         0x160 | MASK, 0xF, 0xF, false));
+#else
+  return __shfl_xor(v, MASK);
+#endif
+}
+
+__device__ __forceinline__ float d96_swap_halves(float v) {
+#if defined(__HIP_DEVICE_COMPILE__) && (defined(__GFX11__) || defined(__GFX12__))
+  const int x = __builtin_bit_cast(int, v);
+  return __builtin_bit_cast(
+      float, __builtin_amdgcn_permlanex16(x, x, 0x76543210, 0xfedcba98, false,
+                                          false));
+#else
+  return __shfl_xor(v, 16);
+#endif
+}
+
+template <int HPG>
+__global__ void __launch_bounds__(HPG * WAVE_SIZE)
+gqa_flash_decode_d96_kernel(
+    const __half* __restrict__ Q_roped,  // [B, 1, H, 96]
+    const __half* __restrict__ Kcache,   // [B, G, max_seq, 96]
+    const __half* __restrict__ Vcache,   // [B, G, max_seq, 96]
+    float* __restrict__ partials,        // [B, H, K_SPLITS, 98]
+    int H, int G, int max_seq,
+    float scale,
+    const int* __restrict__ seqlens_k,
+    int local_window_size,
+    int K_SPLITS) {
+  constexpr int D   = 96;
+  constexpr int LPK = 16;          // lanes per key
+  constexpr int EPL = D / LPK;     // fp16 elements per lane
+  constexpr int DW  = EPL / 2;     // dwords per lane per row
+  // Flash decode never runs on wave64 (see gqa_flash_decode_kernel), but the
+  // device pass still compiles this; the two-halves layout needs wave32.
+  if constexpr (WAVE_SIZE != 2 * LPK) __builtin_trap();
+
+  const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
+  const int head_kv = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
+  const int split   = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int wave_id = threadIdx.x / WAVE_SIZE;
+  const int lane    = threadIdx.x % WAVE_SIZE;
+  const int half    = lane / LPK;  // which key of the pair this lane scores
+  const int hl      = lane % LPK;  // which 6-element slice of the row
+  const int head_q  = head_kv * HPG + wave_id;
+
+  // Same length / window / split partition as gqa_flash_decode_kernel.
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size)
+    kv_lo = eff_skv - local_window_size;
+  const int kv_range = eff_skv - kv_lo;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split;
+  const int kv_end   = min(kv_start + chunk, eff_skv);
+
+  float* pd = partials +
+      flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+  if (kv_start >= kv_end) {
+    if (lane == 0) {
+      pd[0] = -INFINITY;
+      pd[1] = 0.0f;
+    }
+    for (int c = lane; c < D; c += WAVE_SIZE) pd[2 + c] = 0.0f;
+    return;
+  }
+
+  float q[EPL];
+  {
+    const __half2* qp = reinterpret_cast<const __half2*>(
+        Q_roped + (size_t)(batch * H + head_q) * D + hl * EPL);
+    #pragma unroll
+    for (int i = 0; i < DW; ++i) {
+      const float2 f = __half22float2(qp[i]);
+      q[2 * i]     = f.x;
+      q[2 * i + 1] = f.y;
+    }
+  }
+
+  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+      (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
+  const uint32_t* Kw = reinterpret_cast<const uint32_t*>(Kcache + kv_base) + hl * DW;
+  const uint32_t* Vw = reinterpret_cast<const uint32_t*>(Vcache + kv_base) + hl * DW;
+
+  // A half whose key is past kv_end re-reads row kv_start (always valid) and
+  // masks its score to -inf, so the loads stay unpredicated.
+  auto load_rows = [&](int kv, uint32_t (&k)[DW], uint32_t (&v)[DW]) {
+    const size_t off = (size_t)(kv < kv_end ? kv : kv_start) * (D / 2);
+    #pragma unroll
+    for (int i = 0; i < DW; ++i) {
+      k[i] = Kw[off + i];
+      v[i] = Vw[off + i];
+    }
+  };
+
+  const float scale_log2e = scale * LOG2E;
+  float m = -INFINITY;
+  float l = 0.0f;
+  float o[EPL];
+  #pragma unroll
+  for (int i = 0; i < EPL; ++i) o[i] = 0.0f;
+
+  // Ring of kRing row-pair buffers. The body is unrolled kRing times so every
+  // buffer index is static: a slot is refilled in place right after it is
+  // consumed, with no register rotation, and while one pair is reduced the next
+  // kRing-1 pairs are in flight. One pair ahead (kRing=2) is fastest only while
+  // the KV range sits in the MALL and falls ~5% behind the generic kernel once
+  // decode is DRAM-bound; 4 wins at every length measured on gfx1151, and 6 or
+  // 8 buy nothing more for the extra registers.
+  constexpr int kRing = 4;
+  uint32_t kb[kRing][DW], vb[kRing][DW];
+  #pragma unroll
+  for (int r = 0; r < kRing; ++r) load_rows(kv_start + 2 * r + half, kb[r], vb[r]);
+
+  for (int base = kv_start; base < kv_end; base += 2 * kRing) {
+    #pragma unroll
+    for (int r = 0; r < kRing; ++r) {
+      const int kv = base + 2 * r + half;
+
+      float dot = 0.0f;
+      #pragma unroll
+      for (int i = 0; i < DW; ++i) {
+        const float2 kf = __half22float2(__builtin_bit_cast(__half2, kb[r][i]));
+        dot += q[2 * i] * kf.x + q[2 * i + 1] * kf.y;
+      }
+      dot += d96_row_xor<8>(dot);
+      dot += d96_row_xor<4>(dot);
+      dot += d96_row_xor<2>(dot);
+      dot += d96_row_xor<1>(dot);
+
+      // Both halves see the same pair of scores (in swapped order), so m and l
+      // come out bit-identical across the wave. A pair wholly past kv_end (the
+      // tail of the last ring pass) leaves the state untouched: m is finite by
+      // then, since the very first key of the split is always in range.
+      const float s     = (kv < kv_end) ? dot * scale_log2e : -INFINITY;
+      const float s_o   = d96_swap_halves(s);
+      const float m_new = fmaxf(m, fmaxf(s, s_o));
+      const float corr  = exp2f(m - m_new);
+      const float p     = exp2f(s - m_new);
+      const float p_o   = exp2f(s_o - m_new);
+      l = corr * l + (p + p_o);
+      #pragma unroll
+      for (int i = 0; i < DW; ++i) {
+        const float2 vf = __half22float2(__builtin_bit_cast(__half2, vb[r][i]));
+        o[2 * i]     = corr * o[2 * i]     + p * vf.x;
+        o[2 * i + 1] = corr * o[2 * i + 1] + p * vf.y;
+      }
+      m = m_new;
+
+      load_rows(kv + 2 * kRing, kb[r], vb[r]);
+    }
+  }
+
+  // Each half accumulated its own keys against the shared m: add the halves.
+  #pragma unroll
+  for (int i = 0; i < EPL; ++i) o[i] += d96_swap_halves(o[i]);
+  if (half == 0) {
+    #pragma unroll
+    for (int i = 0; i < EPL; ++i) pd[2 + hl * EPL + i] = o[i];
+  }
+  if (lane == 0) {
+    pd[0] = m;
+    pd[1] = l;
   }
 }
 
@@ -2520,10 +2768,23 @@ static inline void launchFlashDecodeConfig(
           <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
               local_window_size, splits)
+    // fp16 D=96 has its own split kernel (gqa_flash_decode_d96_kernel); the
+    // INT8 cache keeps the generic one.
+    #define LAUNCH_SCALAR_D96(HPG_)                                            \
+      do {                                                                     \
+        if constexpr (FMT == KvDtype::kF16)                                    \
+          gqa_flash_decode_d96_kernel<HPG_>                                    \
+              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
+                  hQ, hK, hV, hP, H, G, max_seq, scale, iSeq,                  \
+                  local_window_size, splits);                                  \
+        else                                                                   \
+          LAUNCH_SCALAR_D(96, HPG_);                                           \
+      } while (0)
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
         if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
         else if (d == 128) LAUNCH_SCALAR_D(128, HPG_);                         \
+        else if (d == 96)  LAUNCH_SCALAR_D96(HPG_);                            \
         else               LAUNCH_SCALAR_D(64, HPG_);                          \
       } while (0)
     switch (hpg) {
@@ -2537,6 +2798,7 @@ static inline void launchFlashDecodeConfig(
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
     }
     #undef LAUNCH_SCALAR
+    #undef LAUNCH_SCALAR_D96
     #undef LAUNCH_SCALAR_D
   }
 
@@ -2548,6 +2810,9 @@ static inline void launchFlashDecodeConfig(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else if (d == 128)
     gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 96)
+    gqa_flash_decode_reduce_kernel<96><<<grid_reduce, 96, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else
     gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
@@ -2886,9 +3151,9 @@ static int runGqaFlashDecode(
             hpg, H, G);
     return -1;
   }
-  if (d != 64 && d != 128 && d != 256) {
+  if (d != 64 && d != 96 && d != 128 && d != 256) {
     fprintf(stderr,
-            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256)\n",
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64/96/128/256)\n",
             d);
     return -1;
   }
@@ -3085,7 +3350,7 @@ extern "C" int hip_gqa_flash_decode_configured(
 }
 
 //===----------------------------------------------------------------------===//
-// Fused FA-2 WMMA prefill kernels: v6x (d64 / d128) and v8x (d256)
+// Fused FA-2 WMMA prefill kernels: v6x (d64 / d96 / d128) and v8x (d256)
 //
 // fp16 in/out, fp32 accumulate, causal, GQA. Q [B,sq,Hq,D]; K/V cache
 // [B,G,max_seq,D]. Both kernels compute transposed scores (S^T = K Q^T) and
@@ -3802,12 +4067,13 @@ struct PrefillV6xCfg { int hb; int qw; int mt; int bkv; };
 // The v6x configs built for a shape (hb must divide the group): 1-wave and
 // 2-wave blocks (hb x qw = 1x1, 2x1), 4-wave blocks (1x4, 2x2, 4x1) and,
 // without a window, 8-wave blocks (1x8, 2x4, 4x2, 8x1). At d64 M_TILES 1/2 x
-// BKV 32/64. At d128 M_TILES=2 spills, so do 2 heads per block (2x1) and BKV=64
+// BKV 32/64. At d96 and d128 M_TILES=2 spills. d96 builds 4- and 8-wave blocks
+// only, at BKV 32/64. At d128 2 heads per block (2x1) spill, and so does BKV=64
 // with 4 waves (592 bytes/lane); 8 waves halve the per-thread staging and do
 // run BKV=64.
 static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_size,
                                        PrefillV6xCfg* out) {
-    if ((d != 64 && d != 128) || G <= 0 || Hq % G != 0) return 0;
+    if ((d != 64 && d != 96 && d != 128) || G <= 0 || Hq % G != 0) return 0;
     static const int kLayouts[][2] = {{1, 1}, {2, 1}, {1, 4}, {2, 2}, {4, 1},
                                       {1, 8}, {2, 4}, {4, 2}, {8, 1}};
     const int hpg = Hq / G;
@@ -3815,7 +4081,7 @@ static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_si
     for (const auto& lay : kLayouts) {
         const int hb = lay[0], qw = lay[1], nw = hb * qw;
         if (hpg % hb != 0 || (local_window_size > 0 && nw > 4)) continue;
-        if (d == 128 && nw == 2) continue;
+        if ((d == 128 && nw == 2) || (d == 96 && nw < 4)) continue;
         for (int mt = 1; mt <= (d == 64 ? 2 : 1); ++mt)
             for (int bkv : {32, 64}) {
                 if (d == 128 && bkv == 64 && nw != 8) continue;
@@ -3894,17 +4160,28 @@ static inline void dispatchPrefillV6x(
             if (nw == 1) LAUNCH_V6X(1, 32, 128, HW_, 1, 1);                     \
             else         V6X_4W(1, 32, 128, HW_);                               \
         } while (0)
+    // d96 builds 4- and 8-wave blocks only.
+    #define V6X_D96(BKV_)                                                      \
+        do {                                                                    \
+            if (nw == 8)                    V6X_8W(1, BKV_, 96);                \
+            else if (local_window_size > 0) V6X_4W(1, BKV_, 96, true);          \
+            else                            V6X_4W(1, BKV_, 96, false);         \
+        } while (0)
     if (d == 64) {
         if (cfg.mt == 2 && cfg.bkv == 64) V6X_ANY(2, 64, 64);
         else if (cfg.mt == 2)             V6X_ANY(2, 32, 64);
         else if (cfg.bkv == 64)           V6X_ANY(1, 64, 64);
         else                              V6X_ANY(1, 32, 64);
+    } else if (d == 96) {
+        if (cfg.bkv == 64) V6X_D96(64);
+        else               V6X_D96(32);
     } else {
         if (nw == 8 && cfg.bkv == 64)   V6X_8W(1, 64, 128);
         else if (nw == 8)               V6X_8W(1, 32, 128);
         else if (local_window_size > 0) V6X_D128_LE4(true);
         else                            V6X_D128_LE4(false);
     }
+    #undef V6X_D96
     #undef V6X_D128_LE4
     #undef V6X_ANY
     #undef V6X_LE4
@@ -4072,8 +4349,9 @@ static std::string prefillTuneKey(int d, int sq, int skv, int Hq, int G, int win
            std::to_string(G) + "_w" + std::to_string(window > 0 ? window : 0);
 }
 
-// Self-tuning launch: v6x at d64 / d128, v8x at d256 (no window). Returns -1
-// for a shape neither kernel is built for, so the caller can fall back.
+// Self-tuning launch: v6x at d64 / d96 / d128, v8x at d256 (no window).
+// Returns -1 for a shape neither kernel is built for, so the caller can fall
+// back.
 static int prefillTunedRun(
     hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
@@ -4143,16 +4421,16 @@ static int prefillTunedRun(
 
 
 // Unified fused flash-prefill entry, tuned online on first use per shape: v6x
-// at d64 and d128, v8x at d256. The runtime only has to call this one symbol
-// for any eligible (fp16, causal, GQA) prefill and gets the right kernel.
-// Returns -1 for unsupported head dims so the caller can fall back.
+// at d64, d96 and d128, v8x at d256. The runtime only has to call this one
+// symbol for any eligible (fp16, causal, GQA) prefill and gets the right
+// kernel. Returns -1 for unsupported head dims so the caller can fall back.
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale)
 {
-    if (d != 64 && d != 128 && d != 256) return -1;
+    if (d != 64 && d != 96 && d != 128 && d != 256) return -1;
     return prefillTunedRun(static_cast<hipStream_t>(stream_ptr),
                            static_cast<const _Float16*>(Q),
                            static_cast<const _Float16*>(Kcache),
@@ -4165,8 +4443,8 @@ extern "C" int hip_gqa_flash_prefill_v2(
 // on top of v2. v2 stays the narrow ABI so the standalone harnesses and shim
 // headers that redeclare it keep linking unchanged.
 //
-// Attention sinks are implemented for d == 64, sliding-window attention for
-// d == 64 and d == 128 (both by v6x). Unsupported feature/head
+// Attention sinks are implemented for d == 64 and d == 96, sliding-window
+// attention for d == 64, 96 and 128 (all by v6x). Unsupported feature/head
 // combinations return -1 rather than silently dropping the requested feature.
 extern "C" int hip_gqa_flash_prefill(
     void* stream_ptr,
@@ -4177,9 +4455,9 @@ extern "C" int hip_gqa_flash_prefill(
 {
     const bool wants_sink   = (head_sink != nullptr) || (smooth_softmax != 0);
     const bool wants_window = local_window_size > 0;
-    if (wants_sink && d != 64) return -1;
-    if (wants_window && d != 64 && d != 128) return -1;
-    if (d != 64 && d != 128 && d != 256) return -1;
+    if (wants_sink && d != 64 && d != 96) return -1;
+    if (wants_window && d != 64 && d != 96 && d != 128) return -1;
+    if (d != 64 && d != 96 && d != 128 && d != 256) return -1;
     return prefillTunedRun(static_cast<hipStream_t>(stream_ptr),
                            static_cast<const _Float16*>(Q),
                            static_cast<const _Float16*>(Kcache),
@@ -4203,8 +4481,8 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
 {
     const bool wants_sink = head_sink != nullptr || smooth_softmax != 0;
     const bool wants_window = local_window_size > 0;
-    if (wants_sink && d != 64) return -1;
-    if (wants_window && d != 64 && d != 128) return -1;
+    if (wants_sink && d != 64 && d != 96) return -1;
+    if (wants_window && d != 64 && d != 96 && d != 128) return -1;
 
     hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
     const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
@@ -4212,7 +4490,7 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr = static_cast<_Float16*>(O);
 
-    if (d == 64 || d == 128) {
+    if (d == 64 || d == 96 || d == 128) {
         const PrefillV6xCfg cfg{hb, qw, mt, bkv};
         if (!prefillV6xBuilt(d, Hq, G, local_window_size, cfg)) return -1;
         dispatchPrefillV6x(cfg, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq,

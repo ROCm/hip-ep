@@ -156,6 +156,25 @@ int main() {
           "windowed prefill config has no windowed instance");
   }
 
+  // head_dim 96 (Phi-3-mini, 32:32) has its own class, so it resolves from its
+  // own rows rather than the heuristic, and its answers are ones the D=96
+  // kernels accept: scalar decode (no D=96 WMMA path) and an MT=1 v6x
+  // prefill (MT=2 is not instantiated at D=96).
+  {
+    GqaDecodeResult r = decode(policy, 32, 32, 96, 4096);
+    CHECK(r.source != GqaTuneSource::Heuristic,
+          "measured d96 decode shape fell to the heuristic");
+    CHECK(runnableDecode(r) && !r.config.use_wmma,
+          "d96 decode config not runnable by the scalar kernel");
+    GqaPrefillResult p =
+        prefill(policy, GqaPrefillVariant::V6x, 32, 32, 96, 1024, 1024);
+    CHECK(p.source != GqaTuneSource::Heuristic,
+          "measured d96 prefill shape fell to the heuristic");
+    CHECK(p.config.hb > 0 && p.config.qw > 0 && p.config.mt == 1 &&
+              p.config.bkv > 0,
+          "d96 prefill config is not a D=96 v6x config");
+  }
+
   // The explicit heuristic recovery path (used after the kernel rejects a
   // resolved config) always yields a config.
   {

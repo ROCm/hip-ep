@@ -76,14 +76,19 @@ mismatch is a loud rejection (fall to heuristic) rather than a silently wrong pi
 ## What the table covers
 
 The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,8,16}** at
-**head_dim ∈ {64,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`). The
+**head_dim ∈ {64,96,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`).
+head_dim 96 (`D96`) was added after the other three: `gfx1151` carries its rows,
+measured with `measure --head-dim 96` and folded in by
+`build --merge-existing --head-dim 96`. A table without D96 rows resolves D=96
+shapes to the compiled-in heuristic, which has D=96 rules of its own
+(`d96DecodeSplits` / `prefillHeuristic` in `../gqa_autotune.cpp`). The
 sweep measures the production model geometries plus, for each, the multi-query
 floor (`G = 1`) so the same-hpg fuzzy search always lands on something measured.
 A prefill config depends on `head_dim` and on the heads per group (which sets
 the v6x / v8x block layout) but barely on the KV length, so prefill needs far
 fewer points.
 
-The current `gfx1151` table is schema 9 / `gqa-v4`: 33 configs, 1739 points and 6
+The current `gfx1151` table is schema 9 / `gqa-v4`: 34 configs, 2004 points and 8
 per-`(phase, head_dim)` fallbacks, over the model geometries at lengths from 128
 to 65536, batch 1. The points are the saturation-pruned survivors of ~3200
 measured shapes (the rest were reconstructable by nearest-neighbour and dropped).

@@ -8,8 +8,9 @@
 //
 // Verifies the FA-2 WMMA prefill kernels that gqa.cpp routes to on the
 // fused-prefill fast path:
-//   v6x  (d == 64: gpt-oss / llama-3.2 geometry; d == 128: llama / qwen
-//         geometry, any heads-per-group, with and without a window)
+//   v6x  (d == 64: gpt-oss / llama-3.2 geometry; d == 96: Phi-3-mini;
+//         d == 128: llama / qwen geometry; any heads-per-group, with and
+//         without a window)
 //   v8x  (d == 256: Qwen3.x / Gemma-3 geometry)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
@@ -319,6 +320,25 @@ int main(int argc, char** argv) {
       {"qwen3.6-d256", 1, 16, 2, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 2048, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  8192, kSinkNone,    false, 0},
+      // Phi-3-mini / Phi-3.5-mini (H32 G32 MHA, d=96). sq=1000 leaves partial
+      // 16-row Q tiles and 64-key KV tiles.
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 1000, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 2048, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  512,  kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 2, 32, 32, 96, 777,  1500, kSinkNone,    false, 0},
+      {"gqa4-d96",       1, 32,  8, 96, 512,  0,    kSinkNone,    false, 0},
+      // Phi-3-mini-4k ships a 2047-key window. First a window that never binds
+      // (total_seq <= window), then binding ones: chunked past deeper than the
+      // window, a window not aligned to the KV tile, and window 1.
+      {"phi-3-win-d96",  1, 32, 32, 96, 2000, 0,    kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 1024, 2048, kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  1000, kSinkNone,    false, 100},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  512,  kSinkNone,    false, 1},
+      // d=96 sinks, with and without a window.
+      {"d96-sink",       1, 32,  8, 96, 512,  0,    kSinkPerHead, false, 0},
+      {"d96-sink+win",   1, 32,  8, 96, 512,  512,  kSinkBoth,    false, 128},
+      {"d96-sink-mha",   1, 32, 32, 96, 1000, 300,  kSinkBoth,    false, 0},
       // Qwen3.8-27B: a group of 6.
       {"qwen3.8-d256", 1, 24, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.8-d256", 1, 24, 4, 256, 512,  8192, kSinkNone,    false, 0},

@@ -23,8 +23,8 @@
 // degrades smoothly: the answer is always the closest thing actually measured.
 //
 // Categorical fields are matched exactly rather than by distance because they
-// are not distances. head_dim is a hard kernel-template split (64/128/256 are
-// three different instantiations), phase is a different kernel entirely, and the
+// are not distances. head_dim is a hard kernel-template split (64/96/128/256
+// are different instantiations), phase is a different kernel entirely, and the
 // KV dtype changes what decode reads per step. Interpolating across them would
 // be meaningless. The numeric dims (head counts, batch, sequence lengths) do
 // vary continuously and are where the distance metric earns its keep.
@@ -43,8 +43,8 @@ namespace hipdnn_ep.gqa_autotune.fbs;
 
 // Which kernel serves the shape. Decode (sq == 1, the generation loop) is the
 // split-K flash-decode kernel. The two prefill kernels are chosen purely by
-// head_dim in real/gqa.cpp -- d64 and d128 -> V6x, d256 -> V8x -- so for
-// prefill this field and head_dim move together; decode carries head_dim
+// head_dim in real/gqa.cpp -- d64, d96 and d128 -> V6x, d256 -> V8x -- so
+// for prefill this field and head_dim move together; decode carries head_dim
 // independently. 2..4 were the retired v5 / v7 / v8 prefill kernels of
 // kernel_abi gqa-v3; they stay unassigned so no value changes meaning.
 enum GqaPhase : ubyte {
@@ -54,12 +54,14 @@ enum GqaPhase : ubyte {
   PrefillV8x = 6
 }
 
-// The head_dim values the fused kernels are instantiated for.
+// The head_dim values the fused kernels are instantiated for. Append only: a
+// table stores these values, so renumbering would misread every shipped .fb.
 enum GqaHeadDim : ubyte {
   Any = 0,
   D64 = 1,
   D128 = 2,
-  D256 = 3
+  D256 = 3,
+  D96 = 4
 }
 
 // Fp16 reads the cache directly; Int8 is the quantized W4A8 decode path. Prefill
