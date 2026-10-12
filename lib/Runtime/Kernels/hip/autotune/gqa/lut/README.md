@@ -77,8 +77,8 @@ mismatch is a loud rejection (fall to heuristic) rather than a silently wrong pi
 
 The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,8,16}** at
 **head_dim ∈ {64,96,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`).
-head_dim 96 (`D96`) was added after the other three: `gfx1151` carries its rows,
-measured with `measure --head-dim 96` and folded in by
+head_dim 96 (`D96`) was added after the other three: all four tables carry its
+rows, measured with `measure --head-dim 96` and folded in by
 `build --merge-existing --head-dim 96`. A table without D96 rows resolves D=96
 shapes to the compiled-in heuristic, which has D=96 rules of its own
 (`d96DecodeSplits` / `prefillHeuristic` in `../gqa_autotune.cpp`). The
