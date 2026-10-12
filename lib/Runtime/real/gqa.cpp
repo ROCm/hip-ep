@@ -11,7 +11,7 @@
 // lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
 // selection:
 //
-//   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
+//   * Common fp16 causal GQA (head_dim in {64,96,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
 //                         hip_gqa_flash_prefill
@@ -22,9 +22,9 @@
 //     max(0, total_seq - window) in the split kernel and folds the sink into
 //     the reduce denominator, and it autotunes (impl, split-count) per shape --
 //     keying sliding layers on the window rather than the full context. Prefill
-//     applies sinks through hip_gqa_flash_prefill for head_dim 64 and sliding
-//     windows for head_dim 64 and 128; unsupported prefill geometries route to
-//     decomposed.
+//     applies sinks through hip_gqa_flash_prefill for head_dim 64 and 96, and
+//     sliding windows for head_dim 64, 96 and 128; unsupported prefill
+//     geometries route to decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
 //     bidirectional, additive attention bias, other head_dim, untemplated
@@ -205,14 +205,14 @@ static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
 // decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
-// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256}
-// (d=256 covers Qwen3-family 16:4 heads); WMMA is layered on top inside the
-// kernel where it helps (d<=128 only). Anything outside this set has no decode
-// kernel.
+// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,96,128,256}
+// (d=96 covers Phi-3-mini 32:32, d=256 Qwen3-family 16:4 heads); WMMA is
+// layered on top inside the kernel where it helps (d 64/128 only). Anything
+// outside this set has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
-  if (d != 64 && d != 128 && d != 256)
+  if (d != 64 && d != 96 && d != 128 && d != 256)
     return false;
   int64_t hpg = H / G;
   if (hpg * G != H)
@@ -460,7 +460,7 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/96/128/256)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -775,9 +775,9 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // d64 and d128 run v6x, d256 runs v8x (d256 prefill never has a window or
-  // a sink here). hip_gqa_flash_prefill_v2 applies the same split when tuning
-  // online.
+  // d64, d96 and d128 run v6x, d256 runs v8x (d256 prefill never has a window
+  // or a sink here). hip_gqa_flash_prefill_v2 applies the same split when
+  // tuning online.
   const bool v8x_prefill = d == 256;
   const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
   int fp_rc;
@@ -2937,21 +2937,23 @@ int wrap_group_query_attention(
 
   //===------------------------------------------------------------------===//
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA with
-  // head_dim in {64,128,256} and a templated decode geometry (HpG in
+  // head_dim in {64,96,128,256} and a templated decode geometry (HpG in
   // {1,2,3,4,5,8,16}). Decode supports sink/window for every templated
-  // geometry; prefill v3 supports sinks at head_dim == 64 and windows at
-  // head_dim == 64 or 128. Everything else uses the feature-complete
+  // geometry; prefill v3 supports sinks at head_dim 64 or 96 and windows at
+  // head_dim 64, 96 or 128. Everything else uses the feature-complete
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
   // head_dim gate: the fused WMMA prefill (v6x/v8x) and the scalar
-  // flash-decode kernels both cover d in {64,128,256} now (d=256 for
-  // Qwen3-family 16:4). For decode, flash_decode_geometry_ok already validates
-  // d; for prefill we clamp to the templated set here.
-  const bool head_dim_ok =
-      is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
+  // flash-decode kernels both cover d in {64,96,128,256} now (d=96 for
+  // Phi-3-mini, d=256 for Qwen3-family 16:4). For decode,
+  // flash_decode_geometry_ok already validates d; for prefill we clamp to the
+  // templated set here.
+  const bool head_dim_ok = is_decode ? true
+                                     : (head_dim == 64 || head_dim == 96 ||
+                                        head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
   // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
   // so exclude it here to route masked attention to gqa_forward_hipblaslt
@@ -2962,13 +2964,14 @@ int wrap_group_query_attention(
   // use_smooth_softmax_ || head_sink != nullptr).
   const bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
   // Sink/window are first-class decode features. Prefill (v6x) implements both
-  // at D64 and the window at D128. D128 sinks and all D256 prefill features
-  // must fall back rather than silently drop them.
-  const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
+  // at D64 and D96 and the window at D128. D128 sinks and all D256 prefill
+  // features must fall back rather than silently drop them.
+  const bool sink_ok =
+      !has_smooth_softmax || is_decode || head_dim == 64 || head_dim == 96;
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
-  // supported geometry; prefill implements it at D64 and D128.
-  const bool window_ok =
-      is_decode || local_window_size <= 0 || head_dim == 64 || head_dim == 128;
+  // supported geometry; prefill implements it at D64, D96 and D128.
+  const bool window_ok = is_decode || local_window_size <= 0 ||
+                         head_dim == 64 || head_dim == 96 || head_dim == 128;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
@@ -2985,7 +2988,8 @@ int wrap_group_query_attention(
   // dedicated cast is added.
   const bool fp32_int8_fused =
       kv_quantized && fused_geometry && element_size_bytes == 4 &&
-      (head_dim == 64 || head_dim == 128) && head_sink == nullptr;
+      (head_dim == 64 || head_dim == 96 || head_dim == 128) &&
+      head_sink == nullptr;
 
   // The quantized-cache kernels live exclusively on the fused path, which is
   // disabled above on wave64 because it is built on the RDNA-only WMMA
@@ -3003,16 +3007,17 @@ int wrap_group_query_attention(
   }
 
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
-  // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
-  // pipeline reads the cache as fp16 and would misinterpret quantized bytes, so
-  // we must reject rather than silently fall through to it.
+  // fp16 prefill-over-dequant), for head_dim in {64,96,128}. The legacy
+  // decomposed pipeline reads the cache as fp16 and would misinterpret
+  // quantized bytes, so we must reject rather than silently fall through to it.
   if (kv_quantized && !fp32_int8_fused &&
-      (!fused_supported || (head_dim != 64 && head_dim != 128))) {
+      (!fused_supported ||
+       (head_dim != 64 && head_dim != 96 && head_dim != 128))) {
     fprintf(stderr,
             "wrap_group_query_attention: quantized KV cache requires the fused "
             "path (fp16 or fp32-cast-to-fp16, causal, no attention bias, any "
             "window/sink only where the fused kernels implement it, head_dim "
-            "64 or 128); got fused_supported=%d fp32_adapter=%d elem=%lld "
+            "64, 96 or 128); got fused_supported=%d fp32_adapter=%d elem=%lld "
             "head_dim=%lld\n",
             static_cast<int>(fused_supported),
             static_cast<int>(fp32_int8_fused), (long long)element_size_bytes,

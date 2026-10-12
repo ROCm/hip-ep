@@ -126,6 +126,16 @@ GEOMETRIES = [
     (32, 16, 128,  0, 'gemma2-27b',         'prefill_v6x'),
     (16,  8, 256,  0, 'gemma2-9b',          'prefill_v8x'),
     (64,  4, 128,  0, 'hpg16-highpar',      'prefill_v6x'),
+    # ---- head_dim 96: Phi-3-mini plus every templated HpG --------------------
+    (32, 32,  96,  0, 'phi3-mini',          'prefill_v6x'),  # Phi-3/3.5-mini
+    (16, 16,  96,  0, 'hold-1-d96',         'prefill_v6x'),
+    (16,  8,  96,  0, 'hpg2-d96',           'prefill_v6x'),
+    (24,  8,  96,  0, 'hpg3-d96',           'prefill_v6x'),
+    (32,  8,  96,  0, 'hpg4-d96',           'prefill_v6x'),
+    (40,  8,  96,  0, 'hpg5-d96',           'prefill_v6x'),
+    (64,  8,  96,  0, 'hpg8-d96',           'prefill_v6x'),
+    (32,  2,  96,  0, 'hpg16-d96',          'prefill_v6x'),
+    (16,  1,  96,  0, 'hold-16-d96-mqa',    'prefill_v6x'),
 ]
 
 PHASE_OF_KERNEL = {
@@ -216,7 +226,8 @@ INTERIOR_FRACTIONS = [1.03, 1.25, 1.5, 1.75]
 PREFILL_SQ = [128, 256, 512, 1024, 2048, 4096]
 PREFILL_SKV = [128, 65536]
 
-VARIANT_OF_HEAD_DIM = {64: 'PrefillV6x', 128: 'PrefillV6x', 256: 'PrefillV8x'}
+VARIANT_OF_HEAD_DIM = {64: 'PrefillV6x', 96: 'PrefillV6x', 128: 'PrefillV6x',
+                       256: 'PrefillV8x'}
 
 
 def _interior(lo, hi):
@@ -367,7 +378,7 @@ SCHEMA_VERSION = 9
 KERNEL_ABI = 'gqa-v4'
 ROCM_VERSION = 70151803
 
-HEAD_DIM_CLASS = {64: 'D64', 128: 'D128', 256: 'D256'}
+HEAD_DIM_CLASS = {64: 'D64', 96: 'D96', 128: 'D128', 256: 'D256'}
 
 
 def _int(row, key, default=0):
@@ -410,6 +421,8 @@ def _config_and_splits(row):
 # A prefill fallback serves any heads-per-group, so it runs one head per block
 # (hb=1 divides every group): v6x 1x4 at M_TILES=1/BKV=32 (also the windowed
 # instance), v8x 2 waves at BKV=16.
+# D96 decode saturates on far fewer splits (its own heuristic in
+# gqa_autotune.cpp), so its fallback starts at 8.
 def _fallback_specs():
     return [
         ('Decode', 'D64', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
@@ -418,10 +431,14 @@ def _fallback_specs():
                             'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 32),
         ('Decode', 'D256', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
                             'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 32),
+        ('Decode', 'D96', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
+                           'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 8),
         ('PrefillV6x', 'D64', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
                                'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
         ('PrefillV6x', 'D128', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
                                 'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
+        ('PrefillV6x', 'D96', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                               'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
         ('PrefillV8x', 'D256', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 16,
                                 'hb': 1, 'qw': 0, 'mt': 0, 'nd': 2}, 0),
     ]

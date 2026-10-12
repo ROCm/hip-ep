@@ -13,9 +13,9 @@
 // control the timing budget. This TU therefore #includes the kernel source and
 // drives the internal dispatch helpers directly:
 //
-//   d == 64, 128 -> gqa_flash_prefill_v6x  candidates: HB x QW x M_TILES x BKV
-//   d == 256     -> gqa_flash_prefill_v8x  candidates: ND x HB x BKV
-//   decode       -> flash split-K decode   candidates: {scalar,wmma} x split-count
+//   d == 64, 96, 128 -> gqa_flash_prefill_v6x  candidates: HB x QW x M_TILES x BKV
+//   d == 256         -> gqa_flash_prefill_v8x  candidates: ND x HB x BKV
+//   decode           -> flash split-K decode   candidates: {scalar,wmma} x split-count
 //
 // The candidate sets are the ones the production tuners use
 // (prefillV*xCandidates / flashDecodeCandidateSplits), so a winner reported here

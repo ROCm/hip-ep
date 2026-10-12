@@ -1056,11 +1056,11 @@ HIP_KERNEL_API int hip_gqa_fused_decode(
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-/* Optimized fused GQA prefill (sq > 1, d in {64,128,256}, fp16, causal, GQA) --
+/* Optimized fused GQA prefill (sq > 1, d in {64,96,128,256}, fp16, causal, GQA) --
  * Flash-Attention-2 with WMMA tile GEMMs and an in-register online softmax
  * over transposed scores, each staged K/V tile shared by several query heads
  * of one KV group:
- *   v6x: d == 64 and d == 128; a block is heads x Q subtiles (4 or 8 waves).
+ *   v6x: d == 64, 96 and 128; a block is heads x Q subtiles (4 or 8 waves).
  *   v8x: d == 256; a block is heads x waves that split the head dim.
  * The unified entry picks the kernel by head dim, self-tunes the launch config
  * on the first call per (d,sq,skv bucket,Hq,G) shape and caches the winner
@@ -1087,11 +1087,11 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  *                       decomposed path when head_sink is null. head_sink takes
  *                       precedence when both are supplied.
  *
- * Sinks are implemented at d == 64 and windows at d == 64 and d == 128 (both
- * by v6x). Returns 0 on success and -1 when the request cannot be served
- * exactly (a sink with d != 64, a window with d == 256), so the caller falls
- * back to the decomposed path instead of silently dropping either. A request
- * with neither keeps v2's head-dim coverage. */
+ * Sinks are implemented at d == 64 and d == 96, and windows at d == 64, 96
+ * and 128 (all by v6x). Returns 0 on success and -1 when the request cannot
+ * be served exactly (a sink with d == 128 or 256, a window with d == 256), so
+ * the caller falls back to the decomposed path instead of silently dropping
+ * either. A request with neither keeps v2's head-dim coverage. */
 HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -1129,10 +1129,12 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
-/* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
+/* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
+ * HPG=H/G in {1,2,3,4,5,8,16}):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
- * across the 4 query heads of each KV group, then a second kernel
- * merges K_SPLITS partial (m, l, O) per query head.
+ * across the query heads of each KV group, then a second kernel
+ * merges K_SPLITS partial (m, l, O) per query head. fp16 d == 96 runs a
+ * dedicated split kernel that streams K/V through registers instead.
  *
  * Depth-gated alternative to hip_gqa_fused_decode for skv >= ~256 where
  * Llama-3.x family shows large bandwidth headroom over the existing

@@ -15,9 +15,10 @@ is **nearest-neighbour**, matmul_nbits style, and hierarchical — most-impactfu
 first:
 
 1. **Kernel identity — exact match.** `phase` (Decode / PrefillV6x / PrefillV8x),
-   `head_dim` (D64/D128/D256), `kv_dtype` (Fp16/Int8). These are not
+   `head_dim` (D64/D96/D128/D256), `kv_dtype` (Fp16/Int8). These are not
    distances: `d64` and `d128` are different kernel instantiations, and prefill's
-   variant *is* its head_dim, so borrowing across them is meaningless.
+   variant follows its head_dim (d64, d96 and d128 all run v6x, as separate
+   instantiations), so borrowing across them is meaningless.
 2. **Geometry.** The exact `(num_heads, kv_num_heads)` pair is preferred; if it was
    never measured, the search stays within the same **heads-per-group** ratio (the
    axis the kernels template on), never crossing to a different ratio.
@@ -32,7 +33,8 @@ first:
 
 If a geometry has no usable point, the per-`(phase, head_dim)` **Fallback** row
 answers. If no table loaded at all (arch/schema/ABI mismatch, or an empty embed),
-the compiled-in **Heuristic** answers. Both last resorts return a runnable config, so
+or the table has neither points nor a fallback for the head_dim (a table measured
+before D96 existed), the compiled-in **Heuristic** answers. Both last resorts return a runnable config, so
 the op never fails for lack of a table. `GqaTuneSource` reports which of
 `Exact / Nearest / Fallback / Heuristic` was used — worth logging.
 
