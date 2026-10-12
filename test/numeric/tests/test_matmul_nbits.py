@@ -714,3 +714,123 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=3e-1, rtol=1e-2, cos_threshold=0.9995)
+
+
+# --- Grouped projections (hip.matmul_nbits_group) ---
+# Shapes from the Llama-2-13B and Phi-3.5-mini int4 decoders: separate q/k/v
+# and gate/up MatMulNBits nodes reading one normalized activation, the MLP
+# combined as Mul(Mul(gate, Sigmoid(gate)), up).
+LLAMA2_HIDDEN = 5120
+LLAMA2_INTERMEDIATE = 13824
+PHI35_HIDDEN = 3072
+PHI35_INTERMEDIATE = 8192
+
+
+def _q4_initializers(rng, prefix: str, K: int, N: int, scale_range=(-0.02, 0.02)):
+    n_blocks = K // BLOCK_SIZE
+    q_weight = rng.integers(0, 256, [N, n_blocks, BLOCK_SIZE // 2], dtype=np.uint8)
+    scales = rng.uniform(scale_range[0], scale_range[1], [N, n_blocks]).astype(
+        np.float16
+    )
+    return [
+        numpy_helper.from_array(q_weight, name=f"{prefix}_Q4"),
+        numpy_helper.from_array(scales, name=f"{prefix}_scales"),
+    ]
+
+
+def _q4_node(prefix: str, x: str, y: str, K: int, N: int):
+    return helper.make_node(
+        "MatMulNBits",
+        [x, f"{prefix}_Q4", f"{prefix}_scales"],
+        [y],
+        domain="com.microsoft",
+        K=K,
+        N=N,
+        bits=BITS,
+        block_size=BLOCK_SIZE,
+        accuracy_level=4,
+    )
+
+
+def _make_qkv_model(seq_len: int, K: int, n_q: int, n_kv: int, seed: int = 7):
+    rng = np.random.default_rng(seed)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    outs, nodes, inits = [], [], []
+    for name, n in (("q", n_q), ("k", n_kv), ("v", n_kv)):
+        inits += _q4_initializers(rng, name, K, n)
+        nodes.append(_q4_node(name, "X", name.upper(), K, n))
+        outs.append(
+            helper.make_tensor_value_info(
+                name.upper(), TensorProto.FLOAT16, [1, seq_len, n]
+            )
+        )
+    return make_model_from_nodes(
+        nodes,
+        [x],
+        outs,
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+def _make_gate_up_silu_model(seq_len: int, K: int, N: int, seed: int = 11):
+    rng = np.random.default_rng(seed)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, seq_len, N])
+    inits = _q4_initializers(rng, "gate", K, N) + _q4_initializers(rng, "up", K, N)
+    nodes = [
+        _q4_node("gate", "X", "G", K, N),
+        _q4_node("up", "X", "U", K, N),
+        helper.make_node("Sigmoid", ["G"], ["S"]),
+        helper.make_node("Mul", ["G", "S"], ["GS"]),
+        helper.make_node("Mul", ["GS", "U"], ["Y"]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [x],
+        [y],
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestMatMulNBitsGroup:
+    """Projections the fusion transform folds into hip.matmul_nbits_group.
+
+    seq_len 1 takes the grouped dp4a kernel; 7 takes the per-projection
+    fallback (and, for gate/up, the separate SiLU*mul kernel).
+    """
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,n_q,n_kv",
+        [
+            (LLAMA2_HIDDEN, LLAMA2_HIDDEN, LLAMA2_HIDDEN),
+            (PHI35_HIDDEN, PHI35_HIDDEN, PHI35_HIDDEN),
+            (512, 512, 128),
+        ],
+        ids=["llama2", "phi35", "gqa"],
+    )
+    def test_qkv(self, model_runner, seq_len, K, n_q, n_kv):
+        model = _make_qkv_model(seq_len, K, n_q, n_kv)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,N",
+        [(LLAMA2_HIDDEN, LLAMA2_INTERMEDIATE), (PHI35_HIDDEN, PHI35_INTERMEDIATE)],
+        ids=["llama2", "phi35"],
+    )
+    def test_gate_up_silu(self, model_runner, seq_len, K, N):
+        model = _make_gate_up_silu_model(seq_len, K, N)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
