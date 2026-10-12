@@ -234,11 +234,54 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   std::mutex scale_mu;
   std::unordered_map<const void *, std::pair<void *, size_t>> scale_fp16;
 
+  // A graph output (e.g. the decode logits) arrives in the EP allocator's
+  // hipHostMalloc(Coherent) memory. The GEMV's scattered per-row stores to it
+  // run the whole kernel ~1.7x slower than stores to device memory, so the
+  // GEMV writes to `out_stage` and one coalesced copy moves the result.
+  // `out_is_host` is the attribute of `out_checked`, rechecked only when ORT
+  // hands over a different buffer.
+  std::mutex out_mu;
+  const void *out_checked = nullptr;
+  bool out_is_host = false;
+  void *out_stage = nullptr;
+  size_t out_stage_bytes = 0;
+
+  // Device buffer the GEMV should write when the caller's output is `out`.
+  // Returns `out` itself unless it is host memory; nullptr on failure.
+  void *gemv_output(void *out, size_t bytes, hipStream_t stream) {
+    std::lock_guard<std::mutex> lk(out_mu);
+    if (out != out_checked) {
+      hipPointerAttribute_t attr{};
+      out_is_host = hipPointerGetAttributes(&attr, out) == hipSuccess &&
+                    attr.type == hipMemoryTypeHost;
+      (void)hipGetLastError();
+      out_checked = out;
+    }
+    if (!out_is_host)
+      return out;
+    if (out_stage_bytes < bytes) {
+      if (out_stage) {
+        hipStreamSynchronize(stream);
+        hipFree(out_stage);
+        out_stage = nullptr;
+        out_stage_bytes = 0;
+      }
+      if (hipMalloc(&out_stage, bytes) != hipSuccess) {
+        out_stage = nullptr;
+        return nullptr;
+      }
+      out_stage_bytes = bytes;
+    }
+    return out_stage;
+  }
+
   ~MatmulNbitsState() {
     for (auto &[k, v] : b_fp16)
       hipFree(v.first);
     for (auto &[k, v] : scale_fp16)
       hipFree(v.first);
+    if (out_stage)
+      hipFree(out_stage);
   }
 };
 
@@ -760,12 +803,25 @@ int run_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) == 0) {
       char *base =
           static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
-      if (base) {
+      MatmulNbitsState *ost =
+          MatmulNbitsState::get_op_state(state, op_state_slot);
+      const size_t out_bytes = static_cast<size_t>(M * N * elem_size);
+      void *gemv_out =
+          ost ? ost->gemv_output(output, out_bytes,
+                                 static_cast<hipStream_t>(stream))
+              : output;
+      if (base && gemv_out) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+        int rc = hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
+                                       gemv_out, M, N, K, block_size, a_qb,
+                                       a_scale);
+        if (rc == 0 && gemv_out != output) {
+          const int64_t unit = (out_bytes % 8 == 0) ? 8 : 2;
+          rc = hip_strided_copy(stream, output, gemv_out, unit, 0, nullptr,
+                                nullptr, nullptr,
+                                static_cast<int64_t>(out_bytes) / unit, 1);
+        }
         if (rc == 0) {
           result = 0;
           goto cleanup;
