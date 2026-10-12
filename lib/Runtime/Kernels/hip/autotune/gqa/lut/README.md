@@ -88,7 +88,7 @@ A prefill config depends on `head_dim` and on the heads per group (which sets
 the v6x / v8x block layout) but barely on the KV length, so prefill needs far
 fewer points.
 
-The current `gfx1151` table is schema 9 / `gqa-v4`: 34 configs, 2004 points and 8
+The current `gfx1151` table is schema 9 / `gqa-v4`: 31 configs, 2002 points and 8
 per-`(phase, head_dim)` fallbacks, over the model geometries at lengths from 128
 to 65536, batch 1. The points are the saturation-pruned survivors of ~3200
 measured shapes (the rest were reconstructable by nearest-neighbour and dropped).
