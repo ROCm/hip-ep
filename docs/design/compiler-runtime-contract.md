@@ -157,7 +157,7 @@ Dynamic dimensions are encoded as `-1`.
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
-| `input_count` | `int64` | Number of model inputs |
+| `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
 | `inputs[i].element_size` | `int64` | Bytes per element of input `i` |
