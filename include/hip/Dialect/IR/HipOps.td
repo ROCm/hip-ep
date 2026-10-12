@@ -2489,6 +2489,39 @@ def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
   }];
 }
 
+def Hip_PReluOp : Hip_DpsOp_Broadcast<"prelu",
+                                    /*operandGetters=*/["X", "Slope"]> {
+  let summary = "PRelu activation: y = x >= 0 ? x : slope * x";
+  let description = [{
+    Applies PRelu element-wise. slope is unidirectional-broadcastable onto x,
+    including a scalar and a per-channel 1xCx1x1 slope.
+
+    Formula: Y = X if X >= 0, else slope * X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.prelu(%ctx) ins(%x, %slope : memref<1x64x8x8xf32, 1>,
+                                    memref<1x64x1x1xf32, 1>)
+                    outs(%y : memref<1x64x8x8xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$slope,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $slope `:` type($x) `,` type($slope) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{

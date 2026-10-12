@@ -113,6 +113,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
+| PRelu | Custom HIP kernel. Slope broadcasts onto X; f16/bf16/f32/f64 |
 | LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |
 | Trilu | Custom HIP kernel. Keeps the upper or lower triangle of the last two dimensions; `k` must be a constant scalar |
 | Clip | Decomposed to Max + Min |
