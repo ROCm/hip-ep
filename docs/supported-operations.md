@@ -67,7 +67,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceProd | Custom HIP kernel |
 | ReduceMean | Custom HIP kernel |
 | CumSum | Custom HIP kernel |
-| Pad | Custom HIP kernel |
+| Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
 | Tile | Custom HIP kernel |
 | Expand | Custom HIP kernel |
 | GatherND | Custom HIP kernel |
