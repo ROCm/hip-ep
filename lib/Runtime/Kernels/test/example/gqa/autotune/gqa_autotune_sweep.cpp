@@ -128,10 +128,15 @@ TuneCost prodDecodeTuneCost(const std::vector<Result> &res) {
 
 // ---- timing -----------------------------------------------------------------
 
-// Time `launch` with an iteration count sized to the shape: one untimed probe
-// call sets the per-call cost, then enough iterations to fill target_ms are run
-// for each of `rounds` measurements. Big prefill shapes (0.5 s a call) would
-// otherwise inherit the production tuner's fixed 30x4x30 launches.
+// Time `launch` with an iteration count sized to the shape: a probe sets the
+// per-call cost, then enough iterations to fill target_ms are run for each of
+// `rounds` measurements. Big prefill shapes (0.5 s a call) would otherwise
+// inherit the production tuner's fixed 30x4x30 launches.
+//
+// The probe doubles its launch count until it spans 1 ms. A single short call
+// (a 5 us prefill) can read ~0 or negative, and sizing from that reading left
+// every round at min_iters: 3 calls, 15 us, which the event timer under-reads
+// in every round alike, so even the median came out at 0.23 us.
 //
 // The rounds are reduced by MEDIAN, not min. hipEventElapsedTime occasionally
 // returns ~0 for a round; with min that single reading becomes the config's
@@ -153,15 +158,22 @@ double timeConfig(F &&launch, double target_ms, int min_iters, int max_iters,
   SWEEP_CHECK(hipEventCreate(&e0));
   SWEEP_CHECK(hipEventCreate(&e1));
 
-  SWEEP_CHECK(hipEventRecord(e0, nullptr));
-  launch();
-  SWEEP_CHECK(hipEventRecord(e1, nullptr));
-  SWEEP_CHECK(hipEventSynchronize(e1));
-  float probe_ms = 0.0f;
-  SWEEP_CHECK(hipEventElapsedTime(&probe_ms, e0, e1));
+  double probe_ms = 0.0;
+  for (int n = 1;; n *= 2) {
+    SWEEP_CHECK(hipEventRecord(e0, nullptr));
+    for (int i = 0; i < n; ++i)
+      launch();
+    SWEEP_CHECK(hipEventRecord(e1, nullptr));
+    SWEEP_CHECK(hipEventSynchronize(e1));
+    float ms = 0.0f;
+    SWEEP_CHECK(hipEventElapsedTime(&ms, e0, e1));
+    probe_ms = (double)ms / n;
+    if (ms >= 1.0f || n >= max_iters)
+      break;
+  }
 
   int iters = min_iters;
-  if (probe_ms > 1e-6f)
+  if (probe_ms > 1e-6)
     iters = (int)(target_ms / probe_ms);
   iters = std::max(min_iters, std::min(max_iters, iters));
   // A call that already runs for tens of ms is far above the noise floor that
@@ -170,7 +182,7 @@ double timeConfig(F &&launch, double target_ms, int min_iters, int max_iters,
   // A median needs an odd sample count to be a real sample, and three rounds is
   // the cheapest count that survives one bad reading.
   rounds = std::max(3, rounds | 1);
-  if (probe_ms > 50.0f)
+  if (probe_ms > 50.0)
     rounds = 3;
 
   std::vector<double> samples;
