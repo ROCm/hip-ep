@@ -17,7 +17,7 @@ flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ## Crash-backtrace helper (always FetchContent; no find_package path).
 cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ##
-therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
+therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;rocm-dist-windows-gfx115x-gfx1170-7.16.0-hipblaslt-gfx1170-trimmed
 ## Linux 7.13 includes zstd symbol isolation for compressed HIP fat binaries:
 ## https://github.com/ROCm/TheRock/pull/4251
 therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.13.0
