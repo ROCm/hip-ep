@@ -118,8 +118,8 @@ FlatBuffers does not conflict with ours.
 
 ```bash
 cd ..  # Go to workspace directory (parent of project root)
-# Recommend a release branch such as rel-1.25.1
-git clone -b rel-1.25.1 https://github.com/Microsoft/onnxruntime.git
+# Pin must match cmake/deps.txt (currently v1.30.0).
+git clone -b v1.30.0 https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 ```
 
@@ -147,7 +147,7 @@ ls $LOCAL_DIR/lib/cmake/onnxruntime/
 
 ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # Should see one wheel matching your Python version, e.g.
-# onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
+# onnxruntime_directml-1.30.0-cp314-cp314-win_amd64.whl
 ```
 
 ### 2. Build hip-ep
@@ -356,11 +356,15 @@ the CI wheel smoke does (`Run OGA wheel smoke (Python)` in
 # OGA's own end-to-end benchmark, from the OGA source cloned in step 3
 python python/examples/run_onnx.py \
   --benchmark onnxruntime-genai/benchmark/python/benchmark_e2e.py \
-  -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v
+  -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 --use_random_tokens
 
 # Or a plain ONNX model with random inputs
 python python/examples/run_onnx.py /path/to/model.onnx
 ```
+
+`--use_random_tokens` keeps the prompt at exactly `-l` tokens. Without a prompt
+source, `benchmark_e2e.py` samples one that can exceed `max_length`, so
+`run_onnx.py` adds the flag in that case.
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA

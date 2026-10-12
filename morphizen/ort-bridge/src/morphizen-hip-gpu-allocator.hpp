@@ -15,6 +15,8 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -24,9 +26,8 @@ namespace morphizen {
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
-// Requests larger than the last class (> 16 MB) are NOT pooled: they are
-// allocated at their exact size and released straight back to the driver in
-// FreeImpl, so a one-off huge transient can never pin memory in a free list.
+// Requests larger than the last class (> 16 MB) do not use this table; they go
+// through the capacity-keyed large pool described on HipGpuAllocator.
 //
 // The class boundaries are generated at compile time in four tiers, with the
 // tier edges de-duplicated where they meet:
@@ -120,6 +121,15 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
+  // All six expect pool_mutex_ held. The first three append buffers the
+  // caller must hand to the driver after releasing it.
+  void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
+  void TrimLarge(std::vector<void *> &out);
+  void DrainLarge(std::vector<void *> &out);
+  void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown);
+  bool ReplacesLiveBuffer(size_t size) const;
+  bool ReplacedByLiveBuffer(size_t requested) const;
+
   // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
   // (page-pinning) call: ORT re-allocates the per-Run input device-copy
   // buffers and (allocator mode) the graph-output buffers on EVERY inference,
@@ -136,13 +146,33 @@ private:
   // project's per-session "grow-on-demand, never shrink, free at cleanup"
   // memory contract.
   //
-  // Requests larger than the largest size class (> 16 MB) are NOT pooled: they
-  // are allocated at their exact size and released straight back to the driver
-  // in FreeImpl. A model's largest transients are few and shape-specific, so
-  // pooling them buys little reuse while risking an unbounded pinned working
-  // set when a model grows its largest transient a little each Run. Treating
-  // them as one-shot allocations keeps peak memory bounded with no eviction
-  // bookkeeping.
+  // Requests above 16 MB bypass the classes: each is allocated at exactly its
+  // size and returned to the driver on Free. The exception is a tensor that is
+  // re-created a little longer on every inference, such as a KV cache run with
+  // past_present_share_buffer=false, where no two steps ask for the same size
+  // and every step would page-pin a fresh buffer. A request slightly larger
+  // than a buffer still checked out is taken as that pattern and allocated
+  // with growth headroom. Only such buffers, and the buffers they replaced,
+  // are kept on Free, keyed by capacity, and a request takes the smallest one
+  // that covers it. Tensors that keep their size, such as a shared
+  // past/present KV buffer, never qualify and are released on Free as without
+  // the pool.
+  //
+  // The first version of a growing tensor, such as the KV cache a new
+  // generator prefills, has nothing to grow from. Allocated exactly, it could
+  // not serve the step after its successor replaces it, and that step would
+  // page-pin a second set. Once a grown buffer has been reused, every large
+  // request is therefore allocated with the headroom, including those of
+  // tensors that keep their size.
+  //
+  // A kept buffer is released as soon as nothing can reuse it: when a request
+  // outgrows its capacity or jumps past it, and all at once when none of the
+  // grown buffers is checked out any more. The allocator can outlive the
+  // session that grew them (a caller may share one allocator across models),
+  // so retention is tied to the tensors rather than to the allocator's
+  // lifetime. TrimLarge additionally ages out capacities that stop being asked
+  // for while others are still cycling, and a driver allocation failure
+  // drains the pool and retries.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
@@ -158,6 +188,37 @@ private:
   // destructor can release them; a large buffer is erased from this map in
   // FreeImpl when it is freed back to the driver.
   std::unordered_map<void *, size_t> ptr_to_size_;
+
+  // Large pool. Ordered so a request can find the smallest capacity that fits
+  // it with one lower_bound; empty buckets are erased.
+  struct LargeBucket {
+    std::vector<void *> free;
+    // large_ops_ at the last hit or free here; read as an age by TrimLarge.
+    uint64_t last_used = 0;
+  };
+  std::map<size_t, LargeBucket> large_free_;
+  // Checked-out large buffers. `grown` marks a buffer handed to a request that
+  // replaced a live buffer a little smaller than itself, whether allocated
+  // with headroom or reused from the pool. Those are pooled on Free, as is a
+  // buffer that a live one has replaced; every other large buffer goes
+  // straight back to the driver.
+  struct LargeLive {
+    size_t requested;
+    bool grown;
+  };
+  std::unordered_map<void *, LargeLive> large_live_;
+  // Requested size -> number of checked-out large buffers holding it.
+  std::map<size_t, size_t> live_requested_;
+  size_t grown_live_count_ = 0;
+  // Set by the first pool hit for a grown request, which a tensor growing
+  // step by step produces and a tensor that keeps its size never does.
+  bool grown_reused_ = false;
+  // Ticked on every large alloc and free, so bucket age tracks pool activity
+  // rather than wall time (an idle session must not lose its working set).
+  uint64_t large_ops_ = 0;
+  // Reset whenever the pool drains, so TrimLarge's slack follows the current
+  // working set rather than the largest one this allocator ever served.
+  size_t peak_live_count_ = 0;
 
   const OrtMemoryInfo *memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"

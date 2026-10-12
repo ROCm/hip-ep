@@ -646,12 +646,18 @@ def Hip_RocMlirOp : Hip_DpsOp<"rocmlir"> {
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
-  let summary = "2D convolution operation using MIOpen (in-place)";
+  let summary = "Forward convolution, 1D / 2D / 3D (in-place)";
   let description = [{
-    Performs 2D convolution using MIOpen (miopenConvolutionForward).
+    Performs forward convolution on the in-tree `hip_conv` kernel. Operand
+    rank may be 3, 4 or 5 (spatial rank 1, 2 or 3); the runtime carries three
+    per-axis slots and rejects anything wider.
 
     Uses destination-passing style: output buffer is provided as argument,
     operation writes result in-place.
+
+    Every per-axis attribute below has one entry per spatial axis (`pads` has
+    two, begin then end), so a 2D conv spells them as shown and a 3D conv adds
+    a third axis.
 
     Attributes:
     - kernel_shape: Array of kernel dimensions [H, W]
@@ -4800,9 +4806,11 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     GPU stream so the kernel that wrote `scalar` is guaranteed to have
     completed.
 
-    Has device->host copy + stream-synchronization side effects; it is not
-    speculative and must not be hoisted across the kernel that produces
-    `scalar`.
+    In tensor form, synchronization establishes readiness of the returned
+    value, not an independent fence for unrelated work. A rewrite may replace
+    it when the same scalar is proven available on the host. Unknown tensor
+    values and memref operands retain synchronized readback and must not be
+    hoisted across their producer.
   }];
 
   let arguments = (ins
@@ -4810,6 +4818,8 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     Hip_TensorOrMemRef:$scalar
   );
   let results = (outs AnyTypeOf<[AnyInteger, AnyFloat, Index]>:$value);
+
+  let hasCanonicalizer = 1;
 
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)

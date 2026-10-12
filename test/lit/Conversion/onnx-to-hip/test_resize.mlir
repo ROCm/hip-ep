@@ -101,4 +101,26 @@ module {
     // CHECK-SAME: outs(%[[INIT]] : tensor<?x3x32x32xf16>)
     return %y : tensor<?x3x32x32xf16>
   }
+
+  // Test 5: empty roi supplied as a statically empty (0-element) tensor rather
+  // than a NoValue -- what some ONNX exporters emit for an omitted roi. It must
+  // be treated as absent so the Resize still converts (regression: previously
+  // the "roi present" guard rejected it and onnx.Resize survived unlowered).
+  func.func @test_resize_empty_roi_tensor(%arg0: tensor<1x3x16x16xf16>,
+                                          %scales: tensor<4xf32>)
+      -> tensor<1x3x32x32xf16> {
+    // CHECK-LABEL: func.func @test_resize_empty_roi_tensor
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x3x16x16xf16>
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>}
+        : () -> tensor<0xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x3x16x16xf16>, tensor<0xf32>, tensor<4xf32>)
+        -> tensor<1x3x32x32xf16>
+
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize(%[[CTX]]) ins(%[[X]] : tensor<1x3x16x16xf16>)
+    // CHECK-SAME: mode = 1
+    return %y : tensor<1x3x32x32xf16>
+  }
 }

@@ -705,37 +705,47 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   int result = 0;
 
-  // Opt-in W4A8 dp4a fast path for single-row decode GEMV. Eligibility:
+  // Opt-in W4A8 dp4a fast path for narrow GEMV. Eligibility:
   //   - HIPDNN_EP_MATMUL_DP4A=1
-  //   - M==1 && batch_count==1 (single decode token)
+  //   - 1 <= M <= HIPDNN_EP_MATMUL_DP4A_MAX_M && batch_count==1
   //   - bits==4, K%32==0, block_size>0, elem_size==2 (fp16 activation)
   //   - symmetric (no zero_points) OR asym with pre_zp_u8 already unpacked
   //   above
-  // The kernel dynamically quantizes the activation row into per-session
-  // scratch (a_qb: K int8 bytes, a_scale: ceil(K/block_size) floats) sized once
-  // and grown on demand, then runs an integer-dot GEMV. Quantizing once (here)
-  // and reusing the compact int8 across all N/TILE_N GEMV blocks is measurably
-  // faster than fusing the quant into the GEMV (which would re-read fp16 A +
-  // re-convert in every block); the extra quant launch it saves is dwarfed by
-  // that redundant work. All other shapes fall through to hip_matmul_nbits.
-  if (hipdnn_ep_matmul_dp4a_enabled() && M == 1 && batch_count == 1 &&
-      bits == 4 && block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
+  // The kernel dynamically quantizes the activation rows into per-session
+  // scratch (a_qb: M*K int8 bytes, a_scale: M*ceil(K/block_size) floats) sized
+  // once and grown on demand, then runs an integer-dot GEMV. Quantizing once
+  // (here) and reusing the compact int8 across all N/TILE_N GEMV blocks is
+  // measurably faster than fusing the quant into the GEMV (which would re-read
+  // fp16 A + re-convert in every block); the extra quant launch it saves is
+  // dwarfed by that redundant work.
+  //
+  // M > 1 is the speculative verify pass, and it wants this path for a second
+  // reason on top of the first: the fp M-blocked GEMV it would otherwise use
+  // reads the weight once but dequantizes it once per row, which leaves it
+  // ALU-bound at ~2.5x the per-byte cost of the single-row kernel. Here the
+  // nibble split is two mask instructions shared by every row in the tile.
+  // All other shapes fall through to hip_matmul_nbits.
+  if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
+      M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
+      block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
       (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
     const size_t k_blocks =
         static_cast<size_t>((K + block_size - 1) / block_size);
-    // a_qb at offset 0 (K bytes, hipMalloc base is over-aligned); a_scale after
-    // a 64-byte-rounded gap so its float reads stay naturally aligned.
-    const size_t a_qb_bytes = static_cast<size_t>(K);
+    // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
+    // after a 64-byte-rounded gap so its float reads stay naturally aligned.
+    const size_t a_qb_bytes = static_cast<size_t>(M) * static_cast<size_t>(K);
     const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
-    const size_t need = scale_off + k_blocks * sizeof(float);
+    const size_t need =
+        scale_off + static_cast<size_t>(M) * k_blocks * sizeof(float);
     if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) == 0) {
       char *base =
           static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc = hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
-                                       output, N, K, block_size, a_qb, a_scale);
+        int rc =
+            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
+                                  M, N, K, block_size, a_qb, a_scale);
         if (rc == 0) {
           result = 0;
           goto cleanup;

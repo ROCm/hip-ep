@@ -381,7 +381,7 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
           & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
-            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
+            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -v --use_random_tokens `
             2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
           exit $LASTEXITCODE
 

@@ -1,0 +1,158 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+One model card on the landing page wall. The card carries what kind of model
+it is, whether it is dense or sparse, its name, and a two-figure measurement
+strip. A wall of cards is scanned rather than read, so the strip is two
+numbers and no sentences: one rate for getting through the prompt and one for
+producing the answer, which is the shortest pair that still separates "slow to
+start" from "slow to generate".
+
+There used to be a second, fuller form of this card behind a `compact`
+parameter, for /models/. That page is gone and the parameter went with it: one
+caller, one card, nothing to drift.
+
+Parameters:
+  m     -- an entry from _data/models.yml (llm or vlm)
+  kind  -- the label above the name, "LLM" or "VLM"
+
+Everything else is derived here rather than passed in, so a caller cannot
+quote a different prompt length or a different snapshot than the card claims.
+{%- endcomment -%}
+{%- assign snap = site.data.benchmarks.snapshot -%}
+{%- assign lens = site.data.benchmarks.prompt_lengths -%}
+{%- assign b = site.data.benchmarks.lm | where: "id", include.m.id | first -%}
+{%- comment -%}
+Two figures.
+
+  Prefill  how fast the model gets through the prompt, in tokens per second.
+  Decode   how fast it produces the answer once it has, at the 128-token case.
+
+Decode carries no prompt length in its label. It barely moves with one -- the
+spread from 128 to 16384 is a few percent on most rows of the matrix -- so
+printing a length beside it implied a condition that was not doing any work,
+and the shortest case is the cleanest read of the steady-state rate.
+
+TTFT used to be the third figure, at 128 tokens. It is gone: at the shortest
+length it is almost entirely fixed start-up cost, which is the same story the
+prefill rate tells, only without the units that let one model be compared to
+the next. /docs/benchmarks/ still carries TTFT at all three lengths.
+
+PREFILL RATE. Derived, not measured. The dashboard reports TTFT and TPS and
+nothing else, so the rate is prompt tokens over time-to-first-token -- an
+average over the whole prefill including the fixed start-up cost, which makes
+it slightly pessimistic and makes it a figure that exists nowhere upstream. Do
+not try to reconcile it against a dashboard column; there isn't one.
+
+The numerator is `b.prompt_tokens`, the tokens ACTUALLY fed to the model, not
+`lens`, the nominal name of the case. For a vision-language model those differ
+by more than 15x -- the image is tokenised into the prompt -- so the nominal
+length would not produce a slightly-off rate, it would produce a meaningless
+one. A row with no `prompt_tokens` gets no rate at all rather than a guess;
+see the provenance note in _data/benchmarks.yml.
+
+The rate is computed at every length and the LARGEST is shown, with the length
+it came from. Which length wins is a property of the model, not a constant:
+most peak at 2048, the Qwen 3.5/3.6 MoE pair keeps climbing to 16384, and
+phi-4-14b peaks at 128 because its 2048 TTFT in this release is unusually
+high. Fixing the label at one length would therefore have understated most of
+the wall, so the loop picks per model and prints what it picked.
+
+The loop is over `lens` so it follows _data/benchmarks.yml if that list is
+reordered or extended, and it reads ttft and prompt_tokens by the same index,
+so the three arrays must stay aligned -- which is what the file says they are.
+{%- endcomment -%}
+{%- assign i_decode = 0 -%}
+{%- assign has_bench = false -%}
+{%- unless snap.placeholder -%}
+{%- if b -%}{%- assign has_bench = true -%}{%- endif -%}
+{%- endunless -%}
+{%- assign prefill_rate = 0 -%}
+{%- assign prefill_len = 0 -%}
+{%- if has_bench and b.prompt_tokens -%}
+{%- assign last_i = lens.size | minus: 1 -%}
+{%- for i in (0..last_i) -%}
+{%- assign t = b.ttft[i] | times: 1.0 -%}
+{%- assign n = b.prompt_tokens[i] -%}
+{%- if t > 0 and n -%}
+{%- assign r = n | divided_by: t | round: 0 -%}
+{%- if r > prefill_rate -%}
+{%- assign prefill_rate = r -%}
+{%- assign prefill_len = lens[i] -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- comment -%}
+The winning length, as a label. 1024 divides 2048 and 16384 exactly, so the
+integer division Liquid does here is not hiding a remainder; 128 stays as
+itself, because "0.1K" would be worse.
+{%- endcomment -%}
+{%- if prefill_len >= 1024 -%}
+{%- assign prefill_at = prefill_len | divided_by: 1024 | append: "K" -%}
+{%- else -%}
+{%- assign prefill_at = prefill_len -%}
+{%- endif -%}
+{%- comment -%}
+Dense or sparse, in one word, matched on `arch` because that is the field that
+describes the architecture -- every sparse entry spells out "mixture of
+experts" whatever else it says. It is the one architectural fact worth a
+glance on a wall: it is why a 120B model generates faster than a 70B one.
+{%- endcomment -%}
+{%- if include.m.arch contains "mixture of experts" -%}
+{%- assign shape = "MoE" -%}
+{%- else -%}
+{%- assign shape = "Dense" -%}
+{%- endif -%}
+{%- comment -%}
+The name links to this model's own section on its family page, not to Hugging
+Face. At this point in the page the reader's question is "what is this and does
+it run", which the family page answers; the Hugging Face link is one line into
+that entry, for the reader who has decided they want the weights.
+
+The fragment reproduces kramdown's heading-id rule for the `## {{ m.name }}`
+that model-detail.html emits: lower-case, drop full stops, spaces to hyphens.
+That is a copy of someone else's rule and copies rot, so it is not left to
+trust -- htmlproofer checks internal link hashes, and a model name that breaks
+the rule (a colon, say, or a slash) fails the build rather than shipping a
+dead anchor.
+{%- endcomment -%}
+{%- assign anchor = include.m.name | downcase | replace: ".", "" | replace: " ", "-" -%}
+{%- assign model_url = "/docs/models/" | append: include.m.family | append: "/#" | append: anchor -%}
+<article class="card model-card model-card--compact">
+  <p class="model-card__kind">{{ include.kind }} &middot; {{ shape }}</p>
+  <h3 class="model-card__name"><a href="{{ model_url | relative_url }}">{{ include.m.name }}</a></h3>
+  {%- comment -%}
+  Both slots stay whether or not there are numbers to put in them, so the wall
+  does not change shape when the snapshot is published -- and so a card is
+  visibly missing a measurement rather than silently not making a claim.
+
+  The visible label is abbreviated; the full name goes to screen readers, which
+  read the strip one cell at a time and get no help from the column it sits in.
+  The prompt length rides in the Prefill label because it varies per card, and
+  a rate without its length is not comparable to the card beside it. When there
+  is no rate the label carries no length either: the winning length is a
+  property of the measurement, so with nothing measured there is nothing to
+  name, and printing the unset value there read as a prompt of zero tokens.
+  {%- endcomment -%}
+  <dl class="model-card__metrics">
+    <div>
+      {%- if prefill_rate > 0 %}
+      <dt><span class="visually-hidden">Prefill speed, at a prompt of </span>Prefill <span class="model-card__at">{{ prefill_at }}</span></dt>
+      <dd>{{ prefill_rate }} <span>tok/s</span></dd>
+      {%- else %}
+      <dt>Prefill</dt>
+      <dd aria-label="Not published yet">&mdash;</dd>
+      {%- endif %}
+    </div>
+    <div>
+      <dt><span class="visually-hidden">Decode throughput, </span>Decode</dt>
+      {%- if has_bench %}
+      <dd>{{ b.tps[i_decode] }} <span>tok/s</span></dd>
+      {%- else %}
+      <dd aria-label="Not published yet">&mdash;</dd>
+      {%- endif %}
+    </div>
+  </dl>
+</article>

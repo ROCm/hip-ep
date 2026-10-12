@@ -9,15 +9,20 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Conv -> hip.conv. Rank-4 input lowers directly to a 2D conv. Rank-3
-/// (1D) input is reshaped to rank-4 with a unit H dimension (NCL -> NC1L) via
-/// tensor.expand_shape, run through the same hip.conv, then collapsed back to
-/// NCL via tensor.collapse_shape. Both expand/collapse lower to zero-cost
-/// metadata ops (no data movement), so 1D conv reuses the 2D MIOpen path
+/// onnx.Conv -> hip.conv. Rank-4 (2D) and rank-5 (3D) inputs lower directly.
+/// Rank-3 (1D) input is reshaped to rank-4 with a unit H dimension (NCL ->
+/// NC1L) via tensor.expand_shape, run through the same hip.conv, then
+/// collapsed back to NCL via tensor.collapse_shape. Both expand/collapse lower
+/// to zero-cost metadata ops (no data movement), so 1D conv reuses the 2D path
 /// instead of a dedicated op/kernel. The `group` attribute is preserved
 /// through the 1D reshape (grouped/depthwise 1D convs -> grouped/depthwise 2D
 /// convs), and dynamic result dims (batch, channels, and spatial extents) are
 /// sized at runtime from the conv input + attributes.
+///
+/// A rank-5 patch embed is usually better served as a GEMM, but that is a
+/// hip.conv-to-hip.gemm rewrite in hip-fusion-transform rather than a
+/// precondition here: declining it would leave the op with no lowering at all,
+/// whereas emitting the conv means the worst case is the general kernel.
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/1, ctx) {}
@@ -48,13 +53,14 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
-  // Only rank-3 (1D conv) and rank-4 (2D conv) are supported. Rank-5 (3D conv)
-  // has no runtime path today — leave it to whatever other pattern (if any)
-  // claims it.
+  // Ranks 3 through 5 (1D, 2D, 3D). The upper bound is the runtime's: wrap_conv
+  // carries three per-axis slots and rejects a larger spatial_rank, and
+  // ConvLowering.cpp checks the same bound before filling them.
   const int64_t inputRank = inputType.getRank();
-  if (inputRank != 3 && inputRank != 4)
+  if (inputRank < 3 || inputRank > 5)
     return rewriter.notifyMatchFailure(
-        op, "ConvToHip only supports rank-3 (1D) and rank-4 (2D) Conv");
+        op, "ConvToHip only supports rank-3 (1D), rank-4 (2D) and rank-5 (3D) "
+            "Conv");
   const bool is1D = (inputRank == 3);
   const int64_t spatialDims = inputRank - 2; // 1 for NCL, 2 for NCHW
 
@@ -288,7 +294,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(bias);
   operands.push_back(init);
 
-  // Build attributes (always 2D form by this point).
+  // Build attributes. Every vector is per-spatial-axis at the conv's own rank;
+  // only the 1D path above rewrote its own into the 2D (H=1) equivalents.
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("kernel_shape",
                                         rewriter.getI64ArrayAttr(kernelShape)));

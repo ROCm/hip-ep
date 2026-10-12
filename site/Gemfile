@@ -1,0 +1,26 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
+# Jekyll is run directly rather than through the `github-pages` gem: that gem
+# pins Jekyll 3.9 and a fixed plugin set, and the site is built and deployed by
+# GitHub Actions, so nothing here has to match the legacy Pages build image.
+
+source "https://rubygems.org"
+
+gem "jekyll", "~> 4.4"
+gem "kramdown-parser-gfm", "~> 1.1"   # GitHub-flavoured tables and fences
+gem "rouge", "~> 4.5"                 # syntax highlighting (see _config.yml)
+gem "webrick", "~> 1.9"               # `jekyll serve` on Ruby >= 3.0
+
+group :jekyll_plugins do
+  gem "jekyll-sitemap", "~> 1.4"
+end
+
+# Internal-link checking. The sidebar in _config.yml is hand-maintained, so a
+# renamed or not-yet-written page would otherwise ship as a live 404; this is
+# what turns that rule into something CI enforces.
+group :test do
+  gem "html-proofer", "~> 5.0"
+end

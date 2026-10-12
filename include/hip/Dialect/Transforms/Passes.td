@@ -296,119 +296,30 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
 
 def HoistAllocSizeArithPass
     : Pass<"hip-hoist-alloc-size-arith", "mlir::func::FuncOp"> {
-  let summary = "Hoist pure size arithmetic feeding memref.alloc dynamic "
-                "operands above the earliest used memref.alloc in the entry "
-                "block";
+  let summary = "Hoist pure allocation-size producers to dependency-safe "
+                "allocation anchors";
   let description = [{
-    Hoists pure producers of `memref.alloc` dynamic operands to a
-    point above the earliest used `memref.alloc` in the function's single entry
-    block. After this pass, every hoistable dynamic-size value dominates every
-    allocation that `--hip-pool-allocs` may absorb, allowing pool-size
-    arithmetic and `hip.get_pool` to share one insertion point.
+    Moves pure producers of used entry-block `memref.alloc` dynamic sizes
+    before the earliest allocation allowed by their operands. A late read or
+    non-speculatable operation stays in place, but its pure consumers can move
+    before later allocations. This lets PoolAllocs reuse storage within a
+    dominance domain even when not all sizes are available at function entry.
 
-    Algorithm
-    ---------
-    Single-entry-block functions only (PoolAllocs already enforces this);
-    multi-block functions are skipped.  Only entry-block allocs are
-    considered — allocs nested inside region-carrying ops are untouched.
+    The backward slice stops at allocations, region-bearing operations, and
+    operations that are not `mlir::isPure`. Purity includes speculatability:
+    division with an unknown divisor cannot move. Regions are excluded because
+    they may capture values absent from the parent operation's operands.
 
-    1. Collect every used entry-block `memref.alloc`, and identify those with
-       dynamic operands.
-    2. Pick `earliestAlloc` = the earliest used allocation in the block (per
-       `Operation::isBeforeInBlock`).
-    3. For each dynamic alloc, walk SSA backward from each of its dynamic
-       operands.  An op is hoistable when:
-         - it is in the entry block,
-         - it is below `earliestAlloc` (otherwise it already dominates),
-         - it is not a `memref.alloc` / `memref.alloca`,
-         - it has no regions and satisfies `mlir::isPure(op)`,
-         - and every transitive operand is itself hoistable (or already
-           dominates `earliestAlloc`).
-    4. Topologically sorted (operands before uses), each hoistable op is
-       moved to immediately before `earliestAlloc`.  Forward iteration of
-       insertion order is operands-first, so each `moveBefore` pushes
-       prior moves up by one slot — final layout has the deepest operands
-       at the top of the hoist region.
+    Producers are planned once in original block order, propagating the first
+    permissible allocation anchor through their operands. Applying the plan
+    afterward avoids repeated block-order recomputation. Moving only across an
+    allocation preserves idempotence. Multi-block functions and nested
+    allocations are skipped, matching the scope of PoolAllocs.
 
-    Why "pure" is the right predicate
-    ---------------------------------
-    `mlir::isPure` requires both speculatability and freedom from memory
-    effects, matching upstream MLIR's LICM. Conditionally-speculatable ops
-    (`arith.divsi`, `arith.divui`) move only when their interface proves
-    speculation safe. Region-bearing operations are rejected because their
-    regions may capture values not listed as parent-op operands.
-
-    Pipeline placement
-    ------------------
-    Wired into `buildOnnxToHipPipelineTail` between
-    `--hip-materialize-host-scalars` and `--hip-pool-allocs`.  Running
-    after host-scalar materialisation means rewrites that turn an alloc
-    into a `memref.view` over host scratch are visible (we will not try
-    to hoist their producers).  Running before pool-allocs means
-    pool-allocs sees IR where every dynamic alloc's operand chain has
-    already been pulled above the earliest used alloc when safe.
-
-    Why a separate pass (vs. an internal phase of pool-allocs)
-    ----------------------------------------------------------
-    `--hip-pool-allocs` deliberately does not move ops or fold shape
-    queries internally; it only places `hip.get_pool` + pool-size
-    arithmetic at a single dominator point.  Keeping the hoist as a
-    standalone, separately-named pass — composed via the pipeline rather
-    than embedded in pool-allocs — keeps each pass single-purpose and is
-    idiomatic with MLIR convention (`--loop-invariant-code-motion`,
-    `--canonicalize`, IREE's `--iree-stream-emplace-transients`, etc.
-    are all standalone composable passes).
-
-    Caveat — does NOT pre-canonicalize
-    ----------------------------------
-    The pass moves existing ops; it does not duplicate, fold, or
-    simplify.  If an input IR has e.g. `arith.muli %x, %c0` (which would
-    fold to zero), this pass leaves it alone.  Canonicalisation runs
-    separately and earlier in the pipeline.
-
-    Idempotent: a second invocation finds no ops below `earliestAlloc`
-    that need moving, so it is a no-op.
-
-    Example IR (canonical case after bufferisation)
-    ------------------------------------------------------------
-
-    Before — `%6` and `%7` are pure but live below `%alloc`,
-    blocking single-block dominator-emit:
-
-    ```mlir
-    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
-    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
-    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
-    // ... unrelated ops ...
-    %6 = arith.muli %dim, %dim_0      : index
-    %7 = arith.muli %6,   %c4096      : index
-    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
-    ```
-
-    After — `%6` and `%7` hoisted to just before `%alloc`; original locations
-    now live above the earliest used alloc:
-
-    ```mlir
-    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
-    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
-    %6 = arith.muli %dim, %dim_0      : index
-    %7 = arith.muli %6,   %c4096      : index
-    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
-    // ... unrelated ops ...
-    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
-    ```
-
-    Non-goals
-    ---------
-      - Multi-block functions: `--hip-pool-allocs` does not pool them
-        either, so they are silently skipped.  Allocs nested in
-        region-carrying ops within a single entry block are also left
-        untouched (only entry-block allocs are considered).
-      - Op duplication / cloning: an op with multiple uses is moved
-        once; hoisting follows existing SSA edges.  Cross-region cloning
-        à la IREE's `computeSizeSliceInRegion` is unnecessary for
-        single-block IR.
-      - Static-only allocs: no dynamic operands → nothing to hoist.
+    Run after host-scalar materialization, dimension resolution, CSE, and
+    canonicalization, and before `hip-pool-allocs`. This pass only moves existing
+    operations; it does not fold shapes, duplicate computation, or move reads.
+    PoolAllocs remains responsible for placing pool acquisitions and storage.
   }];
   let dependentDialects = [
     "mlir::arith::ArithDialect",

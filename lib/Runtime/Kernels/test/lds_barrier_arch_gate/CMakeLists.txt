@@ -3,7 +3,7 @@
 ## Licensed under the MIT License.
 ##
 
-# Compile-time guard for the arch-gated LDS barrier in matmul_nbits_kernel.hip.
+# Compile-time guard for the arch-gated LDS barrier in matmul_nbits_wmma_core.h.
 # GPU-free: only needs the HIP-capable compiler to emit device assembly and to
 # preprocess the barrier gate. See check_barrier_arch_gate.py for details.
 find_package(Python3 COMPONENTS Interpreter)

@@ -572,10 +572,10 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
-/// direct MorphiZen converter into supported primitives — patch-embed
-/// Conv-ND → Reshape/Gemm/Reshape, AveragePool(kernel==stride) →
-/// Reshape/Transpose/ReduceMean, Pow(x, c) → repeated Mul, ReduceMean →
-/// ReduceSum·(1/N), and broadcasting Div → Mul(x, Reciprocal). Emits
+/// direct MorphiZen converter into supported primitives —
+/// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
+/// repeated Mul, ReduceMean → ReduceSum·(1/N), and broadcasting Div →
+/// Mul(x, Reciprocal). Emits
 /// `onnx.*` ops with result types built explicitly from the dims the
 /// rewriter already knows (no separate shape pass needed at emission;
 /// `--hip-infer-shapes` resolves any residual dynamic dims post-conversion).
