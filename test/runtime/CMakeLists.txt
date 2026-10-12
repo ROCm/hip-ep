@@ -79,3 +79,15 @@ add_test(NAME GqaAutotuneUnitTest COMMAND test-gqa-autotune)
 set_tests_properties(GqaAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_GQA_ARCH=gfx1151")
 set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")
+
+# ELF-only. Require DF_1_NODELETE and the two plugin entry points.
+# See test_hipgpu_elf_contract.cpp.
+if(UNIX AND NOT APPLE AND TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+  add_executable(test-hipgpu-elf-contract test_hipgpu_elf_contract.cpp)
+  target_compile_features(test-hipgpu-elf-contract PRIVATE cxx_std_17)
+  target_link_libraries(test-hipgpu-elf-contract PRIVATE ${CMAKE_DL_LIBS})
+  add_test(NAME HipGpuElfContract
+    COMMAND test-hipgpu-elf-contract $<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>)
+  set_tests_properties(HipGpuElfContract PROPERTIES TIMEOUT 60)
+  set_target_properties(test-hipgpu-elf-contract PROPERTIES FOLDER "runtime-tests")
+endif()
