@@ -77,6 +77,13 @@ if(WIN32)
         message(FATAL_ERROR "Could not find hipcc in ${HIP_PATH}/bin")
     endif()
 
+    # hipcc only looks for clang under <rocm>/lib/llvm/bin unless HIP_CLANG_PATH
+    # is set; flat SDKs keep clang in bin/.
+    set(HIPCC_ENV "")
+    if(EXISTS "${HIP_PATH}/bin/clang.exe" AND NOT EXISTS "${HIP_PATH}/lib/llvm/bin")
+        set(HIPCC_ENV "HIP_CLANG_PATH=${HIP_PATH}/bin")
+    endif()
+
     # Set paths (used as fallback if hip::host not available)
     set(HIP_INCLUDE_DIR "${HIP_PATH}/include")
     set(HIP_LIBRARY_DIR "${HIP_PATH}/lib")
@@ -291,7 +298,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             # Use generator expressions for config-specific flags
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${CMAKE_COMMAND} -E env ${HIPCC_ENV} ${HIPCC_EXECUTABLE}
                     -c "${source_abs}"
                     -o "${output_obj}"
                     ${arch_flags}
@@ -331,7 +338,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
 
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${CMAKE_COMMAND} -E env ${HIPCC_ENV} ${HIPCC_EXECUTABLE}
                     -c "${source_abs}"
                     -o "${output_obj}"
                     ${arch_flags}
