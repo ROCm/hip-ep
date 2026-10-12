@@ -21,4 +21,4 @@ therock_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;rocm-dis
 ## Linux 7.13 includes zstd symbol isolation for compressed HIP fat binaries:
 ## https://github.com/ROCm/TheRock/pull/4251
 therock_linux;https://repo.amd.com/rocm/tarball;therock-dist-linux-gfx1151-7.13.0
-migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.3.0;migraphx-sdk-windows-1217ce1d
+migraphx_windows;https://github.com/ROCm/hip-ep/releases/download/v0.5.1;migraphx-sdk-windows-7bb0654e

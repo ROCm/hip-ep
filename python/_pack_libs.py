@@ -24,6 +24,7 @@ CRT_LIBS = [
 
 ROCM_DLL_GROUPS = [
     ["hipblaslt.dll", "libhipblaslt.dll"],
+    ["tensilelite-host.dll"],
 ]
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
