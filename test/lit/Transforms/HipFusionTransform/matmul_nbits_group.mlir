@@ -1,0 +1,241 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// MatMulNBitsGroup folds hip.matmul_nbits ops that read the same activation
+// into one hip.matmul_nbits_group, and a gate/up pair consumed only by
+// SiLU(gate) * up into one group with the silu_mul epilogue.
+
+// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+
+// q/k/v: three projections of one activation become one group, in program
+// order, each original result replaced by the matching group result. The
+// later members' inits are defined after the first projection and have to be
+// moved above the group.
+// CHECK-LABEL: func.func @qkv
+// CHECK:         %[[G:.*]]:3 = hip.matmul_nbits_group(%{{.*}}) ins(%{{.*}} : tensor<1x?x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg4, %arg6 :
+// CHECK-SAME:      outs(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} :
+// CHECK-SAME:      N = [64, 32, 32]
+// CHECK-NOT:       epilogue
+// CHECK-NOT:     hip.matmul_nbits(
+// CHECK:         return %[[G]]#0, %[[G]]#1, %[[G]]#2
+func.func @qkv(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
+               %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+               %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>,
+               %bv: tensor<32x2x16xui8>, %sv: tensor<32x2xf16>)
+    -> (tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x32xf16>) {
+  %c1 = arith.constant 1 : index
+  %m = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %eq = tensor.empty(%m) : tensor<1x?x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%x, %bq, %sq :
+      tensor<1x?x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x?x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x64xf16>
+  %ek = tensor.empty(%m) : tensor<1x?x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%x, %bk, %sk :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  %ev = tensor.empty(%m) : tensor<1x?x32xf16>
+  %v = hip.matmul_nbits(%ctx) ins(%x, %bv, %sv :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ev : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  return %q, %k, %v : tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x32xf16>
+}
+
+// -----
+
+// gate/up feeding SiLU(gate) * up: the sigmoid and both muls fold into the
+// group's epilogue and the group writes into the gate projection's init.
+// CHECK-LABEL: func.func @gate_up_silu
+// CHECK:         %[[EG:.*]] = tensor.empty
+// CHECK:         %[[Y:.*]] = hip.matmul_nbits_group(%{{.*}}) ins(%{{.*}} : tensor<1x1x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg4 :
+// CHECK-SAME:      scales(%arg3, %arg5 :
+// CHECK-SAME:      outs(%[[EG]] : tensor<1x1x128xf16>)
+// CHECK-SAME:      epilogue = 1
+// CHECK-NOT:     hip.sigmoid
+// CHECK-NOT:     hip.mul
+// CHECK:         return %[[Y]]
+func.func @gate_up_silu(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                        %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
+                        %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)
+    -> tensor<1x1x128xf16> {
+  %eg = tensor.empty() : tensor<1x1x128xf16>
+  %g = hip.matmul_nbits(%ctx) ins(%x, %bg, %sg :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eg : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %eu = tensor.empty() : tensor<1x1x128xf16>
+  %u = hip.matmul_nbits(%ctx) ins(%x, %bu, %su :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eu : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %es = tensor.empty() : tensor<1x1x128xf16>
+  %s = hip.sigmoid(%ctx) ins(%g : tensor<1x1x128xf16>)
+      outs(%es : tensor<1x1x128xf16>) : tensor<1x1x128xf16>
+  %em = tensor.empty() : tensor<1x1x128xf16>
+  %gs = hip.mul(%ctx) ins(%g, %s : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%em : tensor<1x1x128xf16>) -> tensor<1x1x128xf16>
+  %ey = tensor.empty() : tensor<1x1x128xf16>
+  %y = hip.mul(%ctx) ins(%gs, %u : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%ey : tensor<1x1x128xf16>) -> tensor<1x1x128xf16>
+  return %y : tensor<1x1x128xf16>
+}
+
+// -----
+
+// The conversions size each init from `tensor.dim` of its producer, so the
+// gate and the intermediate products also feed shape queries. Those are not
+// consumers of the values; they are re-pointed at the fused result, which has
+// the same shape.
+// CHECK-LABEL: func.func @gate_up_silu_dynamic
+// CHECK:         %[[Y:.*]] = hip.matmul_nbits_group
+// CHECK-SAME:      epilogue = 1
+// CHECK-NOT:     hip.sigmoid
+// CHECK-NOT:     hip.mul
+// CHECK:         return %[[Y]]
+func.func @gate_up_silu_dynamic(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
+                                %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
+                                %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)
+    -> tensor<1x?x128xf16> {
+  %c1 = arith.constant 1 : index
+  %m = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %eu = tensor.empty(%m) : tensor<1x?x128xf16>
+  %u = hip.matmul_nbits(%ctx) ins(%x, %bu, %su :
+      tensor<1x?x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eu : tensor<1x?x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x128xf16>
+  %eg = tensor.empty(%m) : tensor<1x?x128xf16>
+  %g = hip.matmul_nbits(%ctx) ins(%x, %bg, %sg :
+      tensor<1x?x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eg : tensor<1x?x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x128xf16>
+  %d0 = tensor.dim %g, %c1 : tensor<1x?x128xf16>
+  %es = tensor.empty(%d0) : tensor<1x?x128xf16>
+  %s = hip.sigmoid(%ctx) ins(%g : tensor<1x?x128xf16>)
+      outs(%es : tensor<1x?x128xf16>) : tensor<1x?x128xf16>
+  %d1 = tensor.dim %g, %c1 : tensor<1x?x128xf16>
+  %em = tensor.empty(%d1) : tensor<1x?x128xf16>
+  %gs = hip.mul(%ctx) ins(%g, %s : tensor<1x?x128xf16>, tensor<1x?x128xf16>)
+      outs(%em : tensor<1x?x128xf16>) -> tensor<1x?x128xf16>
+  %d2 = tensor.dim %gs, %c1 : tensor<1x?x128xf16>
+  %ey = tensor.empty(%d2) : tensor<1x?x128xf16>
+  %y = hip.mul(%ctx) ins(%gs, %u : tensor<1x?x128xf16>, tensor<1x?x128xf16>)
+      outs(%ey : tensor<1x?x128xf16>) -> tensor<1x?x128xf16>
+  return %y : tensor<1x?x128xf16>
+}
+
+// -----
+
+// The gate projection has a second consumer, so it has to reach memory: the
+// pair is still grouped, but with the concat epilogue, and the SiLU chain
+// stays.
+// CHECK-LABEL: func.func @gate_escapes
+// CHECK:         hip.matmul_nbits_group
+// CHECK-NOT:       epilogue
+// CHECK:         hip.sigmoid
+// CHECK:         hip.mul
+// CHECK:         hip.mul
+func.func @gate_escapes(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                        %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
+                        %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)
+    -> (tensor<1x1x128xf16>, tensor<1x1x128xf16>) {
+  %eg = tensor.empty() : tensor<1x1x128xf16>
+  %g = hip.matmul_nbits(%ctx) ins(%x, %bg, %sg :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eg : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %eu = tensor.empty() : tensor<1x1x128xf16>
+  %u = hip.matmul_nbits(%ctx) ins(%x, %bu, %su :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eu : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %es = tensor.empty() : tensor<1x1x128xf16>
+  %s = hip.sigmoid(%ctx) ins(%g : tensor<1x1x128xf16>)
+      outs(%es : tensor<1x1x128xf16>) : tensor<1x1x128xf16>
+  %em = tensor.empty() : tensor<1x1x128xf16>
+  %gs = hip.mul(%ctx) ins(%g, %s : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%em : tensor<1x1x128xf16>) -> tensor<1x1x128xf16>
+  %ey = tensor.empty() : tensor<1x1x128xf16>
+  %y = hip.mul(%ctx) ins(%gs, %u : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%ey : tensor<1x1x128xf16>) -> tensor<1x1x128xf16>
+  return %y, %g : tensor<1x1x128xf16>, tensor<1x1x128xf16>
+}
+
+// -----
+
+// A group fed by hip.skip_rms_norm reads the norm's quantized copy of the
+// row: the norm grows quant_outs (int8 row, one f32 scale per 32 elements)
+// and the group takes them as quantized(...). Existing norm results keep
+// their positions.
+// CHECK-LABEL: func.func @norm_feeds_group
+// CHECK:         %[[N:.*]]:4 = hip.skip_rms_norm
+// CHECK-SAME:      quant_outs(%{{.*}}, %{{.*}} : tensor<1x1x64xi8>, tensor<1x1x2xf32>)
+// CHECK-SAME:      quant_block_size = 32
+// CHECK:         hip.matmul_nbits_group(%{{.*}}) ins(%[[N]]#0 : tensor<1x1x64xf16>)
+// CHECK-SAME:      quantized(%[[N]]#2, %[[N]]#3 : tensor<1x1x64xi8>, tensor<1x1x2xf32>)
+// CHECK:         return {{.*}}%[[N]]#1
+func.func @norm_feeds_group(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                            %r: tensor<1x1x64xf16>, %gamma: tensor<64xf16>,
+                            %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+                            %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>)
+    -> (tensor<1x1x64xf16>, tensor<1x1x32xf16>, tensor<1x1x64xf16>) {
+  %ey = tensor.empty() : tensor<1x1x64xf16>
+  %es = tensor.empty() : tensor<1x1x64xf16>
+  %y, %sum = hip.skip_rms_norm(%ctx)
+      ins(%x, %r, %gamma : tensor<1x1x64xf16>, tensor<1x1x64xf16>, tensor<64xf16>)
+      outs(%ey, %es : tensor<1x1x64xf16>, tensor<1x1x64xf16>)
+      {epsilon = 1.0e-05 : f32} : tensor<1x1x64xf16>, tensor<1x1x64xf16>
+  %eq = tensor.empty() : tensor<1x1x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%y, %bq, %sq :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %ek = tensor.empty() : tensor<1x1x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%y, %bk, %sk :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  return %q, %k, %sum : tensor<1x1x64xf16>, tensor<1x1x32xf16>, tensor<1x1x64xf16>
+}
+
+// -----
+
+// Asymmetric weights (zero points) are not grouped: the grouped kernel
+// assumes zero point 8.
+// CHECK-LABEL: func.func @zero_points_not_grouped
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK-COUNT-2: hip.matmul_nbits(
+func.func @zero_points_not_grouped(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                                   %b: tensor<32x2x16xui8>, %s: tensor<32x2xf16>,
+                                   %zp: tensor<32x1xui8>)
+    -> (tensor<1x1x32xf16>, tensor<1x1x32xf16>) {
+  %e0 = tensor.empty() : tensor<1x1x32xf16>
+  %a = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      zero_points(%zp : tensor<32x1xui8>)
+      outs(%e0 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 1 : i64} : tensor<1x1x32xf16>
+  %e1 = tensor.empty() : tensor<1x1x32xf16>
+  %c = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      zero_points(%zp : tensor<32x1xui8>)
+      outs(%e1 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 1 : i64} : tensor<1x1x32xf16>
+  return %a, %c : tensor<1x1x32xf16>, tensor<1x1x32xf16>
+}
