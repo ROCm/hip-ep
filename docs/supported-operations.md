@@ -22,6 +22,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Mul | Custom HIP kernel |
 | Add | Custom HIP kernel |
 | ImageScaler | Decomposed to `hip.mul`, or `hip.add` then `hip.mul` when the per-channel bias is non-zero. NCHW only; bias broadcasts as `1xCx1x1`. |
+| Sum | Decomposed to Add. Variadic elementwise sum with NumPy broadcast; same rank and dtype limits as Add |
 | Softmax | Custom HIP kernel |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
@@ -68,7 +69,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceProd | Custom HIP kernel |
 | ReduceMean | Custom HIP kernel |
 | CumSum | Custom HIP kernel |
-| Pad | Custom HIP kernel |
+| Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
 | Tile | Custom HIP kernel |
 | Expand | Custom HIP kernel |
 | GatherND | Custom HIP kernel |
@@ -114,6 +115,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
+| PRelu | Custom HIP kernel. Slope broadcasts onto X; f16/bf16/f32/f64 |
 | LRN | Custom HIP kernel. Channel window, rank >= 2, f16/bf16/f32/f64 |
 | Trilu | Custom HIP kernel. Keeps the upper or lower triangle of the last two dimensions; `k` must be a constant scalar |
 | Clip | Decomposed to Max + Min |
@@ -122,7 +124,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | AveragePool | Custom HIP kernel |
 | LpPool | Custom HIP kernel |
 | Resize | Custom HIP kernel. A dynamic extent comes from a constant `scales` vector, or from a `sizes` vector read back to a host index when `scales` is absent |
-| Upsample | Lowered through Resize (`asymmetric`, nearest `floor`) |
+| Upsample | Lowered through Resize (`asymmetric`, nearest `floor`). Schema 9 passes `scales` as an input; opset 7–8 stores them as an f32 attribute |
 | GridSample | Custom HIP kernel |
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |

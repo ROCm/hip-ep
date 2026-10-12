@@ -3,11 +3,12 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for ONNX Upsample (schema 9), lowered through hip.resize.
+"""Tests for ONNX Upsample, lowered through hip.resize.
 
 Upsample is Resize with asymmetric coordinates. Nearest sampling uses floor.
-output_dim = floor(input_dim * scale). The two Deeplab shapes are the
-linear nodes in ul_deeplabv3_fp16.
+output_dim = floor(input_dim * scale). Schema 9 passes scales as an input.
+Opset 7 and 8 store the same list as an attribute. The two Deeplab shapes
+are the linear nodes in ul_deeplabv3_fp16.
 """
 
 from __future__ import annotations
@@ -20,6 +21,17 @@ from onnx import TensorProto, helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
+
+
+def _make_upsample_attr_model(
+    shape: list[int], scales: list[float], dtype: np.dtype, mode: str
+):
+    out_shape = [int(math.floor(dim * scale)) for dim, scale in zip(shape, scales)]
+    x_info = helper.make_tensor_value_info("X", np_to_onnx_type(dtype), list(shape))
+    y_info = helper.make_tensor_value_info("Y", np_to_onnx_type(dtype), list(out_shape))
+    node = helper.make_node("Upsample", ["X"], ["Y"], mode=mode, scales=scales)
+    # Opset 9 moved scales from an attribute to an input.
+    return make_model_from_nodes([node], [x_info], [y_info], opset=8)
 
 
 def _make_upsample_model(
@@ -58,6 +70,15 @@ class TestUpsample:
         scales = [1.0, 1.0, 2.0, 3.0]
         model = _make_upsample_model(shape, scales, np.float32, "nearest")
         rng = np.random.default_rng(202)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_nearest_opset8_scales_attribute(self, model_runner):
+        shape = [1, 128, 56, 56]
+        scales = [1.0, 1.0, 2.0, 2.0]
+        model = _make_upsample_attr_model(shape, scales, np.float32, "nearest")
+        rng = np.random.default_rng(203)
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
