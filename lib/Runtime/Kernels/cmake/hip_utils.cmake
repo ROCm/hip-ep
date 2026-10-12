@@ -79,9 +79,10 @@ if(WIN32)
 
     # hipcc only looks for clang under <rocm>/lib/llvm/bin unless HIP_CLANG_PATH
     # is set; flat SDKs keep clang in bin/.
-    set(HIPCC_ENV "")
+    set(HIPCC_ENV "" CACHE INTERNAL "Environment for hipcc invocations")
     if(EXISTS "${HIP_PATH}/bin/clang.exe" AND NOT EXISTS "${HIP_PATH}/lib/llvm/bin")
-        set(HIPCC_ENV "HIP_CLANG_PATH=${HIP_PATH}/bin")
+        set(HIPCC_ENV "HIP_CLANG_PATH=${HIP_PATH}/bin"
+            CACHE INTERNAL "Environment for hipcc invocations")
     endif()
 
     # Set paths (used as fallback if hip::host not available)
