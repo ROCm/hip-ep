@@ -6,7 +6,9 @@
 #include "HipToLLVMUtils.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
 
 namespace mlir {
@@ -374,6 +376,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
+
+  // A ui8 If condition is compared as signless i8. Lowering the readback
+  // inserts the reverse cast, and that round trip is not executable LLVM.
+  // Drop casts whose chain returns to the original type.
+  SmallVector<UnrealizedConversionCastOp> casts;
+  module.walk(
+      [&](UnrealizedConversionCastOp castOp) { casts.push_back(castOp); });
+  reconcileUnrealizedCasts(casts);
 
   if (failed(transformMainFunction(module)))
     signalPassFailure();
