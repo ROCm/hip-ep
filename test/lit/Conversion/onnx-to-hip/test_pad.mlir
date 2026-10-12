@@ -240,4 +240,28 @@ module {
   // CHECK-LABEL: func.func @pad_too_many_operands
   // CHECK: onnx.Pad
   // CHECK-NOT: hip.pad
+
+  // A static result needs nothing from the input to size the output, but
+  // hip.pad still takes ranked operands only, so unranked data is refused.
+  func.func @pad_unranked_data(%data: tensor<*xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<*xf32>, tensor<4xi64>, none, none) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_unranked_data
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
+
+  // A scalar has no axes to pad and the runtime rejects rank 0, so the legacy
+  // form is not normalized into a call that can only fail.
+  func.func @pad_legacy_scalar(%data: tensor<f32>) -> tensor<f32> {
+    %r = "onnx.Pad"(%data) {mode = "constant", pads = []} : (tensor<f32>) -> tensor<f32>
+    return %r : tensor<f32>
+  }
+
+  // CHECK-LABEL: func.func @pad_legacy_scalar
+  // CHECK-NOT: onnx.Constant
+  // CHECK: onnx.Pad
+  // CHECK-NOT: hip.pad
 }

@@ -115,11 +115,8 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
         .getResult();
   }
 
-  // Reached only for a dynamic result, where the per-axis math needs the input
-  // rank. An unranked input cannot supply one.
-  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!dataType)
-    return rewriter.notifyMatchFailure(op, "pad.unranked_data");
+  // PadToHip has already turned away unranked data.
+  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
   int64_t rank = dataType.getRank();
 
   // Build the axis -> pad-index map. By default every axis is padded in
@@ -229,6 +226,11 @@ struct PadToHip : public mlir::RewritePattern {
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "pad.unranked_result");
+
+    // hip.pad takes ranked operands only, and that holds even when the result
+    // is fully static and buildPadOutputInit never looks at the input.
+    if (!mlir::isa<mlir::RankedTensorType>(op->getOperand(0).getType()))
+      return rewriter.notifyMatchFailure(op, "pad.unranked_data");
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))

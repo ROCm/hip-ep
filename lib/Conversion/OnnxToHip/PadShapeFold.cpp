@@ -165,6 +165,10 @@ struct PadLegacyAttrsToOperands : public mlir::RewritePattern {
     auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     if (!dataType)
       return rewriter.notifyMatchFailure(op, "pad.legacy_unranked_data");
+    // A scalar has no axes to pad, so `pads` would be empty, and wrap_pad
+    // rejects both rank 0 and empty pads at runtime.
+    if (dataType.getRank() == 0)
+      return rewriter.notifyMatchFailure(op, "pad.legacy_scalar_data");
     if (static_cast<int64_t>(padsVec.size()) != 2 * dataType.getRank())
       return rewriter.notifyMatchFailure(op, "pad.legacy_pads_arity");
 
