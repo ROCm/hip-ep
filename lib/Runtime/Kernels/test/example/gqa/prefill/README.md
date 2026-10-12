@@ -1,7 +1,7 @@
 # GQA Prefill Test Suite
 
 Tests for the fused FA-2 WMMA prefill kernels (`sq > 1`), which the runtime
-selects by head_dim: v6 at 64, v7 at 128, v8 at 256.
+selects by head_dim: v6x at 64 and 128, v8x at 256.
 
 Both programs are standalone: they compile `gqa_kernel.hip` directly and call
 the kernel entry, so nothing needs the EP or a model to be built first.
@@ -78,7 +78,8 @@ hipcc --offload-arch=gfx1151 -O3 -std=c++17 -Wno-deprecated-declarations \
 ## Selecting a kernel configuration by hand
 
 The prefill launchers self-tune their launch configuration on the first call per
-`(d, sq, skv, Hq, G)` shape and cache the winner. To see what they pick:
+`(d, sq, skv bucket, Hq, G, window)` shape and cache the winner. To see what they
+pick:
 
 ```bash
 HIPDNN_PREFILL_TUNE_DEBUG=1 ./test_gqa_prefill.exe --iters 10

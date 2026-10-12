@@ -71,8 +71,9 @@ constexpr uint32_t kSchemaVersion = 9;
 // Bump when the config knobs or the meaning of a stored config changes. A table
 // stamped with an older ABI is rejected outright rather than allowed to pick a
 // config that no longer means what it meant when it was measured. v3 is the
-// nearest-neighbour rewrite (v2 was the tier table in runtime.bc).
-constexpr const char kKernelAbi[] = "gqa-v3";
+// nearest-neighbour rewrite (v2 was the tier table in runtime.bc); v4 replaced
+// the v5/v7/v8 prefill kernels and their knobs with v6x/v8x.
+constexpr const char kKernelAbi[] = "gqa-v4";
 
 bool logOn() {
   static const bool on = [] {
@@ -108,15 +109,8 @@ bool logLineFirstSeen(const char *line) {
 fbs::GqaPhase decodePhase() { return fbs::GqaPhase::Decode; }
 
 fbs::GqaPhase prefillPhase(GqaPrefillVariant v) {
-  switch (v) {
-  case GqaPrefillVariant::V5:
-    return fbs::GqaPhase::PrefillV5;
-  case GqaPrefillVariant::V7:
-    return fbs::GqaPhase::PrefillV7;
-  case GqaPrefillVariant::V8:
-    return fbs::GqaPhase::PrefillV8;
-  }
-  return fbs::GqaPhase::PrefillV8;
+  return v == GqaPrefillVariant::V8x ? fbs::GqaPhase::PrefillV8x
+                                     : fbs::GqaPhase::PrefillV6x;
 }
 
 fbs::GqaHeadDim headDimClass(int head_dim) {
@@ -268,18 +262,27 @@ GqaDecodeConfig decodeHeuristic(const GqaDecodeRequest &request, int cus) {
           /*bkv=*/16};
 }
 
+// The best config on gfx1151 for the common shapes, and always one that
+// prefillV6xCandidates / prefillV8xCandidates build for the request, so the
+// recovery path never hands the kernel a config it rejects.
 GqaPrefillConfig prefillHeuristic(const GqaPrefillRequest &request) {
-  switch (request.variant) {
-  case GqaPrefillVariant::V5:
-    // v6 builds only BKV=16 at d == 256 (see prefillV5Candidates).
-    return {/*m_tiles=*/1, /*bkv=*/request.head_dim == 256 ? 16 : 32,
-            /*nw=*/0, /*mt=*/0, /*nd=*/0};
-  case GqaPrefillVariant::V7:
-    return {/*m_tiles=*/0, /*bkv=*/32, /*nw=*/1, /*mt=*/1, /*nd=*/0};
-  case GqaPrefillVariant::V8:
-    return {/*m_tiles=*/0, /*bkv=*/32, /*nw=*/0, /*mt=*/1, /*nd=*/2};
+  const int hpg = request.kv_num_heads > 0
+                      ? std::max(1, request.num_heads / request.kv_num_heads)
+                      : 1;
+  if (request.variant == GqaPrefillVariant::V8x) {
+    // Two waves per head, as many heads per block as divide the group; BKV=32
+    // only pays off with 4 heads.
+    const int hb = hpg % 4 == 0 ? 4 : hpg % 3 == 0 ? 3 : hpg % 2 == 0 ? 2 : 1;
+    return {/*hb=*/hb, /*qw=*/0, /*mt=*/0, /*bkv=*/hb == 4 ? 32 : 16,
+            /*nd=*/2};
   }
-  return {0, 32, 0, 0, 0};
+  // 4 waves: as many heads of the group as divide it, the rest Q subtiles.
+  // M_TILES=2 wins at d64 without a window.
+  const int hb = hpg % 4 == 0 ? 4 : hpg % 2 == 0 ? 2 : 1;
+  const bool window = request.local_window > 0;
+  return {/*hb=*/hb, /*qw=*/4 / hb,
+          /*mt=*/(request.head_dim == 64 && !window) ? 2 : 1, /*bkv=*/32,
+          /*nd=*/0};
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +442,7 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
       a.bkv = c->bkv();
     } else {
       a.prefill =
-          GqaPrefillConfig{c->m_tiles(), c->bkv(), c->nw(), c->mt(), c->nd()};
+          GqaPrefillConfig{c->hb(), c->qw(), c->mt(), c->bkv(), c->nd()};
     }
     t.pool.push_back(a);
   }
@@ -587,12 +590,13 @@ GqaAutotuneMode chooseMode(const char *provider_mode) {
 // The nearest point in the group, plus whether it was accepted by the decode
 // validator. Returns the pool index and squared distance through out-params.
 // `decode` requests validate+clamp the candidate; prefill accepts any point in
-// its own phase group. On rejection the search walks outwards to the next
-// point.
+// its own phase group, except that under a window (prefill_window > 0) a v6x
+// config must be a block of at most 4 waves, the only windowed instances. On
+// rejection the search walks outwards to the next point.
 bool nearestUsable(const std::vector<Point> &pts, float qnh, float qkh,
                    float qb, float qsq, float qsk, const Table &t,
-                   const GqaDecodeRequest *decode_req, size_t &chosen,
-                   float &best_d2) {
+                   const GqaDecodeRequest *decode_req, int prefill_window,
+                   size_t &chosen, float &best_d2) {
   auto dist2 = [&](const Point &p) {
     const float d0 = t.w_num_heads * (qnh - p.l_num_heads);
     const float d1 = t.w_kv_num_heads * (qkh - p.l_kv_num_heads);
@@ -602,9 +606,13 @@ bool nearestUsable(const std::vector<Point> &pts, float qnh, float qkh,
     return d0 * d0 + d1 * d1 + d2b * d2b + d3 * d3 + d4 * d4;
   };
   auto usable = [&](const Point &p) {
-    if (!decode_req)
-      return t.pool[p.config].kind == fbs::GqaConfigKind::Prefill;
     const Answer &a = t.pool[p.config];
+    if (!decode_req) {
+      if (a.kind != fbs::GqaConfigKind::Prefill)
+        return false;
+      return prefill_window <= 0 || a.prefill.qw == 0 ||
+             a.prefill.hb * a.prefill.qw <= 4;
+    }
     if (a.kind != fbs::GqaConfigKind::Decode)
       return false;
     const GqaDecodeConfig cfg = clampDecodeConfig(
@@ -707,8 +715,8 @@ void hip_gqa_autotune_resolve_decode(void *policy,
     if (group) {
       size_t chosen = 0;
       float best_d2 = 0.0f;
-      if (nearestUsable(*group, qnh, qkh, qb, qsq, qsk, t, req, chosen,
-                        best_d2)) {
+      if (nearestUsable(*group, qnh, qkh, qb, qsq, qsk, t, req,
+                        /*prefill_window=*/0, chosen, best_d2)) {
         const Point &p = (*group)[chosen];
         const Answer &a = t.pool[p.config];
         const GqaDecodeConfig cfg = clampDecodeConfig(
@@ -812,7 +820,8 @@ void hip_gqa_autotune_resolve_prefill(void *policy,
       size_t chosen = 0;
       float best_d2 = 0.0f;
       if (nearestUsable(*group, qnh, qkh, qb, qsq, qsk, t,
-                        /*decode_req=*/nullptr, chosen, best_d2)) {
+                        /*decode_req=*/nullptr, req->local_window, chosen,
+                        best_d2)) {
         const Point &p = (*group)[chosen];
         const bool exact = best_d2 == 0.0f;
         out->config = t.pool[p.config].prefill;

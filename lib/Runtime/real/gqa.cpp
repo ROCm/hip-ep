@@ -22,8 +22,9 @@
 //     max(0, total_seq - window) in the split kernel and folds the sink into
 //     the reduce denominator, and it autotunes (impl, split-count) per shape --
 //     keying sliding layers on the window rather than the full context. Prefill
-//     applies sinks and sliding windows through hip_gqa_flash_prefill for
-//     head_dim == 64; unsupported prefill geometries route to decomposed.
+//     applies sinks through hip_gqa_flash_prefill for head_dim 64 and sliding
+//     windows for head_dim 64 and 128; unsupported prefill geometries route to
+//     decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
 //     bidirectional, additive attention bias, other head_dim, untemplated
@@ -735,14 +736,11 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // d128 runs v6 where it beats v7 and v5: with a window, or with a KV group
-  // of a multiple of 4 heads. d256 runs v6 where it beats v8: a KV group of a
-  // multiple of 3 or 4 heads (d256 prefill never has a window here).
-  // hip_gqa_flash_prefill_v2 applies the same rule when tuning online.
-  const bool v6_prefill =
-      d == 64 || (d == 128 && (local_window_size > 0 || (H / G) % 4 == 0)) ||
-      (d == 256 && ((H / G) % 4 == 0 || (H / G) % 3 == 0));
-  const int fused_prefill_version = v6_prefill ? 6 : (d == 128 ? 7 : 8);
+  // d64 and d128 run v6x, d256 runs v8x (d256 prefill never has a window or
+  // a sink here). hip_gqa_flash_prefill_v2 applies the same split when tuning
+  // online.
+  const bool v8x_prefill = d == 256;
+  const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
   int fp_rc;
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
       static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
@@ -753,13 +751,9 @@ static int gqa_forward_fused(
         static_cast<int>(past_len), scale, local_window_size, head_sink,
         static_cast<int>(H), use_smooth_softmax ? 1 : 0);
   } else {
-    // v6 configs are keyed in the table as PrefillV5. The table has no d128 or
-    // d256 PrefillV5 points, so those resolve to the heuristic, which is the
-    // only config v6 builds at that head dim.
     const hipdnn_ep::GqaPrefillVariant variant =
-        v6_prefill ? hipdnn_ep::GqaPrefillVariant::V5
-        : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7
-                   : hipdnn_ep::GqaPrefillVariant::V8;
+        v8x_prefill ? hipdnn_ep::GqaPrefillVariant::V8x
+                    : hipdnn_ep::GqaPrefillVariant::V6x;
     const hipdnn_ep::GqaPrefillRequest request{variant,
                                                static_cast<int>(B),
                                                static_cast<int>(H),
@@ -777,8 +771,8 @@ static int gqa_forward_fused(
           static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
           static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
           static_cast<int>(past_len), scale, local_window_size, head_sink,
-          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.m_tiles,
-          config.bkv, config.nw, config.mt, config.nd);
+          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.hb, config.qw,
+          config.mt, config.bkv, config.nd);
     };
     fp_rc = launch_configured(selected.config);
     if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
@@ -793,20 +787,20 @@ static int gqa_forward_fused(
       selected = {heuristic, hipdnn_ep::GqaTuneSource::Heuristic, 0.0f};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
-                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s %s "
+                      "hb=%d qw=%d mt=%d bkv=%d nd=%d\n",
                       hipdnn_ep::gqa_tune_source_name(selected.source),
-                      fused_prefill_version, selected.config.m_tiles,
-                      selected.config.bkv, selected.config.nw,
-                      selected.config.mt, selected.config.nd);
+                      fused_prefill_kernel, selected.config.hb,
+                      selected.config.qw, selected.config.mt,
+                      selected.config.bkv, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
   RUNTIME_DEBUG_LOG(
-      "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
+      "[REAL] GQA fused prefill (%s d=%lld -> %s): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
       "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_version,
+      kv_quantized ? "quant" : "fp16", (long long)d, fused_prefill_kernel,
       (long long)B, (long long)sq, (long long)total_seq, (long long)H,
       (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
       static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
@@ -2913,7 +2907,7 @@ int wrap_group_query_attention(
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  // head_dim gate: the fused WMMA prefill (v6/v7/v8) and the scalar
+  // head_dim gate: the fused WMMA prefill (v6x/v8x) and the scalar
   // flash-decode kernels both cover d in {64,128,256} now (d=256 for
   // Qwen3-family 16:4). For decode, flash_decode_geometry_ok already validates
   // d; for prefill we clamp to the templated set here.
@@ -2928,9 +2922,9 @@ int wrap_group_query_attention(
   // explicitly 1, matching ORT (gqa_attention_base.h:
   // use_smooth_softmax_ || head_sink != nullptr).
   const bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
-  // Sink/window are first-class decode features. Prefill v3 implements both at
-  // D64, and v5 implements the window at D128. D128 sinks and all D256
-  // prefill features must fall back rather than silently drop them.
+  // Sink/window are first-class decode features. Prefill (v6x) implements both
+  // at D64 and the window at D128. D128 sinks and all D256 prefill features
+  // must fall back rather than silently drop them.
   const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
   // supported geometry; prefill implements it at D64 and D128.

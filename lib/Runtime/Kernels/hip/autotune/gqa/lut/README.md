@@ -66,8 +66,9 @@ mismatch is a loud rejection (fall to heuristic) rather than a silently wrong pi
   `points[]` / `fallbacks[]`, `file_identifier "GQAL"`, 16-byte points). Not
   compatible with the old tier files (they carried buckets and per-field
   wildcards this loader has no field for).
-- **GQA kernel ABI** — `gqa-v3`. Bumped whenever a config knob's meaning changes,
-  so a stale `.fb` swept against different kernels is rejected, not misread.
+- **GQA kernel ABI** — `gqa-v4` (the v6x / v8x prefill knobs). Bumped whenever a
+  config knob's meaning changes, so a stale `.fb` swept against different kernels
+  is rejected, not misread.
 - **ROCm/HIP version** — advisory: a mismatch warns but still loads.
 - **KV-cache dtype** — points are `Fp16` today; the schema reserves `Int8` for the
   W4A8 decode path, so adding it is a regeneration, not a schema break.
@@ -78,18 +79,22 @@ The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,8,16}** at
 **head_dim ∈ {64,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`). The
 sweep measures the production model geometries plus, for each, the multi-query
 floor (`G = 1`) so the same-hpg fuzzy search always lands on something measured.
-Prefill kernels are templated on `head_dim` alone, so a prefill config is nearly
-geometry- and KV-length-independent and needs far fewer points.
+A prefill config depends on `head_dim` and on the heads per group (which sets
+the v6x / v8x block layout) but barely on the KV length, so prefill needs far
+fewer points.
 
-The current `gfx1151` table is schema 9 / `gqa-v3`: 18 configs, 1614 points and 6
+The current `gfx1151` table is schema 9 / `gqa-v4`: 33 configs, 1739 points and 6
 per-`(phase, head_dim)` fallbacks, over the model geometries at lengths from 128
 to 65536, batch 1. The points are the saturation-pruned survivors of ~3200
 measured shapes (the rest were reconstructable by nearest-neighbour and dropped).
-A sliding window is folded into the scanned length (`effective_len`) at query
-time, so the schema has no window field and the table needs no separate windowed
-rows. Every production geometry resolves `Exact` or short-distance `Nearest`; an
-unmeasured length resolves to its nearest measured neighbour rather than the
-heuristic.
+The decode points are the `gqa-v3` table's, unchanged; the prefill points were
+re-measured for v6x / v8x. In decode a sliding window is folded into the scanned
+length (`effective_len`) at query time, so the schema has no window field and the
+table needs no separate windowed rows; prefill points are measured without a
+window, and a windowed prefill request skips the 8-wave v6x configs, which have
+no windowed instance. Every production geometry resolves `Exact` or
+short-distance `Nearest`; an unmeasured length resolves to its nearest measured
+neighbour rather than the heuristic.
 
 `../scripts/update_lut.py plan` prints the exact shape list, and `GEOMETRIES` in
 that script is the source of truth for which geometries are swept. To widen
