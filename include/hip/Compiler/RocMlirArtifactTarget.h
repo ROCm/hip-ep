@@ -14,12 +14,12 @@
 namespace hip::compiler {
 
 /// The GPU arch CompilerDriver would embed rocMLIR code objects for right now,
-/// or "" when the rocMLIR path is off (HIPDNN_EP_ROCMLIR unset/0, or a build
-/// without ENABLE_ROCMLIRTRITON).
+/// or "" when the rocMLIR path is off (a build without ENABLE_ROCMLIRTRITON,
+/// or HIPDNN_EP_PIPELINE / HIPDNN_EP_HIPSR is selected).
 ///
 /// The model cache / EPContext identity is derived from the graph alone, so an
 /// artifact that carries an arch-specific HSACO could otherwise be reused on
-/// a different GPU or after HIPDNN_EP_ROCMLIR is toggled. The level-1 pass
+/// a different GPU. The level-1 pass
 /// records this value in the artifact metadata and the custom op refuses to
 /// load an artifact whose recorded value differs from the current one.
 std::string rocMlirArtifactTarget();

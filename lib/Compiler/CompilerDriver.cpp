@@ -63,15 +63,12 @@ bool hipsrPipelineRequested() {
 }
 
 // Offload eligible subgraphs to rocMLIR instead of the hipBLASLt/hipDNN
-// library path. Opt-in because it compiles GPU kernels during session
-// creation: a graph with many outlined kernels pays that serially, once per
-// session. hip_env_is_on, not std::getenv -- this code is linked into the
-// static-CRT EP DLL, which cannot see host-process env vars otherwise. It also
-// honours HIPDNN_EP_ROCMLIR=0 as off, so a run can be forced back onto the
-// library path without unsetting the variable.
+// library path. Always on when this binary was built with rocMLIR
+// (ENABLE_ROCMLIRTRITON). HIPDNN_EP_ROCMLIR is not read. HIPDNN_EP_PIPELINE
+// and HIPDNN_EP_HIPSR still take precedence in compileImpl.
 bool rocMlirPipelineRequested() {
 #ifdef ENABLE_ROCMLIRTRITON
-  return hip_env_is_on("HIPDNN_EP_ROCMLIR");
+  return true;
 #else
   return false;
 #endif
@@ -439,7 +436,7 @@ bool CompilerDriver::runMLIRPasses(
     rocMlirLlvmOpts.constantsFile = options.constants_file;
     mlir::hip::buildHipToLLVMPipeline(pm, rocMlirLlvmOpts);
 
-    COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_ROCMLIR set\n");
+    COMPILER_DEBUG_LOG("[CompilerDriver] rocMLIR path\n");
 #endif
   } else {
     mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;

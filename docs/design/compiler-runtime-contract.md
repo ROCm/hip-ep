@@ -70,11 +70,12 @@ The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
 opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
 
 `Metadata.rocmlir_arch` records the GPU arch whose rocMLIR code objects are
-embedded in the artifact (empty when `HIPDNN_EP_ROCMLIR` was off). The model
-cache / EPContext identity is derived from the graph alone, so the EP refuses
-to load an artifact whose recorded value differs from the current
+embedded in the artifact (empty when the rocMLIR path is off). Builds with
+`ENABLE_ROCMLIRTRITON` always take that path; `HIPDNN_EP_ROCMLIR` is not read.
+The model cache / EPContext identity is derived from the graph alone, so the EP
+refuses to load an artifact whose recorded value differs from the current
 `hip::compiler::rocMlirArtifactTarget()`; delete the cache and recompile after
-changing GPUs or toggling `HIPDNN_EP_ROCMLIR`.
+changing GPUs.
 
 ---
 
