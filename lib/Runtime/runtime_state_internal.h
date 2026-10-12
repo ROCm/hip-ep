@@ -164,6 +164,13 @@ struct RuntimeState {
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
 
+  // Per-session scratch for hip.matmul_nbits_group's multi-row path: holds the
+  // gate and up projections that the SiLU epilogue combines. Same policy as
+  // matmul_dp4a_scratch. Kept apart from it because the per-segment matmuls
+  // that fill it use matmul_dp4a_scratch themselves.
+  void *matmul_group_scratch;
+  size_t matmul_group_scratch_size;
+
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device
   // buffer holding the per-(head,chunk) Uloc/W/rlast/alast tiles and the

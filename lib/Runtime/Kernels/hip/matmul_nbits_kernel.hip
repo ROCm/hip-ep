@@ -2831,6 +2831,322 @@ extern "C" int hip_matmul_nbits_dp4a(
 }
 
 /* -----------------------------------------------------------------------
+ * Grouped W4A8 dp4a GEMV (M == 1): weights that all read the same activation
+ * row -- a layer's q/k/v projections, or its MLP gate and up -- in one launch
+ * behind one activation quantization.
+ *
+ * Separately, each of those projections pays its own quantization of the same
+ * row and its own launch, and at decode both are a fixed cost per call that
+ * the GEMV body does not amortize.
+ *
+ * HIP_MATMUL_GROUP_EPI_CONCAT: segment s writes out[s] = A @ W_s^T. blockIdx.x
+ *   walks the segments' column tiles back to back, so every segment keeps the
+ *   tile shape it would have had alone.
+ * HIP_MATMUL_GROUP_EPI_SILU_MUL: two segments of equal N, gate and up. A block
+ *   computes the same columns of both and writes silu(gate) * up, so neither
+ *   projection reaches memory. Each half is rounded to fp16 first, the value
+ *   the unfused graph hands its Sigmoid and Mul.
+ *
+ * Symmetric weights (zero point 8) without bias only: that is every grouped
+ * shape the fusion pattern produces, and it keeps zero-point indexing out of
+ * the inner loop.
+ * ----------------------------------------------------------------------- */
+
+struct Dp4aGroupArgs {
+    const uint8_t* B[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    const __half*  scales[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    __half*        out[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    int64_t        N[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    // Exclusive end of each segment's column tiles along blockIdx.x.
+    int            tile_end[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    int            nseg;
+};
+
+// Selects a segment's field without indexing the kernarg array by a runtime
+// value, which would copy the struct to scratch.
+template <typename T>
+__device__ __forceinline__ T dp4aGroupPick(const T (&arr)[HIP_MATMUL_GROUP_MAX_SEGMENTS],
+                                           int s) {
+    return s == 0 ? arr[0] : (s == 1 ? arr[1] : arr[2]);
+}
+
+template <int BLOCK_SIZE, int TILE_N, int EPI>
+__global__ __attribute__((amdgpu_waves_per_eu(1, 16)))
+void matmul_nbits_gemv_dp4a_group_kernel(
+    const int8_t* __restrict__ a_qb,
+    const float*  __restrict__ a_scale,
+    Dp4aGroupArgs g, int64_t K, int64_t block_size)
+{
+    constexpr bool kSilu = (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL);
+    constexpr int  NCOL  = kSilu ? 2 * TILE_N : TILE_N;
+
+    int tile = static_cast<int>(blockIdx.x);
+    int seg  = 0;
+    if constexpr (!kSilu) {
+        while (seg + 1 < g.nseg && tile >= dp4aGroupPick(g.tile_end, seg))
+            seg++;
+        if (seg > 0)
+            tile -= dp4aGroupPick(g.tile_end, seg - 1);
+    }
+    const int64_t N        = dp4aGroupPick(g.N, seg);
+    const int64_t n_base   = static_cast<int64_t>(tile) * TILE_N;
+    const int     tid      = threadIdx.x;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int     bs_shift =
+        __builtin_ctzll(static_cast<unsigned long long>(block_size));
+
+    const uint8_t* b_rows[NCOL];
+    const __half*  s_rows[NCOL];
+#pragma unroll
+    for (int c = 0; c < NCOL; c++) {
+        const int     s  = kSilu ? (c / TILE_N) : seg;
+        const int64_t n  = n_base + (c % TILE_N);
+        const int64_t sn = (n < N) ? n : 0;
+        b_rows[c] = dp4aGroupPick(g.B, s) + sn * (K / 2);
+        s_rows[c] = dp4aGroupPick(g.scales, s) + sn * k_blocks;
+    }
+
+    float partial[NCOL];
+#pragma unroll
+    for (int c = 0; c < NCOL; c++)
+        partial[c] = 0.0f;
+
+    const int num_u128 = static_cast<int>(K / 32);
+    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+        const int grp = (idx * 32) >> bs_shift;
+        const int8_t* aq = a_qb + static_cast<int64_t>(idx) * 32;
+        const float a_sc = a_scale[grp];
+        int a_lo[4], a_hi[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
+            a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+        }
+        int a_sum_q = 0;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
+            a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
+        }
+
+#pragma unroll
+        for (int c = 0; c < NCOL; c++) {
+            uint4 b = *reinterpret_cast<const uint4*>(&b_rows[c][idx * 16]);
+            const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+            int dot = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+                const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+                dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
+                dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
+            }
+            const float sv = static_cast<float>(s_rows[c][grp]);
+            partial[c] += a_sc * sv * static_cast<float>(dot - a_sum_q * 8);
+        }
+    }
+
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
+
+#pragma unroll
+    for (int c = 0; c < NCOL; c++)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
+            partial[c] += __shfl_down(partial[c], offset);
+
+    if constexpr (BLOCK_SIZE > WARP_SIZE) {
+        __shared__ float warp_sums[NCOL * NUM_WARPS];
+        if (lane_id == 0) {
+#pragma unroll
+            for (int c = 0; c < NCOL; c++)
+                warp_sums[c * NUM_WARPS + warp_id] = partial[c];
+        }
+        __syncthreads();
+        if (warp_id != 0)
+            return;
+#pragma unroll
+        for (int c = 0; c < NCOL; c++) {
+            float val = (lane_id < NUM_WARPS) ? warp_sums[c * NUM_WARPS + lane_id]
+                                              : 0.0f;
+            for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                val += __shfl_down(val, offset);
+            partial[c] = val;
+        }
+    }
+    if (lane_id != 0)
+        return;
+
+    __half* out = dp4aGroupPick(g.out, seg);
+#pragma unroll
+    for (int c = 0; c < TILE_N; c++) {
+        const int64_t n = n_base + c;
+        if (n >= N)
+            break;
+        if constexpr (kSilu) {
+            const float gate =
+                static_cast<float>(static_cast<__half>(partial[c]));
+            const float up =
+                static_cast<float>(static_cast<__half>(partial[c + TILE_N]));
+            out[n] = static_cast<__half>(gate / (1.0f + __expf(-gate)) * up);
+        } else {
+            out[n] = static_cast<__half>(partial[c]);
+        }
+    }
+}
+
+template <int BS, int TN, int EPI>
+static void launchDp4aGroupKernel(hipStream_t stream, const int8_t* a_qb,
+                                  const float* a_sc, Dp4aGroupArgs g,
+                                  int64_t K, int64_t bs)
+{
+    int tiles = 0;
+    if (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL) {
+        tiles = static_cast<int>((g.N[0] + TN - 1) / TN);
+    } else {
+        for (int s = 0; s < g.nseg; s++) {
+            tiles += static_cast<int>((g.N[s] + TN - 1) / TN);
+            g.tile_end[s] = tiles;
+        }
+    }
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_group_kernel<BS, TN, EPI>),
+        dim3(static_cast<unsigned>(tiles)), dim3(BS), 0, stream, a_qb, a_sc,
+        g, K, bs);
+}
+
+// The config id is the single-weight kGemvConfigs entry tuned for segment 0.
+// The SiLU epilogue computes two columns per output, so it halves the tile to
+// keep the tuned config's accumulator count.
+template <int EPI>
+static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
+                                  const int8_t* a_qb, const float* a_sc,
+                                  const Dp4aGroupArgs& g, int64_t K, int64_t bs)
+{
+#define DP4A_GROUP_CASE(ID, BS, TN)                                            \
+    case ID: {                                                                 \
+        constexpr int kTn =                                                    \
+            (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL && TN > 1) ? TN / 2 : TN;    \
+        launchDp4aGroupKernel<BS, kTn, EPI>(stream, a_qb, a_sc, g, K, bs);     \
+    } break
+
+    switch (config_id) {
+        DP4A_GROUP_CASE( 0,  32,  1);  DP4A_GROUP_CASE( 1,  32,  2);
+        DP4A_GROUP_CASE( 2,  32,  4);  DP4A_GROUP_CASE( 3,  32,  8);
+        DP4A_GROUP_CASE( 4,  64,  1);  DP4A_GROUP_CASE( 5,  64,  2);
+        DP4A_GROUP_CASE( 6,  64,  4);  DP4A_GROUP_CASE( 7,  64,  8);
+        DP4A_GROUP_CASE( 8,  64, 16);
+        DP4A_GROUP_CASE( 9, 128,  1);  DP4A_GROUP_CASE(10, 128,  2);
+        DP4A_GROUP_CASE(11, 128,  4);  DP4A_GROUP_CASE(12, 128,  8);
+        DP4A_GROUP_CASE(13, 128, 16);
+        DP4A_GROUP_CASE(14, 256,  1);  DP4A_GROUP_CASE(15, 256,  2);
+        DP4A_GROUP_CASE(16, 256,  4);  DP4A_GROUP_CASE(17, 256,  8);
+        DP4A_GROUP_CASE(18, 256, 16);
+        DP4A_GROUP_CASE(19, 512,  1);  DP4A_GROUP_CASE(20, 512,  2);
+        DP4A_GROUP_CASE(21, 512,  4);  DP4A_GROUP_CASE(22, 512,  8);
+        DP4A_GROUP_CASE(23, 512, 16);
+        DP4A_GROUP_CASE(24, 1024,  1); DP4A_GROUP_CASE(25, 1024,  2);
+        DP4A_GROUP_CASE(26, 1024,  4); DP4A_GROUP_CASE(27, 1024,  8);
+        DP4A_GROUP_CASE(28, 1024, 16);
+        default: break;
+    }
+#undef DP4A_GROUP_CASE
+}
+
+extern "C" int hip_matmul_nbits_quant_act_i8(
+    void* stream_v, const void* A, int64_t M, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    if (K % 32 != 0 || M < 1 || block_size <= 0) return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                       dim3(static_cast<unsigned>(k_blocks),
+                            static_cast<unsigned>(M)),
+                       dim3(128), 0, stream, static_cast<const __half*>(A),
+                       static_cast<int8_t*>(a_qb_scratch),
+                       static_cast<float*>(a_scale_scratch), K, block_size,
+                       k_blocks);
+    return hipGetLastError();
+}
+
+extern "C" int hip_matmul_nbits_dp4a_group(
+    void* stream_v, const void* A, int nseg, const void* const* B,
+    const void* const* scales, void* const* out, const int64_t* N, int64_t K,
+    int64_t block_size, int epilogue, int quantize_a, void* a_qb_scratch,
+    void* a_scale_scratch)
+{
+    if (K % 32 != 0 || block_size <= 0 || nseg < 1 ||
+        nseg > HIP_MATMUL_GROUP_MAX_SEGMENTS)
+        return hipErrorInvalidValue;
+    if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL && (nseg != 2 || N[0] != N[1]))
+        return hipErrorInvalidValue;
+    if (epilogue != HIP_MATMUL_GROUP_EPI_CONCAT &&
+        epilogue != HIP_MATMUL_GROUP_EPI_SILU_MUL)
+        return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    int8_t* a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*  a_sc = static_cast<float*>(a_scale_scratch);
+
+    if (quantize_a) {
+        int rc = hip_matmul_nbits_quant_act_i8(stream_v, A, 1, K, block_size,
+                                               a_qb_scratch, a_scale_scratch);
+        if (rc != hipSuccess) return rc;
+    }
+
+    Dp4aGroupArgs g{};
+    g.nseg = nseg;
+    for (int s = 0; s < nseg; s++) {
+        g.B[s]      = static_cast<const uint8_t*>(B[s]);
+        g.scales[s] = static_cast<const __half*>(scales[s]);
+        g.out[s]    = static_cast<__half*>(out[s]);
+        g.N[s]      = N[s];
+    }
+
+    const int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[0], g.scales[0],
+                                        nullptr, nullptr, g.out[0], N[0], K,
+                                        block_size);
+    if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL)
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL>(cfg, stream, a_qb,
+                                                             a_sc, g, K,
+                                                             block_size);
+    else
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT>(cfg, stream, a_qb,
+                                                           a_sc, g, K,
+                                                           block_size);
+    return hipGetLastError();
+}
+
+__global__ void matmul_nbits_silu_mul_kernel(const __half* __restrict__ gate,
+                                             const __half* __restrict__ up,
+                                             __half* __restrict__ out,
+                                             int64_t n)
+{
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gv = static_cast<float>(gate[i]);
+    out[i] = static_cast<__half>(gv / (1.0f + __expf(-gv)) *
+                                 static_cast<float>(up[i]));
+}
+
+extern "C" int hip_matmul_nbits_silu_mul(void* stream_v, const void* gate,
+                                         const void* up, void* out, int64_t n)
+{
+    if (n <= 0) return hipSuccess;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(matmul_nbits_silu_mul_kernel,
+                       dim3(static_cast<unsigned>((n + 255) / 256)), dim3(256),
+                       0, stream, static_cast<const __half*>(gate),
+                       static_cast<const __half*>(up),
+                       static_cast<__half*>(out), n);
+    return hipGetLastError();
+}
+
+/* -----------------------------------------------------------------------
  * GEMV (int8) Autotune: dispatch, benchmark, cache
  *
  * Reuses kGemvConfigs (29 configs of BLOCK_SIZE x TILE_N) and the same

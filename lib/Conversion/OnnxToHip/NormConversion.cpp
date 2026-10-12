@@ -285,7 +285,8 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   attrs.push_back(rewriter.getNamedAttr("epsilon", epsilonAttr));
 
   // operand_segment_sizes for AttrSizedOperandSegments
-  // [ctx(1), input(1), skip(1), gamma(1), bias(0|1), outputs(1|2)]
+  // [ctx(1), input(1), skip(1), gamma(1), bias(0|1), outputs(1|2),
+  //  quant_outputs(0)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(kCtxSize);
   segmentSizes.push_back(kInputSize);
@@ -293,6 +294,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   segmentSizes.push_back(kGammaSize);
   segmentSizes.push_back(kBiasSize);
   segmentSizes.push_back(kOutputsSize);
+  segmentSizes.push_back(0);
 
   auto state = mlir::OperationState(loc, "hip.skip_rms_norm");
   state.addOperands(operands);
