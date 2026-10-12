@@ -1,7 +1,7 @@
 # ============================================================
 # GQA autotune sweep
 #
-# Enumerates every autotune candidate (prefill v5/v7/v8 tile configs, decode
+# Enumerates every autotune candidate (prefill v6x/v8x block configs, decode
 # impl x split-count) for the representative model shapes in
 # RdpCapture/ops_analyze/gqa/data/ and writes the full ranking plus the winner
 # per shape back into the same folder. Run tools/make_gqa_xlsx.py afterwards to

@@ -1056,29 +1056,18 @@ HIP_KERNEL_API int hip_gqa_fused_decode(
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
- * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
- * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
- *   v5: warp-private / register-resident (best at d == 64).
- *   v7: M-register-blocked, global-streamed K (best at d == 128).
- * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
- * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
- * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
- * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
- * softmax / softcap -- caller must gate those out (use the decomposed path). */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v5_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-HIP_KERNEL_API int hip_gqa_flash_prefill_v7_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-/* Unified fused flash-prefill entry: picks v5 (d==64) or v7 (d==128) internally
- * so the runtime calls one symbol for any eligible prefill. Same layout /
- * constraints as v5/v7 above. Returns 0 on success, -1 if d is unsupported. */
+/* Optimized fused GQA prefill (sq > 1, d in {64,128,256}, fp16, causal, GQA) --
+ * Flash-Attention-2 with WMMA tile GEMMs and an in-register online softmax
+ * over transposed scores, each staged K/V tile shared by several query heads
+ * of one KV group:
+ *   v6x: d == 64 and d == 128; a block is heads x Q subtiles (4 or 8 waves).
+ *   v8x: d == 256; a block is heads x waves that split the head dim.
+ * The unified entry picks the kernel by head dim, self-tunes the launch config
+ * on the first call per (d,sq,skv bucket,Hq,G) shape and caches the winner
+ * process-wide. Layout: Q [B,sq,Hq,d]; K/V cache [B,G,max_seq,d] (post-RoPE,
+ * post-append). Returns 0 on success, -1 if d is unsupported. No seqlens_k /
+ * sliding-window / head-sink / smooth softmax / softcap -- caller must gate
+ * those out (use hip_gqa_flash_prefill below or the decomposed path). */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -1098,26 +1087,27 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  *                       decomposed path when head_sink is null. head_sink takes
  *                       precedence when both are supplied.
  *
- * Sinks and windows are implemented by the v5 kernel, i.e. at d == 64 only.
- * Returns 0 on success and -1 when the request cannot be served exactly (a sink
- * or a window with d != 64), so the caller falls back to the decomposed path
- * instead of silently dropping either. A request with neither is forwarded to
- * v2 and keeps v2's head-dim coverage. */
+ * Sinks are implemented at d == 64 and windows at d == 64 and d == 128 (both
+ * by v6x). Returns 0 on success and -1 when the request cannot be served
+ * exactly (a sink with d != 64, a window with d == 256), so the caller falls
+ * back to the decomposed path instead of silently dropping either. A request
+ * with neither keeps v2's head-dim coverage. */
 HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
-/* Lookup-only v3 variant. The final five fields are explicit launch
- * parameters for v5/v7/v8 respectively; unused fields are zero. This entry
- * validates the selected tuple and never invokes an online autotuner. */
+/* Lookup-only v3 variant. The final five fields are the explicit launch
+ * config (hipdnn_ep::GqaPrefillConfig): v6x uses hb / qw / mt / bkv, v8x uses
+ * nd / hb / bkv; unused fields are zero. This entry validates the tuple against
+ * the configs built for the shape and never invokes an online autotuner. */
 HIP_KERNEL_API int hip_gqa_flash_prefill_v3_configured(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
+    int hb, int qw, int mt, int bkv, int nd);
 
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an

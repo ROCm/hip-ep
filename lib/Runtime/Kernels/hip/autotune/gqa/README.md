@@ -14,8 +14,8 @@ exported from `custom_kernels_<arch>` (implemented in `gqa_autotune.cpp`). The l
 is **nearest-neighbour**, matmul_nbits style, and hierarchical — most-impactful axis
 first:
 
-1. **Kernel identity — exact match.** `phase` (Decode / PrefillV5 / PrefillV7 /
-   PrefillV8), `head_dim` (D64/D128/D256), `kv_dtype` (Fp16/Int8). These are not
+1. **Kernel identity — exact match.** `phase` (Decode / PrefillV6x / PrefillV8x),
+   `head_dim` (D64/D128/D256), `kv_dtype` (Fp16/Int8). These are not
    distances: `d64` and `d128` are different kernel instantiations, and prefill's
    variant *is* its head_dim, so borrowing across them is meaningless.
 2. **Geometry.** The exact `(num_heads, kv_num_heads)` pair is preferred; if it was
@@ -50,6 +50,8 @@ only for some `(head_dim, heads-per-group)` pairs, the split count must be in
 rejected and the search moves to the next-nearest point — the same self-correction
 matmul_nbits uses — so a table measured against a wider kernel set than the running
 one degrades to the nearest *usable* point instead of launching something illegal.
+Prefill points are measured without a window, so a windowed prefill request skips
+8-wave v6x configs (the windowed instances go up to 4 waves) the same way.
 
 ### Decode split counts are clamped
 
@@ -67,7 +69,7 @@ matmul_nbits does:
 
 - **`configs[]`** — every distinct launch config once. A config is `kind`
   (`Decode`/`Prefill`) plus its knobs: decode carries `use_wmma` + `bkv`; prefill
-  carries the v5/v7/v8 tuple (`m_tiles`, `bkv`, `nw`, `mt`, `nd`). At most 256.
+  carries the v6x / v8x tuple (`hb`, `qw`, `mt`, `bkv`, `nd`). At most 256.
 - **`points[]`** — one measured winner per shape: the categorical key, a 1-byte
   `config` index into `configs[]`, a per-point `splits` (decode only), and the
   literal numeric dims `num_heads / kv_num_heads / batch / seq_q / seq_kv`. Thousands
@@ -176,14 +178,14 @@ kernels — and about the compiler that built them. Two rules:
   once), so a table swept on the wrong toolchain is confidently wrong.
 - **Stamp kernel changes.** Bump the kernel's entry in
   `gqa_autotune_sweep.cpp :: kKernelVersions` in the same commit as the kernel change
-  (this marks old readings stale), and re-measure. Bump `kGqaKernelAbi` (`gqa-v3`) in
-  `gqa_autotune.h` when a config's *meaning* changes, so a stale shipped `.fb` is
-  rejected rather than misread.
+  (this marks old readings stale), and re-measure. Bump `kKernelAbi` (`gqa-v4`) in
+  `gqa_autotune.cpp` (and `KERNEL_ABI` in `update_lut.py`) when a config's *meaning*
+  changes, so a stale shipped `.fb` is rejected rather than misread.
 
 | Change | Bump | Costs |
 |---|---|---|
 | A kernel's tiles, inner loop, or candidate set | its `kKernelVersions` entry | remeasure that kernel |
-| A config knob's meaning | `kGqaKernelAbi` (+ `kSchemaVersion` on a layout change) | shipped `.fb` is rejected, not misread |
+| A config knob's meaning | `kKernelAbi` (+ `kSchemaVersion` on a layout change) | shipped `.fb` is rejected, not misread |
 | A new arch / ROCm version | — | loader checks `gpu_arch`; ROCm mismatch only warns |
 
 `test/runtime/test_gqa_autotune.cpp` links the real embedded `.fb` and drives this
