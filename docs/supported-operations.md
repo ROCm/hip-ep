@@ -133,7 +133,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Implementation |
 |---|---|
-| If | Outlined then/else functions with runtime branch dispatch |
+| If | Outlined then/else functions with runtime branch dispatch. The condition is a single-element `i1`, `i8`, or `ui8` tensor, including a unit shape such as `tensor<1xui8>` |
 | Loop | Outlined loop body with runtime loop dispatch |
 
 ## Compiler-optimized operations
