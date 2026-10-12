@@ -21,6 +21,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Transpose | Custom HIP kernel |
 | Mul | Custom HIP kernel |
 | Add | Custom HIP kernel |
+| Sum | Decomposed to Add. Variadic elementwise sum with NumPy broadcast; same rank and dtype limits as Add |
 | Softmax | Custom HIP kernel |
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |

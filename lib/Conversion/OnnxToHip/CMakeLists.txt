@@ -14,6 +14,7 @@ add_library(OnnxToHip STATIC
   EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
+  SumConversion.cpp
   PowerConversion.cpp
   PowConversion.cpp
   ActivationConversion.cpp
