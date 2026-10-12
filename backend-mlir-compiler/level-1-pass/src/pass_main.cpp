@@ -10,6 +10,7 @@
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 #include <glog/logging.h>
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // Protobuf
@@ -266,20 +268,32 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
     return false;
   }
 
-  // The artifact was compiled from @main_graph above, whose arguments are
-  // graphRef.inputs() in this order. try_fuse walks explicit operands only, so
-  // a graph input consumed inside an If/Loop/Scan body (or by a producer that
-  // is only reached through that body) is dropped from MetaDef::inputs. The
-  // EP marshals that list into the already-compiled artifact, and a shorter
-  // list shifts every later tensor (rank-1 alpha lands in the rank-4 slot).
+  // try_fuse follows explicit operands, so a graph input used only through
+  // an If/Loop/Scan body is missing from MetaDef::inputs. Put those used
+  // inputs back, in graph-argument order. Leave an argument out when nothing
+  // in the graph reads it: it is not a fused-node input, and listing it makes
+  // MetaDef longer than the ORT node.
   {
     std::vector<std::string> discovered{meta_def->inputs().begin(),
                                         meta_def->inputs().end()};
-    if (discovered != input_names) {
-      MY_LOG(1) << "Restoring compiled graph inputs (" << input_names.size()
+    std::unordered_set<std::string> discoveredSet(discovered.begin(),
+                                                  discovered.end());
+    std::vector<std::string> kept;
+    kept.reserve(input_names.size());
+    for (const auto &input : graphRef.inputs()) {
+      const std::string &name = input.name();
+      if (discoveredSet.count(name) != 0 || !input.find_consumers().empty())
+        kept.push_back(name);
+    }
+    for (const auto &name : discovered) {
+      if (std::find(kept.begin(), kept.end(), name) == kept.end())
+        kept.push_back(name);
+    }
+    if (kept != discovered) {
+      MY_LOG(1) << "Restoring used graph inputs (" << kept.size()
                 << ") over try_fuse inputs (" << discovered.size() << ")";
       meta_def->clear_inputs();
-      for (const auto &name : input_names)
+      for (const auto &name : kept)
         meta_def->add_inputs(name);
     }
   }
