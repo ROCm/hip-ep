@@ -103,23 +103,51 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
+// Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
+// own diagnostics, which it prints while that variable is set. The kernels log
+// from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
+// the handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
+// kernels only when they are linked into this executable (the local make
+// build).
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_path,
     const std::function<void()>& fn) {
-  std::vector<std::string> lines;
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const std::string path = redirect ? tmp_path : leaf_stderr;
+  std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
-  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
-  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  if (redirect) {
+    if (!std::freopen(path.c_str(), "w", stderr)) {
+      fn();
+      _putenv_s(env_var, "");
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
   fn();
   std::fflush(stderr);
-  std::freopen("CON", "w", stderr);
+  if (redirect) std::freopen("CON", "w", stderr);
   _putenv_s(env_var, "");
-  std::ifstream in(tmp_path);
-  std::string line;
-  while (std::getline(in, line)) lines.push_back(line);
-  in.close();
-  std::remove(tmp_path.c_str());
+
+  std::vector<std::string> lines;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(start);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+  if (redirect) std::remove(path.c_str());
   return lines;
 }
 }  // namespace hipdnn_ep_test
@@ -252,7 +280,7 @@ struct Case {
 // CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD. O(sq^2)
 // per (b,hq) -- threaded over the B*H (batch, query-head) pairs (each is
 // fully independent) so the wider sq/past additions below (including the new
-// sq=8192 rows) stay inside the shared ~30 min tier3 budget across all 9 UT
+// sq=8192 rows) stay inside the shared ~30 min tier3 budget across all UT
 // leaves. Each thread gets its own `scores` scratch buffer.
 static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& K,
@@ -329,6 +357,18 @@ static double rel_l2(const std::vector<float>& a, const std::vector<float>& b) {
     den += (double)b[i] * b[i];
   }
   return std::sqrt(num / (den + 1e-12));
+}
+
+// results.csv shape: the parameters that tell any two cases apart. The window
+// and the sink/smooth modes appear only when set.
+static std::string case_shape(const Case& c) {
+  std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
+                  "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
+                  "_sq" + std::to_string(c.sq) + "_past" + std::to_string(c.past);
+  if (c.window > 0) s += "_win" + std::to_string(c.window);
+  if (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth) s += "_sink";
+  if (c.sink_mode == kSinkSmooth || c.sink_mode == kSinkBoth) s += "_smooth";
+  return s;
 }
 
 static bool run_case(const Case& c, int iters) {
@@ -457,12 +497,9 @@ static bool run_case(const Case& c, int iters) {
       // A declined combination still gets a row: results.csv is the record of
       // every case that ran, and "no config" is the expected outcome here.
       using namespace hipdnn_ep_test;
-      char shape_buf[96];
-      std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_sq%d_past%d",
-                    c.name, H, G, D, sq, past_len);
       CsvWriter csv;
       CsvRow row;
-      row.shape = shape_buf;
+      row.shape = case_shape(c);
       row.config = "declined";
       row.verdict = ok ? "PASS" : "FAIL";
       csv.write(row);
@@ -506,19 +543,17 @@ static bool run_case(const Case& c, int iters) {
 
   {
     using namespace hipdnn_ep_test;
-    char shape_buf[96];
-    std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_sq%d_past%d",
-                  c.name, H, G, D, sq, past_len);
     CsvWriter csv;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     CsvRow row;
-    row.shape = shape_buf;
+    row.shape = case_shape(c);
     if (use_lookup) {
       char config_buf[96];
       std::snprintf(config_buf, sizeof(config_buf),
-                    "lookup:m_tiles=%d bkv=%d nw=%d mt=%d nd=%d",
+                    "lookup:m_tiles=%d bkv=%d nw=%d mt=%d nd=%d (%s)",
                     lut_res.config.m_tiles, lut_res.config.bkv,
-                    lut_res.config.nw, lut_res.config.mt, lut_res.config.nd);
+                    lut_res.config.nw, lut_res.config.mt, lut_res.config.nd,
+                    hipdnn_ep::gqa_tune_source_name(lut_res.source));
       row.config = config_buf;
     } else {
       row.config =
@@ -530,7 +565,7 @@ static bool run_case(const Case& c, int iters) {
     csv.write(row);
 #else
     CsvRow row;
-    row.shape = shape_buf;
+    row.shape = case_shape(c);
     row.config = launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
     row.time_ms = ms;
     row.rel_l2 = err;

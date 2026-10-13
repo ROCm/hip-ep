@@ -34,13 +34,11 @@ is no `shapes.csv` or `gen_data.py` in this leaf.
 
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
 exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
-warning. Both build and run fine either
-way -- `gqa_kernel.hip` never calls the autotune-LUT resolver for this path
-(only production `real/gqa.cpp` does), so `MODE=lookup` here only needs to
-satisfy `gqa_autotune.cpp`'s (unused) LUT-data symbols so the link succeeds;
-the kernel itself always runs its own internal runtime autotune + cache,
-independent of `MODE`. `MODE=lookup` needs `flatc` + its `include/` (a build
-tool, not part of this repo):
+warning. Like production `real/gqa.cpp`, the leaf resolves the int8 decode
+config itself (`hip_gqa_autotune_resolve_decode` with `kv_dtype=INT8`) and
+launches it through `hip_gqa_flash_decode_configured`; `MODE=autotune` calls
+the self-tuning `hip_gqa_flash_decode` instead. `MODE=lookup` needs `flatc` +
+its `include/` (a build tool, not part of this repo):
 `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>` -- see
 `example/README.md`.
 

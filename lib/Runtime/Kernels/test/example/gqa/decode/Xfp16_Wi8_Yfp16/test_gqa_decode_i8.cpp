@@ -99,38 +99,62 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
-// Redirects stderr to `tmp_path` for the duration of `fn` (with `env_var=1`
-// set) so the op's own diagnostics land in a file instead of the console, then
-// returns them split by line.
+// Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
+// own diagnostics, which it prints while that variable is set. The kernels log
+// from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
+// the handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
+// kernels only when they are linked into this executable (the local make
+// build).
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_path,
     const std::function<void()>& fn) {
-  std::vector<std::string> lines;
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const std::string path = redirect ? tmp_path : leaf_stderr;
+  std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
-  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
-  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  if (redirect) {
+    if (!std::freopen(path.c_str(), "w", stderr)) {
+      fn();
+      _putenv_s(env_var, "");
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
   fn();
   std::fflush(stderr);
-  std::freopen("CON", "w", stderr);
+  if (redirect) std::freopen("CON", "w", stderr);
   _putenv_s(env_var, "");
-  std::ifstream in(tmp_path);
-  std::string line;
-  while (std::getline(in, line)) lines.push_back(line);
-  in.close();
-  std::remove(tmp_path.c_str());
+
+  std::vector<std::string> lines;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(start);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+  if (redirect) std::remove(path.c_str());
   return lines;
 }
 }  // namespace hipdnn_ep_test
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-// This leaf's kernel calls are always the runtime-autotune entry point (no
-// resolve-from-LUT call here, unlike the fp16 decode/prefill leaves) --
-// MODE=lut only needs to satisfy gqa_autotune.cpp's (unused by this test)
-// extern LUT-data symbols so it still links. One-line C23 #embed of the real
-// LUT .fb -- HIPDNN_LUT_FB is defined by a tiny Makefile-generated header (a
-// plain #define, not a data file) so the path never has to survive hipcc's
-// Windows -D quoting (which mangles embedded quote characters).
+#include "gqa_autotune.h"
+#ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
 #include "lut_fb_path.h"
 static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
@@ -138,6 +162,7 @@ static const unsigned char kLutBlob0[] = {
 extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
 extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
 extern "C" const size_t               kGqaLutBlobCount    = 1;
+#endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 #endif
 
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
@@ -152,6 +177,19 @@ extern "C" int hip_gqa_flash_decode(
     float scale, const void* seqlens_k, int local_window_size,
     const void* head_sink, int use_smooth_softmax,
     int kv_dtype, const void* k_scale, const void* v_scale);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+// Lookup-only sibling: dispatches an explicit config instead of autotuning.
+// Same ABI as hip_gqa_flash_decode plus the three resolved knobs at the end.
+extern "C" int hip_gqa_flash_decode_configured(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax,
+    int kv_dtype, const void* k_scale, const void* v_scale,
+    int use_wmma, int splits, int bkv);
+#endif
 
 static constexpr int MAX_SPLITS = 64;
 
@@ -169,6 +207,13 @@ struct Case {
   const char* name;
   int B, H, G, D, max_seq, total;  // total = effective KV length (seqlens_k+1)
 };
+
+// results.csv shape: the parameters that tell any two cases apart.
+static std::string case_shape(const Case& c) {
+  return "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) + "_G" +
+         std::to_string(c.G) + "_D" + std::to_string(c.D) + "_len" +
+         std::to_string(c.total);
+}
 
 // ---- CPU fp32 reference over dequantized int8 cache -----------------------
 // K_i8 / V_i8: [B,G,max_seq,D] int8; kscale/vscale: [G,D].
@@ -369,6 +414,45 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dVsc, vscale.data(), vscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
 
+  // Dispatch the int8 kernel the way real/gqa.cpp does: in lookup mode resolve
+  // the config from the table in custom_kernels_<arch>.dll and launch it
+  // through the lookup-only entry; in online mode let the kernel tune itself.
+  std::string lookup_config;
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  hipdnn_ep::GqaDecodeConfig selected_config{};
+  {
+    void* policy = hip_gqa_autotune_create(nullptr);
+    if (hip_gqa_autotune_mode(policy) !=
+        static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+      const hipdnn_ep::GqaDecodeRequest request{
+          HIP_KV_DTYPE_INT8, B, H, G, D, c.total, MAX_SPLITS, /*window=*/0};
+      hipdnn_ep::GqaDecodeResult selected;
+      hip_gqa_autotune_resolve_decode(policy, &request, &selected);
+      selected_config = selected.config;
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "lookup:impl=%s splits=%d bkv=%d (%s)",
+                    selected.config.use_wmma ? "wmma" : "scalar",
+                    selected.config.splits, selected.config.bkv,
+                    hipdnn_ep::gqa_tune_source_name(selected.source));
+      lookup_config = buf;
+    }
+    hip_gqa_autotune_destroy(policy);
+  }
+#endif
+  auto launch_int8 = [&]() -> int {
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    if (!lookup_config.empty())
+      return hip_gqa_flash_decode_configured(
+          nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
+          MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc,
+          dVsc, selected_config.use_wmma ? 1 : 0, selected_config.splits,
+          selected_config.bkv);
+#endif
+    return hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
+                                c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
+                                nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
+  };
+
   // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8). Every
   // launch in this function runs inside a capture window: the op's [gqa-cfg]
   // diagnostic latches its enable flag on the first read, so it has to be on
@@ -376,10 +460,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   // and once on it prints per dispatch, which would otherwise reach the console.
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
-        HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-            nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
-            MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc,
-            dVsc));
+        HIP_CHECK((hipError_t)launch_int8());
         HIP_CHECK(hipDeviceSynchronize());
       });
   std::vector<float> O_int8((size_t)B * H * D);
@@ -425,11 +506,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   {
     const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
         "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
-          ms_int8 = bench([&]() {
-            hip_gqa_flash_decode(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
-                                    c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                                    nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
-          });
+          ms_int8 = bench(launch_int8);
         });
     for (const std::string& line : lines) {
       const size_t knobs = line.find("-> ");
@@ -463,13 +540,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   {
     hipdnn_ep_test::CsvWriter csv;
-    char shape_buf[96];
-    std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_len%d", c.name,
-                  H, G, D, c.total);
     hipdnn_ep_test::CsvRow row;
-    row.shape = shape_buf;
-    row.config =
-        launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
+    row.shape = case_shape(c);
+    row.config = !lookup_config.empty() ? lookup_config
+                 : launched_cfg.empty() ? "unlogged"
+                                        : "autotune:" + launched_cfg;
     // The int8-KV path is what this leaf covers; the fp16 run above is only a
     // reference point, and its time is in the stdout line.
     row.time_ms = ms_int8;

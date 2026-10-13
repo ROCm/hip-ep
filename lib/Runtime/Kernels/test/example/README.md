@@ -58,6 +58,10 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe
     hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe
     hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
@@ -83,10 +87,17 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 8 leaves serially, with `bin` as the working
+The controller runs the 12 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
+
+Each leaf starts with its stderr on `bin/out/<executable>.stderr.log`, which
+the controller deletes when the leaf passes and keeps (printing its path) when
+it fails. The leaves read their per-case `config` back from that file: the
+kernels print their diagnostics from `custom_kernels_<arch>.dll`, whose
+statically linked C runtime keeps the stderr the process started with, so a
+leaf cannot redirect them itself.
 
 The leaves use the HIP runtime in `bin`, the same copy the controller loads.
 Windows searches System32 before a leaf's working directory, and the GPU
@@ -116,8 +127,9 @@ To run a single leaf by hand, also start it from `bin`:
 ```
 
 A leaf started this way does not get the controller's DLL search path, so it
-loads the driver's HIP runtime from System32. Run the suite through the
-controller to test the package's runtime.
+loads the driver's HIP runtime from System32, and its `config` column can read
+`unlogged` because it cannot capture the kernels' diagnostics. Run the suite
+through the controller to test the package's runtime and record every config.
 
 When `BUILD_TESTING` is on, each leaf is also registered with CTest under the
 labels `gpu;kernel-ut;<arch>` (run from the build tree, e.g.
@@ -145,11 +157,12 @@ A GPU job that wants the results runs the controller from the downloaded
   uses: actions/upload-artifact@v4
   with:
     name: kernel-ut-results
-    path: gpu-test-package/bin/out/results.csv
+    path: gpu-test-package/bin/out/
 ```
 
 The step fails on any non-zero exit code. The uploaded `results.csv` shows
-which op, leaf and shape failed.
+which op, leaf and shape failed, and a failing leaf's `.stderr.log` sits next
+to it.
 
 ## These are unit tests — comprehensive shapes, not a perf sweep
 
@@ -167,10 +180,11 @@ is what `hip/autotune/<op>/tools/` is for). The coverage model is:
 
 Concretely:
 
-- **Categorical axes** (group_size, zero-points on/off, dtype fp16/fp32,
-  TA/TB transpose, bias on/off, heads-per-group ratio, head_dim,
-  sliding-window/head-sink/smooth-softmax, INT8-KV, …) are enumerated in
-  full and run at **every** `COVERAGE` tier.
+- **Categorical axes** (group_size, zero-points on/off, TA/TB transpose,
+  bias on/off, heads-per-group ratio, head_dim,
+  sliding-window/head-sink/smooth-softmax, …) are enumerated in full and run
+  at **every** `COVERAGE` tier. Tensor dtypes are not an axis inside a leaf:
+  each dtype combo is its own leaf (see "Leaf name" below).
 - **Continuous axes** (M/K/N, sequence length) are a comprehensive, explicitly
   listed set of typical values — e.g. matmul_nbits M in
   `{1,16,64,128,512[,1024]}` round-robined across several real `(K,N)` layer
@@ -182,7 +196,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 8-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 12-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -217,6 +231,7 @@ Examples:
 | `matmul_nbits/Xfp16_Wu2_Yfp16` | bits=2 |
 | `matmul_nbits/Xfp16_Wu3_Yfp16` | bits=3 |
 | `matmul_nbits/Xfp16_Wi8_Yfp16` | unpacked int8 weights |
+| `matmul_nbits/Xfp32_Wu4_Yfp32` | A fp32, B uint4, C fp32 (likewise `Wu2`, `Wu3`, `Wi8`) |
 | `gqa/decode/Xfp16_Wfp16_Yfp16` | Q/O fp16, KV cache fp16 |
 | `gqa/decode/Xfp16_Wi8_Yfp16` | Q/O fp16, KV cache int8 |
 | `gqa/prefill/Xfp16_Wfp16_Yfp16` | same for prefill |
@@ -238,6 +253,8 @@ example/
   Makefile                   # local suite: build every leaf, run hipdnn-kernel-ut.exe
   matmul_nbits/Xfp16_Wu{2,3,4}_Yfp16/
   matmul_nbits/Xfp16_Wi8_Yfp16/
+  matmul_nbits/Xfp32_Wu{2,3,4}_Yfp32/
+  matmul_nbits/Xfp32_Wi8_Yfp32/
   gqa/decode/Xfp16_Wfp16_Yfp16/
   gqa/decode/Xfp16_Wi8_Yfp16/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
@@ -301,9 +318,9 @@ README — default is the three files above and nothing more.
 Every leaf's `test_<op>.cpp` defines, near the top of the file:
 
 - a small, explicit list (or nested loop) of the op's **categorical
-  situations** — every group_size / zero-points / dtype / transpose / bias /
-  head-geometry / window-sink-smooth / INT8-KV value the op actually
-  supports. This list is the same size at every tier.
+  situations** — every group_size / zero-points / transpose / bias /
+  head-geometry / window-sink-smooth value the op actually supports for the
+  leaf's dtypes. This list is the same size at every tier.
 - a **short list of typical shapes** on the continuous axes (M/K/N or
   B/H/G/D/seq) — a handful of values, not a ladder. `COVERAGE` selects a
   subset of *this* list only (tier3 = all of it, tier2 a smaller subset,
@@ -330,13 +347,14 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{128,256,512,1024,2048}`). The i8 prefill leaf's two `O(sq^2)` CPU
   references (i8-cache + fp16) are also multithreaded over `(batch,
   query-head)` pairs.
-- **matmul_nbits** (all four bit-widths): `group_size {32,64,128} x
-  zero-points {on,off} x dtype {fp16,fp32}` (12 combos, always full) x 12
-  typical `(M,K,N)` shapes — M in `{1,16,64,128,512}` round-robined (not a
-  full M x KN cross) across 4 representative real-model `(K,N)` layer
-  families (gate/up-proj, attn-proj, down-proj, o-proj/square). Every shape
-  is ALSO crossed with the full 12-way categorical set, so the shape-list
-  size directly multiplies CPU-reference cost by 12 — the reference
+- **matmul_nbits** (all four bit-widths, fp16 and fp32 activations as
+  separate leaves): `group_size {32,64,128} x zero-points {on,off}` (6
+  combos, always full) x 12 typical `(M,K,N)` shapes — M in
+  `{1,16,64,128,512}` round-robined (not a full M x KN cross) across 4
+  representative real-model `(K,N)` layer families (gate/up-proj, attn-proj,
+  down-proj, o-proj/square). Every shape is ALSO crossed with the full 6-way
+  categorical set, so the shape-list size directly multiplies CPU-reference
+  cost by 6 — the reference
   (`genCase()`'s `O(M*K*N)`, no BLAS) is now multithreaded over `N` to keep
   this affordable; see the comment above `genCase()` in any
   `matmul_nbits/*/test_matmul_nbits*.cpp`.
@@ -465,14 +483,13 @@ entry. They are declared `extern "C"` in each op's unmodified
 
 For matmul_nbits the kernel calls `resolve()` itself, so linking the
 real resolver is enough. For GQA, `gqa_kernel.hip` does not call the resolver
-(only production `real/gqa.cpp` does) — `test_gqa_decode.cpp` /
-`test_gqa_prefill.cpp` instead call `hip_gqa_autotune_resolve_decode` /
-`_resolve_prefill` themselves (guarded by `#ifdef HIPDNN_LUT_LINKED_EXTERNALLY`)
-and dispatch the resolved config through the production
-`hip_gqa_flash_decode_configured` / `_prefill_v3_configured` entries. The GQA
-i8 leaves' kernel calls never resolve from the LUT directly (only the fp16
-decode/prefill leaves do) — `MODE=lookup` there only needs to satisfy
-`gqa_autotune.cpp`'s LUT-data symbols so the link succeeds.
+(only production `real/gqa.cpp` does) — every GQA leaf instead calls
+`hip_gqa_autotune_resolve_decode` / `_resolve_prefill` itself (guarded by
+`#ifdef HIPDNN_LUT_LINKED_EXTERNALLY`) and dispatches the resolved config
+through the production `hip_gqa_flash_decode_configured` /
+`_prefill_v3_configured` entries. The i8 leaves do it the way `real/gqa.cpp`
+does for an int8 KV cache: decode resolves with `kv_dtype=INT8`, and prefill
+resolves the fp16 prefill that runs on the dequantized cache.
 
 ### `out/results.csv`
 
@@ -486,6 +503,11 @@ op,leaf,arch,mode,shape,config,time_ms,relL2,verdict
 
 One row per case.
 
+`shape` lists the case's parameters, enough to tell any two rows of a leaf
+apart: MatMulNBits `M1_N5120_K2880_gs32` (`_noz` without zero points), GQA
+decode `B1_H64_G8_D64_len2048` and prefill `B1_H64_G8_D64_sq512_past0`, with
+`_win<n>`, `_sink` and `_smooth` only when set.
+
 `time_ms` is the **mean per-launch** time of that case's own timing loop (the
 leaf's `kIters` launches between two HIP events), not a total. It is the only
 timing in the row: the tuner's own figure is a *peak* (minimum) sample taken
@@ -493,13 +515,14 @@ during the sweep, under a different clock state, so it is deliberately not
 carried in `config` where it would read as the same measurement.
 
 `config` names the configuration that actually ran, recovered from the op's own
-diagnostics (`HIPDNN_{MATMUL,GQA}_AUTOTUNE_MODE` logs, `HIPDNN_MATMUL_LUT_LOG`) rather
+diagnostics (`HIPDNN_{MATMUL,GQA}_AUTOTUNE_LOG`, `HIPDNN_MATMUL_LUT_LOG`) or,
+for the fp16 GQA leaves in `lookup` mode, from the resolver they call, rather
 than inferred from `mode`. The prefix says
 where the configuration came from, the rest is the configuration itself:
 
 | Prefix | Meaning |
 |---|---|
-| `lookup:…` | the offline table answered. MatMulNBits also reports `(exact\|nearest\|fallback d=…)`, where `d` is the weighted log2 distance to the measured point |
+| `lookup:…` | the offline table answered. MatMulNBits reports `(exact\|nearest\|fallback d=…)`, where `d` is the weighted log2 distance to the measured point; GQA reports `(exact\|nearest\|fallback\|heuristic)` |
 | `autotune:…` | the table missed, was bypassed, or the op has no lookup wired, and the runtime sweep picked this one |
 | `declined` | the op rejected the combination by design (a leaf's `expect_reject` case); `time_ms`/`relL2` are 0 because nothing ran |
 | `unlogged` | the op emitted no config diagnostic for this case — treat it as a gap to fix, not a result |
@@ -509,17 +532,20 @@ A run is either `lookup` or `autotune`, never both, so a leaf has exactly one
 `mode` column records which mode was asked for; an `autotune:` config under
 `mode=lookup` is the honest report of a table miss, not a second result set.
 
-Each leaf captures that output per case into a single scratch file under `out/`
-and deletes it again, so a completed run leaves only `out/results.csv`. Because
-an op logs a selection only on the first encounter with a tune key — which does
-not include the activation dtype — a later case sharing that key (e.g. the fp32
-twin of an fp16 shape) reuses the earlier selection silently; the leaf remembers
-it per key so every row still names a real config.
+Under `hipdnn-kernel-ut.exe` each leaf reads that output back from its stderr
+log (see "Run" above); a leaf started any other way redirects its own stderr
+to a scratch file under `out/` instead, which captures the kernels only when
+they are linked into the leaf (the local make build). Either way a passing run
+leaves only `out/results.csv`. Because an op logs a selection only on the
+first encounter with a tune key, a later case sharing that key reuses the
+earlier selection silently; the leaf remembers it per key so every row still
+names a real config.
 
-`hipdnn-kernel-ut.exe` appends one extra row per leaf to the same file, with
-`shape=suite`, `config=suite-total` and the leaf process's **total wall time**
-in `time_ms` — the one row where that column is not a per-launch mean.
+`hipdnn-kernel-ut.exe` appends one extra row per leaf to the same file. It is
+a per-leaf summary, not a case: `shape=suite` and `config=suite-total` are
+fixed markers, `time_ms` is the leaf process's **total wall time** (the one row
+where that column is not a per-launch mean) and `verdict` is the leaf's
+overall `PASS`/`FAIL`.
 
-Each leaf that writes this file inlines its own ~30-line `CsvWriter`/`CsvRow`
-(no shared header) — see the top of any `test_<op>.cpp`. The two GQA i8 leaves
-are the only ones that still emit no per-case rows.
+Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
+see the top of any `test_<op>.cpp`.

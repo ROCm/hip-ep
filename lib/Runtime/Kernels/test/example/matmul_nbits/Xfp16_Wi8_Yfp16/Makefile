@@ -13,7 +13,7 @@
 # include dir>.
 #
 # `test` runs the exe's own built-in `sweep` namespace: every categorical
-# situation (group_size x zero-points x dtype) x a small typical-shape list,
+# situation (group_size x zero-points) x a small typical-shape list,
 # self-sampled to COVERAGE (default 3; see example/README.md "Shape
 # coverage"). Everything (inputs + CPU reference) is generated in-process --
 # no python, no data files.
@@ -84,17 +84,11 @@ INCLUDES     := -I$(INCLUDE_DIR)
 SIZE     ?= 128x2880x5120
 GS       ?= 128
 NO_ZEROS ?=
-FP32     ?=
 
 ifeq ($(NO_ZEROS),1)
     CXX_NZ_FLAG := --no-zeros
 else
     CXX_NZ_FLAG :=
-endif
-ifeq ($(FP32),1)
-    CXX_FP32_FLAG := --fp32
-else
-    CXX_FP32_FLAG :=
 endif
 
 # ---- OS-specific: run command + clean ----
@@ -204,12 +198,12 @@ test: direct
 	@$(RESET_RESULTS_CSV)
 	$(call RUN_CMD,$(TARGET_DIRECT)) --coverage $(COVERAGE)
 
-# One shape from Make variables / CLI (SIZE=, GS=, NO_ZEROS=1, FP32=1).
+# One shape from Make variables / CLI (SIZE=, GS=, NO_ZEROS=1).
 test_custom: direct
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) --group-size $(GS) $(CXX_NZ_FLAG) $(CXX_FP32_FLAG)
+	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) --group-size $(GS) $(CXX_NZ_FLAG)
 
 # Build only. The example/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.

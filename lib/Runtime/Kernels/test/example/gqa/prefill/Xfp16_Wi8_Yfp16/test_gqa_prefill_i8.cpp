@@ -12,7 +12,9 @@
 //      scale (the scale arg selects the int8 path).
 //   2. hip_gqa_dequant_kv_i8_to_fp16    : rebuild an fp16 BNSD view of the cache
 //      ONCE (prefill is compute-bound; per-fragment dequant would be pure waste).
-//   3. hip_gqa_flash_prefill_v2         : the tuned fp16 WMMA prefill, unchanged.
+//   3. the fp16 WMMA prefill, unchanged: hip_gqa_flash_prefill_v3_configured
+//      with the config resolved from the LUT in lookup mode, as real/gqa.cpp
+//      does, or the self-tuning hip_gqa_flash_prefill_v2 in autotune mode.
 //
 // This is why prefill needs NO separate int8 kernel: the compute is byte-identical
 // to fp16; only the KV load differs, and we localize that to a single dequant pass.
@@ -104,38 +106,62 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
-// Redirects stderr to `tmp_path` for the duration of `fn` (with `env_var=1`
-// set) so the op's own diagnostics land in a file instead of the console, then
-// returns them split by line.
+// Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
+// own diagnostics, which it prints while that variable is set. The kernels log
+// from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
+// the handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
+// kernels only when they are linked into this executable (the local make
+// build).
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_path,
     const std::function<void()>& fn) {
-  std::vector<std::string> lines;
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const std::string path = redirect ? tmp_path : leaf_stderr;
+  std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
-  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
-  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  if (redirect) {
+    if (!std::freopen(path.c_str(), "w", stderr)) {
+      fn();
+      _putenv_s(env_var, "");
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
   fn();
   std::fflush(stderr);
-  std::freopen("CON", "w", stderr);
+  if (redirect) std::freopen("CON", "w", stderr);
   _putenv_s(env_var, "");
-  std::ifstream in(tmp_path);
-  std::string line;
-  while (std::getline(in, line)) lines.push_back(line);
-  in.close();
-  std::remove(tmp_path.c_str());
+
+  std::vector<std::string> lines;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(start);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+  if (redirect) std::remove(path.c_str());
   return lines;
 }
 }  // namespace hipdnn_ep_test
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-// This leaf's kernel calls (append/dequant/prefill_v2) never resolve from the
-// autotune LUT directly -- MODE=lut only needs to satisfy gqa_autotune.cpp's
-// (unused by this test) extern LUT-data symbols so it still links. One-line
-// C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a tiny
-// Makefile-generated header (a plain #define, not a data file) so the path
-// never has to survive hipcc's Windows -D quoting (which mangles embedded
-// quote characters).
+#include "gqa_autotune.h"
+#ifndef HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
+// One-line C23 #embed of the real LUT .fb -- HIPDNN_LUT_FB is defined by a
+// tiny Makefile-generated header (a plain #define, not a data file) so the
+// path never has to survive hipcc's Windows -D quoting (which mangles
+// embedded quote characters).
 #include "lut_fb_path.h"
 static const unsigned char kLutBlob0[] = {
 #embed HIPDNN_LUT_FB
@@ -143,6 +169,27 @@ static const unsigned char kLutBlob0[] = {
 extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
 extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
 extern "C" const size_t               kGqaLutBlobCount    = 1;
+#endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
+
+// Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
+// resolved v5/v7/v8 knobs (see gqa_kernel.hip).
+extern "C" int hip_gqa_flash_prefill_v3_configured(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    int m_tiles, int bkv, int nw, int mt, int nd);
+
+// Mirrors real/gqa.cpp for a prefill without a window: d128 uses v6
+// (PrefillV5) with a KV group of a multiple of 4 heads, v7 otherwise; d256
+// uses v6 with a group of a multiple of 3 or 4 heads, v8 otherwise.
+static hipdnn_ep::GqaPrefillVariant prefill_variant(int d, int H, int G) {
+  if (d == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0)
+    return hipdnn_ep::GqaPrefillVariant::V8;
+  if (d == 128 && (H / G) % 4 != 0)
+    return hipdnn_ep::GqaPrefillVariant::V7;
+  return hipdnn_ep::GqaPrefillVariant::V5;
+}
 #endif
 
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
@@ -174,10 +221,17 @@ extern "C" int hip_gqa_flash_prefill_v2(
 
 struct Case { const char* name; int B, H, G, D, sq; };
 
+// results.csv shape: the parameters that tell any two cases apart.
+static std::string case_shape(const Case& c) {
+  return "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) + "_G" +
+         std::to_string(c.G) + "_D" + std::to_string(c.D) + "_sq" +
+         std::to_string(c.sq);
+}
+
 // Runs `body(b, hq)` for every (batch, query-head) pair, threaded across
 // std::thread::hardware_concurrency() workers (each pair is fully
 // independent) so the wider sq coverage below stays inside the shared
-// ~30 min tier3 budget across all 9 UT leaves.
+// ~30 min tier3 budget across all UT leaves.
 template <typename Fn>
 static void forEachBH(int B, int H, Fn&& body) {
   const int total = B * H;
@@ -382,9 +436,45 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, ref_fp16, B, H, G, D, sq, max_seq, scale);
 
   // Step 2+3: dequant once -> fp16 prefill (the runtime int8 prefill path).
+  // The prefill is dispatched the way real/gqa.cpp does: in lookup mode resolve
+  // the config from the table in custom_kernels_<arch>.dll and launch it
+  // through the lookup-only entry; in online mode let the kernel tune itself.
+  std::string lookup_config;
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  hipdnn_ep::GqaPrefillConfig selected_config{};
+  {
+    void* policy = hip_gqa_autotune_create(nullptr);
+    if (hip_gqa_autotune_mode(policy) !=
+        static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
+      const hipdnn_ep::GqaPrefillRequest request{
+          prefill_variant(D, H, G), B, H, G, D, sq, skv, /*window=*/0};
+      hipdnn_ep::GqaPrefillResult selected;
+      hip_gqa_autotune_resolve_prefill(policy, &request, &selected);
+      selected_config = selected.config;
+      char buf[96];
+      std::snprintf(buf, sizeof(buf),
+                    "lookup:m_tiles=%d bkv=%d nw=%d mt=%d nd=%d (%s)",
+                    selected.config.m_tiles, selected.config.bkv,
+                    selected.config.nw, selected.config.mt, selected.config.nd,
+                    hipdnn_ep::gqa_tune_source_name(selected.source));
+      lookup_config = buf;
+    }
+    hip_gqa_autotune_destroy(policy);
+  }
+#endif
   auto run_int8_path = [&]() {
     hip_gqa_dequant_kv_i8_to_fp16(nullptr, dK8, dKf16, dKsc, B, sq, G, D, max_seq, max_seq);
     hip_gqa_dequant_kv_i8_to_fp16(nullptr, dV8, dVf16, dVsc, B, sq, G, D, max_seq, max_seq);
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+    if (!lookup_config.empty()) {
+      hip_gqa_flash_prefill_v3_configured(
+          nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
+          past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
+          /*smooth_softmax=*/0, selected_config.m_tiles, selected_config.bkv,
+          selected_config.nw, selected_config.mt, selected_config.nd);
+      return;
+    }
+#endif
     hip_gqa_flash_prefill_v2(nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq, past_len, scale);
   };
   // Every launch in this function runs inside a capture window: the op's
@@ -462,13 +552,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
 
   {
     hipdnn_ep_test::CsvWriter csv;
-    char shape_buf[96];
-    std::snprintf(shape_buf, sizeof(shape_buf), "%s_H%d_G%d_D%d_sq%d", c.name,
-                  H, G, D, sq);
     hipdnn_ep_test::CsvRow row;
-    row.shape = shape_buf;
-    row.config =
-        launched_cfg.empty() ? "unlogged" : "autotune:" + launched_cfg;
+    row.shape = case_shape(c);
+    row.config = !lookup_config.empty() ? lookup_config
+                 : launched_cfg.empty() ? "unlogged"
+                                        : "autotune:" + launched_cfg;
     // The int8-KV path is what this leaf covers (dequant + fp16 prefill); the
     // fp16-only and dequant-only times are in the stdout line.
     row.time_ms = ms_int8;
@@ -498,13 +586,15 @@ static void write_markdown(const char* path, const char* dev, int cus,
              "the same dequant for every query tile (~`sq/ROWS`x). So the runtime "
              "does the opposite: `real/gqa.cpp` **dequantizes the int8 cache to an "
              "fp16 scratch exactly once** (`hip_gqa_dequant_kv_i8_to_fp16`) and "
-             "runs the **unchanged, tuned fp16 prefill** (`hip_gqa_flash_prefill_v2`). "
+             "runs the **unchanged fp16 prefill** with the config resolved from "
+             "the LUT (`hip_gqa_flash_prefill_v3_configured`). "
              "The attention compute is therefore byte-identical to fp16 -- no "
              "separate int8 prefill kernel exists. Numerically it attends over the "
              "exact rounded values that decode will later read, so prefill/decode "
              "stay consistent.\n\n");
   fprintf(f, "Full runtime path: `append_quant_i8` (write new K/V into the int8 "
-             "cache) -> `dequant_kv_i8_to_fp16` (once) -> `flash_prefill_v2`.\n\n");
+             "cache) -> `dequant_kv_i8_to_fp16` (once) -> "
+             "`flash_prefill_v3_configured`.\n\n");
   fprintf(f, "## Results\n\n");
   fprintf(f, "- `relL2 path/i8ref` = full GPU int8 path output vs CPU fp32 causal "
              "reference over the exact int8 bytes the append kernel wrote (PASS < 2e-2).\n");

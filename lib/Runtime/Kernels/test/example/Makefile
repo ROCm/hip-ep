@@ -37,7 +37,9 @@ endif
 LEAVES := gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
 	gqa/prefill/Xfp16_Wfp16_Yfp16 gqa/prefill/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp16_Wu2_Yfp16 matmul_nbits/Xfp16_Wu3_Yfp16 \
-	matmul_nbits/Xfp16_Wu4_Yfp16 matmul_nbits/Xfp16_Wi8_Yfp16
+	matmul_nbits/Xfp16_Wu4_Yfp16 matmul_nbits/Xfp16_Wi8_Yfp16 \
+	matmul_nbits/Xfp32_Wu2_Yfp32 matmul_nbits/Xfp32_Wu3_Yfp32 \
+	matmul_nbits/Xfp32_Wu4_Yfp32 matmul_nbits/Xfp32_Wi8_Yfp32
 
 ARCH  := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 HIPCC := $(HIP_SDK)/bin/hipcc.exe

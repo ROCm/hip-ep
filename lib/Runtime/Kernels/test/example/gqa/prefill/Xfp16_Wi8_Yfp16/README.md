@@ -41,13 +41,13 @@ full-cross budget blowup.
 
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
 exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
-warning. Both build and run fine either
-way -- the prefill launchers here never call the autotune-LUT resolver
-directly (only production `real/gqa.cpp` does), so `MODE=lookup` only needs to
-satisfy `gqa_autotune.cpp`'s (unused) LUT-data symbols so the link succeeds;
-they always self-tune their launch configuration per shape, independent of
-`MODE`. `MODE=lookup` needs `flatc` + its `include/` (a build tool, not part of
-this repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`
+warning. Like production `real/gqa.cpp`, the leaf resolves the config of the
+fp16 prefill that runs on the dequantized cache
+(`hip_gqa_autotune_resolve_prefill`) and launches it through
+`hip_gqa_flash_prefill_v3_configured`; `MODE=autotune` calls the self-tuning
+`hip_gqa_flash_prefill_v2` instead. `MODE=lookup` needs `flatc` + its
+`include/` (a build tool, not part of this repo):
+`FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`
 -- see `example/README.md`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

@@ -8,25 +8,25 @@
  * no python, no on-disk data) -- inputs, the uint4 packing, and the
  * dequant+matmul CPU reference are all generated in-process. The case set is
  * every categorical situation this op supports (group_size in {32,64,128},
- * zero-points on/off, dtype fp16/fp32) crossed with a comprehensive list of
+ * zero-points on/off) crossed with a comprehensive list of
  * typical (M,K,N) shapes -- M in {1,16,64,128,512} (decode/GEMV through
  * several prefill points) round-robined across 4 representative real-model
  * (K,N) layer families (FFN gate/up-proj, attn-proj, FFN down-proj, o-proj) --
  * NOT the full M/K/N shape space, and not a blind M x KN cross (which would
- * multiply by the 12-way categorical cross below and blow the tier3 time
+ * multiply by the 6-way categorical cross below and blow the tier3 time
  * budget; see kShapes4's comment). COVERAGE=1|2|3 (default 3) only thins how
  * many typical shapes run; every tier still touches every
- * group_size/zero-points/dtype value. The CPU reference is multithreaded
+ * group_size/zero-points value. The CPU reference is multithreaded
  * (see genCase() below) so the wider shape set stays inside budget.
  *
- * A:        FP16 (or FP32) row-major [M, K]
+ * A:        FP16 row-major [M, K]
  * B_packed: uint4 packed [N, K/2]-ish (see kernel_ut spec below), each byte
  *           = 2 values (low nibble first), row padded to
  *           num_groups_k * (group_size/2) bytes (ONNX MatMulNBits convention)
  * scales:   FP16 [N, num_groups_k], per-column per-group
  * zeros:    FP16 [N, num_groups_k], per-column per-group zero point
  *           (optional; default zero point is 8 when absent)
- * C:        FP16 (or FP32) row-major [M, N]
+ * C:        FP16 row-major [M, N]
  */
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
@@ -131,57 +131,95 @@ class CsvWriter {
 };
 }  // namespace hipdnn_ep_test
 
-// Reports which config the op actually ran, read back from its own
-// HIPDNN_MATMUL_LUT_LOG / HIPDNN_MATMUL_AUTOTUNE_LOG output rather than guessed
-// from the mode. The op logs a selection only on the first encounter with a
-// tune key (which does not include the activation dtype), so a later case
-// sharing that key reuses the earlier selection silently -- hence the memo,
-// which keeps every row attributable to a real config.
+// Runs `fn` and returns the stderr lines it produced. The kernels log from
+// custom_kernels_<arch>.dll, which links its own static CRT: its stderr is the
+// handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen(), which captures the kernels only
+// when they are linked into this executable (the local make build).
 template <typename Fn>
-static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
-  static std::map<std::string, std::string> selected_by_key;
+static std::vector<std::string> capture_stderr(Fn&& fn) {
   static const char* const kCapture = "out/_config_capture.tmp";
-  _putenv_s("HIPDNN_MATMUL_AUTOTUNE_LOG", "1");
-  _putenv_s("HIPDNN_MATMUL_LUT_LOG", "1");
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const char* path = redirect ? kCapture : leaf_stderr;
+  std::streamoff start = 0;
   std::fflush(stderr);
-  FILE* redirected = std::freopen(kCapture, "w", stderr);
-  launch();
+  if (redirect) {
+    if (!std::freopen(kCapture, "w", stderr)) {
+      fn();
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
+  fn();
   std::fflush(stderr);
-  std::freopen("CON", "w", stderr);
-  if (!redirected) return "log-unavailable";
+  if (redirect) std::freopen("CON", "w", stderr);
 
-  std::string lut, tuned;
+  std::vector<std::string> lines;
   {
     // Scoped so the stream is closed before the remove below; Windows refuses
     // to delete a file that is still open.
-    std::ifstream log(kCapture);
-    std::string line;
-    while (std::getline(log, line)) {
-      if (line.find("LUT hit") != std::string::npos) {
-        lut = "lookup:" + line.substr(line.find("config["));
-        const size_t src = line.find('(');
-        if (src != std::string::npos)
-          lut += " " + line.substr(src, line.find(')', src) + 1 - src);
-      } else if (line.find("best config[") != std::string::npos) {
-        tuned = "autotune:" + line.substr(line.find("best config["));
-        // Drop the tuner's own "(x ms/iter)": it is a peak sample taken under
-        // the clock state of the sweep, not this row's time_ms, and showing
-        // both invites reading them as the same measurement.
-        const size_t timing = tuned.rfind(" (");
-        if (timing != std::string::npos &&
-            tuned.find("ms/iter", timing) != std::string::npos)
-          tuned.erase(timing);
-      }
+    std::ifstream log(path, std::ios::binary);
+    log.seekg(start);
+    for (std::string line; std::getline(log, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
     }
   }
-  std::remove(kCapture);
+  if (redirect) std::remove(kCapture);
+  return lines;
+}
+
+// Reports which config the op actually ran, read back from its own
+// HIPDNN_MATMUL_LUT_LOG / HIPDNN_MATMUL_AUTOTUNE_LOG output rather than guessed
+// from the mode. The op logs a selection only on the first encounter with a
+// tune key, so a later case sharing that key reuses the earlier selection
+// silently -- hence the memo, which keeps every row attributable to a real
+// config.
+template <typename Fn>
+static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
+  static std::map<std::string, std::string> selected_by_key;
+  _putenv_s("HIPDNN_MATMUL_AUTOTUNE_LOG", "1");
+  _putenv_s("HIPDNN_MATMUL_LUT_LOG", "1");
+
+  std::string lut, tuned;
+  for (const std::string& line : capture_stderr(launch)) {
+    if (line.find("LUT hit") != std::string::npos) {
+      // The op prints the table's Source as a number; name it the way
+      // matmul_nbits_autotune.h does.
+      static const char* const kSources[] = {"none", "exact", "nearest",
+                                             "fallback"};
+      int src = -1;
+      double distance = 0.0;
+      const size_t tier = line.find("(src=");
+      if (tier != std::string::npos)
+        std::sscanf(line.c_str() + tier, "(src=%d d=%lf)", &src, &distance);
+      char source[48];
+      std::snprintf(source, sizeof(source), " (%s d=%.3f)",
+                    src >= 0 && src < 4 ? kSources[src] : "unknown", distance);
+      lut = "lookup:" + line.substr(line.find("config[")) + source;
+    } else if (line.find("best config[") != std::string::npos) {
+      tuned = "autotune:" + line.substr(line.find("best config["));
+      // Drop the tuner's own "(x ms/iter)": it is a peak sample taken under
+      // the clock state of the sweep, not this row's time_ms, and showing
+      // both invites reading them as the same measurement.
+      const size_t timing = tuned.rfind(" (");
+      if (timing != std::string::npos &&
+          tuned.find("ms/iter", timing) != std::string::npos)
+        tuned.erase(timing);
+    }
+  }
 
   std::string selected = !lut.empty() ? lut : tuned;
   if (selected.empty()) {
     auto it = selected_by_key.find(tune_key);
-    // No selection logged and none remembered: this shape reached a path with
-    // no tunable config at all.
-    if (it == selected_by_key.end()) return "naive";
+    // Nothing logged and nothing remembered: the op printed no diagnostic for
+    // this config, a gap to fix rather than a result.
+    if (it == selected_by_key.end()) return "unlogged";
     selected = it->second;
   } else {
     selected_by_key[tune_key] = selected;
@@ -301,7 +339,7 @@ static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
   // fp32 reference: C[m,n] = sum_k A[m,k] * (Bq[n,k] - zp) * scale. Threaded
   // over N (each output column is independent, no cross-column state) so the
   // wider M/K/N shapes in the coverage sweep (buildCases() below) stay
-  // inside the shared ~30 min tier3 budget across all 9 UT leaves -- see
+  // inside the shared ~30 min tier3 budget across all UT leaves -- see
   // example/README.md "Shape coverage".
   std::vector<float> Cref(static_cast<size_t>(M) * N, 0.0f);
   auto refColumns = [&](int n0, int n1) {
@@ -353,11 +391,11 @@ static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
 }
 
 // ============================================================
-// Categorical situations (group_size x zero-points x dtype) -- ALWAYS run in
-// full, every tier -- crossed with a comprehensive typical-shape list. Every
-// shape below is ALSO crossed with the full 12-way group_size x zero-points
-// x dtype set in buildCases(), so the shape list size directly multiplies
-// total CPU-reference cost by 12 -- see genCase() above, which is
+// Categorical situations (group_size x zero-points) -- ALWAYS run in full,
+// every tier -- crossed with a comprehensive typical-shape list. Every shape
+// below is ALSO crossed with the full 6-way group_size x zero-points set in
+// buildCases(), so the shape list size directly multiplies total
+// CPU-reference cost by 6 -- see genCase() above, which is
 // O(M*K*N) per case (now multithreaded over N so this stays affordable).
 // ============================================================
 namespace sweep {
@@ -371,7 +409,7 @@ struct Shape { int M, K, N; };
 // touches all 4 families; M=16/128 touch gate/up-proj + attn-proj; M=64/512
 // touch down-proj + o-proj -- every M value and every (K,N) family appears at
 // least once without paying for the full M x KN cross (5x4=20 shapes would
-// multiply the already-12x categorical cross to 240 cases/leaf).
+// multiply the already-6x categorical cross to 120 cases/leaf).
 static const Shape kShapes4[] = {
     {1,   4096,  11008},  // decode, FFN gate/up-proj (K=hidden, N=intermediate)
     {1,   2880,  5120},   // decode, attn-proj (group_size zero-padding path)
@@ -397,7 +435,8 @@ static const Shape kShapes2[] = {kShapes4[1], kShapes4[6]};
 
 static const int kGsArray[] = {32, 64, 128};
 static const bool kZeroArray[] = {true, false};
-static const bool kDtypeArray[] = {false, true};  // fp16, fp32
+// The leaf's activation and output dtype: X and Y in its name.
+static constexpr bool kFp32 = false;
 
 struct Case {
   int M, K, N, gs;
@@ -412,9 +451,8 @@ static std::vector<Case> buildCases(int tier) {
   std::vector<Case> out;
   for (int gs : kGsArray)
     for (bool zero : kZeroArray)
-      for (bool fp32 : kDtypeArray)
-        for (size_t si = 0; si < n_shapes; ++si)
-          out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, fp32});
+      for (size_t si = 0; si < n_shapes; ++si)
+        out.push_back({shapes[si].M, shapes[si].K, shapes[si].N, gs, zero, kFp32});
   return out;
 }
 
@@ -508,8 +546,8 @@ static bool runOne(const Case& c, int idx) {
     using namespace hipdnn_ep_test;
     CsvWriter csv;
     char shape_buf[96];
-    std::snprintf(shape_buf, sizeof(shape_buf), "%dx%dx%d_gs%d_%s%s", c.M, c.N,
-                 c.K, c.gs, c.fp32 ? "fp32" : "fp16", c.zero ? "" : "_noz");
+    std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_gs%d%s", c.M, c.N,
+                 c.K, c.gs, c.zero ? "" : "_noz");
     CsvRow row;
     row.shape = shape_buf;
     row.config = selected_config;
@@ -531,7 +569,7 @@ static bool runOne(const Case& c, int idx) {
 static int run(int coverage_tier) {
   std::vector<Case> cases = buildCases(coverage_tier);
   std::printf("coverage=%d -> running %zu matmul_nbits cases (3 group_size x "
-             "2 zero-points x 2 dtype x typical shapes)\n",
+             "2 zero-points x typical shapes)\n",
              coverage_tier, cases.size());
   int fail = 0;
   for (size_t i = 0; i < cases.size(); ++i)
@@ -545,10 +583,10 @@ static int run(int coverage_tier) {
 
 // ============================================================
 // Single-shape convenience path (make test_custom): in-process rng, no data
-// files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1] [FP32=1].
+// files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
-static int runCustom(int M, int N, int K, int gs, bool zero, bool fp32) {
-  return sweep::runOne({M, K, N, gs, zero, fp32}, /*idx=*/0) ? 0 : 1;
+static int runCustom(int M, int N, int K, int gs, bool zero) {
+  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32}, /*idx=*/0) ? 0 : 1;
 }
 
 int main(int argc, char* argv[]) {
@@ -561,18 +599,17 @@ int main(int argc, char* argv[]) {
 
   int M = 0, N = 0, K = 0;
   int gs = 128;
-  bool no_zeros = false, fp32_mode = false;
+  bool no_zeros = false;
   bool have_custom = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--no-zeros") no_zeros = true;
-    else if (a == "--fp32") fp32_mode = true;
     else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
     else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
   }
 
   if (have_custom)
-    return runCustom(M, N, K, gs, !no_zeros, fp32_mode);
+    return runCustom(M, N, K, gs, !no_zeros);
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   return sweep::run(tier);

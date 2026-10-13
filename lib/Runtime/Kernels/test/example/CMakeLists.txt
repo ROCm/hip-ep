@@ -57,10 +57,11 @@ function(add_kernel_package_ut arch executable_name source_file)
     -Wno-c23-extensions
     -DHIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS=1
   )
-  if(source_file MATCHES "^gqa/(decode|prefill)/Xfp16_Wfp16_Yfp16/")
-    # The fp16 GQA leaves exercise the production lookup-only entry points.
-    # Their resolver and LUT blobs stay in custom_kernels_<arch>; the source
-    # guard suppresses the old per-executable #embed payload.
+  if(source_file MATCHES "^gqa/")
+    # The GQA leaves exercise the production lookup-only entry points, as
+    # real/gqa.cpp does for both the fp16 and the int8 KV cache. Their resolver
+    # and LUT blobs stay in custom_kernels_<arch>; the source guard suppresses
+    # the old per-executable #embed payload.
     list(APPEND ut_options -DHIPDNN_LUT_LINKED_EXTERNALLY=1)
     list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa)
   endif()
@@ -113,6 +114,18 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16
     matmul_nbits/Xfp16_Wi8_Yfp16/test_matmul_nbits_i8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32
+    matmul_nbits/Xfp32_Wu2_Yfp32/test_matmul_nbits_u2.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32
+    matmul_nbits/Xfp32_Wu3_Yfp32/test_matmul_nbits_u3.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32
+    matmul_nbits/Xfp32_Wu4_Yfp32/test_matmul_nbits.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32
+    matmul_nbits/Xfp32_Wi8_Yfp32/test_matmul_nbits_i8.cpp)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16
     gqa/decode/Xfp16_Wfp16_Yfp16/test_gqa_decode.cpp)

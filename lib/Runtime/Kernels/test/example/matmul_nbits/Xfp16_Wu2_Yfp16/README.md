@@ -6,23 +6,26 @@ padding). No CMake, no EP build. Entirely self-contained: inputs (uint2
 packing, scales, zero-points) and the CPU fp32 dequant+matmul reference are
 all generated in-process, no python, no data files, no `example/common/`.
 
+Activations (`A`) and the output (`C`) are fp16; `matmul_nbits/Xfp32_Wu2_Yfp32` is
+the same test with fp32 activations.
+
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
-make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x2880x5120 GS=128 [NO_ZEROS=1] [FP32=1]
+make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x2880x5120 GS=128 [NO_ZEROS=1]
 make clean
 ```
 
 | Target | Meaning |
 |---|---|
 | `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
-| `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1`, `FP32=1` (in-process rng). |
+| `test_custom` | One shape from `SIZE=MxKxN`, `GS=`, `NO_ZEROS=1` (in-process rng). |
 | `clean` | Removes `out/`. |
 
 ## Shape coverage (3 tiers)
 
 Same model as `matmul_nbits/Xfp16_Wu4_Yfp16` (see its README for the full
-rationale): `group_size {32,64,128} x zero-points {on,off} x dtype
-{fp16,fp32}` (12 combos, always full) x a comprehensive M-in-`{1,16,64,128,
+rationale): `group_size {32,64,128} x zero-points {on,off}` (6
+combos, always full) x a comprehensive M-in-`{1,16,64,128,
 512}` x 4-(K,N)-family typical-shape grid thinned by tier (tier3 = 12
 shapes, tier2 = 8, tier1 = 2 -- "1 decode + 1 prefill"). The CPU reference
 is multithreaded over `N` so the wider grid stays affordable.

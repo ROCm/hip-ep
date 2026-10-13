@@ -109,27 +109,51 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
-// Redirects stderr to `tmp_path` for the duration of `fn` (with `env_var=1`
-// set) so the [custom_kernels]/[gqa-lut] debug lines the op already prints
-// (gated on that env var) land in a file instead of the console, then
-// returns them split by line.
+// Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
+// own diagnostics, which it prints while that variable is set. The kernels log
+// from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
+// the handle this process started with, so freopen() here would not move it.
+// hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
+// HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
+// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
+// kernels only when they are linked into this executable (the local make
+// build).
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_path,
     const std::function<void()>& fn) {
-  std::vector<std::string> lines;
+  const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
+  const bool redirect = !leaf_stderr || !leaf_stderr[0];
+  const std::string path = redirect ? tmp_path : leaf_stderr;
+  std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
-  FILE* redirected = std::freopen(tmp_path.c_str(), "w", stderr);
-  if (!redirected) { _putenv_s(env_var, ""); return lines; }
+  if (redirect) {
+    if (!std::freopen(path.c_str(), "w", stderr)) {
+      fn();
+      _putenv_s(env_var, "");
+      return {};
+    }
+  } else {
+    std::ifstream log(path, std::ios::binary | std::ios::ate);
+    if (log) start = log.tellg();
+  }
   fn();
   std::fflush(stderr);
-  std::freopen("CON", "w", stderr);
+  if (redirect) std::freopen("CON", "w", stderr);
   _putenv_s(env_var, "");
-  std::ifstream in(tmp_path);
-  std::string line;
-  while (std::getline(in, line)) lines.push_back(line);
-  in.close();
-  std::remove(tmp_path.c_str());
+
+  std::vector<std::string> lines;
+  {
+    // Scoped so the stream is closed before the remove below; Windows refuses
+    // to delete a file that is still open.
+    std::ifstream in(path, std::ios::binary);
+    in.seekg(start);
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+  if (redirect) std::remove(path.c_str());
   return lines;
 }
 }  // namespace hipdnn_ep_test
@@ -222,6 +246,18 @@ struct Case {
   int sink;                         // head_sink present
   int smooth;                       // use_smooth_softmax (no explicit sink)
 };
+
+// results.csv shape: the parameters that tell any two cases apart. The window,
+// sink and smooth flags appear only when set.
+static std::string case_shape(const Case& c) {
+  std::string s = "B" + std::to_string(c.B) + "_H" + std::to_string(c.H) +
+                  "_G" + std::to_string(c.G) + "_D" + std::to_string(c.D) +
+                  "_len" + std::to_string(c.total);
+  if (c.window > 0) s += "_win" + std::to_string(c.window);
+  if (c.sink) s += "_sink";
+  if (c.smooth) s += "_smooth";
+  return s;
+}
 
 // One collected result row for the Markdown perf report. The three latency
 // columns are fixed-config vs autotune on the SAME kernel (see file header);
@@ -600,9 +636,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   if (!g_prod_only)
     ok = ok && (l2_base < tol) && (l2_wmma < tol) && (l2_scalar < tol);
 
-  char csv_shape[96];
-  std::snprintf(csv_shape, sizeof(csv_shape), "%s_H%d_G%d_D%d_len%d_win%d",
-                c.name, H, G, D, c.total, c.window);
+  const std::string csv_shape = case_shape(c);
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
   if (kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded()) {
     using namespace hipdnn_ep_test;

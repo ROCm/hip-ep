@@ -38,6 +38,14 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wi8_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wi8-yfp16.exe"},
+    {"matmul_nbits", "Xfp32_Wu2_Yfp32",
+     "hipdnn-kernel-ut-matmul-nbits-xfp32-wu2-yfp32.exe"},
+    {"matmul_nbits", "Xfp32_Wu3_Yfp32",
+     "hipdnn-kernel-ut-matmul-nbits-xfp32-wu3-yfp32.exe"},
+    {"matmul_nbits", "Xfp32_Wu4_Yfp32",
+     "hipdnn-kernel-ut-matmul-nbits-xfp32-wu4-yfp32.exe"},
+    {"matmul_nbits", "Xfp32_Wi8_Yfp32",
+     "hipdnn-kernel-ut-matmul-nbits-xfp32-wi8-yfp32.exe"},
     {"gqa/decode", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-gqa-decode-xfp16-wfp16-yfp16.exe"},
     {"gqa/decode", "Xfp16_Wi8_Yfp16",
@@ -111,25 +119,58 @@ static bool setEnvironment(const char* name, const std::string& value) {
   return false;
 }
 
+static HANDLE inheritableStdHandle(DWORD id) {
+  const HANDLE handle = GetStdHandle(id);
+  if (handle && handle != INVALID_HANDLE_VALUE)
+    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+  return handle;
+}
+
+// custom_kernels_<arch>.dll links its own static CRT, whose stderr stays on the
+// handle the process started with, so a leaf cannot capture the kernels'
+// diagnostics with freopen(). The leaf therefore starts with stderr on
+// `stderr_log`, named in HIPDNN_KERNEL_UT_STDERR, and reads back what each case
+// appends.
 static bool runLeaf(const fs::path& executable, const fs::path& working_dir,
-                    int coverage, DWORD& exit_code, double& elapsed_ms) {
+                    const fs::path& stderr_log, int coverage, DWORD& exit_code,
+                    double& elapsed_ms) {
   std::string command = "\"" + executable.string() + "\" --coverage " +
                         std::to_string(coverage);
   std::vector<char> command_buffer(command.begin(), command.end());
   command_buffer.push_back('\0');
 
+  exit_code = static_cast<DWORD>(-1);
+  elapsed_ms = 0.0;
+  SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
+  const HANDLE log = CreateFileW(
+      stderr_log.c_str(), FILE_APPEND_DATA,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &inherit,
+      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (log == INVALID_HANDLE_VALUE) {
+    std::fprintf(stderr, "failed to create %s: %lu\n",
+                 stderr_log.string().c_str(), GetLastError());
+    return false;
+  }
+  if (!setEnvironment("HIPDNN_KERNEL_UT_STDERR", stderr_log.string())) {
+    CloseHandle(log);
+    return false;
+  }
+
   STARTUPINFOA startup{};
   startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = inheritableStdHandle(STD_INPUT_HANDLE);
+  startup.hStdOutput = inheritableStdHandle(STD_OUTPUT_HANDLE);
+  startup.hStdError = log;
   PROCESS_INFORMATION process{};
   const auto start = std::chrono::steady_clock::now();
   const BOOL created = CreateProcessA(
       executable.string().c_str(), command_buffer.data(), nullptr, nullptr,
-      FALSE, 0, nullptr, working_dir.string().c_str(), &startup, &process);
+      TRUE, 0, nullptr, working_dir.string().c_str(), &startup, &process);
+  CloseHandle(log);
   if (!created) {
     std::fprintf(stderr, "failed to launch %s: %lu\n", executable.string().c_str(),
                  GetLastError());
-    exit_code = static_cast<DWORD>(-1);
-    elapsed_ms = 0.0;
     return false;
   }
 
@@ -188,6 +229,7 @@ int main(int argc, char** argv) {
   }
   std::printf("Running %s kernel tests from %s\n", arch.c_str(),
               leaf_dir.string().c_str());
+  std::fflush(stdout);
 
   const fs::path out_dir = bin / "out";
   fs::create_directories(out_dir);
@@ -229,11 +271,20 @@ int main(int argc, char** argv) {
     DWORD exit_code = 0;
     double elapsed_ms = 0.0;
     const fs::path executable = leaf_dir / leaf.executable;
-    const bool launched = fs::is_regular_file(executable) &&
-                          runLeaf(executable, bin, coverage, exit_code, elapsed_ms);
+    const fs::path stderr_log =
+        out_dir / (executable.stem().string() + ".stderr.log");
+    const bool launched =
+        fs::is_regular_file(executable) &&
+        runLeaf(executable, bin, stderr_log, coverage, exit_code, elapsed_ms);
     const bool leaf_passed = launched && exit_code == 0;
     std::printf("[%s/%s] %s (%.1f ms)\n", leaf.op, leaf.name,
                 leaf_passed ? "PASS" : "FAIL", elapsed_ms);
+    std::error_code ignored;
+    if (leaf_passed)
+      fs::remove(stderr_log, ignored);
+    else if (fs::exists(stderr_log, ignored))
+      std::printf("  stderr: %s\n", stderr_log.string().c_str());
+    std::fflush(stdout);
 
     // One summary row per leaf, alongside the per-case rows the leaf itself
     // appended. time_ms here is the leaf process's total wall time, the only
