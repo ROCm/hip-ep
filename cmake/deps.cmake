@@ -36,6 +36,10 @@ endif()
 #     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
 #     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
 #     tablegen collector or include-dir export.
+#   - rocmlirTriton-static-triton-libs.patch: build Triton libraries as STATIC
+#     archives when TRITON_BUILD_STATIC_LIBS is set. Linux otherwise makes them
+#     OBJECT libraries that CMake archives into every static consumer, so
+#     --whole-archive of libHipCInterface.a links each Triton pass twice.
 #
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
@@ -52,7 +56,8 @@ endif()
 # applied and we skip; otherwise we (re)apply the series from a pristine tree.
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-static-triton-libs.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
   get_filename_component(_p "${_p}" ABSOLUTE)
@@ -465,6 +470,10 @@ if(ENABLE_ROCMLIRTRITON)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error>)
   endif()
 
+  # See rocmlirTriton-static-triton-libs.patch. Must be set before Triton
+  # defines add_triton_object. The patch builds those libraries as PIC static
+  # archives so they can be linked into hipgpu.so exactly once.
+  set(TRITON_BUILD_STATIC_LIBS ON)
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
 

@@ -26,7 +26,9 @@ if(ENABLE_ROCMLIRTRITON)
   # rocMLIR/Triton's per-library static archives have circular dependencies,
   # so a single-pass link leaves undefined symbols. GNU/BSD-style linkers need
   # an explicit RESCAN group; MSVC-style linkers (link.exe / lld-link) rescan
-  # automatically and do not support the feature.
+  # automatically and do not support the feature. Triton itself is built as
+  # static archives (TRITON_BUILD_STATIC_LIBS): its Linux OBJECT libraries would
+  # be copied into libHipCInterface.a and linked a second time.
   if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
     set(_rocmlir_link_closure "$<LINK_GROUP:RESCAN,${HIPDNN_ROCMLIR_LINK_LIBS}>")
   else()
