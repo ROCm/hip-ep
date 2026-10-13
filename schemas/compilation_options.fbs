@@ -14,7 +14,6 @@ table CompilationOptions {
   verbose: bool = false;
   constants_file: string = "constants.bin";
   skip_constant_data: bool = false;
-  disk_resident_gather: bool = true;
 }
 
 root_type CompilationOptions;

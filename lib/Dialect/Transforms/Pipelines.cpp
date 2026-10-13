@@ -137,15 +137,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // every carrier before canonicalization, CSE, and bufferization.
   if (fs) {
     pm.addPass(mlir::hip::createExternalizeConstantsPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData,
-        options.diskResidentGather));
+        fs, options.externalizeMinNumElements, options.skipConstantData));
   } else {
     mlir::hip::ExternalizeConstantsPassOptions externalizeOptions;
     externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
     externalizeOptions.externalizeMinNumElements =
         options.externalizeMinNumElements;
     externalizeOptions.skipConstantData = options.skipConstantData;
-    externalizeOptions.diskResidentGather = options.diskResidentGather;
     pm.addPass(mlir::hip::createExternalizeConstantsPass(
         std::move(externalizeOptions)));
   }

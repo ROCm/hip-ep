@@ -1,20 +1,15 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true disk-resident-gather=true' %s | FileCheck %s --check-prefix=DISK
-// RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s --check-prefix=OFF --implicit-check-not=disk_resident
+// RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s
 
-// DISK: module attributes
-// DISK-SAME: hipdnn.constant_offsets = array<i64: 0, 0, 2819260416, 6845792256>
-// DISK-SAME: hipdnn.constant_source_kinds = array<i32: 4, 2, 2, 2>
-// DISK-DAG: memref.global "private" @hip_ext_constant_ple_0 {{.*}}hip.external_data = {disk_resident, index = 0 : i64
-// DISK-DAG: memref.global "private" @hip_ext_constant_embed_1 {{.*}}hip.external_data = {index = 1 : i64
-// DISK-DAG: memref.global "private" @hip_ext_constant_shared_2 {{.*}}hip.external_data = {index = 2 : i64
-// DISK-DAG: memref.global "private" @hip_ext_constant_inner_3 {{.*}}hip.external_data = {index = 3 : i64
-
-// OFF: module attributes
-// OFF-SAME: hipdnn.constant_source_kinds = array<i32: 2, 2, 2, 2>
-// OFF: memref.global "private" @hip_ext_constant_ple_0
+// CHECK: module attributes
+// CHECK-SAME: hipdnn.constant_offsets = array<i64: 0, 0, 2819260416, 6845792256>
+// CHECK-SAME: hipdnn.constant_source_kinds = array<i32: 4, 2, 2, 2>
+// CHECK-DAG: memref.global "private" @hip_ext_constant_ple_0 {{.*}}hip.external_data = {disk_resident, index = 0 : i64
+// CHECK-DAG: memref.global "private" @hip_ext_constant_embed_1 {{.*}}hip.external_data = {index = 1 : i64
+// CHECK-DAG: memref.global "private" @hip_ext_constant_shared_2 {{.*}}hip.external_data = {index = 2 : i64
+// CHECK-DAG: memref.global "private" @hip_ext_constant_inner_3 {{.*}}hip.external_data = {index = 3 : i64
 
 func.func @tables(%ctx: !hip.context, %idx: tensor<2xi64>,
                   %rows_ple: tensor<2x7680xf16>, %rows_emb: tensor<2x5376xf16>,
