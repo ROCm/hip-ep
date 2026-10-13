@@ -474,6 +474,13 @@ if(ENABLE_ROCMLIRTRITON)
   # defines add_triton_object. The patch builds those libraries as PIC static
   # archives so they can be linked into hipgpu.so exactly once.
   set(TRITON_BUILD_STATIC_LIBS ON)
+  # TritonToHsaco names the AMDGPUCodeGen component. llvm_map_components_to_libnames
+  # rejects that name when AMDGPU is missing from LLVM_TARGETS_TO_BUILD, even if
+  # libLLVMAMDGPUCodeGen is in the prefix. The CI LLVM and the in-tree fallback
+  # are both built with X86 and AMDGPU; pin that here so a CACHE value of
+  # "host" or an X86-only default cannot drop AMDGPU.
+  set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING
+      "Backends required by rocMLIR/Triton" FORCE)
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
 
