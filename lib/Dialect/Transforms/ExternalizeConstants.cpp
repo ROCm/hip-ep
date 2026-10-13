@@ -292,10 +292,9 @@ class ConstantExternalizer {
 public:
   ConstantExternalizer(ModuleOp module, morphizen::FileSystem &fs,
                        int64_t minElements, bool skipData,
-                       bool allowMemorySources, bool diskResidentGather)
+                       bool allowMemorySources)
       : module(module), fs(fs), minElements(minElements), skipData(skipData),
         allowMemorySources(allowMemorySources),
-        diskResidentGather(diskResidentGather),
         binFileName(moduleBaseName(module) + ".constants.bin") {}
 
   LogicalResult buildPlan() {
@@ -384,8 +383,7 @@ private:
   }
 
   bool isDiskResidentGatherTable(ConstantPlan &plan) const {
-    if (!diskResidentGather || !skipData || !plan.externalize ||
-        plan.source != SourceKind::File ||
+    if (!skipData || !plan.externalize || plan.source != SourceKind::File ||
         plan.numElements < kMinDiskResidentGatherElements) {
       return false;
     }
@@ -757,7 +755,6 @@ private:
   int64_t minElements;
   bool skipData;
   bool allowMemorySources;
-  bool diskResidentGather;
   std::string binFileName;
   size_t externalizedCount = 0;
   int64_t totalBlobSize = 0;
@@ -770,10 +767,9 @@ struct ExternalizeConstantsPass
   using ExternalizeConstantsPassBase::ExternalizeConstantsPassBase;
 
   ExternalizeConstantsPass(morphizen::FileSystem *fs, int64_t minElements,
-                           bool skipConstantData, bool diskResidentGather)
+                           bool skipConstantData)
       : fileSystem(fs), fsMinElements(minElements),
-        fsSkipConstantData(skipConstantData),
-        fsDiskResidentGather(diskResidentGather) {}
+        fsSkipConstantData(skipConstantData) {}
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -791,10 +787,8 @@ struct ExternalizeConstantsPass
       fs = fallback.get();
     }
 
-    bool diskGather =
-        fileSystem ? fsDiskResidentGather : diskResidentGather.getValue();
     ConstantExternalizer externalizer(module, *fs, minElements, skipData,
-                                      allowMemorySources, diskGather);
+                                      allowMemorySources);
     if (failed(externalizer.buildPlan()) ||
         failed(externalizer.writeArtifacts())) {
       signalPassFailure();
@@ -806,17 +800,15 @@ struct ExternalizeConstantsPass
   morphizen::FileSystem *fileSystem = nullptr;
   int64_t fsMinElements = 0;
   bool fsSkipConstantData = false;
-  bool fsDiskResidentGather = false;
 };
 
 } // namespace
 
 std::unique_ptr<mlir::Pass>
 createExternalizeConstantsPass(morphizen::FileSystem *fs,
-                               int64_t minNumElements, bool skipConstantData,
-                               bool diskResidentGather) {
-  return std::make_unique<ExternalizeConstantsPass>(
-      fs, minNumElements, skipConstantData, diskResidentGather);
+                               int64_t minNumElements, bool skipConstantData) {
+  return std::make_unique<ExternalizeConstantsPass>(fs, minNumElements,
+                                                    skipConstantData);
 }
 
 } // namespace hip
