@@ -13,13 +13,12 @@
 // control the timing budget. This TU therefore #includes the kernel source and
 // drives the internal dispatch helpers directly:
 //
-//   d == 64  -> gqa_flash_prefill_v5   candidates: M_TILES x BKV
-//   d == 128 -> gqa_flash_prefill_v7   candidates: NW x BKV x MT
-//   d == 256 -> gqa_flash_prefill_v8   candidates: ND x MT x BKV
-//   decode   -> flash split-K decode   candidates: {scalar,wmma} x split-count
+//   d == 64, 96, 128 -> gqa_flash_prefill_v6x  candidates: HB x QW x M_TILES x BKV
+//   d == 256         -> gqa_flash_prefill_v8x  candidates: ND x HB x BKV
+//   decode           -> flash split-K decode   candidates: {scalar,wmma} x split-count
 //
 // The candidate sets are the ones the production tuners use
-// (prefillV*Candidates / flashDecodeCandidateSplits), so a winner reported here
+// (prefillV*xCandidates / flashDecodeCandidateSplits), so a winner reported here
 // is a config the runtime can actually land on. Decode additionally sweeps
 // split counts outside the production guard, flagged `prod=0`, to show what the
 // guard costs.
@@ -73,14 +72,15 @@ struct Shape {
 };
 
 struct Result {
-  std::string cfg; // canonical config string, e.g. "MT2_BKV32"
+  std::string cfg; // canonical config string, e.g. "HB4_QW1_MT2_BKV32"
   double ms;
   bool prod_candidate; // in the production tuner's candidate set
   double rel_l2;       // vs. the first candidate's output (-1 = not checked)
   // The same config split into its individual knobs, so the summary table can
   // give each tunable its own column instead of a string a reader has to parse.
   // -1 = the knob does not exist for this kernel.
-  int impl_wmma = -1, splits = -1, mt = -1, bkv = -1, nw = -1, nd = -1;
+  int impl_wmma = -1, splits = -1, hb = -1, qw = -1, mt = -1, bkv = -1,
+      nd = -1;
 };
 
 // What the *production* tuner would spend on its first call for this shape.
@@ -91,8 +91,9 @@ struct TuneCost {
   int launches; // kernel launches issued while tuning
 };
 
-// tunePrefillV5/V7/V8Cfg: kWarmup=30 launches cycling the candidate list, then
-// kRounds=4 x (1 untimed + kIters=30 timed) launches per candidate.
+// tunePrefillCandidates: kWarmup=30 launches cycling the candidate list, one
+// probe launch per candidate, then kRounds=4 x (1 untimed + n timed) launches
+// per candidate, n = clamp(25 ms / per-call time, 1, 30).
 TuneCost prodPrefillTuneCost(const std::vector<Result> &res) {
   TuneCost c{0.0, 0};
   const int nc = (int)res.size();
@@ -103,8 +104,11 @@ TuneCost prodPrefillTuneCost(const std::vector<Result> &res) {
     ++c.launches;
   }
   for (const Result &r : res) {
-    c.ms += 4 * 31 * r.ms;
-    c.launches += 4 * 31;
+    const int n =
+        r.ms > 0.0 ? std::max(1, std::min(30, static_cast<int>(25.0 / r.ms)))
+                   : 30;
+    c.ms += (1 + 4 * (1 + n)) * r.ms;
+    c.launches += 1 + 4 * (1 + n);
   }
   return c;
 }
@@ -124,10 +128,15 @@ TuneCost prodDecodeTuneCost(const std::vector<Result> &res) {
 
 // ---- timing -----------------------------------------------------------------
 
-// Time `launch` with an iteration count sized to the shape: one untimed probe
-// call sets the per-call cost, then enough iterations to fill target_ms are run
-// for each of `rounds` measurements. Big prefill shapes (0.5 s a call) would
-// otherwise inherit the production tuner's fixed 30x4x30 launches.
+// Time `launch` with an iteration count sized to the shape: a probe sets the
+// per-call cost, then enough iterations to fill target_ms are run for each of
+// `rounds` measurements. Big prefill shapes (0.5 s a call) would otherwise
+// inherit the production tuner's fixed 30x4x30 launches.
+//
+// The probe doubles its launch count until it spans 1 ms. A single short call
+// (a 5 us prefill) can read ~0 or negative, and sizing from that reading left
+// every round at min_iters: 3 calls, 15 us, which the event timer under-reads
+// in every round alike, so even the median came out at 0.23 us.
 //
 // The rounds are reduced by MEDIAN, not min. hipEventElapsedTime occasionally
 // returns ~0 for a round; with min that single reading becomes the config's
@@ -149,15 +158,22 @@ double timeConfig(F &&launch, double target_ms, int min_iters, int max_iters,
   SWEEP_CHECK(hipEventCreate(&e0));
   SWEEP_CHECK(hipEventCreate(&e1));
 
-  SWEEP_CHECK(hipEventRecord(e0, nullptr));
-  launch();
-  SWEEP_CHECK(hipEventRecord(e1, nullptr));
-  SWEEP_CHECK(hipEventSynchronize(e1));
-  float probe_ms = 0.0f;
-  SWEEP_CHECK(hipEventElapsedTime(&probe_ms, e0, e1));
+  double probe_ms = 0.0;
+  for (int n = 1;; n *= 2) {
+    SWEEP_CHECK(hipEventRecord(e0, nullptr));
+    for (int i = 0; i < n; ++i)
+      launch();
+    SWEEP_CHECK(hipEventRecord(e1, nullptr));
+    SWEEP_CHECK(hipEventSynchronize(e1));
+    float ms = 0.0f;
+    SWEEP_CHECK(hipEventElapsedTime(&ms, e0, e1));
+    probe_ms = (double)ms / n;
+    if (ms >= 1.0f || n >= max_iters)
+      break;
+  }
 
   int iters = min_iters;
-  if (probe_ms > 1e-6f)
+  if (probe_ms > 1e-6)
     iters = (int)(target_ms / probe_ms);
   iters = std::max(min_iters, std::min(max_iters, iters));
   // A call that already runs for tens of ms is far above the noise floor that
@@ -166,7 +182,7 @@ double timeConfig(F &&launch, double target_ms, int min_iters, int max_iters,
   // A median needs an odd sample count to be a real sample, and three rounds is
   // the cheapest count that survives one bad reading.
   rounds = std::max(3, rounds | 1);
-  if (probe_ms > 50.0f)
+  if (probe_ms > 50.0)
     rounds = 3;
 
   std::vector<double> samples;
@@ -376,90 +392,79 @@ std::vector<Result> sweepPrefill(const Shape &s, bool verify, double target_ms,
     }
   };
 
-  if (d == 64) {
-    PrefillV5Cfg cands[8];
-    const int nc = prefillV5Candidates(d, cands);
-    for (int i = 0; i < nc; ++i) {
-      const PrefillV5Cfg c = cands[i];
-      char cfg[64];
-      snprintf(cfg, sizeof(cfg), "MT%d_BKV%d", c.m_tiles, c.bkv);
-      Result r;
-      r.cfg = cfg;
-      r.mt = c.m_tiles;
-      r.bkv = c.bkv;
-      measure(r, [&]() {
-        dispatchPrefillV5(c.m_tiles, c.bkv, d, nullptr, Q, K, V, O, B, H, G, sq,
-                          skv, max_seq, past_len, scale, sink, H, smooth,
-                          window);
-      });
-    }
-  } else if (d == 128) {
-    PrefillV7Cfg cands[12];
-    const int nc = prefillV7Candidates(d, cands);
-    for (int i = 0; i < nc; ++i) {
-      const PrefillV7Cfg c = cands[i];
-      char cfg[64];
-      snprintf(cfg, sizeof(cfg), "NW%d_BKV%d_MT%d", c.nw, c.bkv, c.mt);
-      Result r;
-      r.cfg = cfg;
-      r.nw = c.nw;
-      r.bkv = c.bkv;
-      r.mt = c.mt;
-      measure(r, [&]() {
-        dispatchPrefillV7(c.nw, c.bkv, c.mt, d, nullptr, Q, K, V, O, B, H, G,
-                          sq, skv, max_seq, past_len, scale);
-      });
-    }
-  } else {
-    PrefillV8Cfg cands[8];
-    const int nc = prefillV8Candidates(d, cands);
-    for (int i = 0; i < nc; ++i) {
-      const PrefillV8Cfg c = cands[i];
-      char cfg[64];
-      snprintf(cfg, sizeof(cfg), "ND%d_MT%d_BKV%d", c.nd, c.mt, c.bkv);
-      Result r;
-      r.cfg = cfg;
-      r.nd = c.nd;
-      r.mt = c.mt;
-      r.bkv = c.bkv;
-      measure(r, [&]() {
-        dispatchPrefillV8(c.nd, c.mt, c.bkv, d, nullptr, Q, K, V, O, B, H, G,
-                          sq, skv, max_seq, past_len, scale);
-      });
-    }
+  PrefillV6xCfg v6x[kPrefillV6xMaxCandidates];
+  PrefillV8xCfg v8x[kPrefillV8xMaxCandidates];
+  const int n6 = prefillV6xCandidates(d, H, G, window, v6x);
+  const int n8 = window > 0 ? 0 : prefillV8xCandidates(d, H, G, v8x);
+  auto v6xLabel = [](const PrefillV6xCfg &c) {
+    char cfg[64];
+    snprintf(cfg, sizeof(cfg), "HB%d_QW%d_MT%d_BKV%d", c.hb, c.qw, c.mt, c.bkv);
+    return std::string(cfg);
+  };
+  auto v8xLabel = [](const PrefillV8xCfg &c) {
+    char cfg[64];
+    snprintf(cfg, sizeof(cfg), "ND%d_HB%d_BKV%d", c.nd, c.hb, c.bkv);
+    return std::string(cfg);
+  };
+  for (int i = 0; i < n6; ++i) {
+    const PrefillV6xCfg c = v6x[i];
+    Result r;
+    r.cfg = v6xLabel(c);
+    r.hb = c.hb;
+    r.qw = c.qw;
+    r.mt = c.mt;
+    r.bkv = c.bkv;
+    measure(r, [&]() {
+      dispatchPrefillV6x(c, d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
+                         past_len, scale, sink, H, smooth, window);
+    });
+  }
+  for (int i = 0; i < n8; ++i) {
+    const PrefillV8xCfg c = v8x[i];
+    Result r;
+    r.cfg = v8xLabel(c);
+    r.nd = c.nd;
+    r.hb = c.hb;
+    r.bkv = c.bkv;
+    measure(r, [&]() {
+      dispatchPrefillV8x(c, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
+                         past_len, scale, sink, H, smooth);
+    });
   }
 
-  if (online) {
+  if (online && !out.empty()) {
     // The production tuner, called exactly as the runtime calls it. Timed
     // around a full sync so the number includes everything it makes the GPU do.
     SWEEP_CHECK(hipDeviceSynchronize());
     const auto t0 = std::chrono::steady_clock::now();
-    int cfg = 0;
-    char buf[64] = {0};
-    if (d == 64) {
-      cfg = tunePrefillV5Cfg(d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
-                             past_len, scale, window);
-      snprintf(buf, sizeof(buf), "MT%d_BKV%d", cfg / 1000, cfg % 1000);
-    } else if (d == 128) {
-      cfg = tunePrefillV7Cfg(d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
-                             past_len, scale);
-      snprintf(buf, sizeof(buf), "NW%d_BKV%d_MT%d", (cfg / 1000) % 1000,
-               cfg % 1000, cfg / 1000000);
+    std::string buf;
+    if (n8 > 0) {
+      const int best = tunePrefillCandidates(
+          nullptr, n8,
+          [&](int i) {
+            dispatchPrefillV8x(v8x[i], nullptr, Q, K, V, O, B, H, G, sq, skv,
+                               max_seq, past_len, scale, nullptr, H, 0);
+          },
+          [&](int i) { return v8xLabel(v8x[i]); }, d, sq, skv);
+      buf = v8xLabel(v8x[best]);
     } else {
-      cfg = tunePrefillV8Cfg(d, nullptr, Q, K, V, O, B, H, G, sq, skv, max_seq,
-                             past_len, scale);
-      snprintf(buf, sizeof(buf), "ND%d_MT%d_BKV%d", cfg / 1000000,
-               (cfg / 1000) % 1000, cfg % 1000);
+      const int best = tunePrefillCandidates(
+          nullptr, n6,
+          [&](int i) {
+            dispatchPrefillV6x(v6x[i], d, nullptr, Q, K, V, O, B, H, G, sq, skv,
+                               max_seq, past_len, scale, nullptr, H, 0, window);
+          },
+          [&](int i) { return v6xLabel(v6x[i]); }, d, sq, skv);
+      buf = v6xLabel(v6x[best]);
     }
     SWEEP_CHECK(hipDeviceSynchronize());
     online->decide_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - t0)
                             .count();
     online->cfg = buf;
-    // kWarmup=30 warmup launches cycling the candidates, then kRounds=4 rounds
-    // of (1 untimed + kIters=30 timed) per candidate. Constants live in the
-    // tune* functions in gqa_kernel.hip.
-    online->launches = 30 + (int)out.size() * 4 * 31;
+    // tunePrefillCandidates sizes its timed batches to each candidate's
+    // duration, so the launch count is the model in prodPrefillTuneCost.
+    online->launches = prodPrefillTuneCost(out).launches;
     online->measured = true;
   }
 
@@ -494,7 +499,7 @@ constexpr const char *kPrefillHarnessVersion = "loop1";
 //
 // This is the mechanism that makes a kernel change maintainable rather than a
 // re-measure of everything. tools/measurement_store.py parses this table, so a bump
-// stops the store reusing readings of *that* kernel and nothing else: change the v7
+// stops the store reusing readings of *that* kernel and nothing else: change the v6x
 // prefill kernel and the decode grid stays valid. Leaving it alone after a real
 // change is the failure this exists to prevent, and it is silent, so it belongs in
 // the same commit as the kernel change.
@@ -504,9 +509,8 @@ struct KernelVersion {
 };
 constexpr KernelVersion kKernelVersions[] = {
     {"flash_decode", "decode-2"},
-    {"prefill_v5", "v5-1"},
-    {"prefill_v7", "v7-2"},
-    {"prefill_v8", "v8-1"},
+    {"prefill_v6x", "v6x-1"},
+    {"prefill_v8x", "v8x-1"},
 };
 
 static const char *kernelVersion(const char *kernel) {
@@ -967,7 +971,7 @@ int main(int argc, char **argv) {
     fprintf(
         best_csv,
         "id,group,phase,B,H,G,HpG,d,sq,skv,window,sink,kernel,"
-        "best_config,cfg_impl,cfg_splits,cfg_MT,cfg_BKV,cfg_NW,cfg_ND,"
+        "best_config,cfg_impl,cfg_splits,cfg_HB,cfg_QW,cfg_MT,cfg_BKV,cfg_ND,"
         "best_ms,worst_ms,best_vs_worst_x,n_candidates,"
         "sweep_wall_s,autotune_prod_ms,autotune_prod_launches,"
         "autotune_prod_vs_one_call_x,"
@@ -1015,9 +1019,7 @@ int main(int argc, char **argv) {
       continue;
     const int hpg = s.H / s.G;
     const bool prefill = (s.phase == "prefill");
-    const char *kernel = prefill ? (s.d == 64    ? "prefill_v5"
-                                    : s.d == 128 ? "prefill_v7"
-                                                 : "prefill_v8")
+    const char *kernel = prefill ? (s.d == 256 ? "prefill_v8x" : "prefill_v6x")
                                  : "flash_decode";
 
     fprintf(stderr,
@@ -1109,14 +1111,15 @@ int main(int argc, char **argv) {
             break;
           }
       fprintf(best_csv,
-              "%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,"
+              "%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
               "%.6f,%.6f,%.2f,%d,%.1f,%.2f,%d,%.0f,%s,%.6f,%.4f,%.2f,%d,"
               "%s,\"%s\"\n",
               s.id.c_str(), s.group.c_str(), s.phase.c_str(), s.B, s.H, s.G,
               hpg, s.d, s.sq, s.skv, s.window, s.sink, kernel, win.cfg.c_str(),
               win.impl_wmma < 0 ? "" : (win.impl_wmma ? "wmma" : "scalar"),
-              opt(win.splits).c_str(), opt(win.mt).c_str(),
-              opt(win.bkv).c_str(), opt(win.nw).c_str(), opt(win.nd).c_str(),
+              opt(win.splits).c_str(), opt(win.hb).c_str(),
+              opt(win.qw).c_str(), opt(win.mt).c_str(), opt(win.bkv).c_str(),
+              opt(win.nd).c_str(),
               win.ms, worst_ms, worst_ms / win.ms, (int)res.size(),
               sweep_wall_s, tc.ms, tc.launches, tc.ms / win.ms,
               online.measured ? online.cfg.c_str() : "", online_ms,
