@@ -6,13 +6,12 @@
 // ============================================================
 // custom_kernels GQA flash *prefill* (TTFT) test + benchmark.
 //
-// Verifies the ported FA-2 WMMA prefill kernels that gqa.cpp routes to on the
+// Verifies the FA-2 WMMA prefill kernels that gqa.cpp routes to on the
 // fused-prefill fast path:
-//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry,
-//                              d == 128, llama-3.1 geometry, and d == 256,
-//                              Qwen3.6 / Qwen3.8 geometry; all run the
-//                              transposed-score v6 kernel)
-//   hip_gqa_flash_prefill_v8  (d == 256 groups of neither 3 nor 4 heads)
+//   v6x  (d == 64: gpt-oss / llama-3.2 geometry; d == 96: Phi-3-mini;
+//         d == 128: llama / qwen geometry; any heads-per-group, with and
+//         without a window)
+//   v8x  (d == 256: Qwen3.x / Gemma-3 geometry)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
 //
@@ -37,12 +36,7 @@
 #include <vector>
 #include <string>
 
-extern "C" int hip_gqa_flash_prefill_v5(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-// Unified entry the runtime (gqa.cpp) actually calls -- picks v6/v8 by head dim.
+// Unified entry the runtime (gqa.cpp) actually calls -- picks v6x/v8x by head dim.
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -56,11 +50,6 @@ extern "C" int hip_gqa_flash_prefill(
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
-extern "C" int hip_gqa_flash_prefill_v7(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
 
@@ -70,23 +59,17 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
+    int hb, int qw, int mt, int bkv, int nd);
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
   return p;
 }
 
-// Mirrors real/gqa.cpp: d128 uses v6 (PrefillV5) with a window or a KV group
-// of a multiple of 4 heads, v7 otherwise; d256 uses v6 with a group of a
-// multiple of 3 or 4 heads, v8 otherwise.
-static hipdnn_ep::GqaPrefillVariant prefill_variant(int d, int H, int G,
-                                                    int window) {
-  if (d == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V8;
-  if (d == 128 && window <= 0 && (H / G) % 4 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V7;
-  return hipdnn_ep::GqaPrefillVariant::V5;
+// Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
+static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
+  return d == 256 ? hipdnn_ep::GqaPrefillVariant::V8x
+                  : hipdnn_ep::GqaPrefillVariant::V6x;
 }
 #endif
 
@@ -237,7 +220,7 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
 
   // Route through the unified entry (same path the runtime takes); it dispatches
-  // v6 / v7 / v8 by head dim and group size internally.
+  // v6x / v8x by head dim internally.
   const void* sink_arg =
       (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth)
           ? (const void*)dSink
@@ -254,7 +237,7 @@ static bool run_case(const Case& c, int iters) {
     if (!c.expect_reject) {
       using namespace hipdnn_ep;
       GqaPrefillRequest req{};
-      req.variant = prefill_variant(D, H, G, c.window);
+      req.variant = prefill_variant(D);
       req.batch = B;
       req.num_heads = H;
       req.kv_num_heads = G;
@@ -273,8 +256,8 @@ static bool run_case(const Case& c, int iters) {
       if (hit) {
         return hip_gqa_flash_prefill_v3_configured(
             nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D, max_seq, past_len,
-            scale, window_arg, sink_arg, H, smooth_arg, res.config.m_tiles,
-            res.config.bkv, res.config.nw, res.config.mt, res.config.nd);
+            scale, window_arg, sink_arg, H, smooth_arg, res.config.hb,
+            res.config.qw, res.config.mt, res.config.bkv, res.config.nd);
       }
     }
 #endif
@@ -315,12 +298,9 @@ static bool run_case(const Case& c, int iters) {
   ms /= iters;
 
   const bool pass = err < 2e-3;
-  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
+  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (%s)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL",
-         (D == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0) ? 8
-         : (D == 128 && c.window <= 0 && (H / G) % 4 != 0)  ? 7
-                                                            : 6);
+         pass ? "PASS" : "FAIL", D == 256 ? "v8x" : "v6x");
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
@@ -333,21 +313,42 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
 
   const Case cases[] = {
-      // Qwen3.6-35B-A3B text decoder: d=256, a group of 8, runs v6 at 4 heads
-      // per block. sq=1000 is deliberately not a multiple of the 16-row Q tile
-      // or the 16-key KV tile, so it exercises the partial tiles that 512 and
-      // 2048 both skip.
+      // Qwen3.6-35B-A3B text decoder: d=256, a group of 8. sq=1000 is
+      // deliberately not a multiple of the 16-row Q tile or the 16-key KV
+      // tile, so it exercises the partial tiles that 512 and 2048 both skip.
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 2048, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  8192, kSinkNone,    false, 0},
-      // Qwen3.8-27B: a group of 6 runs 3 heads per block.
+      // Phi-3-mini / Phi-3.5-mini (H32 G32 MHA, d=96). sq=1000 leaves partial
+      // 16-row Q tiles and 64-key KV tiles.
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 1000, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 2048, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  512,  kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 2, 32, 32, 96, 777,  1500, kSinkNone,    false, 0},
+      {"gqa4-d96",       1, 32,  8, 96, 512,  0,    kSinkNone,    false, 0},
+      // Phi-3-mini-4k ships a 2047-key window. First a window that never binds
+      // (total_seq <= window), then binding ones: chunked past deeper than the
+      // window, a window not aligned to the KV tile, and window 1.
+      {"phi-3-win-d96",  1, 32, 32, 96, 2000, 0,    kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 1024, 2048, kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  1000, kSinkNone,    false, 100},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  512,  kSinkNone,    false, 1},
+      // d=96 sinks, with and without a window.
+      {"d96-sink",       1, 32,  8, 96, 512,  0,    kSinkPerHead, false, 0},
+      {"d96-sink+win",   1, 32,  8, 96, 512,  512,  kSinkBoth,    false, 128},
+      {"d96-sink-mha",   1, 32, 32, 96, 1000, 300,  kSinkBoth,    false, 0},
+      // Qwen3.8-27B: a group of 6.
       {"qwen3.8-d256", 1, 24, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.8-d256", 1, 24, 4, 256, 512,  8192, kSinkNone,    false, 0},
-      // Qwen3 16:4 (group of 4), and a group of 2 (Gemma-3) that stays on v8.
+      // Qwen3 16:4 (group of 4), a group of 2 (Gemma-3), and a group of 5,
+      // which only one head per block divides.
       {"qwen3-16:4",   1, 16, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"gemma3-d256",  1,  8, 4, 256, 1000, 0,    kSinkNone,    false, 0},
-      // v6 has no windowed d256 instance, so a d256 window still declines.
+      {"hpg5-d256",    1, 40, 8, 256, 777,  1500, kSinkNone,    false, 0},
+      {"gemma3-d256",  2,  8, 4, 256, 1000, 300,  kSinkNone,    false, 0},
+      // There is no windowed d256 instance, so a d256 window still declines.
       {"qwen3.6-win",  1, 16, 2, 256, 512,  0,    kSinkNone,    true,  128},
       // No-sink regression set (must stay as accurate as before).
       {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false, 0},
@@ -358,11 +359,13 @@ int main(int argc, char** argv) {
       {"llama-3.1-8b", 1, 32, 8, 128, 2048, 0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 512,  8192, kSinkNone,    false, 0},
-      // d == 128 groups not divisible by 4 stay on v7.
+      {"llama-3.1-8b", 2, 32, 8, 128, 1000, 500,  kSinkNone,    false, 0},
+      // d == 128 groups not divisible by 4 split the block into Q subtiles.
       {"qwen3-1.7b",   1, 16, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-3.2-3b", 1, 24, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"qwen2.5-7b",   1, 28, 4, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-2-7b",   1, 32, 32,128, 512,  0,    kSinkNone,    false, 0},
+      {"llama-2-7b",   1, 32, 32,128, 777,  1500, kSinkNone,    false, 0},
       // Sink set at the real gpt-oss geometry (H=64, G=8, d=64), including
       // chunked prefill (past > 0), which is what a 16k prompt actually runs.
       {"gpt_oss-sink",  1, 64, 8,  64, 512,  0,    kSinkPerHead, false, 0},
@@ -376,6 +379,10 @@ int main(int argc, char** argv) {
       // exact combination the runtime sends is untested.
       {"gpt_oss-both",  1, 64, 8,  64, 512,  0,    kSinkBoth,    false, 0},
       {"gpt_oss-both",  1, 64, 8,  64, 512,  512,  kSinkBoth,    false, 0},
+      // Groups of 3 and 1 split the block into Q subtiles; the sink and the
+      // window have to follow each wave's own rows.
+      {"hpg3-d64-both", 1, 24, 8,  64, 1000, 512,  kSinkBoth,    false, 0},
+      {"mha-d64-both",  2, 16, 16, 64, 777,  300,  kSinkBoth,    false, 128},
       // A sink must not silently apply at d == 128: v3 declines so the runtime
       // falls back to the decomposed path, which does implement it.
       {"llama-sink-d128",1, 32, 8, 128, 512, 0,    kSinkPerHead, true,  0},
@@ -407,7 +414,8 @@ int main(int argc, char** argv) {
       {"mistral-win",   1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
       {"mistral-win",   1, 32, 8, 128, 512,  8192, kSinkNone,    false, 4096},
       {"mistral-win",   1, 32, 8, 128, 1000, 1000, kSinkNone,    false, 100},
-      // With a window, a group not divisible by 4 runs v6 at 1 head per block.
+      // With a window, a group not divisible by 4 splits the block into Q
+      // subtiles, each skipping the tiles below its own window.
       {"qwen2.5-win",   1, 28, 4, 128, 512,  8192, kSinkNone,    false, 4096},
       {"qwen3-win",     1, 16, 8, 128, 1000, 1000, kSinkNone,    false, 100},
   };
