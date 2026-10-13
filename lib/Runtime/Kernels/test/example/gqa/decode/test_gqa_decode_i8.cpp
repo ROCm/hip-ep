@@ -529,7 +529,8 @@ int main(int argc, char** argv) {
   int fails = 0;
   if (all || !have_single) {
     // Comprehensive coverage: MHA (heads-per-group = 1) and GQA (hpg 2/4/8),
-    // each at head_dim 64 AND 128, swept across decode context lengths.
+    // each at head_dim 64 AND 128 (plus 96 at MHA and hpg 4), swept across
+    // decode context lengths.
     struct Shape { const char* name; int H, G, D; };
     const Shape shapes[] = {
         // ---- MHA (hpg = 1) ----
@@ -547,6 +548,9 @@ int main(int argc, char** argv) {
         // ---- GQA hpg = 8 ----
         {"gpt-oss-20b",    64,  8,  64},
         {"llama-3-70b",    64,  8, 128},
+        // ---- head_dim 96 (3 elements per lane in the scalar kernel) ----
+        {"phi-3-mini-d96", 32, 32,  96},
+        {"gqa4-h32-d96",   32,  8,  96},
     };
     const int lens[] = {512, 2048, 8192, 32768};
     for (const auto& s : shapes) {

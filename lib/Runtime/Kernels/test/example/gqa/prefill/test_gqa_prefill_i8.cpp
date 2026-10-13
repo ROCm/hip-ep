@@ -388,6 +388,7 @@ int main(int argc, char** argv) {
         {"gqa2-h16-d128", 16, 8, 128}, {"llama-3.2-1b", 32, 8, 64},
         {"llama-3.1-8b", 32, 8, 128},  {"psu_orc_211", 40, 10, 128},
         {"gpt-oss-20b", 64, 8, 64},    {"llama-3-70b", 64, 8, 128},
+        {"phi-3-mini-d96", 32, 32, 96},
     };
     const int sqs[] = {512, 2048, 4096};
     for (const auto& s : shapes) {
