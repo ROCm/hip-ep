@@ -18,6 +18,9 @@
 //         weights(%Bq, %Bk, %Bv) scales(%Sq, %Sk, %Sv) outs(%eq, %ek, %ev)
 //         {epilogue = 0}
 //
+// Asymmetric members carry their zero points over the same way:
+// `zero_points(%Zq, %Zk, %Zv)` after `scales(...)`.
+//
 // Two projections whose only consumer is SiLU(gate) * up:
 //
 //   Before:
@@ -72,10 +75,12 @@ constexpr size_t kMaxGroupSize = 3;
 constexpr int64_t kEpilogueConcat = 0;
 constexpr int64_t kEpilogueSiluMul = 1;
 
-/// A projection the grouped kernel can serve: symmetric int4 weights, an fp16
-/// activation and a single tensor result.
+/// A projection the grouped kernel can serve: int4 weights, symmetric or with
+/// packed uint8 zero points, an fp16 activation and a single tensor result.
 bool isGroupable(mlir::hip::MatMulNBitsOp op) {
-  if (op.getZeroPoints() || op.getGIdx() || op.getBias())
+  if (op.getGIdx() || op.getBias())
+    return false;
+  if (op.getZeroPoints() && op.getZpElemSize() != 1)
     return false;
   if (op.getBits() != 4 || op->getNumResults() != 1)
     return false;
@@ -90,7 +95,9 @@ bool sameGrouping(mlir::hip::MatMulNBitsOp a, mlir::hip::MatMulNBitsOp b) {
   return a.getK() == b.getK() && a.getBits() == b.getBits() &&
          a.getBlockSize() == b.getBlockSize() &&
          a.getScaleElemSize() == b.getScaleElemSize() &&
-         a.getAccuracyLevel() == b.getAccuracyLevel();
+         a.getAccuracyLevel() == b.getAccuracyLevel() &&
+         static_cast<bool>(a.getZeroPoints()) ==
+             static_cast<bool>(b.getZeroPoints());
 }
 
 /// Whether `v` is available at `point`, possibly after moving its
@@ -236,12 +243,14 @@ struct MatMulNBitsGroup final
     llvm::SmallVector<mlir::hip::MatMulNBitsOp> ordered =
         silu ? llvm::SmallVector<mlir::hip::MatMulNBitsOp>{silu->gate, silu->up}
              : group;
-    llvm::SmallVector<mlir::Value> weights, scales, outputs;
+    llvm::SmallVector<mlir::Value> weights, scales, zeroPoints, outputs;
     llvm::SmallVector<mlir::Attribute> ns;
     llvm::SmallVector<mlir::Type> resultTypes;
     for (mlir::hip::MatMulNBitsOp mm : ordered) {
       weights.push_back(mm.getB());
       scales.push_back(mm.getScales());
+      if (mlir::Value zp = mm.getZeroPoints())
+        zeroPoints.push_back(zp);
       ns.push_back(rewriter.getI64IntegerAttr(mm.getN()));
       if (!silu || mm == silu->gate) {
         outputs.push_back(mm.getOutput());
@@ -252,10 +261,10 @@ struct MatMulNBitsGroup final
     rewriter.setInsertionPoint(root);
     auto groupOp = mlir::hip::MatMulNBitsGroupOp::create(
         rewriter, root.getLoc(), resultTypes, root.getHandle(), root.getA(),
-        weights, scales, /*a_quant=*/mlir::Value(), /*a_scale=*/mlir::Value(),
-        outputs, root.getKAttr(), rewriter.getArrayAttr(ns), root.getBitsAttr(),
-        root.getBlockSizeAttr(), root.getAccuracyLevelAttr(),
-        root.getScaleElemSizeAttr(),
+        weights, scales, zeroPoints, /*a_quant=*/mlir::Value(),
+        /*a_scale=*/mlir::Value(), outputs, root.getKAttr(),
+        rewriter.getArrayAttr(ns), root.getBitsAttr(), root.getBlockSizeAttr(),
+        root.getAccuracyLevelAttr(), root.getScaleElemSizeAttr(),
         rewriter.getI64IntegerAttr(silu ? kEpilogueSiluMul : kEpilogueConcat));
 
     if (!silu) {

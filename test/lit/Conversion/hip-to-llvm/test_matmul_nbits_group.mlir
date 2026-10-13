@@ -3,7 +3,8 @@
 
 // hip.matmul_nbits_group lowers to one call of wrap_matmul_nbits_group with a
 // fixed three-segment signature: segments the op does not have are passed as
-// null pointers with N = 0, and so is an absent quantized(...) operand pair.
+// null pointers with N = 0, and so are absent zero points and an absent
+// quantized(...) operand pair.
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
 
@@ -38,6 +39,7 @@ module {
   // CHECK:       llvm.call @wrap_matmul_nbits_group({{.*}}) :
   // CHECK-SAME:  (!llvm.ptr, i32, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr) -> i32
 
@@ -85,12 +87,39 @@ module {
   }
 
   // The quantized row's pointers are the last two arguments. The only null
-  // pointers are the absent third segment's weight, scale and output.
+  // pointers are the absent third segment's weight, scale and output, and the
+  // three absent zero points.
   // CHECK-LABEL: llvm.func @group_quantized
-  // CHECK-COUNT-3: llvm.mlir.zero : !llvm.ptr
+  // CHECK-COUNT-6: llvm.mlir.zero : !llvm.ptr
   // CHECK-NOT:   llvm.mlir.zero
   // CHECK:       %[[AQ:.*]] = llvm.addrspacecast %{{.*}} : !llvm.ptr<1> to !llvm.ptr
   // CHECK-NEXT:  llvm.extractvalue
   // CHECK-NEXT:  %[[AS:.*]] = llvm.addrspacecast %{{.*}} : !llvm.ptr<1> to !llvm.ptr
   // CHECK-NEXT:  llvm.call @wrap_matmul_nbits_group({{.*}}, %[[AQ]], %[[AS]]) :
+
+  func.func @group_zero_points(%ctx: !hip.context,
+                               %A: memref<1x1x64xf16, 1>,
+                               %Bg: memref<64x2x16xui8, 1>,
+                               %Bu: memref<64x2x16xui8, 1>,
+                               %Sg: memref<64x2xf16, 1>,
+                               %Su: memref<64x2xf16, 1>,
+                               %Zg: memref<64xui8, 1>,
+                               %Zu: memref<64xui8, 1>,
+                               %y: memref<1x1x64xf16, 1>) {
+    hip.matmul_nbits_group(%ctx) ins(%A : memref<1x1x64xf16, 1>)
+        weights(%Bg, %Bu : memref<64x2x16xui8, 1>, memref<64x2x16xui8, 1>)
+        scales(%Sg, %Su : memref<64x2xf16, 1>, memref<64x2xf16, 1>)
+        zero_points(%Zg, %Zu : memref<64xui8, 1>, memref<64xui8, 1>)
+        outs(%y : memref<1x1x64xf16, 1>)
+        {K = 64 : i64, N = [64, 64], bits = 4 : i64, block_size = 32 : i64,
+         accuracy_level = 4 : i64, epilogue = 1 : i64}
+    return
+  }
+
+  // Both segments' zero points are passed; the nulls are the absent third
+  // segment (weight, scale, zero points, two outputs) and quantized(...).
+  // CHECK-LABEL: llvm.func @group_zero_points
+  // CHECK-COUNT-7: llvm.mlir.zero : !llvm.ptr
+  // CHECK-NOT:   llvm.mlir.zero
+  // CHECK:       llvm.call @wrap_matmul_nbits_group(
 }
