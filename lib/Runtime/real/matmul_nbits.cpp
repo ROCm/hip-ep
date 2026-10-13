@@ -924,19 +924,21 @@ cleanup:
 
 } // namespace
 
-// hip.matmul_nbits_group: symmetric int4 weights without bias that share one
-// activation. A single decode row takes the grouped dp4a kernel, which
-// quantizes the row once and runs every segment in one launch. Anything else
-// runs each segment through the ordinary MatMulNBits path, so prefill keeps
-// the kernels it had before the grouping.
+// hip.matmul_nbits_group: int4 weights without bias that share one
+// activation, either all symmetric or all with packed uint8 zero points. A
+// single decode row takes the grouped dp4a kernel, which quantizes the row
+// once and runs every segment in one launch. Anything else runs each segment
+// through the ordinary MatMulNBits path, so prefill keeps the kernels it had
+// before the grouping.
 int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
                             const void *A, int64_t nseg, const void *B0,
                             const void *B1, const void *B2, const void *scales0,
                             const void *scales1, const void *scales2,
-                            void *out0, void *out1, void *out2, int64_t N0,
-                            int64_t N1, int64_t N2, int64_t M, int64_t K,
-                            int64_t batch_count, int64_t bits,
-                            int64_t block_size, int64_t elem_size,
+                            const void *zero_points0, const void *zero_points1,
+                            const void *zero_points2, void *out0, void *out1,
+                            void *out2, int64_t N0, int64_t N1, int64_t N2,
+                            int64_t M, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
                             int64_t scale_elem_size, int64_t epilogue,
                             const void *a_quant, const void *a_scale) {
   OP_PROFILE(
@@ -962,10 +964,14 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
   }
   const void *Bs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {B0, B1, B2};
   const void *Ss[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {scales0, scales1, scales2};
+  const void *Zs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {zero_points0, zero_points1,
+                                                   zero_points2};
   void *Os[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {out0, out1, out2};
   const int64_t Ns[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {N0, N1, N2};
+  const bool has_zp = zero_points0 != nullptr;
   for (int64_t s = 0; s < nseg; ++s) {
-    if (!Bs[s] || !Ss[s] || (!Os[s] && (!silu || s == 0))) {
+    if (!Bs[s] || !Ss[s] || (!Zs[s] && has_zp) ||
+        (!Os[s] && (!silu || s == 0))) {
       fprintf(stderr, "wrap_matmul_nbits_group: null segment %lld\n",
               (long long)s);
       return -1;
@@ -980,12 +986,28 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
 
   // The grouped kernel reads one activation scale per 32-wide K step, so
   // block_size must be a power of two no smaller than 32.
-  if (M == 1 && batch_count == 1 && hipdnn_ep_matmul_dp4a_enabled() &&
+  const void *zp_u8[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {};
+  bool zp_ready = !has_zp;
+  const bool grouped_kernel =
+      M == 1 && batch_count == 1 && hipdnn_ep_matmul_dp4a_enabled() &&
       bits == 4 && block_size >= 32 && (block_size & (block_size - 1)) == 0 &&
-      (K % block_size == 0) && elem_size == 2 && scale_elem_size == 2) {
+      (K % block_size == 0) && elem_size == 2 && scale_elem_size == 2;
+  if (grouped_kernel && has_zp) {
+    MatmulNbitsState *mst =
+        MatmulNbitsState::get_op_state(state, op_state_slot);
+    zp_ready = mst != nullptr;
+    const int ngk = static_cast<int>(K / block_size);
+    for (int64_t s = 0; zp_ready && s < nseg; ++s) {
+      zp_u8[s] = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+          mst->zp, stream, Zs[s], static_cast<int>(Ns[s]), ngk);
+      zp_ready = zp_u8[s] != nullptr;
+    }
+  }
+  if (grouped_kernel && zp_ready) {
+    const void *const *zps = has_zp ? zp_u8 : nullptr;
     if (a_quant && a_scale && hip_norm_quant_supported(1, K, block_size)) {
       int rc = hip_matmul_nbits_dp4a_group(
-          stream, A, static_cast<int>(nseg), Bs, Ss, Os, Ns, K, block_size,
+          stream, A, static_cast<int>(nseg), Bs, Ss, zps, Os, Ns, K, block_size,
           static_cast<int>(epilogue), /*quantize_a=*/0,
           const_cast<void *>(a_quant), const_cast<void *>(a_scale));
       if (rc == 0)
@@ -1003,8 +1025,8 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
           static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
       if (base) {
         int rc = hip_matmul_nbits_dp4a_group(
-            stream, A, static_cast<int>(nseg), Bs, Ss, Os, Ns, K, block_size,
-            static_cast<int>(epilogue), /*quantize_a=*/1, base,
+            stream, A, static_cast<int>(nseg), Bs, Ss, zps, Os, Ns, K,
+            block_size, static_cast<int>(epilogue), /*quantize_a=*/1, base,
             base + scale_off);
         if (rc == 0)
           return 0;
@@ -1016,7 +1038,7 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
 
   if (!silu) {
     for (int64_t s = 0; s < nseg; ++s) {
-      int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], nullptr,
+      int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], Zs[s],
                                 nullptr, nullptr, Os[s], M, Ns[s], K,
                                 batch_count, bits, block_size, elem_size,
                                 /*zp_elem_size=*/1, scale_elem_size);
@@ -1037,7 +1059,7 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
   void *up = scratch + half_bytes;
   void *proj[2] = {gate, up};
   for (int s = 0; s < 2; ++s) {
-    int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], nullptr,
+    int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], Zs[s],
                               nullptr, nullptr, proj[s], M, N0, K, batch_count,
                               bits, block_size, elem_size,
                               /*zp_elem_size=*/1, scale_elem_size);
