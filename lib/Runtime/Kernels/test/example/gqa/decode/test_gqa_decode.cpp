@@ -24,8 +24,9 @@
 //   [v2]          autotune (impl, split-count<=64) per shape + cache (no env)
 //
 // Coverage spans MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in
-// {64,128,256} x context length in {512..32768}, plus gpt-oss-20b full/sliding
-// (head_sink) and a smooth-softmax variant. Pass --md to emit a Markdown table.
+// {64,96,128,256} x context length in {512..32768}, plus gpt-oss-20b
+// full/sliding (head_sink), Phi-3-mini full/sliding (d=96) and a
+// smooth-softmax variant. Pass --md to emit a Markdown table.
 //
 // To benchmark one build against another, add --prod-only (times just the
 // autotuned config, so the fixed-config runs cannot disturb the clock state
@@ -550,7 +551,8 @@ int main(int argc, char** argv) {
   int fails = 0;
   if (all || !have_single) {
     // B=1 single-stream decode. Coverage: real models + a geometry sweep over
-    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in {64,128,256}.
+    // MHA (HpG==1) and GQA (HpG in {2,4,5,8,16}) x head_dim in
+    // {64,96,128,256}.
     const int lens[] = {512, 2048, 8192, 32768};
     auto maybe = [&](const Case& c) {
       if (!g_only.empty() &&
@@ -577,6 +579,10 @@ int main(int argc, char** argv) {
       maybe({"llama-3.2-1b",        1, 32,  8,  64, L, L,   0, 0, 0});
       // qwen2.5-14b: H40 G8 (hpg5) D128 -- HpG=5 has no WMMA path (scalar).
       maybe({"qwen2.5-14b",         1, 40,  8, 128, L, L,   0, 0, 0});
+      // phi-3-mini: H32 G32 (MHA) D96 -- the D=96 split kernel. The -4k
+      // variant ships a 2047-key sliding window.
+      maybe({"phi-3-mini",          1, 32, 32,  96, L, L,   0, 0, 0});
+      maybe({"phi-3-mini sliding",  1, 32, 32,  96, L, L, 2047, 0, 0});
       // ---- Geometry sweep: MHA (hpg1) x head_dim ----
       maybe({"MHA hpg1 D64",        1, 16, 16,  64, L, L,   0, 0, 0});
       maybe({"MHA hpg1 D128",       1, 16, 16, 128, L, L,   0, 0, 0});
@@ -586,6 +592,9 @@ int main(int argc, char** argv) {
       maybe({"GQA hpg8 D128",       1, 64,  8, 128, L, L,   0, 0, 0});
       maybe({"GQA hpg16 D64",       1, 32,  2,  64, L, L,   0, 0, 0});
       maybe({"GQA hpg4 D256",       1, 32,  8, 256, L, L,   0, 0, 0});
+      // ---- D96 at GQA ratios (the D=96 kernel streams K/V per wave) ----
+      maybe({"GQA hpg4 D96",        1, 32,  8,  96, L, L,   0, 0, 0});
+      maybe({"GQA hpg8 D96 sink",   1, 64,  8,  96, L, L,   0, 1, 0});
       if (!g_md) printf("\n");
     }
   } else {

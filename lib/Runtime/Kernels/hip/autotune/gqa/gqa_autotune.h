@@ -90,10 +90,10 @@ struct GqaDecodeResult {
   float distance;
 };
 
+// The prefill kernel, chosen by head_dim: v6x at d64 / d128, v8x at d256.
 enum class GqaPrefillVariant : uint8_t {
-  V5,
-  V7,
-  V8,
+  V6x,
+  V8x,
 };
 
 struct GqaPrefillRequest {
@@ -107,11 +107,15 @@ struct GqaPrefillRequest {
   int local_window;
 };
 
+// Launch knobs of hip_gqa_flash_prefill_v3_configured. hb is the query heads
+// of one KV group per block (both kernels); v6x adds qw Q subtiles of 16*mt
+// rows per block, v8x splits the head dim over nd waves; bkv is the keys per
+// staged K/V tile. Fields a kernel does not use are zero.
 struct GqaPrefillConfig {
-  int m_tiles;
-  int bkv;
-  int nw;
+  int hb;
+  int qw;
   int mt;
+  int bkv;
   int nd;
 };
 
