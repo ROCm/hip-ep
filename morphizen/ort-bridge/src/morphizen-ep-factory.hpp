@@ -132,7 +132,9 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   // OrtMemoryInfo is the slot index, not a HIP ordinal: registration does not
   // initialize HIP. The ordinal is resolved when a session or allocator is
   // created and cached here. OrtEpDevice copies the descriptors, so the
-  // factory still owns these.
+  // factory still owns these. A caller may also pass a memory info whose
+  // device id is the hardware id rather than this slot index; one registered
+  // GPU still maps to that slot, and no registered GPU keeps ordinal 0.
   using MemoryInfoPtr =
       std::unique_ptr<OrtMemoryInfo, void (*)(OrtMemoryInfo *)>;
   struct GpuDeviceSlot {

@@ -495,9 +495,21 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
     if (auto *status = factory->ort_api.MemoryInfoGetId(memory_info, &slot)) {
       return status;
     }
-    if (slot < 0) {
-      return factory->ort_api.CreateStatus(
-          ORT_INVALID_ARGUMENT, "GPU allocator memory info has no slot id.");
+    // The id is the slot index for a memory info this factory registered.
+    // ORT's default allocator, and the AMDGPU umbrella, can instead pass the
+    // hardware device id. A single registered GPU is that session's device.
+    // No registered GPU keeps ordinal 0, which is what CreateEp used.
+    const size_t num_slots = factory->gpu_device_slots_.size();
+    if (slot < 0 || static_cast<size_t>(slot) >= num_slots) {
+      if (num_slots == 1) {
+        slot = 0;
+      } else if (num_slots == 0) {
+        *allocator = new HipGpuAllocator(memory_info, factory->ort_api, 0);
+        return nullptr;
+      } else {
+        return factory->ort_api.CreateStatus(
+            ORT_INVALID_ARGUMENT, "GPU allocator slot is not registered.");
+      }
     }
     int hip_ordinal = 0;
     if (auto *status = factory->ResolveSlotOrdinal(static_cast<size_t>(slot),
