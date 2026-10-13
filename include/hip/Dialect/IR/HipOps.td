@@ -961,10 +961,12 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
                                                    OpStateOpInterface]> {
   let summary = "MatMulNBits projections that read the same activation";
   let description = [{
-    Formed by fusion from 1-3 hip.matmul_nbits ops that share `A`, have
-    symmetric weights (no zero points, no g_idx, no bias) and the same K,
-    bits and block_size. `weights[i]` / `scales[i]` are the B / scales
-    operands of the i-th original op and `N[i]` its output width.
+    Formed by fusion from 1-3 hip.matmul_nbits ops that share `A`, have no
+    g_idx and no bias, and the same K, bits and block_size. `weights[i]` /
+    `scales[i]` are the B / scales operands of the i-th original op and
+    `N[i]` its output width. `zero_points` is empty for symmetric weights,
+    or holds one packed uint8 zero_points operand per weight
+    (zp_elem_size = 1) when every original op had one.
 
     `epilogue` selects how the projections are written:
       0 (concat):   outputs[i] = A @ dequant(weights[i])^T, one output per
@@ -1001,6 +1003,7 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
     Hip_TensorOrMemRef:$A,                      // activation [..., K]
     Variadic<Hip_TensorOrMemRef>:$weights,      // packed uint8 [N_i, k_blocks, blob_size]
     Variadic<Hip_TensorOrMemRef>:$scales,       // dequant scales [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$zero_points,  // packed uint8 zero points (none, or one per weight)
     Optional<Hip_TensorOrMemRef>:$a_quant,      // int8 copy of A (optional)
     Optional<Hip_TensorOrMemRef>:$a_scale,      // its group scales (optional)
     Variadic<Hip_TensorOrMemRef>:$outputs,      // results [..., N_i] (silu_mul: one)
@@ -1017,6 +1020,7 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
     `(` $handle `)` `ins` `(` $A `:` type($A) `)`
     `weights` `(` $weights `:` type($weights) `)`
     `scales` `(` $scales `:` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
     (`quantized` `(` $a_quant^ `,` $a_scale `:` type($a_quant) `,`
         type($a_scale) `)`)?
     `outs` `(` $outputs `:` type($outputs) `)`
@@ -1024,8 +1028,8 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
   }];
   let hasVerifier = 1;
 
-  // Shares MatMulNBits' per-session state; the grouped path never reads its
-  // zero-point cache, but the per-projection fallback goes through the same
+  // Shares MatMulNBits' per-session state: its zero-point unpack cache serves
+  // the grouped kernel, and the per-projection fallback goes through the same
   // entry point as hip.matmul_nbits.
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,

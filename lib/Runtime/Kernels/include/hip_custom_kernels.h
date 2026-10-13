@@ -2292,20 +2292,23 @@ HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
 
 /**
  * Grouped W4A8 dp4a GEMV for one activation row (M == 1): up to
- * HIP_MATMUL_GROUP_MAX_SEGMENTS symmetric int4 weights (no zero points, no
- * bias) that share A, in one launch. With quantize_a != 0 the row is quantized
- * into the scratch first; with quantize_a == 0 the scratch must already hold
+ * HIP_MATMUL_GROUP_MAX_SEGMENTS int4 weights (no bias) that share A, in one
+ * launch. With quantize_a != 0 the row is quantized into the scratch first;
+ * with quantize_a == 0 the scratch must already hold
  * hip_matmul_nbits_quant_act_i8's output for A.
  *   B[s]      : packed int4 [N[s], K/2]
  *   scales[s] : fp16 [N[s], ceil(K/block_size)]
+ *   zp_u8     : nullptr (symmetric, zero point 8), or per segment the
+ *               unpacked uint8 zero points [N[s], ceil(K/block_size)]; every
+ *               segment must then have one
  *   out[s]    : fp16 [N[s]] (SiLU epilogue: out[0] only)
  * Returns a hipError_t; hipErrorInvalidValue for an unsupported group.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
     void* stream, const void* A, int nseg, const void* const* B,
-    const void* const* scales, void* const* out, const int64_t* N, int64_t K,
-    int64_t block_size, int epilogue, int quantize_a, void* a_qb_scratch,
-    void* a_scale_scratch);
+    const void* const* scales, const void* const* zp_u8, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size, int epilogue,
+    int quantize_a, void* a_qb_scratch, void* a_scale_scratch);
 
 /** out[i] = silu(gate[i]) * up[i], fp16, n elements. */
 HIP_KERNEL_API int hip_matmul_nbits_silu_mul(void* stream, const void* gate,

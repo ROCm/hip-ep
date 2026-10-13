@@ -11,9 +11,10 @@
 // ops with one hip.matmul_nbits_group, which the runtime serves with one
 // activation quantization and one GEMV launch.
 //
-// Members must be symmetric (no zero points, no g_idx, no bias) fp16 int4
-// projections with the same K, block_size and scale type. Declining is always
-// safe: the original ops are untouched and keep their own kernels.
+// Members must be fp16 int4 projections without g_idx or bias, with the same
+// K, block_size and scale type, and either all symmetric or all with packed
+// uint8 zero points (AWQ-style asymmetric weights). Declining is always safe:
+// the original ops are untouched and keep their own kernels.
 //
 // When the shared activation is a hip.skip_rms_norm output, the norm also
 // emits the quantized row and the group reads it, removing the group's own
