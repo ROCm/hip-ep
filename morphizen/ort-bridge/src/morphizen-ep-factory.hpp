@@ -128,17 +128,19 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  // One pair of allocator descriptors per registered GPU. device_id on each
-  // OrtMemoryInfo is the slot index, not a HIP ordinal: registration does not
-  // initialize HIP. The ordinal is resolved when a session or allocator is
-  // created and cached here. OrtEpDevice copies the descriptors, so the
-  // factory still owns these. A caller may also pass a memory info whose
-  // device id is the hardware id rather than this slot index; one registered
-  // GPU still maps to that slot, and no registered GPU keeps ordinal 0.
+  // One pair of allocator descriptors per registered GPU. The OrtMemoryInfo
+  // device id is OrtHardwareDevice's device id, the id ORT and a parent EP
+  // pass to CreateAllocator. Registration does not initialize HIP. The HIP
+  // ordinal is resolved when a session or allocator is created and cached
+  // here. OrtEpDevice stores the descriptors, so the factory still owns
+  // these. ORT's device id identifies the hardware type together with the
+  // vendor id, so two identical GPUs can share it; lookup uses the first
+  // registered slot. Session selection still matches LUID or PCI bus id.
   using MemoryInfoPtr =
       std::unique_ptr<OrtMemoryInfo, void (*)(OrtMemoryInfo *)>;
   struct GpuDeviceSlot {
     device_selection::PlatformId identity;
+    uint32_t ort_device_id = 0;
     bool ordinal_resolved = false;
     int hip_ordinal = 0;
     MemoryInfoPtr default_memory{nullptr, nullptr};
@@ -151,6 +153,7 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   // stays on ordinal 0. A present identity that HIP cannot match fails.
   OrtStatus *ResolveSlotOrdinal(size_t slot, int *hip_ordinal);
   int SlotIndexForIdentity(const device_selection::PlatformId &identity) const;
+  int SlotIndexForDeviceId(uint32_t device_id) const;
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;

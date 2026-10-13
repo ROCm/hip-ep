@@ -104,10 +104,10 @@ inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 // the host). ORT keeps the allocator alive for the matching session.
 struct HipGpuAllocator : OrtAllocator {
   // memory_info ownership stays with the factory. hip_device_id is the
-  // resolved HIP ordinal for this allocator's slot. The OrtMemoryInfo device
-  // id is only the factory slot index, so it must not be passed to
-  // hipSetDevice. ScopedDevice applies hip_device_id around each call because
-  // ORT may interleave allocators for different GPUs on one thread.
+  // resolved HIP ordinal for this allocator's GPU. The OrtMemoryInfo device
+  // id is the hardware device id, so it must not be passed to hipSetDevice.
+  // ScopedDevice applies hip_device_id around each call because ORT may
+  // interleave allocators for different GPUs on one thread.
   HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api,
                   int hip_device_id);
   // Frees every pinned buffer this allocator ever handed out (both the

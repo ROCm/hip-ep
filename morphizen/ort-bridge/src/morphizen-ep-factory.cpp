@@ -228,6 +228,16 @@ int MorphiZenEpFactory::SlotIndexForIdentity(
   }
   return -1;
 }
+
+int MorphiZenEpFactory::SlotIndexForDeviceId(uint32_t device_id) const {
+  std::lock_guard<std::mutex> lock(gpu_device_slots_mutex_);
+  for (size_t i = 0; i < gpu_device_slots_.size(); ++i) {
+    if (gpu_device_slots_[i].ort_device_id == device_id) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
 #endif
 
 OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
@@ -310,18 +320,19 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
     // up by OrtMemoryInfo and call CreateAllocator/CreateDataTransfer.
     if (!cpu_debug_mode) {
       const OrtEpApi *ep_api_ptr = factory->ort_api.GetEpApi();
-      const auto slot_index =
-          static_cast<uint32_t>(factory->gpu_device_slots_.size());
+      const uint32_t ort_device_id =
+          factory->ort_api.HardwareDevice_DeviceId(hardware_device);
       MorphiZenEpFactory::GpuDeviceSlot slot;
       slot.identity = platform_id;
+      slot.ort_device_id = ort_device_id;
       if (auto *st = MakeMemoryInfo(
-              factory->ort_api, "MorphiZen", factory->vendor_id_, slot_index,
+              factory->ort_api, "MorphiZen", factory->vendor_id_, ort_device_id,
               OrtDeviceMemoryType_DEFAULT, &slot.default_memory)) {
         return st;
       }
       if (auto *st =
               MakeMemoryInfo(factory->ort_api, "MorphiZen host accessible",
-                             factory->vendor_id_, slot_index,
+                             factory->vendor_id_, ort_device_id,
                              OrtDeviceMemoryType_HOST_ACCESSIBLE,
                              &slot.host_accessible_memory)) {
         return st;
@@ -491,25 +502,20 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (memory_info != nullptr) {
-    int slot = 0;
-    if (auto *status = factory->ort_api.MemoryInfoGetId(memory_info, &slot)) {
+    int device_id = 0;
+    if (auto *status =
+            factory->ort_api.MemoryInfoGetId(memory_info, &device_id)) {
       return status;
     }
-    // The id is the slot index for a memory info this factory registered.
-    // ORT's default allocator, and the AMDGPU umbrella, can instead pass the
-    // hardware device id. A single registered GPU is that session's device.
-    // No registered GPU keeps ordinal 0, which is what CreateEp used.
-    const size_t num_slots = factory->gpu_device_slots_.size();
-    if (slot < 0 || static_cast<size_t>(slot) >= num_slots) {
-      if (num_slots == 1) {
-        slot = 0;
-      } else if (num_slots == 0) {
-        *allocator = new HipGpuAllocator(memory_info, factory->ort_api, 0);
-        return nullptr;
-      } else {
-        return factory->ort_api.CreateStatus(
-            ORT_INVALID_ARGUMENT, "GPU allocator slot is not registered.");
-      }
+    // The id is the hardware device id stored at registration. An id this
+    // factory did not record is a caller error, including an empty table.
+    const int slot =
+        device_id < 0
+            ? -1
+            : factory->SlotIndexForDeviceId(static_cast<uint32_t>(device_id));
+    if (slot < 0) {
+      return factory->ort_api.CreateStatus(
+          ORT_INVALID_ARGUMENT, "GPU allocator device id is not registered.");
     }
     int hip_ordinal = 0;
     if (auto *status = factory->ResolveSlotOrdinal(static_cast<size_t>(slot),
