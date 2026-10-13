@@ -1011,8 +1011,7 @@ extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
 #endif
-    void
-    hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
+        void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
   if (!state) {
     return;
   }
@@ -1044,8 +1043,7 @@ extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
 #endif
-    void
-    hipdnn_ep_runtime_flush_op_profile(RuntimeState *state) {
+        void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state) {
   if (!state) {
     return;
   }
@@ -1062,9 +1060,10 @@ extern "C"
 #ifdef _WIN32
     __declspec(dllexport)
 #endif
-    void
-    hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state, const char *name,
-                                      double cpu_start_us, double cpu_ms) {
+        void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state,
+                                               const char *name,
+                                               double cpu_start_us,
+                                               double cpu_ms) {
   if (!state || !name) {
     return;
   }
