@@ -1699,14 +1699,11 @@ int wrap_hyper_connection_post_mix_norm(
 // a_quant/a_scale (nullable): int8 copy of `output` for
 // hip.matmul_nbits_group, written when hip_norm_quant_supported() accepts the
 // shape and quant_block_size.
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    void *a_quant, void *a_scale,
-                                    int64_t quant_block_size);
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size);
 
 // Same op with an element size per tensor (bias shares skip's); emitted only
 // when they differ, e.g. an fp32 residual with fp16 skip/gamma/output. A

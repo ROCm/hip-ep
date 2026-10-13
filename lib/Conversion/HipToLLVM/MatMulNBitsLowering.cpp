@@ -182,8 +182,8 @@ struct MatMulNBitsGroupOpLowering
     }
     for (int64_t i = 0; i < kMaxSegments; ++i) {
       paramTypes.push_back(i64Type);
-      args.push_back(createI64Const(
-          i < nseg ? cast<IntegerAttr>(nAttr[i]).getInt() : 0));
+      args.push_back(
+          createI64Const(i < nseg ? cast<IntegerAttr>(nAttr[i]).getInt() : 0));
     }
     // M, K, batch_count, bits, block_size, elem_size, scale_elem_size,
     // epilogue
@@ -195,8 +195,10 @@ struct MatMulNBitsGroupOpLowering
                  createI64Const(op.getEpilogue())});
     // a_quant, a_scale
     paramTypes.append(2, ptrType);
-    args.push_back(extractOptionalMemRefPtr(adaptor.getAQuant(), rewriter, loc));
-    args.push_back(extractOptionalMemRefPtr(adaptor.getAScale(), rewriter, loc));
+    args.push_back(
+        extractOptionalMemRefPtr(adaptor.getAQuant(), rewriter, loc));
+    args.push_back(
+        extractOptionalMemRefPtr(adaptor.getAScale(), rewriter, loc));
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMatMulNBitsGroup, paramTypes, i32Type);
