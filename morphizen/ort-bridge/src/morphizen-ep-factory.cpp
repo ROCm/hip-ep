@@ -17,7 +17,9 @@
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
 #include "./morphizen-hip-gpu-allocator.hpp"
+#include <cstring>
 #include <hip/hip_runtime.h>
+#include <string>
 #endif
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY, "0")
@@ -85,10 +87,10 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
 MorphiZenEpFactory::~MorphiZenEpFactory() {
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  if (runtime_discovered_gpu_device_ != nullptr) {
-    ort_api.GetEpApi()->ReleaseHardwareDevice(runtime_discovered_gpu_device_);
-    runtime_discovered_gpu_device_ = nullptr;
+  for (OrtHardwareDevice *device : runtime_discovered_gpu_devices_) {
+    ort_api.GetEpApi()->ReleaseHardwareDevice(device);
   }
+  runtime_discovered_gpu_devices_.clear();
 #endif
 }
 
@@ -120,50 +122,61 @@ namespace {
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
 // ORT's Linux device discovery only walks /sys/class/drm and /sys/bus/pci.
 // Under WSL the GPU is projected through /dev/dxg and appears in neither, so no
-// AMD OrtHardwareDevice ever reaches GetSupportedDevices. Synthesize one from
-// the HIP runtime, which is authoritative for what this EP can actually drive.
-// Leaves *device_out null (with an OK status) when HIP sees no usable device.
-OrtStatus *GetOrCreateRuntimeGpuDevice(MorphiZenEpFactory *factory,
-                                       const OrtHardwareDevice **device_out) {
-  *device_out = factory->runtime_discovered_gpu_device_;
-  if (*device_out != nullptr) {
+// AMD OrtHardwareDevice ever reaches GetSupportedDevices. Synthesize one per
+// HIP device, the runtime being authoritative for what this EP can drive.
+// Leaves the cache empty (with an OK status) when HIP sees no usable device.
+OrtStatus *GetOrCreateRuntimeGpuDevices(MorphiZenEpFactory *factory) {
+  if (!factory->runtime_discovered_gpu_devices_.empty()) {
     return nullptr;
   }
 
   int device_count = 0;
-  hipDeviceProp_t props{};
-  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count <= 0 ||
-      hipGetDeviceProperties(&props, 0) != hipSuccess) {
+  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count <= 0) {
     // Clear the sticky error so later unrelated HIP calls are not poisoned.
     (void)hipGetLastError();
     return nullptr;
   }
 
-  OrtKeyValuePairs *metadata = nullptr;
-  factory->ort_api.CreateKeyValuePairs(&metadata);
-  factory->ort_api.AddKeyValuePair(metadata, "hip_runtime_discovered", "1");
-  factory->ort_api.AddKeyValuePair(metadata, "Discrete",
-                                   props.integrated == 0 ? "1" : "0");
-  factory->ort_api.AddKeyValuePair(metadata, "gcn_arch_name",
-                                   props.gcnArchName);
-  char pci_bus_id[32] = {};
-  if (hipDeviceGetPCIBusId(pci_bus_id, static_cast<int>(sizeof(pci_bus_id)),
-                           0) == hipSuccess &&
-      pci_bus_id[0] != '\0') {
-    factory->ort_api.AddKeyValuePair(metadata, "pci_bus_id", pci_bus_id);
+  for (int hip_device_id = 0; hip_device_id < device_count; ++hip_device_id) {
+    hipDeviceProp_t props{};
+    if (hipGetDeviceProperties(&props, hip_device_id) != hipSuccess) {
+      (void)hipGetLastError();
+      continue;
+    }
+
+    // The sysfs path above filters on OrtHardwareDeviceType_GPU and vendor
+    // 0x1002; apply the equivalent test here. hipDeviceProp_t carries no PCI
+    // vendor id, but a HIP build targeting a non-AMD backend reports a non-gfx
+    // architecture, which this EP could not generate code for anyway.
+    if (std::strncmp(props.gcnArchName, "gfx", 3) != 0) {
+      continue;
+    }
+
+    // No pci_bus_id metadata: under WSL hipDeviceGetPCIBusId reports the
+    // host-side address, which is invisible from inside the guest and so
+    // cannot be correlated with anything ORT enumerates there.
+    OrtKeyValuePairs *metadata = nullptr;
+    factory->ort_api.CreateKeyValuePairs(&metadata);
+    factory->ort_api.AddKeyValuePair(metadata, "hip_runtime_discovered", "1");
+    factory->ort_api.AddKeyValuePair(metadata, "hip_device_id",
+                                     std::to_string(hip_device_id).c_str());
+    factory->ort_api.AddKeyValuePair(metadata, "Discrete",
+                                     props.integrated == 0 ? "1" : "0");
+    factory->ort_api.AddKeyValuePair(metadata, "gcn_arch_name",
+                                     props.gcnArchName);
+
+    OrtHardwareDevice *device = nullptr;
+    auto *status = factory->ort_api.GetEpApi()->CreateHardwareDevice(
+        OrtHardwareDeviceType_GPU, factory->vendor_id_, /*device_id*/ 0,
+        factory->vendor_.c_str(), metadata, &device);
+    factory->ort_api.ReleaseKeyValuePairs(metadata);
+    if (status != nullptr) {
+      return status;
+    }
+
+    factory->runtime_discovered_gpu_devices_.push_back(device);
   }
 
-  OrtHardwareDevice *device = nullptr;
-  auto *status = factory->ort_api.GetEpApi()->CreateHardwareDevice(
-      OrtHardwareDeviceType_GPU, factory->vendor_id_, /*device_id*/ 0,
-      factory->vendor_.c_str(), metadata, &device);
-  factory->ort_api.ReleaseKeyValuePairs(metadata);
-  if (status != nullptr) {
-    return status;
-  }
-
-  factory->runtime_discovered_gpu_device_ = device;
-  *device_out = device;
   return nullptr;
 }
 #endif
@@ -288,18 +301,27 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  // Platform discovery misses GPU-PV style setups such as WSL, where the GPU
-  // is reachable only via /dev/dxg. Ask the HIP runtime directly before giving
-  // up, otherwise the EP would be silently unusable there.
-  if (!cpu_debug_mode && num_ep_devices == 0 && max_ep_devices > 0) {
-    const OrtHardwareDevice *runtime_device = nullptr;
-    if (auto *status = GetOrCreateRuntimeGpuDevice(factory, &runtime_device);
+  // Platform discovery misses GPU-PV style setups such as WSL, where the GPU is
+  // reachable only via /dev/dxg. Ask the HIP runtime directly before giving up,
+  // otherwise the EP would be silently unusable there. Only an empty result can
+  // trigger this: the HIP ordinals carry no identity that could be matched
+  // against what platform discovery already reported.
+  if (!cpu_debug_mode && num_ep_devices == 0) {
+    if (auto *status = GetOrCreateRuntimeGpuDevices(factory);
         status != nullptr) {
       return status;
     }
-    if (runtime_device != nullptr) {
+    if (!factory->runtime_discovered_gpu_devices_.empty()) {
       MY_LOG(1) << "No AMD GPU reported by ORT device discovery; using the "
-                   "HIP runtime as the device source.";
+                   "HIP runtime as the device source for "
+                << factory->runtime_discovered_gpu_devices_.size()
+                << " device(s).";
+    }
+    for (const OrtHardwareDevice *runtime_device :
+         factory->runtime_discovered_gpu_devices_) {
+      if (num_ep_devices >= max_ep_devices) {
+        break;
+      }
       if (auto *status = register_device(runtime_device); status != nullptr) {
         return status;
       }
