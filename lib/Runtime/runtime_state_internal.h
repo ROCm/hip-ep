@@ -226,6 +226,10 @@ struct RuntimeState {
   // hipdnn_ep_runtime_get_provider_option.
   void *provider_options;
 
+  // HIP ordinal selected for this session. 0 when the provider option is
+  // absent. Streams, handles, and device allocations are created on it.
+  int hip_device_id;
+
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;

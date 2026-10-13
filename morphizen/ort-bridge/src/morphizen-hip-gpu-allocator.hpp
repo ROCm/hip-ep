@@ -103,13 +103,13 @@ inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 // mapped pinned allocator, since AMD APU iGPU shares physical memory with
 // the host). ORT keeps the allocator alive for the matching session.
 struct HipGpuAllocator : OrtAllocator {
-  // memory_info ownership stays with the factory. The OrtMemoryInfo's
-  // device_id (extracted via OrtApi::MemoryInfoGetId at construction time)
-  // is what the allocator passes to hipSetDevice; this is how a single
-  // factory serving multiple AMD GPUs keeps each allocator pinned to the
-  // GPU that the OrtEpDevice actually represents (instead of always hitting
-  // device 0).
-  HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api);
+  // memory_info ownership stays with the factory. hip_device_id is the
+  // resolved HIP ordinal for this allocator's slot. The OrtMemoryInfo device
+  // id is only the factory slot index, so it must not be passed to
+  // hipSetDevice. ScopedDevice applies hip_device_id around each call because
+  // ORT may interleave allocators for different GPUs on one thread.
+  HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api,
+                  int hip_device_id);
   // Frees every pinned buffer this allocator ever handed out (both the
   // currently-free pool entries and any still checked out). Called by the
   // factory's ReleaseAllocator at session teardown.
@@ -221,9 +221,8 @@ private:
   size_t peak_live_count_ = 0;
 
   const OrtMemoryInfo *memory_info_;
-  // Cached at construction time. -1 means "couldn't read it from memory_info"
-  // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
-  // current HIP device in that case rather than failing the allocation.
+  // HIP ordinal this allocator allocates on. Resolved from the factory slot
+  // before construction; ScopedDevice applies it around every HIP call.
   int device_id_;
 };
 

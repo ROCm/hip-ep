@@ -123,9 +123,16 @@ struct Table {
 Table& table();
 
 std::string currentGpuArch() {
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0) {
+    (void)hipGetLastError();
+    device = 0;
+  }
   hipDeviceProp_t props;
-  if (hipGetDeviceProperties(&props, 0) != hipSuccess)
+  if (hipGetDeviceProperties(&props, device) != hipSuccess) {
+    (void)hipGetLastError();
     return std::string();
+  }
   std::string arch(props.gcnArchName);
   // gcnArchName carries feature suffixes like "gfx1151:xnack-"; the table is
   // stamped with the bare arch.

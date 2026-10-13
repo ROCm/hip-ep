@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
+#include "./device-selection.hpp"
 #include <vector>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
@@ -15,6 +16,7 @@
 // runtime headers, so this stays cheap for callers.
 #include "./morphizen-hip-gpu-allocator.hpp"
 #include <memory>
+#include <mutex>
 #endif
 
 namespace morphizen {
@@ -126,14 +128,28 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-  // Lazily-created OrtMemoryInfo describing where the EP's GPU allocator places
-  // tensors. Owned by the factory; OrtEpDevice copies them when registered via
-  // EpDevice_AddAllocatorInfo, so we may free them when the factory dies.
+  // One pair of allocator descriptors per registered GPU. device_id on each
+  // OrtMemoryInfo is the slot index, not a HIP ordinal: registration does not
+  // initialize HIP. The ordinal is resolved when a session or allocator is
+  // created and cached here. OrtEpDevice copies the descriptors, so the
+  // factory still owns these.
   using MemoryInfoPtr =
       std::unique_ptr<OrtMemoryInfo, void (*)(OrtMemoryInfo *)>;
-  MemoryInfoPtr gpu_memory_info_{nullptr, nullptr}; // hipMalloc-backed
-  MemoryInfoPtr gpu_host_accessible_memory_info_{
-      nullptr, nullptr}; // hipHostMalloc-backed
+  struct GpuDeviceSlot {
+    device_selection::PlatformId identity;
+    bool ordinal_resolved = false;
+    int hip_ordinal = 0;
+    MemoryInfoPtr default_memory{nullptr, nullptr};
+    MemoryInfoPtr host_accessible_memory{nullptr, nullptr};
+  };
+  std::vector<GpuDeviceSlot> gpu_device_slots_;
+  mutable std::mutex gpu_device_slots_mutex_;
+
+  // Resolves the slot's platform identity to a HIP ordinal. An empty identity
+  // stays on ordinal 0. A present identity that HIP cannot match fails.
+  OrtStatus *ResolveSlotOrdinal(size_t slot, int *hip_ordinal);
+  int SlotIndexForIdentity(
+      const device_selection::PlatformId &identity) const;
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;

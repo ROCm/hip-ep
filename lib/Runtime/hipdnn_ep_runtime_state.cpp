@@ -18,9 +18,11 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -29,7 +31,9 @@ using ProviderOptions = std::unordered_map<std::string, std::string>;
 }
 
 // Forward decl of static helpers defined later in this file.
-static int initialize_state_handles(RuntimeState **out_state);
+static int initialize_state_handles(RuntimeState **out_state,
+                                    int hip_device_id);
+static int read_hip_device_id(const void *config, int *hip_device_id);
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
@@ -54,7 +58,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 1;
   }
 
-  if (int rc = initialize_state_handles(out_state); rc != 0) {
+  int hip_device_id = 0;
+  if (int rc = read_hip_device_id(config, &hip_device_id); rc != 0) {
+    return rc;
+  }
+
+  if (int rc = initialize_state_handles(out_state, hip_device_id); rc != 0) {
     return rc;
   }
 
@@ -167,13 +176,49 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   return 0;
 }
 
+// Reads the session HIP ordinal from provider options. Absent means ordinal 0.
+// Returns 4 when the value is present but not a non-negative integer.
+static int read_hip_device_id(const void *config, int *hip_device_id) {
+  *hip_device_id = 0;
+  const auto *init_config = static_cast<const hipdnn_ep_init_config *>(config);
+  if (!init_config || !init_config->provider_option_count ||
+      !init_config->provider_option_at) {
+    return 0;
+  }
+  const size_t count = init_config->provider_option_count(init_config->self);
+  for (size_t i = 0; i < count; ++i) {
+    const char *key = nullptr;
+    const char *value = nullptr;
+    init_config->provider_option_at(init_config->self, i, &key, &value);
+    if (!key || std::strcmp(key, "hip_device_id") != 0) {
+      continue;
+    }
+    if (!value) {
+      fprintf(stderr, "hip_device_id provider option is empty\n");
+      return 4;
+    }
+    errno = 0;
+    char *end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0' || errno != 0 || parsed < 0 ||
+        parsed > std::numeric_limits<int>::max()) {
+      fprintf(stderr, "Invalid hip_device_id '%s'\n", value);
+      return 4;
+    }
+    *hip_device_id = static_cast<int>(parsed);
+    return 0;
+  }
+  return 0;
+}
+
 // Shared initialization that brings up HIP device, stream, and hipBLASLt
 // handles in a fresh RuntimeState. On any failure the partially
 // initialized state is released and a non-zero error code (matching the
 // historical exit codes 1-9) is returned. On success *out_state holds the
 // RuntimeState ready for constants_blob allocation; no constant memory has
 // been touched yet.
-static int initialize_state_handles(RuntimeState **out_state) {
+static int initialize_state_handles(RuntimeState **out_state,
+                                    int hip_device_id) {
   auto t_prev = timing_now();
 
   RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));
@@ -226,6 +271,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
   state->provider_options = nullptr;
+  state->hip_device_id = hip_device_id;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
@@ -248,8 +294,15 @@ static int initialize_state_handles(RuntimeState **out_state) {
     return 2;
   }
 
-  if (hipSetDevice(0) != hipSuccess) {
-    fprintf(stderr, "Failed to set HIP device 0\n");
+  if (hip_device_id >= device_count) {
+    fprintf(stderr, "HIP device %d is outside the enumerated range of %d\n",
+            hip_device_id, device_count);
+    free(state);
+    return 3;
+  }
+  if (hipSetDevice(hip_device_id) != hipSuccess) {
+    fprintf(stderr, "Failed to set HIP device %d\n", hip_device_id);
+    (void)hipGetLastError();
     free(state);
     return 3;
   }
@@ -727,6 +780,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     return 0; // Best-effort - don't fail
   }
 
+  // Device frees and the stream sync have to run on the session's GPU.
+  if (hipSetDevice(state->hip_device_id) != hipSuccess) {
+    (void)hipGetLastError();
+  }
+
   // Best-effort cleanup - continue even if operations fail
   // Cleanup in reverse order of initialization (LIFO)
 
@@ -956,6 +1014,14 @@ extern "C"
         void hipdnn_ep_runtime_begin_compute(RuntimeState *state) {
   if (!state) {
     return;
+  }
+  // Compute may run on a different thread than session init. Re-select the
+  // session GPU before any allocation or launch on this thread.
+  if (hipSetDevice(state->hip_device_id) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_runtime_begin_compute: hipSetDevice(%d) failed\n",
+            state->hip_device_id);
+    (void)hipGetLastError();
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;

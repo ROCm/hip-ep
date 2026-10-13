@@ -12,6 +12,7 @@ set(_ORT_BRIDGE_SOURCES
   src/ort-status-exception.cpp
   src/ort-graph-wrapper.hpp
   src/ort-graph-wrapper.cpp
+  src/device-selection.hpp
   src/morphizen-ep-factory.cpp
   src/morphizen-ep-factory.hpp
   src/morphizen-ep.hpp

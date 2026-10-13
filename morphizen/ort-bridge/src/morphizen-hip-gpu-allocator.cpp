@@ -14,15 +14,6 @@
 #include <glog/logging.h>
 #include <hip/hip_runtime.h>
 
-// ORT_API_MANUAL_INIT must be set before <onnxruntime_cxx_api.h> to match
-// the rest of morphizen, which initializes the Ort::api global manually
-// via Ort::InitApi() in ort-bridge.cpp at DLL load. Without this define
-// the C++ wrapper's GetApi() would compile against an internal default
-// initializer and link-mismatch with main.cpp.obj (LNK2038 on
-// ORT_API_MANUAL_INIT enabled vs disabled).
-#define ORT_API_MANUAL_INIT 1
-#include <onnxruntime_cxx_api.h>
-
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -42,12 +33,9 @@ inline OrtStatus *MakeHipStatus(const OrtApi &api, hipError_t err,
 }
 
 // Lightweight RAII helper to set the active HIP device for the duration of
-// a single allocator call. We can't rely on the process-wide hipSetDevice
-// state because ORT may interleave calls into allocators bound to different
-// GPUs from the same thread (e.g. a session that uses MorphiZen on GPU 0
-// and another EP on GPU 1). The device id is read from the OrtMemoryInfo
-// that was passed to HipGpuAllocator's constructor; -1 means "leave the
-// current HIP device alone" (the OrtMemoryInfo didn't carry a device id).
+// a single allocator call. ORT may interleave allocators bound to different
+// GPUs on one thread. device_id is the resolved HIP ordinal; -1 leaves the
+// calling thread's current device unchanged.
 struct ScopedDevice {
   explicit ScopedDevice(int device_id) {
     if (device_id >= 0) {
@@ -56,12 +44,6 @@ struct ScopedDevice {
   }
 };
 
-// Read the device id off an OrtMemoryInfo, returning -1 on null / on any
-// underlying ORT error. We swallow the (rare) error path because this is
-// invoked from the allocator constructor and we'd rather degrade to "use
-// whatever HIP device the caller had selected" than throw across the EP
-// factory ABI boundary. Real production callers go through
-// MorphiZenEpFactory::CreateMemoryInfo_V2, which always sets a valid id.
 // Map a request (or an allocated buffer's size) to a fixed size class. Returns
 // the index into kSizeClasses of the first class whose capacity is >= size, or
 // -1 when size exceeds the largest class (a "large" buffer handled best-fit).
@@ -120,30 +102,13 @@ void ReleaseToDriver(const std::vector<void *> &buffers, int device_id) {
   }
 }
 
-int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
-  if (memory_info == nullptr) {
-    return -1;
-  }
-  try {
-    // Ort::ConstMemoryInfo is an Unowned wrapper around the raw pointer
-    // (see onnxruntime_cxx_api.h: ConstMemoryInfo =
-    // MemoryInfoImpl<Unowned<...>>). Construction is free; GetDeviceId calls
-    // OrtApi::MemoryInfoGetId and ThrowOnError-routes a failure status into
-    // Ort::Exception. Ort::api was wired up by Ort::InitApi() in ort-bridge.cpp
-    // at DLL load.
-    return Ort::ConstMemoryInfo(memory_info).GetDeviceId();
-  } catch (const Ort::Exception &) {
-    return -1;
-  }
-}
-
 } // namespace
 
 // =============== HipGpuAllocator ===============
 
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
-                                 const OrtApi & /*api*/)
-    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
+                                 const OrtApi & /*api*/, int hip_device_id)
+    : memory_info_{memory_info}, device_id_{hip_device_id} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;

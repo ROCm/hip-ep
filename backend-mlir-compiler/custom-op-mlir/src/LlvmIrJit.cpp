@@ -344,8 +344,15 @@ std::string thisModuleDirectory() {
 // Falls back to gfx1151 on any failure (incl. the empty gcnArchName seen on
 // some Windows TheRock builds).
 std::string detectCustomKernelArch() {
+  // CreateEp selects the session GPU on this thread before compilation.
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0) {
+    (void)hipGetLastError();
+    device = 0;
+  }
   hipDeviceProp_t prop{};
-  if (hipGetDeviceProperties(&prop, 0) != hipSuccess) {
+  if (hipGetDeviceProperties(&prop, device) != hipSuccess) {
+    (void)hipGetLastError();
     LOG(WARNING) << "LlvmIrJit::detectCustomKernelArch: "
                     "hipGetDeviceProperties failed; defaulting to gfx1151";
     return "gfx1151";

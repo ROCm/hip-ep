@@ -4,19 +4,23 @@
  */
 #include "morphizen/morphizen.hpp"
 
+#include "./device-selection.hpp"
 #include "./morphizen-ep-factory.hpp"
 #include "./morphizen-ep.hpp"
 #include "./ort-api-version.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
+#include <cstring>
 #include <glog/logging.h>
 #include <google/protobuf/message_lite.h>
 #include <google/protobuf/util/json_util.h>
+#include <string>
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
 #include "./morphizen-hip-gpu-allocator.hpp"
+#include <hip/hip_runtime.h>
 #endif
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY, "0")
@@ -102,6 +106,130 @@ MorphiZenEpFactory::GetVersionImpl(const OrtEpFactory *this_ptr) noexcept {
   return factory->ep_version_.c_str();
 }
 
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+namespace {
+
+device_selection::PlatformId
+ReadPlatformId(const OrtApi &api, const OrtHardwareDevice *device) {
+  if (api.HardwareDevice_Metadata == nullptr || api.GetKeyValue == nullptr ||
+      device == nullptr) {
+    return {};
+  }
+  const OrtKeyValuePairs *metadata = api.HardwareDevice_Metadata(device);
+  if (metadata == nullptr) {
+    return {};
+  }
+  const char *key = device_selection::PlatformIdMetadataKey();
+  return device_selection::PlatformIdFromMetadata(
+      key, api.GetKeyValue(metadata, key));
+}
+
+// Walks HIP ordinals until one reports the same canonical identity. Returns
+// -1 and writes *error when enumeration fails or nothing matches. Does not
+// change the calling thread's current device.
+int FindHipOrdinal(const device_selection::PlatformId &identity,
+                   std::string *error) {
+  int device_count = 0;
+  if (hipGetDeviceCount(&device_count) != hipSuccess || device_count <= 0) {
+    (void)hipGetLastError();
+    *error = "HIP device enumeration failed while selecting a GPU.";
+    return -1;
+  }
+
+  for (int ordinal = 0; ordinal < device_count; ++ordinal) {
+#ifdef _WIN32
+    char luid_bytes[8] = {};
+    unsigned int node_mask = 0;
+    if (hipDeviceGetLuid(luid_bytes, &node_mask, ordinal) != hipSuccess) {
+      (void)hipGetLastError();
+      continue;
+    }
+    std::uint64_t luid = 0;
+    static_assert(sizeof(luid) == sizeof(luid_bytes), "LUID is 8 bytes");
+    std::memcpy(&luid, luid_bytes, sizeof(luid));
+    if (device_selection::CanonicalLuid(luid) == identity.value) {
+      return ordinal;
+    }
+#else
+    char pci_bus_id[32] = {};
+    if (hipDeviceGetPCIBusId(pci_bus_id, static_cast<int>(sizeof(pci_bus_id)),
+                             ordinal) != hipSuccess) {
+      (void)hipGetLastError();
+      continue;
+    }
+    device_selection::PciBusId parsed;
+    if (device_selection::ParsePciBusId(pci_bus_id, &parsed) &&
+        device_selection::CanonicalPciBusId(parsed) == identity.value) {
+      return ordinal;
+    }
+#endif
+  }
+
+  *error = "No HIP device matches the GPU selected in ONNX Runtime.";
+  return -1;
+}
+
+OrtStatus *MakeMemoryInfo(const OrtApi &api, const char *name,
+                          uint32_t vendor_id, uint32_t device_id,
+                          OrtDeviceMemoryType memory_type,
+                          MorphiZenEpFactory::MemoryInfoPtr *out) {
+  OrtMemoryInfo *raw = nullptr;
+  OrtStatus *status = api.CreateMemoryInfo_V2(
+      name, OrtMemoryInfoDeviceType_GPU, vendor_id, device_id, memory_type,
+      /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
+  if (status != nullptr) {
+    return status;
+  }
+  *out = MorphiZenEpFactory::MemoryInfoPtr(raw, api.ReleaseMemoryInfo);
+  return nullptr;
+}
+
+} // namespace
+
+OrtStatus *MorphiZenEpFactory::ResolveSlotOrdinal(size_t slot,
+                                                  int *hip_ordinal) {
+  std::lock_guard<std::mutex> lock(gpu_device_slots_mutex_);
+  if (slot >= gpu_device_slots_.size()) {
+    return ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
+                                "GPU allocator slot is not registered.");
+  }
+  GpuDeviceSlot &entry = gpu_device_slots_[slot];
+  if (!entry.ordinal_resolved) {
+    int resolved = 0;
+    if (entry.identity.kind == device_selection::PlatformIdKind::Malformed) {
+      return ort_api.CreateStatus(
+          ORT_INVALID_ARGUMENT,
+          "Selected GPU platform identity could not be parsed.");
+    }
+    if (entry.identity.kind != device_selection::PlatformIdKind::None) {
+      std::string error;
+      resolved = FindHipOrdinal(entry.identity, &error);
+      if (resolved < 0) {
+        return ort_api.CreateStatus(ORT_INVALID_ARGUMENT, error.c_str());
+      }
+    }
+    entry.hip_ordinal = resolved;
+    entry.ordinal_resolved = true;
+  }
+  *hip_ordinal = entry.hip_ordinal;
+  return nullptr;
+}
+
+int MorphiZenEpFactory::SlotIndexForIdentity(
+    const device_selection::PlatformId &identity) const {
+  std::lock_guard<std::mutex> lock(gpu_device_slots_mutex_);
+  for (size_t i = 0; i < gpu_device_slots_.size(); ++i) {
+    const GpuDeviceSlot &slot = gpu_device_slots_[i];
+    if (slot.identity.kind == identity.kind &&
+        slot.identity.value == identity.value) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+#endif
+
 OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
     OrtEpFactory *this_ptr, const OrtHardwareDevice *const *devices,
     size_t num_devices, OrtEpDevice **ep_devices, size_t max_ep_devices,
@@ -109,9 +237,8 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
   size_t &num_ep_devices = *p_num_ep_devices;
   auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
 
-  // ORT plugin EP V2 requires every OrtEpDevice registered by a single
-  // factory to share the same OrtDeviceMemoryInfo. We therefore pick a single
-  // device "mode" up-front: production = AMD GPU, debug = CPU. See the
+  // A factory serves one device mode: production AMD GPUs, or the CPU debug
+  // fallback. Each registered GPU gets its own allocator slot. See the
   // MORPHIZEN_EP_ENABLE_CPU_DEVICE comment near the top of this file.
   const bool cpu_debug_mode = ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE) != 0;
 
@@ -148,6 +275,20 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
     factory->ep_options_ =
         std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs *)>(
             ep_options, factory->ort_api.ReleaseKeyValuePairs);
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+    device_selection::PlatformId platform_id;
+    if (!cpu_debug_mode) {
+      // Record the identity ORT already discovered. This does not call HIP.
+      platform_id = ReadPlatformId(factory->ort_api, hardware_device);
+      if (platform_id.kind == device_selection::PlatformIdKind::PciBusId ||
+          platform_id.kind == device_selection::PlatformIdKind::Luid) {
+        factory->ort_api.AddKeyValuePair(
+            ep_metadata, device_selection::PlatformIdMetadataKey(),
+            platform_id.value.c_str());
+      }
+    }
+#endif
     if (num_ep_devices == max_ep_devices) {
       return factory->ort_api.CreateStatus(
           ORT_INVALID_ARGUMENT, "Not enough space to return EP devices.");
@@ -169,46 +310,32 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
     // up by OrtMemoryInfo and call CreateAllocator/CreateDataTransfer.
     if (!cpu_debug_mode) {
       const OrtEpApi *ep_api_ptr = factory->ort_api.GetEpApi();
-
-      // Lazily create the two OrtMemoryInfo instances on first use; reuse
-      // them across subsequent factory invocations.
-      if (!factory->gpu_memory_info_) {
-        OrtMemoryInfo *raw = nullptr;
-        auto *st = factory->ort_api.CreateMemoryInfo_V2(
-            "MorphiZen", OrtMemoryInfoDeviceType_GPU,
-            /*vendor*/ factory->vendor_id_,
-            /*device_id*/ 0, OrtDeviceMemoryType_DEFAULT,
-            /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
-        if (st != nullptr) {
-          return st;
-        }
-        factory->gpu_memory_info_ = MorphiZenEpFactory::MemoryInfoPtr(
-            raw, factory->ort_api.ReleaseMemoryInfo);
+      const auto slot_index =
+          static_cast<uint32_t>(factory->gpu_device_slots_.size());
+      MorphiZenEpFactory::GpuDeviceSlot slot;
+      slot.identity = platform_id;
+      if (auto *st = MakeMemoryInfo(
+              factory->ort_api, "MorphiZen", factory->vendor_id_, slot_index,
+              OrtDeviceMemoryType_DEFAULT, &slot.default_memory)) {
+        return st;
       }
-      if (!factory->gpu_host_accessible_memory_info_) {
-        OrtMemoryInfo *raw = nullptr;
-        auto *st = factory->ort_api.CreateMemoryInfo_V2(
-            "MorphiZen host accessible", OrtMemoryInfoDeviceType_GPU,
-            /*vendor*/ factory->vendor_id_,
-            /*device_id*/ 0, OrtDeviceMemoryType_HOST_ACCESSIBLE,
-            /*alignment*/ 0, OrtAllocatorType::OrtDeviceAllocator, &raw);
-        if (st != nullptr) {
-          return st;
-        }
-        factory->gpu_host_accessible_memory_info_ =
-            MorphiZenEpFactory::MemoryInfoPtr(
-                raw, factory->ort_api.ReleaseMemoryInfo);
+      if (auto *st = MakeMemoryInfo(
+              factory->ort_api, "MorphiZen host accessible",
+              factory->vendor_id_, slot_index,
+              OrtDeviceMemoryType_HOST_ACCESSIBLE,
+              &slot.host_accessible_memory)) {
+        return st;
       }
 
       if (auto *st = ep_api_ptr->EpDevice_AddAllocatorInfo(
-              registered_ep_device, factory->gpu_memory_info_.get())) {
+              registered_ep_device, slot.default_memory.get())) {
         return st;
       }
       if (auto *st = ep_api_ptr->EpDevice_AddAllocatorInfo(
-              registered_ep_device,
-              factory->gpu_host_accessible_memory_info_.get())) {
+              registered_ep_device, slot.host_accessible_memory.get())) {
         return st;
       }
+      factory->gpu_device_slots_.push_back(std::move(slot));
     }
 #endif
   }
@@ -217,7 +344,7 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
 
 OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
     OrtEpFactory *this_ptr,
-    _In_reads_(num_devices) const OrtHardwareDevice *const * /*devices*/,
+    _In_reads_(num_devices) const OrtHardwareDevice *const *devices,
     _In_reads_(num_devices) const OrtKeyValuePairs *const *ep_metadata,
     _In_ size_t num_devices, _In_ const OrtSessionOptions *session_options,
     _In_ const OrtLogger *logger, _Out_ OrtEp **ep) noexcept {
@@ -225,22 +352,95 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
   auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
   *ep = nullptr;
 
-  // MorphiZen does not use the selected-device array: it compiles for and runs
-  // on the default / currently-selected HIP device. Any num_devices is
-  // accepted, including a parent EP (e.g. the AMD GPU umbrella) that creates
-  // the EP without forwarding the selection.
+  // A session runs on one GPU. Zero forwarded devices keep ordinal 0 so a
+  // parent EP that does not pass a selection still works. CPU debug mode
+  // never touches HIP, so session creation still works without a GPU.
+  if (num_devices > 1) {
+    return factory->ort_api.CreateStatus(
+        ORT_INVALID_ARGUMENT,
+        "MorphiZen EP supports one selected GPU per session.");
+  }
+  const OrtKeyValuePairs *metadata_for_ep =
+      (num_devices > 0 && ep_metadata != nullptr) ? ep_metadata[0] : nullptr;
+
+#if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
+    MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
+  const bool cpu_debug_mode = ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE) != 0;
+  OrtKeyValuePairs *merged_metadata = nullptr;
+  if (!cpu_debug_mode) {
+    const OrtHardwareDevice *selected =
+        (num_devices == 1 && devices != nullptr) ? devices[0] : nullptr;
+    const device_selection::PlatformId identity =
+        ReadPlatformId(factory->ort_api, selected);
+    const auto decision =
+        device_selection::Decide(num_devices, identity.kind);
+    int hip_ordinal = 0;
+    if (decision ==
+        device_selection::DeviceSelectionDecision::RejectMalformed) {
+      return factory->ort_api.CreateStatus(
+          ORT_INVALID_ARGUMENT,
+          "Selected GPU platform identity could not be parsed.");
+    }
+    if (decision ==
+        device_selection::DeviceSelectionDecision::MatchIdentity) {
+      const int slot = factory->SlotIndexForIdentity(identity);
+      if (slot < 0) {
+        return factory->ort_api.CreateStatus(
+            ORT_INVALID_ARGUMENT,
+            "Selected GPU was not registered by this EP factory.");
+      }
+      if (auto *status = factory->ResolveSlotOrdinal(
+              static_cast<size_t>(slot), &hip_ordinal)) {
+        return status;
+      }
+    }
+    if (hipSetDevice(hip_ordinal) != hipSuccess) {
+      (void)hipGetLastError();
+      return factory->ort_api.CreateStatus(
+          ORT_RUNTIME_EXCEPTION, "hipSetDevice failed for the selected GPU.");
+    }
+
+    factory->ort_api.CreateKeyValuePairs(&merged_metadata);
+    if (metadata_for_ep != nullptr) {
+      const char *const *keys = nullptr;
+      const char *const *values = nullptr;
+      size_t num_keys = 0;
+      factory->ort_api.GetKeyValuePairs(metadata_for_ep, &keys, &values,
+                                        &num_keys);
+      for (size_t i = 0; i < num_keys; ++i) {
+        if (keys[i] != nullptr) {
+          factory->ort_api.AddKeyValuePair(merged_metadata, keys[i],
+                                           values[i] != nullptr ? values[i]
+                                                                : "");
+        }
+      }
+    }
+    const std::string ordinal_text = std::to_string(hip_ordinal);
+    factory->ort_api.AddKeyValuePair(merged_metadata, "hip_device_id",
+                                     ordinal_text.c_str());
+    metadata_for_ep = merged_metadata;
+  }
+  struct MetadataRelease {
+    const OrtApi &api;
+    OrtKeyValuePairs *pairs;
+    ~MetadataRelease() {
+      if (pairs != nullptr) {
+        api.ReleaseKeyValuePairs(pairs);
+      }
+    }
+  } release{factory->ort_api, merged_metadata};
+#else
+  (void)devices;
+#endif
 
   // Create the execution provider
   factory->throw_if_error(factory->ort_api.Logger_LogMessage(
       logger, OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO, "Creating MorphiZen EP",
       ORT_FILE, __LINE__, __FUNCTION__));
 
-  // use properties from the device and ep_metadata if needed
-  // const OrtHardwareDevice* device = devices[0];
-  // const OrtKeyValuePairs* ep_metadata = ep_metadata[0];
-
+  const OrtKeyValuePairs *metadata_list[] = {metadata_for_ep};
   auto morphizen_ep = std::make_unique<MorphiZenEP>(
-      *factory, factory->ep_name_, ep_metadata, *session_options, *logger);
+      *factory, factory->ep_name_, metadata_list, *session_options, *logger);
 
   *ep = morphizen_ep.release();
   return nullptr;
@@ -294,7 +494,21 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (memory_info != nullptr) {
-    *allocator = new HipGpuAllocator(memory_info, factory->ort_api);
+    int slot = 0;
+    if (auto *status = factory->ort_api.MemoryInfoGetId(memory_info, &slot)) {
+      return status;
+    }
+    if (slot < 0) {
+      return factory->ort_api.CreateStatus(
+          ORT_INVALID_ARGUMENT, "GPU allocator memory info has no slot id.");
+    }
+    int hip_ordinal = 0;
+    if (auto *status = factory->ResolveSlotOrdinal(static_cast<size_t>(slot),
+                                                   &hip_ordinal)) {
+      return status;
+    }
+    *allocator =
+        new HipGpuAllocator(memory_info, factory->ort_api, hip_ordinal);
     return nullptr;
   }
 #endif

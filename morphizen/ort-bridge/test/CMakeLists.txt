@@ -7,6 +7,7 @@ find_package(onnxruntime REQUIRED)
 set(TEST_EXE_NAME ort-bridge-test)
 add_executable(${TEST_EXE_NAME}
   src/ort-bridge-test.cpp
+  src/test-device-selection.cpp
   src/test-environment.hpp
   src/test-hello-ep.cpp
   src/test-compile-model.cpp

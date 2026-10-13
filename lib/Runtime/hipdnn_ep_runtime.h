@@ -255,7 +255,11 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
 //   config:        hipdnn_ep_init_config* (hip/init_config_abi.h) carrying the
 //                  session's provider options, or null. Kept const void* here
 //                  so ordinary runtime TUs do not pull that ABI in.
-// Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error
+//                  The "hip_device_id" option selects the HIP ordinal. It is
+//                  applied before any device allocation. Absent selects
+//                  ordinal 0.
+// Return codes: 0=success, 1=alloc/read error, 2-11=GPU/runtime init error,
+//               4=invalid hip_device_id
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size,
                                  const void *config);

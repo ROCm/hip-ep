@@ -320,6 +320,21 @@ struct Table {
   std::atomic<uint32_t> rejected{0};
 };
 
+#if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
+bool currentDeviceProps(hipDeviceProp_t *props) {
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess || device < 0) {
+    (void)hipGetLastError();
+    device = 0;
+  }
+  if (hipGetDeviceProperties(props, device) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return true;
+}
+#endif
+
 std::string currentGpuArch() {
 #if defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
   // No device to ask; the arch a table is checked against comes from the
@@ -334,7 +349,7 @@ std::string currentGpuArch() {
 #endif
 #else
   hipDeviceProp_t props;
-  if (hipGetDeviceProperties(&props, 0) != hipSuccess)
+  if (!currentDeviceProps(&props))
     return std::string();
   std::string arch(props.gcnArchName);
   // gcnArchName carries feature suffixes like "gfx1151:xnack-"; the table is
@@ -349,7 +364,7 @@ int currentComputeUnits() {
   return 0;
 #else
   hipDeviceProp_t props;
-  if (hipGetDeviceProperties(&props, 0) != hipSuccess)
+  if (!currentDeviceProps(&props))
     return 0;
   return props.multiProcessorCount;
 #endif
