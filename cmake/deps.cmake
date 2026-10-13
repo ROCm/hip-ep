@@ -40,6 +40,10 @@ endif()
 #     archives when TRITON_BUILD_STATIC_LIBS is set. Linux otherwise makes them
 #     OBJECT libraries that CMake archives into every static consumer, so
 #     --whole-archive of libHipCInterface.a links each Triton pass twice.
+#   - rocmlirTriton-amdgpu-component.patch: put AMDGPU back into the normal
+#     LLVM_TARGETS_TO_BUILD variable that Triton's component mapper reads.
+#     set(CACHE FORCE) does not override that variable (CMP0126), and a nested
+#     find_package(LLVM) replaces it with the installed value.
 #
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
@@ -57,7 +61,8 @@ endif()
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-static-triton-libs.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-static-triton-libs.patch"
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-amdgpu-component.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
   get_filename_component(_p "${_p}" ABSOLUTE)
@@ -474,12 +479,13 @@ if(ENABLE_ROCMLIRTRITON)
   # defines add_triton_object. The patch builds those libraries as PIC static
   # archives so they can be linked into hipgpu.so exactly once.
   set(TRITON_BUILD_STATIC_LIBS ON)
-  # TritonToHsaco names the AMDGPUCodeGen component. llvm_map_components_to_libnames
-  # rejects that name when AMDGPU is missing from LLVM_TARGETS_TO_BUILD, even if
-  # libLLVMAMDGPUCodeGen is in the prefix. The CI LLVM and the in-tree fallback
-  # are both built with X86 and AMDGPU; pin that here so a CACHE value of
-  # "host" or an X86-only default cannot drop AMDGPU.
-  set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING
+  # Normal variable, not only the cache. CMP0126 keeps a same-named normal
+  # variable (the one find_package(LLVM) already set) shadowing the cache, so
+  # CACHE FORCE alone does not change what the component mapper reads.
+  # rocmlirTriton-amdgpu-component.patch repeats this in the TritonToHsaco
+  # directory, after any nested find_package(LLVM) has replaced it.
+  set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU")
+  set(LLVM_TARGETS_TO_BUILD "${LLVM_TARGETS_TO_BUILD}" CACHE STRING
       "Backends required by rocMLIR/Triton" FORCE)
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)

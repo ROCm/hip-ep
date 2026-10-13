@@ -152,9 +152,10 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM cache.
-          key: linux-llvm-rocmlirtriton-${{ steps.rocmlir.outputs.commit }}
+          # The rocmlirTriton commit plus the backend list. A prefix built without
+          # AMDGPU stays cached forever if the key is only the commit, and
+          # TritonToHsaco then rejects AMDGPUCodeGen as an omitted target.
+          key: linux-llvm-rocmlirtriton-${{ steps.rocmlir.outputs.commit }}-x86-amdgpu
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
