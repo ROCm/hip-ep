@@ -82,6 +82,14 @@ operations introduced by strided-metadata expansion.
 
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
+For `memref.collapse_shape`, a constant-axis query becomes the product of the
+source dimensions in that axis's reassociation group. A singleton group uses
+its source dimension directly. Further dimension folds can recover explicit
+subview sizes or expand-shape operands. This removes false dependencies on
+late buffer views without changing their offsets or strides. Dynamic-axis
+queries remain unchanged. The rule uses descriptor sizes, not frontend names
+or tensor payload reads.
+
 The following CSE removes repeated size queries exposed by late allocation and
 view rewrites. Canonicalization then folds identities exposed by CSE, such as
 `select(c, d, d) -> d`. Folding must precede pool planning to recover reuse:

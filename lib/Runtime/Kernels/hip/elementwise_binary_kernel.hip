@@ -16,7 +16,7 @@
  * Type coverage (per-op):
  *   Div   : FP16 + INT64  (vision.onnx Div is FP16 + shape-arith INT64)
  *   Mod   : INT64 (python-style %), FP16 (fmod) -- per the `fmod` flag
- *   Equal : FP16 + INT64 -> bool (1 byte out)
+ *   Equal : f16, f32, i8, ui8, i16, ui16, i32, i64 -> bool (1 byte out)
  *   Less  : FP16 + INT64 -> bool (1 byte out)
  */
 
@@ -141,6 +141,50 @@ extern "C" int hip_elementwise_equal(void *stream, const void *lhs,
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const float *>(lhs),
                        static_cast<const float *>(rhs),
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
+    break;
+  case HIP_DTYPE_INT8:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_equal: i8, out=%lld\n",
+        (long long)out_num_elements);
+    hipLaunchKernelGGL(elementwise_equal_kernel<int8_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t *>(lhs),
+                       static_cast<const int8_t *>(rhs),
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
+    break;
+  case HIP_DTYPE_UINT8:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_equal: ui8, out=%lld\n",
+        (long long)out_num_elements);
+    hipLaunchKernelGGL(elementwise_equal_kernel<uint8_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t *>(lhs),
+                       static_cast<const uint8_t *>(rhs),
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
+    break;
+  case HIP_DTYPE_INT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_equal: i16, out=%lld\n",
+        (long long)out_num_elements);
+    hipLaunchKernelGGL(elementwise_equal_kernel<int16_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int16_t *>(lhs),
+                       static_cast<const int16_t *>(rhs),
+                       static_cast<uint8_t *>(output), out_num_elements,
+                       lhs_stride, rhs_stride);
+    break;
+  case HIP_DTYPE_UINT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_equal: ui16, out=%lld\n",
+        (long long)out_num_elements);
+    hipLaunchKernelGGL(elementwise_equal_kernel<uint16_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint16_t *>(lhs),
+                       static_cast<const uint16_t *>(rhs),
                        static_cast<uint8_t *>(output), out_num_elements,
                        lhs_stride, rhs_stride);
     break;
