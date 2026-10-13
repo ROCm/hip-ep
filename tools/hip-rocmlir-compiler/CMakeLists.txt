@@ -3,7 +3,10 @@
 # ** Licensed under the MIT License.
 ##
 
-add_executable(hip-rocmlir-compiler hip-rocmlir-compiler.cpp)
+add_executable(hip-rocmlir-compiler
+  hip-rocmlir-compiler.cpp
+  ${CMAKE_SOURCE_DIR}/tools/problem-cache/nearest_conv_tune.cpp
+)
 
 add_dependencies(hip-rocmlir-compiler
   HipDialectIncGen
@@ -24,6 +27,7 @@ add_dependencies(hip-rocmlir-compiler
 # with different features".
 target_link_libraries(hip-rocmlir-compiler PRIVATE
   HipSupport
+  HipSchemasLib
   LibHipCompiler
   HipDialectIR
   HipsrDialectIR
@@ -54,6 +58,7 @@ target_include_directories(hip-rocmlir-compiler PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/include
   ${CMAKE_BINARY_DIR}/schemas
+  ${CMAKE_SOURCE_DIR}/tools/problem-cache
 )
 
 install(TARGETS hip-rocmlir-compiler
