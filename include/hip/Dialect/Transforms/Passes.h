@@ -26,6 +26,7 @@ enum class ConstantMetadataSourceKind : int32_t {
   Splat = 1,
   File = 2,
   Memory = 3,
+  DiskFile = 4,
 };
 
 #define GEN_PASS_DECL
@@ -37,10 +38,9 @@ enum class ConstantMetadataSourceKind : int32_t {
 /// authorizes process-local memory-address carriers while their backing
 /// storage is live. The generated no-arg/options overload keeps the direct-pass
 /// threshold default at 0, uses DiskFileSystem, and rejects memory addresses.
-std::unique_ptr<mlir::Pass>
-createExternalizeConstantsPass(morphizen::FileSystem *fs,
-                               int64_t minNumElements,
-                               bool skipConstantData = false);
+std::unique_ptr<mlir::Pass> createExternalizeConstantsPass(
+    morphizen::FileSystem *fs, int64_t minNumElements,
+    bool skipConstantData = false, int64_t diskResidentGatherMinBytes = 0);
 
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Transforms/Passes.h.inc"

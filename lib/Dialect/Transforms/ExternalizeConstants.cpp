@@ -77,6 +77,7 @@ struct ConstantPlan {
   SourceKind source = SourceKind::Inline;
   bool externalize = false;
   bool splat = false;
+  bool diskResident = false;
   int64_t numElements = 0;
   int64_t size = 0;
   /// Dense index in the generated constant metadata arrays.
@@ -287,9 +288,10 @@ class ConstantExternalizer {
 public:
   ConstantExternalizer(ModuleOp module, morphizen::FileSystem &fs,
                        int64_t minElements, bool skipData,
-                       bool allowMemorySources)
+                       bool allowMemorySources, int64_t diskResidentMinBytes)
       : module(module), fs(fs), minElements(minElements), skipData(skipData),
         allowMemorySources(allowMemorySources),
+        diskResidentMinBytes(diskResidentMinBytes),
         binFileName(moduleBaseName(module) + ".constants.bin") {}
 
   LogicalResult buildPlan() {
@@ -369,11 +371,31 @@ private:
       return failure();
     }
 
+    plan.diskResident = isDiskResidentGatherTable(plan);
     if (plan.externalize &&
         failed(assignExternalStorage(plan, currentOffset, plannedSymbols)))
       return failure();
     plans.push_back(std::move(plan));
     return success();
+  }
+
+  bool isDiskResidentGatherTable(ConstantPlan &plan) const {
+    if (diskResidentMinBytes <= 0 || !skipData || !plan.externalize ||
+        plan.source != SourceKind::File || plan.size < diskResidentMinBytes) {
+      return false;
+    }
+    Value result = plan.op.getResult();
+    int64_t rank = plan.type.getRank();
+    return !result.use_empty() &&
+           llvm::all_of(result.getUses(), [&](OpOperand &use) {
+             auto gather = dyn_cast<hip::GatherOp>(use.getOwner());
+             if (!gather || use.getOperandNumber() !=
+                                gather.getDataMutable().getOperandNumber()) {
+               return false;
+             }
+             int64_t axis = static_cast<int64_t>(gather.getAxis());
+             return (axis < 0 ? axis + rank : axis) == 0;
+           });
   }
 
   LogicalResult planInlineSource(ConstantPlan &plan) {
@@ -455,13 +477,15 @@ private:
   LogicalResult assignExternalStorage(ConstantPlan &plan,
                                       int64_t &currentOffset,
                                       llvm::StringSet<> &plannedSymbols) {
-    FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
-    if (failed(aligned))
-      return failure();
-    plan.blobOffset = *aligned;
-    if (plan.blobOffset > std::numeric_limits<int64_t>::max() - plan.size)
-      return plan.op.emitError("constant layout range overflows int64");
-    currentOffset = plan.blobOffset + plan.size;
+    if (!plan.diskResident) {
+      FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
+      if (failed(aligned))
+        return failure();
+      plan.blobOffset = *aligned;
+      if (plan.blobOffset > std::numeric_limits<int64_t>::max() - plan.size)
+        return plan.op.emitError("constant layout range overflows int64");
+      currentOffset = plan.blobOffset + plan.size;
+    }
 
     if (externalizedCount >
         static_cast<size_t>(std::numeric_limits<int64_t>::max()))
@@ -520,7 +544,8 @@ private:
       int64_t splatValue = 0;
       Attribute filePath = emptyPath;
       if (plan.source == SourceKind::File) {
-        kind = ConstantMetadataSourceKind::File;
+        kind = plan.diskResident ? ConstantMetadataSourceKind::DiskFile
+                                 : ConstantMetadataSourceKind::File;
         filePath = StringAttr::get(ctx, plan.filePath);
       } else if (plan.splat) {
         kind = ConstantMetadataSourceKind::Splat;
@@ -691,14 +716,20 @@ private:
     MemRefType memrefType =
         MemRefType::get(plan.type.getShape(), plan.type.getElementType());
     OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
-    DictionaryAttr externalData = moduleBuilder.getDictionaryAttr({
+    SmallVector<NamedAttribute> externalEntries = {
         moduleBuilder.getNamedAttr("index",
                                    moduleBuilder.getI64IntegerAttr(plan.index)),
         moduleBuilder.getNamedAttr(
             "offset", moduleBuilder.getI64IntegerAttr(plan.blobOffset)),
         moduleBuilder.getNamedAttr("size",
                                    moduleBuilder.getI64IntegerAttr(plan.size)),
-    });
+    };
+    if (plan.diskResident) {
+      externalEntries.push_back(moduleBuilder.getNamedAttr(
+          "disk_resident", moduleBuilder.getUnitAttr()));
+    }
+    DictionaryAttr externalData =
+        moduleBuilder.getDictionaryAttr(externalEntries);
     auto global = memref::GlobalOp::create(
         moduleBuilder, plan.op.getLoc(), plan.symbolName,
         moduleBuilder.getStringAttr("private"), memrefType,
@@ -721,6 +752,7 @@ private:
   int64_t minElements;
   bool skipData;
   bool allowMemorySources;
+  int64_t diskResidentMinBytes;
   std::string binFileName;
   size_t externalizedCount = 0;
   int64_t totalBlobSize = 0;
@@ -733,9 +765,11 @@ struct ExternalizeConstantsPass
   using ExternalizeConstantsPassBase::ExternalizeConstantsPassBase;
 
   ExternalizeConstantsPass(morphizen::FileSystem *fs, int64_t minElements,
-                           bool skipConstantData)
+                           bool skipConstantData,
+                           int64_t diskResidentGatherMinBytes)
       : fileSystem(fs), fsMinElements(minElements),
-        fsSkipConstantData(skipConstantData) {}
+        fsSkipConstantData(skipConstantData),
+        fsDiskResidentGatherMinBytes(diskResidentGatherMinBytes) {}
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -753,8 +787,10 @@ struct ExternalizeConstantsPass
       fs = fallback.get();
     }
 
+    int64_t diskMinBytes = fileSystem ? fsDiskResidentGatherMinBytes
+                                      : diskResidentGatherMinBytes.getValue();
     ConstantExternalizer externalizer(module, *fs, minElements, skipData,
-                                      allowMemorySources);
+                                      allowMemorySources, diskMinBytes);
     if (failed(externalizer.buildPlan()) ||
         failed(externalizer.writeArtifacts())) {
       signalPassFailure();
@@ -766,15 +802,17 @@ struct ExternalizeConstantsPass
   morphizen::FileSystem *fileSystem = nullptr;
   int64_t fsMinElements = 0;
   bool fsSkipConstantData = false;
+  int64_t fsDiskResidentGatherMinBytes = 0;
 };
 
 } // namespace
 
 std::unique_ptr<mlir::Pass>
 createExternalizeConstantsPass(morphizen::FileSystem *fs,
-                               int64_t minNumElements, bool skipConstantData) {
-  return std::make_unique<ExternalizeConstantsPass>(fs, minNumElements,
-                                                    skipConstantData);
+                               int64_t minNumElements, bool skipConstantData,
+                               int64_t diskResidentGatherMinBytes) {
+  return std::make_unique<ExternalizeConstantsPass>(
+      fs, minNumElements, skipConstantData, diskResidentGatherMinBytes);
 }
 
 } // namespace hip

@@ -744,6 +744,12 @@ def ExternalizeConstantsPass
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
 
+    With `skip-constant-data`, a file-backed carrier of at least
+    `disk-resident-gather-min-bytes` whose every use is the `data` operand of
+    an axis-0 `hip.gather` gets a `disk_resident` unit entry in its
+    `hip.external_data`, takes no range in the GPU constants layout, and is
+    recorded with source kind `DiskFile`.
+
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before
     canonicalization and bufferization.
@@ -758,7 +764,11 @@ def ExternalizeConstantsPass
     Option<"skipConstantData", "skip-constant-data", "bool",
            /*default=*/"false",
            "Use existing streaming/hybrid source metadata instead of writing "
-           "all constant bytes to constants.bin">
+           "all constant bytes to constants.bin">,
+    Option<"diskResidentGatherMinBytes", "disk-resident-gather-min-bytes",
+           "int64_t", /*default=*/"0",
+           "Minimum byte size of a streamed file-backed constant read only "
+           "as axis-0 hip.gather data to mark disk_resident (0 = disabled)">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",

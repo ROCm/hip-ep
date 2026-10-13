@@ -72,6 +72,9 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    config.diskResidentGatherMinBytes = std::stoll(
+        ctx->get_provider_option("disk_resident_gather_min_bytes", "0"));
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -83,7 +86,9 @@ static CompilationConfig load_config(PassContext *ctx) {
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> constants file)"
-                            : " (streaming default)");
+                            : " (streaming default)")
+            << "; diskResidentGatherMinBytes="
+            << config.diskResidentGatherMinBytes;
 
   return config;
 }

@@ -40,6 +40,7 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  int64_t diskResidentGatherMinBytes = 0;
 };
 
 // Compiled artifact (bytes + metadata)
