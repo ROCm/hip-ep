@@ -190,9 +190,8 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
             : extractContiguousMemRefPtr(quantOutputs[1], rewriter, loc);
     Value quantBlockSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type,
-        rewriter.getI64IntegerAttr(quantOutputs.empty()
-                                       ? 0
-                                       : op.getQuantBlockSize()));
+        rewriter.getI64IntegerAttr(
+            quantOutputs.empty() ? 0 : op.getQuantBlockSize()));
 
     // Runtime function signature (14 params)
     SmallVector<Type> paramTypes = {
