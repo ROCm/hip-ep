@@ -2881,9 +2881,10 @@ extern "C" int hip_matmul_nbits_dp4a(
  *   projection reaches memory. Each half is rounded to fp16 first, the value
  *   the unfused graph hands its Sigmoid and Mul.
  *
- * Symmetric weights (zero point 8) without bias only: that is every grouped
- * shape the fusion pattern produces, and it keeps zero-point indexing out of
- * the inner loop.
+ * No bias. Zero points (AWQ-style asymmetric weights) are pre-unpacked uint8
+ * [N[s], k_blocks] per segment, as for hip_matmul_nbits_dp4a; HAS_ZP is a
+ * template parameter so the symmetric instantiation keeps zero-point indexing
+ * out of its inner loop.
  *
  * The launch config is timed on the grouped kernel itself, per group shape
  * (getOrTuneDp4aGroupConfig). Borrowing segment 0's single-weight config is
@@ -2895,6 +2896,7 @@ extern "C" int hip_matmul_nbits_dp4a(
 struct Dp4aGroupArgs {
     const uint8_t* B[HIP_MATMUL_GROUP_MAX_SEGMENTS];
     const __half*  scales[HIP_MATMUL_GROUP_MAX_SEGMENTS];
+    const uint8_t* zp[HIP_MATMUL_GROUP_MAX_SEGMENTS];
     __half*        out[HIP_MATMUL_GROUP_MAX_SEGMENTS];
     int64_t        N[HIP_MATMUL_GROUP_MAX_SEGMENTS];
     // Exclusive end of each segment's column tiles along blockIdx.x.
@@ -2910,7 +2912,7 @@ __device__ __forceinline__ T dp4aGroupPick(const T (&arr)[HIP_MATMUL_GROUP_MAX_S
     return s == 0 ? arr[0] : (s == 1 ? arr[1] : arr[2]);
 }
 
-template <int BLOCK_SIZE, int TILE_N, int EPI>
+template <int BLOCK_SIZE, int TILE_N, int EPI, bool HAS_ZP>
 __global__ __attribute__((amdgpu_waves_per_eu(1, 16)))
 void matmul_nbits_gemv_dp4a_group_kernel(
     const int8_t* __restrict__ a_qb,
@@ -2937,6 +2939,7 @@ void matmul_nbits_gemv_dp4a_group_kernel(
 
     const uint8_t* b_rows[NCOL];
     const __half*  s_rows[NCOL];
+    [[maybe_unused]] const uint8_t* z_rows[HAS_ZP ? NCOL : 1];
 #pragma unroll
     for (int c = 0; c < NCOL; c++) {
         const int     s  = kSilu ? (c / TILE_N) : seg;
@@ -2944,6 +2947,8 @@ void matmul_nbits_gemv_dp4a_group_kernel(
         const int64_t sn = (n < N) ? n : 0;
         b_rows[c] = dp4aGroupPick(g.B, s) + sn * (K / 2);
         s_rows[c] = dp4aGroupPick(g.scales, s) + sn * k_blocks;
+        if constexpr (HAS_ZP)
+            z_rows[c] = dp4aGroupPick(g.zp, s) + sn * k_blocks;
     }
 
     float partial[NCOL];
@@ -2982,7 +2987,10 @@ void matmul_nbits_gemv_dp4a_group_kernel(
                 dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
             }
             const float sv = static_cast<float>(s_rows[c][grp]);
-            partial[c] += a_sc * sv * static_cast<float>(dot - a_sum_q * 8);
+            int zv = 8;
+            if constexpr (HAS_ZP)
+                zv = static_cast<int>(z_rows[c][grp]);
+            partial[c] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
         }
     }
 
@@ -3037,7 +3045,7 @@ void matmul_nbits_gemv_dp4a_group_kernel(
     }
 }
 
-template <int BS, int TN, int EPI>
+template <int BS, int TN, int EPI, bool HAS_ZP>
 static void launchDp4aGroupKernel(hipStream_t stream, const int8_t* a_qb,
                                   const float* a_sc, Dp4aGroupArgs g,
                                   int64_t K, int64_t bs)
@@ -3052,14 +3060,14 @@ static void launchDp4aGroupKernel(hipStream_t stream, const int8_t* a_qb,
         }
     }
     hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_group_kernel<BS, TN, EPI>),
+        HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_group_kernel<BS, TN, EPI, HAS_ZP>),
         dim3(static_cast<unsigned>(tiles)), dim3(BS), 0, stream, a_qb, a_sc,
         g, K, bs);
 }
 
 // The config id indexes kGemvConfigs. The SiLU epilogue computes two columns
 // per output, so it halves the tile to keep the config's accumulator count.
-template <int EPI>
+template <int EPI, bool HAS_ZP>
 static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
                                   const int8_t* a_qb, const float* a_sc,
                                   const Dp4aGroupArgs& g, int64_t K, int64_t bs)
@@ -3068,7 +3076,8 @@ static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
     case ID: {                                                                 \
         constexpr int kTn =                                                    \
             (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL && TN > 1) ? TN / 2 : TN;    \
-        launchDp4aGroupKernel<BS, kTn, EPI>(stream, a_qb, a_sc, g, K, bs);     \
+        launchDp4aGroupKernel<BS, kTn, EPI, HAS_ZP>(stream, a_qb, a_sc, g, K,  \
+                                                    bs);                       \
     } break
 
     switch (config_id) {
@@ -3098,18 +3107,25 @@ static void launchDp4aGroup(int config_id, int epilogue, hipStream_t stream,
                             const int8_t* a_qb, const float* a_sc,
                             const Dp4aGroupArgs& g, int64_t K, int64_t bs)
 {
-    if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL)
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL>(
+    const bool silu = (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL);
+    if (silu && g.zp[0])
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL, true>(
+            config_id, stream, a_qb, a_sc, g, K, bs);
+    else if (silu)
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL, false>(
+            config_id, stream, a_qb, a_sc, g, K, bs);
+    else if (g.zp[0])
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT, true>(
             config_id, stream, a_qb, a_sc, g, K, bs);
     else
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT>(
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT, false>(
             config_id, stream, a_qb, a_sc, g, K, bs);
 }
 
-// {epilogue, N0, N1, N2 (0 when absent), K, block_size}. A model has a few
-// group shapes, and the lookup runs on every grouped launch, so this is a
+// {epilogue, has_zp, N0, N1, N2 (0 when absent), K, block_size}. A model has a
+// few group shapes, and the lookup runs on every grouped launch, so this is a
 // linear scan over trivially comparable keys rather than a string-keyed map.
-using Dp4aGroupKey = std::array<int64_t, 6>;
+using Dp4aGroupKey = std::array<int64_t, 7>;
 static std::vector<std::pair<Dp4aGroupKey, int>> dp4a_group_cache;
 static std::mutex dp4a_group_tune_mutex;
 
@@ -3140,8 +3156,8 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
                                     const float* a_sc, const Dp4aGroupArgs& g,
                                     int64_t K, int64_t bs, int epilogue)
 {
-    const Dp4aGroupKey key{epilogue, g.N[0], g.N[1], g.nseg > 2 ? g.N[2] : 0,
-                           K, bs};
+    const Dp4aGroupKey key{epilogue, g.zp[0] != nullptr, g.N[0], g.N[1],
+                           g.nseg > 2 ? g.N[2] : 0, K, bs};
     {
         std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
         if (const int* hit = findDp4aGroupConfig(key))
@@ -3149,7 +3165,7 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
     }
 
     const int seed = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[0],
-                                         g.scales[0], nullptr, nullptr,
+                                         g.scales[0], g.zp[0], nullptr,
                                          g.out[0], g.N[0], K, bs);
 
     std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
@@ -3247,10 +3263,11 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
     hipEventDestroy(ev1);
 
     MATMUL_NBITS_AUTOTUNE_LOG(
-        "[custom_kernels] dp4a group autotune: epi=%d N=%lld+%lld+%lld K=%lld "
-        "bs=%lld seed config[%d] %.4f ms -> config[%d] threads=%d tile_n=%d "
-        "%.4f ms\n",
-        epilogue, (long long)key[1], (long long)key[2], (long long)key[3],
+        "[custom_kernels] dp4a group autotune: epi=%d zp=%d N=%lld+%lld+%lld "
+        "K=%lld bs=%lld seed config[%d] %.4f ms -> config[%d] threads=%d "
+        "tile_n=%d %.4f ms\n",
+        epilogue, static_cast<int>(key[1]), (long long)key[2],
+        (long long)key[3], (long long)key[4],
         (long long)K, (long long)bs, seed, seed_ms, best_id,
         kGemvConfigs[best_id].threads, kGemvConfigs[best_id].tile_n,
         best_id == seed ? seed_ms : best_ms);
@@ -3279,9 +3296,9 @@ extern "C" int hip_matmul_nbits_quant_act_i8(
 
 extern "C" int hip_matmul_nbits_dp4a_group(
     void* stream_v, const void* A, int nseg, const void* const* B,
-    const void* const* scales, void* const* out, const int64_t* N, int64_t K,
-    int64_t block_size, int epilogue, int quantize_a, void* a_qb_scratch,
-    void* a_scale_scratch)
+    const void* const* scales, const void* const* zp_u8, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size, int epilogue,
+    int quantize_a, void* a_qb_scratch, void* a_scale_scratch)
 {
     if (K % 32 != 0 || block_size <= 0 || nseg < 1 ||
         nseg > HIP_MATMUL_GROUP_MAX_SEGMENTS)
@@ -3301,13 +3318,17 @@ extern "C" int hip_matmul_nbits_dp4a_group(
         if (rc != hipSuccess) return rc;
     }
 
+    const bool has_zp = zp_u8 && zp_u8[0];
     Dp4aGroupArgs g{};
     g.nseg = nseg;
     for (int s = 0; s < nseg; s++) {
         g.B[s]      = static_cast<const uint8_t*>(B[s]);
         g.scales[s] = static_cast<const __half*>(scales[s]);
+        g.zp[s]     = has_zp ? static_cast<const uint8_t*>(zp_u8[s]) : nullptr;
         g.out[s]    = static_cast<__half*>(out[s]);
         g.N[s]      = N[s];
+        if (has_zp && !g.zp[s])
+            return hipErrorInvalidValue;
     }
 
     const int cfg =

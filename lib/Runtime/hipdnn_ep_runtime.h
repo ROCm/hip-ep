@@ -1427,9 +1427,11 @@ int wrap_matmul_nbits(
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
-// hip.matmul_nbits_group: 1-3 symmetric N-bit weights (no zero points, no
-// bias) that read the same activation A [batch_count x M x K]. Segment s has
-// weight B<s> [N<s> x k_blocks x blob_size] and scales<s> [N<s> x k_blocks].
+// hip.matmul_nbits_group: 1-3 N-bit weights (no bias) that read the same
+// activation A [batch_count x M x K]. Segment s has weight B<s>
+// [N<s> x k_blocks x blob_size], scales<s> [N<s> x k_blocks] and, for
+// asymmetric weights, zero_points<s> (uint8, packed at `bits` bits per
+// value); either every segment has zero points or none does.
 // epilogue HIP_MATMUL_GROUP_EPI_CONCAT writes out<s> = A @ dequant(B<s>)^T;
 // HIP_MATMUL_GROUP_EPI_SILU_MUL (nseg == 2, N0 == N1, fp16) writes
 // out0 = silu(A @ dequant(B0)^T) * (A @ dequant(B1)^T). Unused segments pass
@@ -1440,10 +1442,11 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
                             const void *A, int64_t nseg, const void *B0,
                             const void *B1, const void *B2, const void *scales0,
                             const void *scales1, const void *scales2,
-                            void *out0, void *out1, void *out2, int64_t N0,
-                            int64_t N1, int64_t N2, int64_t M, int64_t K,
-                            int64_t batch_count, int64_t bits,
-                            int64_t block_size, int64_t elem_size,
+                            const void *zero_points0, const void *zero_points1,
+                            const void *zero_points2, void *out0, void *out1,
+                            void *out2, int64_t N0, int64_t N1, int64_t N2,
+                            int64_t M, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
                             int64_t scale_elem_size, int64_t epilogue,
                             const void *a_quant, const void *a_scale);
 

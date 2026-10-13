@@ -144,6 +144,7 @@ struct MatMulNBitsGroupOpLowering
 
     ValueRange weights = adaptor.getWeights();
     ValueRange scales = adaptor.getScales();
+    ValueRange zeroPoints = adaptor.getZeroPoints();
     ValueRange outputs = adaptor.getOutputs();
     ArrayAttr nAttr = op.getN();
     int64_t nseg = static_cast<int64_t>(weights.size());
@@ -174,7 +175,7 @@ struct MatMulNBitsGroupOpLowering
         adaptor.getHandle(), getOpStateSlotValue(op, rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
         createI64Const(nseg)};
-    for (ValueRange vals : {weights, scales, outputs}) {
+    for (ValueRange vals : {weights, scales, zeroPoints, outputs}) {
       for (int64_t i = 0; i < kMaxSegments; ++i) {
         paramTypes.push_back(ptrType);
         args.push_back(segmentPtr(vals, i));
