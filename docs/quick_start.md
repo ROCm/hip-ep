@@ -118,8 +118,8 @@ FlatBuffers does not conflict with ours.
 
 ```bash
 cd ..  # Go to workspace directory (parent of project root)
-# Recommend a release branch such as rel-1.25.1
-git clone -b rel-1.25.1 https://github.com/Microsoft/onnxruntime.git
+# Pin must match cmake/deps.txt (currently v1.30.0).
+git clone -b v1.30.0 https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 ```
 
@@ -147,7 +147,7 @@ ls $LOCAL_DIR/lib/cmake/onnxruntime/
 
 ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # Should see one wheel matching your Python version, e.g.
-# onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
+# onnxruntime_directml-1.30.0-cp314-cp314-win_amd64.whl
 ```
 
 ### 2. Build hip-ep
@@ -159,9 +159,14 @@ and runs the cmake configure/build/install plus the LIT tests. A fresh tree need
 no manual dependency setup; the cold from-source LLVM build is the long pole
 (multi-hour).
 
-On Windows the default generator is "Visual Studio 17 2022" (it locates MSVC on
-its own, so no special prompt is needed). To use Ninja instead, run from an
-"x64 Native Tools Command Prompt for VS" and pass `--cmake_generator Ninja`.
+On Windows the host compiler is MSVC `cl.exe` and the generator is Ninja, which
+is what CI builds. Both come from the MSVC environment, so run this from an
+"x64 Native Tools Command Prompt for VS" (see "MSVC Environment Setup" above).
+Outside that environment there is no `ninja.exe`, and `build.py` falls back to
+the "Visual Studio 17 2022" generator, which locates MSVC on its own; that path
+does not cover the in-tree LLVM build
+(`--cmake_extra_defines ENABLE_ROCMLIRTRITON=ON`), which needs a single-config
+generator.
 
 Run from the project root:
 
@@ -178,7 +183,6 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #                             cross-machine build+run -- the *target* GPU's arch
 #                             (e.g. from `offload-arch.exe` on that machine)
 #   --therock_dist <path>     reuse a local TheRock SDK (else auto-downloaded)
-#   --cmake_generator Ninja   use Ninja (run from an x64 Native Tools prompt)
 #   --config RelWithDebInfo   build type (default Release)
 #   --skip_tests              skip the LIT tests (run by default after install)
 #   --clean                   remove build/ and install/
@@ -248,21 +252,22 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 
 ```bash
 cd ..  # Go to workspace directory (sibling of hip-ep)
-git clone -b v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
+# Clone with full history: `git apply --3way` below needs the blob each PR was
+# prepared from, which lives at that PR's merge base.
+git clone -b v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-# Apply the AMDGPU integration PR on top of the upstream tag. pull/<n>.patch is
-# a format-patch series (it renames src/morphizen_ep -> src/amdgpu mid-series),
-# so apply it with `git am` -- `git apply` flattens the series and fails on the
-# rename whose pre-image only exists after an earlier commit.
-curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2194.patch -o /tmp/oga-2194.patch
-git am --3way --whitespace=nowarn /tmp/oga-2194.patch
+for pr in 2685 2691; do
+  curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
+    -o "/tmp/oga-${pr}.diff"
+  git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
+done
 ```
 
 > **Note**: the upstream tag + PR list are pinned in CI via `OGA_VERSION` and
 > `OGA_PR_PATCHES` in
-> [`.github/workflows/windows-build-real.yml`](../.github/workflows/windows-build-real.yml);
+> [`.github/workflows/windows-deps.yml`](../.github/workflows/windows-deps.yml);
 > match those for byte-for-byte reproducibility.
 
 #### 3c. Build OGA
@@ -279,6 +284,7 @@ python build.py \
   --config Release \
   --cmake_generator Ninja \
   --use_dml \
+  --no_telemetry \
   --ort_home "$ORT_HOME" \
   --skip_tests --skip_examples \
   --parallel \
@@ -368,7 +374,7 @@ source, `benchmark_e2e.py` samples one that can exceed `max_length`, so
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
-(v0.14.0 + PR2194, DeviceType AMDGPU) this is the AMD GPU umbrella
+(v0.17.0, DeviceType AMDGPU) this is the AMD GPU umbrella
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
@@ -493,8 +499,8 @@ present there too.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 +
-PR2194) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0) the
+EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
 {"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build-real.yml`).
 

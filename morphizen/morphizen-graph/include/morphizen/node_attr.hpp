@@ -34,7 +34,6 @@ private:
 class NodeAttributesBuilder {
 public:
   MORPHIZEN_DLL_SPEC explicit NodeAttributesBuilder(size_t capacity = 10);
-  MORPHIZEN_DLL_SPEC
   NodeAttributesBuilder(const NodeAttributesBuilder &) = delete;
   MORPHIZEN_DLL_SPEC
   NodeAttributesBuilder(NodeAttributesBuilder &&) = default;

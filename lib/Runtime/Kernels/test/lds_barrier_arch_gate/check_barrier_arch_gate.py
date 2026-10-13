@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Compile-time guard for the arch-gated LDS barrier in matmul_nbits_kernel.hip.
+"""Compile-time guard for the arch-gated LDS barrier in matmul_nbits_wmma_core.h.
 
 The kernel's ``HIPDNN_LDS_BARRIER`` macro must emit the raw ``s_barrier``
 instruction only on architectures that provide it (gfx9 / gfx10 / gfx11) and
@@ -37,7 +37,8 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KERNEL = os.path.normpath(os.path.join(HERE, "..", "..", "hip", "matmul_nbits_kernel.hip"))
+KERNEL = os.path.normpath(
+    os.path.join(HERE, "..", "..", "include", "matmul_nbits_wmma_core.h"))
 
 # arch -> True if the standalone s_barrier instruction is expected in device asm
 ARCHS = {

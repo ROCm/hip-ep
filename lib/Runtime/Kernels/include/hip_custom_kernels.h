@@ -541,6 +541,10 @@ HIP_KERNEL_API int hip_elementwise_binary_bcast(
  * rejected by the host wrapper.
  *
  * Output type is always uint8 (1-byte bool).
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_INT8,
+ * HIP_DTYPE_UINT8, HIP_DTYPE_INT16, HIP_DTYPE_UINT16, HIP_DTYPE_INT32,
+ * HIP_DTYPE_INT64.
  */
 HIP_KERNEL_API int hip_elementwise_equal(
     void* stream,
@@ -2180,6 +2184,47 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
     int64_t block_size,
     int64_t element_size_bytes);
 
+/* int4 x fp16 GEMM over a ragged batch of expert row slices (MoE prefill),
+ * fp16 activations and fp32 accumulation. Streams each weight once straight
+ * into WMMA fragments instead of staging it through LDS, which is what bounds
+ * the general WMMA tile at small M. One launch covers every expert, driven by
+ * a device-side row-tile list so nothing is read back.
+ *   A / output         : fp16 rows packed back-to-back in expert order; expert
+ *                        e's rows start at expert_row_offsets[e] (int32,
+ *                        device). A is [rows, K], output [rows, N].
+ *   B, scales          : expert-major MatMulNBits layout
+ *                        ([E, N, ceil(K/bs)*bs/2] packed, fp16 [E, N, ceil(K/bs)])
+ *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
+ *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
+ *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
+ *                        bit-identical results.
+ *   bias               : fp16 [E, N] or nullptr
+ *   row_tiles          : int32 [max_row_tiles][3] = (expert, row0, rows) with
+ *                        rows <= tile_rows (hip_qmoe_build_row_tiles)
+ *   num_row_tiles      : int32 device scalar, valid entries of row_tiles
+ *   max_row_tiles      : host-side upper bound on *num_row_tiles (grid size)
+ *   tile_rows          : tile height the list was built with; cfg < 0 picks
+ *                        the default config for it, and a cfg whose row tile
+ *                        is shorter returns -1.
+ * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0, power-of-two
+ * block_size >= 32 and K small enough for one workgroup per column tile
+ * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
+ * -1 otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped(
+    void* stream, int cfg,
+    const void* A, const void* B, const void* scales, const void* zero_points,
+    int zp_packed_u4, const void* bias, const void* expert_row_offsets,
+    const void* row_tiles, const void* num_row_tiles, void* output,
+    int64_t max_row_tiles, int64_t tile_rows, int64_t N, int64_t K,
+    int64_t bits, int64_t block_size, int64_t element_size_bytes);
+
+/* 1 when hip_matmul_nbits_wmma_smallm_grouped accepts this shape and tile
+ * height (same cfg rule), else 0. Lets a caller commit to the device-side
+ * grouped flow before issuing any of it. */
+HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
+    int cfg, int64_t tile_rows, int64_t N, int64_t K, int64_t bits,
+    int64_t block_size, int64_t element_size_bytes);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
@@ -2545,6 +2590,113 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens(
     void* sorted_weights,
     int64_t num_tokens,
     int64_t num_experts,
+    int64_t k,
+    int64_t element_size_bytes);
+
+/* Extended bucket output for the device-driven prefill path. In addition to
+ * the regular sorted buffers, writes:
+ *   pair_to_sorted [num_tokens*k] : inverse map for deterministic reduction
+ *   row_groups     [num_tokens*k,4]: {expert,row_begin,row_count,task_kind},
+ *                                    packed densely with row_count <= 64;
+ *                                    kinds are GEMV=0, WMMA16=1, WMMA64=2
+ *   row_group_count[1]            : number of valid row_groups
+ *   fc1/fc2_queue_head[1]         : initialized to zero for persistent MM
+ */
+HIP_KERNEL_API int hip_qmoe_bucket_tokens_ragged(
+    void* stream,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* expert_counts,
+    void* expert_offsets,
+    void* sorted_token_ids,
+    void* sorted_weights,
+    void* pair_to_sorted,
+    void* row_groups,
+    void* row_group_count,
+    void* fc1_queue_head,
+    void* fc2_queue_head,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t row_group_size,
+    int64_t element_size_bytes);
+
+/* Row tiles for hip_matmul_nbits_wmma_smallm_grouped, built on the device from
+ * the bucketed expert counts. Experts with 0 < count <= split_rows are cut into
+ * tiles of rows_small rows (tiles_small), larger ones into tiles of rows_big
+ * (tiles_big). Each tile is int32 (expert, row0, rows), in ascending expert
+ * order; num_small / num_big are int32 device scalars receiving the counts.
+ * Capacity the caller must provide: tiles_small holds at most
+ * sum over small experts of ceil(count / rows_small), tiles_big
+ * total_rows / rows_big + (number of experts above split_rows). */
+HIP_KERNEL_API int hip_qmoe_build_row_tiles(
+    void* stream, const void* expert_counts, int64_t num_experts,
+    int64_t split_rows, int64_t rows_small, int64_t rows_big, void* tiles_small,
+    void* num_small, void* tiles_big, void* num_big);
+
+/* One-launch ragged W4A16 MatMulNBits over every row group/expert.
+ * input_row_ids may be null for already-sorted input rows; otherwise it maps
+ * each sorted output row to a source input row (FC1 fused gather).
+ * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ */
+HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
+    void* stream,
+    const void* input,
+    const void* input_row_ids,
+    const void* row_groups,
+    const void* row_group_count,
+    void* queue_head,
+    const void* weights,
+    const void* scales,
+    const void* zero_points_u8,
+    const void* bias,
+    void* output,
+    int64_t total_rows,
+    int64_t num_experts,
+    int64_t N,
+    int64_t K,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* Query the exact grid policy used by hip_qmoe_ragged_matmul_nbits. With no
+ * benchmark override, the returned grid is min(upper_tasks, occupancy_window
+ * * factor), where factor is 1 below 512 total rows and 2 otherwise, and the
+ * occupancy window is queried for the adaptive 128-thread kernel on the
+ * current HIP device. Output pointers are host-side.
+ */
+HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_launch_config(
+    int64_t total_rows,
+    int64_t N,
+    int32_t* device_cu_count,
+    int32_t* resident_blocks_per_cu,
+    int32_t* grid_blocks,
+    int64_t* upper_tasks);
+
+/* Query the process-latched stage policy's task kind for a row group.
+ * is_fc1=1 selects the gather/FC1 policy and is_fc1=0 the contiguous/FC2
+ * policy. policy_id is P0..P3 and task_kind is GEMV=0, WMMA16=1, WMMA64=2.
+ * This internal query keeps the standalone boundary/fallback test aligned with
+ * the exact selector used by the production kernel.
+ */
+HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_task_kind(
+    int64_t is_fc1,
+    int64_t row_count,
+    int32_t* policy_id,
+    int32_t* task_kind);
+
+/* Deterministic routed-pair reduction. Reorders each token's k contributions
+ * by ascending expert id and rounds to fp16 after every addition, matching the
+ * old serial per-expert scatter-add path without atomics.
+ */
+HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
+    void* stream,
+    const void* sorted_expert_output,
+    const void* pair_to_sorted,
+    const void* expert_indices,
+    const void* expert_weights,
+    void* output,
+    int64_t num_tokens,
+    int64_t width,
     int64_t k,
     int64_t element_size_bytes);
 
