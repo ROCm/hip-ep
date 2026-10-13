@@ -1396,14 +1396,11 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
 // a_quant/a_scale (nullable): int8 copy of `output` for
 // hip.matmul_nbits_group, written when hip_norm_quant_supported() accepts the
 // shape and quant_block_size.
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    void *a_quant, void *a_scale,
-                                    int64_t quant_block_size);
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias

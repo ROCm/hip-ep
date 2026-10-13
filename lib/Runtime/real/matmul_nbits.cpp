@@ -806,16 +806,15 @@ int run_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       MatmulNbitsState *ost =
           MatmulNbitsState::get_op_state(state, op_state_slot);
       const size_t out_bytes = static_cast<size_t>(M * N * elem_size);
-      void *gemv_out =
-          ost ? ost->gemv_output(output, out_bytes,
-                                 static_cast<hipStream_t>(stream))
-              : output;
+      void *gemv_out = ost ? ost->gemv_output(output, out_bytes,
+                                              static_cast<hipStream_t>(stream))
+                           : output;
       if (base && gemv_out) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc = hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
-                                       gemv_out, M, N, K, block_size, a_qb,
-                                       a_scale);
+        int rc =
+            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
+                                  gemv_out, M, N, K, block_size, a_qb, a_scale);
         if (rc == 0 && gemv_out != output) {
           const int64_t unit = (out_bytes % 8 == 0) ? 8 : 2;
           rc = hip_strided_copy(stream, output, gemv_out, unit, 0, nullptr,
