@@ -1,0 +1,25 @@
+diff --git a/external/triton/CMakeLists.txt b/external/triton/CMakeLists.txt
+--- a/external/triton/CMakeLists.txt
++++ b/external/triton/CMakeLists.txt
+@@ -243,11 +243,17 @@
+ function(add_triton_object name)
+   cmake_parse_arguments(ARG "" "" "DEPENDS;LINK_LIBS" ${ARGN})
+ 
+-  if(WIN32)
+-    # On Windows with MSVC, OBJECT libraries don't produce .lib files but CMake
+-    # generates bare .lib references for them in link commands, causing LNK1181.
+-    # Use STATIC libraries instead so CMake generates full-path .lib references.
++  # Windows: OBJECT libraries don't produce .lib files, and CMake then emits a
++  # bare .lib name (LNK1181). hip-ep sets TRITON_BUILD_STATIC_LIBS because an
++  # OBJECT library's $<TARGET_OBJECTS> is archived into every static consumer;
++  # --whole-archive of libHipCInterface.a then links each Triton pass twice.
++  # STATIC libraries are linked once. Upstream leaves the variable unset, so
++  # Triton's own Python module still receives OBJECT libraries.
++  if(WIN32 OR TRITON_BUILD_STATIC_LIBS)
+     add_library(${name} STATIC ${ARG_UNPARSED_ARGUMENTS})
++    if(TRITON_BUILD_STATIC_LIBS)
++      set_target_properties(${name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
++    endif()
+   else()
+     add_library(${name} OBJECT)
+     target_sources(${name}
