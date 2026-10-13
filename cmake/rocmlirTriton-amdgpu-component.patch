@@ -1,0 +1,27 @@
+diff --git a/mlir/lib/Translation/TritonToHsaco/CMakeLists.txt b/mlir/lib/Translation/TritonToHsaco/CMakeLists.txt
+--- a/mlir/lib/Translation/TritonToHsaco/CMakeLists.txt
++++ b/mlir/lib/Translation/TritonToHsaco/CMakeLists.txt
+@@ -48,5 +48,23 @@
+ add_custom_target(TritonAmdDeviceLibsIncGen
+   DEPENDS "${TRITON_AMD_DEVICE_LIBS_INC}")
+ 
++# The component mapper reads this directory's normal LLVM_TARGETS_TO_BUILD.
++# set(CACHE FORCE) does not replace it (CMP0126), and find_package(LLVM) from
++# the installed prefix can set a value that omits AMDGPU. AMDGPUCodeGen is then
++# rejected as an omitted target even when libLLVMAMDGPUCodeGen is present.
++if(NOT "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
++  list(APPEND LLVM_TARGETS_TO_BUILD AMDGPU)
++endif()
++if(NOT "X86" IN_LIST LLVM_TARGETS_TO_BUILD)
++  list(APPEND LLVM_TARGETS_TO_BUILD X86)
++endif()
++foreach(_comp IN ITEMS AMDGPUCodeGen AMDGPUAsmParser AMDGPUDesc AMDGPUInfo
++                       AMDGPUDisassembler X86CodeGen X86AsmParser X86Desc
++                       X86Info X86Disassembler)
++  if(TARGET "LLVM${_comp}" AND NOT "LLVM${_comp}" IN_LIST LLVM_AVAILABLE_LIBS)
++    list(APPEND LLVM_AVAILABLE_LIBS "LLVM${_comp}")
++  endif()
++endforeach()
++
+ add_mlir_translation_library(TritonToHsacoTranslation
+   TritonToHsaco.cpp

@@ -169,9 +169,11 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed on the resolved branch tip: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM cache, and a moved tip must.
-          key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}
+          # Keyed on the resolved LLVM tip plus the backends this build enables.
+          # A protobuf/ORT bump must not evict the multi-hour LLVM cache, and a
+          # moved tip must. The backend suffix keeps a prefix built without
+          # AMDGPU from satisfying TritonToHsaco.
+          key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}-x86-amdgpu
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
