@@ -214,14 +214,49 @@ func.func @norm_feeds_group(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
 
 // -----
 
-// Asymmetric weights (zero points) are not grouped: the grouped kernel
-// assumes zero point 8.
-// CHECK-LABEL: func.func @zero_points_not_grouped
+// Asymmetric weights with packed uint8 zero points (AWQ) are grouped too; each
+// member's zero points follow its weights into the group, in member order.
+// CHECK-LABEL: func.func @zero_points_grouped
+// CHECK:         hip.matmul_nbits_group(%{{.*}}) ins(%{{.*}} : tensor<1x1x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg5 :
+// CHECK-SAME:      scales(%arg3, %arg6 :
+// CHECK-SAME:      zero_points(%arg4, %arg7 : tensor<32x1xui8>, tensor<16x1xui8>)
+// CHECK-NOT:     hip.matmul_nbits(
+func.func @zero_points_grouped(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                               %b0: tensor<32x2x16xui8>, %s0: tensor<32x2xf16>,
+                               %z0: tensor<32x1xui8>,
+                               %b1: tensor<16x2x16xui8>, %s1: tensor<16x2xf16>,
+                               %z1: tensor<16x1xui8>)
+    -> (tensor<1x1x32xf16>, tensor<1x1x16xf16>) {
+  %e0 = tensor.empty() : tensor<1x1x32xf16>
+  %a = hip.matmul_nbits(%ctx) ins(%x, %b0, %s0 :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      zero_points(%z0 : tensor<32x1xui8>)
+      outs(%e0 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 1 : i64} : tensor<1x1x32xf16>
+  %e1 = tensor.empty() : tensor<1x1x16xf16>
+  %c = hip.matmul_nbits(%ctx) ins(%x, %b1, %s1 :
+      tensor<1x1x64xf16>, tensor<16x2x16xui8>, tensor<16x2xf16>)
+      zero_points(%z1 : tensor<16x1xui8>)
+      outs(%e1 : tensor<1x1x16xf16>)
+      {K = 64 : i64, N = 16 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 1 : i64} : tensor<1x1x16xf16>
+  return %a, %c : tensor<1x1x32xf16>, tensor<1x1x16xf16>
+}
+
+// -----
+
+// A symmetric and an asymmetric projection of the same row are not grouped:
+// the group's zero points are all or nothing.
+// CHECK-LABEL: func.func @mixed_zero_points_not_grouped
 // CHECK-NOT:     hip.matmul_nbits_group
 // CHECK-COUNT-2: hip.matmul_nbits(
-func.func @zero_points_not_grouped(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
-                                   %b: tensor<32x2x16xui8>, %s: tensor<32x2xf16>,
-                                   %zp: tensor<32x1xui8>)
+func.func @mixed_zero_points_not_grouped(%ctx: !hip.context,
+                                         %x: tensor<1x1x64xf16>,
+                                         %b: tensor<32x2x16xui8>,
+                                         %s: tensor<32x2xf16>,
+                                         %zp: tensor<32x1xui8>)
     -> (tensor<1x1x32xf16>, tensor<1x1x32xf16>) {
   %e0 = tensor.empty() : tensor<1x1x32xf16>
   %a = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
@@ -233,9 +268,38 @@ func.func @zero_points_not_grouped(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
   %e1 = tensor.empty() : tensor<1x1x32xf16>
   %c = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
       tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
-      zero_points(%zp : tensor<32x1xui8>)
       outs(%e1 : tensor<1x1x32xf16>)
       {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
-       accuracy_level = 4 : i64, zp_elem_size = 1 : i64} : tensor<1x1x32xf16>
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  return %a, %c : tensor<1x1x32xf16>, tensor<1x1x32xf16>
+}
+
+// -----
+
+// fp16 zero points (zp_elem_size = 2) are not grouped: the grouped kernel
+// reads the uint8 unpack of packed zero points.
+// CHECK-LABEL: func.func @fp16_zero_points_not_grouped
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK-COUNT-2: hip.matmul_nbits(
+func.func @fp16_zero_points_not_grouped(%ctx: !hip.context,
+                                        %x: tensor<1x1x64xf16>,
+                                        %b: tensor<32x2x16xui8>,
+                                        %s: tensor<32x2xf16>,
+                                        %zp: tensor<32x2xf16>)
+    -> (tensor<1x1x32xf16>, tensor<1x1x32xf16>) {
+  %e0 = tensor.empty() : tensor<1x1x32xf16>
+  %a = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      zero_points(%zp : tensor<32x2xf16>)
+      outs(%e0 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 2 : i64} : tensor<1x1x32xf16>
+  %e1 = tensor.empty() : tensor<1x1x32xf16>
+  %c = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      zero_points(%zp : tensor<32x2xf16>)
+      outs(%e1 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 2 : i64} : tensor<1x1x32xf16>
   return %a, %c : tensor<1x1x32xf16>, tensor<1x1x32xf16>
 }
