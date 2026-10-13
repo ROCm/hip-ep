@@ -2216,6 +2216,19 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
     p.scaleD = inExtent - 1;
     p.offset = 0;
     break;
+  case 3: // pytorch_half_pixel
+    // OUT == 1 samples input coordinate 0. Otherwise the ONNX map is the
+    // half_pixel one, so the integer triple matches case 0.
+    if (outExtent == 1) {
+      p.scaleN = 1;
+      p.scaleD = 1;
+      p.offset = 0;
+      break;
+    }
+    p.scaleN = 2 * outExtent;
+    p.scaleD = 2 * inExtent;
+    p.offset = inExtent - outExtent;
+    break;
   default:
     return std::nullopt;
   }
@@ -2262,8 +2275,6 @@ static bool isTosaExpressibleResize(hip::ResizeOp op) {
     return false;
 
   if (op.getMode() != 1)
-    return false;
-  if (op.getNearestMode() != 0)
     return false;
 
   int64_t coordTransform = op.getCoordTransform();
