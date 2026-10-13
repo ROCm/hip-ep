@@ -20,7 +20,7 @@ data dtype set is:
     Tile      : f16, f32, i32, i64
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
-    GatherND  : f16, f32, i32, i64       (indices: int64 only)
+    GatherND  : f16, f32, i32, i64, ui8   (indices: int64 only)
     Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int64 only)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
@@ -371,6 +371,19 @@ class TestGatherND:
         )
         rng = np.random.default_rng(407)
         x = rng.uniform(-2.0, 2.0, data_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_gather_nd_uint8(self, model_runner):
+        """data[4,5] ui8; indices[3,1] -> output[3,5]. ONNX allows uint8 data."""
+        data_shape = [4, 5]
+        indices = np.array([[0], [3], [2]], dtype=np.int64)
+        out_shape = [3, 5]
+        model = _make_gather_nd_model(
+            np.uint8, data_shape, list(indices.shape), indices, out_shape
+        )
+        rng = np.random.default_rng(408)
+        x = rng.integers(0, 256, data_shape, dtype=np.uint8)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
