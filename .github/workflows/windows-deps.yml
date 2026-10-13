@@ -36,12 +36,10 @@ env:
   OGA_VERSION: "0.14.0"
   OGA_PR_PATCHES: "2194"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-  AMDGPU_EP_REF: "05eaa2a938f71e98b49bd1be3fb03720167be5cc"
+  AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
-  # of AMDGPU_EP_REF. 102: forward Hip custom-op domains; 105: forward unknown /
-  # Hip-owned provider options under the shared ep.<amdgpu>.* prefix.
-  # 122 (draft): hip as the only backend (no MIGraphX).
-  AMDGPU_PR_PATCHES: "102 105 122"
+  # of AMDGPU_EP_REF.
+  AMDGPU_PR_PATCHES: ""
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
@@ -421,7 +419,6 @@ jobs:
           fetch_dep migraphx_windows "$WS/migraphx-sdk"
           fetch_dep therock_windows "$WS/therock"
           test -f "$WS/migraphx-sdk/lib/cmake/migraphx/migraphx-config.cmake"
-          test -f "$WS/migraphx-sdk/problem_cache.json"
           test -f "$WS/therock/lib/cmake/hip/hip-config.cmake"
 
       - name: Build amdgpu-ep
@@ -446,7 +443,6 @@ jobs:
             --hip_path "${{ runner.workspace }}/therock" \
             --build_wheel \
             --cmake_extra_defines \
-              "MIGRAPHX_EP_PROBLEM_CACHE=$MIGRAPHX_SDK/problem_cache.json" \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
 

@@ -34,8 +34,12 @@ if(Python3_Interpreter_FOUND AND _lds_barrier_hip_cc)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/check_barrier_arch_gate.py
   )
+  set(_lds_barrier_env "HIP_CLANG=${_lds_barrier_hip_cc}")
+  if(HIPCC_ENV)
+    list(APPEND _lds_barrier_env "${HIPCC_ENV}")
+  endif()
   set_tests_properties(LdsBarrierArchGate PROPERTIES
-    ENVIRONMENT "HIP_CLANG=${_lds_barrier_hip_cc}"
+    ENVIRONMENT "${_lds_barrier_env}"
     LABELS "kernels")
 else()
   message(STATUS
