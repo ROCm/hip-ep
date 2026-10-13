@@ -201,6 +201,17 @@ int main(int argc, char** argv) {
       !setEnvironment("HIPDNN_RESULTS_ARCH", arch))
     return 1;
 
+  // Windows searches System32 before a leaf's working directory, and the GPU
+  // driver installs its own amdhip64_*.dll and amd_comgr*.dll there. Child
+  // processes inherit this DLL directory (long-standing, though undocumented),
+  // so the leaves load the HIP runtime from bin/ like this controller does.
+  if (!SetDllDirectoryW(bin.wstring().c_str())) {
+    const DWORD error = GetLastError();
+    std::fprintf(stderr, "failed to add %s to the DLL search path: %lu\n",
+                 bin.string().c_str(), error);
+    return 1;
+  }
+
   bool passed = true;
   for (const Leaf& leaf : kLeaves) {
     // Do not predict a table hit from the leaf name. Every leaf receives the

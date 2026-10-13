@@ -67,8 +67,11 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
 ### Run (on a machine with a supported AMD GPU)
 
 Copy `<install>/bin` to the GPU machine. At minimum that is
-`hipdnn-kernel-ut.exe`, every `custom_kernels_*.dll` and `kernel-tests/`. Then
-run the controller from that `bin` directory:
+`hipdnn-kernel-ut.exe`, every `custom_kernels_*.dll` and `kernel-tests/`, plus
+the HIP runtime the tests were built against (`amdhip64_7.dll` and
+`amd_comgr*.dll` from the SDK's `bin`). The install step does not copy the HIP
+runtime; the CI's `gpu-test-package/bin` already contains it. Then run the
+controller from that `bin` directory:
 
 ```
 .\hipdnn-kernel-ut.exe --mode lookup --coverage 1
@@ -84,6 +87,14 @@ The controller runs the 8 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
+
+The leaves use the HIP runtime in `bin`, the same copy the controller loads.
+Windows searches System32 before a leaf's working directory, and the GPU
+driver installs its own `amdhip64_7.dll` and `amd_comgr_*.dll` there, so a
+leaf on its own would load the driver's runtime, even with `bin` first on
+`PATH`. The controller therefore adds `bin` to the DLL search path with
+`SetDllDirectoryW` before launching the leaves, which inherit it. If `bin` has
+no HIP runtime, the controller and the leaves fall back to the driver's copy.
 
 | Exit code | Meaning |
 |---|---|
@@ -103,6 +114,10 @@ To run a single leaf by hand, also start it from `bin`:
 ```
 .\kernel-tests\gfx11-generic\hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe --coverage 1
 ```
+
+A leaf started this way does not get the controller's DLL search path, so it
+loads the driver's HIP runtime from System32. Run the suite through the
+controller to test the package's runtime.
 
 When `BUILD_TESTING` is on, each leaf is also registered with CTest under the
 labels `gpu;kernel-ut;<arch>` (run from the build tree, e.g.
@@ -355,9 +370,10 @@ builds `out/bin/hipdnn-kernel-ut.exe` from `kernel_ut_main.cpp`, then runs
 `hipdnn-kernel-ut.exe --mode <MODE> --coverage <COVERAGE>` from `out/bin`: the
 same controller, layout, exit codes and `out/results.csv` (here
 `out/bin/out/results.csv`) as the CI package. Only the leaves differ: they
-contain the kernels instead of linking `custom_kernels_<arch>.dll`. For the
-exact CI binaries, build hip-ep with `build.py` and run the same command from
-`<install>/bin`.
+contain the kernels instead of linking `custom_kernels_<arch>.dll`. `out/bin`
+has no HIP runtime, so the controller and the leaves use the driver's copy
+from System32. For the exact CI binaries, build hip-ep with `build.py` and run
+the same command from `<install>/bin`.
 
 In a leaf directory, `test`, `test_custom`, `clean` and `build` work on that
 leaf alone; `make test` there runs the leaf directly and writes the leaf's own
