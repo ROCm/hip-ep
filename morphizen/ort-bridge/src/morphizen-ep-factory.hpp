@@ -148,8 +148,7 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   // Resolves the slot's platform identity to a HIP ordinal. An empty identity
   // stays on ordinal 0. A present identity that HIP cannot match fails.
   OrtStatus *ResolveSlotOrdinal(size_t slot, int *hip_ordinal);
-  int SlotIndexForIdentity(
-      const device_selection::PlatformId &identity) const;
+  int SlotIndexForIdentity(const device_selection::PlatformId &identity) const;
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;

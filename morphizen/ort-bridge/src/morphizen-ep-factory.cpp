@@ -110,8 +110,8 @@ MorphiZenEpFactory::GetVersionImpl(const OrtEpFactory *this_ptr) noexcept {
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
 namespace {
 
-device_selection::PlatformId
-ReadPlatformId(const OrtApi &api, const OrtHardwareDevice *device) {
+device_selection::PlatformId ReadPlatformId(const OrtApi &api,
+                                            const OrtHardwareDevice *device) {
   if (api.HardwareDevice_Metadata == nullptr || api.GetKeyValue == nullptr ||
       device == nullptr) {
     return {};
@@ -319,11 +319,11 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
               OrtDeviceMemoryType_DEFAULT, &slot.default_memory)) {
         return st;
       }
-      if (auto *st = MakeMemoryInfo(
-              factory->ort_api, "MorphiZen host accessible",
-              factory->vendor_id_, slot_index,
-              OrtDeviceMemoryType_HOST_ACCESSIBLE,
-              &slot.host_accessible_memory)) {
+      if (auto *st =
+              MakeMemoryInfo(factory->ort_api, "MorphiZen host accessible",
+                             factory->vendor_id_, slot_index,
+                             OrtDeviceMemoryType_HOST_ACCESSIBLE,
+                             &slot.host_accessible_memory)) {
         return st;
       }
 
@@ -372,8 +372,7 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
         (num_devices == 1 && devices != nullptr) ? devices[0] : nullptr;
     const device_selection::PlatformId identity =
         ReadPlatformId(factory->ort_api, selected);
-    const auto decision =
-        device_selection::Decide(num_devices, identity.kind);
+    const auto decision = device_selection::Decide(num_devices, identity.kind);
     int hip_ordinal = 0;
     if (decision ==
         device_selection::DeviceSelectionDecision::RejectMalformed) {
@@ -381,16 +380,15 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
           ORT_INVALID_ARGUMENT,
           "Selected GPU platform identity could not be parsed.");
     }
-    if (decision ==
-        device_selection::DeviceSelectionDecision::MatchIdentity) {
+    if (decision == device_selection::DeviceSelectionDecision::MatchIdentity) {
       const int slot = factory->SlotIndexForIdentity(identity);
       if (slot < 0) {
         return factory->ort_api.CreateStatus(
             ORT_INVALID_ARGUMENT,
             "Selected GPU was not registered by this EP factory.");
       }
-      if (auto *status = factory->ResolveSlotOrdinal(
-              static_cast<size_t>(slot), &hip_ordinal)) {
+      if (auto *status = factory->ResolveSlotOrdinal(static_cast<size_t>(slot),
+                                                     &hip_ordinal)) {
         return status;
       }
     }
@@ -409,9 +407,8 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
                                         &num_keys);
       for (size_t i = 0; i < num_keys; ++i) {
         if (keys[i] != nullptr) {
-          factory->ort_api.AddKeyValuePair(merged_metadata, keys[i],
-                                           values[i] != nullptr ? values[i]
-                                                                : "");
+          factory->ort_api.AddKeyValuePair(
+              merged_metadata, keys[i], values[i] != nullptr ? values[i] : "");
         }
       }
     }

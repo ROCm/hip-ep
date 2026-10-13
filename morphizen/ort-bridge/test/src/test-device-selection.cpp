@@ -63,8 +63,7 @@ TEST(DeviceSelection, MetadataKeyMatchesTheHostPlatform) {
 }
 
 TEST(DeviceSelection, MetadataKeySelectsThePlatformIdentity) {
-  const auto pci =
-      PlatformIdFromMetadata("pci_bus_id", "0000:03:00.0");
+  const auto pci = PlatformIdFromMetadata("pci_bus_id", "0000:03:00.0");
   EXPECT_EQ(pci.kind, PlatformIdKind::PciBusId);
   EXPECT_EQ(pci.value, "0000:03:00.0");
 
