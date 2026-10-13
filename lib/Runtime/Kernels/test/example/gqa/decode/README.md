@@ -101,7 +101,8 @@ hipcc --offload-arch=gfx1151 -O3 -std=c++17 -Wno-deprecated-declarations \
 The decode entry autotunes the implementation, split count and KV tile height
 on the first call per shape and caches the winner. These variables override that
 and bypass the autotuner, which is what you want when profiling one specific
-configuration:
+configuration. Each variable is read once, on the first flash-decode call in
+the process, and then stays fixed:
 
 | Variable | Values | Effect |
 |---|---|---|
@@ -119,8 +120,11 @@ HIPDNN_EP_DEBUG=1 ./test_gqa_decode.exe --iters 100 --only 'gpt_oss-20b full'
 On Windows PowerShell, set them with `$env:HIPDNN_EP_DEBUG = '1'` and clear them
 with `Remove-Item Env:\HIPDNN_EP_DEBUG`.
 
-Note that `test_gqa_decode` sets these itself to time its fixed-configuration
-columns, so it overwrites whatever you export. `--prod-only` leaves them alone.
+`test_gqa_decode` does not set these. Its fixed-configuration columns call
+`hip_gqa_flash_decode_configured` with an explicit config. A variable exported
+before the process starts still applies, including on top of those columns,
+because the kernel reads it once and the override wins over the explicit
+config. `--prod-only` times only the autotuned entry.
 
 ## Comparing two builds
 
