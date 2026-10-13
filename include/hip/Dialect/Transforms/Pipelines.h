@@ -64,11 +64,11 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
-  Option<int64_t> diskResidentGatherMinBytes{
-      *this, "disk-resident-gather-min-bytes",
-      llvm::cl::desc("Keep streamed file-backed axis-0 gather tables of at "
-                     "least this many bytes on disk (0 = disabled)"),
-      llvm::cl::init(0)};
+  Option<bool> diskResidentGather{
+      *this, "disk-resident-gather",
+      llvm::cl::desc("Keep large streamed file-backed tables read only by "
+                     "axis-0 gathers on disk"),
+      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.

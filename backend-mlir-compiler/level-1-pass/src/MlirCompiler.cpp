@@ -48,8 +48,8 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   json << "\"opt_level\": " << config.optLevel;
   json << ", \"skip_constant_data\": "
        << (config.skipConstantData ? "true" : "false");
-  json << ", \"disk_resident_gather_min_bytes\": "
-       << config.diskResidentGatherMinBytes;
+  json << ", \"disk_resident_gather\": "
+       << (config.diskResidentGather ? "true" : "false");
   // output_mode maps to the flatbuffers OutputMode enum
   // (schemas/compilation_options.fbs). The flatbuffers JSON parser accepts
   // the enum value name.
