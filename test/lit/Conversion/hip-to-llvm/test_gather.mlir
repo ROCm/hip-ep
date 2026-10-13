@@ -45,6 +45,19 @@ module {
         {axis = 0 : i64}
     return
   }
+
+  func.func @test_gather_disk_resident(%ctx: !hip.context,
+                                        %indices: memref<128xi64, 1>,
+                                        %output: memref<128x128xf16, 1>) {
+    %c3 = arith.constant 3 : i64
+    %data = hip.get_constant(%ctx, %c3) {hip.disk_resident}
+        : memref<32000x128xf16, 1>
+    hip.gather(%ctx)
+        ins(%data, %indices : memref<32000x128xf16, 1>, memref<128xi64, 1>)
+        outs(%output : memref<128x128xf16, 1>)
+        {axis = 0 : i64}
+    return
+  }
 }
 
 // All three variants lower to the same 12-parameter wrap_gather call:
@@ -58,3 +71,10 @@ module {
 
 // CHECK-LABEL: llvm.func @test_gather_embedding
 // CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// CHECK-LABEL: llvm.func @test_gather_disk_resident
+// CHECK: llvm.call @hipdnn_ep_constant_get
+// CHECK-NOT: llvm.call @wrap_gather(
+// CHECK: %[[IDX:.*]] = llvm.mlir.constant(3 : i64) : i64
+// CHECK-NOT: llvm.call @wrap_gather(
+// CHECK: llvm.call @wrap_gather_from_file(%arg0, %[[IDX]], {{.*}}) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
