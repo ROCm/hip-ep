@@ -75,6 +75,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +85,8 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 /* -----------------------------------------------------------------------
  * Autotune config caches are in-process only.
@@ -1659,6 +1662,37 @@ static void gemvEvict(void* scratch, hipStream_t stream) {
     if (scratch) (void)hipMemsetAsync(scratch, 0, kGemvEvictBytes, stream);
 }
 
+__global__ void gemv_evict_read_kernel(const uint4* __restrict__ buf, size_t n,
+                                       unsigned* sink)
+{
+    unsigned acc = 0;
+    for (size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
+         i < n; i += static_cast<size_t>(gridDim.x) * blockDim.x) {
+        const uint4 v = buf[i];
+        acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+    if (acc == 0x9e3779b9u)
+        *sink = acc;
+}
+
+// Eviction by reading: the cache is left holding clean lines, so the timed
+// launch's misses do not first write back the dirty lines a memset leaves.
+// Memset eviction misranked grouped configs: Phi-4's q/k/v timed a config 13%
+// faster than its seed that then ran 46% slower inside the model.
+static void* gemvEvictReadAlloc(hipStream_t stream) {
+    void* p = gemvEvictAlloc();
+    if (p) (void)hipMemsetAsync(p, 0, kGemvEvictBytes, stream);
+    return p;
+}
+
+static void gemvEvictRead(void* scratch, hipStream_t stream) {
+    if (!scratch) return;
+    hipLaunchKernelGGL(gemv_evict_read_kernel, dim3(1024), dim3(256), 0, stream,
+                       static_cast<const uint4*>(scratch),
+                       kGemvEvictBytes / sizeof(uint4),
+                       static_cast<unsigned*>(scratch));
+}
+
 // Drive `launch()` until per-iter latency plateaus at the sustained clock
 // (>=60 ms total so the still-boosted first samples are not accepted, then 3
 // consecutive iters within 2% of each other). Shared by all GEMV/decode
@@ -2850,6 +2884,12 @@ extern "C" int hip_matmul_nbits_dp4a(
  * Symmetric weights (zero point 8) without bias only: that is every grouped
  * shape the fusion pattern produces, and it keeps zero-point indexing out of
  * the inner loop.
+ *
+ * The launch config is timed on the grouped kernel itself, per group shape
+ * (getOrTuneDp4aGroupConfig). Borrowing segment 0's single-weight config is
+ * not safe: DeepSeek-R1-Distill-Llama-70B's gate/up (N=28672, K=8192) inherits
+ * 1024x8, whose SiLU form (4 columns of each weight per block) ran its 80
+ * layers ~6 ms per token slower than the two separate GEMVs on gfx1151.
  * ----------------------------------------------------------------------- */
 
 struct Dp4aGroupArgs {
@@ -3017,9 +3057,8 @@ static void launchDp4aGroupKernel(hipStream_t stream, const int8_t* a_qb,
         g, K, bs);
 }
 
-// The config id is the single-weight kGemvConfigs entry tuned for segment 0.
-// The SiLU epilogue computes two columns per output, so it halves the tile to
-// keep the tuned config's accumulator count.
+// The config id indexes kGemvConfigs. The SiLU epilogue computes two columns
+// per output, so it halves the tile to keep the config's accumulator count.
 template <int EPI>
 static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
                                   const int8_t* a_qb, const float* a_sc,
@@ -3053,6 +3092,171 @@ static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
         default: break;
     }
 #undef DP4A_GROUP_CASE
+}
+
+static void launchDp4aGroup(int config_id, int epilogue, hipStream_t stream,
+                            const int8_t* a_qb, const float* a_sc,
+                            const Dp4aGroupArgs& g, int64_t K, int64_t bs)
+{
+    if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL)
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL>(
+            config_id, stream, a_qb, a_sc, g, K, bs);
+    else
+        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT>(
+            config_id, stream, a_qb, a_sc, g, K, bs);
+}
+
+// {epilogue, N0, N1, N2 (0 when absent), K, block_size}. A model has a few
+// group shapes, and the lookup runs on every grouped launch, so this is a
+// linear scan over trivially comparable keys rather than a string-keyed map.
+using Dp4aGroupKey = std::array<int64_t, 6>;
+static std::vector<std::pair<Dp4aGroupKey, int>> dp4a_group_cache;
+static std::mutex dp4a_group_tune_mutex;
+
+static const int* findDp4aGroupConfig(const Dp4aGroupKey& key) {
+    for (const auto& e : dp4a_group_cache)
+        if (e.first == key)
+            return &e.second;
+    return nullptr;
+}
+
+// Seeded with segment 0's single-weight config; another config replaces it
+// only when at least 5% faster, so a shape whose candidates time within noise
+// keeps the same config, and the same summation order, from run to run.
+//
+// How it times matters more than what it times; each rule below was a
+// misranking measured in the model:
+//  - Cold, as at decode, but evicted by reading (gemvEvictRead), not memset.
+//  - Interleaved: every round times each candidate once from a rotating start,
+//    and a candidate scores its median round. Timed in back-to-back sweeps,
+//    one kernel came out 9% apart under two config ids.
+//  - Configs that compile to the same kernel are timed once (the SiLU form
+//    halves tile_n, so tile_n 1 and 2 coincide).
+//  - On a private stream: recording timing events on the inference stream
+//    slowed every later decode step of Phi-3.5-mini by ~1%.
+//  - Groups whose seed runs under 0.1 ms keep it: there the Windows event
+//    timer's noise is comparable to the differences being ranked.
+static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
+                                    const float* a_sc, const Dp4aGroupArgs& g,
+                                    int64_t K, int64_t bs, int epilogue)
+{
+    const Dp4aGroupKey key{epilogue, g.N[0], g.N[1], g.nseg > 2 ? g.N[2] : 0,
+                           K, bs};
+    {
+        std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
+        if (const int* hit = findDp4aGroupConfig(key))
+            return *hit;
+    }
+
+    const int seed = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[0],
+                                         g.scales[0], nullptr, nullptr,
+                                         g.out[0], g.N[0], K, bs);
+
+    std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
+    if (const int* hit = findDp4aGroupConfig(key))
+        return *hit;
+
+    (void)hipStreamSynchronize(stream);
+    hipStream_t ts = nullptr;
+    if (hipStreamCreateWithFlags(&ts, hipStreamNonBlocking) != hipSuccess)
+        ts = stream;
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+    void* evict = gemvEvictReadAlloc(ts);
+    auto time_once = [&](int cid) {
+        gemvEvictRead(evict, ts);
+        hipEventRecord(ev0, ts);
+        launchDp4aGroup(cid, epilogue, ts, a_qb, a_sc, g, K, bs);
+        hipEventRecord(ev1, ts);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        return ms;
+    };
+
+    settleClock(ev0, ev1, ts, [&] {
+        launchDp4aGroup(seed, epilogue, ts, a_qb, a_sc, g, K, bs);
+    });
+    constexpr int kSeedSamples = 9;
+    float seed_samples[kSeedSamples];
+    for (int i = 0; i < kSeedSamples; i++)
+        seed_samples[i] = time_once(seed);
+    std::nth_element(seed_samples, seed_samples + kSeedSamples / 2,
+                     seed_samples + kSeedSamples);
+
+    auto kernel_id = [&](int cid) {
+        int tn = kGemvConfigs[cid].tile_n;
+        if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL && tn > 1)
+            tn /= 2;
+        return kGemvConfigs[cid].threads * 64 + tn;
+    };
+    std::vector<int> cand{seed};
+    if (seed_samples[kSeedSamples / 2] >= 0.1f) {
+        for (int cid = 0; cid < kNumGemvConfigs; cid++) {
+            bool dup = false;
+            for (int c : cand)
+                dup = dup || kernel_id(c) == kernel_id(cid);
+            if (!dup)
+                cand.push_back(cid);
+        }
+    }
+
+    int best_id = seed;
+    float seed_ms = seed_samples[kSeedSamples / 2];
+    float best_ms = seed_ms;
+    if (cand.size() > 1) {
+        constexpr int kRounds = 11;
+        const int nc = static_cast<int>(cand.size());
+        std::vector<float> samples(static_cast<size_t>(nc) * kRounds);
+        for (int c : cand)
+            launchDp4aGroup(c, epilogue, ts, a_qb, a_sc, g, K, bs);
+        for (int r = 0; r < kRounds; r++)
+            for (int j = 0; j < nc; j++) {
+                const int c = (j + r) % nc;
+                samples[static_cast<size_t>(c) * kRounds + r] = time_once(cand[c]);
+            }
+        std::vector<float> med(nc);
+        for (int c = 0; c < nc; c++) {
+            float* s = &samples[static_cast<size_t>(c) * kRounds];
+            std::nth_element(s, s + kRounds / 2, s + kRounds);
+            med[c] = s[kRounds / 2];
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   dp4a group config[%2d] threads=%4d tile_n=%2d "
+                ": %.4f ms\n",
+                cand[c], kGemvConfigs[cand[c]].threads,
+                kGemvConfigs[cand[c]].tile_n, med[c]);
+        }
+        seed_ms = best_ms = med[0];
+        for (int c = 1; c < nc; c++) {
+            if (med[c] < best_ms) {
+                best_ms = med[c];
+                best_id = cand[c];
+            }
+        }
+        if (best_ms > seed_ms * 0.95f)
+            best_id = seed;
+    }
+
+    (void)hipStreamSynchronize(ts);
+    if (evict)
+        hipFree(evict);
+    if (ts != stream)
+        (void)hipStreamDestroy(ts);
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    MATMUL_NBITS_AUTOTUNE_LOG(
+        "[custom_kernels] dp4a group autotune: epi=%d N=%lld+%lld+%lld K=%lld "
+        "bs=%lld seed config[%d] %.4f ms -> config[%d] threads=%d tile_n=%d "
+        "%.4f ms\n",
+        epilogue, (long long)key[1], (long long)key[2], (long long)key[3],
+        (long long)K, (long long)bs, seed, seed_ms, best_id,
+        kGemvConfigs[best_id].threads, kGemvConfigs[best_id].tile_n,
+        best_id == seed ? seed_ms : best_ms);
+
+    dp4a_group_cache.emplace_back(key, best_id);
+    return best_id;
 }
 
 extern "C" int hip_matmul_nbits_quant_act_i8(
@@ -3106,17 +3310,9 @@ extern "C" int hip_matmul_nbits_dp4a_group(
         g.N[s]      = N[s];
     }
 
-    const int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[0], g.scales[0],
-                                        nullptr, nullptr, g.out[0], N[0], K,
-                                        block_size);
-    if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL)
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL>(cfg, stream, a_qb,
-                                                             a_sc, g, K,
-                                                             block_size);
-    else
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_CONCAT>(cfg, stream, a_qb,
-                                                           a_sc, g, K,
-                                                           block_size);
+    const int cfg =
+        getOrTuneDp4aGroupConfig(stream, a_qb, a_sc, g, K, block_size, epilogue);
+    launchDp4aGroup(cfg, epilogue, stream, a_qb, a_sc, g, K, block_size);
     return hipGetLastError();
 }
 
