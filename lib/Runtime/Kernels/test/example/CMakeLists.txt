@@ -26,7 +26,7 @@ endif()
 # clang_rt.builtins only when HIP_CXX_COMPILER is clang, and here it is MSVC,
 # so ask hipcc for the library the way hip-config-amd.cmake asks clang.
 execute_process(
-  COMMAND ${CMAKE_COMMAND} -E env HIPCC_VERBOSE=0
+  COMMAND ${CMAKE_COMMAND} -E env HIPCC_VERBOSE=0 ${HIPCC_ENV}
           ${HIPCC_EXECUTABLE} -print-libgcc-file-name --rtlib=compiler-rt
   OUTPUT_VARIABLE _kernel_ut_clang_rt
   OUTPUT_STRIP_TRAILING_WHITESPACE
