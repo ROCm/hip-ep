@@ -20,6 +20,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -229,6 +230,7 @@ struct ConvertShapeToExtentPass
     //
     // Folding off also leaves the hipsr.compute bodies alone.
     RewritePatternSet inliners(context);
+    cf::BranchOp::getCanonicalizationPatterns(inliners, context);
     scf::ExecuteRegionOp::getCanonicalizationPatterns(inliners, context);
     shape::AssumingOp::getCanonicalizationPatterns(inliners, context);
     if (failed(applyPatternsGreedily(

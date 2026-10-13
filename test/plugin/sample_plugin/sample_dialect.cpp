@@ -63,7 +63,8 @@ struct SampleMarkerLowering : public ConversionPattern {
 /// -- not merely promising it -- is what makes the convert-hip-to-llvm guard
 /// admit the dialect (hasPromisedInterface == false).
 struct SampleConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
-  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+  explicit SampleConvertToLLVMInterface(Dialect *dialect)
+      : ConvertToLLVMPatternInterface(dialect) {}
 
   void loadDependentDialects(MLIRContext *context) const final {
     context->loadDialect<LLVM::LLVMDialect>();
