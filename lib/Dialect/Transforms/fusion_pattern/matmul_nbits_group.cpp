@@ -101,8 +101,7 @@ bool canMakeAvailableBefore(mlir::Value v, mlir::Operation *point,
   if (!def || def->getBlock() != point->getBlock() ||
       def->isBeforeInBlock(point))
     return true;
-  if (depth > 8 || def->getNumRegions() != 0 ||
-      !mlir::isMemoryEffectFree(def))
+  if (depth > 8 || def->getNumRegions() != 0 || !mlir::isMemoryEffectFree(def))
     return false;
   return llvm::all_of(def->getOperands(), [&](mlir::Value operand) {
     return canMakeAvailableBefore(operand, point, depth + 1);
@@ -123,9 +122,10 @@ collectGroup(mlir::hip::MatMulNBitsOp root) {
       continue;
     members.push_back(mm);
   }
-  llvm::sort(members, [](mlir::hip::MatMulNBitsOp x, mlir::hip::MatMulNBitsOp y) {
-    return x->isBeforeInBlock(y);
-  });
+  llvm::sort(members,
+             [](mlir::hip::MatMulNBitsOp x, mlir::hip::MatMulNBitsOp y) {
+               return x->isBeforeInBlock(y);
+             });
   // Only the first member forms the group, so it is formed exactly once and
   // the result is independent of the order the driver visits the members in.
   if (members.empty() || members.front() != root)
@@ -234,8 +234,7 @@ struct MatMulNBitsGroup final
         return rewriter.notifyMatchFailure(mm, "cannot hoist operands");
 
     llvm::SmallVector<mlir::hip::MatMulNBitsOp> ordered =
-        silu ? llvm::SmallVector<mlir::hip::MatMulNBitsOp>{silu->gate,
-                                                           silu->up}
+        silu ? llvm::SmallVector<mlir::hip::MatMulNBitsOp>{silu->gate, silu->up}
              : group;
     llvm::SmallVector<mlir::Value> weights, scales, outputs;
     llvm::SmallVector<mlir::Attribute> ns;
@@ -254,9 +253,9 @@ struct MatMulNBitsGroup final
     auto groupOp = mlir::hip::MatMulNBitsGroupOp::create(
         rewriter, root.getLoc(), resultTypes, root.getHandle(), root.getA(),
         weights, scales, /*a_quant=*/mlir::Value(), /*a_scale=*/mlir::Value(),
-        outputs, root.getKAttr(), rewriter.getArrayAttr(ns),
-        root.getBitsAttr(), root.getBlockSizeAttr(),
-        root.getAccuracyLevelAttr(), root.getScaleElemSizeAttr(),
+        outputs, root.getKAttr(), rewriter.getArrayAttr(ns), root.getBitsAttr(),
+        root.getBlockSizeAttr(), root.getAccuracyLevelAttr(),
+        root.getScaleElemSizeAttr(),
         rewriter.getI64IntegerAttr(silu ? kEpilogueSiluMul : kEpilogueConcat));
 
     if (!silu) {
@@ -285,8 +284,7 @@ struct MatMulNBitsGroup final
 /// block_size has to be the 32 the norm kernel quantizes with.
 struct MatMulNBitsGroupReadsNormQuant final
     : public mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp> {
-  using mlir::OpRewritePattern<
-      mlir::hip::MatMulNBitsGroupOp>::OpRewritePattern;
+  using mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp>::OpRewritePattern;
 
   static constexpr int64_t kQuantBlockSize = 32;
 
@@ -329,12 +327,10 @@ struct MatMulNBitsGroupReadsNormQuant final
     llvm::SmallVector<int64_t> scaleShape(aType.getShape());
     scaleShape.back() = group.getK() / kQuantBlockSize;
     auto sType = mlir::RankedTensorType::get(scaleShape, rewriter.getF32Type());
-    mlir::Value qInit =
-        mlir::tensor::EmptyOp::create(rewriter, loc, qType.getShape(),
-                                      qType.getElementType(), dynSizes);
-    mlir::Value sInit =
-        mlir::tensor::EmptyOp::create(rewriter, loc, sType.getShape(),
-                                      sType.getElementType(), dynSizes);
+    mlir::Value qInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, qType.getShape(), qType.getElementType(), dynSizes);
+    mlir::Value sInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, sType.getShape(), sType.getElementType(), dynSizes);
 
     llvm::SmallVector<mlir::Type> resultTypes(norm->getResultTypes());
     resultTypes.push_back(qType);

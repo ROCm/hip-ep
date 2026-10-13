@@ -26,14 +26,11 @@
 
 #include <cstdio>
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon,
-                                    void *a_quant, void *a_scale,
-                                    int64_t quant_block_size) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -84,10 +81,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   if (a_quant && a_scale && element_size_bytes == 2 &&
       hip_norm_quant_supported(num_rows, hidden_dim, quant_block_size))
-    return hip_skip_rms_norm_quant(hipdnn_ep_state_get_stream(state), input,
-                                   skip, gamma, bias, output,
-                                   input_skip_bias_sum, num_rows, hidden_dim,
-                                   epsilon, a_quant, a_scale);
+    return hip_skip_rms_norm_quant(
+        hipdnn_ep_state_get_stream(state), input, skip, gamma, bias, output,
+        input_skip_bias_sum, num_rows, hidden_dim, epsilon, a_quant, a_scale);
 
   return hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
                            gamma, bias, output, input_skip_bias_sum, num_rows,
