@@ -157,18 +157,18 @@ After it finishes you should have `$ROOT/local/bin/hipgpu.dll`.
 ## 1b. Install a matching ONNX Runtime wheel (mandatory)
 
 **You must do this, or the EP will not load.** The EP DLL links the ORT version
-pinned in `cmake/deps.txt` (currently **1.27.0**) and requests that exact ORT
+pinned in `cmake/deps.txt` (currently **1.30.0**) and requests that exact ORT
 C-API version when it registers. The Python tests `import onnxruntime`, so the
 pip package must expose the **same** API version. A mismatch fails registration
 (`The requested API version [N] is not available...`) and then segfaults
 (Windows access violation on session create).
 
 PyPI's `onnxruntime-directml` frequently **lags** the pinned tag (e.g. PyPI tops
-out at 1.24.x while the repo pins 1.27.0), so `pip install onnxruntime-directml`
+out at 1.24.x while the repo pins 1.30.0), so `pip install onnxruntime-directml`
 alone is usually **not** enough — you build a matching wheel from source (this is
 exactly what CI does). Run from an **x64 Native Tools Command Prompt for VS**
 (Ninja + MSVC required; `build.bat` is a Windows batch script). `$ROOT` is the
-same short path as §1, and the `v1.27.0` / PR-patch values come from
+same short path as §1, and the `v1.30.0` / PR-patch values come from
 `cmake/deps.txt` + `.github/workflows/windows-deps.yml`
 (`ONNXRUNTIME_VERSION` / `ONNXRUNTIME_PR_PATCHES`, the latter currently empty —
 add a `git apply` step per listed PR if it is not).
@@ -176,32 +176,32 @@ add a `git apply` step per listed PR if it is not).
 **PowerShell:**
 
 ```powershell
-git clone --depth 1 --branch v1.27.0 --recurse-submodules --shallow-submodules `
+git clone --depth 1 --branch v1.30.0 --recurse-submodules --shallow-submodules `
   https://github.com/Microsoft/onnxruntime.git "$ROOT\source-onnxruntime"
 cd "$ROOT\source-onnxruntime"
 # Build the shared lib + wheel:
 .\build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error `
   --skip_submodule_sync --build_dir "$ROOT\build-onnxruntime" --skip_tests `
   --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel
-$wheel = (Get-ChildItem "$ROOT\build-onnxruntime\Release\dist\onnxruntime_directml-1.27.0-*.whl" | Select-Object -First 1).FullName
+$wheel = (Get-ChildItem "$ROOT\build-onnxruntime\Release\dist\onnxruntime_directml-1.30.0-*.whl" | Select-Object -First 1).FullName
 pip install --force-reinstall "$wheel"
-python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.27.0
+python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.30.0
 ```
 
 **Git Bash** (run `build.bat` from a Native Tools prompt, or `cmd //c build.bat ...`):
 
 ```bash
-git clone --depth 1 --branch v1.27.0 --recurse-submodules --shallow-submodules \
+git clone --depth 1 --branch v1.30.0 --recurse-submodules --shallow-submodules \
   https://github.com/Microsoft/onnxruntime.git "$ROOT/source-onnxruntime"
 cd "$ROOT/source-onnxruntime"
 cmd //c "build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir \"$ROOT\\build-onnxruntime\" --skip_tests --disable_memleak_checker --use_dml --cmake_generator Ninja --build_wheel"
-pip install --force-reinstall "$ROOT"/build-onnxruntime/Release/dist/onnxruntime_directml-1.27.0-*.whl
-python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.27.0
+pip install --force-reinstall "$ROOT"/build-onnxruntime/Release/dist/onnxruntime_directml-1.30.0-*.whl
+python -c "import onnxruntime as ort; print(ort.__version__)"   # must print 1.30.0
 ```
 
 The wheel is Python-version-specific (`cp314` for Python 3.14). **If PyPI has
 caught up** to the pinned version, skip the source build and just
-`pip install --force-reinstall onnxruntime-directml==1.27.0`.
+`pip install --force-reinstall onnxruntime-directml==1.30.0`.
 
 ---
 

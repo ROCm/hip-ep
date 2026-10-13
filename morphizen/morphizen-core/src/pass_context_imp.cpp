@@ -36,6 +36,19 @@ DEF_ENV_PARAM(HIP_EP_VERBOSE, "0")
 
 namespace morphizen {
 
+namespace {
+thread_local const void *g_run_option_state = nullptr;
+thread_local DllSafe<std::string> (*g_get_run_option_entry)(
+    const void *state, const char *entry_name) = nullptr;
+} // namespace
+
+void set_run_option_accessor(const void *state,
+                             DllSafe<std::string> (*get_entry)(
+                                 const void *state, const char *entry_name)) {
+  g_run_option_state = state;
+  g_get_run_option_entry = get_entry;
+}
+
 /// struct WithPass
 PassContextImp::WithPass::WithPass(PassContextImp &context, IPass &pass)
     : _context(&context) {
@@ -298,17 +311,16 @@ PassContextImp::get_session_config(const std::string &option_name,
 std::string
 PassContextImp::get_run_option(const std::string &option_name,
                                const std::string &default_value) const {
-  auto ret = default_value;
-  if (get_run_options_) {
-    // if the function exists. TODO, it might be a stale
-    // function.
-    std::shared_lock<std::shared_mutex> lock(
-        const_cast<PassContextImp *>(this)->rw_mutex_);
-    auto maybe_value = get_run_options_(option_name);
-    if (maybe_value) {
-      ret = maybe_value.value();
-    }
+  auto value = DllSafe<std::string>();
+  if (g_get_run_option_entry != nullptr && g_run_option_state != nullptr) {
+    value = g_get_run_option_entry(g_run_option_state, option_name.c_str());
   }
+  // OrtRunOptions has no API to enumerate its config entries, so logging every
+  // lookup is the only way to see which run options actually reach us.
+  const bool found = value.get() != nullptr;
+  auto ret = found ? *value : default_value;
+  LOG_VERBOSE(1) << "run_option: " << option_name << " = " << ret
+                 << (found ? "" : " (default)");
   return ret;
 }
 std::string

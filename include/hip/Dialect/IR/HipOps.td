@@ -148,7 +148,7 @@ class Hip_DpsOp<string mnemonic,
           ::std::optional<::mlir::Location>,
           ::mlir::ValueRange operands,
           ::mlir::DictionaryAttr attrs,
-          ::mlir::OpaqueProperties props,
+          ::mlir::PropertyRef props,
           ::mlir::RegionRange regions,
           ::llvm::SmallVectorImpl<::mlir::Type> &results) {
         $cppClass::Adaptor adaptor(operands, attrs, props, regions);
@@ -4806,9 +4806,11 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     GPU stream so the kernel that wrote `scalar` is guaranteed to have
     completed.
 
-    Has device->host copy + stream-synchronization side effects; it is not
-    speculative and must not be hoisted across the kernel that produces
-    `scalar`.
+    In tensor form, synchronization establishes readiness of the returned
+    value, not an independent fence for unrelated work. A rewrite may replace
+    it when the same scalar is proven available on the host. Unknown tensor
+    values and memref operands retain synchronized readback and must not be
+    hoisted across their producer.
   }];
 
   let arguments = (ins
@@ -4816,6 +4818,8 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     Hip_TensorOrMemRef:$scalar
   );
   let results = (outs AnyTypeOf<[AnyInteger, AnyFloat, Index]>:$value);
+
+  let hasCanonicalizer = 1;
 
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)

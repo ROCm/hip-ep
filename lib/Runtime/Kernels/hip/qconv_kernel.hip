@@ -1119,6 +1119,9 @@ constexpr int64_t kGemvSpatialThreshold = 8;
 // A/B operand carries the whole of K=16 replicated across the wave's two lane
 // halves. gfx12 splits K between the halves instead, so the same kernel would
 // read the wrong elements there, and gfx9 has no such instruction at all.
+// gfx1170 is numbered gfx11 but only implements that gfx12 encoding, so its
+// image of qconv_tiled_wmma_kernel returns the accumulator unchanged.
+// gcnArchName may carry a feature suffix such as "gfx1151:xnack-".
 static bool device_has_gfx11_wmma() {
   static const bool ok = [] {
     int dev = 0;
@@ -1127,8 +1130,9 @@ static bool device_has_gfx11_wmma() {
         hipGetDeviceProperties(&prop, dev) != hipSuccess)
       return false;
     const char *arch = prop.gcnArchName;
-    return arch[0] == 'g' && arch[1] == 'f' && arch[2] == 'x' &&
-           arch[3] == '1' && arch[4] == '1';
+    const bool gfx11 = arch[0] == 'g' && arch[1] == 'f' && arch[2] == 'x' &&
+                       arch[3] == '1' && arch[4] == '1';
+    return gfx11 && arch[5] != '7';
   }();
   return ok;
 }
