@@ -9,8 +9,10 @@
 // memrefs that have at least one host I/O user (memref.store / load) --
 // away from the GPU pool.  Each candidate is replaced by a `memref.view`
 // over a single per-function `hip.get_host_scratch(%ctx, %total)` buffer
-// (host-mapped via `hipHostMalloc(hipHostMallocMapped)`, GPU-readable at
-// the same VA on UMA targets, runtime-owned, grow-on-demand).
+// (host-mapped via `hipHostMalloc(hipHostMallocMapped)`, runtime-owned,
+// grow-on-demand). Host stores use this address. Kernel launches must
+// pass hipdnn_ep_as_device_ptr of it; the device mapping is not the
+// host address on every target.
 //
 // Why this pass exists
 // --------------------
@@ -40,8 +42,8 @@
 //   %c0_i64  = arith.constant 0 : i64
 //   memref.store %c0_i64, %view[] : memref<i64>      // host store, into
 //                                                    // host-mapped memory
-//   %seqlens_k = hip.cast %view                      // GPU still reads at
-//                : memref<i64> to memref<1xi32>      // the same VA (UMA)
+//   %seqlens_k = hip.cast %view                      // kernel wrapper maps
+//                : memref<i64> to memref<1xi32>      // this to the device ptr
 //
 // Multiple candidates in one function share ONE `hip.get_host_scratch`
 // emitted at the entry block; each candidate gets its own 64-byte-aligned
@@ -78,14 +80,12 @@
 //
 // Hip-dialect users are accepted, not rejected
 // --------------------------------------------
-// `hipHostMalloc(hipHostMallocMapped)` returns a host pointer that is also
-// GPU-accessible at the same virtual address on UMA targets, so the bare-ptr
-// ABI used by `--convert-hip-to-llvm` consumes the same buffer regardless of
-// whether it was hipMalloc'd or hipHostMalloc'd.  The canonical
-// `tensor.from_elements -> reduce_sum + sub + cast -> seqlens_k` GQA pattern
-// produces exactly an alloc with a host `memref.store` followed by a
-// `hip.cast` that reads it; an earlier design rejected such hip consumers and
-// left the host store crashing inside the GPU pool.
+// `hipHostMalloc(hipHostMallocMapped)` is what host stores write. The bare
+// pointer lowered by `--convert-hip-to-llvm` is that host address, which is
+// not a GPU mapping on every target. Kernel wrappers that can receive this
+// buffer (cast, elementwise, div) pass hipdnn_ep_as_device_ptr before launch.
+// An earlier design rejected hip consumers and left the host store crashing
+// inside the GPU pool.
 //
 // Non-goals
 // ---------
@@ -169,8 +169,9 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
     // Metadata-only / lifetime users: harmless.
     if (isa<memref::DimOp, memref::DeallocOp>(user))
       continue;
-    // hip.* consumers are host-mapping-safe (hipHostMallocMapped is
-    // GPU-readable at the same VA on UMA targets).
+    // hip.* consumers are accepted. The host address is what memref.store
+    // and memref.load use; it is not a GPU mapping on every target, so a
+    // kernel launch must receive hipdnn_ep_as_device_ptr of this pointer.
     if (user->getDialect() && user->getDialect()->getNamespace() == "hip") {
       sawHipUser = true;
       continue;

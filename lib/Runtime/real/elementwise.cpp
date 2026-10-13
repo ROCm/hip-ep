@@ -98,6 +98,15 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
             (long long)data_type);
     return -1;
   }
+  // Host scratch is not GPU-visible at the host address. Copy it into the
+  // device mirror and pass that pointer to the kernel.
+  void *host_output = output;
+  void *scratch_stream = hipdnn_ep_state_get_stream(state);
+  if (hipdnn_ep_copy_scratch_to_device(state, scratch_stream) != 0)
+    return -1;
+  lhs = hipdnn_ep_as_device_ptr(state, lhs);
+  rhs = hipdnn_ep_as_device_ptr(state, rhs);
+  output = hipdnn_ep_as_device_ptr(state, output);
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
@@ -176,6 +185,9 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                 hipGetErrorString(err));
         return -1;
       }
+      if (output != host_output)
+        hipdnn_ep_copy_scratch_from_device(state, scratch_stream, host_output,
+                                           bytes);
       return 0;
     }
     // Neither operand matches OUT — undefined broadcast. Zero-fill OUT
@@ -285,24 +297,67 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
         rhs_use = ws_byte;
       }
     }
+    auto volume = [](int64_t n, int64_t c, int64_t h, int64_t w) {
+      return static_cast<size_t>(n) * static_cast<size_t>(c) *
+             static_cast<size_t>(h) * static_cast<size_t>(w);
+    };
+    size_t elem_sz = elem_bytes > 0 ? static_cast<size_t>(elem_bytes) : 0;
+    size_t lhs_bytes = (lhs_use == lhs ? volume(lhs_n, lhs_c, lhs_h, lhs_w)
+                                       : volume(out_n, out_c, out_h, out_w)) *
+                       elem_sz;
+    size_t rhs_bytes = (rhs_use == rhs ? volume(rhs_n, rhs_c, rhs_h, rhs_w)
+                                       : volume(out_n, out_c, out_h, out_w)) *
+                       elem_sz;
+    size_t out_bytes = volume(out_n, out_c, out_h, out_w) * elem_sz;
+    void *lhs_staged = nullptr;
+    void *rhs_staged = nullptr;
+    void *out_staged = nullptr;
+    void *lhs_k = hipdnn_ep_ensure_device_ptr(stream, lhs_use, lhs_bytes, 1,
+                                              &lhs_staged);
+    void *rhs_k = hipdnn_ep_ensure_device_ptr(stream, rhs_use, rhs_bytes, 1,
+                                              &rhs_staged);
+    void *out_k = hipdnn_ep_ensure_device_ptr(stream, output, out_bytes, 0,
+                                              &out_staged);
     int rc = -1;
     switch (tensor_op) {
     case HIPDNN_EP_TENSOR_OP_MUL:
-      rc = hip_elementwise_mul(stream, lhs_use, rhs_use, output, out_vol,
-                               hip_dtype);
+      rc = hip_elementwise_mul(stream, lhs_k, rhs_k, out_k, out_vol, hip_dtype);
       break;
     case HIPDNN_EP_TENSOR_OP_ADD:
-      rc = hip_elementwise_add(stream, lhs_use, rhs_use, output, out_vol,
-                               hip_dtype);
+      rc = hip_elementwise_add(stream, lhs_k, rhs_k, out_k, out_vol, hip_dtype);
       break;
     case HIPDNN_EP_TENSOR_OP_MIN:
-      rc = hip_elementwise_min(stream, lhs_use, rhs_use, output, out_vol,
-                               hip_dtype);
+      rc = hip_elementwise_min(stream, lhs_k, rhs_k, out_k, out_vol, hip_dtype);
       break;
     case HIPDNN_EP_TENSOR_OP_MAX:
-      rc = hip_elementwise_max(stream, lhs_use, rhs_use, output, out_vol,
-                               hip_dtype);
+      rc = hip_elementwise_max(stream, lhs_k, rhs_k, out_k, out_vol, hip_dtype);
       break;
+    }
+    if (rc == 0 && out_staged) {
+      (void)hipMemcpyAsync(host_output, out_staged, out_bytes,
+                           hipMemcpyDeviceToHost,
+                           static_cast<hipStream_t>(stream));
+    }
+    if (lhs_staged || rhs_staged || out_staged) {
+      (void)hipStreamSynchronize(static_cast<hipStream_t>(stream));
+      if (lhs_staged)
+        (void)hipFree(lhs_staged);
+      if (rhs_staged)
+        (void)hipFree(rhs_staged);
+      if (out_staged)
+        (void)hipFree(out_staged);
+    }
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_elementwise: integer kernel failed (%d) op=%s dtype=%s\n",
+              rc, op_name, type_name);
+    } else if (output != host_output) {
+      const int64_t elem = hipdnn_ep_datatype_size(data_type);
+      if (elem > 0) {
+        hipdnn_ep_copy_scratch_from_device(
+            state, stream, host_output,
+            static_cast<size_t>(out_vol) * static_cast<size_t>(elem));
+      }
     }
     return rc;
   }
@@ -334,8 +389,18 @@ int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
     // rc == -2: output volume exceeds the kernel's 32-bit index range; no
     // fallback exists, so this falls through to the unsupported-combination
     // error below. Any other rc is terminal.
-    if (rc != -2)
+    if (rc != -2) {
+      if (rc == 0 && output != host_output) {
+        const int64_t elem = hipdnn_ep_datatype_size(data_type);
+        const int64_t vol = out_n * out_c * out_h * out_w;
+        if (elem > 0 && vol > 0) {
+          hipdnn_ep_copy_scratch_from_device(
+              state, scratch_stream, host_output,
+              static_cast<size_t>(vol) * static_cast<size_t>(elem));
+        }
+      }
       return rc;
+    }
   }
 
   fprintf(stderr, "wrap_elementwise: not support datatype: %s, op: %s\n",
@@ -377,6 +442,13 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
     fprintf(stderr, "wrap_elementwise_sub: null argument\n");
     return -1;
   }
+  void *host_output = output;
+  void *scratch_stream = hipdnn_ep_state_get_stream(state);
+  if (hipdnn_ep_copy_scratch_to_device(state, scratch_stream) != 0)
+    return -1;
+  lhs = hipdnn_ep_as_device_ptr(state, lhs);
+  rhs = hipdnn_ep_as_device_ptr(state, rhs);
+  output = hipdnn_ep_as_device_ptr(state, output);
 
   const int64_t out_vol = out_n * out_c * out_h * out_w;
   if (out_vol <= 0)
@@ -452,6 +524,15 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
         hipdnn_ep_datatype_name(data_type));
   }
 
-  return hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
-                             hip_dtype);
+  int rc = hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
+                              hip_dtype);
+  if (rc == 0 && output != host_output) {
+    const int64_t elem = hipdnn_ep_datatype_size(data_type);
+    if (elem > 0) {
+      hipdnn_ep_copy_scratch_from_device(
+          state, scratch_stream, host_output,
+          static_cast<size_t>(out_vol) * static_cast<size_t>(elem));
+    }
+  }
+  return rc;
 }

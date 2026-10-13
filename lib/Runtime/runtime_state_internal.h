@@ -72,15 +72,16 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
-  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
-  // GPU pool by hip-materialize-host-scalars.
-  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
-  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
-  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
-  // real device memory; host stores into it SEGV. Other targets silently
-  // worked because hipMalloc returned UMA-mapped host memory there, masking
-  // the bug.
+  // Host scratch for tiny host-fed scalars routed away from the GPU pool by
+  // hip-materialize-host-scalars. host_scratch_base is hipHostMalloc'd and is
+  // what generated memref.store / memref.load use. host_scratch_dev is a
+  // separate hipMalloc of the same size: on this target
+  // hipHostGetDevicePointer returns the host address, and a kernel load of
+  // that address page-faults. Wrappers copy host bytes into the device
+  // mirror before launch. Grow-on-demand via
+  // hipdnn_ep_get_host_scratch_base(); never shrinks.
   void *host_scratch_base;
+  void *host_scratch_dev;
   size_t host_scratch_size;
 
   // Output allocator installed by the EP before inference_compute via
