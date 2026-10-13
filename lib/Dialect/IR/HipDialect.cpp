@@ -312,7 +312,7 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
                          ValueRange operands, DictionaryAttr attributes,
-                         OpaqueProperties properties, RegionRange regions,
+                         PropertyRef properties, RegionRange regions,
                          SmallVectorImpl<Type> &inferredReturnTypes) {
   LoopOpAdaptor adaptor(operands, attributes, properties, regions);
   auto vInit = adaptor.getVInit();
@@ -391,7 +391,7 @@ LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
                        ValueRange operands, DictionaryAttr attributes,
-                       OpaqueProperties properties, RegionRange regions,
+                       PropertyRef properties, RegionRange regions,
                        SmallVectorImpl<Type> &inferredReturnTypes) {
   IfOpAdaptor adaptor(operands, attributes, properties, regions);
   auto oInit = adaptor.getOInit();
