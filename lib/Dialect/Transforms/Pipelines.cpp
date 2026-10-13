@@ -138,15 +138,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   if (fs) {
     pm.addPass(mlir::hip::createExternalizeConstantsPass(
         fs, options.externalizeMinNumElements, options.skipConstantData,
-        options.diskResidentGatherMinBytes));
+        options.diskResidentGather));
   } else {
     mlir::hip::ExternalizeConstantsPassOptions externalizeOptions;
     externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
     externalizeOptions.externalizeMinNumElements =
         options.externalizeMinNumElements;
     externalizeOptions.skipConstantData = options.skipConstantData;
-    externalizeOptions.diskResidentGatherMinBytes =
-        options.diskResidentGatherMinBytes;
+    externalizeOptions.diskResidentGather = options.diskResidentGather;
     pm.addPass(mlir::hip::createExternalizeConstantsPass(
         std::move(externalizeOptions)));
   }

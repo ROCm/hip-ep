@@ -40,7 +40,7 @@ enum class ConstantMetadataSourceKind : int32_t {
 /// threshold default at 0, uses DiskFileSystem, and rejects memory addresses.
 std::unique_ptr<mlir::Pass> createExternalizeConstantsPass(
     morphizen::FileSystem *fs, int64_t minNumElements,
-    bool skipConstantData = false, int64_t diskResidentGatherMinBytes = 0);
+    bool skipConstantData = false, bool diskResidentGather = false);
 
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Transforms/Passes.h.inc"
