@@ -3260,6 +3260,8 @@ LogicalResult MatMulNBitsGroupOp::verify() {
     return emitOpError("expected 1 to 3 weights, got ") << numWeights;
   if (getScales().size() != numWeights)
     return emitOpError("expected one scales operand per weight");
+  if (!getZeroPoints().empty() && getZeroPoints().size() != numWeights)
+    return emitOpError("expected no zero_points or one per weight");
   ArrayAttr nAttr = getN();
   if (nAttr.size() != numWeights)
     return emitOpError("expected one N entry per weight");
@@ -3293,6 +3295,7 @@ LogicalResult MatMulNBitsGroupOp::verify() {
   dataOperands.push_back(getA());
   llvm::append_range(dataOperands, getWeights());
   llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getZeroPoints());
   if (getAQuant()) {
     dataOperands.push_back(getAQuant());
     dataOperands.push_back(getAScale());
