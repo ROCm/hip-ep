@@ -124,9 +124,21 @@ def update_submodules():
 
 
 def default_generator():
-    # Like ONNX Runtime: on Windows default to the Visual Studio generator so
-    # CMake locates MSVC itself (no vcvarsall sourcing); Ninja elsewhere.
-    return "Visual Studio 17 2022" if IS_WINDOWS else "Ninja"
+    # Ninja everywhere it is available, which on Windows means any developer
+    # shell: VS ships ninja.exe and the Windows CI jobs already pass
+    # `--cmake_generator Ninja`, so this makes the default the configuration
+    # that is actually exercised. It also matters for the in-tree LLVM build
+    # (ENABLE_ROCMLIRTRITON), where cmake/deps.cmake consumes single-config
+    # build-tree paths such as ${CMAKE_BINARY_DIR}/lib/cmake/mlir that a
+    # multi-config generator does not produce.
+    #
+    # Outside a developer shell there is no ninja, so fall back to the Visual
+    # Studio generator, which locates MSVC itself. Pinned to 2022 (VS 17)
+    # rather than probed: that is the toolset CI builds with, and the dependency
+    # set is not yet green on VS 18. Pass --cmake_generator to override.
+    if IS_WINDOWS and not have_tool("ninja"):
+        return "Visual Studio 17 2022"
+    return "Ninja"
 
 
 def check_toolchain(generator):
@@ -140,7 +152,7 @@ def check_toolchain(generator):
         # the caller having loaded the MSVC environment (run from an "x64 Native
         # Tools Command Prompt for VS"), exactly as ONNX Runtime's build expects.
         if generator == "Ninja" and not have_tool("cl"):
-            log.warning(
+            raise BuildError(
                 "cl.exe not on PATH; for the Ninja generator on Windows run from "
                 "an 'x64 Native Tools Command Prompt for VS' (or pass "
                 "--cmake_generator 'Visual Studio 17 2022')."
@@ -229,6 +241,15 @@ def detect_hip_arch():
 
 # ---------------------------------------------------------------------------
 # Configure / build / install (deps resolved by cmake/deps.cmake)
+#
+# The Windows host compiler is MSVC cl.exe, which is what this project's own
+# sources are written for (morphizen/cmake/compile_options.msvc.cmake tunes
+# /W4 /WX for it). CMake picks it up from the environment, so there is nothing
+# to provision: name no CMAKE_*_COMPILER and either let the Visual Studio
+# generator locate it or run Ninja from a developer shell. rocMLIR used to
+# block this -- it FATAL_ERRORed on cl.exe right after project() -- until
+# ROCm/rocmlirTriton#538 added the ROCMLIR_ALLOW_MSVC opt-out that
+# cmake/deps.cmake now sets.
 # ---------------------------------------------------------------------------
 
 

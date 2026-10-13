@@ -72,15 +72,25 @@ endif()
 # find_library for legacy trees that omit LLDConfig.cmake.
 set(lld_libs "")
 if(WIN32)
-    find_package(LLD CONFIG QUIET)
-    if(LLD_FOUND)
-        message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+    if(TARGET lldCOFF AND TARGET lldCommon)
+        # In-tree LLVM/LLD build (no external prefix): the LLD libraries already
+        # exist as real targets in this same build. find_package(LLD CONFIG)
+        # would resolve the build-tree export package, whose LLDTargets.cmake is
+        # an export()-generated file that CMake refuses to include(). Use the
+        # existing targets directly.
+        message(STATUS "Using in-tree LLD targets (lldCommon, lldCOFF)")
         set(lld_libs lldCommon lldCOFF)
     else()
-        message(STATUS "LLD CONFIG package not found; falling back to find_library")
-        find_library(LLD_COFF_LIB NAMES lldCOFF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-        find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
-        list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
+        find_package(LLD CONFIG QUIET)
+        if(LLD_FOUND)
+            message(STATUS "Found LLD via CONFIG package: ${LLD_DIR}")
+            set(lld_libs lldCommon lldCOFF)
+        else()
+            message(STATUS "LLD CONFIG package not found; falling back to find_library")
+            find_library(LLD_COFF_LIB NAMES lldCOFF PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
+            find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
+            list(APPEND lld_libs ${LLD_COFF_LIB} ${LLD_COMMON_LIB})
+        endif()
     endif()
 endif()
 
