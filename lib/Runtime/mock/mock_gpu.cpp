@@ -1252,6 +1252,30 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   return 0;
 }
 
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm_mixed\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm_mixed("
+             "input_num_elements=%lld, gamma_num_elements=%lld, "
+             "element_sizes=%lld/%lld/%lld/%lld/%lld, epsilon=%f, bias=%s, "
+             "input_skip_bias_sum=%s)\n",
+             (long long)input_num_elements, (long long)gamma_num_elements,
+             (long long)input_element_size, (long long)skip_element_size,
+             (long long)gamma_element_size, (long long)output_element_size,
+             (long long)sum_element_size, (double)epsilon, bias ? "yes" : "no",
+             input_skip_bias_sum ? "yes" : "no");
+
+  return 0;
+}
+
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
