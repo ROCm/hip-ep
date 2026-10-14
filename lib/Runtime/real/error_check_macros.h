@@ -7,7 +7,6 @@
 
 #include <cstdio>
 #include <hip/hip_runtime.h>
-#include <hipblaslt/hipblaslt.h>
 
 //===----------------------------------------------------------------------===//
 // Error Checking Macros with Goto Cleanup Pattern
@@ -25,17 +24,6 @@
     if (error != hipSuccess) {                                                 \
       fprintf(stderr, "HIP error: %s failed at %s:%d: %s\n", #expr, __FILE__,  \
               __LINE__, hipGetErrorString(error));                             \
-      result = -1;                                                             \
-      goto label;                                                              \
-    }                                                                          \
-  } while (0)
-
-#define HIPBLAS_CHECK_GOTO(expr, label)                                        \
-  do {                                                                         \
-    hipblasStatus_t status = (expr);                                           \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLAS error: %s failed at %s:%d (status=%d)\n",       \
-              #expr, __FILE__, __LINE__, status);                              \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \

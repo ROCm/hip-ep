@@ -416,7 +416,7 @@ bool isSharedLibraryFile(llvm::StringRef path) {
 }
 
 // Install symbol search generators on the JIT's main JITDylib, in priority
-// order: per-OS ROCm libs, the per-arch kernel DLL/SO, plugin-contributed
+// order: hipdnn_backend, the per-arch kernel DLL/SO, plugin-contributed
 // libraries, then the process image.
 // The kernel DLL is added before the process generator so its hip_* launchers
 // win over any look-alike symbol in another loaded module. Returns false only
@@ -439,31 +439,6 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
     }
     return false;
   };
-
-  // ROCm libs the runtime calls into (the EP only imports amdhip64 directly).
-  // A missing lib is tolerated: a model that never touches it still JITs.
-  const std::vector<std::vector<const char *>> rocm_libs = {
-#ifdef _WIN32
-      {"hipblaslt.dll", "libhipblaslt.dll"},
-#else
-      {"libhipblaslt.so"},
-#endif
-  };
-  for (const std::vector<const char *> &names : rocm_libs) {
-    if (loadFirst(names))
-      continue;
-    std::string tried;
-    for (const char *lib : names) {
-      if (!tried.empty())
-        tried += ", ";
-      tried += lib;
-    }
-    if (hipdnn_ep::env_enabled("HIPDNN_EP_DEBUG")) {
-      LOG(WARNING) << "LlvmIrJit: Load(" << tried
-                   << ") failed: " << last_load_error
-                   << "; models needing it will fail at lookup.";
-    }
-  }
 
 #ifdef _WIN32
   const char *const kHipdnnBackend = "hipdnn_backend.dll";

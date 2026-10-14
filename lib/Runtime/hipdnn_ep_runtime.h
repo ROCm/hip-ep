@@ -288,11 +288,6 @@ HIPDNN_EP_RT_EXPORT void *hipdnn_ep_get_current_stream(void);
 // tls_stream.cpp alongside the getter.
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 
-// Get hipBLASLt handle from state (for GEMM operations)
-// Returns: hipblasLtHandle_t cast to void* (NULL on error)
-// Ownership: Caller does NOT own handle (destroyed in cleanup)
-void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
-
 // Get buffer from memory pool by index
 // Returns: GPU pointer at pool_base + buffer_offsets[index] (NULL on error)
 // Ownership: Caller does NOT own pointer (freed in cleanup)
@@ -790,35 +785,20 @@ int wrap_conv_transpose(
     int64_t group,            // Number of groups
     int64_t data_type);       // HIPDNN_EP_DATATYPE_* element type
 
-//===----------------------------------------------------------------------===//
-// Library Operations (hipBLAS)
-//===----------------------------------------------------------------------===//
-
-// hipBLASLt GEMM operation wrapper
-// Called by generated IR for matrix multiplication operations
-int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
-                       void *stream, // HIP stream
-                       int64_t m, int64_t n, int64_t k,
-                       const void *alpha, // Scalar alpha
-                       const void *A,     // Matrix A GPU pointer
-                       const void *B,     // Matrix B GPU pointer
-                       const void *beta,  // Scalar beta
-                       void *C);          // Matrix C GPU pointer (in/out)
-
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
 // Computes output = A @ B for each batch
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
+// `b_batch_stride` is the per-batch advance in elements through B when
+// `batch_count > 1`. It MUST be:
 //   * 0   when B is a broadcast weight — one matrix reused across all
 //         batches. Includes both rank-2 `[K, N]` and rank-N
 //         `[1, ..., 1, K, N]` (any leading-dim product == 1).
 //   * K*N when B is per-batch — leading-dim product > 1, so the buffer
 //         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
+// Mis-setting this to K*N for a broadcast B causes the GEMM to step K*N
 // elements past the end of the weight buffer on every batch beyond the
 // first, reading uninitialised memory into the GEMM and producing wrong
 // (often NaN) outputs for batch > 0. For batch_count == 1 the value is
@@ -1624,11 +1604,6 @@ int wrap_causal_conv_with_state(
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
     int64_t channels_last);
 
-//==============================================================================
-// ONNX Gemm via hipBLASLt
-//==============================================================================
-// Y = alpha * op(A) * op(B) + beta * C
-// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
 // LinearAttention operation wrapper (com.microsoft.LinearAttention)
 // Unified linear attention with recurrent state for autoregressive decoding
 // and prefill. Supports update rules: linear(0), gated(1), delta(2),
@@ -1672,7 +1647,7 @@ int wrap_linear_attention(
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
 //==============================================================================
-// ONNX Gemm via hipBLASLt
+// ONNX Gemm
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
