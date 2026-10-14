@@ -24,8 +24,8 @@
 #include "hip/Target/LLVM/DLLLinker.h"
 #endif
 #include "hip/Target/LLVM/LLVMBackend.h"
-#include "hip/native_artifacts.h"
 #include "hip/artifact_abi.h"
+#include "hip/native_artifacts.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
