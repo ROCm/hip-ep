@@ -49,6 +49,47 @@ func.func @qkv(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
 
 // -----
 
+// A later projection whose init is sized from the first projection's result
+// cannot move above it, so it is left out; the remaining members still group.
+// CHECK-LABEL: func.func @member_depends_on_first
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group(
+// CHECK-SAME:      weights(%arg2, %arg4 :
+// CHECK:         %[[D:.*]] = tensor.dim %[[G]]#0
+// CHECK:         %[[E:.*]] = tensor.empty(%[[D]])
+// CHECK:         %[[V:.*]] = hip.matmul_nbits(%{{.*}}) ins(%{{.*}}, %arg6, %arg7 :
+// CHECK-SAME:      outs(%[[E]] :
+// CHECK:         return %[[G]]#0, %[[G]]#1, %[[V]]
+func.func @member_depends_on_first(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
+                                   %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+                                   %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>,
+                                   %bv: tensor<32x2x16xui8>, %sv: tensor<32x2xf16>)
+    -> (tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x32xf16>) {
+  %c1 = arith.constant 1 : index
+  %m = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %eq = tensor.empty(%m) : tensor<1x?x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%x, %bq, %sq :
+      tensor<1x?x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x?x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x64xf16>
+  %ek = tensor.empty(%m) : tensor<1x?x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%x, %bk, %sk :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  %mq = tensor.dim %q, %c1 : tensor<1x?x64xf16>
+  %ev = tensor.empty(%mq) : tensor<1x?x32xf16>
+  %v = hip.matmul_nbits(%ctx) ins(%x, %bv, %sv :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ev : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  return %q, %k, %v : tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x32xf16>
+}
+
+// -----
+
 // gate/up feeding SiLU(gate) * up: the sigmoid and both muls fold into the
 // group's epilogue and the group writes into the gate projection's init.
 // CHECK-LABEL: func.func @gate_up_silu
