@@ -97,7 +97,7 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
-# Standalone kernel unit-test executables (lib/Runtime/Kernels/test/example)
+# Standalone kernel unit-test executables (lib/Runtime/Kernels/unit_test)
 # for the packaging CI. Windows real-runtime builds only; OFF skips them.
 option(BUILD_HIP_KERNEL_UNIT_TESTS
   "Build the standalone GPU kernel unit-test executables (Windows, real runtime)" ON)
@@ -244,7 +244,7 @@ if(BUILD_HIP_UNIT_TESTS)
   add_subdirectory(test/unit)
 
   # Kernel compile-time guards (GPU-free; device-kernel arch-gating invariants).
-  add_subdirectory(lib/Runtime/Kernels/test/lds_barrier_arch_gate)
+  add_subdirectory(test/kernel_guards/lds_barrier_arch_gate)
 endif()
 
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can

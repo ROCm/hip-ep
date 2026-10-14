@@ -276,5 +276,5 @@ set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_
 # the hip_utils.cmake variables (HIP_INCLUDE_DIR, ...) are directory-scoped:
 # a sibling directory of this one cannot see them.
 if(BUILD_HIP_KERNEL_UNIT_TESTS)
-    add_subdirectory(test/example)
+    add_subdirectory(unit_test)
 endif()
