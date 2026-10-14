@@ -430,6 +430,12 @@ def _discover_repo_op_support() -> RepoOpSupport:
                 op = match.group(1)
                 if op != "Custom":
                     onnx_ops.add(op)
+            # PoolToHip is constructed with the op name as an argument, so the
+            # RewritePattern("onnx.X") scan above does not see MaxPool/LpPool.
+            for match in re.finditer(
+                r'patterns\.add<PoolToHip>\([^,]+,\s*"onnx\.(\w+)"', text
+            ):
+                onnx_ops.add(match.group(1))
             for match in RE_MS_CUSTOM_FUNC.finditer(text):
                 ms_custom.add(match.group(1))
 
@@ -811,6 +817,54 @@ def _mlir_attr_int(attrs: dict[str, str], key: str, default: int = 0) -> int:
     return int(match.group(0)) if match else default
 
 
+_POOL_FLOAT_ELEMS = frozenset(
+    {
+        "f16",
+        "f32",
+        "f64",
+        "bf16",
+        "float",
+        "float16",
+        "float32",
+        "float64",
+        "double",
+        "bfloat16",
+    }
+)
+# MaxPool compares in-type, so quantized activations (i8/ui8) are supported.
+# AveragePool still needs a float accumulator.
+_POOL_INT_MAX_ELEMS = frozenset({"i8", "ui8", "si8", "int8", "uint8"})
+
+
+def _type_elem_token(type_str: str) -> str:
+    """Element type of a tensor/memref string, or a bare ONNX dtype name.
+
+    ``tensor<1x64x111x111xuint8>`` must yield ``uint8``. A search for a
+    trailing identifier also matches ``x64x111x111xuint8`` because ``x`` is
+    a letter, so split off the last ``x``-separated component instead.
+    """
+    text = type_str.strip()
+    shaped = re.search(r"(?:tensor|memref)<([^>]+)>", text)
+    body = shaped.group(1) if shaped else text
+    body = body.split(",", 1)[0].strip()
+    if "x" in body:
+        body = body.rsplit("x", 1)[-1]
+    return body.strip().lower()
+
+
+def _pool_elem_issue(op: str, type_str: str) -> str | None:
+    if not type_str:
+        return None
+    token = _type_elem_token(type_str)
+    if token in _POOL_FLOAT_ELEMS:
+        return None
+    if op == "MaxPool" and token in _POOL_INT_MAX_ELEMS:
+        return None
+    if op == "MaxPool":
+        return "MaxPool runtime supports float, int8, and uint8 only"
+    return "Pool runtime supports float element types only"
+
+
 def _variant_issue_for_op(
     op: str,
     *,
@@ -859,8 +913,9 @@ def _variant_issue_for_op(
 
     if op in {"MaxPool", "AveragePool"}:
         in_type = input_types[0] if input_types else ""
-        if in_type and not re.search(r"f16|f32|f64", in_type):
-            return "Pool runtime supports float element types only"
+        issue = _pool_elem_issue(op, in_type)
+        if issue:
+            return issue
         in_dims = _tensor_dims_from_type(in_type)
         if len(in_dims) > 5:
             return "Pool spatial rank > 3 not supported"
@@ -967,8 +1022,13 @@ def _onnx_pool_variant_issue(node, values_by_name: dict) -> str | None:
     if rank > 5:
         return "Pool spatial rank > 3 not supported"
     elem = _onnx_elem_type_name(input_value)
-    if elem and elem not in {"float", "float16", "double"}:
-        return "Pool runtime supports float element types only"
+    if not elem:
+        return None
+    allowed = set(_POOL_FLOAT_ELEMS)
+    if node.op_type == "MaxPool":
+        allowed.update(_POOL_INT_MAX_ELEMS)
+    if elem not in allowed:
+        return _pool_elem_issue(node.op_type, elem)
     return None
 
 

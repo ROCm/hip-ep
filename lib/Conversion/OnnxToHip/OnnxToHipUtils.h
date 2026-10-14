@@ -254,6 +254,8 @@ constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 /// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
 ///                        encoder paths an unused-but-required DPS init buffer
 /// \param presentValueType ditto for present_value
+/// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
+///                        seq_kv]. nullptr when absent.
 mlir::LogicalResult
 buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value context, mlir::Value query, mlir::Value key,
@@ -261,7 +263,8 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
                 float scale, bool noCausal, mlir::RankedTensorType outputType,
                 mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType);
+                mlir::RankedTensorType presentValueType,
+                mlir::Value attentionBias = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /
@@ -297,6 +300,8 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
 
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateEinsumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
@@ -356,6 +361,8 @@ void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -462,6 +469,8 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,

@@ -11,6 +11,7 @@ add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
+  EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
   PowerConversion.cpp
@@ -38,6 +39,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
+  RandomNormalLikeConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
@@ -100,6 +102,7 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  UpsampleConversion.cpp
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp

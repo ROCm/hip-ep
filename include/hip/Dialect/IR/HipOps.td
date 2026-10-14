@@ -2149,6 +2149,51 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   }];
 }
 
+def Hip_RandomNormalLikeOp : Hip_DpsOp<"random_normal_like",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Fill a tensor with normal random values, copying the input shape";
+  let description = [{
+    Implements ONNX RandomNormalLike. The input is a shape donor: its values
+    are not read. The output has the same rank and dimensions, including
+    dynamic dimensions, and is filled with Normal(mean, scale) samples.
+
+    Output element types are f16, bf16, f32, and f64, at rank 0 through 8.
+    `mean` and `scale` are f32 attributes (defaults 0 and 1). `seed`, when
+    set, makes the fill reproducible inside hip-ep. ONNX does not define the
+    generator, so the values are not bit-identical to another runtime. An
+    absent seed is chosen from the clock at each run.
+
+    The generator is one Box-Muller sample per element from a counter hash of
+    (seed, index), so the element count can change with the input shape
+    without recompiling.
+
+    Example:
+    ```mlir
+    hip.random_normal_like(%ctx)
+        ins(%input : tensor<?x?x?xf16>)
+        outs(%output : tensor<?x?x?xf16>)
+        {mean = 0.0 : f32, scale = 1.0 : f32, seed = 1.0 : f32}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "0.0">:$mean,
+    DefaultValuedAttr<F32Attr, "1.0">:$scale,
+    OptionalAttr<F32Attr>:$seed
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
@@ -2439,7 +2484,8 @@ def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
 def Hip_SwishOp : Hip_DpsOp<"swish"> {
   let summary = "Swish activation: y = x * sigmoid(alpha * x)";
   let description = [{
-    Applies the ONNX Swish activation element-wise.
+    Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
+    is the same formula; its alpha defaults to 1.702 rather than 1.
 
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
@@ -4712,7 +4758,8 @@ def Hip_PoolOp : Hip_DpsOp<"pool"> {
     HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h):
 
       * pool_mode=0 (AVERAGE): Y = mean over the window
-      * pool_mode=1 (MAX)    : Y = max over the window
+      * pool_mode=1 (MAX)    : Y = max over the window. Element type may be
+                             f16/bf16/f32/f64 or i8/ui8 (integer compare).
       * pool_mode=2 (LP)     : Y = pow(sum(pow(|x|, p)), 1/p)
 
     Pad positions are never read (they fall outside the input bounds). For
