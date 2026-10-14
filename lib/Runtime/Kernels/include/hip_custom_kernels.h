@@ -2493,6 +2493,34 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a_prequant(
     const void* zp_u8, const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size);
 
+#define HIP_MATMUL_GROUP_MAX_SEGMENTS 3
+/* out[s] = A @ W_s^T for every segment. */
+#define HIP_MATMUL_GROUP_EPI_NONE 0
+/* Two equal-N segments (gate, up): out[0] = silu(A @ W_0^T) * (A @ W_1^T). */
+#define HIP_MATMUL_GROUP_EPI_SILU_MUL 1
+
+/* W4A8 dp4a GEMV of one prequantized activation row against up to
+ * HIP_MATMUL_GROUP_MAX_SEGMENTS int4 weights (no bias), in one launch.
+ *   a_qb / a_scale : hip_matmul_nbits_quant_act_i8's output for the row
+ *   B[s]      : packed int4 [N[s], K/2]
+ *   scales[s] : fp16 [N[s], K/block_size]
+ *   zp_u8     : nullptr (symmetric, zero point 8), or per segment the
+ *               unpacked uint8 zero points [N[s], K/block_size]
+ *   out[s]    : fp16 [N[s]] (SiLU epilogue: out[0] only)
+ *   block_size: a power of two >= 32 that divides K
+ * The launch config is the widest segment's single-weight dp4a config.
+ * Returns a hipError_t; hipErrorInvalidValue for an unsupported group. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
+    void* stream, const void* a_qb, const void* a_scale, int nseg,
+    const void* const* B, const void* const* scales,
+    const void* const* zp_u8, void* const* out, const int64_t* N, int64_t K,
+    int64_t block_size, int epilogue);
+
+/* out[i] = silu(gate[i]) * up[i], fp16, n elements. `out` may be `gate`. */
+HIP_KERNEL_API int hip_matmul_nbits_silu_mul(void* stream, const void* gate,
+                                             const void* up, void* out,
+                                             int64_t n);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *

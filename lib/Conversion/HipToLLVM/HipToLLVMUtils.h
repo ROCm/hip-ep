@@ -103,6 +103,7 @@ inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQuantizeAct = "wrap_quantize_act";
+inline constexpr const char *kWrapMatMulNBitsGroup = "wrap_matmul_nbits_group";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
