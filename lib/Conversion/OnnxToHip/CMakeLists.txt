@@ -266,6 +266,7 @@ add_library(OnnxToHip STATIC
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   DepthToSpaceConversion.cpp
+  SpaceToDepthConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
