@@ -20,10 +20,12 @@ namespace hip {
 inline constexpr llvm::StringLiteral kFallibleRuntimeCallAttrName =
     "hip.runtime.fallible";
 
-/// Opts a module into fail-closed status handling for every device-side
-/// memref.copy lowered by HIP. This is useful for source pipelines that may
-/// introduce copies inside helpers: until helper functions have a status ABI,
-/// such copies are rejected instead of silently discarding runtime failures.
+/// Opts a module into fail-closed status handling for device-side memref.copy
+/// and other runtime calls explicitly marked by their lowering. This is useful
+/// for source pipelines that may introduce copies inside helpers: until helper
+/// functions have a status ABI, such copies are rejected instead of silently
+/// discarding runtime failures. The legacy attribute name is retained for
+/// compatibility.
 inline constexpr llvm::StringLiteral kRequireFallibleMemRefCopiesAttrName =
     "hip.runtime.require_fallible_memref_copies";
 
