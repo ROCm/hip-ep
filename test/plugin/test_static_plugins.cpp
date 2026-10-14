@@ -211,6 +211,9 @@ int main() {
           "(convert-hip-to-llvm guard admits it)");
   }
 #else
+#if defined(HIP_EP_EXPECT_OTHER_PLUGINS)
+  llvm::outs() << "Mode: production plugins selected, sample not linked in\n";
+#else
   llvm::outs() << "Mode: NO plugins selected (dispatch must be a no-op)\n";
 
   check(slotPasses.empty(), "no plugin slot requests recorded");
@@ -219,6 +222,7 @@ int main() {
   check(libPaths.empty(), "no plugin library paths recorded");
   check(bitcode.empty(), "no plugin bitcode recorded");
   check(dialectRegs.empty(), "no plugin dialect registrations recorded");
+#endif
 
   // The authoritative default build deliberately selects no production
   // plugins, but still links the real sample archive into this focused test.
