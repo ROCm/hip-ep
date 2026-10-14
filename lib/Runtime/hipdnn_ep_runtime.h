@@ -1480,12 +1480,13 @@ int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+// a_quant/a_scale (nullable, together; fp16 only): output quantized exactly as
+// wrap_quantize_act would with quant_block_size, for every row.
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias

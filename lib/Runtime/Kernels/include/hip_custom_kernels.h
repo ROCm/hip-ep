@@ -2183,6 +2183,27 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* FLOAT16 hip_skip_rms_norm that also writes `output` quantized to int8 per
+ * `quant_block_size` group (a power of two >= 32 dividing norm_size), with
+ * bytes identical to hip_matmul_nbits_quant_act_i8 applied to `output`.
+ * a_quant: int8 [outer, norm_size]; a_scale: f32 [outer, norm_size /
+ * quant_block_size]. Returns hipErrorInvalidValue for an unsupported block
+ * size or null quantized buffers. */
+HIP_KERNEL_API int hip_skip_rms_norm_quant(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    void* a_quant,
+    void* a_scale,
+    int64_t quant_block_size);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================

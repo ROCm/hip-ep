@@ -285,6 +285,8 @@ A decoder layer reads one activation through several projections (q/k/v, gate/up
 
 The int8 activation is written for every row, whatever M is at runtime. A consumer on the dp4a path reads it and skips its own quantization; any other path (prefill, `HIPDNN_EP_MATMUL_DP4A=0`) reads the fp16 activation. Producer and consumer therefore need no shared predicate. The cost is one extra M×K int8 write per shared activation on paths that do not read it.
 
+When the shared activation is a `hip.skip_rms_norm` output (the usual case: the pre-attention and pre-MLP norms), a second pattern in the same file folds the `hip.quantize_act` into the norm as `quant_outs(%a_quant, %a_scale)` with `quant_block_size`. `hip_skip_rms_norm_quant` runs the normal one-block-per-row kernel and then, after a block barrier, re-reads the fp16 row it just wrote and quantizes it with one wave per group. The re-read hits cache, works for any row count and any power-of-two block size ≥ 32, and produces the same bytes as `hip_matmul_nbits_quant_act_i8` applied to the norm output: the group max is order-independent and each element uses the same expression. `TestMatMulNBitsNormFedActivation` in `test/numeric/tests/test_matmul_nbits.py` checks this end to end, bit for bit.
+
 ## Key Design Decisions
 
 - **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.

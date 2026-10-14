@@ -1616,6 +1616,11 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
       outputs[0] = output             (required, T) - normalized result
       outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
 
+    Optional `quant_outs(%a_quant, %a_scale)` (f16 only), attached by
+    hip-fusion-transform when `output` feeds a hip.quantize_act: `output`
+    quantized per `quant_block_size` group, byte-identical to what that
+    hip.quantize_act would write, for every row.
+
     Uses destination-passing style: output buffers are provided as arguments.
 
     Example (without bias, 1 output):
@@ -1653,9 +1658,12 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
 
     // DPS output buffers: [output] or [output, input_skip_bias_sum]
     Variadic<Hip_TensorOrMemRef>:$outputs,
+    // Optional quantized copy of output: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
 
     // Attributes
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1666,6 +1674,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
         ( `,` type($bias)^ )?
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
