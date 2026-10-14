@@ -497,6 +497,8 @@ void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
                                             MLIRContext *ctx);
+void populateSpaceToDepthConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);

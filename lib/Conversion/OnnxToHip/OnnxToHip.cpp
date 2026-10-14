@@ -351,6 +351,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
   populateDepthToSpaceConversionPatterns(patterns, ctx);
+  populateSpaceToDepthConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
 
   for (std::unique_ptr<mlir::RewritePattern> &pattern :
