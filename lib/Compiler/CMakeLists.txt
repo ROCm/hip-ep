@@ -27,6 +27,8 @@ target_link_libraries(LibHipCompiler PUBLIC
   HipDialectIR
   HipsrDialectIR
   HipsrDialectTransforms
+  CrestBindings
+  CrestPasses
   HipsrDialectPipelines
   HipDialectTransforms
   HipTargetLLVM
