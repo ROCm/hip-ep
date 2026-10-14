@@ -40,12 +40,27 @@ Value MatMulOp::generateOpStateInit(OpBuilder &builder, Location loc,
 
 // A and B must be at least 1-D because matmul needs a contraction dimension.
 LogicalResult MatMulOp::verify() {
-  if (cast<ShapedType>(getA().getType()).getRank() < 1) {
+  auto aType = cast<ShapedType>(getA().getType());
+  auto bType = cast<ShapedType>(getB().getType());
+  auto outputType = cast<ShapedType>(getInit().getType());
+  if (aType.getRank() < 1) {
     return emitOpError("operand A must be at least 1-D");
   }
-  if (cast<ShapedType>(getB().getType()).getRank() < 1) {
+  if (bType.getRank() < 1) {
     return emitOpError("operand B must be at least 1-D");
   }
+  Type inputElementType = aType.getElementType();
+  Type outputElementType = outputType.getElementType();
+  if (inputElementType != bType.getElementType())
+    return emitOpError("requires A and B to have the same element type");
+  if (!inputElementType.isF16() && !inputElementType.isBF16() &&
+      !inputElementType.isF32())
+    return emitOpError("supports only f16, bf16, or f32 inputs");
+  if (outputElementType != inputElementType &&
+      !(inputElementType.isBF16() && outputElementType.isF32()))
+    return emitOpError(
+        "requires output type to match the inputs, except bf16 inputs may "
+        "produce f32 output");
   return success();
 }
 
@@ -128,7 +143,7 @@ LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &shapeBlock,
 
 namespace {
 
-constexpr const char *kWrapHipblasLtMatmul = "wrap_hipblasLtMatmul";
+constexpr const char *kWrapHipblasLtMatmulTyped = "wrap_hipblasLtMatmulTyped";
 
 struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -204,19 +219,23 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       }
     }
 
-    int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
+    int64_t inputDataType = getHipdnnDataType(aType.getElementType());
+    int64_t outputDataType = getHipdnnDataType(outputType.getElementType());
+    if (inputDataType < 0 || outputDataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported matmul element type");
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
-                    i64, i64, i64, i64, i64, i64, i64, i64>;
+                    i64, i64, i64, i64, i64, i64, i64, i64, i64>;
     auto matMulFunc = MatMulCall::lookupOrCreateFn(rewriter, loc, module,
-                                                   kWrapHipblasLtMatmul);
+                                                   kWrapHipblasLtMatmulTyped);
     if (failed(matMulFunc)) {
       return failure();
     }
     if (failed(matMulFunc->call(
             adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
-            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, elementSize,
-            bBatchStride, static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
+            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount,
+            inputDataType, outputDataType, bBatchStride,
+            static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
       return failure();
     }
     rewriter.eraseOp(op);
