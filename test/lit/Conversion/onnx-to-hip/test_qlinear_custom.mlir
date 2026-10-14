@@ -3,11 +3,11 @@
 
 // com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
 // QLinearGlobalAveragePool arrive as onnx.Custom. They decompose into
-// DequantizeLinear + the float op + QuantizeLinear before PDLL fusion.
-// Per-tensor Add and Mul then fuse to hip.qadd / hip.qmul. Absent zero
+// DequantizeLinear + the float op + QuantizeLinear, and --hip-fusion-transform
+// then fuses per-tensor Add and Mul to hip.qadd / hip.qmul. Absent zero
 // points are onnx.NoValue and fuse as zp 0.
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<1x8xi8>) -> tensor<1x8xi8> {
