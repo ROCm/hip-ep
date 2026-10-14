@@ -164,9 +164,12 @@ add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
+  EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
+  SumConversion.cpp
   PowerConversion.cpp
+  PowConversion.cpp
   ActivationConversion.cpp
   BiasGeluConversion.cpp
   FastGeluConversion.cpp
@@ -179,6 +182,7 @@ add_library(OnnxToHip STATIC
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
@@ -191,6 +195,8 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
+  ArgMaxConversion.cpp
+  RandomNormalLikeConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
@@ -218,6 +224,7 @@ add_library(OnnxToHip STATIC
   ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
+  IsNaNConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   ErfConversion.cpp
@@ -252,16 +259,25 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  QLinearConvConversion.cpp
+  QLinearMatMulConversion.cpp
+  UpsampleConversion.cpp
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
+  DepthToSpaceConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
+  ImageScalerConversion.cpp
   LeakyReluConversion.cpp
+  PReluConversion.cpp
+  LRNConversion.cpp
+  TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
+  HardSigmoidConversion.cpp
 )
 
 if(TARGET HipPdllPatterns)

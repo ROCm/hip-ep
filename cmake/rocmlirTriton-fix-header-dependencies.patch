@@ -1,5 +1,5 @@
 From f3e201a9512b2117901e2657ad66b6c06fbe48e7 Mon Sep 17 00:00:00 2001
-From: Ilango Rajagopal <ilangokul@gmail.com>
+From: Ilango Rajagopal <ilango.rajagopal@amd.com>
 Date: Tue, 22 Sep 2026 01:58:58 -0600
 Subject: [PATCH 2/2] Fix header dependencies
 

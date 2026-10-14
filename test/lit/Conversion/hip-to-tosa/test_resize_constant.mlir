@@ -24,6 +24,9 @@
 //
 //   asymmetric      n = OUT,   d = IN,   offset = 0
 //   half_pixel      n = 2*OUT, d = 2*IN, offset = IN - OUT
+//   pytorch_half_pixel
+//                   same triple as half_pixel when OUT > 1. When OUT == 1,
+//                   n = 1, d = 1, offset = 0 (input coordinate 0).
 //   align_corners   n = OUT-1, d = IN-1, offset = 0
 //
 // half_pixel doubles the ratio because its offset is a half-integer otherwise,
@@ -66,6 +69,50 @@ func.func @resize_half_pixel(%ctx: !hip.context, %x: tensor<1x3x16x16xf16>,
        {mode = 1 : i64, coord_transform = 0 : i64, nearest_mode = 0 : i64}
        : tensor<1x3x32x32xf16>
   return %r : tensor<1x3x32x32xf16>
+}
+
+// -----
+
+// pytorch_half_pixel with OUT > 1 is the half_pixel triple: n = 64, d = 32,
+// offset = -16, border = 16.
+// CHECK-LABEL: func.func @resize_pytorch_half_pixel
+// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[64, 32, 64, 32]> : tensor<4xindex>}
+// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<-16> : tensor<2xindex>}
+// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<16> : tensor<2xindex>}
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK-NOT: hip.resize
+func.func @resize_pytorch_half_pixel(%ctx: !hip.context,
+                                     %x: tensor<1x3x16x16xf16>,
+                                     %init: tensor<1x3x32x32xf16>)
+    -> tensor<1x3x32x32xf16> attributes {rock.kernel} {
+  %r = hip.resize(%ctx) ins(%x : tensor<1x3x16x16xf16>)
+                        outs(%init : tensor<1x3x32x32xf16>)
+       {mode = 1 : i64, coord_transform = 3 : i64, nearest_mode = 0 : i64}
+       : tensor<1x3x32x32xf16>
+  return %r : tensor<1x3x32x32xf16>
+}
+
+// -----
+
+// Height OUT == 1 samples input coordinate 0: n = d = 1, offset = 0,
+// border = 1 - IN = -7. Width is a 2x upsample and keeps the half_pixel
+// triple n = 32, d = 16, offset = 8 - 16 = -8,
+// border = (16-1)*16 + -8 - (8-1)*32 = 8.
+// CHECK-LABEL: func.func @resize_pytorch_half_pixel_out1
+// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[1, 1, 32, 16]> : tensor<4xindex>}
+// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<[0, -8]> : tensor<2xindex>}
+// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<[-7, 8]> : tensor<2xindex>}
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK-NOT: hip.resize
+func.func @resize_pytorch_half_pixel_out1(%ctx: !hip.context,
+                                          %x: tensor<1x3x8x8xf16>,
+                                          %init: tensor<1x3x1x16xf16>)
+    -> tensor<1x3x1x16xf16> attributes {rock.kernel} {
+  %r = hip.resize(%ctx) ins(%x : tensor<1x3x8x8xf16>)
+                        outs(%init : tensor<1x3x1x16xf16>)
+       {mode = 1 : i64, coord_transform = 3 : i64, nearest_mode = 0 : i64}
+       : tensor<1x3x1x16xf16>
+  return %r : tensor<1x3x1x16xf16>
 }
 
 // -----

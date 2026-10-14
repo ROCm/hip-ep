@@ -88,3 +88,45 @@ class TestConv:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+    def test_conv3d_temporal(self, model_runner):
+        """Rank-5 NCDHW conv: depth kernel 3, spatial kernel 1x1, pad 1 on D.
+
+        Output depth stays 6:
+        (6 + 1 + 1 - (3 - 1) - 1) / 1 + 1 = 6.
+        """
+        depth, height, width = 6, 4, 4
+        channels = 4
+        inp = helper.make_tensor_value_info(
+            "input", TensorProto.FLOAT16, [1, channels, depth, height, width]
+        )
+        out = helper.make_tensor_value_info(
+            "output", TensorProto.FLOAT16, [1, channels, depth, height, width]
+        )
+        rng = np.random.default_rng(7)
+        w = rng.uniform(-0.1, 0.1, [channels, channels, 3, 1, 1]).astype(np.float16)
+        b = rng.uniform(-0.1, 0.1, [channels]).astype(np.float16)
+        node = helper.make_node(
+            "Conv",
+            ["input", "weight", "bias"],
+            ["output"],
+            group=1,
+            kernel_shape=[3, 1, 1],
+            strides=[1, 1, 1],
+            pads=[1, 0, 0, 1, 0, 0],
+            dilations=[1, 1, 1],
+        )
+        model = make_model_from_nodes(
+            [node],
+            [inp],
+            [out],
+            initializers=[
+                numpy_helper.from_array(w, name="weight"),
+                numpy_helper.from_array(b, name="bias"),
+            ],
+        )
+        x = rng.uniform(-1.0, 1.0, [1, channels, depth, height, width]).astype(
+            np.float16
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)

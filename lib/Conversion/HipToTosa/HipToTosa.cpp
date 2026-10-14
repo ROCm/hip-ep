@@ -4203,6 +4203,10 @@ struct ConstantConverter final : public OpConversionPattern<hip::ConstantOp> {
 //                   n = OUT, d = IN, offset = 0
 //   half_pixel      in = (o + 0.5) * IN/OUT - 0.5
 //                   n = 2*OUT, d = 2*IN, offset = IN - OUT
+//   pytorch_half_pixel
+//                   same as half_pixel when OUT > 1. When OUT == 1 the only
+//                   output sample is input coordinate 0:
+//                   n = 1, d = 1, offset = 0
 //   align_corners   in = o * (IN-1)/(OUT-1)
 //                   n = OUT-1, d = IN-1, offset = 0
 //
@@ -4241,6 +4245,19 @@ planResizeAxis(int64_t inExtent, int64_t outExtent, int64_t coordTransform) {
     p.scaleN = outExtent - 1;
     p.scaleD = inExtent - 1;
     p.offset = 0;
+    break;
+  case 3: // pytorch_half_pixel
+    // OUT == 1 samples input coordinate 0. Otherwise the ONNX map is the
+    // half_pixel one, so the integer triple matches case 0.
+    if (outExtent == 1) {
+      p.scaleN = 1;
+      p.scaleD = 1;
+      p.offset = 0;
+      break;
+    }
+    p.scaleN = 2 * outExtent;
+    p.scaleD = 2 * inExtent;
+    p.offset = inExtent - outExtent;
     break;
   default:
     return std::nullopt;

@@ -15,10 +15,13 @@ add_library(HipToLLVM STATIC
   ActivationLowering.cpp
   BiasGeluLowering.cpp
   FastGeluLowering.cpp
+  TriluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
   GatherElementsLowering.cpp
   TopKLowering.cpp
+  ArgMaxLowering.cpp
+  RandomNormalLikeLowering.cpp
   ScatterElementsLowering.cpp
   CompressLowering.cpp
   OneHotLowering.cpp
@@ -67,6 +70,8 @@ add_library(HipToLLVM STATIC
   QMatMulLowering.cpp
   QGemmLowering.cpp
   QConvLowering.cpp
+  QLinearConvLowering.cpp
+  QLinearMatMulLowering.cpp
   QLpNormalizationLowering.cpp
   QSigmoidLowering.cpp
 )

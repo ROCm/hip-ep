@@ -86,4 +86,28 @@ module {
     %output = "onnx.Gelu"(%input) : (tensor<1x1024xf64>) -> tensor<1x1024xf64>
     return %output : tensor<1x1024xf64>
   }
+
+  // com.microsoft Gelu is the erf formula, so approximate stays at the default.
+  // CHECK-LABEL: func.func @test_microsoft_gelu
+  // CHECK-NOT: onnx.Custom
+  // CHECK: hip.gelu
+  // CHECK-NOT: approximate
+  func.func @test_microsoft_gelu(%input: tensor<1x9216x1280xf16>) -> tensor<1x9216x1280xf16> {
+    %output = "onnx.Custom"(%input) {
+      function_name = "Gelu",
+      domain_name = "com.microsoft"
+    } : (tensor<1x9216x1280xf16>) -> tensor<1x9216x1280xf16>
+    return %output : tensor<1x9216x1280xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_microsoft_gelu_wrong_domain
+  // CHECK: onnx.Custom
+  // CHECK-NOT: hip.gelu
+  func.func @test_microsoft_gelu_wrong_domain(%input: tensor<4xf32>) -> tensor<4xf32> {
+    %output = "onnx.Custom"(%input) {
+      function_name = "Gelu",
+      domain_name = "com.example"
+    } : (tensor<4xf32>) -> tensor<4xf32>
+    return %output : tensor<4xf32>
+  }
 }

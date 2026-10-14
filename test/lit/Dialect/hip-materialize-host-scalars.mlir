@@ -63,7 +63,24 @@ func.func @two_scalars_one_scratch(%ctx: !hip.context, %x: i64, %y: i32) -> (i64
   return %va, %vb : i64, i32
 }
 
-// --- Float element type: NOT a candidate (likely a real GPU buffer). ---
+// --- Host-stored f32 read by a hip op: a candidate. This is the rank-0 fill
+//     hip.trilu broadcasts for Trilu(ConstantOfShape) in ChatGLM. ---
+// CHECK-LABEL: func.func @rank0_f32_hip_consumer
+// CHECK-NOT:     memref.alloc() : memref<f32>
+// CHECK:         %[[SCRATCH:.*]] = hip.get_host_scratch
+// CHECK:         %[[V:.*]] = memref.view %[[SCRATCH]]{{.*}} : memref<?xi8> to memref<f32>
+// CHECK:         memref.store {{.*}}, %[[V]][] : memref<f32>
+// CHECK:         hip.trilu(%{{.*}}) ins(%[[V]] : memref<f32>)
+func.func @rank0_f32_hip_consumer(%ctx: !hip.context, %x: f32,
+                                  %out: memref<4x4xf32>) {
+  %a = memref.alloc() : memref<f32>
+  memref.store %x, %a[] : memref<f32>
+  hip.trilu(%ctx) ins(%a : memref<f32>) outs(%out : memref<4x4xf32>) {upper = 0 : si64}
+  memref.dealloc %a : memref<f32>
+  return
+}
+
+// --- Float element type without a hip consumer: NOT a candidate. ---
 // CHECK-LABEL: func.func @rank0_f32_left_alone
 // CHECK-NOT:   hip.get_host_scratch
 // CHECK:       memref.alloc() : memref<f32>
