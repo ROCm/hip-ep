@@ -166,6 +166,10 @@ extern "C" int hip_gather_nd(void *stream, const void *input,
       hip_dtype, data_rank, indices_rank, K, batch_dims, (long long)slice_size,
       (long long)total_slices, (long long)num_output_elements);
 
+  // Drop a sticky error from an earlier launch so this kernel's status
+  // is the one hipGetLastError reports.
+  (void)hipGetLastError();
+
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_gather_nd_kernel<__half>),
@@ -194,6 +198,13 @@ extern "C" int hip_gather_nd(void *stream, const void *input,
                        static_cast<const int64_t *>(input),
                        static_cast<const int64_t *>(indices),
                        static_cast<int64_t *>(output), p, num_output_elements);
+    break;
+  case HIP_DTYPE_UINT8:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_gather_nd_kernel<uint8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t *>(input),
+                       static_cast<const int64_t *>(indices),
+                       static_cast<uint8_t *>(output), p, num_output_elements);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_gather_nd: unsupported dtype=%d\n",

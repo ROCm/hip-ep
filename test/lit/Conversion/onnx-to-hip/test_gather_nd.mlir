@@ -60,4 +60,13 @@ module {
   // CHECK-DAG: %[[DIM:.*]] = tensor.dim %[[D]], %[[C1]] : tensor<4x?xf32>
   // CHECK: tensor.empty(%[[DIM]]) : tensor<3x?xf32>
   // CHECK: hip.gather_nd
+
+  // ONNX GatherND data may be uint8. The vision-encoder mask is this type.
+  func.func @gather_nd_uint8(%data: tensor<?x512x512xui8>, %indices: tensor<?x1xi64>) -> tensor<?x512x512xui8> {
+    %r = "onnx.GatherND"(%data, %indices) {batch_dims = 0 : si64} : (tensor<?x512x512xui8>, tensor<?x1xi64>) -> tensor<?x512x512xui8>
+    return %r : tensor<?x512x512xui8>
+  }
+
+  // CHECK-LABEL: func.func @gather_nd_uint8
+  // CHECK: hip.gather_nd({{.*}}) ins({{.*}}, {{.*}} : tensor<?x512x512xui8>, tensor<?x1xi64>) outs({{.*}} : tensor<?x512x512xui8>)
 }
