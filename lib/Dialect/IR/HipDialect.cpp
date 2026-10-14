@@ -2139,6 +2139,59 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  if (static_cast<bool>(getAQuant()) != static_cast<bool>(getAScale()))
+    return emitOpError("a_quant and a_scale must be given together");
+  if (getAQuant() && getBits() != 4)
+    return emitOpError("a quantized activation requires bits = 4");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeActOp: ins(A) outs(a_quant, a_scale)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeActOp::getDpsInitsMutable() {
+  // a_quant and a_scale are the last two operands, tied to results 0 and 1.
+  return MutableOperandRange(getOperation(),
+                             getAQuantMutable().getOperandNumber(), 2);
+}
+
+void QuantizeActOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantizeActOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getAQuant(), getAScale()},
+                                /*numInits=*/2)))
+    return failure();
+  int64_t bs = getBlockSize();
+  if (bs < 32 || (bs & (bs - 1)) != 0)
+    return emitOpError("block_size must be a power of two >= 32, got ") << bs;
+  auto aType = cast<ShapedType>(getA().getType());
+  auto qType = cast<ShapedType>(getAQuant().getType());
+  auto sType = cast<ShapedType>(getAScale().getType());
+  if (!aType.getElementType().isF16())
+    return emitOpError("A must be f16");
+  if (!qType.getElementType().isInteger(8))
+    return emitOpError("a_quant must be 8-bit integers");
+  if (!sType.getElementType().isF32())
+    return emitOpError("a_scale must be f32");
+  int64_t rank = aType.getRank();
+  if (rank < 1 || qType.getRank() != rank || sType.getRank() != rank)
+    return emitOpError("A, a_quant and a_scale must have the same rank >= 1");
+  int64_t k = aType.getShape().back();
+  if (ShapedType::isDynamic(k) || k % 32 != 0 || k % bs != 0)
+    return emitOpError("K must be static, a multiple of 32 and of block_size");
+  if (qType.getShape().back() != k)
+    return emitOpError("a_quant trailing dim must be K");
+  if (sType.getShape().back() != k / bs)
+    return emitOpError("a_scale trailing dim must be K / block_size");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//

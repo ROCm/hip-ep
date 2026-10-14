@@ -2783,6 +2783,32 @@ static int getOrTuneDp4aMConfig(
 //   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
 //       >= M*K bytes and >= M*k_blocks floats respectively.
 // Returns hip status (hipSuccess on success). K must be a multiple of 32.
+// Dynamic per-group int8 quantization of M activation rows. One block per
+// (K-group, row), fixed 128 threads (bs in {32,64,128,256}). Rows go in
+// launches of at most 65535, the grid's y limit, so a long prefill fits.
+extern "C" int hip_matmul_nbits_quant_act_i8(
+    void* stream_v, const void* A, int64_t M, int64_t K, int64_t block_size,
+    void* a_qb, void* a_scale)
+{
+    if (K % 32 != 0 || M < 0 || block_size <= 0) return hipErrorInvalidValue;
+    if (M == 0) return hipSuccess;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    constexpr int64_t kMaxRows = 65535;
+    (void)hipGetLastError();
+    for (int64_t r0 = 0; r0 < M; r0 += kMaxRows) {
+        const int64_t rows = std::min(kMaxRows, M - r0);
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), static_cast<unsigned>(rows)),
+            dim3(128), 0, stream, static_cast<const __half*>(A) + r0 * K,
+            static_cast<int8_t*>(a_qb) + r0 * K,
+            static_cast<float*>(a_scale) + r0 * k_blocks, K, block_size,
+            k_blocks);
+    }
+    return hipGetLastError();
+}
+
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v,
     const void* A, const void* B, const void* scales, const void* zp_u8,
@@ -2792,30 +2818,35 @@ extern "C" int hip_matmul_nbits_dp4a(
 {
     if (K % 32 != 0) return hipErrorInvalidValue;
     if (M < 1) return hipErrorInvalidValue;
+    int rc = hip_matmul_nbits_quant_act_i8(stream_v, A, M, K, block_size,
+                                           a_qb_scratch, a_scale_scratch);
+    if (rc != hipSuccess) return rc;
+    return hip_matmul_nbits_dp4a_prequant(stream_v, a_qb_scratch,
+                                          a_scale_scratch, B, scales, zp_u8,
+                                          bias, out, M, N, K, block_size);
+}
+
+extern "C" int hip_matmul_nbits_dp4a_prequant(
+    void* stream_v,
+    const void* a_qb_v, const void* a_scale_v, const void* B,
+    const void* scales, const void* zp_u8, const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size)
+{
+    if (K % 32 != 0) return hipErrorInvalidValue;
+    if (M < 1) return hipErrorInvalidValue;
     hipStream_t stream = static_cast<hipStream_t>(stream_v);
 
-    const __half*  Ah   = static_cast<const __half*>(A);
     const uint8_t* Bp   = static_cast<const uint8_t*>(B);
     const __half*  sc   = static_cast<const __half*>(scales);
     const uint8_t* zp   = static_cast<const uint8_t*>(zp_u8);
     const __half*  bi   = static_cast<const __half*>(bias);
     __half*        outp = static_cast<__half*>(out);
-    int8_t*        a_qb = static_cast<int8_t*>(a_qb_scratch);
-    float*         a_sc = static_cast<float*>(a_scale_scratch);
+    const int8_t*  a_qb = static_cast<const int8_t*>(a_qb_v);
+    const float*   a_sc = static_cast<const float*>(a_scale_v);
 
-    const int64_t k_blocks = (K + block_size - 1) / block_size;
-
-    // Step 1: dynamic per-group int8 quantization of the activations.
-    // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks),
-                            static_cast<unsigned>(M)),
-                       dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
-
-    // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
-    // launcher and its own tune cache, which has more history behind it.
+    // M == 1 keeps the single-row launcher and its own tune cache, which has
+    // more history behind it.
     if (M == 1) {
         int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
                                       N, K, block_size);

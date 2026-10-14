@@ -37,12 +37,13 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-  // Verify 17 parameters:
+  // Verify 19 parameters:
   // - 1 i32: op_state_slot (2nd arg; per-instance MatmulNbitsState; threaded by
   //          --assign-op-state-slots, replaces shared RuntimeState::zp_unpack_cache)
-  // - 8 pointers: state, A, B, scales, zero_points(null), g_idx(null), bias(null), output
+  // - 10 pointers: state, A, B, scales, zero_points(null), g_idx(null),
+  //   bias(null), a_quant(null), a_scale(null), output
   // - 8 i64: M=128, N=5120, K=2880, batch_count=1, bits=4, block_size=32, elem_size=2, zp_elem_size=0
 
   // ===== Test 2: MatMulNBits with zero_points =====
@@ -66,7 +67,7 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_with_zp
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
   // ===== Test 3: 2D MatMulNBits (no batch dimension) =====
@@ -88,7 +89,44 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_2d
   // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
-  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // M=128, batch_count=1 (2D: no batch dims)
+
+  // ===== Test 4: quantize_act feeding a prequantized MatMulNBits =====
+
+  func.func @test_matmul_nbits_quantized(%ctx: !hip.context,
+                                         %A: memref<1x?x2880xf16, 1>,
+                                         %B: memref<5120x90x16xui8, 1>,
+                                         %scales: memref<5120x90xf16, 1>,
+                                         %aq: memref<1x?x2880xi8, 1>,
+                                         %as: memref<1x?x90xf32, 1>,
+                                         %output: memref<1x?x5120xf16, 1>) {
+    hip.quantize_act(%ctx) ins(%A : memref<1x?x2880xf16, 1>)
+        outs(%aq, %as : memref<1x?x2880xi8, 1>, memref<1x?x90xf32, 1>)
+        {block_size = 32 : i64}
+    hip.matmul_nbits(%ctx) ins(%A, %B, %scales :
+        memref<1x?x2880xf16, 1>, memref<5120x90x16xui8, 1>,
+        memref<5120x90xf16, 1>)
+        quantized(%aq, %as : memref<1x?x2880xi8, 1>, memref<1x?x90xf32, 1>)
+        outs(%output : memref<1x?x5120xf16, 1>)
+        {K = 2880 : i64, N = 5120 : i64, bits = 4 : i64,
+         block_size = 32 : i64, accuracy_level = 4 : i64,
+         zp_elem_size = 0 : i64}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_matmul_nbits_quantized
+  // rows = 1 * dim(1), K = 2880, block_size = 32
+  // CHECK: llvm.mul
+  // CHECK: %[[ROWS:[0-9]+]] = llvm.mul %{{[0-9]+}}, %{{[0-9]+}} : i64
+  // CHECK: %[[K:[0-9]+]] = llvm.mlir.constant(2880 : i64) : i64
+  // CHECK: %[[BS:[0-9]+]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK: llvm.call @wrap_quantize_act(%arg0, %{{[0-9]+}}, %[[AQ:[0-9]+]], %[[AS:[0-9]+]], %[[ROWS]], %[[K]], %[[BS]]) :
+  // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+  // zero_points, g_idx and bias are null; a_quant and a_scale are passed:
+  // CHECK: %[[ZP:[0-9]+]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK: %[[GIDX:[0-9]+]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK: %[[BIAS:[0-9]+]] = llvm.mlir.zero : !llvm.ptr
+  // CHECK: llvm.call @wrap_matmul_nbits(%arg0, %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}, %[[ZP]], %[[GIDX]], %[[BIAS]], %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}},
 }

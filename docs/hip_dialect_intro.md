@@ -112,6 +112,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
+| `hip.quantize_act` | `(%ctx) ins(%A : ...) outs(%a_quant, %a_scale : ...) {block_size}` | Per-block int8 copy of an fp16 activation, read by `hip.matmul_nbits ... quantized(%a_quant, %a_scale)` on the W4A8 dp4a path; formed by `hip-fusion-transform`, see [custom_kernel_design.md](design/custom_kernel_design.md#shared-int8-activation-hipquantize_act) | Full impl |
 
 ---
 
