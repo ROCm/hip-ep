@@ -993,16 +993,14 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
     return 0;
   }
 
+  // The gate projection goes straight into out0 and the SiLU*mul runs in
+  // place, so only the up projection needs scratch.
   const int64_t n = batch_count * M * N0;
-  const size_t half_bytes =
-      (static_cast<size_t>(n) * 2 + 255) & ~static_cast<size_t>(255);
-  if (hipdnn_ep_state_ensure_matmul_group_scratch(state, 2 * half_bytes) != 0)
+  if (hipdnn_ep_state_ensure_matmul_group_scratch(
+          state, static_cast<size_t>(n) * 2) != 0)
     return -1;
-  char *scratch =
-      static_cast<char *>(hipdnn_ep_state_get_matmul_group_scratch(state));
-  void *gate = scratch;
-  void *up = scratch + half_bytes;
-  void *proj[2] = {gate, up};
+  void *up = hipdnn_ep_state_get_matmul_group_scratch(state);
+  void *proj[2] = {out0, up};
   for (int s = 0; s < 2; ++s) {
     int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], Zs[s],
                               nullptr, nullptr, proj[s], M, N0, K, batch_count,
@@ -1011,5 +1009,5 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
     if (rc != 0)
       return rc;
   }
-  return hip_matmul_nbits_silu_mul(stream, gate, up, out0, n) == 0 ? 0 : -1;
+  return hip_matmul_nbits_silu_mul(stream, out0, up, out0, n) == 0 ? 0 : -1;
 }
