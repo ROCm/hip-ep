@@ -555,13 +555,103 @@ struct MiopenSoftmaxOpLowering
   }
 };
 
+// hip.prelu(ctx, x, slope, output)
+//   -> wrap_prelu(state, x, slope, output, x_shape, x_rank, slope_shape,
+//                 slope_rank, out_shape, out_rank, data_type)
+// slope is unidirectional-broadcastable onto x. The runtime left-pads each
+// shape and uses a 0 stride on broadcast axes.
+struct PReluOpLowering : public ConvertOpToLLVMPattern<PReluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(PReluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto xType = cast<MemRefType>(op.getX().getType());
+    auto slopeType = cast<MemRefType>(op.getSlope().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Type elemType = outputType.getElementType();
+    if (elemType != xType.getElementType() ||
+        elemType != slopeType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: x, slope, and output element types must match");
+    if (!elemType.isF32() && !elemType.isF16() && !elemType.isBF16() &&
+        !elemType.isF64())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: only f32, f16, bf16, and f64 are supported");
+    if (outputType.getRank() > 8 || xType.getRank() > outputType.getRank() ||
+        slopeType.getRank() > outputType.getRank())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: rank must be <= 8 and operands must not outrank "
+              "the output");
+
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "hip.prelu: unsupported dtype");
+
+    Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                         rewriter.getI64IntegerAttr(1));
+    auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
+      int rank = type.getRank();
+      int arrLen = std::max(rank, 1);
+      auto arrType = LLVM::LLVMArrayType::get(i64Type, arrLen);
+      Value arr =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+      for (int i = 0; i < rank; ++i) {
+        Value dim = getMemRefDimSize(type, i, descriptor, rewriter, loc);
+        Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                             rewriter.getI32IntegerAttr(i));
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+        LLVM::StoreOp::create(rewriter, loc, dim, elemPtr);
+      }
+      return arr;
+    };
+
+    auto createI64Const = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                        ptrType, i64Type, ptrType, i64Type,
+                                        ptrType, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapPRelu, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 11> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getSlope(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        emitShapeArray(xType, adaptor.getX()),
+        createI64Const(xType.getRank()),
+        emitShapeArray(slopeType, adaptor.getSlope()),
+        createI64Const(slopeType.getRank()),
+        emitShapeArray(outputType, adaptor.getOutput()),
+        createI64Const(outputType.getRank()),
+        createI64Const(dataType)};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-               LRNOpLowering, SwishOpLowering, PowOpLowering, SiluOpLowering,
-               MiopenSoftmaxOpLowering>(converter);
+               PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
+               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

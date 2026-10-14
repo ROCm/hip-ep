@@ -2449,6 +2449,39 @@ def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
   }];
 }
 
+def Hip_PReluOp : Hip_DpsOp_Broadcast<"prelu",
+                                    /*operandGetters=*/["X", "Slope"]> {
+  let summary = "PRelu activation: y = x >= 0 ? x : slope * x";
+  let description = [{
+    Applies PRelu element-wise. slope is unidirectional-broadcastable onto x,
+    including a scalar and a per-channel 1xCx1x1 slope.
+
+    Formula: Y = X if X >= 0, else slope * X
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.prelu(%ctx) ins(%x, %slope : memref<1x64x8x8xf32, 1>,
+                                    memref<1x64x1x1xf32, 1>)
+                    outs(%y : memref<1x64x8x8xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$slope,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $slope `:` type($x) `,` type($slope) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{
@@ -4952,9 +4985,15 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
         - 0 = round_prefer_floor (only used when mode=nearest)
 
     Per-axis scale is recovered at runtime from the window's input and output
-    extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
-    appear as operands here — they were resolved at compile time into the
-    output type that the upstream importer produced.
+    extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear
+    as operands.  A dynamic window extent is filled in at conversion from a
+    compile-time constant `scales` vector (scale 1 copies the input dim;
+    any other scale is floor(input_dim * scale)).  When `scales` is absent, a
+    rank-1 integer `sizes` vector supplies the extents: a constant vector is
+    written into the result type, and a runtime vector is read back to host
+    indexes that size the output.  That launch may be saved as `prefix_count`
+    and `spatial_rank` when a static input extent is paired with a dynamic
+    output extent.
 
     Uses destination-passing style: the output buffer is provided.
 
