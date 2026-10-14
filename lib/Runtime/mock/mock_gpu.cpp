@@ -1045,6 +1045,26 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
   return 0;
 }
 
+int wrap_top_k_static(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t element_size_bytes) {
+  (void)x;
+  (void)values;
+  (void)indices;
+  (void)x_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_top_k_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_top_k_static(k=%lld, axis=%lld, largest=%lld, "
+             "sorted=%lld, rank=%lld, num_elements=%lld, element_size=%lld)\n",
+             (long long)k, (long long)axis, (long long)largest,
+             (long long)sorted, (long long)rank, (long long)num_elements,
+             (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
   if (!state) {

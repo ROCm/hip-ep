@@ -1191,6 +1191,14 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
 
+// Static-K form for compiler frontends that have proved K at compile time.
+// Passing K by value avoids the device-to-host copy and synchronization needed
+// by wrap_top_k. All remaining arguments and result semantics are identical.
+int wrap_top_k_static(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t element_size_bytes);
+
 // RandomNormalLike. `shape` is the output rank's sizes, including dynamic
 // dims filled in by the HIP-to-LLVM lowering. The input tensor is not
 // passed: only its shape was copied onto the output. `mean_bits` and
