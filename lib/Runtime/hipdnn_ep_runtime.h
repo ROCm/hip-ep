@@ -1496,6 +1496,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
 // scales: [N x k_blocks], output: [batch_count x M x N]
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+// a_quant/a_scale (nullable, together): A quantized by wrap_quantize_act with
+// this block_size, valid for every row; read instead of A on the W4A8 dp4a
+// path.
 int wrap_matmul_nbits(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (zp-cache home)
@@ -1505,6 +1508,8 @@ int wrap_matmul_nbits(
     const void *zero_points, // per-block zero points (nullable)
     const void *g_idx,       // GPTQ group indices (nullable, deprecated)
     const void *bias,        // output bias [N] (nullable)
+    const void *a_quant,     // int8 copy of A (nullable)
+    const void *a_scale,     // its per-block scales (nullable)
     void *output,            // result tensor
     int64_t M,               // rows per batch
     int64_t N,               // output columns
@@ -1515,6 +1520,14 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+
+// hip.quantize_act: quantizes `rows` fp16 rows of K elements per block of
+// block_size into a_quant (int8 [rows x K], dp4a deinterleaved layout) and
+// a_scale (f32 [rows x K/block_size]). K % 32 == 0; block_size is a power of
+// two >= 32 that divides K.
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
