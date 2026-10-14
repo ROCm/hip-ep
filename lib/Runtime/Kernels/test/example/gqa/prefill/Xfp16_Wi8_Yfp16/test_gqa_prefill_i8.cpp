@@ -47,7 +47,7 @@
 #include <vector>
 
 // ---- Tiny inline coverage-tier resolver (replaces example/common/coverage.h) ----
-// Model: categorical situations (the 8 named MHA/GQA geometries below) are
+// Model: categorical situations (the 9 named MHA/GQA geometries below) are
 // covered by every case regardless of tier; COVERAGE only picks how many of
 // the typical prompt lengths (kSqs) run.
 namespace hipdnn_ep_test {
@@ -172,23 +172,18 @@ extern "C" const size_t               kGqaLutBlobCount    = 1;
 #endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
 
 // Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
-// resolved v5/v7/v8 knobs (see gqa_kernel.hip).
+// resolved v6x/v8x knobs (see gqa_kernel.hip).
 extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
+    int hb, int qw, int mt, int bkv, int nd);
 
-// Mirrors real/gqa.cpp for a prefill without a window: d128 uses v6
-// (PrefillV5) with a KV group of a multiple of 4 heads, v7 otherwise; d256
-// uses v6 with a group of a multiple of 3 or 4 heads, v8 otherwise.
-static hipdnn_ep::GqaPrefillVariant prefill_variant(int d, int H, int G) {
-  if (d == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V8;
-  if (d == 128 && (H / G) % 4 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V7;
-  return hipdnn_ep::GqaPrefillVariant::V5;
+// Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
+static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
+  return d == 256 ? hipdnn_ep::GqaPrefillVariant::V8x
+                  : hipdnn_ep::GqaPrefillVariant::V6x;
 }
 #endif
 
@@ -447,15 +442,15 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     if (hip_gqa_autotune_mode(policy) !=
         static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
       const hipdnn_ep::GqaPrefillRequest request{
-          prefill_variant(D, H, G), B, H, G, D, sq, skv, /*window=*/0};
+          prefill_variant(D), B, H, G, D, sq, skv, /*window=*/0};
       hipdnn_ep::GqaPrefillResult selected;
       hip_gqa_autotune_resolve_prefill(policy, &request, &selected);
       selected_config = selected.config;
       char buf[96];
       std::snprintf(buf, sizeof(buf),
-                    "lookup:m_tiles=%d bkv=%d nw=%d mt=%d nd=%d (%s)",
-                    selected.config.m_tiles, selected.config.bkv,
-                    selected.config.nw, selected.config.mt, selected.config.nd,
+                    "lookup:hb=%d qw=%d mt=%d bkv=%d nd=%d (%s)",
+                    selected.config.hb, selected.config.qw, selected.config.mt,
+                    selected.config.bkv, selected.config.nd,
                     hipdnn_ep::gqa_tune_source_name(selected.source));
       lookup_config = buf;
     }
@@ -470,8 +465,8 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
       hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
           past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
-          /*smooth_softmax=*/0, selected_config.m_tiles, selected_config.bkv,
-          selected_config.nw, selected_config.mt, selected_config.nd);
+          /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
+          selected_config.mt, selected_config.bkv, selected_config.nd);
       return;
     }
 #endif
@@ -657,9 +652,10 @@ int main(int argc, char** argv) {
         {"gqa2-h16-d128", 16, 8, 128}, {"llama-3.2-1b", 32, 8, 64},
         {"llama-3.1-8b", 32, 8, 128},  {"psu_orc_211", 40, 10, 128},
         {"gpt-oss-20b", 64, 8, 64},    {"llama-3-70b", 64, 8, 128},
+        {"phi-3-mini-d96", 32, 32, 96},
     };
     // Typical prompt-length list -- NOT the full shape space. COVERAGE thins
-    // this list only; every tier still runs all 8 named geometries. This
+    // this list only; every tier still runs all 9 named geometries. This
     // leaf runs EVERY named shape (incl. the H=64 ones) x every sq, and
     // computes TWO O(sq^2) causal-attention CPU references per case (i8 +
     // fp16) -- both are now threaded over (batch, query-head) pairs (see
@@ -680,7 +676,7 @@ int main(int argc, char** argv) {
     for (const auto& s : shapes)
       for (size_t li = 0; li < n_sqs; ++li)
         full_cases.push_back({s.name, 1, s.H, s.G, s.D, sqs[li]});
-    printf("coverage=%d -> running %zu typical length(s) x 8 categorical "
+    printf("coverage=%d -> running %zu typical length(s) x 9 categorical "
            "case(s) = %zu gqa_prefill_i8 cases\n",
            coverage_tier, n_sqs, full_cases.size());
 

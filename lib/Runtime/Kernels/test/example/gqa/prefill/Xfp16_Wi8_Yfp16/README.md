@@ -20,14 +20,14 @@ make clean
 
 ## Shape coverage (3 tiers)
 
-`test_gqa_prefill_i8.cpp`'s `main()` has 8 named geometries (MHA d64, MHA
+`test_gqa_prefill_i8.cpp`'s `main()` has 9 named geometries (MHA d64, MHA
 d128, GQA2 d128, llama-3.2-1b, llama-3.1-8b, psu_orc_211, gpt-oss-20b,
-llama-3-70b), which run in full at **every** `COVERAGE` tier. Crossed with
+llama-3-70b, phi-3-mini d96), which run in full at **every** `COVERAGE` tier. Crossed with
 that is a typical prompt-length list: tier3 (default) =
 `{128, 256, 512, 1024, 2048}`, tier2 = `{256, 1024}`, tier1 = `{512}` alone.
 `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only
 picks which of those lengths run. At startup the exe prints `coverage=N ->
-running <n> typical length(s) x 8 categorical case(s) = <n*8>
+running <n> typical length(s) x 9 categorical case(s) = <n*9>
 gqa_prefill_i8 cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 

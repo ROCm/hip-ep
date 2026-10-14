@@ -335,14 +335,14 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
 **Per op family:**
 
 - **gqa decode/prefill (fp16)**: a fixed list of named real-model +
-  geometry-sweep cases (13 for decode, 56 hand-authored rows for prefill:
-  the original 29, short `sq=128` and long pure-prefill `sq=8192` rows, and
-  a set that walks every prefill kernel route)
+  geometry-sweep cases (17 for decode, 75 hand-authored rows for prefill:
+  the original 29, short `sq=128` and long pure-prefill `sq=8192` rows, a
+  set that walks every prefill kernel route, and head_dim 96)
   crossed with (decode) or fused with (prefill) a typical context-length /
   prompt-length list (decode: `{128,512,2048,8192}`). Prefill's `O(sq^2)`
   causal-attention CPU reference is multithreaded over `(batch,
   query-head)` pairs.
-- **gqa decode/prefill (i8)**: same idea, 11 / 8 named geometries x a typical
+- **gqa decode/prefill (i8)**: same idea, 13 / 9 named geometries x a typical
   length list (decode: `{128,512,2048,8192}`; prefill:
   `{128,256,512,1024,2048}`). The i8 prefill leaf's two `O(sq^2)` CPU
   references (i8-cache + fp16) are also multithreaded over `(batch,

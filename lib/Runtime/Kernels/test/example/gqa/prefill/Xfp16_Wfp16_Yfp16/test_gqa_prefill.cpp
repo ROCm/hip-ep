@@ -6,13 +6,12 @@
 // ============================================================
 // custom_kernels GQA flash *prefill* (TTFT) test + benchmark.
 //
-// Verifies the ported FA-2 WMMA prefill kernels that gqa.cpp routes to on the
+// Verifies the FA-2 WMMA prefill kernels that gqa.cpp routes to on the
 // fused-prefill fast path:
-//   hip_gqa_flash_prefill_v5  (d == 64, gpt-oss / llama-3.2 geometry,
-//                              d == 128, llama-3.1 geometry, and d == 256,
-//                              Qwen3.6 / Qwen3.8 geometry; all run the
-//                              transposed-score v6 kernel)
-//   hip_gqa_flash_prefill_v8  (d == 256 groups of neither 3 nor 4 heads)
+//   v6x  (d == 64: gpt-oss / llama-3.2 geometry; d == 96: Phi-3-mini;
+//         d == 128: llama / qwen geometry; any heads-per-group, with and
+//         without a window)
+//   v8x  (d == 256: Qwen3.x / Gemma-3 geometry)
 // against a CPU fp32 causal-attention reference (correctness) and reports the
 // per-prefill latency (the quantity that bounds TTFT).
 //
@@ -44,7 +43,7 @@
 
 // ---- Tiny inline coverage-tier resolver + CSV writer (replaces
 // example/common/coverage.h + csv_writer.h) ----
-// Model: categorical situations (D/group dispatch v6/v7/v8, sink modes, window
+// Model: categorical situations (D dispatch v6x/v8x, sink modes, window
 // on/off, chunked-prefill past>0, the d128-must-decline case) are covered by
 // every case in `cases[]` below regardless of tier; COVERAGE only picks how
 // many of those (categorical, typical-shape) rows run, via a fixed index
@@ -172,23 +171,9 @@ extern "C" const unsigned char* const kGqaLutBlobs[1]   = { kLutBlob0 };
 extern "C" const size_t               kGqaLutBlobSizes[1] = { sizeof(kLutBlob0) };
 extern "C" const size_t               kGqaLutBlobCount    = 1;
 #endif  // HIPDNN_KERNEL_UT_LINKS_SHARED_KERNELS
-
-// Lookup-only prefill entry: same ABI as hip_gqa_flash_prefill plus the
-// resolved v5/v7/v8 knobs (see gqa_kernel.hip).
-extern "C" int hip_gqa_flash_prefill_v3_configured(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale, int local_window_size, const void* head_sink,
-    int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
 #endif
 
-extern "C" int hip_gqa_flash_prefill_v5(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-// Unified entry the runtime (gqa.cpp) actually calls -- picks v6/v8 by head dim.
+// Unified entry the runtime (gqa.cpp) actually calls -- picks v6x/v8x by head dim.
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -202,11 +187,6 @@ extern "C" int hip_gqa_flash_prefill(
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
-extern "C" int hip_gqa_flash_prefill_v7(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
 #include "gqa_autotune.h"
 
@@ -216,23 +196,17 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int m_tiles, int bkv, int nw, int mt, int nd);
+    int hb, int qw, int mt, int bkv, int nd);
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
   return p;
 }
 
-// Mirrors real/gqa.cpp: d128 uses v6 (PrefillV5) with a window or a KV group
-// of a multiple of 4 heads, v7 otherwise; d256 uses v6 with a group of a
-// multiple of 3 or 4 heads, v8 otherwise.
-static hipdnn_ep::GqaPrefillVariant prefill_variant(int d, int H, int G,
-                                                    int window) {
-  if (d == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V8;
-  if (d == 128 && window <= 0 && (H / G) % 4 != 0)
-    return hipdnn_ep::GqaPrefillVariant::V7;
-  return hipdnn_ep::GqaPrefillVariant::V5;
+// Mirrors real/gqa.cpp: v8x at d256, v6x otherwise.
+static hipdnn_ep::GqaPrefillVariant prefill_variant(int d) {
+  return d == 256 ? hipdnn_ep::GqaPrefillVariant::V8x
+                  : hipdnn_ep::GqaPrefillVariant::V6x;
 }
 #endif
 
@@ -418,7 +392,7 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
 
   // Route through the unified entry (same path the runtime takes); it dispatches
-  // v6 / v7 / v8 by head dim and group size internally.
+  // v6x / v8x by head dim internally.
   const void* sink_arg =
       (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth)
           ? (const void*)dSink
@@ -438,7 +412,7 @@ static bool run_case(const Case& c, int iters) {
     // This exactly mirrors real/gqa.cpp: resolve against the LUT embedded in
     // custom_kernels_<arch>.dll, then call the lookup-only kernel entry.
     hipdnn_ep::GqaPrefillRequest lut_req{};
-    lut_req.variant = prefill_variant(D, H, G, c.window);
+    lut_req.variant = prefill_variant(D);
     lut_req.batch = B;
     lut_req.num_heads = H;
     lut_req.kv_num_heads = G;
@@ -446,16 +420,14 @@ static bool run_case(const Case& c, int iters) {
     lut_req.seq_q = sq;
     lut_req.seq_kv = skv;
     lut_req.local_window = (c.window > 0) ? c.window : 0;
-    void* lut_policy = hip_gqa_autotune_create(nullptr);
-    hip_gqa_autotune_resolve_prefill(lut_policy, &lut_req, &lut_res);
-    hip_gqa_autotune_destroy(lut_policy);
+    hip_gqa_autotune_resolve_prefill(gqa_policy(), &lut_req, &lut_res);
   }
   auto launch = [&]() {
     if (use_lookup) {
       return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D, max_seq, past_len,
-          scale, window_arg, sink_arg, H, smooth_arg, lut_res.config.m_tiles,
-          lut_res.config.bkv, lut_res.config.nw, lut_res.config.mt,
+          scale, window_arg, sink_arg, H, smooth_arg, lut_res.config.hb,
+          lut_res.config.qw, lut_res.config.mt, lut_res.config.bkv,
           lut_res.config.nd);
     }
     return hip_gqa_flash_prefill(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
@@ -534,12 +506,9 @@ static bool run_case(const Case& c, int iters) {
   ms /= iters;
 
   const bool pass = err < 2e-3;
-  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
+  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (%s)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL",
-         (D == 256 && (H / G) % 4 != 0 && (H / G) % 3 != 0) ? 8
-         : (D == 128 && c.window <= 0 && (H / G) % 4 != 0)  ? 7
-                                                            : 6);
+         pass ? "PASS" : "FAIL", D == 256 ? "v8x" : "v6x");
 
   {
     using namespace hipdnn_ep_test;
@@ -550,9 +519,9 @@ static bool run_case(const Case& c, int iters) {
     if (use_lookup) {
       char config_buf[96];
       std::snprintf(config_buf, sizeof(config_buf),
-                    "lookup:m_tiles=%d bkv=%d nw=%d mt=%d nd=%d (%s)",
-                    lut_res.config.m_tiles, lut_res.config.bkv,
-                    lut_res.config.nw, lut_res.config.mt, lut_res.config.nd,
+                    "lookup:hb=%d qw=%d mt=%d bkv=%d nd=%d (%s)",
+                    lut_res.config.hb, lut_res.config.qw, lut_res.config.mt,
+                    lut_res.config.bkv, lut_res.config.nd,
                     hipdnn_ep::gqa_tune_source_name(lut_res.source));
       row.config = config_buf;
     } else {
@@ -606,10 +575,9 @@ int main(int argc, char** argv) {
   }
 
   const Case cases[] = {
-      // Qwen3.6-35B-A3B text decoder: d=256, a group of 8, runs v6 at 4 heads
-      // per block. sq=1000 is deliberately not a multiple of the 16-row Q tile
-      // or the 16-key KV tile, so it exercises the partial tiles that 512 and
-      // 2048 both skip.
+      // Qwen3.6-35B-A3B text decoder: d=256, a group of 8. sq=1000 is
+      // deliberately not a multiple of the 16-row Q tile or the 16-key KV
+      // tile, so it exercises the partial tiles that 512 and 2048 both skip.
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.6-d256", 1, 16, 2, 256, 2048, 0,    kSinkNone,    false, 0},
@@ -659,7 +627,7 @@ int main(int argc, char** argv) {
       // The full production configuration of a gpt-oss sliding layer: window,
       // sink tensor and smooth together, deep enough to skip whole KV tiles.
       {"gpt_oss-win+bo",1, 64, 8,  64, 512,  8192, kSinkBoth,    false, 128},
-      // Window at d==128 is implemented (prefill v5). Check relL2 like gpt_oss-win.
+      // Window at d==128 is implemented (v6x). Check relL2 like gpt_oss-win.
       {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
 
       // ---- Widened shape coverage: short (sq=128) and long (sq=8192, pure
@@ -681,21 +649,20 @@ int main(int argc, char** argv) {
       {"llama-3.1-8b",   1, 32, 8, 128, 8192, 0,    kSinkNone,    false, 0},
 
       // ---- Prefill kernel routing, appended so indices 0-38 are unchanged.
-      // d256 runs v6 at 4 heads per block for a group divisible by 4, at 3 for
-      // one divisible by 3, and v8 otherwise; d128 runs v6 for a group
-      // divisible by 4 or with a window, and v7 otherwise. ----
+      // v8x runs d256 and v6x every other head dim; a group that no block of
+      // heads divides splits the block into Q subtiles. ----
       {"qwen3.6-d256", 1, 16, 2, 256, 512,  8192, kSinkNone,    false, 0},
-      // Qwen3.8-27B: a group of 6 runs 3 heads per block.
+      // Qwen3.8-27B: a group of 6.
       {"qwen3.8-d256", 1, 24, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"qwen3.8-d256", 1, 24, 4, 256, 512,  8192, kSinkNone,    false, 0},
-      // Qwen3 16:4 (group of 4), and a group of 2 (Gemma-3) that stays on v8.
+      // Qwen3 16:4 (group of 4) and a group of 2 (Gemma-3).
       {"qwen3-16:4",   1, 16, 4, 256, 1000, 0,    kSinkNone,    false, 0},
       {"gemma3-d256",  1,  8, 4, 256, 1000, 0,    kSinkNone,    false, 0},
-      // v6 has no windowed d256 instance, so a d256 window still declines.
+      // There is no windowed d256 instance, so a d256 window still declines.
       {"qwen3.6-win",  1, 16, 2, 256, 512,  0,    kSinkNone,    true,  128},
       {"llama-3.1-8b", 1, 32, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 512,  8192, kSinkNone,    false, 0},
-      // d == 128 groups not divisible by 4 stay on v7.
+      // d == 128 groups not divisible by 4 split the block into Q subtiles.
       {"qwen3-1.7b",   1, 16, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"llama-3.2-3b", 1, 24, 8, 128, 1000, 0,    kSinkNone,    false, 0},
       {"qwen2.5-7b",   1, 28, 4, 128, 1000, 0,    kSinkNone,    false, 0},
@@ -705,29 +672,67 @@ int main(int argc, char** argv) {
       {"mistral-win",   1, 32, 8, 128, 512,  0,    kSinkNone,    false, 128},
       {"mistral-win",   1, 32, 8, 128, 512,  8192, kSinkNone,    false, 4096},
       {"mistral-win",   1, 32, 8, 128, 1000, 1000, kSinkNone,    false, 100},
-      // With a window, a group not divisible by 4 runs v6 at 1 head per block.
+      // With a window, a group not divisible by 4 splits the block into Q
+      // subtiles, each skipping the tiles below its own window.
       {"qwen2.5-win",   1, 28, 4, 128, 512,  8192, kSinkNone,    false, 4096},
       {"qwen3-win",     1, 16, 8, 128, 1000, 1000, kSinkNone,    false, 100},
+
+      // ---- head_dim 96 and more block splits, appended so indices 0-55 are
+      // unchanged. ----
+      // Phi-3-mini / Phi-3.5-mini (H32 G32 MHA, d=96). sq=1000 leaves partial
+      // 16-row Q tiles and 64-key KV tiles.
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 1000, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 2048, 0,    kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 1, 32, 32, 96, 512,  512,  kSinkNone,    false, 0},
+      {"phi-3-mini-d96", 2, 32, 32, 96, 777,  1500, kSinkNone,    false, 0},
+      {"gqa4-d96",       1, 32,  8, 96, 512,  0,    kSinkNone,    false, 0},
+      // Phi-3-mini-4k ships a 2047-key window. First a window that never binds
+      // (total_seq <= window), then binding ones: chunked past deeper than the
+      // window, a window not aligned to the KV tile, and window 1.
+      {"phi-3-win-d96",  1, 32, 32, 96, 2000, 0,    kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 1024, 2048, kSinkNone,    false, 2047},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  1000, kSinkNone,    false, 100},
+      {"phi-3-win-d96",  1, 32, 32, 96, 512,  512,  kSinkNone,    false, 1},
+      // d=96 sinks, with and without a window.
+      {"d96-sink",       1, 32,  8, 96, 512,  0,    kSinkPerHead, false, 0},
+      {"d96-sink+win",   1, 32,  8, 96, 512,  512,  kSinkBoth,    false, 128},
+      {"d96-sink-mha",   1, 32, 32, 96, 1000, 300,  kSinkBoth,    false, 0},
+      // A d256 group of 5, which only one head per block divides, and
+      // Gemma-3 at batch 2 with a chunk.
+      {"hpg5-d256",      1, 40,  8, 256, 777,  1500, kSinkNone,   false, 0},
+      {"gemma3-d256",    2,  8,  4, 256, 1000, 300,  kSinkNone,   false, 0},
+      // d128 at batch 2 with a chunk, and an MHA group, which splits the block
+      // into Q subtiles.
+      {"llama-3.1-8b",   2, 32,  8, 128, 1000, 500,  kSinkNone,   false, 0},
+      {"llama-2-7b",     1, 32, 32, 128, 777,  1500, kSinkNone,   false, 0},
+      // Groups of 3 and 1 split the block into Q subtiles; the sink and the
+      // window have to follow each wave's own rows.
+      {"hpg3-d64-both",  1, 24,  8,  64, 1000, 512,  kSinkBoth,   false, 0},
+      {"mha-d64-both",   2, 16, 16,  64, 777,  300,  kSinkBoth,   false, 128},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (17 rows) still touches D{64,128,256}, every sink_mode, window
+  // tier1 (22 rows) still touches D{64,96,128,256}, every sink_mode, window
   // on/off, chunked-prefill (past>0), the d128-must-decline case and 2 of
   // the sq=128 rows (the cheapest shape), plus one row per prefill route
-  // the first rows miss: v6 at 3 heads per block, v8, the declined d256
-  // window, v7, and a windowed d128 group not divisible by 4.
-  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18,
-                                  25, 29, 30, 40, 43, 44, 47, 55};
+  // the first rows miss: a d256 group of 6, a group of 2, the declined d256
+  // window, a d128 group not divisible by 4 with and without a window, d96
+  // plain / windowed / with a sink, a d256 group of 5 and a d64 group of 3.
+  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 25, 29,
+                                  30, 40, 43, 44, 47, 55, 56, 64, 66, 69, 73};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
   // tier3-only, a deliberate budget trade-off documented in RESULT.md).
-  // The prefill routing rows (39-55) are all in tier2.
+  // The prefill routing and head_dim 96 rows (39-74) are all in tier2.
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
                                   13, 14, 15, 16, 17, 18, 19, 20, 21, 25,
                                   26, 28, 29, 30, 31, 32, 33, 34, 35, 36,
                                   39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-                                  49, 50, 51, 52, 53, 54, 55};
+                                  49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+                                  59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+                                  69, 70, 71, 72, 73, 74};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;

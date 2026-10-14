@@ -49,6 +49,10 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRTargetLLVMIRExport
   MLIRIndexToLLVM
   MLIRControlFlowToLLVM
+  MLIRUBToLLVM
+  MLIRComplexToLLVM
+  MLIRMathToLLVM
+  MLIRVectorToLLVM
   HipSchemasLib
 )
 

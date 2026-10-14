@@ -40,7 +40,7 @@
 #include <vector>
 
 // ---- Tiny inline coverage-tier resolver (replaces example/common/coverage.h) ----
-// Model: categorical situations (the 11 named MHA/GQA geometries below) are
+// Model: categorical situations (the 13 named MHA/GQA geometries below) are
 // covered by every case regardless of tier; COVERAGE only picks how many of
 // the typical context lengths (kLens) run.
 namespace hipdnn_ep_test {
@@ -758,9 +758,9 @@ int main(int argc, char** argv) {
   int fails = 0;
   if (all || !have_single) {
     // Categorical situations: MHA (heads-per-group = 1) and GQA (hpg
-    // 2/4/8), each at head_dim 64 AND 128 -- all 11 named geometries run at
-    // every tier. kLens (below) is the small typical-context-length list;
-    // COVERAGE only thins that.
+    // 2/4/8), each at head_dim 64 AND 128 (plus 96 at MHA and hpg 4) -- all
+    // 13 named geometries run at every tier. kLens (below) is the small
+    // typical-context-length list; COVERAGE only thins that.
     struct Shape { const char* name; int H, G, D; };
     const Shape shapes[] = {
         // ---- MHA (hpg = 1) ----
@@ -778,10 +778,13 @@ int main(int argc, char** argv) {
         // ---- GQA hpg = 8 ----
         {"gpt-oss-20b",    64,  8,  64},
         {"llama-3-70b",    64,  8, 128},
+        // ---- head_dim 96 (3 elements per lane in the scalar kernel) ----
+        {"phi-3-mini-d96", 32, 32,  96},
+        {"gqa4-h32-d96",   32,  8,  96},
     };
     // Typical context-length list (widened to also cover a short/interactive
     // decode length) -- NOT the full shape space. COVERAGE thins this list
-    // only; every tier still runs all 11 named geometries.
+    // only; every tier still runs all 13 named geometries.
     static const int kLens3[] = {128, 512, 2048, 8192};
     static const int kLens2[] = {128, 2048, 8192};
     static const int kLens1[] = {2048};
@@ -797,7 +800,7 @@ int main(int argc, char** argv) {
       for (size_t li = 0; li < n_lens; ++li)
         full_cases.push_back({s.name, 1, s.H, s.G, s.D, lens[li], lens[li]});
     }
-    printf("coverage=%d -> running %zu typical length(s) x 11 categorical "
+    printf("coverage=%d -> running %zu typical length(s) x 13 categorical "
            "case(s) = %zu gqa_decode_i8 cases\n",
            coverage_tier, n_lens, full_cases.size());
 

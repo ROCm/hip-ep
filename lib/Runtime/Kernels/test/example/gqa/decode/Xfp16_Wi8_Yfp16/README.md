@@ -19,17 +19,18 @@ make clean
 
 ## Shape coverage (3 tiers)
 
-`test_gqa_decode_i8.cpp`'s `main()` has 11 named geometries -- MHA hpg1
+`test_gqa_decode_i8.cpp`'s `main()` has 13 named geometries -- MHA hpg1
 (`mha-h16-d64`, `mha-h16-d128`, `mha-h20-d64`, `mha-h20-d128`), GQA hpg2
 (`gqa2-h16-d64`, `gqa2-h16-d128`), GQA hpg4 (`llama-3.2-1b`, `llama-3.1-8b`,
-`psu_orc_211`), GQA hpg8 (`gpt-oss-20b`, `llama-3-70b`) -- which run in full
+`psu_orc_211`), GQA hpg8 (`gpt-oss-20b`, `llama-3-70b`), and head_dim 96 at
+MHA and hpg4 (`phi-3-mini-d96`, `gqa4-h32-d96`) -- which run in full
 at **every** `COVERAGE` tier. Crossed with that is a typical context-length
 list widened to also cover a short/interactive decode length: tier3
 (default) = `{128, 512, 2048, 8192}`, tier2 = `{128, 2048, 8192}`, tier1 =
 `{2048}` alone. `COVERAGE=1|2|3` (`make test COVERAGE=N` or env
 `HIPDNN_UT_COVERAGE`) only picks which of those lengths run. At startup the
-exe prints `coverage=N -> running <n> typical length(s) x 11 categorical
-case(s) = <n*11> gqa_decode_i8 cases`. No human edits a shape list -- there
+exe prints `coverage=N -> running <n> typical length(s) x 13 categorical
+case(s) = <n*13> gqa_decode_i8 cases`. No human edits a shape list -- there
 is no `shapes.csv` or `gen_data.py` in this leaf.
 
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
