@@ -709,6 +709,14 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 // Memory Operations
 //===----------------------------------------------------------------------===//
 
+// ABI-compatible header used by MLIR's unranked memref descriptor lowering.
+// `descriptor` points to a ranked descriptor containing allocated/aligned
+// pointers, an element offset, sizes[rank], and strides[rank].
+typedef struct HipdnnEpUnrankedMemRef {
+  int64_t rank;
+  void *descriptor;
+} HipdnnEpUnrankedMemRef;
+
 // GPU D2D memcpy (hipMemcpyAsync); called from generated LLVM IR.
 // Follows opaque RuntimeState pattern - extracts stream internally
 //
@@ -751,6 +759,14 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 ///   -1 = invalid argument, or the copy could not be started
 int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                   int64_t size_bytes);
+
+/// Checked arbitrary-rank memref copy. Sizes, strides, and offsets are read
+/// from MLIR-compatible unranked descriptors at runtime. All transfers execute
+/// on the stream owned by `state`; malformed descriptors fail without issuing
+/// a copy. Returns zero on success and nonzero on validation or HIP failure.
+int wrap_hipMemrefCopy(RuntimeState *state, int64_t elem_size,
+                       const HipdnnEpUnrankedMemRef *src,
+                       const HipdnnEpUnrankedMemRef *dst);
 
 // Forward convolution via the custom HIP kernel (hip_conv). Arbitrary stride,
 // dilation, group and asymmetric padding over 1D / 2D / 3D spatial ranks, with

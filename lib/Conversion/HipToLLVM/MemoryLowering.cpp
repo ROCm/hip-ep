@@ -12,9 +12,25 @@
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
+
+/// Core control-flow lowering still uses helper-local copies whose status ABI
+/// predates graph-level propagation. Mark copies in the public graph body,
+/// whose runtime status is propagated by ConvertHipToLLVM. A source pipeline
+/// can require the same fail-closed behavior for every copy in its module.
+static LLVM::CallOp
+markFallibleCopyCallIfNeeded(LLVM::CallOp call, ModuleOp module,
+                             LLVM::LLVMFuncOp enclosingFunction) {
+  if (enclosingFunction.getName() == "main_graph" ||
+      requiresFallibleMemRefCopies(module)) {
+    markFallibleRuntimeCall(call);
+  }
+  return call;
+}
 
 /// If module metadata is present, verify callback rank matches the ONNX
 /// output shape recorded at compile time (hipdnn.output_shapes). Metadata
@@ -636,17 +652,24 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
     int64_t running = 1;
     for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
       out[static_cast<unsigned>(i)] = running;
-      if (ShapedType::isDynamic(shape[i]))
+      const int64_t extent = shape[i];
+      if (ShapedType::isDynamic(extent) || extent < 0) {
         return failure();
-      running *= shape[i];
+      }
+      if (extent != 0 &&
+          running > std::numeric_limits<int64_t>::max() / extent) {
+        return failure();
+      }
+      running *= extent;
     }
     return out;
   }
 
   if (auto sl = dyn_cast<StridedLayoutAttr>(layout)) {
     auto strides = llvm::to_vector(sl.getStrides());
-    if (strides.size() != rank)
+    if (strides.size() != rank) {
       return failure();
+    }
 
     for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
       unsigned dim = static_cast<unsigned>(i);
@@ -655,7 +678,7 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
           return failure();
         strides[dim] = dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
       }
-      if (ShapedType::isDynamic(shape[dim]))
+      if (ShapedType::isDynamic(shape[dim]) || strides[dim] <= 0)
         return failure();
     }
     return strides;
@@ -664,23 +687,180 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
   return failure();
 }
 
+static FailureOr<int64_t> checkedMultiply(int64_t lhs, int64_t rhs) {
+  if (lhs < 0 || rhs < 0 ||
+      (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs)) {
+    return failure();
+  }
+  return lhs * rhs;
+}
+
+static FailureOr<SmallVector<int64_t>>
+computeRowMajorStridesElems(ArrayRef<int64_t> shape) {
+  unsigned rank = shape.size();
+  SmallVector<int64_t> out(rank);
+  int64_t running = 1;
+  for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+    out[static_cast<unsigned>(i)] = running;
+    const int64_t extent = shape[static_cast<unsigned>(i)];
+    if (ShapedType::isDynamic(extent) || extent < 0) {
+      return failure();
+    }
+    if (extent != 0 && running > std::numeric_limits<int64_t>::max() / extent) {
+      return failure();
+    }
+    running *= extent;
+  }
+  return out;
+}
+
+/// Returns true when every element of a statically shaped memref occupies one
+/// contiguous row-major byte range. Strides on unit-extent dimensions are
+/// intentionally ignored: they do not participate in the address of any
+/// element and are commonly dynamic on bufferized tensor.extract_slice ops.
+static bool hasEffectivelyContiguousStaticLayout(MemRefType type) {
+  if (!type.hasStaticShape()) {
+    return false;
+  }
+
+  FailureOr<SmallVector<int64_t>> denseStrides =
+      computeRowMajorStridesElems(type.getShape());
+  if (failed(denseStrides)) {
+    return false;
+  }
+
+  if (type.getLayout().isIdentity()) {
+    return true;
+  }
+
+  auto layout = dyn_cast<StridedLayoutAttr>(type.getLayout());
+  if (!layout ||
+      layout.getStrides().size() != static_cast<size_t>(type.getRank())) {
+    return false;
+  }
+
+  for (auto [dimension, stride] : llvm::enumerate(layout.getStrides())) {
+    if (type.getDimSize(dimension) == 1) {
+      continue;
+    }
+    if (ShapedType::isDynamic(stride) || stride != (*denseStrides)[dimension]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static FailureOr<int64_t> computeStaticByteCount(MemRefType type,
+                                                 int64_t elementBytes) {
+  // An empty memref copies zero bytes regardless of the other extents. Detect
+  // that before multiplying so a shape such as [INT64_MAX, 2, 0] cannot report
+  // a spurious overflow before reaching its zero dimension.
+  if (llvm::is_contained(type.getShape(), int64_t{0})) {
+    return int64_t{0};
+  }
+
+  int64_t byteCount = elementBytes;
+  for (int64_t extent : type.getShape()) {
+    if (ShapedType::isDynamic(extent) || extent < 0) {
+      return failure();
+    }
+    if (extent != 0 &&
+        byteCount > std::numeric_limits<int64_t>::max() / extent) {
+      return failure();
+    }
+    byteCount *= extent;
+  }
+  return byteCount;
+}
+
 static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
-  if (!elemTy.isIntOrFloat())
+  if (!elemTy.isIntOrFloat()) {
     return failure();
+  }
   unsigned bits = elemTy.getIntOrFloatBitWidth();
-  if (bits % 8 != 0)
+  if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
     return failure();
+  }
   return static_cast<int64_t>(bits / 8);
 }
 
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
-/// wrap_hipMemcpy2DAsync when strides are statically known, plus the flat case
-/// where both sides are identity-layout but their extents are dynamic.
-/// Otherwise leaves conversion to the default MemRef→LLVM copy lowering
-/// (benefit 1).
+/// wrap_hipMemcpy2DAsync when contiguity or pitched geometry is statically
+/// provable, plus the flat case where both sides are identity-layout but their
+/// extents are dynamic. Other copies take the checked descriptor path
+/// (wrap_hipMemrefCopy); none fall through to the host `memrefCopy` helper.
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
+
+  LogicalResult
+  lowerToGenericDeviceCopy(memref::CopyOp op, OpAdaptor adaptor,
+                           MemRefType srcTy, MemRefType dstTy,
+                           ConversionPatternRewriter &rewriter) const {
+    constexpr int64_t kMaximumRuntimeRank = 12;
+    Location loc = op.getLoc();
+    if (srcTy.getRank() > kMaximumRuntimeRank) {
+      return op.emitOpError()
+             << "GPU copy rank " << srcTy.getRank()
+             << " exceeds runtime maximum " << kMaximumRuntimeRank;
+    }
+
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
+    if (!module || !llvmFn || llvmFn.getNumArguments() == 0) {
+      return op.emitOpError(
+          "GPU copy lowering requires an LLVM function with a runtime-state "
+          "argument");
+    }
+
+    Type indexType = getIndexType();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    FailureOr<LLVM::LLVMFuncOp> copyFn =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemRefCopy,
+                               {ptrType, indexType, ptrType, ptrType}, i32Type);
+    if (failed(copyFn)) {
+      return failure();
+    }
+
+    // Match upstream's generic memref.copy ABI: promote each ranked descriptor
+    // to stack storage, wrap it as {rank, descriptor*}, then pass a pointer to
+    // that unranked descriptor. The stateful runtime entry point validates the
+    // complete runtime geometry and performs the copy on the inference stream.
+    Value stack = LLVM::StackSaveOp::create(rewriter, loc, ptrType);
+    auto makeUnrankedPointer = [&](Value ranked, MemRefType type) -> Value {
+      Value rank = LLVM::ConstantOp::create(
+          rewriter, loc, indexType, rewriter.getIndexAttr(type.getRank()));
+      Value rankedPointer =
+          getTypeConverter()->promoteOneMemRefDescriptor(loc, ranked, rewriter);
+      auto unrankedType =
+          UnrankedMemRefType::get(type.getElementType(), type.getMemorySpace());
+      Value unranked = UnrankedMemRefDescriptor::pack(
+          rewriter, loc, *getTypeConverter(), unrankedType,
+          ValueRange{rank, rankedPointer});
+      Value one = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                           rewriter.getIndexAttr(1));
+      Value pointer = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                                             unranked.getType(), one);
+      LLVM::StoreOp::create(rewriter, loc, unranked, pointer);
+      return pointer;
+    };
+
+    Value source = makeUnrankedPointer(adaptor.getSource(), srcTy);
+    Value destination = makeUnrankedPointer(adaptor.getTarget(), dstTy);
+    FailureOr<int64_t> elementBytes = tryElemSizeBytes(srcTy.getElementType());
+    assert(succeeded(elementBytes) && "element type was checked by caller");
+    Value elementSize = LLVM::ConstantOp::create(
+        rewriter, loc, indexType, rewriter.getIndexAttr(*elementBytes));
+    markFallibleCopyCallIfNeeded(
+        LLVM::CallOp::create(rewriter, loc, *copyFn,
+                             ValueRange{llvmFn.getArgument(0), elementSize,
+                                        source, destination}),
+        module, llvmFn);
+    LLVM::StackRestoreOp::create(rewriter, loc, stack);
+    rewriter.eraseOp(op);
+    return success();
+  }
 
   LogicalResult
   matchAndRewrite(memref::CopyOp op, OpAdaptor adaptor,
@@ -688,13 +868,32 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     Location loc = op.getLoc();
 
     auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
-    if (!llvmFn)
-      return rewriter.notifyMatchFailure(op, "expected parent llvm.func");
+    if (!llvmFn) {
+      return op.emitOpError("GPU copy lowering expected parent llvm.func");
+    }
 
     auto srcTy = dyn_cast<MemRefType>(op.getSource().getType());
     auto dstTy = dyn_cast<MemRefType>(op.getTarget().getType());
-    if (!srcTy || !dstTy)
-      return rewriter.notifyMatchFailure(op, "expected ranked memrefs");
+    if (!srcTy || !dstTy) {
+      return op.emitOpError("GPU copy lowering requires ranked memrefs");
+    }
+
+    if (srcTy.getRank() != dstTy.getRank()) {
+      return op.emitOpError("GPU copy requires equal source/target ranks");
+    }
+    for (auto [sourceExtent, targetExtent] :
+         llvm::zip(srcTy.getShape(), dstTy.getShape())) {
+      if (!ShapedType::isDynamic(sourceExtent) &&
+          !ShapedType::isDynamic(targetExtent) &&
+          sourceExtent != targetExtent) {
+        return op.emitOpError(
+            "GPU copy has incompatible static source/target shapes");
+      }
+    }
+    if (srcTy.getElementType() != dstTy.getElementType()) {
+      return op.emitOpError(
+          "GPU copy requires identical source/target element types");
+    }
 
     // memref.copy requires equal runtime extents, so a dimension that is
     // dynamic on one side and static on the other has the static extent.
@@ -702,14 +901,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // memref<?x100x91xf32> -> memref<1x100x91xf32> on the device path; the
     // default lowering would emit a host memcpy on device pointers.
     if (srcTy.getShape() != dstTy.getShape()) {
-      if (srcTy.getRank() != dstTy.getRank())
-        return rewriter.notifyMatchFailure(op, "copy rank mismatch");
       SmallVector<int64_t> merged;
-      for (auto [s, d] : llvm::zip_equal(srcTy.getShape(), dstTy.getShape())) {
-        if (!ShapedType::isDynamic(s) && !ShapedType::isDynamic(d) && s != d)
-          return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+      for (auto [s, d] : llvm::zip_equal(srcTy.getShape(), dstTy.getShape()))
         merged.push_back(ShapedType::isDynamic(s) ? d : s);
-      }
       srcTy = MemRefType::get(merged, srcTy.getElementType(), srcTy.getLayout(),
                               srcTy.getMemorySpace());
       dstTy = MemRefType::get(merged, dstTy.getElementType(), dstTy.getLayout(),
@@ -717,23 +911,66 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     }
 
     FailureOr<int64_t> elemBytesOr = tryElemSizeBytes(srcTy.getElementType());
-    if (failed(elemBytesOr))
-      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    if (failed(elemBytesOr)) {
+      return op.emitOpError(
+          "GPU copy requires an 8-, 16-, 32-, or 64-bit integer or "
+          "floating-point element type");
+    }
     int64_t elemBytes = *elemBytesOr;
 
+    std::optional<int64_t> totalBytes;
+    if (srcTy.hasStaticShape()) {
+      FailureOr<int64_t> byteCount = computeStaticByteCount(srcTy, elemBytes);
+      if (failed(byteCount)) {
+        return op.emitOpError("static copy byte count overflows int64");
+      }
+      totalBytes = *byteCount;
+      if (*totalBytes == 0) {
+        rewriter.eraseOp(op);
+        return success();
+      }
+    }
+
+    const bool effectivelyContiguous =
+        hasEffectivelyContiguousStaticLayout(srcTy) &&
+        hasEffectivelyContiguousStaticLayout(dstTy);
+    const auto hasNonPositiveStaticStride = [](MemRefType type) {
+      auto layout = dyn_cast<StridedLayoutAttr>(type.getLayout());
+      if (!layout) {
+        return false;
+      }
+      for (auto [dimension, stride] : llvm::enumerate(layout.getStrides())) {
+        const int64_t extent = type.getDimSize(dimension);
+        // Empty copies are removed before this check. A unit dimension can
+        // address only coordinate zero, so its stride is semantically inert.
+        // Dynamic extents are validated against their runtime strides by the
+        // generic descriptor path below.
+        if (extent <= 1 || ShapedType::isDynamic(extent)) {
+          continue;
+        }
+        if (!ShapedType::isDynamic(stride) && stride <= 0) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (!effectivelyContiguous && (hasNonPositiveStaticStride(srcTy) ||
+                                   hasNonPositiveStaticStride(dstTy))) {
+      return op.emitOpError(
+          "GPU copy lowering requires positive static strides");
+    }
     FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
     FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);
     // An identity layout is contiguous whatever its extents are, so a copy
     // between two of them stays a single flat transfer when the shape is only
     // known at runtime; just the byte count has to come from the descriptor.
-    // Bailing out would hand the op to the default MemRef->LLVM lowering, whose
-    // host memcpy faults on device pointers.
     const bool needStaticStrides = failed(srcStridesOr) || failed(dstStridesOr);
-    const bool dynamicContiguous = needStaticStrides &&
+    const bool dynamicContiguous = !effectivelyContiguous && needStaticStrides &&
                                    srcTy.getLayout().isIdentity() &&
                                    dstTy.getLayout().isIdentity();
-    if (needStaticStrides && !dynamicContiguous)
-      return rewriter.notifyMatchFailure(op, "need static strides/layout");
+    if (!effectivelyContiguous && needStaticStrides && !dynamicContiguous) {
+      return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+    }
 
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
@@ -745,8 +982,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
                                         getTypeConverter(), rewriter, loc);
     Value dstPtr = extractMemRefDataPtr(adaptor.getTarget(), dstTy,
                                         getTypeConverter(), rewriter, loc);
-    if (!srcPtr || !dstPtr)
+    if (!srcPtr || !dstPtr) {
       return failure();
+    }
 
     int64_t rank = srcTy.getRank();
     ArrayRef<int64_t> shape = srcTy.getShape();
@@ -756,27 +994,43 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    auto emitFlatCopy = [&](Value totalBytes) -> LogicalResult {
+    auto emitFlatCopy = [&](Value byteCount) -> LogicalResult {
       FailureOr<LLVM::LLVMFuncOp> memcpyFn =
           LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
                                  {ptrType, ptrType, ptrType, i64Type}, i32Type);
-      if (failed(memcpyFn))
+      if (failed(memcpyFn)) {
         return failure();
+      }
 
-      LLVM::CallOp::create(rewriter, loc, *memcpyFn,
-                           ValueRange{statePtr, dstPtr, srcPtr, totalBytes});
+      markFallibleCopyCallIfNeeded(
+          LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                               ValueRange{statePtr, dstPtr, srcPtr, byteCount}),
+          module, llvmFn);
       rewriter.eraseOp(op);
       return success();
     };
 
+    // Unit-extent dimensions do not affect physical contiguity. Bufferization
+    // nevertheless often gives such dimensions dynamic strides, notably for
+    // one-element index and one-row activation/output slices used by routed
+    // dispatch loops. Keep those copies on device instead of allowing the
+    // generic MemRef-to-LLVM fallback to emit a host llvm.memcpy over device
+    // pointers.
+    if (effectivelyContiguous) {
+      assert(totalBytes.has_value() &&
+             "effectively contiguous copy must have a static byte count");
+      return emitFlatCopy(i64Const(*totalBytes));
+    }
+
     if (dynamicContiguous) {
       MemRefDescriptor srcDesc(adaptor.getSource());
-      Value totalBytes = i64Const(elemBytes);
-      for (int64_t i = 0; i < rank; ++i)
-        totalBytes = LLVM::MulOp::create(
-            rewriter, loc, totalBytes,
+      Value byteCount = i64Const(elemBytes);
+      for (int64_t i = 0; i < rank; ++i) {
+        byteCount = LLVM::MulOp::create(
+            rewriter, loc, byteCount,
             srcDesc.size(rewriter, loc, static_cast<unsigned>(i)));
-      return emitFlatCopy(totalBytes);
+      }
+      return emitFlatCopy(byteCount);
     }
 
     ArrayRef<int64_t> srcStrides = *srcStridesOr;
@@ -792,6 +1046,12 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       for (int64_t d : shape)
         numElems *= d;
       return emitFlatCopy(i64Const(numElems * elemBytes));
+    }
+
+    FailureOr<SmallVector<int64_t>> denseStridesOr =
+        computeRowMajorStridesElems(shape);
+    if (failed(denseStridesOr)) {
+      return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
     }
 
     // Pitched 2D copy: last dim contiguous (stride 1) on BOTH sides, and a
@@ -812,21 +1072,21 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     //   memref.copy %in, %slice
     //       : memref<1x128x64x64xf16>
     //         to memref<1x128x64x64xf16, strided<[1048576,4096,64,1]>>
-    //   // dst is NOT dense row-major (outer stride 1048576 keeps the parent
-    //   // pitch, dense would be 524288) -> old code rejected this copy.
+    //   // The outer stride keeps the parent pitch. If that outer dimension
+    //   // is non-unit, the copy therefore needs the pitched path.
     //
     // After (splitDim=1: row = contiguous suffix [1..3] = 128*64*64 elems,
     // height = dim 0 = 1, dst pitch = dstStrides[0] = 1048576 elems):
     //   llvm.call @wrap_hipMemcpy2DAsync(%state, %dstPtr, %dstPitchBytes,
     //       %srcPtr, %srcPitchBytes, %widthBytes, %height) : ...
-    if (rank < 2)
-      return rewriter.notifyMatchFailure(
-          op, "rank-1 non-uniform stride needs different lowering");
+    if (rank < 2) {
+      return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+    }
 
     if (srcStrides[static_cast<unsigned>(rank - 1)] != 1 ||
-        dstStrides[static_cast<unsigned>(rank - 1)] != 1)
-      return rewriter.notifyMatchFailure(op,
-                                         "last dimension must be contiguous");
+        dstStrides[static_cast<unsigned>(rank - 1)] != 1) {
+      return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+    }
 
     // To express this copy as a single hipMemcpy2DAsync we need to split the
     // dims into two groups:
@@ -842,54 +1102,94 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // If neither condition holds we cannot lower with a single 2D pitched
     // copy and must bail out (a future ND/loop lowering can pick this up).
     for (int64_t i = 0; i < rank; ++i) {
-      if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
-        return rewriter.notifyMatchFailure(op, "need static shape");
+      if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)])) {
+        return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+      }
     }
 
     // Find the longest contiguous suffix that holds on BOTH src and dst.
     int64_t splitDim = rank - 1;
     for (int64_t i = rank - 2; i >= 0; --i) {
-      int64_t expectSrc = srcStrides[static_cast<unsigned>(i + 1)] *
-                          shape[static_cast<unsigned>(i + 1)];
-      int64_t expectDst = dstStrides[static_cast<unsigned>(i + 1)] *
-                          shape[static_cast<unsigned>(i + 1)];
-      if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
-          dstStrides[static_cast<unsigned>(i)] != expectDst)
+      FailureOr<int64_t> expectSrc =
+          checkedMultiply(srcStrides[static_cast<unsigned>(i + 1)],
+                          shape[static_cast<unsigned>(i + 1)]);
+      FailureOr<int64_t> expectDst =
+          checkedMultiply(dstStrides[static_cast<unsigned>(i + 1)],
+                          shape[static_cast<unsigned>(i + 1)]);
+      if (failed(expectSrc) || failed(expectDst)) {
+        return op.emitOpError("static copy stride geometry overflows int64");
+      }
+      if (srcStrides[static_cast<unsigned>(i)] != *expectSrc ||
+          dstStrides[static_cast<unsigned>(i)] != *expectDst) {
         break;
+      }
       splitDim = i;
     }
 
     // splitDim == 0 means the whole thing is dense; that case is already
     // handled by the d2d memcpy path above, so we should never reach here.
-    if (splitDim == 0)
-      return rewriter.notifyMatchFailure(
-          op, "fully dense copy should use plain memcpy");
+    if (splitDim == 0) {
+      return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+    }
 
     // Outer dims [0..splitDim) must also collapse into a single height pitch.
     for (int64_t i = 0; i + 1 < splitDim; ++i) {
-      int64_t expectSrc = srcStrides[static_cast<unsigned>(i + 1)] *
-                          shape[static_cast<unsigned>(i + 1)];
-      int64_t expectDst = dstStrides[static_cast<unsigned>(i + 1)] *
-                          shape[static_cast<unsigned>(i + 1)];
-      if (srcStrides[static_cast<unsigned>(i)] != expectSrc ||
-          dstStrides[static_cast<unsigned>(i)] != expectDst)
-        return rewriter.notifyMatchFailure(
-            op, "non-collapsible outer strides; needs ND copy lowering");
+      FailureOr<int64_t> expectSrc =
+          checkedMultiply(srcStrides[static_cast<unsigned>(i + 1)],
+                          shape[static_cast<unsigned>(i + 1)]);
+      FailureOr<int64_t> expectDst =
+          checkedMultiply(dstStrides[static_cast<unsigned>(i + 1)],
+                          shape[static_cast<unsigned>(i + 1)]);
+      if (failed(expectSrc) || failed(expectDst)) {
+        return op.emitOpError("static copy stride geometry overflows int64");
+      }
+      if (srcStrides[static_cast<unsigned>(i)] != *expectSrc ||
+          dstStrides[static_cast<unsigned>(i)] != *expectDst) {
+        return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
+      }
     }
 
     int64_t widthElems = 1;
-    for (int64_t i = splitDim; i < rank; ++i)
-      widthElems *= shape[static_cast<unsigned>(i)];
-    int64_t widthBytes = widthElems * elemBytes;
+    for (int64_t i = splitDim; i < rank; ++i) {
+      FailureOr<int64_t> product =
+          checkedMultiply(widthElems, shape[static_cast<unsigned>(i)]);
+      if (failed(product)) {
+        return op.emitOpError("static copy row width overflows int64");
+      }
+      widthElems = *product;
+    }
+    FailureOr<int64_t> widthBytesOr = checkedMultiply(widthElems, elemBytes);
+    if (failed(widthBytesOr)) {
+      return op.emitOpError("static copy row byte width overflows int64");
+    }
+    int64_t widthBytes = *widthBytesOr;
 
     int64_t height = 1;
-    for (int64_t i = 0; i < splitDim; ++i)
-      height *= shape[static_cast<unsigned>(i)];
+    for (int64_t i = 0; i < splitDim; ++i) {
+      FailureOr<int64_t> product =
+          checkedMultiply(height, shape[static_cast<unsigned>(i)]);
+      if (failed(product)) {
+        return op.emitOpError("static copy row count overflows int64");
+      }
+      height = *product;
+    }
 
     int64_t srcPitchElems = srcStrides[static_cast<unsigned>(splitDim - 1)];
     int64_t dstPitchElems = dstStrides[static_cast<unsigned>(splitDim - 1)];
-    int64_t srcPitchBytes = srcPitchElems * elemBytes;
-    int64_t dstPitchBytes = dstPitchElems * elemBytes;
+    if (srcPitchElems < widthElems || dstPitchElems < widthElems) {
+      return op.emitOpError(
+          "GPU pitched copy requires source and destination pitches to be at "
+          "least the copied row width");
+    }
+    FailureOr<int64_t> srcPitchBytesOr =
+        checkedMultiply(srcPitchElems, elemBytes);
+    FailureOr<int64_t> dstPitchBytesOr =
+        checkedMultiply(dstPitchElems, elemBytes);
+    if (failed(srcPitchBytesOr) || failed(dstPitchBytesOr)) {
+      return op.emitOpError("static copy byte pitch overflows int64");
+    }
+    int64_t srcPitchBytes = *srcPitchBytesOr;
+    int64_t dstPitchBytes = *dstPitchBytesOr;
 
     // Degenerate pitched-2D: very thin rows (few bytes) over many rows make
     // hipMemcpy2DAsync pathological -- the copy engine processes each row as a
@@ -918,14 +1218,17 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
                                  {ptrType, ptrType, ptrType, i64Type, i64Type,
                                   i64Type, i64Type, i64Type},
                                  i32Type);
-      if (failed(stridedFn))
+      if (failed(stridedFn)) {
         return failure();
+      }
 
-      LLVM::CallOp::create(
-          rewriter, loc, *stridedFn,
-          ValueRange{statePtr, dstPtr, srcPtr, i64Const(elemBytes),
-                     i64Const(height), i64Const(srcPitchElems),
-                     i64Const(dstPitchElems), i64Const(widthElems)});
+      markFallibleCopyCallIfNeeded(
+          LLVM::CallOp::create(
+              rewriter, loc, *stridedFn,
+              ValueRange{statePtr, dstPtr, srcPtr, i64Const(elemBytes),
+                         i64Const(height), i64Const(srcPitchElems),
+                         i64Const(dstPitchElems), i64Const(widthElems)}),
+          module, llvmFn);
       rewriter.eraseOp(op);
       return success();
     }
@@ -934,13 +1237,17 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
         rewriter, module, kWrapHipMemcpy2DAsync,
         {ptrType, ptrType, i64Type, ptrType, i64Type, i64Type, i64Type},
         i32Type);
-    if (failed(memcpy2dFn))
+    if (failed(memcpy2dFn)) {
       return failure();
+    }
 
-    LLVM::CallOp::create(rewriter, loc, *memcpy2dFn,
-                         ValueRange{statePtr, dstPtr, i64Const(dstPitchBytes),
-                                    srcPtr, i64Const(srcPitchBytes),
-                                    i64Const(widthBytes), i64Const(height)});
+    markFallibleCopyCallIfNeeded(
+        LLVM::CallOp::create(
+            rewriter, loc, *memcpy2dFn,
+            ValueRange{statePtr, dstPtr, i64Const(dstPitchBytes), srcPtr,
+                       i64Const(srcPitchBytes), i64Const(widthBytes),
+                       i64Const(height)}),
+        module, llvmFn);
     rewriter.eraseOp(op);
     return success();
   }

@@ -8,7 +8,337 @@
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
+#include <limits>
+
+namespace {
+
+constexpr int64_t kMaximumMemRefRank = 12;
+
+struct RankedMemRefDescriptor {
+  void *allocatedPtr;
+  void *alignedPtr;
+  int64_t offset;
+  int64_t sizesAndStrides[];
+};
+
+bool checkedMultiply(int64_t lhs, int64_t rhs, int64_t &result) {
+  if (lhs < 0 || rhs < 0 ||
+      (lhs != 0 && rhs > std::numeric_limits<int64_t>::max() / lhs)) {
+    return false;
+  }
+  result = lhs * rhs;
+  return true;
+}
+
+bool checkedAdd(int64_t lhs, int64_t rhs, int64_t &result) {
+  if (lhs < 0 || rhs < 0 || lhs > std::numeric_limits<int64_t>::max() - rhs) {
+    return false;
+  }
+  result = lhs + rhs;
+  return true;
+}
+
+bool validateReachableSpan(int64_t offset, const int64_t *sizes,
+                           const int64_t *strides, int64_t rank,
+                           int64_t &maximumOffset) {
+  if (offset < 0) {
+    return false;
+  }
+  maximumOffset = offset;
+  for (int64_t dimension = 0; dimension < rank; ++dimension) {
+    if (sizes[dimension] <= 1) {
+      continue;
+    }
+    if (strides[dimension] <= 0) {
+      return false;
+    }
+    int64_t contribution = 0;
+    if (!checkedMultiply(sizes[dimension] - 1, strides[dimension],
+                         contribution) ||
+        !checkedAdd(maximumOffset, contribution, maximumOffset)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool hasNonOverlappingElements(const int64_t *sizes, const int64_t *strides,
+                               int64_t rank) {
+  std::array<int64_t, kMaximumMemRefRank> activeDimensions{};
+  int64_t activeCount = 0;
+  for (int64_t dimension = 0; dimension < rank; ++dimension) {
+    if (sizes[dimension] > 1) {
+      activeDimensions[static_cast<size_t>(activeCount++)] = dimension;
+    }
+  }
+  std::sort(
+      activeDimensions.begin(), activeDimensions.begin() + activeCount,
+      [&](int64_t lhs, int64_t rhs) { return strides[lhs] < strides[rhs]; });
+
+  // This is a conservative non-overlap proof: after sorting active dimensions
+  // by stride, each new step must start beyond the complete address span of
+  // all lower-stride dimensions. It accepts dense permutations and padded
+  // layouts while rejecting descriptors that could race destination writes.
+  int64_t lowerSpan = 1;
+  for (int64_t index = 0; index < activeCount; ++index) {
+    const int64_t dimension = activeDimensions[static_cast<size_t>(index)];
+    if (strides[dimension] < lowerSpan) {
+      return false;
+    }
+    int64_t contribution = 0;
+    if (!checkedMultiply(sizes[dimension] - 1, strides[dimension],
+                         contribution) ||
+        !checkedAdd(lowerSpan, contribution, lowerSpan)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int copyMemRefOnStream(hipStream_t stream, int64_t elemSize,
+                       const HipdnnEpUnrankedMemRef *src,
+                       const HipdnnEpUnrankedMemRef *dst,
+                       const char *entryPoint) {
+  if (!src || !dst || !src->descriptor || !dst->descriptor) {
+    fprintf(stderr, "%s: null descriptor\n", entryPoint);
+    return -1;
+  }
+  if (src->rank != dst->rank || src->rank < 0 ||
+      src->rank > kMaximumMemRefRank) {
+    fprintf(stderr, "%s: incompatible or unsupported rank\n", entryPoint);
+    return -1;
+  }
+  if (elemSize <= 0) {
+    fprintf(stderr, "%s: element size must be positive\n", entryPoint);
+    return -1;
+  }
+
+  auto *source = static_cast<const RankedMemRefDescriptor *>(src->descriptor);
+  auto *destination =
+      static_cast<const RankedMemRefDescriptor *>(dst->descriptor);
+  const int64_t rank = src->rank;
+  const int64_t *srcSizes = source->sizesAndStrides;
+  const int64_t *srcStrides = source->sizesAndStrides + rank;
+  const int64_t *dstSizes = destination->sizesAndStrides;
+  const int64_t *dstStrides = destination->sizesAndStrides + rank;
+
+  bool empty = false;
+  for (int64_t dimension = 0; dimension < rank; ++dimension) {
+    if (srcSizes[dimension] < 0 || dstSizes[dimension] < 0 ||
+        srcSizes[dimension] != dstSizes[dimension]) {
+      fprintf(stderr, "%s: source and destination shapes differ\n", entryPoint);
+      return -1;
+    }
+    empty |= srcSizes[dimension] == 0;
+  }
+  // Empty memrefs touch no storage. Once both runtime shapes are known equal
+  // and nonnegative, offsets, strides, pointers, and products are irrelevant.
+  // Returning here also avoids overflowing on shapes such as [INT64_MAX,
+  // INT64_MAX, 0].
+  if (empty) {
+    return 0;
+  }
+
+  int64_t totalElements = 1;
+  for (int64_t dimension = 0; dimension < rank; ++dimension) {
+    if (!checkedMultiply(totalElements, srcSizes[dimension], totalElements)) {
+      fprintf(stderr, "%s: element count overflows int64\n", entryPoint);
+      return -1;
+    }
+  }
+
+  int64_t srcMaximumOffset = 0;
+  int64_t dstMaximumOffset = 0;
+  if (!validateReachableSpan(source->offset, srcSizes, srcStrides, rank,
+                             srcMaximumOffset) ||
+      !validateReachableSpan(destination->offset, dstSizes, dstStrides, rank,
+                             dstMaximumOffset)) {
+    fprintf(stderr, "%s: invalid offset, stride, or address span\n",
+            entryPoint);
+    return -1;
+  }
+  if (!hasNonOverlappingElements(dstSizes, dstStrides, rank)) {
+    fprintf(stderr, "%s: destination layout has overlapping elements\n",
+            entryPoint);
+    return -1;
+  }
+  int64_t totalBytes = 0;
+  int64_t srcOffsetBytes = 0;
+  int64_t dstOffsetBytes = 0;
+  int64_t srcSpanElements = 0;
+  int64_t dstSpanElements = 0;
+  if (!checkedMultiply(totalElements, elemSize, totalBytes) ||
+      !checkedMultiply(source->offset, elemSize, srcOffsetBytes) ||
+      !checkedMultiply(destination->offset, elemSize, dstOffsetBytes) ||
+      !checkedAdd(srcMaximumOffset, 1, srcSpanElements) ||
+      !checkedAdd(dstMaximumOffset, 1, dstSpanElements) ||
+      srcSpanElements > std::numeric_limits<int64_t>::max() / elemSize ||
+      dstSpanElements > std::numeric_limits<int64_t>::max() / elemSize) {
+    fprintf(stderr, "%s: byte range overflows int64\n", entryPoint);
+    return -1;
+  }
+  if (!source->alignedPtr || !destination->alignedPtr) {
+    fprintf(stderr, "%s: null data pointer\n", entryPoint);
+    return -1;
+  }
+
+  const char *srcBase = static_cast<const char *>(source->alignedPtr) +
+                        static_cast<size_t>(srcOffsetBytes);
+  char *dstBase = static_cast<char *>(destination->alignedPtr) +
+                  static_cast<size_t>(dstOffsetBytes);
+
+  if (rank == 0) {
+    hipError_t error = hipMemcpyAsync(dstBase, srcBase, elemSize,
+                                      hipMemcpyDeviceToDevice, stream);
+    if (error != hipSuccess) {
+      fprintf(stderr, "%s: rank-0 copy failed: %s\n", entryPoint,
+              hipGetErrorString(error));
+      return -1;
+    }
+    return 0;
+  }
+
+  // Find the largest suffix that is contiguous on both sides. Strides on a
+  // unit dimension are irrelevant because that coordinate can only be zero.
+  int64_t rowStart = rank;
+  int64_t rowElements = 1;
+  for (int64_t dimension = rank - 1; dimension >= 0; --dimension) {
+    if (srcSizes[dimension] == 1) {
+      rowStart = dimension;
+      continue;
+    }
+    if (srcStrides[dimension] != rowElements ||
+        dstStrides[dimension] != rowElements) {
+      break;
+    }
+    if (!checkedMultiply(rowElements, srcSizes[dimension], rowElements)) {
+      fprintf(stderr, "%s: contiguous row size overflows int64\n", entryPoint);
+      return -1;
+    }
+    rowStart = dimension;
+  }
+
+  int64_t rowBytes = 0;
+  if (!checkedMultiply(rowElements, elemSize, rowBytes)) {
+    fprintf(stderr, "%s: contiguous row byte size overflows int64\n",
+            entryPoint);
+    return -1;
+  }
+  if (rowStart == 0) {
+    hipError_t error =
+        hipMemcpyAsync(dstBase, srcBase, static_cast<size_t>(totalBytes),
+                       hipMemcpyDeviceToDevice, stream);
+    if (error != hipSuccess) {
+      fprintf(stderr, "%s: contiguous copy failed: %s\n", entryPoint,
+              hipGetErrorString(error));
+      return -1;
+    }
+    return 0;
+  }
+
+  const int64_t outerRank = rowStart;
+  int64_t outerTotal = 1;
+  for (int64_t dimension = 0; dimension < outerRank; ++dimension) {
+    if (!checkedMultiply(outerTotal, srcSizes[dimension], outerTotal)) {
+      fprintf(stderr, "%s: outer element count overflows int64\n", entryPoint);
+      return -1;
+    }
+  }
+
+  if (outerRank == 1) {
+    if (srcStrides[0] < rowElements || dstStrides[0] < rowElements) {
+      fprintf(stderr, "%s: pitch is shorter than the copied row\n", entryPoint);
+      return -1;
+    }
+    int64_t srcPitch = 0;
+    int64_t dstPitch = 0;
+    if (!checkedMultiply(srcStrides[0], elemSize, srcPitch) ||
+        !checkedMultiply(dstStrides[0], elemSize, dstPitch)) {
+      fprintf(stderr, "%s: byte pitch overflows int64\n", entryPoint);
+      return -1;
+    }
+    hipError_t error = hipMemcpy2DAsync(
+        dstBase, static_cast<size_t>(dstPitch), srcBase,
+        static_cast<size_t>(srcPitch), static_cast<size_t>(rowBytes),
+        static_cast<size_t>(srcSizes[0]), hipMemcpyDeviceToDevice, stream);
+    if (error != hipSuccess) {
+      fprintf(stderr, "%s: pitched copy failed: %s\n", entryPoint,
+              hipGetErrorString(error));
+      return -1;
+    }
+    return 0;
+  }
+
+  int result =
+      hip_strided_copy(static_cast<void *>(stream), dstBase, srcBase, elemSize,
+                       static_cast<int>(outerRank), srcSizes, srcStrides,
+                       dstStrides, rowElements, outerTotal);
+  if (result == 0) {
+    return 0;
+  }
+
+  // Preserve correctness for element widths not implemented by the kernel.
+  // The validated span arithmetic above guarantees these row offsets cannot
+  // overflow signed 64-bit arithmetic.
+  int64_t indices[kMaximumMemRefRank] = {};
+  for (int64_t row = 0; row < outerTotal; ++row) {
+    int64_t srcElementOffset = 0;
+    int64_t dstElementOffset = 0;
+    for (int64_t dimension = 0; dimension < outerRank; ++dimension) {
+      srcElementOffset += indices[dimension] * srcStrides[dimension];
+      dstElementOffset += indices[dimension] * dstStrides[dimension];
+    }
+    hipError_t error = hipMemcpyAsync(
+        dstBase + static_cast<size_t>(dstElementOffset * elemSize),
+        srcBase + static_cast<size_t>(srcElementOffset * elemSize),
+        static_cast<size_t>(rowBytes), hipMemcpyDeviceToDevice, stream);
+    if (error != hipSuccess) {
+      fprintf(stderr, "%s: strided-row copy failed: %s\n", entryPoint,
+              hipGetErrorString(error));
+      return -1;
+    }
+    for (int64_t dimension = outerRank - 1; dimension >= 0; --dimension) {
+      if (++indices[dimension] < srcSizes[dimension]) {
+        break;
+      }
+      indices[dimension] = 0;
+    }
+  }
+  return 0;
+}
+
+} // namespace
+
+int wrap_hipMemrefCopy(RuntimeState *state, int64_t elem_size,
+                       const HipdnnEpUnrankedMemRef *src,
+                       const HipdnnEpUnrankedMemRef *dst) {
+  OP_PROFILE_CPU("memref_copy", state);
+  if (!state) {
+    fprintf(stderr, "wrap_hipMemrefCopy: null state\n");
+    return -1;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  int result =
+      copyMemRefOnStream(stream, elem_size, src, dst, "wrap_hipMemrefCopy");
+  if (result != 0) {
+    // The interface will stop using this invocation's buffers after observing
+    // the error. Drain work queued before this copy before returning so an
+    // immediate cleanup cannot race those earlier operations. The generated
+    // interface must also drain its shared error-cleanup path to cover work
+    // enqueued after this call before the accumulated status is returned.
+    hipError_t syncError = hipStreamSynchronize(stream);
+    if (syncError != hipSuccess) {
+      fprintf(stderr,
+              "wrap_hipMemrefCopy: failure-path stream sync failed: %s\n",
+              hipGetErrorString(syncError));
+    }
+  }
+  return result;
+}
 
 // GPU D2D memcpy via hipMemcpyAsync.
 // Follows opaque RuntimeState pattern - extracts stream internally

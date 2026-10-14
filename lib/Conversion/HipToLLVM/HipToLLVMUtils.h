@@ -7,6 +7,7 @@
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
 #include "RuntimeAccess.h"
+#include "hip/Conversion/HipToLLVM/RuntimeCallUtils.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
@@ -59,6 +60,7 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
+inline constexpr const char *kWrapHipMemRefCopy = "wrap_hipMemrefCopy";
 
 inline constexpr const char *kWrapConv = "wrap_conv";
 inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";

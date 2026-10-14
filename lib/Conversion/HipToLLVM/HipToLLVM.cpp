@@ -13,6 +13,9 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
+
+#include <iterator>
 
 namespace mlir {
 namespace hip {
@@ -52,26 +55,26 @@ private:
       auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
       if (ptrTy.getAddressSpace() == 0)
         return ptr;
-      return builder.create<LLVM::AddrSpaceCastOp>(loc, as0PtrType, ptr);
+      return LLVM::AddrSpaceCastOp::create(builder, loc, as0PtrType, ptr);
     };
 
-    Value allocPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kAllocPtrIdx});
+    Value allocPtr = LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{kAllocPtrIdx});
     args.push_back(castToAs0(allocPtr));
 
-    Value alignedPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
+    Value alignedPtr = LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
     args.push_back(castToAs0(alignedPtr));
 
-    args.push_back(builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{kOffsetIdx}));
+    args.push_back(LLVM::ExtractValueOp::create(builder, loc, memrefStruct,
+                                                ArrayRef<int64_t>{kOffsetIdx}));
 
     for (int64_t dim : llvm::seq<int64_t>(0, rank))
-      args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{kSizesIdx, dim}));
+      args.push_back(LLVM::ExtractValueOp::create(
+          builder, loc, memrefStruct, ArrayRef<int64_t>{kSizesIdx, dim}));
     for (int64_t dim : llvm::seq<int64_t>(0, rank))
-      args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
+      args.push_back(LLVM::ExtractValueOp::create(
+          builder, loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
   // Split @main_graph into two functions so the runtime's simple (ctx, inputs)
@@ -98,7 +101,8 @@ private:
   //   llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
   //       -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
   // After (wrapper takes only (ctx, inputs); the returned descriptor is
-  // ignored, the output reaches the EP via the callback):
+  // ignored, the output reaches the EP via the callback). A marked fallible
+  // runtime call returns immediately from the internal graph:
   //   llvm.func @main_graph_internal(<same 5 scalars>) -> !llvm.struct<...>
   //   llvm.func @main_graph(%ctx: ptr, %inputs: ptr) -> i32 {
   //     %sp = llvm.load (gep %inputs[0])       ; ptr to the descriptor
@@ -112,9 +116,18 @@ private:
   //     llvm.return %c0_i32
   //   }
   LogicalResult transformMainFunction(ModuleOp module) {
+    WalkResult markerValidation = module.walk([&](LLVM::CallOp call) {
+      Attribute marker = call->getAttr(kFallibleRuntimeCallAttrName);
+      if (!marker || isa<UnitAttr>(marker))
+        return WalkResult::advance();
+      call.emitError() << "requires '" << kFallibleRuntimeCallAttrName
+                       << "' to be a unit attribute";
+      return WalkResult::interrupt();
+    });
+    if (markerValidation.wasInterrupted())
+      return failure();
+
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
-    if (!mainFunc)
-      return success();
 
     auto inputCountAttr =
         module->getAttrOfType<IntegerAttr>("hipdnn.input_count");
@@ -125,8 +138,25 @@ private:
     auto outputShapesAttr =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
 
-    if (!inputCountAttr || !outputCountAttr || !inputShapesAttr ||
-        !outputShapesAttr) {
+    const bool hasCompleteMainAbi = mainFunc && inputCountAttr &&
+                                    outputCountAttr && inputShapesAttr &&
+                                    outputShapesAttr;
+    if (!hasCompleteMainAbi) {
+      LLVM::CallOp unpropagatedCall;
+      module.walk([&](LLVM::CallOp call) {
+        if (isFallibleRuntimeCall(call)) {
+          unpropagatedCall = call;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (unpropagatedCall) {
+        return unpropagatedCall.emitError(
+            "fallible runtime call requires @main_graph and complete "
+            "hipdnn input/output metadata for status propagation");
+      }
+      if (!mainFunc)
+        return success();
       COMPILER_DEBUG_LOG(
           "[HipToLLVM] Warning: No metadata found, skipping @main_graph "
           "transformation\n");
@@ -160,6 +190,79 @@ private:
 
     OpBuilder builder(module.getContext());
     Location loc = mainFunc.getLoc();
+    Type i32Type = builder.getI32Type();
+
+    // The public graph ABI can propagate a runtime status only from
+    // @main_graph. Reject helper-local marked calls instead of silently
+    // dropping their result until outlined functions have an explicit error
+    // convention.
+    WalkResult helperCall = module.walk([&](LLVM::CallOp call) {
+      if (!isFallibleRuntimeCall(call) ||
+          call->getParentOfType<LLVM::LLVMFuncOp>() == mainFunc) {
+        return WalkResult::advance();
+      }
+      call.emitError(
+          "fallible runtime call is unsupported outside @main_graph");
+      return WalkResult::interrupt();
+    });
+    if (helperCall.wasInterrupted())
+      return failure();
+
+    // Short-circuit @main_graph immediately after the first failed marked
+    // call. This prevents later kernels from consuming an invalid result and
+    // propagates the exact nonzero status through inference_compute.
+    SmallVector<LLVM::CallOp> fallibleCalls;
+    mainFunc.walk([&](LLVM::CallOp call) {
+      if (isFallibleRuntimeCall(call))
+        fallibleCalls.push_back(call);
+    });
+    const bool propagatesRuntimeStatus = !fallibleCalls.empty();
+    if (propagatesRuntimeStatus) {
+      for (LLVM::CallOp call : fallibleCalls) {
+        if (call.getNumResults() != 1 ||
+            !call.getResult().getType().isInteger(32)) {
+          return call.emitError(
+              "fallible runtime wrapper must return one i32 status");
+        }
+      }
+
+      Block &entry = mainFunc.getBody().front();
+      builder.setInsertionPointToStart(&entry);
+      Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                            builder.getI32IntegerAttr(0));
+
+      SmallVector<LLVM::ReturnOp> returns;
+      mainFunc.walk(
+          [&](LLVM::ReturnOp returnOp) { returns.push_back(returnOp); });
+      for (LLVM::ReturnOp returnOp : returns) {
+        builder.setInsertionPoint(returnOp);
+        LLVM::ReturnOp::create(builder, returnOp.getLoc(), ValueRange{zero});
+        returnOp.erase();
+      }
+
+      LLVM::LLVMFunctionType oldType = mainFunc.getFunctionType();
+      mainFunc.setFunctionType(LLVM::LLVMFunctionType::get(
+          i32Type, oldType.getParams(), oldType.isVarArg()));
+      mainFunc.removeResAttrsAttr();
+
+      Block *errorBlock = mainFunc.addBlock();
+      Value errorStatus = errorBlock->addArgument(i32Type, loc);
+      builder.setInsertionPointToStart(errorBlock);
+      LLVM::ReturnOp::create(builder, loc, ValueRange{errorStatus});
+
+      for (LLVM::CallOp call : fallibleCalls) {
+        Block *callBlock = call->getBlock();
+        Block *continueBlock =
+            callBlock->splitBlock(std::next(call->getIterator()));
+        builder.setInsertionPointToEnd(callBlock);
+        Value failed = LLVM::ICmpOp::create(builder, call.getLoc(),
+                                            LLVM::ICmpPredicate::ne,
+                                            call.getResult(), zero);
+        LLVM::CondBrOp::create(builder, call.getLoc(), failed, errorBlock,
+                               ValueRange{call.getResult()}, continueBlock,
+                               ValueRange{});
+      }
+    }
 
     // Rename the original main_graph so we can add a (ctx, inputs) wrapper that
     // unpacks the input memref structs and forwards the call. No outputs arg.
@@ -167,14 +270,13 @@ private:
     mainFunc.setLinkage(LLVM::Linkage::Private);
 
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
-    Type i32Type = builder.getI32Type();
     SmallVector<Type> newParamTypes{ptrType, ptrType}; // (ctx, inputs)
     auto newFuncType = LLVM::LLVMFunctionType::get(i32Type, newParamTypes);
 
     // Create the (ctx, inputs) wrapper.
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
-        builder.create<LLVM::LLVMFuncOp>(loc, "main_graph", newFuncType);
+        LLVM::LLVMFuncOp::create(builder, loc, "main_graph", newFuncType);
     newMainFunc.setLinkage(LLVM::Linkage::Private);
 
     newMainFunc->setAttr(
@@ -192,28 +294,31 @@ private:
 
     for (int64_t i : llvm::seq<int64_t>(0, inputCount)) {
       int64_t rank = cast<DenseI64ArrayAttr>(inputShapesAttr[i]).size();
-      Value inputIdxVal = builder.create<LLVM::ConstantOp>(
-          loc, i32Type, builder.getI32IntegerAttr(i));
-      Value inputSlotPtr = builder.create<LLVM::GEPOp>(
-          loc, ptrType, ptrType, inputsArg, ValueRange{inputIdxVal});
+      Value inputIdxVal = LLVM::ConstantOp::create(
+          builder, loc, i32Type, builder.getI32IntegerAttr(i));
+      Value inputSlotPtr = LLVM::GEPOp::create(
+          builder, loc, ptrType, ptrType, inputsArg, ValueRange{inputIdxVal});
       Value inputStructPtr =
-          builder.create<LLVM::LoadOp>(loc, ptrType, inputSlotPtr);
+          LLVM::LoadOp::create(builder, loc, ptrType, inputSlotPtr);
       Type memrefStructType = getMemRefStructType(builder, rank, 1);
       Value inputMemref =
-          builder.create<LLVM::LoadOp>(loc, memrefStructType, inputStructPtr);
+          LLVM::LoadOp::create(builder, loc, memrefStructType, inputStructPtr);
       unpackMemRefStructWithAddrCast(builder, loc, inputMemref, rank,
                                      mainInternalArgs);
     }
 
-    // Call the internal graph and return 0. Outputs are not out-params: the
-    // graph allocates them via hip.alloc_output and returns them by value, so
-    // any returned descriptor is ignored (the output reaches the EP through the
-    // callback). A zero-output graph returns void, so there is nothing to
-    // ignore.
-    builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
-    Value zero = builder.create<LLVM::ConstantOp>(loc, i32Type,
+    // Outputs are not out-params: the graph allocates them through callbacks,
+    // so its original returned descriptors are intentionally discarded. When
+    // fallible runtime calls are present, the rewritten internal graph instead
+    // returns the first failed status or zero; otherwise preserve the
+    // historical zero status.
+    auto internalCall =
+        LLVM::CallOp::create(builder, loc, mainFunc, mainInternalArgs);
+    Value status = propagatesRuntimeStatus
+                       ? internalCall.getResult()
+                       : LLVM::ConstantOp::create(builder, loc, i32Type,
                                                   builder.getI32IntegerAttr(0));
-    builder.create<LLVM::ReturnOp>(loc, zero);
+    LLVM::ReturnOp::create(builder, loc, status);
 
     COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
                        << actualParams << " params -> " << newParamTypes.size()
@@ -342,6 +447,15 @@ static void populateDialectLowerings(Dialect *dialect,
 void ConvertHipToLLVMPass::runOnOperation() {
   ModuleOp module = getOperation();
   MLIRContext *ctx = module.getContext();
+
+  if (Attribute policy = module->getAttr(kRequireFallibleMemRefCopiesAttrName);
+      policy && !isa<UnitAttr>(policy)) {
+    module.emitError() << "'" << kRequireFallibleMemRefCopiesAttrName
+                       << "' must be a unit attribute";
+    signalPassFailure();
+    return;
+  }
+
   LLVMTypeConverter typeConverter(ctx);
   // Scratch placement and the runtime memref ABI both use 64-bit indices.
   if (typeConverter.getIndexTypeBitwidth() != 64) {
