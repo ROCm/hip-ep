@@ -165,7 +165,7 @@ struct RuntimeState {
   size_t matmul_dp4a_scratch_size;
 
   // Per-session scratch for hip.matmul_nbits_group's multi-row path: holds the
-  // gate and up projections that the SiLU epilogue combines. Same policy as
+  // up projection that the SiLU epilogue combines with the gate. Same policy as
   // matmul_dp4a_scratch. Kept apart from it because the per-segment matmuls
   // that fill it use matmul_dp4a_scratch themselves.
   void *matmul_group_scratch;

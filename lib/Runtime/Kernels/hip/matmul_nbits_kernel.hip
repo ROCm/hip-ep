@@ -3307,8 +3307,10 @@ extern "C" int hip_matmul_nbits_dp4a_group(
     const int64_t* N, int64_t K, int64_t block_size, int epilogue,
     int quantize_a, void* a_qb_scratch, void* a_scale_scratch)
 {
-    if (K % 32 != 0 || block_size <= 0 || nseg < 1 ||
-        nseg > HIP_MATMUL_GROUP_MAX_SEGMENTS)
+    // The kernel reads one activation scale per 32-wide K step, indexed by a
+    // shift of block_size.
+    if (K % 32 != 0 || block_size < 32 || (block_size & (block_size - 1)) ||
+        K % block_size != 0 || nseg < 1 || nseg > HIP_MATMUL_GROUP_MAX_SEGMENTS)
         return hipErrorInvalidValue;
     if (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL && (nseg != 2 || N[0] != N[1]))
         return hipErrorInvalidValue;
@@ -3344,10 +3346,10 @@ extern "C" int hip_matmul_nbits_dp4a_group(
     return hipGetLastError();
 }
 
-__global__ void matmul_nbits_silu_mul_kernel(const __half* __restrict__ gate,
+// `out` may alias `gate`: each element is read and written by one thread.
+__global__ void matmul_nbits_silu_mul_kernel(const __half* gate,
                                              const __half* __restrict__ up,
-                                             __half* __restrict__ out,
-                                             int64_t n)
+                                             __half* out, int64_t n)
 {
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n) return;

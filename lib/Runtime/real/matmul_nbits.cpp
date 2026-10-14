@@ -238,26 +238,38 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   // hipHostMalloc(Coherent) memory. The GEMV's scattered per-row stores to it
   // run the whole kernel ~1.7x slower than stores to device memory, so the
   // GEMV writes to `out_stage` and one coalesced copy moves the result.
-  // `out_is_host` is the attribute of `out_checked`, rechecked only when ORT
-  // hands over a different buffer.
+  // `out_checked` remembers the memory type of the last few output buffers:
+  // hip.matmul_nbits_group's per-segment fallback shares this state across
+  // up to three outputs, which a single entry would re-query on every call.
+  struct CheckedOutput {
+    const void *ptr = nullptr;
+    bool is_host = false;
+  };
+  static constexpr size_t kCheckedOutputs = 4;
   std::mutex out_mu;
-  const void *out_checked = nullptr;
-  bool out_is_host = false;
+  CheckedOutput out_checked[kCheckedOutputs];
+  size_t out_checked_next = 0;
   void *out_stage = nullptr;
   size_t out_stage_bytes = 0;
+
+  bool output_is_host(const void *out) {
+    for (const CheckedOutput &c : out_checked)
+      if (c.ptr == out)
+        return c.is_host;
+    hipPointerAttribute_t attr{};
+    const bool is_host = hipPointerGetAttributes(&attr, out) == hipSuccess &&
+                         attr.type == hipMemoryTypeHost;
+    (void)hipGetLastError();
+    out_checked[out_checked_next] = {out, is_host};
+    out_checked_next = (out_checked_next + 1) % kCheckedOutputs;
+    return is_host;
+  }
 
   // Device buffer the GEMV should write when the caller's output is `out`.
   // Returns `out` itself unless it is host memory; nullptr on failure.
   void *gemv_output(void *out, size_t bytes, hipStream_t stream) {
     std::lock_guard<std::mutex> lk(out_mu);
-    if (out != out_checked) {
-      hipPointerAttribute_t attr{};
-      out_is_host = hipPointerGetAttributes(&attr, out) == hipSuccess &&
-                    attr.type == hipMemoryTypeHost;
-      (void)hipGetLastError();
-      out_checked = out;
-    }
-    if (!out_is_host)
+    if (!output_is_host(out))
       return out;
     if (out_stage_bytes < bytes) {
       if (out_stage) {
@@ -1048,16 +1060,14 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
     return 0;
   }
 
+  // The gate projection goes straight into out0 and the SiLU*mul runs in
+  // place, so only the up projection needs scratch.
   const int64_t n = batch_count * M * N0;
-  const size_t half_bytes =
-      (static_cast<size_t>(n) * 2 + 255) & ~static_cast<size_t>(255);
-  if (hipdnn_ep_state_ensure_matmul_group_scratch(state, 2 * half_bytes) != 0)
+  if (hipdnn_ep_state_ensure_matmul_group_scratch(
+          state, static_cast<size_t>(n) * 2) != 0)
     return -1;
-  char *scratch =
-      static_cast<char *>(hipdnn_ep_state_get_matmul_group_scratch(state));
-  void *gate = scratch;
-  void *up = scratch + half_bytes;
-  void *proj[2] = {gate, up};
+  void *up = hipdnn_ep_state_get_matmul_group_scratch(state);
+  void *proj[2] = {out0, up};
   for (int s = 0; s < 2; ++s) {
     int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], Zs[s],
                               nullptr, nullptr, proj[s], M, N0, K, batch_count,
@@ -1066,5 +1076,5 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
     if (rc != 0)
       return rc;
   }
-  return hip_matmul_nbits_silu_mul(stream, gate, up, out0, n) == 0 ? 0 : -1;
+  return hip_matmul_nbits_silu_mul(stream, out0, up, out0, n) == 0 ? 0 : -1;
 }

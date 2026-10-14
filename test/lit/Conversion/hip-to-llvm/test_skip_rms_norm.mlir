@@ -44,7 +44,7 @@ func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
   // Verify epsilon constant
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
-  // Verify runtime function call with 11 params (bias and input_skip_bias_sum may be nullptr)
+  // Verify runtime function call with 14 params (bias, input_skip_bias_sum and the quantized outputs may be nullptr)
   // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, !llvm.ptr, !llvm.ptr, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)

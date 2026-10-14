@@ -2302,6 +2302,7 @@ HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
  *               unpacked uint8 zero points [N[s], ceil(K/block_size)]; every
  *               segment must then have one
  *   out[s]    : fp16 [N[s]] (SiLU epilogue: out[0] only)
+ *   block_size: a power of two >= 32 that divides K
  * Returns a hipError_t; hipErrorInvalidValue for an unsupported group.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
@@ -2310,7 +2311,7 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
     const int64_t* N, int64_t K, int64_t block_size, int epilogue,
     int quantize_a, void* a_qb_scratch, void* a_scale_scratch);
 
-/** out[i] = silu(gate[i]) * up[i], fp16, n elements. */
+/** out[i] = silu(gate[i]) * up[i], fp16, n elements. `out` may be `gate`. */
 HIP_KERNEL_API int hip_matmul_nbits_silu_mul(void* stream, const void* gate,
                                              const void* up, void* out,
                                              int64_t n);

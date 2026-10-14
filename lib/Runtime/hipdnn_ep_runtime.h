@@ -398,7 +398,7 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size);
 
 // Per-session scratch for hip.matmul_nbits_group's multi-row SiLU path (the
-// gate and up projections before they are combined). Same policy as the dp4a
+// up projection before it is combined with the gate). Same policy as the dp4a
 // scratch above.
 void *hipdnn_ep_state_get_matmul_group_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_group_scratch(RuntimeState *state,
