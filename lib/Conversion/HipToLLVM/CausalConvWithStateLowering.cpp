@@ -161,7 +161,9 @@ struct CausalConvWithStateOpLowering
         elemSizeVal, channelsLastVal,
         dilationVal, stateChannelsLastVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    LLVM::CallOp call = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (requiresFallibleMemRefCopies(module))
+      markFallibleRuntimeCall(call);
 
     rewriter.eraseOp(op);
     return success();
