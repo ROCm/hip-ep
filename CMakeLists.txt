@@ -257,6 +257,11 @@ if(BUILD_HIP_UNIT_TESTS)
   # Runtime unit tests (GPU-free; native against mock types)
   add_subdirectory(test/runtime)
 
+  # Focused tests for source-neutral GPU runtime kernels.
+  if(NOT BUILD_MOCK_RUNTIME)
+    add_subdirectory(test/gpu)
+  endif()
+
   # Static compiler-plugin tests (sample plugin + unit test).
   # See docs/design/plugin-interface.md.
   add_subdirectory(test/plugin)
