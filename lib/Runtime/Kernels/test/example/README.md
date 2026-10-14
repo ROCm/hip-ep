@@ -344,9 +344,10 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   query-head)` pairs.
 - **gqa decode/prefill (i8)**: same idea, 13 / 9 named geometries x a typical
   length list (decode: `{128,512,2048,8192}`; prefill:
-  `{128,256,512,1024,2048}`). The i8 prefill leaf's two `O(sq^2)` CPU
-  references (i8-cache + fp16) are also multithreaded over `(batch,
-  query-head)` pairs.
+  `{128,256,512,1024,2048}`). The geometries cover head_dim 64, 96 and 128,
+  the range `real/gqa.cpp` accepts for an INT8 KV cache (d256 is rejected
+  there). The i8 prefill leaf's two `O(sq^2)` CPU references (i8-cache +
+  fp16) are also multithreaded over `(batch, query-head)` pairs.
 - **matmul_nbits** (all four bit-widths, fp16 and fp32 activations as
   separate leaves): `group_size {32,64,128} x zero-points {on,off}` (6
   combos, always full) x 12 typical `(M,K,N)` shapes — M in

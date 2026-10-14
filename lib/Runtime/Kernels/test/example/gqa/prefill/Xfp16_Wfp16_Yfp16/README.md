@@ -32,11 +32,13 @@ causal attention) is now multithreaded over `(batch, query-head)` pairs so
 this wider range -- especially the 2 `sq=8192` rows -- stays inside the
 shared ~30 min tier3 budget. `COVERAGE=1|2|3` (default 3, `make test
 COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) picks a fixed index subset of that
-array (`kTier1` 22 rows, `kTier2` 66 rows, tier3 all 75) chosen so tier1
+array (`kTier1` 26 rows, `kTier2` 68 rows, tier3 all 75) chosen so tier1
 still touches every `D`(64/96/128/256)/sink-mode/window-on-off/chunked-prefill
-(`past>0`)/must-decline value and every prefill kernel route, plus 2 of the
-cheap `sq=128` rows; tier2 adds all 8 `sq=128` rows (cheap) and all the
-routing and head_dim 96 rows but deliberately excludes the 2 expensive
+(`past>0`)/must-decline value, window 1, a window wider than the sequence,
+batch 2, the sink + smooth + window combination and every prefill kernel
+route, plus 2 of the cheap `sq=128` rows; tier2 keeps every tier1 row and
+adds all 8 `sq=128` rows (cheap) and all the routing and head_dim 96 rows
+but deliberately excludes the 2 expensive
 `sq=8192` rows (tier3-only, a budget trade-off). At startup the exe prints
 `coverage=N -> running <n>/75 gqa_prefill cases`. No human edits a shape
 list -- there is no `shapes.csv` or `gen_data.py` in this leaf.

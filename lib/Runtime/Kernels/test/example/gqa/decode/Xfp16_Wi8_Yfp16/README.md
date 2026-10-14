@@ -33,6 +33,10 @@ exe prints `coverage=N -> running <n> typical length(s) x 13 categorical
 case(s) = <n*13> gqa_decode_i8 cases`. No human edits a shape list -- there
 is no `shapes.csv` or `gen_data.py` in this leaf.
 
+There is no head_dim 256 geometry: production `real/gqa.cpp` accepts an INT8
+KV cache only at head_dim 64, 96 and 128 and rejects d256 before any kernel
+launch, so the leaf stays inside that range.
+
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
 exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
 warning. Like production `real/gqa.cpp`, the leaf resolves the int8 decode

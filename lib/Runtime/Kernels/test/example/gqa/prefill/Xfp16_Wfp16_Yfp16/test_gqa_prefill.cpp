@@ -713,26 +713,30 @@ int main(int argc, char** argv) {
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (22 rows) still touches D{64,96,128,256}, every sink_mode, window
-  // on/off, chunked-prefill (past>0), the d128-must-decline case and 2 of
-  // the sq=128 rows (the cheapest shape), plus one row per prefill route
-  // the first rows miss: a d256 group of 6, a group of 2, the declined d256
-  // window, a d128 group not divisible by 4 with and without a window, d96
-  // plain / windowed / with a sink, a d256 group of 5 and a d64 group of 3.
-  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 25, 29,
-                                  30, 40, 43, 44, 47, 55, 56, 64, 66, 69, 73};
+  // tier1 (26 rows) still touches D{64,96,128,256}, every sink_mode, window
+  // on/off, window 1, a window wider than the sequence, chunked-prefill
+  // (past>0), batch 2, the d128-must-decline case and 2 of the sq=128 rows
+  // (the cheapest shape), plus one row per prefill route the first rows
+  // miss: a d256 group of 6, a group of 2, the declined d256 window, a d128
+  // group not divisible by 4 with and without a window, d128 MHA, d96
+  // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3 and
+  // d64 MHA with the sink, smooth and a window together.
+  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18,
+                                  23, 24, 25, 29, 30, 40, 43, 44, 47,
+                                  50, 55, 56, 64, 66, 69, 73, 74};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
   // tier3-only, a deliberate budget trade-off documented in RESULT.md).
-  // The prefill routing and head_dim 96 rows (39-74) are all in tier2.
+  // The prefill routing and head_dim 96 rows (39-74) are all in tier2, and
+  // so is every tier1 row.
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
-                                  13, 14, 15, 16, 17, 18, 19, 20, 21, 25,
-                                  26, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-                                  39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-                                  49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
-                                  59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
-                                  69, 70, 71, 72, 73, 74};
+                                  13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
+                                  24, 25, 26, 28, 29, 30, 31, 32, 33, 34,
+                                  35, 36, 39, 40, 41, 42, 43, 44, 45, 46,
+                                  47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+                                  57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+                                  67, 68, 69, 70, 71, 72, 73, 74};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;
