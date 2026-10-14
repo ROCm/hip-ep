@@ -2887,7 +2887,7 @@ extern "C" int hip_matmul_nbits_dp4a(
  * out of its inner loop.
  *
  * The launch config is timed on the grouped kernel itself, per group shape
- * (getOrTuneDp4aGroupConfig). Borrowing segment 0's single-weight config is
+ * (getOrTuneDp4aGroupConfig). Borrowing a segment's single-weight config is
  * not safe: DeepSeek-R1-Distill-Llama-70B's gate/up (N=28672, K=8192) inherits
  * 1024x8, whose SiLU form (4 columns of each weight per block) ran its 80
  * layers ~6 ms per token slower than the two separate GEMVs on gfx1151.
@@ -3136,9 +3136,12 @@ static const int* findDp4aGroupConfig(const Dp4aGroupKey& key) {
     return nullptr;
 }
 
-// Seeded with segment 0's single-weight config; another config replaces it
-// only when at least 5% faster, so a shape whose candidates time within noise
-// keeps the same config, and the same summation order, from run to run.
+// Seeded with the widest segment's single-weight config; another config
+// replaces it only when at least 5% faster, so a shape whose candidates time
+// within noise keeps the same config, and the same summation order, from run
+// to run. Segment order follows the graph, and seeding from a narrow k_proj
+// left Llama-3.1-8B's q/k/v (1024+4096+1024) on 32x2 at 0.0997 ms, under the
+// tuning floor, where the q_proj config 128x2 runs it in 0.054 ms.
 //
 // How it times matters more than what it times; each rule below was a
 // misranking measured in the model:
@@ -3164,9 +3167,13 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
             return *hit;
     }
 
-    const int seed = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[0],
-                                         g.scales[0], g.zp[0], nullptr,
-                                         g.out[0], g.N[0], K, bs);
+    int w = 0;
+    for (int s = 1; s < g.nseg; s++)
+        if (g.N[s] > g.N[w])
+            w = s;
+    const int seed = getOrTuneDp4aConfig(stream, a_qb, a_sc, g.B[w],
+                                         g.scales[w], g.zp[w], nullptr,
+                                         g.out[w], g.N[w], K, bs);
 
     std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
     if (const int* hit = findDp4aGroupConfig(key))
