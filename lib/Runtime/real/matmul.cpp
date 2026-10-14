@@ -8,6 +8,7 @@
 #include "../op_state.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
+#include "matmul_dispatch.h"
 #include "runtime_types.h"
 
 #include <algorithm>
@@ -125,9 +126,14 @@ struct MatmulAlgoTable {
 // shared_ptr to it.
 struct MatmulState : OpStateT<MatmulState> {
   std::shared_ptr<MatmulAlgoTable> table;
+  bool use_f32_decode_gemv = false;
   MatmulState() {
     int dev = 0;
     hipGetDevice(&dev);
+    hipDeviceProp_t properties{};
+    if (hipGetDeviceProperties(&properties, dev) == hipSuccess) {
+      use_f32_decode_gemv = hipdnn_ep_real::isGfx1151(properties.gcnArchName);
+    }
     table = WeakStore<int, MatmulAlgoTable>::get_or_create(
         dev, [] { return std::make_shared<MatmulAlgoTable>(); });
   }
@@ -484,6 +490,25 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
+  MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
+  if (!ms || !ms->table) {
+    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
+  // hipBLASLt launch overhead dominates these small decode projections. When
+  // transB is set, B is physically [N,K], which the GEMV kernel consumes
+  // directly on the target where this policy was measured. Other targets,
+  // prefill, and wider projections retain the tuned GEMM path below.
+  if (hipdnn_ep_real::useF32TransposedBDecodeGemv(
+          ms->use_f32_decode_gemv, M, N, K, batch_count, elem_size, transA,
+          transB)) {
+    return hip_gemv_f32_transposed_b(
+        stream, static_cast<const float *>(A), static_cast<const float *>(B),
+        static_cast<float *>(output), static_cast<int>(N), static_cast<int>(K));
+  }
+
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
@@ -492,13 +517,6 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                     (long long)batch_count, (long long)b_batch_stride,
                     (long long)transA, (long long)transB, (long long)elem_size,
                     type_name, (long long)(batch_count * M * N * elem_size));
-
-  MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
-  if (!ms || !ms->table) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
-            op_state_slot);
-    return -1;
-  }
 
   MatmulCacheKey key{M,      N,     K, batch_count, elem_size, b_batch_stride,
                      transA, transB};

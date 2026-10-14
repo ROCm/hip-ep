@@ -3907,6 +3907,12 @@ HIP_KERNEL_API int hip_conv_transpose(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* F32 GEMV for C[1,N] = A[1,K] * transpose(B[N,K]). This decode-oriented
+ * path consumes the physical transposed-B layout directly. */
+HIP_KERNEL_API int hip_gemv_f32_transposed_b(void* stream, const float* A,
+                                              const float* B, float* C,
+                                              int N, int K);
+
 #ifdef __cplusplus
 }
 #endif

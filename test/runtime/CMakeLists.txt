@@ -91,3 +91,12 @@ if(UNIX AND NOT APPLE AND TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
   set_tests_properties(HipGpuElfContract PROPERTIES TIMEOUT 60)
   set_target_properties(test-hipgpu-elf-contract PROPERTIES FOLDER "runtime-tests")
 endif()
+
+add_executable(test-matmul-dispatch test_matmul_dispatch.cpp)
+target_compile_features(test-matmul-dispatch PRIVATE cxx_std_17)
+target_include_directories(test-matmul-dispatch PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/real
+)
+
+add_test(NAME MatmulDispatchUnitTest COMMAND test-matmul-dispatch)
+set_target_properties(test-matmul-dispatch PROPERTIES FOLDER "runtime-tests")

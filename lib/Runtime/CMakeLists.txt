@@ -264,6 +264,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         DEPENDS ${SOURCE_FILE}
+                ${ARGN}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_SOURCE_DIR}/include/hip/datatype_abi.h
                 ${CMAKE_SOURCE_DIR}/include/hip/init_config_abi.h
@@ -305,7 +306,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
-    compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
+    compile_to_bitcode(real/matmul.cpp runtime_matmul.bc
+        real/matmul_dispatch.h)
     compile_to_bitcode(real/rocmlir.cpp runtime_rocmlir.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
     compile_to_bitcode(real/trilu.cpp runtime_trilu.bc)
