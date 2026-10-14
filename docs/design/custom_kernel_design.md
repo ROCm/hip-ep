@@ -277,6 +277,14 @@ Four execution paths, auto-dispatched by shape:
 
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
 
+#### Shared int8 activation (`hip.quantize_act`)
+
+The W4A8 dp4a path (`1 <= M <= HIPDNN_EP_MATMUL_DP4A_MAX_M`, int4, K % 32 == 0) runs in two steps: `hip_matmul_nbits_quant_act_i8` quantizes the fp16 activation per `block_size` group into int8 (deinterleaved layout) plus one f32 scale per group, and `hip_matmul_nbits_dp4a_prequant` runs the integer-dot GEMV on that. `hip_matmul_nbits_dp4a` is the two together.
+
+A decoder layer reads one activation through several projections (q/k/v, gate/up), and each would repeat the first step. `hip-fusion-transform` (`lib/Dialect/Transforms/fusion_pattern/matmul_nbits_shared_act.cpp`) therefore inserts one `hip.quantize_act` per activation and block_size that two or more eligible `hip.matmul_nbits` ops read, and passes its results to them as `quantized(%a_quant, %a_scale)`. Eligible: fp16 activation with static K, bits = 4, no `g_idx`, symmetric or packed uint8 zero points, K % 32 == 0, block_size a power of two ≥ 32 dividing K.
+
+The int8 activation is written for every row, whatever M is at runtime. A consumer on the dp4a path reads it and skips its own quantization; any other path (prefill, `HIPDNN_EP_MATMUL_DP4A=0`) reads the fp16 activation. Producer and consumer therefore need no shared predicate. The cost is one extra M×K int8 write per shared activation on paths that do not read it.
+
 ## Key Design Decisions
 
 - **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.

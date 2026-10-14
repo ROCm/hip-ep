@@ -573,7 +573,8 @@ cleanup:
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
+                      const void *bias, const void *a_quant,
+                      const void *a_scale, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size, int64_t scale_elem_size) {
@@ -725,10 +726,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // ALU-bound at ~2.5x the per-byte cost of the single-row kernel. Here the
   // nibble split is two mask instructions shared by every row in the tile.
   // All other shapes fall through to hip_matmul_nbits.
-  if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
-      M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
-      block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
-      (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
+  //
+  // With a_quant/a_scale the activation was quantized once for every
+  // projection that reads it (hip.quantize_act), so only the GEMV runs here.
+  const bool dp4a_path = hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
+                         M <= hipdnn_ep_matmul_dp4a_max_m() &&
+                         batch_count == 1 && bits == 4 && block_size > 0 &&
+                         (K % 32 == 0) && elem_size == 2 &&
+                         (!zero_points || (zp_elem_size == 1 && pre_zp_u8));
+  if (dp4a_path && a_quant && a_scale) {
+    int rc = hip_matmul_nbits_dp4a_prequant(stream, a_quant, a_scale, B, scales,
+                                            pre_zp_u8, bias, output, M, N, K,
+                                            block_size);
+    if (rc == 0)
+      goto cleanup;
+    RUNTIME_DEBUG_LOG(
+        "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
+  } else if (dp4a_path) {
     const size_t k_blocks =
         static_cast<size_t>((K + block_size - 1) / block_size);
     // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
@@ -741,11 +755,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       char *base =
           static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
       if (base) {
-        void *a_qb = base;
-        void *a_scale = base + scale_off;
         int rc =
             hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+                                  M, N, K, block_size, base, base + scale_off);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -845,4 +857,34 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
 cleanup:
   return result;
+}
+
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size) {
+  OP_PROFILE(
+      "quantize_act",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "rows=%lld,k=%lld,bs=%lld", (long long)rows,
+                 (long long)K, (long long)block_size);
+        return std::string(b);
+      },
+      state);
+  if (!state || (rows > 0 && (!A || !a_quant || !a_scale))) {
+    fprintf(stderr, "wrap_quantize_act: null argument\n");
+    return -1;
+  }
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_quantize_act: null stream\n");
+    return -1;
+  }
+  int rc = hip_matmul_nbits_quant_act_i8(stream, A, rows, K, block_size,
+                                         a_quant, a_scale);
+  if (rc != 0) {
+    fprintf(stderr, "wrap_quantize_act: launch failed (%d)\n", rc);
+    return -1;
+  }
+  return 0;
 }

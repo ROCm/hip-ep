@@ -1365,12 +1365,14 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
+                      const void *bias, const void *a_quant,
+                      const void *a_scale, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size, int64_t scale_elem_size) {
   (void)op_state_slot;
   (void)scale_elem_size;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -1378,11 +1380,28 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   MOCK_PRINT("[MOCK] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
-             "zero_points=%s, g_idx=%s, bias=%s)\n",
+             "zero_points=%s, g_idx=%s, bias=%s, quantized=%s)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
              (long long)bits, (long long)block_size, (long long)elem_size,
              zero_points ? "yes" : "null", g_idx ? "yes" : "null",
-             bias ? "yes" : "null");
+             bias ? "yes" : "null", a_quant ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size) {
+  (void)A;
+  (void)a_quant;
+  (void)a_scale;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_quantize_act\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_quantize_act(rows=%lld, K=%lld, block_size=%lld)\n",
+             (long long)rows, (long long)K, (long long)block_size);
 
   return 0;
 }

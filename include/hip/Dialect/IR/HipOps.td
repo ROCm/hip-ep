@@ -901,6 +901,12 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
       g_idx: GPTQ group ordering indices (deprecated)
       bias: output bias vector [N]
 
+    Optional `quantized(%a_quant, %a_scale)` is `A` already quantized by
+    hip.quantize_act (or a producer that folded it) with this op's
+    block_size. It is valid for every row of `A`; the runtime reads it on
+    the W4A8 dp4a path instead of quantizing `A` itself, and reads `A` on
+    every other path.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -921,6 +927,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     Optional<Hip_TensorOrMemRef>:$zero_points,  // dequant zero points (optional)
     Optional<Hip_TensorOrMemRef>:$g_idx,        // GPTQ group indices (optional, deprecated)
     Optional<Hip_TensorOrMemRef>:$bias,         // output bias [N] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_quant,      // int8 copy of A (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,      // its block scales (optional)
     Hip_TensorOrMemRef:$output,                 // result [..., N]
     I64Attr:$K,
     I64Attr:$N,
@@ -937,9 +945,12 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
     (`g_idx` `(` $g_idx^ `:` type($g_idx) `)`)?
     (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`quantized` `(` $a_quant^ `,` $a_scale `:` type($a_quant) `,`
+        type($a_scale) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 
   // OpStateOpInterface: construct this MatMulNBits instance's per-session
   // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
@@ -954,6 +965,51 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+}
+
+def Hip_QuantizeActOp : Hip_DpsOp<"quantize_act"> {
+  let summary = "Per-block int8 quantization of an fp16 activation for W4A8 "
+                "hip.matmul_nbits";
+  let description = [{
+    Quantizes every row of `A` [..., K] in blocks of `block_size` elements
+    along K, symmetric with a per-block f32 scale. With
+    m = max(|A[r, b*bs : (b+1)*bs]|):
+      a_scale[r, b] = m / 127 (1 for an all-zero block)
+      a_quant[r, k] = round(A[r, k] * 127 / m), clamped to +-127
+    `a_quant` is stored in the deinterleaved layout of the dp4a GEMV: within
+    each 8-element chunk, bytes 0-3 hold the even elements and bytes 4-7 the
+    odd ones (see matmul_nbits_quant_act_i8_kernel).
+
+    Formed by fusion for an activation read by several int4 hip.matmul_nbits
+    ops with this block_size, which then take the result through their
+    `quantized(...)` operands. Both outputs are written for every row, so a
+    consumer may read them at any M.
+
+    Constraints: fp16 `A` with static K, K % 32 == 0, block_size a power of
+    two >= 32 that divides K.
+
+    Example:
+    ```mlir
+    %q, %s = hip.quantize_act(%ctx) ins(%x : tensor<1x?x4096xf16>)
+        outs(%eq, %es : tensor<1x?x4096xi8>, tensor<1x?x128xf32>)
+        {block_size = 32} : tensor<1x?x4096xi8>, tensor<1x?x128xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,        // fp16 [..., K]
+    Hip_TensorOrMemRef:$a_quant,  // int8 [..., K]
+    Hip_TensorOrMemRef:$a_scale,  // f32 [..., K / block_size]
+    I64Attr:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    `outs` `(` $a_quant `,` $a_scale `:` type($a_quant) `,` type($a_scale) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",

@@ -2451,6 +2451,27 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* The activation quantization hip_matmul_nbits_dp4a runs first: per-block
+ * int8 into the deinterleaved layout its GEMV reads (bytes 0-3 of each
+ * 8-element chunk hold the even elements, bytes 4-7 the odd ones).
+ *   A       : fp16 [M, K], K % 32 == 0
+ *   a_qb    : >= M*K bytes
+ *   a_scale : >= M*ceil(K/block_size) floats
+ * M == 0 is a no-op. Returns a hipError_t. */
+HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
+    void* stream, const void* A, int64_t M, int64_t K, int64_t block_size,
+    void* a_qb, void* a_scale);
+
+/* hip_matmul_nbits_dp4a without its quantization step: a_qb / a_scale hold
+ * hip_matmul_nbits_quant_act_i8's output for the M rows of A with this
+ * block_size. Same weight, bias and output contract as hip_matmul_nbits_dp4a.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_prequant(
+    void* stream,
+    const void* a_qb, const void* a_scale, const void* B, const void* scales,
+    const void* zp_u8, const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
