@@ -9,10 +9,21 @@
 #include <limits>
 
 using hipdnn_ep_real::useF32TransposedBDecodeGemv;
+using hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151;
 
 int main() {
   if (!useF32TransposedBDecodeGemv(true, 1, 1, 256, 1, 4, 0, 1) ||
       !useF32TransposedBDecodeGemv(true, 1, 256, 4096, 1, 4, 0, 1))
+    return 1;
+
+  if (!useF32TransposedBMultiwaveGfx1151(1, 2048) ||
+      !useF32TransposedBMultiwaveGfx1151(128, 2048) ||
+      !useF32TransposedBMultiwaveGfx1151(256, 2048) ||
+      !useF32TransposedBMultiwaveGfx1151(128, 2816) ||
+      useF32TransposedBMultiwaveGfx1151(0, 2048) ||
+      useF32TransposedBMultiwaveGfx1151(257, 2048) ||
+      useF32TransposedBMultiwaveGfx1151(128, 1024) ||
+      useF32TransposedBMultiwaveGfx1151(128, 4096))
     return 1;
 
   // Prefill, batched, F16, untransposed, wide, and unrepresentable dimensions

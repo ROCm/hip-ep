@@ -504,6 +504,12 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   if (hipdnn_ep_real::useF32TransposedBDecodeGemv(
           ms->use_f32_decode_gemv, M, N, K, batch_count, elem_size, transA,
           transB)) {
+    if (hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151(N, K)) {
+      return hip_gemv_f32_transposed_b_multiwave_gfx1151(
+          stream, static_cast<const float *>(A), static_cast<const float *>(B),
+          static_cast<float *>(output), static_cast<int>(N),
+          static_cast<int>(K));
+    }
     return hip_gemv_f32_transposed_b(
         stream, static_cast<const float *>(A), static_cast<const float *>(B),
         static_cast<float *>(output), static_cast<int>(N), static_cast<int>(K));
