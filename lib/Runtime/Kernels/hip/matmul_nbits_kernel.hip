@@ -6144,16 +6144,18 @@ void GemmFp16I8Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -6671,16 +6673,18 @@ void GemmFp16U3Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -7350,16 +7354,18 @@ void GemmFp16U2Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
