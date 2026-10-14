@@ -1435,6 +1435,108 @@ def Hip_InstanceNormOp : Hip_DpsOp<"instance_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_BatchNormOp : Hip_DpsOp<"batch_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "ONNX BatchNormalization inference (supplied per-channel mean/var)";
+  let description = [{
+    Inference form of ONNX BatchNormalization
+    (https://arxiv.org/abs/1502.03167):
+
+      y = scale * (x - mean) / sqrt(variance + epsilon) + B
+
+    Mean and variance are the supplied per-channel vectors, not reduced from
+    the input. Input rank is at least 2: (N, C, D1, ..., Dn). Rank 2 has a
+    spatial extent of 1. Scale, B, mean, and variance are 1-D tensors of
+    length C. Training mode is not represented by this op.
+
+    Example:
+    ```mlir
+    hip.batch_norm(%ctx)
+        ins(%input, %scale, %bias, %mean, %variance :
+            memref<1x4x1x1xf16, 1>, memref<4xf16, 1>, memref<4xf16, 1>,
+            memref<4xf16, 1>, memref<4xf16, 1>)
+        outs(%output : memref<1x4x1x1xf16, 1>)
+        {epsilon = 1.001000e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$mean,
+    Hip_TensorOrMemRef:$variance,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `,` $mean `,` $variance `:`
+        type($input) `,` type($scale) `,` type($bias) `,`
+        type($mean) `,` type($variance)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
+                                /*outsAccessor=*/"Output",
+                                /*autoReify=*/1,
+                                /*autoInfer=*/1,
+                                /*declareInfer=*/1> {
+  let summary = "com.microsoft GroupNorm (per-group mean/var, optional SiLU)";
+  let description = [{
+    Group normalization from the `com.microsoft` contrib operator:
+
+      y = gamma * (x - mean) / sqrt(variance + epsilon) + beta
+
+    Channels are split into `groups` equal groups. Mean and variance are
+    computed over each (N, group) slice. `gamma` and `beta` are per-channel
+    and length C. `channels_last` 0 is NCHW (channel axis 1); 1 is NHWC
+    (channel axis rank-1). `activation` 0 is none; 1 applies SiLU after the
+    affine transform.
+
+    Example:
+    ```mlir
+    hip.group_norm(%ctx)
+        ins(%input, %scale, %bias :
+            memref<1x8x4x4xf32, 1>, memref<8xf32, 1>, memref<8xf32, 1>)
+        outs(%output : memref<1x8x4x4xf32, 1>)
+        {activation = 1 : i64, channels_last = 0 : i64,
+         epsilon = 1.000000e-05 : f32, groups = 4 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$groups,
+    DefaultValuedAttr<I64Attr, "0">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$channels_last,
+    DefaultValuedAttr<F32Attr, "1.000000e-05">:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $bias `:`
+        type($input) `,` type($scale) `,` type($bias)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
@@ -2555,6 +2657,47 @@ def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_IsNaNOp : Hip_DpsOp<"isnan", /*traits=*/[],
+                            /*outsAccessor=*/"Y",
+                            /*autoReify=*/1,
+                            /*autoInfer=*/1,
+                            /*declareInfer=*/1> {
+  let summary = "Element-wise NaN test: y = isnan(x)";
+  let description = [{
+    Returns which elements of the input are NaN.
+    Implements the standard ONNX IsNaN operator.
+
+    Formula: Y = isnan(X)
+
+    The input is a floating-point tensor (f16, bf16, f32, or f64). The
+    output is a 1-byte boolean with the same shape. ONNX bool is `i1` in
+    hand-written IR and `ui8` in the ORT/morphizen frontend; both are one
+    byte per element and are accepted by `hip.where`.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.isnan(%ctx) ins(%x : memref<24x20x1x1xf16, 1>)
+                    outs(%y : memref<24x20x1x1xui8, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
