@@ -5122,7 +5122,7 @@ static void launchWmmaConfig(
     if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
     else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
 
-#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, BC_V) do { \
+#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, BC_V) do { \
     constexpr int WM_ = BM_V / (2 * 16); \
     constexpr int WN_ = BN_V / (4 * 16); \
     constexpr int THR_ = WM_ * WN_ * 32; \
@@ -5131,22 +5131,22 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } \
 } while(0)
 
-#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
-    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, true); \
-    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, false)
+#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V, WAVES_V) \
+    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, true); \
+    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, false)
 
 #define WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, BC_V) do { \
     constexpr int WM_ = BM_V / (4 * 16); \
@@ -5181,10 +5181,20 @@ static void launchWmmaConfig(
     const int c_bk = wmmaBk(c);
     if      (c.wt_m == 4 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
                                               WMMA_TILE_CASE_WT44(128, 128, 32);
+    // The 256-thread 128x128 WT2x4 tile asks for 6 waves: its 40 KB of LDS
+    // allows no more than 6 per SIMD anyway, and 6 is a 160-VGPR budget on a
+    // 1024-VGPR target. With the nominal 8 the compiler fell back to the LDS
+    // limit and took 161 VGPRs under ROCm 7.16 (160 under 7.14), which on the
+    // 1024-VGPR hardware (gfx1150 / gfx1152) is one SIMD wave and one
+    // workgroup per WGP less: 1.07-1.25x slower on their LUT points. It fits
+    // 160 with no scratch (156-160 VGPRs, both compilers) since the epilogue
+    // builds one C row pointer per tile; before that, 7.16 spilled 36 B/lane
+    // here. The 512-thread 128x256 tile stays at 8 (see its comment in
+    // matmul_nbits_wmma_core.h).
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 128, 32);
+                                              WMMA_TILE_CASE_WT24(128, 128, 32, 6);
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 256 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 256, 32);
+                                              WMMA_TILE_CASE_WT24(128, 256, 32, 8);
     else if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                               WMMA_TILE_CASE_WT4(256, 128);
     else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
