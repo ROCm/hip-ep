@@ -34,10 +34,13 @@
 #include "llvm/Support/raw_ostream.h"
 
 // After the MLIR/LLVM headers: the HIP headers pull in platform definitions
-// that collide otherwise. Same ordering hip-rocmlir-compiler used.
+// that collide otherwise. Through rocMLIR's portable wrapper rather than
+// <hip/hip_runtime.h>: the LLVM headers above define __has_attribute to 0,
+// which sends HIP into a vector-type fallback cl.exe cannot parse. See
+// RocMlirKernelCompiler.cpp.
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
 #define HIPDNN_EP_HAVE_HIP_RUNTIME 1
-#include <hip/hip_runtime.h>
+#include "mlir/Support/HipRuntime.h"
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
