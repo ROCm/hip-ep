@@ -7,7 +7,7 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_group_query_attention` (42-arg ABI, kept in
+// The generated IR calls `wrap_group_query_attention` (43-arg ABI, kept in
 // lockstep with the HipToLLVM lowering so the symbol keeps resolving). Path
 // selection:
 //
@@ -1166,7 +1166,17 @@ static int gqa_forward_hipblaslt(
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
-    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd) {
+    int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
+    bool reuse_past_kv = false) {
+
+  void *const out_present_key = present_key;
+  void *const out_present_value = present_value;
+  const int64_t out_present_seq = skv;
+  if (reuse_past_kv) {
+    present_key = const_cast<void *>(past_key);
+    present_value = const_cast<void *>(past_value);
+    skv = past_buf_seq;
+  }
 
   // Bidirectional no-past path. The discriminator is the ABSENCE of a past KV
   // operand, not the absence of an external mask: an additive mask is
@@ -1260,10 +1270,10 @@ static int gqa_forward_hipblaslt(
   // (cross-attn ships it as rank-4 BNSD with Skv != sq). Routing no_causal to
   // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
-      (!gqa_fused_decode_disabled() && !no_causal && !attention_bias &&
-       fused_fp16 && fused_d && sq == 1 && kv_inputs_ok && present_key &&
-       present_value && sliding_ok_for_fused && sink_ok_for_fused &&
-       size_ok_for_fused);
+      (!gqa_fused_decode_disabled() && !no_causal && !reuse_past_kv &&
+       !attention_bias && fused_fp16 && fused_d && sq == 1 && kv_inputs_ok &&
+       present_key && present_value && sliding_ok_for_fused &&
+       sink_ok_for_fused && size_ok_for_fused);
 
   //===--------------------------------------------------------------------===//
   // Fused GQA decode fallback (sq == 1, d in {64,128,256}, KV cache on).
@@ -1543,8 +1553,17 @@ static int gqa_forward_hipblaslt(
   }
   if (past_len < 0)
     past_len = 0;
+  if (reuse_past_kv && out_present_seq != 0 && out_present_seq < total_seq) {
+    fprintf(stderr,
+            "gqa_forward_hipblaslt: present holds %lld tokens but the reused "
+            "past KV prefix is total_seq=%lld\n",
+            (long long)out_present_seq, (long long)total_seq);
+    return -1;
+  }
 
-  bool packed_qkv = (key == nullptr && value == nullptr);
+  // A zero-length key/value may arrive as null pointers; that is not packed
+  // QKV.
+  bool packed_qkv = (key == nullptr && value == nullptr) && !reuse_past_kv;
 
   //===--------------------------------------------------------------------===//
   // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths).
@@ -2208,14 +2227,15 @@ static int gqa_forward_hipblaslt(
                              static_cast<int>(H), static_cast<int>(d), half_rot,
                              static_cast<int>(past_len), nullptr,
                              static_cast<int>(elem_sz)));
-      HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                             static_cast<int>(B), static_cast<int>(sq),
-                             static_cast<int>(G), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
-                             static_cast<int>(elem_sz)));
-
       qSrc = d_Qroped;
-      kSrc = d_Kroped;
+      if (!reuse_past_kv) {
+        HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+                               static_cast<int>(B), static_cast<int>(sq),
+                               static_cast<int>(G), static_cast<int>(d),
+                               half_rot, static_cast<int>(past_len), nullptr,
+                               static_cast<int>(elem_sz)));
+        kSrc = d_Kroped;
+      }
     }
 
     // ---- Step 3: Q Transpose BSHD [B,sq,H,d] -> BNSD [B,H,sq,d] ----
@@ -2230,7 +2250,24 @@ static int gqa_forward_hipblaslt(
     // ---- Steps 4-5: KV Cache Update (concat/append into BNSD present) ----
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
-    if (present_key && present_value) {
+    if (reuse_past_kv) {
+      // Attention reads past directly; this only fills a consumed present.
+      if (out_present_key && out_present_value && out_present_seq > 0 &&
+          out_present_key != past_key) {
+        const size_t row_bytes = static_cast<size_t>(total_seq) * d * elem_sz;
+        const size_t src_pitch =
+            static_cast<size_t>(past_buf_seq) * d * elem_sz;
+        const size_t dst_pitch =
+            static_cast<size_t>(out_present_seq) * d * elem_sz;
+        const size_t rows = static_cast<size_t>(B) * G;
+        HIP_CHECK(hipMemcpy2DAsync(out_present_key, dst_pitch, past_key,
+                                   src_pitch, row_bytes, rows,
+                                   hipMemcpyDeviceToDevice, stream));
+        HIP_CHECK(hipMemcpy2DAsync(out_present_value, dst_pitch, past_value,
+                                   src_pitch, row_bytes, rows,
+                                   hipMemcpyDeviceToDevice, stream));
+      }
+    } else if (present_key && present_value) {
       // bidirectional_no_past (Whisper encoder / cross-attn, KV-sharing decoder
       // layers): never hand seqlens_k to the append kernel (it would apply the
       // +1 convention). An onnx.Attention with a past KV cache keeps the
@@ -2732,7 +2769,7 @@ static int gqa_forward_fused_from_fp32(
 
 //===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 42 params).
+// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 43 params).
 //===----------------------------------------------------------------------===//
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
@@ -2753,7 +2790,8 @@ int wrap_group_query_attention(
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd) {
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -2810,7 +2848,22 @@ int wrap_group_query_attention(
     fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
     return -1;
   }
-  if (!present_key || !present_value) {
+
+  const bool reuse_past_kv = seq_len_new_kv == 0 && seq_len_q > 0 &&
+                             past_key != nullptr && past_value != nullptr &&
+                             no_causal == 0;
+  // With a causal past cache, the new K/V rows are the sq query tokens being
+  // appended. Any other length would make RoPE and the append read past the
+  // end of key/value.
+  if (key != nullptr && past_key != nullptr && no_causal == 0 &&
+      seq_len_new_kv != 0 && seq_len_new_kv != seq_len_q) {
+    fprintf(stderr,
+            "wrap_group_query_attention: key/value length %lld must be 0 or "
+            "match the query length %lld when a causal past cache is given\n",
+            (long long)seq_len_new_kv, (long long)seq_len_q);
+    return -1;
+  }
+  if (!reuse_past_kv && (!present_key || !present_value)) {
     fprintf(stderr, "wrap_group_query_attention: GQA requires "
                     "present_key/present_value KV cache\n");
     return -1;
@@ -2872,8 +2925,15 @@ int wrap_group_query_attention(
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  const bool fused_geometry = no_causal == 0 && window_ok && sink_ok &&
-                              head_dim_ok && decode_geometry_ok &&
+  // Only the decomposed pipeline implements reuse_past_kv, so it bypasses
+  // fused below.
+  if (reuse_past_kv && kv_quantized) {
+    fprintf(stderr, "wrap_group_query_attention: a zero-length key/value over "
+                    "a quantized KV cache is not supported\n");
+    return -1;
+  }
+  const bool fused_geometry = !reuse_past_kv && no_causal == 0 && window_ok &&
+                              sink_ok && head_dim_ok && decode_geometry_ok &&
                               attention_bias == nullptr &&
                               !hipdnn_device_is_wave64();
   const bool fused_supported = fused_geometry && element_size_bytes == 2;
@@ -2962,7 +3022,7 @@ int wrap_group_query_attention(
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0);
+        kv_bnsd != 0, reuse_past_kv);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
