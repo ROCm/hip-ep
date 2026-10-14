@@ -78,6 +78,10 @@ int SizeClassIndex(size_t size) noexcept {
 
 constexpr size_t kPageSize = 4096;
 
+// Idle pooled bytes always kept regardless of the working set, so a model whose
+// transients are small never pays a re-pin.
+constexpr size_t kMinPooledRetain = 256ull << 20;
+
 // Capacity for a large request that is growing. The 1/32 headroom is the
 // reuse span: a KV tensor that is 64 MiB at a 16 K context grows 4096 bytes
 // per token, so one capacity covers the next 512 tokens. It matches the
@@ -233,6 +237,54 @@ void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
   large_free_.clear();
 }
 
+void HipGpuAllocator::NotePooledCheckedOut(int cls) {
+  pooled_live_bytes_ += kSizeClasses[cls];
+  peak_pooled_live_bytes_ =
+      std::max(peak_pooled_live_bytes_, pooled_live_bytes_);
+  class_last_used_[cls] = ++pooled_ops_;
+}
+
+// Keep the idle pooled bytes within twice the largest in-flight set. Whole
+// classes go, least recently used first: a class a growing tensor has moved
+// past is never asked for again, while a class still cycling is touched on
+// every Run and stays young. `keep_cls` is the class being freed into, which
+// the caller is about to need again.
+void HipGpuAllocator::TrimPooled(int keep_cls, std::vector<void *> &out) {
+  const size_t cap = std::max(kMinPooledRetain, 2 * peak_pooled_live_bytes_);
+  while (pooled_free_bytes_ > cap) {
+    int victim = -1;
+    uint64_t oldest = UINT64_MAX;
+    for (int i = 0; i < static_cast<int>(kNumSizeClasses); ++i) {
+      if (i != keep_cls && !free_lists_[i].empty() &&
+          class_last_used_[i] < oldest) {
+        oldest = class_last_used_[i];
+        victim = i;
+      }
+    }
+    if (victim < 0) {
+      return;
+    }
+    auto &fl = free_lists_[victim];
+    for (void *ptr : fl) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+    pooled_free_bytes_ -= fl.size() * kSizeClasses[victim];
+    fl.clear();
+  }
+}
+
+void HipGpuAllocator::DrainPooled(std::vector<void *> &out) {
+  for (size_t i = 0; i < kNumSizeClasses; ++i) {
+    for (void *ptr : free_lists_[i]) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+    free_lists_[i].clear();
+  }
+  pooled_free_bytes_ = 0;
+}
+
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
@@ -261,6 +313,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       if (!fl.empty()) {
         void *ptr = fl.back();
         fl.pop_back();
+        self->pooled_free_bytes_ -= kSizeClasses[cls];
+        self->NotePooledCheckedOut(cls);
         return ptr;
       }
     } else {
@@ -321,6 +375,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     {
       std::lock_guard<std::mutex> lk(self->pool_mutex_);
       self->DrainLarge(drained);
+      self->DrainPooled(drained);
     }
     if (!drained.empty()) {
       ReleaseToDriver(drained, self->device_id_);
@@ -339,6 +394,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     self->ptr_to_size_[ptr] = alloc_size;
     if (cls < 0) {
       self->NoteLargeCheckedOut(ptr, size, grown);
+    } else {
+      self->NotePooledCheckedOut(cls);
     }
   }
   return ptr;
@@ -349,7 +406,8 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
     return;
   }
   auto *self = static_cast<HipGpuAllocator *>(this_);
-  // Only ever holds p: this path never evicts.
+  // Holds p, plus any idle pooled classes TrimPooled evicts when this free
+  // pushes the idle total over its cap.
   std::vector<void *> to_release;
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
@@ -359,10 +417,14 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       to_release.push_back(p);
     } else if (const int cls = SizeClassIndex(it->second); cls >= 0) {
       // Pooled small/medium buffer (<= 16 MB): return to its free list for
-      // reuse; do NOT release to the driver here. Stays tracked in
-      // ptr_to_size_ so the destructor can release it. Safe to reuse without
-      // a stream sync: see the pool comment in the header.
+      // reuse. Stays tracked in ptr_to_size_ so the destructor can release it.
+      // Safe to reuse without a stream sync: see the pool comment in the
+      // header. Only TrimPooled hands idle classes back to the driver.
       self->free_lists_[cls].push_back(p);
+      self->pooled_live_bytes_ -= kSizeClasses[cls];
+      self->pooled_free_bytes_ += kSizeClasses[cls];
+      self->class_last_used_[cls] = ++self->pooled_ops_;
+      self->TrimPooled(cls, to_release);
     } else {
       const size_t capacity = it->second;
       ++self->large_ops_;
