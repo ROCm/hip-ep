@@ -2543,6 +2543,11 @@ static int tuneDp4aConfig(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Same 64 MB stream as the fp16 GEMV tuner above. A warm Infinity Cache
+    // hides the DRAM latency and biases the thread count toward narrow tiles.
+    // HIPDNN_EP_MATMUL_TUNE_COLD=0 is the warm control.
+    void* evict = gemvEvictAlloc();
+
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
                          N, K, bs);
@@ -2550,7 +2555,7 @@ static int tuneDp4aConfig(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
                              N, K, bs);
         });
@@ -2562,6 +2567,7 @@ static int tuneDp4aConfig(
 
         if (cfg_best_ms < best_ms) { best_ms = cfg_best_ms; best_id = cid; }
     }
+    if (evict) (void)hipFree(evict);
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
@@ -3564,6 +3570,11 @@ static int tuneGemvConfigU3(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Same 64 MB stream as the fp16 GEMV tuner. A warm Infinity Cache hides
+    // the DRAM latency and biases the thread count toward narrow tiles.
+    // HIPDNN_EP_MATMUL_TUNE_COLD=0 is the warm control.
+    void* evict = gemvEvictAlloc();
+
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigU3(best_id, stream, A, B, sc, zp, bi, out,
                            M, N, K, batch, bs);
@@ -3571,7 +3582,7 @@ static int tuneGemvConfigU3(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfigU3(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -3586,6 +3597,7 @@ static int tuneGemvConfigU3(
             best_id = cid;
         }
     }
+    if (evict) (void)hipFree(evict);
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
@@ -3967,6 +3979,11 @@ static int tuneGemvConfigU2(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Same 64 MB stream as the fp16 GEMV tuner. A warm Infinity Cache hides
+    // the DRAM latency and biases the thread count toward narrow tiles.
+    // HIPDNN_EP_MATMUL_TUNE_COLD=0 is the warm control.
+    void* evict = gemvEvictAlloc();
+
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
                            M, N, K, batch, bs);
@@ -3974,7 +3991,7 @@ static int tuneGemvConfigU2(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -3989,6 +4006,7 @@ static int tuneGemvConfigU2(
             best_id = cid;
         }
     }
+    if (evict) (void)hipFree(evict);
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
