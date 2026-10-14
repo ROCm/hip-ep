@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 ---
 name: ktrace-profiling
 description: Profile a HIP/ROCm workload on Windows and optimise a specific kernel, using ktrace for the global timeline and RGP + rgpparse for per-instruction analysis. Use when asked to find why a model is slow, to rank kernels by cost, to capture RGP/SQTT, or to optimise a named kernel with real runtime data rather than static disassembly.

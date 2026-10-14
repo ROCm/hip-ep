@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # ktrace agent skills
 
 Each subdirectory contains an agent skill that follows the standard `SKILL.md`

@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 ---
 name: roctx-pipeline-stages
 description: Add ROCTx ranges that name the pipeline stage issuing GPU work (embeddings, prefill, decode, lm_head) in an onnxruntime-genai model, and read the resulting per-stage breakdown out of a ktrace capture. Use when a trace shows kernels but not which stage they belong to, when attributing TTFT or per-token cost to stages, or when deciding whether phase attribution belongs in the app, the runtime, or the EP.
