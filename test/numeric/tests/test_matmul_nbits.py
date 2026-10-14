@@ -917,3 +917,102 @@ class TestMatMulNBitsGroup:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+def _make_norm_fed_model(seq_len: int, K: int, kind: str, n_q=0, n_kv=0, N=0):
+    """SkipSimplifiedLayerNormalization feeding q/k/v (kind="qkv") or the
+    SiLU(gate) * up MLP (kind="gate_up"), as in a decoder layer. The residual
+    sum is a graph output so the norm keeps both of its results."""
+    rng = np.random.default_rng(23)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    r = helper.make_tensor_value_info("R", TensorProto.FLOAT16, [1, seq_len, K])
+    gamma = rng.uniform(0.5, 1.5, [K]).astype(np.float16)
+    inits = [numpy_helper.from_array(gamma, name="gamma")]
+    nodes = [
+        helper.make_node(
+            "SkipSimplifiedLayerNormalization",
+            ["X", "R", "gamma"],
+            ["H", "", "", "SUM"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        )
+    ]
+    outs = [helper.make_tensor_value_info("SUM", TensorProto.FLOAT16, [1, seq_len, K])]
+    if kind == "qkv":
+        for name, n in (("q", n_q), ("k", n_kv), ("v", n_kv)):
+            inits += _q4_initializers(rng, name, K, n)
+            nodes.append(_q4_node(name, "H", name.upper(), K, n))
+            outs.append(
+                helper.make_tensor_value_info(
+                    name.upper(), TensorProto.FLOAT16, [1, seq_len, n]
+                )
+            )
+    else:
+        inits += _q4_initializers(rng, "gate", K, N) + _q4_initializers(rng, "up", K, N)
+        nodes += [
+            _q4_node("gate", "H", "G", K, N),
+            _q4_node("up", "H", "U", K, N),
+            helper.make_node("Sigmoid", ["G"], ["S"]),
+            helper.make_node("Mul", ["G", "S"], ["GS"]),
+            helper.make_node("Mul", ["GS", "U"], ["Y"]),
+        ]
+        outs.append(
+            helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, seq_len, N])
+        )
+    return make_model_from_nodes(
+        nodes,
+        [x, r],
+        outs,
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestMatMulNBitsGroupNormQuant:
+    """A group fed by SkipSimplifiedLayerNormalization reads the int8 copy of
+    the row that the norm kernel writes (block_size 32).
+
+    seq_len 1 is the only shape where the norm writes the copy and the grouped
+    kernel reads it; 7 and 128 must ignore the unwritten buffers and quantize
+    the activation themselves, through the per-projection fallback (dp4a at 7,
+    the prefill kernels at 128, plus the in-place SiLU*mul for gate/up).
+
+    The normalized activation drives q/k/v to |y| ~ 20 and SiLU(gate) * up to
+    |y| ~ 200, so the absolute error of int8 activation quantization scales
+    with them: atol is ~1% of the output range, and cosine >= 0.9995 catches a
+    real regression (a wrong scale or layout drops it far below that).
+    """
+
+    @pytest.mark.parametrize("seq_len", [1, 7, 128])
+    @pytest.mark.parametrize(
+        "K,n_q,n_kv",
+        [
+            (LLAMA2_HIDDEN, LLAMA2_HIDDEN, LLAMA2_HIDDEN),
+            (LLAMA31_HIDDEN, LLAMA31_HIDDEN, LLAMA31_KV),
+        ],
+        ids=["llama2", "llama31_gqa"],
+    )
+    def test_qkv(self, model_runner, seq_len, K, n_q, n_kv):
+        model = _make_norm_fed_model(seq_len, K, "qkv", n_q=n_q, n_kv=n_kv)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+        r = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, r])
+        compare_outputs(actual, expected, atol=2e-1, rtol=1e-2, cos_threshold=0.9995)
+
+    @pytest.mark.parametrize("seq_len", [1, 7, 128])
+    @pytest.mark.parametrize(
+        "K,N",
+        [(LLAMA2_HIDDEN, LLAMA2_INTERMEDIATE), (PHI35_HIDDEN, PHI35_INTERMEDIATE)],
+        ids=["llama2", "phi35"],
+    )
+    def test_gate_up_silu(self, model_runner, seq_len, K, N):
+        model = _make_norm_fed_model(seq_len, K, "gate_up", N=N)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+        r = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, r])
+        compare_outputs(actual, expected, atol=2.0, rtol=1e-2, cos_threshold=0.9995)
