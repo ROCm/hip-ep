@@ -19,6 +19,10 @@
 // symmetric or packed uint8 zero points, K % 32 == 0, block_size a power of
 // two >= 32 that divides K.
 //
+// A second pattern folds a hip.quantize_act of a hip.skip_rms_norm output into
+// the norm (quant_outs), so the decoder's usual norm -> projections chain pays
+// no extra launch or re-read for the int8 copy.
+//
 // Before/After IR: matmul_nbits_shared_act.cpp.
 //===----------------------------------------------------------------------===//
 #pragma once

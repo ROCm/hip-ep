@@ -1341,12 +1341,12 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size) {
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -1354,10 +1354,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm(input_num_elements=%lld, "
              "gamma_num_elements=%lld, element_size=%lld, epsilon=%f, "
-             "bias=%s, input_skip_bias_sum=%s)\n",
+             "bias=%s, input_skip_bias_sum=%s, quant_block_size=%lld)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
-             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no",
+             (long long)(a_quant ? quant_block_size : 0));
 
   return 0;
 }
