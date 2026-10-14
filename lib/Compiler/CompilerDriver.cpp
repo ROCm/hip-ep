@@ -15,9 +15,11 @@
 #include "hip/Support/DiskFileSystem.h"
 
 #ifdef ENABLE_ROCMLIRTRITON
+#include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
+#include <optional>
 #endif
 
 #include "hip/Target/LLVM/DLLLinker.h"
@@ -89,8 +91,18 @@ std::string rocMlirArtifactTarget() {
   // HIPDNN_EP_HIPSR take precedence, so the rocMLIR arm (and its HSACO) is
   // not reached under either.
   if (hip_get_env("HIPDNN_EP_PIPELINE").empty() && !hipsrPipelineRequested() &&
-      rocMlirPipelineRequested())
-    return mlir::hip::resolveRocMlirArch();
+      rocMlirPipelineRequested()) {
+    std::string target = mlir::hip::resolveRocMlirArch();
+    // Which perfConfig each kernel was tuned to is baked into the embedded
+    // HSACO, so an artifact built with the default configs must not be reused
+    // once tuning is requested -- the cache is keyed on the graph alone, and
+    // the knob would silently appear to do nothing. Folding the mode into the
+    // target string puts it under the recorded-vs-current check below.
+    mlir::hip::AutotuneSpace space;
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+      target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    return target;
+  }
 #endif
   return "";
 }
@@ -423,6 +435,36 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
+
+    // Opt-in: without this the embed falls back to position 0 of the tuning
+    // space, which rocMLIR picks for applicability rather than speed. Tuning
+    // compiles and times every candidate, so it costs far more than a session
+    // creation normally should -- hence off unless asked for. Declared in this
+    // scope because embedOpts only holds function_refs into it.
+    std::optional<mlir::hip::RocMlirAutotuner> autotuner;
+    mlir::hip::AutotuneSpace autotuneSpace;
+    if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
+      mlir::hip::AutotuneOptions autotuneOpts;
+      autotuneOpts.space = autotuneSpace;
+      autotuneOpts.log = embedOpts.log;
+      autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      autotuner.emplace(embedOpts.arch, autotuneOpts);
+      // Refuse rather than fall back to the default perfConfig. By this point
+      // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
+      // metadata, so continuing would label an untuned artifact as tuned --
+      // and carrying it to a machine with a working runtime would then pass
+      // the cache check and reuse position 0 for good. Unusable means no HIP
+      // runtime or no visible device, which the autotuner has already
+      // described on the log.
+      if (!autotuner->isUsable()) {
+        error_message = "HIPDNN_EP_ROCMLIR_AUTOTUNE was set, but autotuning "
+                        "could not reach a HIP device; unset it to compile "
+                        "with the default perfConfig";
+        return false;
+      }
+      autotuner->installInto(embedOpts);
+    }
+
     if (mlir::failed(
             mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
       error_message = "rocMLIR kernel compilation failed";
