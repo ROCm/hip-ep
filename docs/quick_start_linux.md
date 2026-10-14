@@ -111,26 +111,27 @@ cp build/Linux/Release/libonnxruntime*.so* "$ORT_HOME/lib/"
 
 ```bash
 cd ..
-git clone --branch v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
+# Clone with full history: `git apply --3way` below needs the blob each PR was
+# prepared from, which lives at that PR's merge base.
+git clone --branch v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2194.patch -o /tmp/oga-2194.patch
-git am --3way --whitespace=nowarn /tmp/oga-2194.patch
+for pr in 2685 2691; do
+  curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
+    -o "/tmp/oga-${pr}.diff"
+  git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
+done
 ```
-
-TODO: The patch above is the AMDGPU integration PR. As of 9/22/2026, [PR #2194](https://github.com/microsoft/onnxruntime-genai/pull/2194)
-was closed without being merged upstream, so this manual patch step is still required
-against `v0.14.0`. Remove once the patch is merged.
 
 **Build:**
 
 ```bash
-python3 build.py --config Release --ort_home "$ORT_HOME" \
+python3 build.py --config Release --ort_home "$ORT_HOME" --no_telemetry \
   --build_wheel --skip_tests --skip_examples --parallel
 ```
 
-The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.14.0-cp310-cp310-linux_x86_64.whl`.
+The wheel lands under `build/Linux/Release/wheel/onnxruntime_genai-0.17.0-cp310-cp310-linux_x86_64.whl`.
 
 **Install `model_benchmark`:**
 
@@ -413,7 +414,7 @@ decode token generation). Prebuilt package includes it.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 + PR2194)
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0)
 the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`);
 the prebuilt package bundles the umbrella libs.
 
