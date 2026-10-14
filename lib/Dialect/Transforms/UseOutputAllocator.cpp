@@ -35,10 +35,12 @@
 // allocs, but those buffers stay inside the DLL and are not EP outputs --
 // rewriting them would hand out an `out_idx` that clashes with the real
 // outputs. Functions whose arg 0 is not `!hip.context` are skipped too (no
-// runtime handle to pass to the new op). Pass-through outputs (a returned value
-// that comes from a block argument or a view of an input, not from an alloc)
-// are left alone. The function signature and the func.return are not touched
-// here -- `convert-hip-to-llvm` builds the `-> i32` entry wrapper later.
+// runtime handle to pass to the new op). A pass-through output (a returned
+// value that comes from a block argument or a view of an input, not from an
+// alloc) is copied into a fresh `hip.alloc_output`: the EP output allocator
+// requires every graph output to be allocated in-graph, and an aliased input
+// never calls that callback. The function signature is not touched here --
+// `convert-hip-to-llvm` builds the `-> i32` entry wrapper later.
 //
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
@@ -60,6 +62,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -172,6 +175,47 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
                        builder.getDenseI64ArrayAttr(groups));
 }
 
+/// Walk cast / reshape / subview chains back to the buffer they view.
+static Value skipViews(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    if (isa<memref::CastOp, memref::CollapseShapeOp, memref::ExpandShapeOp,
+            memref::SubViewOp, memref::ReshapeOp>(def) &&
+        def->getNumOperands() >= 1) {
+      value = def->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  return value;
+}
+
+/// Copy a returned buffer that is not rooted at `hip.alloc_output` into a new
+/// one and return the copy. The source is typically a graph input forwarded by
+/// `onnx.Identity`. The copy is what makes the output allocator run for this
+/// output index.
+static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
+                                         int64_t outIdx, OpBuilder &builder) {
+  Value source = returnOp.getOperand(outIdx);
+  if (skipViews(source).getDefiningOp<AllocOutputOp>())
+    return;
+
+  auto type = dyn_cast<MemRefType>(source.getType());
+  if (!type)
+    return;
+
+  builder.setInsertionPoint(returnOp);
+  Location loc = returnOp.getLoc();
+  SmallVector<Value> dynamicSizes;
+  for (int64_t dim = 0; dim < type.getRank(); ++dim)
+    if (type.isDynamicDim(dim))
+      dynamicSizes.push_back(memref::DimOp::create(builder, loc, source, dim));
+
+  auto allocOutput = AllocOutputOp::create(
+      builder, loc, type, ctx, dynamicSizes, builder.getI64IntegerAttr(outIdx));
+  memref::CopyOp::create(builder, loc, source, allocOutput.getResult());
+  returnOp.setOperand(outIdx, allocOutput.getResult());
+}
+
 struct UseOutputAllocatorPass
     : impl::UseOutputAllocatorPassBase<UseOutputAllocatorPass> {
 
@@ -179,7 +223,9 @@ struct UseOutputAllocatorPass
     // The pass creates hip.alloc_output (HipDialect). BufferViewFlowAnalysis
     // follows the memref view ops (cast, collapse_shape, expand_shape, subview)
     // through their ViewLikeOpInterface, which MemRefDialect provides.
-    registry.insert<hip::HipDialect, memref::MemRefDialect>();
+    // memref.dim materializes an arith.constant for a static dimension index.
+    registry
+        .insert<hip::HipDialect, memref::MemRefDialect, arith::ArithDialect>();
   }
 
   void runOnOperation() override {
@@ -256,6 +302,14 @@ struct UseOutputAllocatorPass
           outIdx < static_cast<int64_t>(returnOp.getNumOperands()))
         stampAbiReshapeAttrs(allocOutput, returnOp.getOperand(outIdx), builder);
     }
+
+    // Phase 3 -- pass-through outputs. A returned input (or a view of one)
+    // never went through memref.alloc, so phase 2 did not allocate it. Copy it
+    // into an EP-owned buffer so the output-allocator callback still runs.
+    if (returnOp)
+      for (int64_t outIdx = 0;
+           outIdx < static_cast<int64_t>(returnOp.getNumOperands()); ++outIdx)
+        materializePassthroughOutput(returnOp, ctx, outIdx, builder);
   }
 };
 

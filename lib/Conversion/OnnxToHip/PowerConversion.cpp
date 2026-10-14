@@ -204,9 +204,9 @@ struct NegToHip : public mlir::RewritePattern {
 ///   * e == -1           -> `onnx.Reciprocal`
 ///   * e == -0.5         -> `onnx.Reciprocal(onnx.Sqrt(x))`
 ///   * negative integer  -> `onnx.Reciprocal(x^|e|)`
-/// Anything else (non-constant exponent, or a fractional value we cannot
-/// express losslessly) is left unmatched, so a genuinely unsupported Pow
-/// surfaces downstream (bufferization error) instead of being silently wrong.
+/// Anything else with a constant scalar exponent is left for hip.pow in
+/// convertComputeOps. A non-constant exponent stays unmatched, so it surfaces
+/// downstream instead of being silently wrong.
 ///
 /// Before (production generic ONNX constant + Cast wrap):
 ///   %c   = "onnx.Constant"() {value = dense<2.0> : tensor<f32>}
