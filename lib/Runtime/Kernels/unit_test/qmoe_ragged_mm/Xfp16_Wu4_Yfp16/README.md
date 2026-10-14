@@ -1,10 +1,28 @@
 # qmoe_ragged_mm Xfp16/Wu4/Yfp16 standalone test
 
-This leaf directly compiles `qmoe_ragged_mm_kernel.hip` and a self-contained
-C++ driver. It does not configure or build hip-ep, ONNX Runtime, LLVM, or MLIR.
+Standalone `hipcc`-only test for the persistent LDS-staged FP16-WMMA ragged
+MatMul primitive (`hip_qmoe_ragged_matmul_nbits`) and the routing kernels
+around it. It does not configure or build hip-ep, ONNX Runtime, LLVM, or MLIR.
+`make` compiles `qmoe_ragged_mm_kernel.hip` and `qmoe_kernel.hip` (token
+bucketing, SwiGLU) into the leaf; the CMake package build links
+`custom_kernels_<arch>.dll` instead. Inputs and the CPU reference
+are generated in-process -- no python, no data files.
 
-The current coverage validates the persistent LDS-staged FP16-WMMA ragged
-MatMul primitive against an in-process CPU reference:
+```
+make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
+make test_custom OFFLOAD=... HIP_SDK=... ARGS="--launcher-grid-only"
+make clean
+```
+
+| Target | Meaning |
+|---|---|
+| `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
+| `test_custom` | Runs the exe with `ARGS=` (e.g. `--coverage 1`, `--launcher-grid-only`). |
+| `clean` | Removes `out/`. |
+
+## What it checks
+
+Against the in-process CPU reference:
 
 - balanced, empty-expert, and highly skewed routing;
 - FC1-style indirect/gather input and FC2-style contiguous input;
@@ -21,21 +39,28 @@ MatMul primitive against an in-process CPU reference:
 - one ragged FC1 launch, one SwiGLU launch, one ragged FC2 launch, followed by
   deterministic sorted reduction (20 byte-identical repetitions).
 
-`COVERAGE=1` runs one small shape across every categorical case. Higher tiers
-add shapes while preserving all combinations of routing, input layout, bias,
-and zero-point mode. `COVERAGE=3` additionally runs exact GPT-OSS-20B FC1
-(`K=2880,N=5760`) and FC2 (`K=2880,N=2880`) dimensions.
+## Shape coverage (3 tiers)
 
-```text
-make test HIP_SDK=C:/ROCm_workspace/therock-dist \
-  OFFLOAD=--offload-arch=gfx1151 COVERAGE=1
+Every tier runs all 24 routing x input layout x bias x zero-point
+combinations on each selected shape, plus the row counts on both sides of
+each GEMV / WMMA16 / WMMA64 boundary (`task_m1` .. `task_m65`), the bucket
+descriptors, the task-policy and launch-grid selectors and the pipeline.
+`COVERAGE` only thins the shape list: tier1 = `tiny`, tier2 adds
+`multi_group`, tier3 (default) adds `tail_k_and_n`, `wider` and the exact
+GPT-OSS-20B FC1 (`K=2880,N=5760`) and FC2 (`K=2880,N=2880`) dimensions. At
+startup the exe prints `qmoe_ragged_mm coverage=N cases=<n>`; a successful run
+prints one `PASS relL2=...` line per case and ends with `ALL PASS`.
 
-make test_custom HIP_SDK=C:/ROCm_workspace/therock-dist \
-  OFFLOAD=--offload-arch=gfx1151 ARGS="--coverage 3"
+## `MODE` and `out/results.csv`
 
-make clean
-```
+This primitive has no autotune table and no tuner: `MODE` is accepted for
+consistency with other leaves and only fills the `mode` column.
 
-`MODE` is accepted for consistency with other leaves but this primitive has no
-autotune LUT. A successful run prints one `PASS relL2=...` line per case and
-ends with `ALL PASS`.
+Each case appends one row to `out/results.csv` (see `unit_test/README.md`).
+`config` uses the `fixed:` prefix and is read back through the production
+selectors (`hip_qmoe_ragged_matmul_nbits_get_task_kind` / `_get_launch_config`):
+for a MatMul case, the stage's task policy, the queue policy, the grid and the
+task kinds its row groups ran, e.g. `fixed:p0-current queue=atomic1 grid=20
+tasks=gemv+wmma16`. The leaf checks correctness only, so `time_ms` is 0.
+
+CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.

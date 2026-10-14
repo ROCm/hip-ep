@@ -138,6 +138,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16
     gqa/prefill/Xfp16_Wi8_Yfp16/test_gqa_prefill_i8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16
+    qmoe_ragged_mm/Xfp16_Wu4_Yfp16/test_qmoe_ragged_mm.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf

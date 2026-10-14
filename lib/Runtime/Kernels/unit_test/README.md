@@ -87,7 +87,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 12 leaves serially, with `bin` as the working
+The controller runs the 13 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -259,6 +259,7 @@ unit_test/
   gqa/decode/Xfp16_Wi8_Yfp16/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
   gqa/prefill/Xfp16_Wi8_Yfp16/
+  qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -363,6 +364,13 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   (`genCase()`'s `O(M*K*N)`, no BLAS) is now multithreaded over `N` to keep
   this affordable; see the comment above `genCase()` in any
   `matmul_nbits/*/test_matmul_nbits*.cpp`.
+- **qmoe_ragged_mm**: routing `{balanced, empty experts, skewed}` x input
+  `{contiguous, FC1 gather}` x bias `{off,on}` x zero points `{off,on}` (24
+  combos) on a shape list COVERAGE thins (tier1 = 1 shape, tier2 = 2, tier3 =
+  4 plus the GPT-OSS-20B FC1/FC2 dimensions). Every tier also runs the row
+  counts on both sides of each GEMV / WMMA16 / WMMA64 boundary, the bucket
+  descriptors, the task-policy and launch-grid selectors, and one
+  FC1 -> SwiGLU -> FC2 pipeline.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -511,13 +519,19 @@ One row per case.
 `shape` lists the case's parameters, enough to tell any two rows of a leaf
 apart: MatMulNBits `M1_N5120_K2880_gs32` (`_noz` without zero points), GQA
 decode `B1_H64_G8_D64_len2048` and prefill `B1_H64_G8_D64_sq512_past0`, with
-`_win<n>`, `_sink` and `_smooth` only when set.
+`_win<n>`, `_sink` and `_smooth` only when set. qmoe_ragged_mm writes
+`R20_E4_N17_K32_bs32_skewed_gather` (rows, experts, N, K, block size, routing,
+input layout) with `_bias` and `_zp` when set, and names its selector,
+descriptor and pipeline cases (`task_policy_fc1`, `launcher_grid`,
+`descriptors_E11_P304_k1`, `pipeline_T20_E5_k2_H32_I16_bs32`).
 
 `time_ms` is the **mean per-launch** time of that case's own timing loop (the
 leaf's `kIters` launches between two HIP events), not a total. It is the only
 timing in the row: the tuner's own figure is a *peak* (minimum) sample taken
 during the sweep, under a different clock state, so it is deliberately not
 carried in `config` where it would read as the same measurement.
+qmoe_ragged_mm checks correctness only and has no timing loop, so its rows
+carry 0.
 
 `config` names the configuration that actually ran, recovered from the op's own
 diagnostics (`HIPDNN_{MATMUL,GQA}_AUTOTUNE_LOG`, `HIPDNN_MATMUL_LUT_LOG`) or,
@@ -529,6 +543,7 @@ where the configuration came from, the rest is the configuration itself:
 |---|---|
 | `lookup:…` | the offline table answered. MatMulNBits reports `(exact\|nearest\|fallback d=…)`, where `d` is the weighted log2 distance to the measured point; GQA reports `(exact\|nearest\|fallback\|heuristic)` |
 | `autotune:…` | the table missed, was bypassed, or the op has no lookup wired, and the runtime sweep picked this one |
+| `fixed:…` | the op has no table and no tuner; a fixed rule picked this, read back through the op's own selectors. qmoe_ragged_mm reports the stage's task policy, queue policy, grid and the task kinds its row groups ran (`fixed:p0-current queue=atomic1 grid=20 tasks=gemv+wmma16`) |
 | `declined` | the op rejected the combination by design (a leaf's `expect_reject` case); `time_ms`/`relL2` are 0 because nothing ran |
 | `unlogged` | the op emitted no config diagnostic for this case — treat it as a gap to fix, not a result |
 

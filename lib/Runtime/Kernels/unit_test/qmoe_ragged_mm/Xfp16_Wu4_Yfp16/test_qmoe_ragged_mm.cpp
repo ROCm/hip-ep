@@ -13,12 +13,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -59,18 +61,21 @@ constexpr Shape kShapes[] = {
     {"wider", 19, 5, 64, 96, 32, 3},
 };
 
+// Row counts on both sides of each GEMV / WMMA16 / WMMA64 boundary. The row
+// count selects the task kind, and no kShapes group is large enough for
+// WMMA64, so these run at every tier.
 constexpr Shape kAdaptiveShapes[] = {
-    {"task_m1", 1, 1, 17, 32, 32, 3},
-    {"task_m2", 2, 1, 17, 32, 32, 3},
-    {"task_m7", 7, 1, 17, 32, 32, 3},
-    {"task_m8", 8, 1, 17, 32, 32, 3},
-    {"task_m15", 15, 1, 17, 32, 32, 3},
-    {"task_m16", 16, 1, 17, 32, 32, 3},
-    {"task_m31", 31, 1, 17, 32, 32, 3},
-    {"task_m32", 32, 1, 17, 32, 32, 3},
-    {"task_m63", 63, 1, 17, 32, 32, 3},
-    {"task_m64", 64, 1, 17, 32, 32, 3},
-    {"task_m65", 65, 1, 17, 32, 32, 3},
+    {"task_m1", 1, 1, 17, 32, 32, 1},
+    {"task_m2", 2, 1, 17, 32, 32, 1},
+    {"task_m7", 7, 1, 17, 32, 32, 1},
+    {"task_m8", 8, 1, 17, 32, 32, 1},
+    {"task_m15", 15, 1, 17, 32, 32, 1},
+    {"task_m16", 16, 1, 17, 32, 32, 1},
+    {"task_m31", 31, 1, 17, 32, 32, 1},
+    {"task_m32", 32, 1, 17, 32, 32, 1},
+    {"task_m63", 63, 1, 17, 32, 32, 1},
+    {"task_m64", 64, 1, 17, 32, 32, 1},
+    {"task_m65", 65, 1, 17, 32, 32, 1},
 };
 
 enum class Routing { Balanced, EmptyExperts, Skewed };
@@ -313,8 +318,144 @@ Metrics compare(const std::vector<__half>& actual,
           finite};
 }
 
+// Tiny out/results.csv writer (op,leaf,arch,mode,shape,config,time_ms,relL2,
+// verdict), opt-in via HIPDNN_RESULTS_CSV (set by the Makefile).
+struct CsvRow {
+  std::string shape, config;
+  double time_ms = 0.0;
+  double rel_l2 = 0.0;
+  std::string verdict;
+};
+class CsvWriter {
+ public:
+  CsvWriter() {
+    const char* path = std::getenv("HIPDNN_RESULTS_CSV");
+    if (!path || !path[0]) return;
+    path_ = path;
+    bool need_header = true;
+    if (FILE* probe = std::fopen(path_.c_str(), "rb")) {
+      std::fseek(probe, 0, SEEK_END);
+      need_header = std::ftell(probe) == 0;
+      std::fclose(probe);
+    }
+    f_ = std::fopen(path_.c_str(), "a");
+    if (f_ && need_header) {
+      std::fprintf(f_, "op,leaf,arch,mode,shape,config,time_ms,relL2,verdict\n");
+      std::fflush(f_);
+    }
+  }
+  ~CsvWriter() { if (f_) std::fclose(f_); }
+  void write(const CsvRow& r) {
+    if (!f_) return;
+    std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
+                 env_or("HIPDNN_RESULTS_OP", "qmoe_ragged_mm"),
+                 env_or("HIPDNN_RESULTS_LEAF", "unknown"),
+                 env_or("HIPDNN_RESULTS_ARCH", "unknown"),
+                 env_or("HIPDNN_RESULTS_MODE", "unknown"), r.shape.c_str(),
+                 r.config.c_str(), r.time_ms, r.rel_l2, r.verdict.c_str());
+    std::fflush(f_);
+  }
+ private:
+  static const char* env_or(const char* name, const char* dflt) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : dflt;
+  }
+  std::string path_;
+  FILE* f_ = nullptr;
+};
+
+// One case's results.csv row, written when it goes out of scope so that a
+// case returning early still reports FAIL. The leaf has no timing loop, so
+// time_ms stays 0.
+struct ResultRow {
+  CsvRow row;
+  ResultRow(std::string shape, std::string config) {
+    row.shape = std::move(shape);
+    row.config = std::move(config);
+    row.rel_l2 = std::numeric_limits<double>::infinity();
+    row.verdict = "FAIL";
+  }
+  ResultRow(const ResultRow&) = delete;
+  ResultRow& operator=(const ResultRow&) = delete;
+  ~ResultRow() { CsvWriter().write(row); }
+  void finish(double rel_l2, bool pass) {
+    row.rel_l2 = rel_l2;
+    row.verdict = pass ? "PASS" : "FAIL";
+  }
+};
+
+const char* task_policy_name(int32_t policy_id) {
+  switch (policy_id) {
+  case 0:
+    return "p0-current";
+  case 1:
+    return "p1-early-wmma16";
+  case 2:
+    return "p2-early-wmma64";
+  case 3:
+    return "p3-early-both";
+  }
+  return "unknown";
+}
+
+std::string stage_policy_name(bool fc1) {
+  int32_t policy_id = -1;
+  int32_t task_kind = -1;
+  hip_qmoe_ragged_matmul_nbits_get_task_kind(fc1 ? 1 : 0, 1, &policy_id,
+                                             &task_kind);
+  return task_policy_name(policy_id);
+}
+
+// The op has no table and no tuner, so a fixed rule picks everything. This
+// names what that rule picked for one hip_qmoe_ragged_matmul_nbits launch,
+// read back through the production selectors: the stage's task policy, the
+// queue policy, the grid, and the task kinds its row groups map to.
+std::string ragged_config(bool fc1, const std::vector<int32_t>& groups,
+                          int64_t total_rows, int64_t n) {
+  static const char* const kKindNames[] = {"gemv", "wmma16", "wmma64"};
+  bool used[3] = {false, false, false};
+  for (size_t group = 0; group < groups.size() / 4; ++group) {
+    int32_t policy_id = -1;
+    int32_t task_kind = -1;
+    if (hip_qmoe_ragged_matmul_nbits_get_task_kind(
+            fc1 ? 1 : 0, groups[group * 4 + 2], &policy_id, &task_kind) ==
+            static_cast<int>(hipSuccess) &&
+        task_kind >= kTaskGemv && task_kind <= kTaskWmma64) {
+      used[task_kind] = true;
+    }
+  }
+  std::string tasks;
+  for (int kind = kTaskGemv; kind <= kTaskWmma64; ++kind) {
+    if (!used[kind]) continue;
+    if (!tasks.empty()) tasks += '+';
+    tasks += kKindNames[kind];
+  }
+  int32_t cu_count = 0;
+  int32_t resident_blocks = 0;
+  int32_t grid_blocks = 0;
+  int64_t upper_tasks = 0;
+  hip_qmoe_ragged_matmul_nbits_get_launch_config(
+      total_rows, n, &cu_count, &resident_blocks, &grid_blocks, &upper_tasks);
+  return "fixed:" + stage_policy_name(fc1) +
+         " queue=" + expected_queue_policy().name +
+         " grid=" + std::to_string(grid_blocks) + " tasks=" + tasks;
+}
+
+std::string case_shape(const Shape& shape, Routing routing, bool gather,
+                       bool use_bias, bool use_zero_points) {
+  char buffer[160];
+  std::snprintf(buffer, sizeof(buffer), "R%d_E%d_N%d_K%d_bs%d_%s_%s%s%s",
+                shape.rows, shape.experts, shape.n, shape.k, shape.block_size,
+                routing_name(routing), gather ? "gather" : "contig",
+                use_bias ? "_bias" : "", use_zero_points ? "_zp" : "");
+  return buffer;
+}
+
 bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
               bool use_zero_points, hipStream_t stream) {
+  ResultRow result(
+      case_shape(shape, routing, gather, use_bias, use_zero_points),
+      "unlogged");
   const std::vector<int> counts = make_counts(shape, routing);
   std::vector<int32_t> groups;
   std::vector<int> expert_for_row;
@@ -323,6 +464,7 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
               << " routing=" << routing_name(routing) << '\n';
     return false;
   }
+  result.row.config = ragged_config(gather, groups, shape.rows, shape.n);
 
   const int input_rows = gather ? std::max(2, shape.rows / 2) : shape.rows;
   std::vector<__half> input(static_cast<size_t>(input_rows) * shape.k);
@@ -480,6 +622,7 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             << " zp=" << (use_zero_points ? "on" : "off")
             << " maxAbs=" << metrics.max_abs
             << " guards=" << (guards_ok ? "PASS" : "FAIL") << '\n';
+  result.finish(metrics.rel_l2, pass);
   return pass;
 }
 
@@ -488,6 +631,9 @@ bool run_bucket_descriptor_case(hipStream_t stream) {
   constexpr int experts = sizeof(counts) / sizeof(counts[0]);
   int pairs = 0;
   for (int count : counts) pairs += count;
+  ResultRow result("descriptors_E" + std::to_string(experts) + "_P" +
+                       std::to_string(pairs) + "_k1",
+                   "fixed:group_rows<=" + std::to_string(kMaxRowsPerGroup));
 
   std::vector<int32_t> expert_indices;
   std::vector<__half> expert_weights;
@@ -577,6 +723,7 @@ bool run_bucket_descriptor_case(hipStream_t stream) {
             << " shape=adaptive_descriptors maxAbs=0 metadata="
             << (pass ? "PASS" : "FAIL")
             << " descriptor_field=reserved_zero\n";
+  result.finish(0.0, pass);
   return pass;
 }
 
@@ -606,6 +753,11 @@ bool run_task_policy_case(bool fc1) {
             << " policy=" << expected.name
             << " boundaries=" << expected.gemv_max_rows << ','
             << expected.wmma16_max_rows << ",64\n";
+  ResultRow result(std::string("task_policy_") + (fc1 ? "fc1" : "fc2"),
+                   "fixed:" + stage_policy_name(fc1) +
+                       " gemv<=" + std::to_string(expected.gemv_max_rows) +
+                       " wmma16<=" + std::to_string(expected.wmma16_max_rows));
+  result.finish(0.0, pass);
   return pass;
 }
 
@@ -703,6 +855,11 @@ bool run_launcher_grid_case() {
             << " task_bound=" << (saw_task_bound ? "PASS" : "FAIL")
             << " occupancy_bound="
             << (saw_occupancy_bound ? "PASS" : "FAIL") << '\n';
+  ResultRow result("launcher_grid",
+                   "fixed:cu=" + std::to_string(expected_cu_count) +
+                       " blocks_per_cu=" +
+                       std::to_string(expected_resident_blocks));
+  result.finish(0.0, pass);
   return pass;
 }
 
@@ -804,6 +961,14 @@ bool run_pipeline_case(hipStream_t stream) {
   constexpr float alpha = 1.702f;
   constexpr float beta = 1.0f;
   constexpr float limit = 7.0f;
+  ResultRow result("pipeline_T" + std::to_string(tokens) + "_E" +
+                       std::to_string(experts) + "_k" + std::to_string(top_k) +
+                       "_H" + std::to_string(hidden) + "_I" +
+                       std::to_string(inter) + "_bs" +
+                       std::to_string(block_size),
+                   std::string("fixed:queue=") + expected_queue_policy().name +
+                       " fc1=" + stage_policy_name(true) +
+                       " fc2=" + stage_policy_name(false));
 
   std::vector<__half> input(static_cast<size_t>(tokens) * hidden);
   for (int token = 0; token < tokens; ++token) {
@@ -1066,6 +1231,7 @@ bool run_pipeline_case(hipStream_t stream) {
             << " fc1_queue_head=" << got_fc1_queue
             << " fc2_queue_head=" << got_fc2_queue
             << " launches=fc1:1,fc2:1\n";
+  result.finish(metrics.rel_l2, pass);
   return pass;
 }
 
@@ -1110,17 +1276,17 @@ int main(int argc, char** argv) {
   }
   constexpr int category_count = 3 * 2 * 2 * 2;
   const int model_shape_cases = coverage == 3 ? 2 : 0;
-  const int adaptive_shape_cases =
-      coverage == 3
-          ? static_cast<int>(sizeof(kAdaptiveShapes) / sizeof(kAdaptiveShapes[0]))
-          : 0;
-  const int descriptor_cases = coverage == 3 ? 1 : 0;
+  constexpr int adaptive_shape_cases =
+      static_cast<int>(sizeof(kAdaptiveShapes) / sizeof(kAdaptiveShapes[0]));
+  constexpr int descriptor_cases = 1;
   constexpr int task_policy_cases = 2;
   constexpr int launcher_cases = 1;
+  constexpr int pipeline_cases = 1;
   std::cout << "qmoe_ragged_mm coverage=" << coverage
             << " cases=" << shape_count * category_count + model_shape_cases +
                                adaptive_shape_cases + descriptor_cases +
-                               task_policy_cases + launcher_cases
+                               task_policy_cases + launcher_cases +
+                               pipeline_cases
             << '\n';
 
   hipStream_t stream = nullptr;
@@ -1146,14 +1312,14 @@ int main(int argc, char** argv) {
       }
     }
   }
+  all_pass = run_bucket_descriptor_case(stream) && all_pass;
+  for (const Shape& shape : kAdaptiveShapes) {
+    all_pass = run_case(shape, Routing::Balanced,
+                        /*gather=*/(shape.rows & 1) != 0,
+                        /*use_bias=*/true, /*use_zero_points=*/true, stream) &&
+               all_pass;
+  }
   if (coverage == 3) {
-    all_pass = run_bucket_descriptor_case(stream) && all_pass;
-    for (const Shape& shape : kAdaptiveShapes) {
-      all_pass = run_case(shape, Routing::Balanced,
-                          /*gather=*/(shape.rows & 1) != 0,
-                          /*use_bias=*/true, /*use_zero_points=*/true, stream) &&
-                 all_pass;
-    }
     const Shape gpt_oss_fc1 =
         {"gpt_oss_20b_fc1", 2, 1, 5760, 2880, 32, 3};
     const Shape gpt_oss_fc2 =
