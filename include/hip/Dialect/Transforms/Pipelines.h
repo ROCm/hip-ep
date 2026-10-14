@@ -42,6 +42,30 @@ namespace hip {
 /// scalar lives in device or host-accessible memory).
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
+/// Options for the source-neutral HIP tensor-to-bufferized pipeline.
+///
+/// Frontends call this pipeline after they have produced tensor-form HIP IR,
+/// including the `!hip.context` function argument, graph ABI metadata, and any
+/// `hip.constant` carriers. The options mirror ExternalizeConstantsPass.
+struct HipTensorToBufferizedPipelineOptions
+    : public PassPipelineOptions<HipTensorToBufferizedPipelineOptions> {
+  Option<std::string> externalizeOutputDir{
+      *this, "externalize-output-dir",
+      llvm::cl::desc("Directory for constants-file .constants.bin/.json files "
+                     "(empty = cwd)"),
+      llvm::cl::init("")};
+  Option<int64_t> externalizeMinNumElements{
+      *this, "externalize-min-num-elements",
+      llvm::cl::desc(
+          "Minimum number of tensor elements to externalize (0 = disabled)"),
+      llvm::cl::init(0)};
+  Option<bool> skipConstantData{
+      *this, "skip-constant-data",
+      llvm::cl::desc(
+          "Skip writing constant data to constants.bin (metadata only)"),
+      llvm::cl::init(false)};
+};
+
 /// Pipeline options forwarded to ExternalizeConstantsPass. ConvertOnnxToHipPass
 /// only emits hip.constant carriers. These mirror the externalizer options
 /// so the pipeline flag surface is:
@@ -65,6 +89,20 @@ struct OnnxToHipPipelineOptions
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
 };
+
+/// Build the source-neutral tensor-form HIP to bufferized HIP pipeline.
+///
+/// This begins at the stable frontend boundary, after source-specific lowering
+/// has produced tensor-form HIP IR. It performs HIP shape refinement, constant
+/// externalization, canonicalization, bufferization, output-allocation
+/// rewriting, memory planning, and final memref cleanup. It does not add a
+/// context argument or run any source-dialect conversion.
+///
+/// \p fs -- when non-null, externalized constants are written through this
+///   FileSystem. When null, a DiskFileSystem is used.
+void buildHipTensorToBufferizedPipeline(
+    OpPassManager &pm, const HipTensorToBufferizedPipelineOptions &options,
+    morphizen::FileSystem *fs = nullptr);
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
 /// Controls the GenerateInterface pass at the end of the pipeline.

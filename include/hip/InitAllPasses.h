@@ -179,9 +179,9 @@ loadAllDialects(mlir::MLIRContext &context,
 /// takes a runtime handle, and a handful of MLIR utility passes are added only
 /// inside the pipeline builders. A textual override that needs the C-ABI entry
 /// point therefore composes the registered *pipeline* names
-/// (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`), which
-/// embed those passes. See docs/design/plugin-interface.md "Pipeline
-/// composition".
+/// (`hip-tensor-to-bufferized-pipeline`, `onnx-to-hip-pipeline`,
+/// `hip-to-llvm-pipeline`, `hipdnn-pipeline`), which embed those passes. See
+/// docs/design/plugin-interface.md "Pipeline composition".
 inline void registerAllPasses() {
   // Register exactly once per process. PassPipelineRegistration (used by
   // registerHipPipelines for `onnx-to-hip-pipeline` etc.) writes into MLIR's

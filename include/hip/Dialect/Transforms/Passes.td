@@ -348,8 +348,9 @@ def HoistAllocSizeArithPass
     allocation preserves idempotence. Multi-block functions and nested
     allocations are skipped, matching the scope of PoolAllocs.
 
-    Run after host-scalar materialization, dimension resolution, CSE, and
-    canonicalization, and before `hip-pool-allocs`. This pass only moves existing
+    Wired into `buildHipTensorToBufferizedPipeline`. Run after host-scalar
+    materialization, dimension resolution, CSE, and canonicalization, and
+    before `hip-pool-allocs`. This pass only moves existing
     operations; it does not fold shapes, duplicate computation, or move reads.
     PoolAllocs remains responsible for placing pool acquisitions and storage.
   }];
@@ -616,9 +617,9 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
 
     Pipeline placement
     ------------------
-    Wired into `buildOnnxToHipPipelineTail` (the shared post-conversion
-    segment of `buildOnnxToHipPipeline`) immediately after
-    `convert-onnx-to-hip` and before `one-shot-bufferize`. Refining
+    Wired at the start of `buildHipTensorToBufferizedPipeline`; the ONNX
+    frontend invokes that shared tail immediately after `convert-onnx-to-hip`.
+    Refining
     tensor result types BEFORE bufferize propagates static dims through
     the alloc / pool sizing computations and removes spurious
     `memref.dim` ops that the legalisation chain would otherwise leave
