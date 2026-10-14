@@ -108,6 +108,9 @@ bool canMakeAvailableBefore(mlir::Value v, mlir::Operation *point,
   if (!def || def->getBlock() != point->getBlock() ||
       def->isBeforeInBlock(point))
     return true;
+  // A value computed from `point` itself can never be moved above it.
+  if (def == point)
+    return false;
   if (depth > 8 || def->getNumRegions() != 0 || !mlir::isMemoryEffectFree(def))
     return false;
   return llvm::all_of(def->getOperands(), [&](mlir::Value operand) {
@@ -236,6 +239,9 @@ struct MatMulNBitsGroup final
         silu = matchSiluMul(group[1], group[0]);
     }
 
+    // collectGroup admitted only members whose operands can be made available
+    // at `root`, so these moves are expected to succeed. If one does not, the
+    // ops already moved are side-effect free and stay valid where they are.
     for (mlir::hip::MatMulNBitsOp mm : llvm::drop_begin(group))
       if (mlir::failed(mlir::moveOperationDependencies(rewriter, mm, root)))
         return rewriter.notifyMatchFailure(mm, "cannot hoist operands");
