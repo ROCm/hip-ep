@@ -257,6 +257,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateReduceMinConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
   populateMaxConversionPatterns(patterns, ctx);
+  populateIsNaNConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
   populateCosConversionPatterns(patterns, ctx);
   populateErfConversionPatterns(patterns, ctx);
@@ -298,6 +299,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
+  populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;

@@ -12,7 +12,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | Custom HIP kernel |
+| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
@@ -23,7 +23,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Sigmoid | Custom HIP kernel |
 | Tanh | Custom HIP kernel |
 | Softplus | Custom HIP kernel (f32/f16) |
-| Gelu | Custom HIP kernel |
+| Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
 | Swish | Custom HIP kernel |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
@@ -41,6 +41,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Neg | Custom HIP kernel |
 | Equal | Custom HIP kernel |
 | Not | Custom HIP kernel |
+| IsNaN | Custom HIP kernel |
 | And | Custom HIP kernel |
 | Or | Custom HIP kernel |
 | Abs | Custom HIP kernel |
@@ -80,6 +81,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
 | InstanceNormalization | Custom HIP kernel |
+| BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
@@ -134,6 +137,7 @@ These operations are handled through standard MLIR transformations and generally
 | ConstantOfShape | `arith.constant` when foldable | Produces a splat constant for constant shape inputs |
 | Identity | SSA value forwarding | No runtime operation |
 | Flatten | `tensor.collapse_shape` and, where needed, `tensor.expand_shape` | Metadata-only where representable |
+| DepthToSpace | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | Rank-4 NCHW. `blocksize >= 1`, `C` divisible by `blocksize^2`, and output `[N, C / blocksize^2, H * blocksize, W * blocksize]`. Modes `DCR` (default) and `CRD`. `blocksize == 1` is the input |
 
 ## Fusion and preprocessing
 

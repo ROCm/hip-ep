@@ -65,6 +65,7 @@ add_library(OnnxToHip STATIC
   ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
+  IsNaNConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   ErfConversion.cpp
@@ -102,6 +103,7 @@ add_library(OnnxToHip STATIC
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
+  DepthToSpaceConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
