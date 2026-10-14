@@ -285,7 +285,7 @@ __global__ void matmul_nbits_kernel_i8(
 // Shared by the int8 GEMV below and the int4 GEMV in section 1b, which have the
 // same accumulator tile and the same reason to want it in registers.
 #define GEMV_WAVES_MIN(TM) ((TM) > 1 ? 1 : 9)
-#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 4 : 9)
+#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 16 : 9)
 
 template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
 __global__
@@ -672,7 +672,7 @@ void matmul_nbits_gemv_kernel_i8(
 // both kernels hold the same partial[TILE_M][TILE_N] accumulator and want the
 // same register budget for it.
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
-__global__
+__global__ __launch_bounds__(BLOCK_SIZE)
 __attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
                                    GEMV_WAVES_MAX(TILE_M))))
 void matmul_nbits_gemv_kernel(
