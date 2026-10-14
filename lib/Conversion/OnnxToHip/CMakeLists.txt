@@ -14,6 +14,7 @@ add_library(OnnxToHip STATIC
   EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
+  SumConversion.cpp
   PowerConversion.cpp
   PowConversion.cpp
   ActivationConversion.cpp
@@ -28,6 +29,7 @@ add_library(OnnxToHip STATIC
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
@@ -114,7 +116,11 @@ add_library(OnnxToHip STATIC
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
+  ImageScalerConversion.cpp
   LeakyReluConversion.cpp
+  PReluConversion.cpp
+  LRNConversion.cpp
+  TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
   HardSigmoidConversion.cpp

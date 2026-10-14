@@ -58,6 +58,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `MatMul`, `Gemm` | `hip.hipblaslt.matmul` | hipBLASLt |
+| `NhwcConv` (`com.microsoft`) | transpose + `hip.conv` | rank-4 NHWC; static weights `[M, kH, kW, C/group]` are permuted at compile time |
 | `Einsum` | transpose / reshape + `hip.matmul` | binary contraction, static shapes, hipBLASLt |
 
 ### Normalization
@@ -113,7 +114,10 @@ must be `NOTSET`. `hip.qconv` is a different op, the W4A16 1x1 QDQ fusion, and
 does not accept `QLinearConv`.
 
 QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
-int4/uint4. Granularity comes from the shape of `scale` rather than a flag: a
+int4/uint4. DequantizeLinear additionally accepts int32, which is where a QDQ
+exporter puts a conv or gemm bias quantized at `input_scale * weight_scale`;
+QuantizeLinear does not, because ONNX gives it no int32 output.
+Granularity comes from the shape of `scale` rather than a flag: a
 single element is per-tensor, a 1-D tensor is per-axis along `axis`, and
 `block_size > 0` is blocked.
 
@@ -131,6 +135,8 @@ runtime coverage.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `Relu` | `hip.max` against a 0-D zero | `wrap_elementwise` |
+| `PRelu` | `hip.prelu` | `prelu_kernel.hip`. Slope broadcasts onto X, f16/bf16/f32/f64 |
+| `LRN` | `hip.lrn` | `lrn_kernel.hip`. Rank >= 2, channel axis 1, f16/bf16/f32/f64 |
 
 ### Softmax
 
@@ -143,6 +149,8 @@ runtime coverage.
 | ONNX | HIP | Backend |
 |---|---|---|
 | `Add` | `hip.add` | `wrap_elementwise` |
+| `ImageScaler` | `hip.mul`, or `hip.add` then `hip.mul` | `wrap_elementwise` |
+| `Sum` | `hip.add` chain | Decomposed to `onnx.Add` after Gelu fusion. Variadic, NumPy broadcast |
 | `Mul` | `hip.mul` | `wrap_elementwise` |
 | `Sub` | `hip.sub` | `wrap_elementwise_sub` |
 
@@ -177,7 +185,7 @@ runtime coverage.
 | `Pow` | `hip.pow` | Element-wise power |
 | `Sqrt` | `hip.sqrt` | Element-wise square root |
 | `IsNaN` | `hip.isnan` | Float input, 1-byte boolean output |
-| `Upsample` | `hip.resize` | Schema 9; asymmetric coordinates, nearest uses floor |
+| `Upsample` | `hip.resize` | Schema 9 `scales` input and opset 7–8 `scales` attribute; asymmetric coordinates, nearest uses floor |
 | `HardSigmoid` | `hip.mul` + `hip.add` + `hip.max` + `hip.min` | Clip(alpha*x + beta, 0, 1); decomposed pre-lowering; f16/f32 only |
 
 Unmapped ops default to `hip.<OpType>`.

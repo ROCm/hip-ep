@@ -307,6 +307,8 @@ void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populateSumConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populatePowConversionPatterns(RewritePatternSet &patterns,
@@ -337,6 +339,8 @@ void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateNhwcConvConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
@@ -461,8 +465,16 @@ void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateImageScalerConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populatePReluConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+void populateLRNConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateTriluConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateSwishConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateClipConversionPatterns(RewritePatternSet &patterns,
