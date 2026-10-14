@@ -283,6 +283,11 @@ if(BUILD_HIP_UNIT_TESTS)
         OFFLOAD_ARCHS
             ${HIP_ARCHITECTURES}
     )
+    # The kernels directory is added before lib/Runtime resolves hipBLASLt.
+    if(NOT TARGET roc::hipblaslt AND NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        find_package(hipblaslt QUIET HINTS "${THEROCK_DIST}")
+    endif()
+    if(TARGET roc::hipblaslt)
     hip_add_executable(test-matmul-typed
         ${CMAKE_SOURCE_DIR}/test/gpu/test_matmul_typed.hip
         ${CMAKE_SOURCE_DIR}/lib/Runtime/real/matmul.cpp
@@ -297,6 +302,7 @@ if(BUILD_HIP_UNIT_TESTS)
         OFFLOAD_ARCHS
             ${HIP_ARCHITECTURES}
     )
+    endif()
 endif()
 
 # Export include directory for Runtime bitcode compilation
