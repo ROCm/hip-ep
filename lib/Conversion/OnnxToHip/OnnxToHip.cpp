@@ -24,6 +24,7 @@
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
+#include "llvm/ADT/BitVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -389,6 +390,28 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 // Module metadata generation
 //===----------------------------------------------------------------------===//
 
+/// Drop `@main_graph` arguments nothing reads. The EP passes only inputs the
+/// graph uses; an unread argument (an imported reshape shape tensor with no
+/// consumer) would make `inference_compute` call `prepare_input` past the end
+/// of that span. Outlined branch functions are left alone: an unused capture
+/// is part of the shared `hip.if` / `hip.loop` argument list.
+static mlir::LogicalResult
+dropUnreadMainGraphInputs(mlir::func::FuncOp mainFunc) {
+  llvm::BitVector dead(mainFunc.getNumArguments());
+  for (unsigned i : llvm::seq<unsigned>(0u, mainFunc.getNumArguments())) {
+    mlir::BlockArgument arg = mainFunc.getArgument(i);
+    if (mlir::isa<mlir::hip::ContextType>(arg.getType()))
+      continue;
+    if (arg.use_empty())
+      dead.set(i);
+  }
+  if (dead.none())
+    return mlir::success();
+  if (mlir::failed(mainFunc.eraseArguments(dead)))
+    return mainFunc.emitError("failed to drop unread @main_graph arguments");
+  return mlir::success();
+}
+
 /// Generate module metadata attributes required by GenerateInterfacePass.
 /// Must be called BEFORE patterns transform function signatures.
 static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
@@ -397,6 +420,8 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
     module.emitError("expected @main_graph function for metadata generation");
     return mlir::failure();
   }
+  if (mlir::failed(dropUnreadMainGraphInputs(mainFunc)))
+    return mlir::failure();
 
   auto originalFuncType = mainFunc.getFunctionType();
   mlir::OpBuilder builder(module.getContext());
