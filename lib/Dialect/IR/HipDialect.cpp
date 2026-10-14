@@ -2221,6 +2221,81 @@ LogicalResult QuantizeActOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp: ins(A, a_quant, a_scale, weights..., scales...,
+//                         [zero_points...]) outs(outputs..., [up_tmp])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  // outputs and up_tmp are the trailing segments, tied to results in order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + (getUpTmp() ? 1 : 0));
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  size_t numSegments = getWeights().size();
+  if (numSegments < 1 || numSegments > 3)
+    return emitOpError("expected 1 to 3 weights, got ") << numSegments;
+  if (getScales().size() != numSegments)
+    return emitOpError("expected one scales operand per weight");
+  if (!getZeroPoints().empty() && getZeroPoints().size() != numSegments)
+    return emitOpError("expected no zero_points or one per weight");
+  ArrayAttr nAttr = getN();
+  if (nAttr.size() != numSegments)
+    return emitOpError("expected one N entry per weight");
+  SmallVector<int64_t> ns;
+  for (Attribute a : nAttr) {
+    auto n = dyn_cast<IntegerAttr>(a);
+    if (!n || n.getInt() <= 0)
+      return emitOpError("N entries must be positive integers");
+    ns.push_back(n.getInt());
+  }
+  for (Value scales : getScales())
+    if (!cast<ShapedType>(scales.getType()).getElementType().isF16())
+      return emitOpError("scales must be f16");
+  if (getBits() != 4)
+    return emitOpError("bits must be 4, got ") << getBits();
+
+  switch (getEpilogue()) {
+  case 0:
+    if (getOutputs().size() != numSegments || getUpTmp())
+      return emitOpError("epilogue 0 expects one output per weight and no "
+                         "up_tmp");
+    break;
+  case 1:
+    if (numSegments != 2 || getOutputs().size() != 1 || !getUpTmp())
+      return emitOpError("silu_mul epilogue expects 2 weights, 1 output and "
+                         "up_tmp");
+    if (ns[0] != ns[1])
+      return emitOpError("silu_mul epilogue expects equal N");
+    break;
+  default:
+    return emitOpError("unknown epilogue ") << getEpilogue();
+  }
+
+  SmallVector<Value> dataOperands{getA(), getAQuant(), getAScale()};
+  llvm::append_range(dataOperands, getWeights());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getZeroPoints());
+  llvm::append_range(dataOperands, getOutputs());
+  if (Value upTmp = getUpTmp())
+    dataOperands.push_back(upTmp);
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/getDpsInitsMutable().size())))
+    return failure();
+  if (cast<ShapedType>(getA().getType()).getShape().back() != getK())
+    return emitOpError("A trailing dim must be K");
+  return verifyInt8Activation(getOperation(), getA(), getAQuant(), getAScale(),
+                              getBlockSize());
+}
+
+//===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
 

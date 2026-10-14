@@ -1530,6 +1530,24 @@ int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
                       void *a_scale, int64_t rows, int64_t K,
                       int64_t block_size);
 
+// hip.matmul_nbits_group: nseg (1-3) int4 projections, fp16 activation and
+// scales, no bias, that read A [batch_count x M x K] and its quantized copy
+// a_quant/a_scale (wrap_quantize_act layout, required). zp0..zp2 are packed
+// uint8 zero points, all null for symmetric weights. Segment s writes
+// A @ dequant(B_s)^T [batch_count x M x N_s] to out_s. With epilogue 1
+// (silu_mul, nseg 2, N0 == N1) out0 receives silu(segment 0) * segment 1 and
+// out1 is scratch for segment 1. Unused slots are null / 0.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_quant,
+                            const void *a_scale, int64_t nseg, const void *B0,
+                            const void *B1, const void *B2, const void *scales0,
+                            const void *scales1, const void *scales2,
+                            const void *zp0, const void *zp1, const void *zp2,
+                            void *out0, void *out1, void *out2, int64_t N0,
+                            int64_t N1, int64_t N2, int64_t M, int64_t K,
+                            int64_t batch_count, int64_t block_size,
+                            int64_t epilogue);
+
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
 // `gather_axis` using `indices`, then dequantize the gathered rows using

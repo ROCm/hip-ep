@@ -1012,6 +1012,93 @@ def Hip_QuantizeActOp : Hip_DpsOp<"quantize_act"> {
   let hasVerifier = 1;
 }
 
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
+                                       /*traits=*/[AttrSizedOperandSegments,
+                                                   OpStateOpInterface]> {
+  let summary = "Int4 hip.matmul_nbits projections of one int8 activation";
+  let description = [{
+    Formed by fusion from 2-3 int4 hip.matmul_nbits ops that read the same
+    `A` and the same `quantized(%a_quant, %a_scale)` copy of it, with fp16
+    scales, no g_idx and no bias, and equal K, block_size and
+    accuracy_level. Segment i is the i-th original op: `weights[i]`,
+    `scales[i]`, optional `zero_points[i]` (packed uint8, all segments or
+    none) and output width `N[i]`.
+
+    `epilogue` selects what is written:
+      0 (none):     outputs[i] = A @ dequant(weights[i])^T for every segment.
+      1 (silu_mul): two segments with equal N and one output,
+                    outputs[0] = silu(A @ dequant(weights[0])^T)
+                               * (A @ dequant(weights[1])^T);
+                    `up_tmp` is a scratch init for the second projection
+                    when it is not computed in registers. Its result is
+                    unused.
+
+    For one activation row the runtime computes every segment (and the
+    epilogue) in one dp4a launch. Otherwise each segment runs through the
+    hip.matmul_nbits kernels, which pick the dp4a GEMV or the fp16 path by
+    row count exactly as for a standalone op.
+
+    Example:
+    ```mlir
+    %q, %k, %v = hip.matmul_nbits_group(%ctx) ins(%x : tensor<1x?x4096xf16>)
+        quantized(%xq, %xs : tensor<1x?x4096xi8>, tensor<1x?x128xf32>)
+        weights(%Bq, %Bk, %Bv : tensor<4096x128x16xui8>,
+                tensor<1024x128x16xui8>, tensor<1024x128x16xui8>)
+        scales(%Sq, %Sk, %Sv : tensor<4096x128xf16>, tensor<1024x128xf16>,
+               tensor<1024x128xf16>)
+        outs(%eq, %ek, %ev : tensor<1x?x4096xf16>, tensor<1x?x1024xf16>,
+             tensor<1x?x1024xf16>)
+        {K = 4096, N = [4096, 1024, 1024], bits = 4, block_size = 32,
+         accuracy_level = 4}
+        : tensor<1x?x4096xf16>, tensor<1x?x1024xf16>, tensor<1x?x1024xf16>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                      // fp16 activation [..., K]
+    Hip_TensorOrMemRef:$a_quant,                // int8 copy of A [..., K]
+    Hip_TensorOrMemRef:$a_scale,                // its block scales [..., K / bs]
+    Variadic<Hip_TensorOrMemRef>:$weights,      // packed uint8 [N_i, k_blocks, blob]
+    Variadic<Hip_TensorOrMemRef>:$scales,       // fp16 [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$zero_points,  // packed uint8 (none, or one per weight)
+    Variadic<Hip_TensorOrMemRef>:$outputs,      // [..., N_i] (silu_mul: one)
+    Optional<Hip_TensorOrMemRef>:$up_tmp,       // silu_mul scratch [..., N]
+    I64Attr:$K,
+    I64ArrayAttr:$N,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level,
+    DefaultValuedAttr<I64Attr, "0">:$epilogue  // 0 = none, 1 = silu_mul
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    `quantized` `(` $a_quant `,` $a_scale `:` type($a_quant) `,`
+        type($a_scale) `)`
+    `weights` `(` $weights `:` type($weights) `)`
+    `scales` `(` $scales `:` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
+    `outs` `(` $outputs `:` type($outputs) `)`
+    (`up_tmp` `(` $up_tmp^ `:` type($up_tmp) `)`)?
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+
+  // Shares hip.matmul_nbits' per-session state: its zero-point unpack cache
+  // serves the grouped kernel, and the per-segment path is the same entry as
+  // hip.matmul_nbits.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
                            /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",

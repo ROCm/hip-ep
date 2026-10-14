@@ -797,7 +797,9 @@ def _qkv_nodes(rng, x: str, K: int, n_q: int, n_kv: int, seq_len: int, **q4):
     return nodes, inits, outs
 
 
-def _gate_up_silu_nodes(rng, x: str, K: int, N: int, seq_len: int, **q4):
+def _gate_up_silu_nodes(
+    rng, x: str, K: int, N: int, seq_len: int, expose_gate: bool = False, **q4
+):
     inits = _q4_initializers(rng, "gate", K, N, **q4) + _q4_initializers(
         rng, "up", K, N, **q4
     )
@@ -808,7 +810,11 @@ def _gate_up_silu_nodes(rng, x: str, K: int, N: int, seq_len: int, **q4):
         helper.make_node("Mul", ["G", "S"], ["GS"]),
         helper.make_node("Mul", ["GS", "U"], ["Y"]),
     ]
-    outs = [helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, seq_len, N])]
+    names = ["Y", "G"] if expose_gate else ["Y"]
+    outs = [
+        helper.make_tensor_value_info(n, TensorProto.FLOAT16, [1, seq_len, N])
+        for n in names
+    ]
     return nodes, inits, outs
 
 
@@ -867,7 +873,8 @@ def _make_shared_act_model(
 
 class TestMatMulNBitsSharedActivation:
     """MatMulNBits nodes reading one activation, which the compiler quantizes
-    once (hip.quantize_act) for every int4 projection that reads it."""
+    once (hip.quantize_act) and groups into one hip.matmul_nbits_group: q/k/v
+    as three segments, gate/up with the fused silu_mul epilogue."""
 
     @pytest.mark.parametrize("seq_len", SHARED_ACT_SEQ_LENS)
     @pytest.mark.parametrize(
@@ -910,6 +917,21 @@ class TestMatMulNBitsSharedActivation:
         actual, expected = model_runner.run_sample(model, [x])
         # silu(gate) * up scales gate's fp16 GEMM error by |up|, so absolute
         # error is larger than for a single projection; cosine stays tight.
+        compare_outputs(actual, expected, atol=5e-1, rtol=1e-2, cos_threshold=0.9999)
+
+    @pytest.mark.parametrize("seq_len", SHARED_ACT_SEQ_LENS)
+    @pytest.mark.parametrize("asym", [False, True], ids=["sym", "asym"])
+    def test_gate_escapes(self, model_runner, seq_len, asym):
+        """gate is also a graph output, so gate/up are grouped without the
+        silu_mul epilogue and Sigmoid/Mul stay separate ops."""
+        K, N = PHI35_HIDDEN, PHI35_INTERMEDIATE
+        model = _make_shared_act_model(
+            seq_len, K, "gate_up", 13, N=N, expose_gate=True, asym=asym
+        )
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-1, rtol=1e-2, cos_threshold=0.9999)
 
 
