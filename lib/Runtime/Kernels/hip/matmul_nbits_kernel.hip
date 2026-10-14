@@ -3336,8 +3336,12 @@ __global__ void matmul_nbits_kernel_u3(
  * on RDNA3, per that kernel's notes).
  * ======================================================================= */
 
+// __launch_bounds__: without it the compiler assumes a 1024-thread block and
+// caps every instantiation at 128 VGPRs, whatever BLOCK_SIZE the launch uses.
+// TILE_N = 16 needs a little more: 56 B/lane of scratch under ROCm 7.14, 68
+// under 7.16 (u2: 0 -> 12).
 template <int BLOCK_SIZE, int TILE_N>
-__global__ void matmul_nbits_gemv_kernel_u3(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -3749,8 +3753,9 @@ __global__ void matmul_nbits_kernel_u2(
  * loop, which had to special-case lanes 10 and 21).
  * ======================================================================= */
 
+// See matmul_nbits_gemv_kernel_u3 for the __launch_bounds__.
 template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t>
-__global__ void matmul_nbits_gemv_kernel_u2(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
