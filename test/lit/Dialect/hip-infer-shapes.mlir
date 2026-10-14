@@ -18,7 +18,8 @@
 //   - leaving the producer alone when it is something else
 //     (`skip_non_empty_producer`),
 //   - early-out on already-static results (`noop_on_static`),
-//   - filtering to ops in the `hip` dialect (`skip_non_hip_op`),
+//   - filtering to explicitly opted-in target dialects
+//     (`skip_non_hip_op`),
 //   - inserting `tensor.cast` barriers on non-DPS uses while exempting
 //     DPS-init uses so chains like
 //     `matmul -> tensor.empty -> matmul` propagate refinement through

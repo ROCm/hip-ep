@@ -27,6 +27,7 @@ using namespace mlir::hip;
 #include "hip/Dialect/IR/HipDialect.cpp.inc"
 
 void HipDialect::initialize() {
+  addInterfaces<ShapeInferenceDialectInterface>();
   addTypes<
 #define GET_TYPEDEF_LIST
 #include "hip/Dialect/IR/HipTypes.cpp.inc"
