@@ -166,9 +166,10 @@ static bool resolveMatmulDataType(int64_t typeCode, hipDataType &dataType) {
   }
 }
 
-static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
-                                             hipblasLtHandle_t handle,
-                                             const MatmulCacheKey &key) {
+static MatmulCacheEntry *
+queryOrCreateMatmul(MatmulAlgoTable &table, hipblasLtHandle_t handle,
+                    const MatmulCacheKey &key,
+                    const hipdnn_ep_real::MatmulDerivedSizes &derivedSizes) {
   assert(handle && "queryOrCreateMatmul: null handle");
   // The table is shared across sessions via WeakStore, so guard find/insert.
   // Entries are never erased, so the returned raw pointer stays valid for
@@ -258,8 +259,9 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
     // every batch reads matrix 0 instead of its own.
     // layB → user's A and layC → output are always per-batch (the BATCH
     // partition comes from A's leading dim by construction).
-    int64_t sA = key.b_batch_stride;
-    int64_t sB = M * K, sC = M * N;
+    int64_t sA = key.b_batch_stride == 0 ? 0 : derivedSizes.weightBatchStride;
+    int64_t sB = derivedSizes.inputBatchStride;
+    int64_t sC = derivedSizes.outputBatchStride;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -488,27 +490,8 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
                               int64_t batch_count, int64_t input_data_type,
                               int64_t output_data_type, int64_t b_batch_stride,
                               int64_t transA, int64_t transB) {
-  OP_PROFILE(
-      "matmul",
-      [&] {
-        char b[64];
-        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
-                 (long long)N, (long long)K);
-        return std::string(b);
-      },
-      state);
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmulTyped\n");
-    return -1;
-  }
-
-  hipblasLtHandle_t handle =
-      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
-  hipStream_t stream =
-      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-
-  if (!handle || !stream) {
-    fprintf(stderr, "wrap_hipblasLtMatmulTyped: null handle or stream\n");
     return -1;
   }
 
@@ -533,6 +516,41 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
             "combination %s/%s\n",
             hipdnn_ep_datatype_name(input_data_type),
             hipdnn_ep_datatype_name(output_data_type));
+    return -1;
+  }
+
+  const int64_t outputElementSize = hipdnn_ep_datatype_size(output_data_type);
+  hipdnn_ep_real::MatmulDerivedSizes derivedSizes{};
+  if (!hipdnn_ep_real::validateMatmulArguments(
+          M, N, K, batch_count, b_batch_stride, transA, transB,
+          outputElementSize, derivedSizes)) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmulTyped: invalid or overflowing arguments "
+            "M=%lld N=%lld K=%lld batch=%lld b_batch_stride=%lld "
+            "transA=%lld transB=%lld output_element_size=%lld\n",
+            (long long)M, (long long)N, (long long)K, (long long)batch_count,
+            (long long)b_batch_stride, (long long)transA, (long long)transB,
+            (long long)outputElementSize);
+    return -1;
+  }
+
+  OP_PROFILE(
+      "matmul",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)N, (long long)K);
+        return std::string(b);
+      },
+      state);
+
+  hipblasLtHandle_t handle =
+      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+
+  if (!handle || !stream) {
+    fprintf(stderr, "wrap_hipblasLtMatmulTyped: null handle or stream\n");
     return -1;
   }
 
@@ -573,7 +591,6 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
         static_cast<int>(K));
   }
 
-  const int64_t output_element_size = hipdnn_ep_datatype_size(output_data_type);
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmulTyped: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
                     "transB=%lld, input_type=%s, output_type=%s, "
@@ -583,7 +600,7 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
                     (long long)transA, (long long)transB,
                     hipdnn_ep_datatype_name(input_data_type),
                     hipdnn_ep_datatype_name(output_data_type),
-                    (long long)(batch_count * M * N * output_element_size));
+                    (long long)derivedSizes.outputByteCount);
 
   MatmulCacheKey key{M,
                      N,
@@ -594,7 +611,8 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
                      b_batch_stride,
                      transA,
                      transB};
-  MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
+  MatmulCacheEntry *cached =
+      queryOrCreateMatmul(*ms->table, handle, key, derivedSizes);
   if (!cached) {
     fprintf(stderr,
             "wrap_hipblasLtMatmulTyped: failed to create/find cached "

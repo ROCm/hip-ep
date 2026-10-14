@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -243,7 +244,36 @@ void op_profile_add_pending(OpProfileState *, const std::string &,
                             const std::string &, int, double, int64_t, double) {
 }
 
+bool rejectsInvalidArguments() {
+  auto *state = reinterpret_cast<RuntimeState *>(uintptr_t{1});
+  auto *buffer = reinterpret_cast<void *>(uintptr_t{4});
+  const auto rejects = [&](int64_t M, int64_t N, int64_t K, int64_t batchCount,
+                           int64_t bBatchStride, int64_t transA,
+                           int64_t transB) {
+    return wrap_hipblasLtMatmulTyped(state, 0, buffer, buffer, buffer, M, N, K,
+                                     batchCount, HIPDNN_EP_DATATYPE_BFLOAT16,
+                                     HIPDNN_EP_DATATYPE_FLOAT, bBatchStride,
+                                     transA, transB) == -1;
+  };
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  return rejects(0, 3, 5, 4, 15, 0, 1) && rejects(2, -3, 5, 4, 15, 0, 1) &&
+         rejects(2, 3, 5, 0, 15, 0, 1) && rejects(2, 3, 5, 4, -1, 0, 1) &&
+         rejects(2, 3, 5, 4, 14, 0, 1) && rejects(2, 3, 5, 4, 15, 0, 2) &&
+         rejects(kMax, 1, 2, 1, 0, 0, 1) && rejects(kMax, 2, 1, 1, 0, 0, 1) &&
+         rejects(2, 2, 1, kMax, 0, 0, 1) &&
+         rejects(1, 5, int64_t{1} << 62, 2, int64_t{1} << 62, 0, 1) &&
+         rejects(1, kMax / 4 + 1, 1, 1, 0, 0, 1) &&
+         wrap_hipblasLtMatmul(state, 0, buffer, buffer, buffer,
+                              /*M=*/0, /*N=*/3, /*K=*/5,
+                              /*batch_count=*/4, /*elem_size=*/4,
+                              /*b_batch_stride=*/15, /*transA=*/0,
+                              /*transB=*/1) == -1;
+}
+
 int main() {
+  if (!rejectsInvalidArguments())
+    return 1;
+
   int deviceCount = 0;
   const hipError_t countStatus = hipGetDeviceCount(&deviceCount);
   if (countStatus == hipErrorNoDevice || deviceCount == 0)
