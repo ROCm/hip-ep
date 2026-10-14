@@ -5,9 +5,162 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
+#include "mlir/Transforms/WalkPatternRewriteDriver.h"
+#include "llvm/ADT/SmallBitVector.h"
+
 namespace mlir {
 namespace hip {
 namespace {
+
+/// Find an existing host scalar through a small shape tensor's construction.
+/// Do not read tensor payloads. Stop at unknown producers or dynamic slices.
+///
+/// Before: readback(collapse(extract_slice(insert_slice(from_elements(x)))))
+/// After:  x
+static std::optional<OpFoldResult> findHostShapeEntry(Value shape,
+                                                      int64_t index) {
+  // Bound the walk independently of the model's graph size.
+  for (unsigned depth = 0; depth < 64; ++depth) {
+    auto type = dyn_cast<RankedTensorType>(shape.getType());
+    if (!type || type.getRank() > 1 || !type.hasStaticShape() || index < 0 ||
+        index >= type.getNumElements())
+      return std::nullopt;
+
+    DenseElementsAttr dense = getConstantDense(shape);
+    if (auto constant = shape.getDefiningOp<hip::ConstantOp>())
+      dense = dyn_cast_or_null<DenseElementsAttr>(constant.getValueAttr());
+    if (dense)
+      return OpFoldResult(dense.getValues<Attribute>()[index]);
+    if (auto elements = shape.getDefiningOp<tensor::FromElementsOp>())
+      return OpFoldResult(elements.getElements()[index]);
+    if (auto cast = shape.getDefiningOp<tensor::CastOp>()) {
+      shape = cast.getSource();
+      continue;
+    }
+    if (auto expand = shape.getDefiningOp<tensor::ExpandShapeOp>()) {
+      shape = expand.getSrc();
+      continue;
+    }
+    if (auto collapse = shape.getDefiningOp<tensor::CollapseShapeOp>()) {
+      shape = collapse.getSrc();
+      continue;
+    }
+    if (auto slice = shape.getDefiningOp<tensor::ExtractSliceOp>()) {
+      if (slice.getSourceType().getRank() != 1)
+        return std::nullopt;
+      auto offset = getConstantIntValue(slice.getMixedOffsets().front());
+      auto stride = getConstantIntValue(slice.getMixedStrides().front());
+      int64_t size = slice.getSourceType().getDimSize(0);
+      // Check the source bound before multiplying the index by the stride.
+      if (!offset || !stride || *offset < 0 || *stride <= 0 ||
+          ShapedType::isDynamic(size) || *offset >= size ||
+          index > (size - 1 - *offset) / *stride)
+        return std::nullopt;
+      index = *offset + index * *stride;
+      shape = slice.getSource();
+      continue;
+    }
+    if (auto insert = shape.getDefiningOp<tensor::InsertSliceOp>()) {
+      if (insert.getType().getRank() != 1)
+        return std::nullopt;
+      auto offset = getConstantIntValue(insert.getMixedOffsets().front());
+      auto size = getConstantIntValue(insert.getMixedSizes().front());
+      auto stride = getConstantIntValue(insert.getMixedStrides().front());
+      if (!offset || !size || !stride || *offset < 0 || *size < 0 ||
+          *stride <= 0)
+        return std::nullopt;
+      int64_t relative = index - *offset;
+      if (relative >= 0 && relative % *stride == 0 &&
+          relative / *stride < *size) {
+        index = relative / *stride;
+        shape = insert.getSource();
+      } else {
+        shape = insert.getDest();
+      }
+      continue;
+    }
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+/// A tensor dimension cannot be the ONNX Reshape sentinel -1.
+/// Preserve this fact through non-narrowing index casts and selections only.
+static bool isNonnegativeShapeEntry(Value value) {
+  SmallVector<Value, 4> worklist{value};
+  for (unsigned visited = 0; visited < 64 && !worklist.empty(); ++visited) {
+    Value current = worklist.pop_back_val();
+    if (auto constant = getConstantIntValue(current)) {
+      if (*constant < 0)
+        return false;
+      continue;
+    }
+    if (current.getDefiningOp<tensor::DimOp>())
+      continue;
+    if (auto cast = current.getDefiningOp<arith::IndexCastOp>()) {
+      auto integerType = dyn_cast<IntegerType>(cast.getType());
+      if (!integerType || !isa<IndexType>(cast.getIn().getType()) ||
+          integerType.getWidth() < DataLayout::closest(cast).getTypeSizeInBits(
+                                       cast.getIn().getType()))
+        return false;
+      worklist.push_back(cast.getIn());
+      continue;
+    }
+    if (auto select = current.getDefiningOp<arith::SelectOp>()) {
+      worklist.push_back(select.getTrueValue());
+      worklist.push_back(select.getFalseValue());
+      continue;
+    }
+    return false;
+  }
+  return worklist.empty();
+}
+
+/// Forward host shape values after all ONNX producers have been converted.
+struct ForwardHostShapeEntry : OpRewritePattern<ReadbackScalarOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ReadbackScalarOp op,
+                                PatternRewriter &rewriter) const override {
+    auto type = dyn_cast<RankedTensorType>(op.getScalar().getType());
+    if (!type || type.getRank() != 0 ||
+        !type.getElementType().isSignlessInteger() ||
+        type.getElementType() != op.getValue().getType())
+      return failure();
+    auto entry = findHostShapeEntry(op.getScalar(), 0);
+    if (!entry)
+      return failure();
+    if (auto value = dyn_cast<Value>(*entry))
+      rewriter.replaceOp(op, value);
+    else
+      rewriter.replaceOpWithNewOp<arith::ConstantOp>(
+          op, cast<TypedAttr>(cast<Attribute>(*entry)));
+    return success();
+  }
+};
+
+/// Remove a sentinel test when its operand is a known nonnegative extent.
+/// Before: cmpi eq, index_cast(tensor.dim), -1
+/// After:  false
+struct FoldImpossibleReshapeInference : OpRewritePattern<arith::CmpIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::CmpIOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getPredicate() != arith::CmpIPredicate::eq)
+      return failure();
+    Value extent;
+    if (getConstantIntValue(op.getRhs()) == -1)
+      extent = op.getLhs();
+    else if (getConstantIntValue(op.getLhs()) == -1)
+      extent = op.getRhs();
+    if (!extent || !isNonnegativeShapeEntry(extent))
+      return failure();
+    rewriter.replaceOpWithNewOp<arith::ConstantIntOp>(op, 0, 1);
+    return success();
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
@@ -467,28 +620,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         return mlir::success();
       } while (false);
 
-    // Dynamic-shape fallback: when the structured expand/collapse paths above
-    // don't recognise the pattern (e.g. fully-dynamic input from a loop-body
-    // block argument, or rank-changing with a leading static 1 and no static
-    // dim to anchor reassoc groups against), lower to tensor.reshape which
-    // accepts the runtime shape operand directly. tensor.reshape bufferizes
-    // to memref.reshape (zero-copy when source is contiguous) and consumes
-    // the existing tensor<Nxi64> shape operand without conversion.
-    //
-    // Canonical site: dynamic-shape vision encoders inside hip.loop bodies
-    // where loop block arguments arrive with under-refined types
-    // (tensor<?x?x?xf16>) and the body's Reshape lifts them back to
-    // higher-rank shapes (tensor<1x?x16x72xf16>) using a runtime-built shape
-    // operand. The static-shape reassoc helper can't prove dim alignment when
-    // the source is fully dynamic, so we hand the runtime shape verbatim to
-    // tensor.reshape.
-    //
-    // Before:
-    //   %r = onnx.Reshape %x, %shape :
-    //          (tensor<?x?x?xf16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
-    // After:
-    //   %r = tensor.reshape %x(%shape) :
-    //          (tensor<?x?x?xf16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
+    // Use tensor.reshape when reassociation cannot determine the result shape.
+    // Resolve ONNX's zero and -1 entries before constructing the shape tensor.
     if (!inputType.hasStaticShape() || !outputType.hasStaticShape()) {
       mlir::Value shapeOperand = op->getOperand(1);
       auto shapeTy =
@@ -496,25 +629,10 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       if (shapeTy && shapeTy.getRank() == 1 &&
           shapeTy.getElementType().isInteger() &&
           shapeTy.getDimSize(0) == outputRank) {
-        // ONNX `Reshape` permits one shape entry to be `-1`, meaning "infer
-        // this dim so the total element count is preserved". `memref.reshape`
-        // (the bufferization target of `tensor.reshape`) does NOT interpret
-        // `-1` -- it uses the shape value verbatim as the dim. If we pass
-        // `-1` through, the alloc downstream sees a negative size, casts to
-        // size_t, hipMalloc returns NULL, and the model SEGVs.
-        //
-        // Resolve `-1` here, before tensor.reshape: build a new shape tensor
-        // where each `-1` entry is replaced by
-        //   total_input_elements / product_of_other_dims_treating_-1_as_1.
-        // Bufferization of tensor.from_elements + tensor.reshape stays
-        // zero-copy for the data path; only the shape side gets the extra
-        // arith chain.
-        //
-        // ONNX `Reshape` also permits a shape entry of literal `0`, meaning
-        // "keep the input's dim at the SAME index" -- NOT a size-0 dim --
-        // unless the node's `allowzero` attribute is set (opset >= 14), in
-        // which case `0` is a literal size like any other entry. Resolved
-        // below, before the `-1` inference that consumes it.
+        // ONNX permits one -1 entry to infer a dimension from the element
+        // count. tensor.reshape and memref.reshape require the resolved extent.
+        // A zero entry copies the input dimension at the same axis unless
+        // allowzero is set. Apply that rule before computing the divisor.
         //
         // clang-format off
         // Before:
@@ -522,12 +640,12 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         //          (tensor<?x1152xf16>, tensor<6xi64>) -> tensor<?x?x2x?x2x?xf16>
         //   // %shape may carry a literal -1 and/or 0 at some index
         // After:
-        //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
-        //   %d[i]   = tensor.extract %shape[i]                for i in 0..outRank
+        //   %d[i]   = host_scalar_or_synchronized_readback(%shape, i)
         //   %d[i]   = select(%d[i] == 0, tensor.dim(%x, i), %d[i])  // i < inputRank && !allowzero
+        //   // Only where -1 remains possible:
+        //   %total  = product of tensor.dim(%x, i) for i in 0..inputRank
         //   %pp     = product of max(%d[i], 1) for i in 0..outRank
-        //   %inf    = %total / %pp
-        //   %d'[i]  = select(%d[i] == -1, %inf, %d[i])
+        //   %d'[i]  = select(%d[i] == -1, %total / %pp, %d[i])
         //   %newsh  = tensor.from_elements %d'[0..outRank-1] : tensor<Nxi64>
         //   %r      = tensor.reshape %x(%newsh)
         // clang-format on
@@ -550,42 +668,26 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         mlir::Value cOne = mlir::arith::ConstantOp::create(
             rewriter, loc, rewriter.getIntegerAttr(elemTy, 1));
 
-        // total = product of input dim sizes (as elemTy).
-        mlir::Value total = cOne;
-        for (int64_t i : llvm::seq<int64_t>(inputRank)) {
-          mlir::Value dimIdx =
-              mlir::tensor::DimOp::create(rewriter, loc, data, i);
-          mlir::Value dimI =
-              mlir::arith::IndexCastOp::create(rewriter, loc, elemTy, dimIdx);
-          total = mlir::arith::MulIOp::create(rewriter, loc, total, dimI);
-        }
-
-        // Extract each shape entry; compute product of positives (treat
-        // negative / zero as 1 for the divisor) to find the inferred dim.
+        // Keep known shape scalars on the host. Unknown payloads still need
+        // a synchronized readback before they can size a destination.
         llvm::SmallVector<mlir::Value> dims;
         dims.reserve(outputRank);
-        mlir::Value posProduct = cOne;
+        llvm::SmallBitVector mayInfer(outputRank);
         for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          // Read each shape entry to the host with a stream sync (constants
-          // fold) instead of a bare host load of device memory. A bare
-          // tensor.extract here races a GPU-computed shape tensor and yields a
-          // garbage dim that collapses the reshape. See ReadbackScalar.h.
-          mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
-                                                            shapeOperand, i);
-          // Case handled here -- allowzero=0 and this position has a
-          // corresponding input dim: resolve the `0` to that input dim BEFORE
-          // it feeds the `-1`-inference product below, so a shape carrying
-          // both `0` and `-1` infers against the real extent instead of
-          // dividing as if this position were size 1.
-          //
-          // The two cases skipped here need no resolution:
-          //   - allowzero=1: `0` is a literal size, so passing the entry
-          //     through unchanged is already the correct output dim. The
-          //     divisor below substitutes 1 for it, leaving `-1` inference
-          //     unaffected.
-          //   - i >= inputRank: `0` names the input dim at the SAME index and
-          //     there is none, so the graph is invalid ONNX; shape inference
-          //     rejects it upstream ("Invalid position of 0.").
+          mlir::Value v;
+          if (auto known = findHostShapeEntry(shapeOperand, i)) {
+            if (auto attr = dyn_cast<Attribute>(*known))
+              v = arith::ConstantOp::create(rewriter, loc,
+                                            cast<TypedAttr>(attr));
+            else
+              v = cast<Value>(*known);
+          } else {
+            v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
+                                                  shapeOperand, i);
+          }
+          // With allowzero, keep zero as a literal extent. Otherwise, replace
+          // it with the input dimension at this axis before -1 inference.
+          // A zero beyond the input rank is invalid ONNX.
           if (!allowzero && i < inputRank) {
             mlir::Value isZero = mlir::arith::CmpIOp::create(
                 rewriter, loc, mlir::arith::CmpIPredicate::eq, v, cZero);
@@ -597,28 +699,38 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
                                               inputDimElemTy, v);
           }
           dims.push_back(v);
-          mlir::Value isPositive = mlir::arith::CmpIOp::create(
-              rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);
-          // sgt 1 catches >=2; combine with == 1 to keep 1 too.
-          mlir::Value isOne = mlir::arith::CmpIOp::create(
-              rewriter, loc, mlir::arith::CmpIPredicate::eq, v, cOne);
-          mlir::Value keep =
-              mlir::arith::OrIOp::create(rewriter, loc, isPositive, isOne);
-          mlir::Value vForProd =
-              mlir::arith::SelectOp::create(rewriter, loc, keep, v, cOne);
-          posProduct =
-              mlir::arith::MulIOp::create(rewriter, loc, posProduct, vForProd);
+          mayInfer[i] = !isNonnegativeShapeEntry(v);
         }
-        mlir::Value inferred =
-            mlir::arith::DivSIOp::create(rewriter, loc, total, posProduct);
 
-        // Replace -1 entries with the inferred dim.
-        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          mlir::Value isMinusOne = mlir::arith::CmpIOp::create(
-              rewriter, loc, mlir::arith::CmpIPredicate::eq, dims[i],
-              cMinusOne);
-          dims[i] = mlir::arith::SelectOp::create(rewriter, loc, isMinusOne,
-                                                  inferred, dims[i]);
+        // Do not depend on the data tensor's element count when no entry can
+        // be -1. A late division would otherwise prevent pool-size hoisting.
+        if (mayInfer.any()) {
+          mlir::Value total = cOne;
+          for (int64_t i : llvm::seq<int64_t>(inputRank)) {
+            mlir::Value dimIdx = tensor::DimOp::create(rewriter, loc, data, i);
+            mlir::Value dimI =
+                arith::IndexCastOp::create(rewriter, loc, elemTy, dimIdx);
+            total = arith::MulIOp::create(rewriter, loc, total, dimI);
+          }
+          mlir::Value posProduct = cOne;
+          for (mlir::Value dim : dims) {
+            mlir::Value positive = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::sgt, dim, cZero);
+            mlir::Value factor =
+                arith::SelectOp::create(rewriter, loc, positive, dim, cOne);
+            posProduct =
+                arith::MulIOp::create(rewriter, loc, posProduct, factor);
+          }
+          mlir::Value inferred =
+              arith::DivSIOp::create(rewriter, loc, total, posProduct);
+          for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+            if (!mayInfer[i])
+              continue;
+            mlir::Value isMinusOne = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::eq, dims[i], cMinusOne);
+            dims[i] = arith::SelectOp::create(rewriter, loc, isMinusOne,
+                                              inferred, dims[i]);
+          }
         }
 
         // Build the resolved shape tensor and pass to tensor.reshape.
@@ -1054,6 +1166,15 @@ void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx) {
   patterns.add<ReshapeToStdTensor, UnsqueezeToStdTensor, SqueezeToStdTensor,
                SplitToStdTensor>(ctx);
+}
+
+void simplifyReshapeShapeComputations(func::FuncOp funcOp) {
+  RewritePatternSet patterns(funcOp.getContext());
+  patterns.add<ForwardHostShapeEntry, FoldImpossibleReshapeInference>(
+      funcOp.getContext());
+  // Visit definitions before their users. Do not run general folding here.
+  // The normal canonicalizer removes dead inference arithmetic later.
+  walkAndApplyPatterns(funcOp, std::move(patterns));
 }
 
 } // namespace hip

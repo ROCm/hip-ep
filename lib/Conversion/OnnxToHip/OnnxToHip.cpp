@@ -580,6 +580,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // exactly like every imported constant.
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
+    // Compute conversion can visit Reshape before its shape producers.
+    // Resolve the resulting host shape chains once all producers are ready.
+    simplifyReshapeShapeComputations(funcOp);
   }
 
   logSubpass("constant carriers + compute ops");
