@@ -58,6 +58,106 @@ static int64_t countDynOutDims(mlir::RankedTensorType outputType,
       group, [&](int64_t idx) { return outputType.isDynamicDim(idx); });
 }
 
+/// Return entry \p outDim of a host-visible shape vector (a
+/// `tensor.from_elements`, possibly behind `tensor.cast`), or null. Creates no
+/// IR, so callers can inspect the shape operand speculatively.
+static mlir::Value getShapeOperandElement(mlir::Value shapeOperand,
+                                          int64_t outDim, int64_t outputRank) {
+  if (!shapeOperand)
+    return {};
+  // Shape-refining casts do not change the elements.
+  while (auto castOp = shapeOperand.getDefiningOp<mlir::tensor::CastOp>())
+    shapeOperand = castOp.getSource();
+
+  auto fromElements =
+      shapeOperand.getDefiningOp<mlir::tensor::FromElementsOp>();
+  if (!fromElements ||
+      static_cast<int64_t>(fromElements.getElements().size()) != outputRank)
+    return {};
+  return fromElements.getElements()[outDim];
+}
+
+/// Whether \p reassoc is the only collapse grouping the source and result
+/// types admit.
+static bool isUniqueCollapseReassociation(mlir::RankedTensorType inputType,
+                                          mlir::RankedTensorType outputType) {
+  auto nonUnitDims = [](mlir::RankedTensorType type) {
+    llvm::SmallVector<int64_t> dims;
+    for (int64_t d : type.getShape())
+      if (d != 1)
+        dims.push_back(d);
+    return dims;
+  };
+  llvm::SmallVector<int64_t> in = nonUnitDims(inputType);
+  llvm::SmallVector<int64_t> out = nonUnitDims(outputType);
+  int64_t numIn = in.size();
+  int64_t numOut = out.size();
+  if (numOut == 0)
+    return true;
+
+  auto groupFits = [&](int64_t begin, int64_t end, int64_t outDim) {
+    if (mlir::ShapedType::isDynamic(out[outDim]))
+      return true;
+    int64_t product = 1;
+    for (int64_t i : llvm::seq<int64_t>(begin, end)) {
+      if (mlir::ShapedType::isDynamic(in[i]))
+        return false;
+      product *= in[i];
+      if (product > out[outDim])
+        return false;
+    }
+    return product == out[outDim];
+  };
+
+  // ways[i][j]: groupings of in[i:] onto out[j:], saturated at 2.
+  llvm::SmallVector<llvm::SmallVector<int64_t>> ways(
+      numIn + 1, llvm::SmallVector<int64_t>(numOut + 1, 0));
+  ways[numIn][numOut] = 1;
+  for (int64_t i : llvm::reverse(llvm::seq<int64_t>(numIn)))
+    for (int64_t j : llvm::reverse(llvm::seq<int64_t>(numOut)))
+      for (int64_t end : llvm::seq_inclusive<int64_t>(i + 1, numIn))
+        if (ways[end][j + 1] && groupFits(i, end, j))
+          ways[i][j] = std::min<int64_t>(2, ways[i][j] + ways[end][j + 1]);
+  return ways[0][0] == 1;
+}
+
+/// Whether the Reshape's shape operand proves that dynamic result dim
+/// \p outDim equals the product of \p group's source dims. Only provable
+/// without runtime arithmetic: a constant matching an all-static group, or the
+/// source's own `tensor.dim` when that is the group's only non-unit dim.
+static bool
+shapeOperandProvesCollapseGroup(mlir::Value data, mlir::Value shapeOperand,
+                                int64_t outDim, int64_t outputRank,
+                                const mlir::ReassociationIndices &group) {
+  mlir::Value element =
+      getShapeOperandElement(shapeOperand, outDim, outputRank);
+  if (!element)
+    return false;
+  if (auto castOp = element.getDefiningOp<mlir::arith::IndexCastOp>())
+    element = castOp.getIn();
+
+  auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+  int64_t staticProduct = 1;
+  llvm::SmallVector<int64_t> dynDims;
+  for (int64_t idx : group) {
+    if (inputType.isDynamicDim(idx))
+      dynDims.push_back(idx);
+    else
+      staticProduct *= inputType.getDimSize(idx);
+  }
+
+  if (std::optional<int64_t> known = mlir::getConstantIntValue(element))
+    return dynDims.empty() && *known == staticProduct;
+
+  if (dynDims.size() != 1 || staticProduct != 1)
+    return false;
+  auto dimOp = element.getDefiningOp<mlir::tensor::DimOp>();
+  if (!dimOp || dimOp.getSource() != data)
+    return false;
+  std::optional<int64_t> dimIdx = mlir::getConstantIntValue(dimOp.getIndex());
+  return dimIdx && *dimIdx == dynDims.front();
+}
+
 /// Resolve output dim \p outDim's extent from a Reshape's `shape` operand.
 ///
 /// Only a host-visible shape vector is honoured, i.e. the
@@ -77,19 +177,10 @@ static std::optional<mlir::OpFoldResult>
 resolveShapeOperandExtent(mlir::PatternRewriter &rewriter, mlir::Location loc,
                           mlir::Value shapeOperand, int64_t outDim,
                           int64_t outputRank) {
-  if (!shapeOperand)
+  mlir::Value element =
+      getShapeOperandElement(shapeOperand, outDim, outputRank);
+  if (!element)
     return std::nullopt;
-  // Shape-refining casts do not change the elements.
-  while (auto castOp = shapeOperand.getDefiningOp<mlir::tensor::CastOp>())
-    shapeOperand = castOp.getSource();
-
-  auto fromElements =
-      shapeOperand.getDefiningOp<mlir::tensor::FromElementsOp>();
-  if (!fromElements ||
-      static_cast<int64_t>(fromElements.getElements().size()) != outputRank)
-    return std::nullopt;
-
-  mlir::Value element = fromElements.getElements()[outDim];
   // ReshapeShapeFold emits `arith.index_cast %tensor.dim`. Reusing the pre-cast
   // index keeps the extent on the same SSA value the rest of the conversion
   // derives dims from, instead of a round trip through i64.
@@ -283,10 +374,34 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // to the tensor.reshape fallback, which takes the runtime shape
           // vector verbatim.
         } else {
-          auto collapseOp = mlir::tensor::CollapseShapeOp::create(
-              rewriter, loc, outputType, data, *reassocOpt);
-          rewriter.replaceOp(op, collapseOp.getResult());
-          return mlir::success();
+          bool justified = isUniqueCollapseReassociation(inputType, outputType);
+          if (!justified) {
+            mlir::Value shapeOperand =
+                op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
+            justified = llvm::all_of(
+                llvm::enumerate(*reassocOpt), [&](const auto &indexedGroup) {
+                  int64_t g = indexedGroup.index();
+                  const mlir::ReassociationIndices &group =
+                      indexedGroup.value();
+                  if (!outputType.isDynamicDim(g)) {
+                    int64_t product = 1;
+                    for (int64_t idx : group) {
+                      if (inputType.isDynamicDim(idx))
+                        return false;
+                      product *= inputType.getDimSize(idx);
+                    }
+                    return product == outputType.getDimSize(g);
+                  }
+                  return shapeOperandProvesCollapseGroup(data, shapeOperand, g,
+                                                         outputRank, group);
+                });
+          }
+          if (justified) {
+            auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+                rewriter, loc, outputType, data, *reassocOpt);
+            rewriter.replaceOp(op, collapseOp.getResult());
+            return mlir::success();
+          }
         }
       }
       // Fall through to tensor.reshape fallback (no structured reassoc).
