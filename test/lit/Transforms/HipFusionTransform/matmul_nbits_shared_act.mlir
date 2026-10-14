@@ -3,7 +3,8 @@
 
 // MatMulNBitsSharedActivation quantizes an activation read by two or more
 // W4A8-eligible hip.matmul_nbits ops once, with hip.quantize_act, and hands
-// the result to each reader through `quantized(...)`.
+// the result to each reader through `quantized(...)`. A quantize of a
+// hip.skip_rms_norm output is then folded into the norm (quant_outs).
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
 
@@ -172,4 +173,87 @@ func.func @k_not_multiple_of_32(%ctx: !hip.context, %x: tensor<1x1x48xf16>,
       {K = 48 : i64, N = 64 : i64, bits = 4 : i64, block_size = 16 : i64,
        accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
   return %y0, %y1 : tensor<1x1x64xf16>, tensor<1x1x64xf16>
+}
+
+// -----
+
+// A skip_rms_norm output read by two projections: the norm writes the int8
+// copy itself (quant_outs) and no quantize op remains. The new inits sit before
+// the norm, sized from its output init, and the residual sum keeps its place.
+// CHECK-LABEL: func.func @norm_fold
+// CHECK:         %[[EY:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x64xf16>
+// CHECK:         %[[ES:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x64xf16>
+// CHECK:         %[[M:.*]] = tensor.dim %[[EY]], %{{.*}} : tensor<1x?x64xf16>
+// CHECK:         %[[E8:.*]] = tensor.empty(%[[M]]) : tensor<1x?x64xi8>
+// CHECK:         %[[EF:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x2xf32>
+// CHECK:         %[[N:.*]]:4 = hip.skip_rms_norm(%arg0) ins(%arg1, %arg2, %arg3 :
+// CHECK-SAME:      outs(%[[EY]], %[[ES]] : tensor<1x?x64xf16>, tensor<1x?x64xf16>)
+// CHECK-SAME:      quant_outs(%[[E8]], %[[EF]] : tensor<1x?x64xi8>, tensor<1x?x2xf32>)
+// CHECK-SAME:      quant_block_size = 32
+// CHECK-NOT:     hip.quantize_act
+// CHECK:         hip.matmul_nbits(%arg0) ins(%[[N]]#0, %arg4, %arg5 :
+// CHECK-SAME:      quantized(%[[N]]#2, %[[N]]#3 :
+// CHECK:         hip.matmul_nbits(%arg0) ins(%[[N]]#0, %arg6, %arg7 :
+// CHECK-SAME:      quantized(%[[N]]#2, %[[N]]#3 :
+// CHECK:         return %{{.*}}, %{{.*}}, %[[N]]#1
+func.func @norm_fold(%ctx: !hip.context, %in: tensor<1x?x64xf16>,
+                     %skip: tensor<1x?x64xf16>, %g: tensor<64xf16>,
+                     %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+                     %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>)
+    -> (tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x64xf16>) {
+  %c1 = arith.constant 1 : index
+  %m = tensor.dim %in, %c1 : tensor<1x?x64xf16>
+  %ey = tensor.empty(%m) : tensor<1x?x64xf16>
+  %es = tensor.empty(%m) : tensor<1x?x64xf16>
+  %y, %sum = hip.skip_rms_norm(%ctx) ins(%in, %skip, %g :
+      tensor<1x?x64xf16>, tensor<1x?x64xf16>, tensor<64xf16>)
+      outs(%ey, %es : tensor<1x?x64xf16>, tensor<1x?x64xf16>)
+      {epsilon = 1.0e-05 : f32} : tensor<1x?x64xf16>, tensor<1x?x64xf16>
+  %eq = tensor.empty(%m) : tensor<1x?x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%y, %bq, %sq :
+      tensor<1x?x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x?x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x64xf16>
+  %ek = tensor.empty(%m) : tensor<1x?x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%y, %bk, %sk :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  return %q, %k, %sum : tensor<1x?x64xf16>, tensor<1x?x32xf16>, tensor<1x?x64xf16>
+}
+
+// -----
+
+// Projections reading the residual sum (result 1), not the normalized output,
+// keep a standalone quantize op.
+// CHECK-LABEL: func.func @norm_sum_not_folded
+// CHECK:         hip.skip_rms_norm
+// CHECK-NOT:       quant_outs
+// CHECK:         hip.quantize_act
+func.func @norm_sum_not_folded(%ctx: !hip.context, %in: tensor<1x1x64xf16>,
+                               %skip: tensor<1x1x64xf16>, %g: tensor<64xf16>,
+                               %b0: tensor<64x2x16xui8>, %s0: tensor<64x2xf16>,
+                               %b1: tensor<64x2x16xui8>, %s1: tensor<64x2xf16>)
+    -> (tensor<1x1x64xf16>, tensor<1x1x64xf16>, tensor<1x1x64xf16>) {
+  %ey = tensor.empty() : tensor<1x1x64xf16>
+  %es = tensor.empty() : tensor<1x1x64xf16>
+  %y, %sum = hip.skip_rms_norm(%ctx) ins(%in, %skip, %g :
+      tensor<1x1x64xf16>, tensor<1x1x64xf16>, tensor<64xf16>)
+      outs(%ey, %es : tensor<1x1x64xf16>, tensor<1x1x64xf16>)
+      {epsilon = 1.0e-05 : f32} : tensor<1x1x64xf16>, tensor<1x1x64xf16>
+  %e0 = tensor.empty() : tensor<1x1x64xf16>
+  %y0 = hip.matmul_nbits(%ctx) ins(%sum, %b0, %s0 :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%e0 : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %e1 = tensor.empty() : tensor<1x1x64xf16>
+  %y1 = hip.matmul_nbits(%ctx) ins(%sum, %b1, %s1 :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%e1 : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  return %y0, %y1, %y : tensor<1x1x64xf16>, tensor<1x1x64xf16>, tensor<1x1x64xf16>
 }

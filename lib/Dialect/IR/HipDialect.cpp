@@ -1169,8 +1169,45 @@ LogicalResult RmsNormOp::verify() {
 // SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 
+/// Checks the per-block int8 activation contract shared by hip.quantize_act
+/// and hip.skip_rms_norm quant_outs: `a` is f16 [..., K], `q` is i8 [..., K]
+/// and `s` is f32 [..., K / blockSize], with a static K that is a multiple of
+/// 32 and of a power-of-two blockSize >= 32.
+static LogicalResult verifyInt8Activation(Operation *op, Value a, Value q,
+                                          Value s, int64_t blockSize) {
+  if (blockSize < 32 || (blockSize & (blockSize - 1)) != 0)
+    return op->emitOpError("block size must be a power of two >= 32, got ")
+           << blockSize;
+  auto aType = cast<ShapedType>(a.getType());
+  auto qType = cast<ShapedType>(q.getType());
+  auto sType = cast<ShapedType>(s.getType());
+  if (!aType.getElementType().isF16())
+    return op->emitOpError("quantized activation source must be f16");
+  if (!qType.getElementType().isInteger(8))
+    return op->emitOpError("a_quant must be 8-bit integers");
+  if (!sType.getElementType().isF32())
+    return op->emitOpError("a_scale must be f32");
+  int64_t rank = aType.getRank();
+  if (rank < 1 || qType.getRank() != rank || sType.getRank() != rank)
+    return op->emitOpError(
+        "activation, a_quant and a_scale must have the same rank >= 1");
+  int64_t k = aType.getShape().back();
+  if (ShapedType::isDynamic(k) || k % 32 != 0 || k % blockSize != 0)
+    return op->emitOpError(
+        "K must be static, a multiple of 32 and of the block size");
+  if (qType.getShape().back() != k)
+    return op->emitOpError("a_quant trailing dim must be K");
+  if (sType.getShape().back() != k / blockSize)
+    return op->emitOpError("a_scale trailing dim must be K / block size");
+  return success();
+}
+
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent segments; together they are the
+  // inits, tied to results in that order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void SkipRmsNormOp::getEffects(
@@ -1179,7 +1216,19 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+LogicalResult SkipRmsNormOp::verify() {
+  auto quantOutputs = getQuantOutputs();
+  if (quantOutputs.empty())
+    return success();
+  if (getOutputs().empty())
+    return emitOpError("quant_outs require an output buffer");
+  if (quantOutputs.size() != 2)
+    return emitOpError("expected 0 or 2 quant_outs (a_quant, a_scale), got ")
+           << quantOutputs.size();
+  return verifyInt8Activation(getOperation(), getOutputs().front(),
+                              quantOutputs[0], quantOutputs[1],
+                              getQuantBlockSize());
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -2167,29 +2216,8 @@ LogicalResult QuantizeActOp::verify() {
   if (failed(verifyDpsComputeOp(*this, {getA(), getAQuant(), getAScale()},
                                 /*numInits=*/2)))
     return failure();
-  int64_t bs = getBlockSize();
-  if (bs < 32 || (bs & (bs - 1)) != 0)
-    return emitOpError("block_size must be a power of two >= 32, got ") << bs;
-  auto aType = cast<ShapedType>(getA().getType());
-  auto qType = cast<ShapedType>(getAQuant().getType());
-  auto sType = cast<ShapedType>(getAScale().getType());
-  if (!aType.getElementType().isF16())
-    return emitOpError("A must be f16");
-  if (!qType.getElementType().isInteger(8))
-    return emitOpError("a_quant must be 8-bit integers");
-  if (!sType.getElementType().isF32())
-    return emitOpError("a_scale must be f32");
-  int64_t rank = aType.getRank();
-  if (rank < 1 || qType.getRank() != rank || sType.getRank() != rank)
-    return emitOpError("A, a_quant and a_scale must have the same rank >= 1");
-  int64_t k = aType.getShape().back();
-  if (ShapedType::isDynamic(k) || k % 32 != 0 || k % bs != 0)
-    return emitOpError("K must be static, a multiple of 32 and of block_size");
-  if (qType.getShape().back() != k)
-    return emitOpError("a_quant trailing dim must be K");
-  if (sType.getShape().back() != k / bs)
-    return emitOpError("a_scale trailing dim must be K / block_size");
-  return success();
+  return verifyInt8Activation(getOperation(), getA(), getAQuant(), getAScale(),
+                              getBlockSize());
 }
 
 //===----------------------------------------------------------------------===//

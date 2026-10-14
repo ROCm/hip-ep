@@ -66,7 +66,10 @@ Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
-`residual = x + skip; output = RMSNorm(residual) * weight`.
+`residual = x + skip; output = RMSNorm(residual) * weight`. An optional
+`quant_outs(%a_quant, %a_scale)` clause with `quant_block_size` also writes
+`output` as the int8 activation `hip.quantize_act` would produce; fusion adds it
+when that output feeds a `hip.quantize_act`.
 
 ### Rotary Positional Embeddings
 

@@ -20,6 +20,20 @@
 // The quantize op is placed right after the activation's definition, so it
 // dominates every reader. Projections with a different block_size get their
 // own quantize op when two or more of them share it.
+//
+// When the activation is a hip.skip_rms_norm output, the norm writes the int8
+// copy itself and the quantize op disappears:
+//
+//   Before:
+//     %y, %sum = hip.skip_rms_norm(%ctx) ins(%in, %skip, %g) outs(%ey, %es)
+//     %xq, %xs = hip.quantize_act(%ctx) ins(%y) outs(%e8, %ef)
+//         {block_size = 32}
+//   After:
+//     %y, %sum, %xq, %xs = hip.skip_rms_norm(%ctx) ins(%in, %skip, %g)
+//         outs(%ey, %es) quant_outs(%e8', %ef') {quant_block_size = 32}
+//
+// %e8' / %ef' are new tensor.empty ops placed before the norm, so the rebuilt
+// norm stays where the old one was and still dominates all of its users.
 //===----------------------------------------------------------------------===//
 
 #include "matmul_nbits_shared_act.hpp"
@@ -107,11 +121,65 @@ struct MatMulNBitsSharedActivation final
   }
 };
 
+/// tensor.empty shaped like `type`, taking dynamic sizes from `like`, whose
+/// leading dims match `type`'s.
+mlir::Value emptyLike(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                      mlir::RankedTensorType type, mlir::Value like) {
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (auto [i, d] : llvm::enumerate(type.getShape()))
+    if (mlir::ShapedType::isDynamic(d))
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, like,
+                                                     static_cast<int64_t>(i)));
+  return mlir::tensor::EmptyOp::create(rewriter, loc, type.getShape(),
+                                       type.getElementType(), dynSizes);
+}
+
+struct FoldQuantizeActIntoSkipRmsNorm final
+    : public mlir::OpRewritePattern<mlir::hip::QuantizeActOp> {
+  using mlir::OpRewritePattern<mlir::hip::QuantizeActOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::QuantizeActOp quant,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto norm = quant.getA().getDefiningOp<mlir::hip::SkipRmsNormOp>();
+    if (!norm || norm->getNumResults() == 0 ||
+        norm->getResult(0) != quant.getA())
+      return rewriter.notifyMatchFailure(quant, "not a skip_rms_norm output");
+    if (!norm.getQuantOutputs().empty())
+      return rewriter.notifyMatchFailure(norm, "norm already quantizes");
+    if (quant->getNumResults() != 2)
+      return rewriter.notifyMatchFailure(quant, "expected tensor results");
+
+    mlir::Location loc = norm.getLoc();
+    rewriter.setInsertionPoint(norm);
+    mlir::Value yInit = norm.getOutputs().front();
+    auto qType = mlir::cast<mlir::RankedTensorType>(quant->getResultTypes()[0]);
+    auto sType = mlir::cast<mlir::RankedTensorType>(quant->getResultTypes()[1]);
+    mlir::Value qInit = emptyLike(rewriter, loc, qType, yInit);
+    mlir::Value sInit = emptyLike(rewriter, loc, sType, yInit);
+
+    llvm::SmallVector<mlir::Type> resultTypes(norm->getResultTypes());
+    resultTypes.push_back(qType);
+    resultTypes.push_back(sType);
+    auto fused = mlir::hip::SkipRmsNormOp::create(
+        rewriter, loc, resultTypes, norm.getCtx(), norm.getInput(),
+        norm.getSkip(), norm.getGamma(), norm.getBias(), norm.getOutputs(),
+        mlir::ValueRange{qInit, sInit}, norm.getEpsilonAttr(),
+        rewriter.getI64IntegerAttr(quant.getBlockSize()));
+
+    unsigned numNormResults = norm->getNumResults();
+    rewriter.replaceOp(quant, fused->getResults().take_back(2));
+    rewriter.replaceOp(norm, fused->getResults().take_front(numNormResults));
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateMatMulNBitsSharedActivationPatterns(
     mlir::RewritePatternSet &patterns, mlir::PatternBenefit benefit) {
-  patterns.add<MatMulNBitsSharedActivation>(patterns.getContext(), benefit);
+  patterns.add<MatMulNBitsSharedActivation, FoldQuantizeActIntoSkipRmsNorm>(
+      patterns.getContext(), benefit);
 }
 
 } // namespace fusion_transform

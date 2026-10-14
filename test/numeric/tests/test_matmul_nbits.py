@@ -36,6 +36,7 @@ Llama-3.1-8B AWQ-int4-g128 (block_size = 128, accuracy_level = 4):
 """
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
@@ -729,7 +730,8 @@ PHI35_INTERMEDIATE = 8192
 # 1 and 7 are on the W4A8 dp4a path (HIPDNN_EP_MATMUL_DP4A_MAX_M defaults to
 # 7) and read the shared int8 activation; 128 takes the prefill kernels and
 # reads the fp16 activation, with the int8 copy written but unused.
-SHARED_ACT_SEQ_LENS = [1, 7, 128]
+DP4A_MAX_M = 7
+SHARED_ACT_SEQ_LENS = [1, DP4A_MAX_M, 128]
 
 
 def _q4_initializers(
@@ -810,21 +812,54 @@ def _gate_up_silu_nodes(rng, x: str, K: int, N: int, seq_len: int, **q4):
     return nodes, inits, outs
 
 
-def _make_shared_act_model(seq_len: int, K: int, kind: str, seed: int, **dims):
+def _make_shared_act_model(
+    seq_len: int, K: int, kind: str, seed: int, norm: bool = False, **dims
+):
+    """Projections of kind "qkv" or "gate_up" reading one activation.
+
+    With norm=True the activation is the output of a
+    SkipSimplifiedLayerNormalization over inputs X and SKIP, and the model
+    also returns that output (NORM) and the residual sum (SUM).
+    """
     rng = np.random.default_rng(seed)
-    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    shape = [1, seq_len, K]
+    graph_inputs = [helper.make_tensor_value_info("X", TensorProto.FLOAT16, shape)]
+    pre_nodes, pre_inits, pre_outs = [], [], []
+    act = "X"
+    if norm:
+        graph_inputs.append(
+            helper.make_tensor_value_info("SKIP", TensorProto.FLOAT16, shape)
+        )
+        # Own generator, so the weights match the norm=False model's.
+        gamma_rng = np.random.default_rng(seed + 1)
+        gamma = gamma_rng.uniform(0.5, 1.5, [K]).astype(np.float16)
+        pre_inits.append(numpy_helper.from_array(gamma, name="gamma"))
+        pre_nodes.append(
+            helper.make_node(
+                "SkipSimplifiedLayerNormalization",
+                ["X", "SKIP", "gamma"],
+                ["NORM", "", "", "SUM"],
+                domain="com.microsoft",
+                epsilon=1e-5,
+            )
+        )
+        pre_outs = [
+            helper.make_tensor_value_info(n, TensorProto.FLOAT16, shape)
+            for n in ("NORM", "SUM")
+        ]
+        act = "NORM"
     q4 = dict(block_size=dims.pop("block_size", BLOCK_SIZE), asym=dims.pop("asym"))
     if kind == "qkv":
-        nodes, inits, outs = _qkv_nodes(rng, "X", K, seq_len=seq_len, **dims, **q4)
+        nodes, inits, outs = _qkv_nodes(rng, act, K, seq_len=seq_len, **dims, **q4)
     else:
         nodes, inits, outs = _gate_up_silu_nodes(
-            rng, "X", K, seq_len=seq_len, **dims, **q4
+            rng, act, K, seq_len=seq_len, **dims, **q4
         )
     return make_model_from_nodes(
-        nodes,
-        [x],
-        outs,
-        initializers=inits,
+        pre_nodes + nodes,
+        graph_inputs,
+        outs + pre_outs,
+        initializers=pre_inits + inits,
         opset=21,
         extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
     )
@@ -876,3 +911,101 @@ class TestMatMulNBitsSharedActivation:
         # silu(gate) * up scales gate's fp16 GEMM error by |up|, so absolute
         # error is larger than for a single projection; cosine stays tight.
         compare_outputs(actual, expected, atol=5e-1, rtol=1e-2, cos_threshold=0.9999)
+
+
+class TestMatMulNBitsNormFedActivation:
+    """Projections reading a SkipSimplifiedLayerNormalization output: the norm
+    kernel writes the shared int8 activation itself (quant_outs).
+
+    Bit-identity with hip.quantize_act is checked end to end: the projection
+    outputs of the norm-fed model must equal, bit for bit, those of a model
+    that takes the norm output as a graph input and quantizes it standalone.
+    The dp4a GEMV is deterministic, so any difference in the int8 activation
+    or its scales shows up in the outputs at seq_len 1 and 7.
+    """
+
+    @staticmethod
+    def _run_and_check(model_runner, request, seq_len, K, kind, seed, tol, **dims):
+        fused = _make_shared_act_model(seq_len, K, kind, seed, norm=True, **dims)
+        split = _make_shared_act_model(seq_len, K, kind, seed, **dims)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+        skip = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        # ORT CPU computes accuracy_level=4 with an int8 activation. That
+        # matches the GPU's dp4a path; past DP4A_MAX_M rows the GPU computes
+        # in fp16, and on the norm's heavier-tailed output the CPU's int8
+        # rounding alone exceeds the tolerance, so compare that path with an
+        # fp32-compute reference instead.
+        reference = None
+        if seq_len > DP4A_MAX_M:
+            reference = onnx.ModelProto()
+            reference.CopyFrom(fused)
+            for node in reference.graph.node:
+                for attr in node.attribute:
+                    if node.op_type == "MatMulNBits" and attr.name == "accuracy_level":
+                        attr.i = 0
+
+        tag = request.node.name
+        actual, expected = model_runner.run_sample(
+            fused, [x, skip], name=f"{tag}_fused", reference_model=reference
+        )
+        compare_outputs(actual, expected, **tol)
+
+        num_proj = len(actual) - 2
+        norm_out = actual[num_proj]
+        split_actual, _ = model_runner.run_sample(
+            split, [norm_out], name=f"{tag}_split"
+        )
+        for i in range(num_proj):
+            assert np.array_equal(
+                actual[i].view(np.uint16), split_actual[i].view(np.uint16)
+            ), f"projection {i}: norm-fused int8 activation differs from quantize_act"
+
+    @pytest.mark.parametrize("seq_len", SHARED_ACT_SEQ_LENS)
+    @pytest.mark.parametrize(
+        "K,n_q,n_kv,block_size,asym",
+        [
+            (LLAMA2_HIDDEN, LLAMA2_HIDDEN, LLAMA2_HIDDEN, BLOCK_SIZE, False),
+            (LLAMA_HIDDEN, LLAMA_HIDDEN, LLAMA_KV_HIDDEN, LLAMA_BLOCK_SIZE, True),
+            (512, 512, 128, 64, True),
+        ],
+        ids=["llama2", "llama31_awq", "gqa_bs64_asym"],
+    )
+    def test_qkv(self, model_runner, request, seq_len, K, n_q, n_kv, block_size, asym):
+        self._run_and_check(
+            model_runner,
+            request,
+            seq_len,
+            K,
+            "qkv",
+            7,
+            dict(atol=5e-2, rtol=1e-2, cos_threshold=0.999),
+            n_q=n_q,
+            n_kv=n_kv,
+            block_size=block_size,
+            asym=asym,
+        )
+
+    @pytest.mark.parametrize("seq_len", SHARED_ACT_SEQ_LENS)
+    @pytest.mark.parametrize(
+        "K,N,block_size,asym",
+        [
+            (PHI35_HIDDEN, PHI35_INTERMEDIATE, BLOCK_SIZE, False),
+            (LLAMA_HIDDEN, LLAMA_INTERMEDIATE, LLAMA_BLOCK_SIZE, True),
+        ],
+        ids=["phi35", "llama31_awq"],
+    )
+    def test_gate_up_silu(self, model_runner, request, seq_len, K, N, block_size, asym):
+        self._run_and_check(
+            model_runner,
+            request,
+            seq_len,
+            K,
+            "gate_up",
+            11,
+            dict(atol=5e-1, rtol=1e-2, cos_threshold=0.9999),
+            N=N,
+            block_size=block_size,
+            asym=asym,
+        )
