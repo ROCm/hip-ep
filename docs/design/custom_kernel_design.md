@@ -201,6 +201,8 @@ These are compiled to bitcode (via `clang -emit-llvm`) and merged into `runtime.
 - Compute shape info from the parameters passed by the compiler lowering
 - Call the `hip_rope_forward()` / `hip_gqa_forward()` C functions
 
+**`seqlens_k` at decode**: single-token decode into an in-place KV cache needs `seqlens_k` on the host only to pick the flash-decode split count; the append, RoPE and decode kernels read the real value from device. Reading it back would synchronize the stream at the first GQA of every token, so this path uses an estimate instead: the last value actually read, advanced by one per forward pass (`seqlens_k_last` / `seqlens_k_hint_pass_*` in `RuntimeState`), clamped to the present length. Prefill, separate past/present buffers, B > 1 and the first pass of a session still read the exact value. A wrong estimate (for example after a rewind) can only change the split count, not the result.
+
 ### 7. `lib/Runtime/CMakeLists.txt` changes
 
 Add the new bitcode modules to the real runtime build (around line 210):
@@ -276,6 +278,23 @@ Four execution paths, auto-dispatched by shape:
 **bits=2 fractional FP16 zero-points**: AMD Quark 2-bit models encode the non-uniform levels `[-1, -1/3, 1/3, 1]` in the `(index - zero_point) * scale` form by using a *fractional* zero-point of `1.5` (the `2/3` factor is folded into the per-group scale). These arrive as an FP16 zero-point tensor (`zp_elem_size==2`, one value per group), which must be read as FP16 — rounding to an integer would corrupt the `1.5`. The u2 GEMV, WMMA (fused inline-decode and dequant+GEMM), and naive kernels are templated on the zero-point element type (`uint8_t` for the packed-integer path, `_Float16`/`__half` for this path); the dequant math is already float, so the FP16 path matches the uint8 path's performance and the integer path is unchanged. The FP16 buffer is one value per group already, so it is passed straight through with no unpack/convert step.
 
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
+
+**Graph outputs in host memory**: the EP allocator returns ORT-visible outputs (the decode logits among them) in `hipHostMalloc(Coherent)` memory, and the dp4a GEMV's scattered per-row stores into it slow the whole kernel down. When `hipPointerGetAttributes` reports host memory, the GEMV writes a per-op-instance device buffer and one coalesced `hip_strided_copy` moves the result. The memory type is cached per output pointer in the op state.
+
+#### Grouped decode GEMV (`hip.matmul_nbits_group`)
+
+The `hip-fusion-transform` pass (`lib/Dialect/Transforms/fusion_pattern/matmul_nbits_group.cpp`) replaces 2-3 `hip.matmul_nbits` ops that read the same activation with one `hip.matmul_nbits_group`. Members must be int4, fp16, without `g_idx` or bias, share K, block_size, scale type and accuracy level, and be either all symmetric or all asymmetric with packed uint8 zero points. A gate/up pair whose only consumer is `Mul(Mul(gate, Sigmoid(gate)), up)` becomes one group with the SiLU epilogue (`epilogue = 1`), which writes `silu(gate) * up` and removes the sigmoid and both muls.
+
+Runtime dispatch (`wrap_matmul_nbits_group` in `lib/Runtime/real/matmul_nbits.cpp`):
+
+| Shape | Path |
+|---|---|
+| M == 1, batch == 1, block_size a power of two ≥ 32 dividing K, dp4a enabled | `hip_matmul_nbits_dp4a_group`: the row is quantized once, then one launch computes every segment (`blockIdx.x` walks the segments' column tiles back to back; the SiLU form computes the same columns of gate and up in one block). |
+| anything else | each segment runs through the ordinary MatMulNBits path. For the SiLU epilogue the gate projection is written into the output, the up projection into a per-session scratch buffer (`matmul_group_scratch`, M·N fp16), and `hip_matmul_nbits_silu_mul` combines them in place. |
+
+**Quantized activation from the norm**: when the group's activation is output 0 of `hip.skip_rms_norm` and the group's block_size is 32, the fusion also gives the norm `quant_outs` (int8 row plus one f32 scale per 32 elements) and the group reads them through `quantized(...)`. The norm kernel then writes the copy in the same deinterleaved layout, scale and rounding as `matmul_nbits_quant_act_i8_kernel`, so the bytes are identical to quantizing the norm output separately. No flag passes between the two ops: the norm writes the copy, and the group reads it, exactly when `hip_norm_quant_supported(rows, hidden, 32)` holds (one fp16 row). For any other shape the buffers are allocated but unwritten, and the group quantizes the activation itself.
+
+**Config tuning**: the grouped launch is timed per (epilogue, zero points, segment widths, K, block_size), seeded with the widest segment's single-weight config, and switched only to a config at least 5% faster. Candidates are timed cold (evicted by reading a 64 MB buffer), interleaved round-robin and scored by their median, on a private stream; groups whose seed runs under 0.1 ms keep it. The cache is in-process, so tuning happens on the first single-row call of each group shape in a process.
 
 ## Key Design Decisions
 

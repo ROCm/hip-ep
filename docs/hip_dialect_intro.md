@@ -60,13 +60,17 @@ The norm ops are backed by custom HIP kernels.
 | Op | DPS Syntax | Backend |
 |---|---|---|
 | `hip.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `rms_norm_kernel.hip` |
-| `hip.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `skip_rms_norm_kernel.hip` |
+| `hip.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...) [quant_outs(%q, %scale : ...)]` | `skip_rms_norm_kernel.hip` |
 
 Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
 `residual = x + skip; output = RMSNorm(residual) * weight`.
+
+The optional `quant_outs` (int8 row and f32 scale per `quant_block_size`
+elements) are attached by fusion when `output` feeds `hip.matmul_nbits_group`;
+see [custom_kernel_design.md](design/custom_kernel_design.md#grouped-decode-gemv-hipmatmul_nbits_group).
 
 ### Rotary Positional Embeddings
 
@@ -112,6 +116,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
+| `hip.matmul_nbits_group` | `(%ctx) ins(%A : ...) weights(...) scales(...) [zero_points(...)] [quantized(%q, %scale : ...)] outs(...) {N = [...], epilogue = 0\|1}` | 1-3 int4 MatMulNBits projections of one activation (q/k/v, or gate/up with a SiLU epilogue), formed by `hip-fusion-transform`; see [custom_kernel_design.md](design/custom_kernel_design.md#grouped-decode-gemv-hipmatmul_nbits_group) | Full impl |
 
 ---
 
