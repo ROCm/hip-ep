@@ -361,9 +361,10 @@ prefix to prevent collisions. Full capture can produce several gigabytes.
 This README is a reference for what each mode and flag does. The procedure for
 an actual investigation — global timeline first, then a targeted per-instruction
 capture of one kernel — is written up in
-[`.claude/skills/ktrace-profiling/SKILL.md`](.claude/skills/ktrace-profiling/SKILL.md),
+[`skills/ktrace-profiling/SKILL.md`](skills/ktrace-profiling/SKILL.md),
 including why ROCTx and disabling autotune are load-bearing rather than
-optional.
+optional. [`skills/README.md`](skills/README.md) lists the agent skills and how
+to install them into an AI coding assistant such as Cursor or Claude Code.
 
 In short: capture the whole run with `system` mode and rank kernels by GPU time
 in `ktrace_report.txt`; disable autotune so the dispatch order is reproducible;

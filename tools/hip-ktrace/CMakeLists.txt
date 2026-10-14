@@ -139,6 +139,20 @@ elseif(KTRACE_BUILD_RDP)
 endif()
 
 if(KTRACE_BUILD_POSTPROCESS)
+    # RapidJSON is header-only and downloaded at configure time. To build
+    # offline, point FETCHCONTENT_SOURCE_DIR_KTRACE_RAPIDJSON at an extracted
+    # copy of the same release.
+    include(FetchContent)
+    FetchContent_Declare(ktrace_rapidjson
+        URL https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz
+        URL_HASH SHA256=bf7ced29704a1e696fbccf2a2b4ea068e7774fa37f6d7dd4039d0787f8bed98e
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        # include/ has no CMakeLists.txt, so RapidJSON's own build (tests,
+        # examples, docs) is never configured.
+        SOURCE_SUBDIR include
+    )
+    FetchContent_MakeAvailable(ktrace_rapidjson)
+
     add_executable(ktrace_postprocess
         src/postprocess/main.cpp
         src/postprocess/common.cpp
@@ -154,7 +168,7 @@ if(KTRACE_BUILD_POSTPROCESS)
     target_include_directories(ktrace_postprocess PRIVATE
         src/postprocess
         src/external/amd_comgr
-        src/external/rapidjson/include
+        "${ktrace_rapidjson_SOURCE_DIR}/include"
     )
 endif()
 
@@ -308,9 +322,14 @@ install(FILES
     run.bat
     DESTINATION .)
 # README.md links to the profiling skill, so ship it or that link dangles.
-install(DIRECTORY .claude/ DESTINATION .claude)
-install(FILES src/external/rapidjson/LICENSE
-    DESTINATION licenses RENAME RapidJSON-LICENSE.txt)
+install(DIRECTORY skills/ DESTINATION skills)
+# Assistants discover skills under .claude/skills in the extracted package.
+install(DIRECTORY skills/ DESTINATION .claude/skills
+    FILES_MATCHING PATTERN "SKILL.md")
+if(KTRACE_BUILD_POSTPROCESS)
+    install(FILES "${ktrace_rapidjson_SOURCE_DIR}/license.txt"
+        DESTINATION licenses RENAME RapidJSON-LICENSE.txt)
+endif()
 install(FILES src/external/llvm/LICENSE.txt
     DESTINATION licenses RENAME LLVM-LICENSE.txt)
 install(FILES src/external/amd_comgr/LICENSE.txt

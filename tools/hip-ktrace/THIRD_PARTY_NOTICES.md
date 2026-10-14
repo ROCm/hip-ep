@@ -65,9 +65,10 @@ SOFTWARE.
 
 ## RapidJSON
 
-The native post-processing tools vendor RapidJSON 1.1.0 under
-`src/external/rapidjson/`. RapidJSON is distributed under the MIT License; its
-complete license text is retained in `src/external/rapidjson/LICENSE`.
+The native post-processing tools use RapidJSON 1.1.0, which CMake downloads
+from https://github.com/Tencent/rapidjson at configure time; it is not stored in
+this repository. RapidJSON is distributed under the MIT License; release
+packages include its complete license text as `licenses/RapidJSON-LICENSE.txt`.
 
 ## LLVM llvm-cxxfilt
 
