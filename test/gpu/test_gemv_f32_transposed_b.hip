@@ -74,7 +74,7 @@ float weightValue(size_t output, size_t index) {
   return static_cast<float>(value) / 384.0f;
 }
 
-bool runCase(int N, int K) {
+bool runCase(int N, int K, bool useMultiwave = false) {
   std::vector<float> input(static_cast<size_t>(K));
   std::vector<float> weights(static_cast<size_t>(N) * K);
   std::vector<float> expected(static_cast<size_t>(N));
@@ -112,9 +112,14 @@ bool runCase(int N, int K) {
                 "hipMemcpyAsync(weights)"))
     return false;
 
-  if (hip_gemv_f32_transposed_b(stream.get(), deviceInput.get(),
-                                deviceWeights.get(), deviceOutput.get(), N,
-                                K) != 0) {
+  const int status =
+      useMultiwave ? hip_gemv_f32_transposed_b_multiwave_gfx1151(
+                         stream.get(), deviceInput.get(), deviceWeights.get(),
+                         deviceOutput.get(), N, K)
+                   : hip_gemv_f32_transposed_b(stream.get(), deviceInput.get(),
+                                               deviceWeights.get(),
+                                               deviceOutput.get(), N, K);
+  if (status != 0) {
     std::fprintf(stderr, "hip_gemv_f32_transposed_b launch failed\n");
     return false;
   }
@@ -166,5 +171,9 @@ int main() {
     return 77;
   if (!checkHip(hipSetDevice(selectedDevice), "hipSetDevice"))
     return 1;
-  return runCase(1, 256) && runCase(128, 1024) && runCase(256, 4096) ? 0 : 1;
+  return runCase(1, 256) && runCase(128, 1024) && runCase(256, 4096) &&
+                 runCase(1, 2048, true) && runCase(128, 2048, true) &&
+                 runCase(256, 2048, true) && runCase(128, 2816, true)
+             ? 0
+             : 1;
 }

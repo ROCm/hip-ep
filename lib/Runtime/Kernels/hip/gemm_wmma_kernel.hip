@@ -154,18 +154,74 @@ __global__ void gemv_f32_transposed_b_kernel(const float *__restrict__ A,
         C[output] = sum;
 }
 
-extern "C"
-int hip_gemv_f32_transposed_b(void *stream, const float *A, const float *B,
-                              float *C, int N, int K) {
-    if (!stream || !A || !B || !C || N <= 0 || K <= 0)
-        return -1;
+template <int BlockSize, int Accumulators>
+__global__ void
+gemv_f32_transposed_b_multiwave_kernel(const float *__restrict__ A,
+                                       const float *__restrict__ B,
+                                       float *__restrict__ C, int N, int K) {
+  const int lane = threadIdx.x % warpSize;
+  const int wave = threadIdx.x / warpSize;
+  const int waves_per_block = blockDim.x / warpSize;
+  const int output = blockIdx.x;
+  if (output >= N)
+    return;
 
-    // A 64-thread block contains one wave on wave64 targets and two waves on
-    // wave32 targets. Only the first wave participates, so the same kernel is
-    // valid for either hardware wave size without a host-side device query.
-    constexpr int kBlockSize = 64;
-    hipLaunchKernelGGL(gemv_f32_transposed_b_kernel, dim3(N),
-                       dim3(kBlockSize), 0, static_cast<hipStream_t>(stream), A,
-                       B, C, N, K);
-    return hipGetLastError() == hipSuccess ? 0 : -1;
+  const float *weight = B + static_cast<size_t>(output) * K;
+  float sums[Accumulators] = {};
+  int k = threadIdx.x;
+  for (; k + (Accumulators - 1) * BlockSize < K;
+       k += Accumulators * BlockSize) {
+#pragma unroll
+    for (int accumulator = 0; accumulator < Accumulators; ++accumulator) {
+      const int index = k + accumulator * BlockSize;
+      sums[accumulator] = fmaf(A[index], weight[index], sums[accumulator]);
+    }
+  }
+  for (; k < K; k += BlockSize)
+    sums[0] = fmaf(A[k], weight[k], sums[0]);
+
+  float sum = sums[0];
+#pragma unroll
+  for (int accumulator = 1; accumulator < Accumulators; ++accumulator)
+    sum += sums[accumulator];
+  for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+    sum += __shfl_down(sum, offset);
+
+  __shared__ float wave_sums[BlockSize / 32];
+  if (lane == 0)
+    wave_sums[wave] = sum;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float output_sum = 0.0f;
+    for (int wave_index = 0; wave_index < waves_per_block; ++wave_index)
+      output_sum += wave_sums[wave_index];
+    C[output] = output_sum;
+  }
+}
+
+extern "C" int hip_gemv_f32_transposed_b(void *stream, const float *A,
+                                         const float *B, float *C, int N,
+                                         int K) {
+  if (!stream || !A || !B || !C || N <= 0 || K <= 0)
+    return -1;
+
+  // A 64-thread block contains one wave on wave64 targets and two waves on
+  // wave32 targets. Only the first wave participates, so the same kernel is
+  // valid for either hardware wave size without a host-side device query.
+  constexpr int kBlockSize = 64;
+  hipLaunchKernelGGL(gemv_f32_transposed_b_kernel, dim3(N), dim3(kBlockSize), 0,
+                     static_cast<hipStream_t>(stream), A, B, C, N, K);
+  return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+extern "C" int hip_gemv_f32_transposed_b_multiwave_gfx1151(
+    void *stream, const float *A, const float *B, float *C, int N, int K) {
+  if (!stream || !A || !B || !C || N <= 0 || N > 256 ||
+      (K != 2048 && K != 2816))
+    return -1;
+
+  hipLaunchKernelGGL((gemv_f32_transposed_b_multiwave_kernel<128, 4>), dim3(N),
+                     dim3(128), 0, static_cast<hipStream_t>(stream), A, B, C, N,
+                     K);
+  return hipGetLastError() == hipSuccess ? 0 : -1;
 }
