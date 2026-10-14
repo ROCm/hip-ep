@@ -116,6 +116,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 | `hip.quantize_act` | `(%ctx) ins(%A : ...) outs(%a_quant, %a_scale : ...) {block_size}` | Per-block int8 copy of an fp16 activation, read by `hip.matmul_nbits ... quantized(%a_quant, %a_scale)` on the W4A8 dp4a path; formed by `hip-fusion-transform`, see [custom_kernel_design.md](design/custom_kernel_design.md#shared-int8-activation-hipquantize_act) | Full impl |
+| `hip.matmul_nbits_group` | `(%ctx) ins(%A : ...) quantized(%a_quant, %a_scale : ...) weights(...) scales(...) [zero_points(...)] outs(...) [up_tmp(%t : ...)] {K, N = [...], epilogue}` | Up to three int4 projections of one shared int8 activation; `epilogue = 1` fuses `silu(gate) * up` into one output. Single launch at M = 1, per-projection kernels otherwise; formed by `hip-fusion-transform`, see [custom_kernel_design.md](design/custom_kernel_design.md#projection-groups-hipmatmul_nbits_group) | Full impl |
 
 ---
 

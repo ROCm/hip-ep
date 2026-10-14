@@ -4,7 +4,9 @@
 // MatMulNBitsSharedActivation quantizes an activation read by two or more
 // W4A8-eligible hip.matmul_nbits ops once, with hip.quantize_act, and hands
 // the result to each reader through `quantized(...)`. A quantize of a
-// hip.skip_rms_norm output is then folded into the norm (quant_outs).
+// hip.skip_rms_norm output is then folded into the norm (quant_outs). Readers
+// that qualify then merge into hip.matmul_nbits_group (matmul_nbits_group.mlir),
+// so the checks below follow the shared operands into the group.
 
 // RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
 
@@ -18,10 +20,9 @@
 // CHECK:         %[[Q:.*]]:2 = hip.quantize_act(%arg0) ins(%arg1 : tensor<1x?x64xf16>)
 // CHECK-SAME:      outs(%[[EQ]], %[[ES]] : tensor<1x?x64xi8>, tensor<1x?x2xf32>)
 // CHECK-SAME:      block_size = 32
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg2, %arg3 :
+// CHECK:         hip.matmul_nbits_group(%arg0) ins(%arg1 :
 // CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg4, %arg5 :
-// CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
+// CHECK-SAME:      weights(%arg2, %arg4 :
 // CHECK-NOT:     hip.quantize_act
 func.func @two_readers(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
                        %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
@@ -71,13 +72,12 @@ func.func @one_reader(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
 // CHECK:         %[[Q:.*]]:2 = hip.quantize_act(%arg0) ins(%arg1 : tensor<1x1x128xf16>)
 // CHECK-SAME:      block_size = 32
 // CHECK-NOT:     hip.quantize_act
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg2, %arg3 :
+// CHECK:         hip.matmul_nbits_group(%arg0) ins(%arg1 :
 // CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
+// CHECK-SAME:      weights(%arg2, %arg6 :
 // CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg4, %arg5 :
 // CHECK-NOT:       quantized(
 // CHECK-SAME:      block_size = 64
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg6, %arg7 :
-// CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
 func.func @mixed_block_size(%ctx: !hip.context, %x: tensor<1x1x128xf16>,
                             %b0: tensor<64x4x16xui8>, %s0: tensor<64x4xf16>,
                             %b1: tensor<64x2x32xui8>, %s1: tensor<64x2xf16>,
@@ -110,12 +110,10 @@ func.func @mixed_block_size(%ctx: !hip.context, %x: tensor<1x1x128xf16>,
 // do not (the dp4a path has no fp16 zero-point form).
 // CHECK-LABEL: func.func @zero_points
 // CHECK:         %[[Q:.*]]:2 = hip.quantize_act
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg2, %arg3 :
-// CHECK-SAME:      zero_points(%arg4 :
+// CHECK:         hip.matmul_nbits_group(%arg0) ins(%arg1 :
 // CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
-// CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg5, %arg6 :
-// CHECK-SAME:      zero_points(%arg7 :
-// CHECK-SAME:      quantized(%[[Q]]#0, %[[Q]]#1 :
+// CHECK-SAME:      weights(%arg2, %arg5 :
+// CHECK-SAME:      zero_points(%arg4, %arg7 :
 // CHECK:         hip.matmul_nbits(%arg0) ins(%arg1, %arg8, %arg9 :
 // CHECK-NOT:       quantized(
 // CHECK-SAME:      zp_elem_size = 2
@@ -191,10 +189,9 @@ func.func @k_not_multiple_of_32(%ctx: !hip.context, %x: tensor<1x1x48xf16>,
 // CHECK-SAME:      quant_outs(%[[E8]], %[[EF]] : tensor<1x?x64xi8>, tensor<1x?x2xf32>)
 // CHECK-SAME:      quant_block_size = 32
 // CHECK-NOT:     hip.quantize_act
-// CHECK:         hip.matmul_nbits(%arg0) ins(%[[N]]#0, %arg4, %arg5 :
+// CHECK:         hip.matmul_nbits_group(%arg0) ins(%[[N]]#0 :
 // CHECK-SAME:      quantized(%[[N]]#2, %[[N]]#3 :
-// CHECK:         hip.matmul_nbits(%arg0) ins(%[[N]]#0, %arg6, %arg7 :
-// CHECK-SAME:      quantized(%[[N]]#2, %[[N]]#3 :
+// CHECK-SAME:      weights(%arg4, %arg6 :
 // CHECK:         return %{{.*}}, %{{.*}}, %[[N]]#1
 func.func @norm_fold(%ctx: !hip.context, %in: tensor<1x?x64xf16>,
                      %skip: tensor<1x?x64xf16>, %g: tensor<64xf16>,
