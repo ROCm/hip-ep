@@ -130,13 +130,14 @@ struct MatmulAlgoTable {
 // shared_ptr to it.
 struct MatmulState : OpStateT<MatmulState> {
   std::shared_ptr<MatmulAlgoTable> table;
-  bool use_f32_decode_gemv = false;
+  bool use_gfx1151_decode_gemv = false;
   MatmulState() {
     int dev = 0;
     hipGetDevice(&dev);
     hipDeviceProp_t properties{};
     if (hipGetDeviceProperties(&properties, dev) == hipSuccess) {
-      use_f32_decode_gemv = hipdnn_ep_real::isGfx1151(properties.gcnArchName);
+      use_gfx1151_decode_gemv =
+          hipdnn_ep_real::isGfx1151(properties.gcnArchName);
     }
     table = WeakStore<int, MatmulAlgoTable>::get_or_create(
         dev, [] { return std::make_shared<MatmulAlgoTable>(); });
@@ -542,14 +543,14 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  // hipBLASLt launch overhead dominates these small decode projections. When
-  // transB is set, B is physically [N,K], which the GEMV kernel consumes
-  // directly on the target where this policy was measured. Other targets,
-  // prefill, and wider projections retain the tuned GEMM path below.
+  // On the validated target, transposed-B decode projections can consume the
+  // physical [N,K] weight layout directly. F32 uses this path only for the
+  // measured small-N range; BF16-to-F32 uses it for any representable N and
+  // even K. Prefill and every unsupported shape retain tuned hipBLASLt.
   if (input_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       hipdnn_ep_real::useF32TransposedBDecodeGemv(
-          ms->use_f32_decode_gemv, M, N, K, batch_count,
+          ms->use_gfx1151_decode_gemv, M, N, K, batch_count,
           /*elementSizeBytes=*/4, transA, transB)) {
     if (hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151(N, K)) {
       return hip_gemv_f32_transposed_b_multiwave_gfx1151(
@@ -560,6 +561,16 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
     return hip_gemv_f32_transposed_b(
         stream, static_cast<const float *>(A), static_cast<const float *>(B),
         static_cast<float *>(output), static_cast<int>(N), static_cast<int>(K));
+  }
+
+  if (input_data_type == HIPDNN_EP_DATATYPE_BFLOAT16 &&
+      output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
+      hipdnn_ep_real::useBf16F32TransposedBDecodeGemv(
+          ms->use_gfx1151_decode_gemv, M, N, K, batch_count, transA, transB) &&
+      hipdnn_ep_real::hasBf16PairAlignment(A, B)) {
+    return hip_gemv_bf16_f32_transposed_b(
+        stream, A, B, static_cast<float *>(output), static_cast<int>(N),
+        static_cast<int>(K));
   }
 
   const int64_t output_element_size = hipdnn_ep_datatype_size(output_data_type);

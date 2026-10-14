@@ -3923,6 +3923,12 @@ HIP_KERNEL_API int hip_gemv_f32_transposed_b(void* stream, const float* A,
 HIP_KERNEL_API int hip_gemv_f32_transposed_b_multiwave_gfx1151(
     void *stream, const float *A, const float *B, float *C, int N, int K);
 
+/* BF16-input, F32-output GEMV for C[1,N] = A[1,K] * transpose(B[N,K]).
+ * This decode-oriented path consumes the physical transposed-B layout
+ * directly and accumulates in F32. */
+HIP_KERNEL_API int hip_gemv_bf16_f32_transposed_b(
+    void* stream, const void* A, const void* B, float* C, int N, int K);
+
 #ifdef __cplusplus
 }
 #endif
