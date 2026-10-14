@@ -787,9 +787,21 @@ void matmul_nbits_gemv_kernel(
             return static_cast<float>(zp[nidx * k_blocks + grp]);
     };
 
-    // Helper: read A element for row `tm` of this block at K-offset
-    auto read_a = [&](int tm, int64_t k_off) __attribute__((always_inline)) -> float {
-        return static_cast<float>(a_base[tm * a_mstep + k_off * a_stride]);
+    // Helper: read A element for row `tm` of this block at K position
+    // k_lane + k_const: k_lane is the thread's position, k_const the
+    // compile-time offset inside the unrolled group. The row pointer is built
+    // from k_lane alone and shared by the whole group; only k_const * a_stride
+    // is added per element, which is a constant (row-major) or a uniform value
+    // (col-major, stride M). Written as one index (k_lane + k_const) * a_stride
+    // the compiler has to prove the 32-bit sum cannot wrap to split it back:
+    // ROCm 7.14 did, 7.16 does not, and emits a sign extension, two
+    // v_mul_lo_u32, a v_mad_u64_u32 and a 64-bit shift per element. At
+    // TILE_M > 1 the extra live values also pushed the tile into scratch
+    // (100-584 bytes per lane, 2-4x slower).
+    auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
+        const __half* row = a_base + tm * a_mstep +
+                            static_cast<int64_t>(k_lane) * a_stride;
+        return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -834,7 +846,7 @@ void matmul_nbits_gemv_kernel(
             float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 32; i++) {
-                a_vals[i] = read_a(0, k32 + i);
+                a_vals[i] = read_a(0, k32, i);
                 a_sum += a_vals[i];
             }
             const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -911,7 +923,7 @@ void matmul_nbits_gemv_kernel(
                     float a8[8];
 #pragma unroll
                     for (int i = 0; i < 8; i++) {
-                        a8[i] = read_a(tm_r, k32 + q * 8 + i);
+                        a8[i] = read_a(tm_r, k32, q * 8 + i);
                         a_sum += a8[i];
                     }
 #pragma unroll
@@ -966,7 +978,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 16; i++) {
-                    a_vals[i] = read_a(0, k16 + i);
+                    a_vals[i] = read_a(0, k16, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1009,7 +1021,7 @@ void matmul_nbits_gemv_kernel(
                         float a8[8];
 #pragma unroll
                         for (int i = 0; i < 8; i++) {
-                            a8[i] = read_a(tm_r, k16 + q * 8 + i);
+                            a8[i] = read_a(tm_r, k16, q * 8 + i);
                             a_sum += a8[i];
                         }
 #pragma unroll
@@ -1065,7 +1077,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
-                    a_vals[i] = read_a(tm_r, k8 + i);
+                    a_vals[i] = read_a(tm_r, k8, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1108,7 +1120,7 @@ void matmul_nbits_gemv_kernel(
 #pragma unroll
                 for (int tm = 0; tm < TILE_M; tm++) {
                     const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
-                    partial[tm][tn] += read_a(tm_r, k) * (qval - zv) * sv;
+                    partial[tm][tn] += read_a(tm_r, k, 0) * (qval - zv) * sv;
                 }
             }
         }
@@ -1571,6 +1583,12 @@ static void launchGemvConfig(
     bool col_major = false)
 {
     auto& c = kGemvConfigs[config_id];
+    // M == 1 without zero points: col-major and row-major A are the same single
+    // row, and the row-major instantiation computes the identical result with a
+    // compile-time A stride. The col-major one indexes A with the runtime stride
+    // M (see read_a), which ROCm 7.16 compiles to a 64-bit multiply per element:
+    // +30% instructions in the decode loop, 1.2x slower on average, up to 1.9x.
+    if (col_major && M == 1 && zp == nullptr && batch == 1) col_major = false;
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
               static_cast<unsigned>(col_major ? 1 : batch));
