@@ -714,3 +714,206 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=3e-1, rtol=1e-2, cos_threshold=0.9995)
+
+
+# --- Grouped projections (hip.matmul_nbits_group) ---
+# Shapes from the Llama-2-13B and Phi-3.5-mini int4 decoders: separate q/k/v
+# and gate/up MatMulNBits nodes reading one normalized activation, the MLP
+# combined as Mul(Mul(gate, Sigmoid(gate)), up). Llama-3.1-8B AWQ adds
+# asymmetric weights: packed uint8 zero points, block_size 128.
+LLAMA2_HIDDEN = 5120
+LLAMA2_INTERMEDIATE = 13824
+PHI35_HIDDEN = 3072
+PHI35_INTERMEDIATE = 8192
+LLAMA31_HIDDEN = 4096
+LLAMA31_KV = 1024
+LLAMA31_INTERMEDIATE = 14336
+AWQ_BLOCK_SIZE = 128
+
+
+def _q4_initializers(
+    rng,
+    prefix: str,
+    K: int,
+    N: int,
+    scale_range=(-0.02, 0.02),
+    block_size: int = BLOCK_SIZE,
+    asym: bool = False,
+):
+    n_blocks = K // block_size
+    q_weight = rng.integers(0, 256, [N, n_blocks, block_size // 2], dtype=np.uint8)
+    scales = rng.uniform(scale_range[0], scale_range[1], [N, n_blocks]).astype(
+        np.float16
+    )
+    inits = [
+        numpy_helper.from_array(q_weight, name=f"{prefix}_Q4"),
+        numpy_helper.from_array(scales, name=f"{prefix}_scales"),
+    ]
+    if asym:
+        # Two 4-bit zero points per byte, each row padded to whole bytes.
+        zp = rng.integers(0, 256, [N * ((n_blocks + 1) // 2)], dtype=np.uint8)
+        inits.append(numpy_helper.from_array(zp, name=f"{prefix}_zp"))
+    return inits
+
+
+def _q4_node(
+    prefix: str,
+    x: str,
+    y: str,
+    K: int,
+    N: int,
+    block_size: int = BLOCK_SIZE,
+    asym: bool = False,
+):
+    inputs = [x, f"{prefix}_Q4", f"{prefix}_scales"]
+    if asym:
+        inputs.append(f"{prefix}_zp")
+    return helper.make_node(
+        "MatMulNBits",
+        inputs,
+        [y],
+        domain="com.microsoft",
+        K=K,
+        N=N,
+        bits=BITS,
+        block_size=block_size,
+        accuracy_level=4,
+    )
+
+
+def _make_qkv_model(
+    seq_len: int,
+    K: int,
+    n_q: int,
+    n_kv: int,
+    seed: int = 7,
+    block_size: int = BLOCK_SIZE,
+    asym: bool = False,
+):
+    rng = np.random.default_rng(seed)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    outs, nodes, inits = [], [], []
+    for name, n in (("q", n_q), ("k", n_kv), ("v", n_kv)):
+        inits += _q4_initializers(rng, name, K, n, block_size=block_size, asym=asym)
+        nodes.append(_q4_node(name, "X", name.upper(), K, n, block_size, asym))
+        outs.append(
+            helper.make_tensor_value_info(
+                name.upper(), TensorProto.FLOAT16, [1, seq_len, n]
+            )
+        )
+    return make_model_from_nodes(
+        nodes,
+        [x],
+        outs,
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+def _make_gate_up_silu_model(
+    seq_len: int,
+    K: int,
+    N: int,
+    seed: int = 11,
+    block_size: int = BLOCK_SIZE,
+    asym: bool = False,
+):
+    rng = np.random.default_rng(seed)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, seq_len, N])
+    q4 = dict(block_size=block_size, asym=asym)
+    inits = _q4_initializers(rng, "gate", K, N, **q4) + _q4_initializers(
+        rng, "up", K, N, **q4
+    )
+    nodes = [
+        _q4_node("gate", "X", "G", K, N, **q4),
+        _q4_node("up", "X", "U", K, N, **q4),
+        helper.make_node("Sigmoid", ["G"], ["S"]),
+        helper.make_node("Mul", ["G", "S"], ["GS"]),
+        helper.make_node("Mul", ["GS", "U"], ["Y"]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [x],
+        [y],
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestMatMulNBitsGroup:
+    """Projections the fusion transform folds into hip.matmul_nbits_group.
+
+    seq_len 1 takes the grouped dp4a kernel; 7 takes the per-projection
+    fallback (and, for gate/up, the separate SiLU*mul kernel).
+    """
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,n_q,n_kv",
+        [
+            (LLAMA2_HIDDEN, LLAMA2_HIDDEN, LLAMA2_HIDDEN),
+            (PHI35_HIDDEN, PHI35_HIDDEN, PHI35_HIDDEN),
+            (512, 512, 128),
+        ],
+        ids=["llama2", "phi35", "gqa"],
+    )
+    def test_qkv(self, model_runner, seq_len, K, n_q, n_kv):
+        model = _make_qkv_model(seq_len, K, n_q, n_kv)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,N",
+        [(LLAMA2_HIDDEN, LLAMA2_INTERMEDIATE), (PHI35_HIDDEN, PHI35_INTERMEDIATE)],
+        ids=["llama2", "phi35"],
+    )
+    def test_gate_up_silu(self, model_runner, seq_len, K, N):
+        model = _make_gate_up_silu_model(seq_len, K, N)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,n_q,n_kv,block_size",
+        [
+            (LLAMA31_HIDDEN, LLAMA31_HIDDEN, LLAMA31_KV, AWQ_BLOCK_SIZE),
+            (512, 512, 128, BLOCK_SIZE),
+        ],
+        ids=["llama31_awq", "gqa_bs32"],
+    )
+    def test_qkv_zero_points(self, model_runner, seq_len, K, n_q, n_kv, block_size):
+        model = _make_qkv_model(seq_len, K, n_q, n_kv, block_size=block_size, asym=True)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,N,block_size",
+        [
+            (LLAMA31_HIDDEN, LLAMA31_INTERMEDIATE, AWQ_BLOCK_SIZE),
+            (512, 1024, BLOCK_SIZE),
+        ],
+        ids=["llama31_awq", "bs32"],
+    )
+    def test_gate_up_silu_zero_points(self, model_runner, seq_len, K, N, block_size):
+        model = _make_gate_up_silu_model(
+            seq_len, K, N, block_size=block_size, asym=True
+        )
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)

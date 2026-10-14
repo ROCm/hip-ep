@@ -397,6 +397,13 @@ void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size);
 
+// Per-session scratch for hip.matmul_nbits_group's multi-row SiLU path (the
+// gate and up projections before they are combined). Same policy as the dp4a
+// scratch above.
+void *hipdnn_ep_state_get_matmul_group_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_matmul_group_scratch(RuntimeState *state,
+                                                size_t needed_size);
+
 // Per-session scratch for the linear-attention chunk-parallel gated_delta
 // prefill (hip_linear_attention_prefill_chunked). Lazily grown via
 // hipdnn_ep_state_ensure_la_scratch (same policy as conv_scratch: never
@@ -1386,12 +1393,14 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+// a_quant/a_scale (nullable): int8 copy of `output` for
+// hip.matmul_nbits_group, written when hip_norm_quant_supported() accepts the
+// shape and quant_block_size.
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
@@ -1417,6 +1426,29 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+
+// hip.matmul_nbits_group: 1-3 N-bit weights (no bias) that read the same
+// activation A [batch_count x M x K]. Segment s has weight B<s>
+// [N<s> x k_blocks x blob_size], scales<s> [N<s> x k_blocks] and, for
+// asymmetric weights, zero_points<s> (uint8, packed at `bits` bits per
+// value); either every segment has zero points or none does.
+// epilogue HIP_MATMUL_GROUP_EPI_CONCAT writes out<s> = A @ dequant(B<s>)^T;
+// HIP_MATMUL_GROUP_EPI_SILU_MUL (nseg == 2, N0 == N1, fp16) writes
+// out0 = silu(A @ dequant(B0)^T) * (A @ dequant(B1)^T). Unused segments pass
+// nullptr and N = 0. a_quant/a_scale (nullable) hold A already quantized by
+// its producer; they are read only when hip_norm_quant_supported() accepts
+// the shape.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, int64_t nseg, const void *B0,
+                            const void *B1, const void *B2, const void *scales0,
+                            const void *scales1, const void *scales2,
+                            const void *zero_points0, const void *zero_points1,
+                            const void *zero_points2, void *out0, void *out1,
+                            void *out2, int64_t N0, int64_t N1, int64_t N2,
+                            int64_t M, int64_t K, int64_t batch_count,
+                            int64_t bits, int64_t block_size, int64_t elem_size,
+                            int64_t scale_elem_size, int64_t epilogue,
+                            const void *a_quant, const void *a_scale);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along

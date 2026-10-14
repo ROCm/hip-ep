@@ -1972,6 +1972,39 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/**
+ * Shapes for which hip_skip_rms_norm_quant writes its quantized copy: one
+ * fp16 row, 32-element groups. hip.matmul_nbits_group reads the copy only
+ * when this holds, so producer and consumer agree without a flag between them.
+ */
+static inline int hip_norm_quant_supported(int64_t rows, int64_t norm_size,
+                                           int64_t block_size) {
+    return rows == 1 && block_size == 32 && norm_size > 0 &&
+           norm_size % 32 == 0;
+}
+
+/**
+ * hip_skip_rms_norm (fp16) that also writes `output` quantized per 32-element
+ * group in the layout hip_matmul_nbits_quant_act_i8 produces: a_quant
+ * receives norm_size int8 values, a_scale norm_size / 32 floats. The values
+ * quantized are the fp16-rounded outputs, so the copy is bit-identical to
+ * running hip_matmul_nbits_quant_act_i8 on `output`. Requires
+ * hip_norm_quant_supported(outer, norm_size, 32).
+ */
+HIP_KERNEL_API int hip_skip_rms_norm_quant(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    void* a_quant,
+    void* a_scale);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
@@ -2239,6 +2272,48 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
+
+/**
+ * Per-group int8 quantization of fp16 activations into the deinterleaved
+ * layout hip_matmul_nbits_dp4a and hip_matmul_nbits_dp4a_group consume.
+ *   A : fp16 [M, K], K % 32 == 0
+ *   a_qb_scratch    : >= M*K bytes
+ *   a_scale_scratch : >= M*ceil(K/block_size) floats
+ */
+HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
+    void* stream, const void* A, int64_t M, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
+#define HIP_MATMUL_GROUP_MAX_SEGMENTS 3
+/* out[s] = A @ W_s^T for every segment. */
+#define HIP_MATMUL_GROUP_EPI_CONCAT 0
+/* Two equal-N segments (gate, up): out[0] = silu(A @ W_0^T) * (A @ W_1^T). */
+#define HIP_MATMUL_GROUP_EPI_SILU_MUL 1
+
+/**
+ * Grouped W4A8 dp4a GEMV for one activation row (M == 1): up to
+ * HIP_MATMUL_GROUP_MAX_SEGMENTS int4 weights (no bias) that share A, in one
+ * launch. With quantize_a != 0 the row is quantized into the scratch first;
+ * with quantize_a == 0 the scratch must already hold
+ * hip_matmul_nbits_quant_act_i8's output for A.
+ *   B[s]      : packed int4 [N[s], K/2]
+ *   scales[s] : fp16 [N[s], ceil(K/block_size)]
+ *   zp_u8     : nullptr (symmetric, zero point 8), or per segment the
+ *               unpacked uint8 zero points [N[s], ceil(K/block_size)]; every
+ *               segment must then have one
+ *   out[s]    : fp16 [N[s]] (SiLU epilogue: out[0] only)
+ * Returns a hipError_t; hipErrorInvalidValue for an unsupported group.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
+    void* stream, const void* A, int nseg, const void* const* B,
+    const void* const* scales, const void* const* zp_u8, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size, int epilogue,
+    int quantize_a, void* a_qb_scratch, void* a_scale_scratch);
+
+/** out[i] = silu(gate[i]) * up[i], fp16, n elements. */
+HIP_KERNEL_API int hip_matmul_nbits_silu_mul(void* stream, const void* gate,
+                                             const void* up, void* out,
+                                             int64_t n);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.

@@ -1002,7 +1002,11 @@ LogicalResult RmsNormOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent segments; together they are the
+  // inits, tied to results in that order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void SkipRmsNormOp::getEffects(
@@ -1011,7 +1015,15 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+LogicalResult SkipRmsNormOp::verify() {
+  size_t numQuant = getQuantOutputs().size();
+  if (numQuant != 0 && numQuant != 2)
+    return emitOpError("expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
+           << numQuant;
+  if (numQuant == 2 && getQuantBlockSize() <= 0)
+    return emitOpError("quant_outputs require a positive quant_block_size");
+  return success();
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -1744,6 +1756,71 @@ void MatMulNBitsOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  size_t numWeights = getWeights().size();
+  if (numWeights < 1 || numWeights > 3)
+    return emitOpError("expected 1 to 3 weights, got ") << numWeights;
+  if (getScales().size() != numWeights)
+    return emitOpError("expected one scales operand per weight");
+  if (!getZeroPoints().empty() && getZeroPoints().size() != numWeights)
+    return emitOpError("expected no zero_points or one per weight");
+  ArrayAttr nAttr = getN();
+  if (nAttr.size() != numWeights)
+    return emitOpError("expected one N entry per weight");
+  for (Attribute a : nAttr) {
+    auto n = dyn_cast<IntegerAttr>(a);
+    if (!n || n.getInt() <= 0)
+      return emitOpError("N entries must be positive integers");
+  }
+
+  int64_t epilogue = getEpilogue();
+  if (epilogue == 0) {
+    if (getOutputs().size() != numWeights)
+      return emitOpError("concat epilogue expects one output per weight");
+  } else if (epilogue == 1) {
+    if (numWeights != 2 || getOutputs().size() != 1)
+      return emitOpError("silu_mul epilogue expects 2 weights and 1 output");
+    if (cast<IntegerAttr>(nAttr[0]).getInt() !=
+        cast<IntegerAttr>(nAttr[1]).getInt())
+      return emitOpError("silu_mul epilogue expects equal N");
+  } else {
+    return emitOpError("unknown epilogue ") << epilogue;
+  }
+  if (getBits() != 4 && getBits() != 8)
+    return emitOpError("bits must be 4 or 8");
+  if (getK() <= 0 || getBlockSize() <= 0)
+    return emitOpError("K and block_size must be positive");
+  if (static_cast<bool>(getAQuant()) != static_cast<bool>(getAScale()))
+    return emitOpError("a_quant and a_scale must be given together");
+
+  SmallVector<Value> dataOperands;
+  dataOperands.push_back(getA());
+  llvm::append_range(dataOperands, getWeights());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getZeroPoints());
+  if (getAQuant()) {
+    dataOperands.push_back(getAQuant());
+    dataOperands.push_back(getAScale());
+  }
+  llvm::append_range(dataOperands, getOutputs());
+  return verifyDpsComputeOp(*this, dataOperands,
+                            /*numInits=*/getOutputs().size());
 }
 
 //===----------------------------------------------------------------------===//
