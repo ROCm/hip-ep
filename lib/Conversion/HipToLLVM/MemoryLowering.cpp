@@ -20,13 +20,17 @@ namespace {
 
 /// Core control-flow lowering still uses helper-local copies whose status ABI
 /// predates graph-level propagation. Mark copies in the public graph body,
-/// whose runtime status is propagated by ConvertHipToLLVM. A source pipeline
-/// can require the same fail-closed behavior for every copy in its module.
+/// whose runtime status is propagated by ConvertHipToLLVM once the module
+/// carries its graph ABI metadata (a module without it, such as a pass-level
+/// test fragment, has no status path). A source pipeline can require the same
+/// fail-closed behavior for every copy in its module.
 static LLVM::CallOp
 markFallibleCopyCallIfNeeded(LLVM::CallOp call, ModuleOp module,
                              LLVM::LLVMFuncOp enclosingFunction) {
-  if (enclosingFunction.getName() == "main_graph" ||
-      requiresFallibleMemRefCopies(module)) {
+  const bool propagatesGraphStatus =
+      enclosingFunction.getName() == "main_graph" &&
+      module->hasAttr("hipdnn.input_count");
+  if (propagatesGraphStatus || requiresFallibleMemRefCopies(module)) {
     markFallibleRuntimeCall(call);
   }
   return call;
@@ -965,9 +969,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     // between two of them stays a single flat transfer when the shape is only
     // known at runtime; just the byte count has to come from the descriptor.
     const bool needStaticStrides = failed(srcStridesOr) || failed(dstStridesOr);
-    const bool dynamicContiguous = !effectivelyContiguous && needStaticStrides &&
-                                   srcTy.getLayout().isIdentity() &&
-                                   dstTy.getLayout().isIdentity();
+    const bool dynamicContiguous =
+        !effectivelyContiguous && needStaticStrides &&
+        srcTy.getLayout().isIdentity() && dstTy.getLayout().isIdentity();
     if (!effectivelyContiguous && needStaticStrides && !dynamicContiguous) {
       return lowerToGenericDeviceCopy(op, adaptor, srcTy, dstTy, rewriter);
     }
