@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
@@ -282,4 +283,100 @@ extern "C" int hip_gemv_f32_transposed_b_multiwave_gfx1151(
                        dim3(N), dim3(kBlockSize), 0,
                        static_cast<hipStream_t>(stream), A, B, C, N, K);
   return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+namespace {
+
+__device__ __forceinline__ float bf16Dot2(__hip_bfloat162 lhs,
+                                          __hip_bfloat162 rhs,
+                                          float accumulator) {
+#if defined(__gfx1151__)
+    return __builtin_amdgcn_fdot2_f32_bf16(
+        static_cast<__bf16_2>(lhs), static_cast<__bf16_2>(rhs), accumulator,
+        false);
+#else
+    const float2 lhs_f32 = __bfloat1622float2(lhs);
+    const float2 rhs_f32 = __bfloat1622float2(rhs);
+    return fmaf(lhs_f32.y, rhs_f32.y,
+                fmaf(lhs_f32.x, rhs_f32.x, accumulator));
+#endif
+}
+
+template <int BlockSize, int Accumulators>
+__global__ void gemv_bf16_f32_transposed_b_kernel(
+    const __hip_bfloat162 *__restrict__ A,
+    const __hip_bfloat162 *__restrict__ B, float *__restrict__ C, int N,
+    int K2) {
+    const int lane = threadIdx.x % warpSize;
+    const int wave = threadIdx.x / warpSize;
+    const int waves_per_block = blockDim.x / warpSize;
+    const int output = blockIdx.x;
+    if (output >= N)
+        return;
+
+    const __hip_bfloat162 *weight =
+        B + static_cast<size_t>(output) * K2;
+    float sums[Accumulators] = {};
+    const int wave_stride = waves_per_block * warpSize;
+    int k = wave * warpSize + lane;
+    for (; k + (Accumulators - 1) * wave_stride < K2;
+         k += Accumulators * wave_stride) {
+#pragma unroll
+        for (int accumulator = 0; accumulator < Accumulators; ++accumulator) {
+            const int index = k + accumulator * wave_stride;
+            sums[accumulator] =
+                bf16Dot2(A[index], weight[index], sums[accumulator]);
+        }
+    }
+    for (; k < K2; k += wave_stride)
+        sums[0] = bf16Dot2(A[k], weight[k], sums[0]);
+
+    float sum;
+    if constexpr (Accumulators == 2) {
+        sum = sums[0] + sums[1];
+    } else {
+        static_assert(Accumulators == 4);
+        sum = (sums[0] + sums[1]) + (sums[2] + sums[3]);
+    }
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        sum += __shfl_down(sum, offset);
+
+    __shared__ float wave_sums[BlockSize / 32];
+    if (lane == 0)
+        wave_sums[wave] = sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float output_sum = 0.0f;
+        for (int wave_index = 0; wave_index < waves_per_block; ++wave_index)
+            output_sum += wave_sums[wave_index];
+        C[output] = output_sum;
+    }
+}
+
+} // namespace
+
+extern "C" int hip_gemv_bf16_f32_transposed_b(void *stream, const void *A,
+                                                const void *B, float *C,
+                                                int N, int K) {
+    constexpr uintptr_t kPairAlignmentMask = alignof(uint32_t) - 1;
+    if (!stream || !A || !B || !C || N <= 0 || K <= 0 || K % 2 != 0 ||
+        ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(B)) &
+         kPairAlignmentMask) != 0)
+        return -1;
+
+    const auto *input = static_cast<const __hip_bfloat162 *>(A);
+    const auto *weight = static_cast<const __hip_bfloat162 *>(B);
+    // gfx1151 benefits from more waves on long rows. Independent accumulator
+    // chains hide dot-product latency while every wave contributes useful
+    // work to the same output row.
+    if (K >= 8192) {
+        hipLaunchKernelGGL((gemv_bf16_f32_transposed_b_kernel<512, 2>), dim3(N),
+                           dim3(512), 0, static_cast<hipStream_t>(stream), input,
+                           weight, C, N, K / 2);
+    } else {
+        hipLaunchKernelGGL((gemv_bf16_f32_transposed_b_kernel<128, 4>), dim3(N),
+                           dim3(128), 0, static_cast<hipStream_t>(stream), input,
+                           weight, C, N, K / 2);
+    }
+    return hipGetLastError() == hipSuccess ? 0 : -1;
 }
