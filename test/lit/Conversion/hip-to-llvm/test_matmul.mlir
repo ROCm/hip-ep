@@ -24,10 +24,11 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
-// Verify 11 parameters:
+// CHECK: llvm.call @wrap_hipblasLtMatmulTyped({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// Verify 14 parameters:
 // - 4 pointers: state, A, B, output
-// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
+// - 9 i64: M=128, N=1024, K=4096, batch_count=1, input_type=f16,
+//   output_type=f16, b_batch_stride=0, transA=0, transB=0
 //   (B is rank-2 [K, N] = broadcast weight → stride = 0, compile-time const)
 // - 1 i32: op_state_slot (-1 here — --assign-op-state-slots not run in this RUN)
 
@@ -54,7 +55,7 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank3_leading_one_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmulTyped({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // ----- transB=1 (fused Q @ K^T) ----------------------------------------------
 module {
@@ -72,4 +73,22 @@ module {
 
 // CHECK-LABEL: llvm.func @test_matmul_trans_b
 // CHECK: llvm.mlir.constant(1 : i64)
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmulTyped({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// ----- BF16 inputs with FP32 accumulation/output -----------------------------
+module {
+  func.func @test_matmul_bf16_f32(%ctx: !hip.context,
+                                   %A: memref<1x4x8xbf16, 1>,
+                                   %B: memref<8x16xbf16, 1>,
+                                   %output: memref<1x4x16xf32, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x4x8xbf16, 1>, memref<8x16xbf16, 1>)
+        outs(%output : memref<1x4x16xf32, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_bf16_f32
+// CHECK: %[[INPUT_TYPE:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK: %[[OUTPUT_TYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmulTyped({{.*}}, %[[INPUT_TYPE]], %[[OUTPUT_TYPE]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32

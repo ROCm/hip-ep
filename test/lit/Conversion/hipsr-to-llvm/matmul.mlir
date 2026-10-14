@@ -14,10 +14,11 @@
 // CHECK-NEXT:  %[[A_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[B_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
-// CHECK-NEXT:  %[[ELEM_SIZE:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:  %[[INPUT_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:  %[[OUTPUT_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[CTX]], %[[SLOT]], %[[A_PTR]], %[[B_PTR]], %[[OUT_PTR]], %[[M]], %[[N]], %[[K]], %[[BATCH]], %[[ELEM_SIZE]], %[[B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmulTyped(%[[CTX]], %[[SLOT]], %[[A_PTR]], %[[B_PTR]], %[[OUT_PTR]], %[[M]], %[[N]], %[[K]], %[[BATCH]], %[[INPUT_TYPE]], %[[OUTPUT_TYPE]], %[[B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.return
 func.func @matmul_rank2(
     %ctx: !hipsr.context,
@@ -50,10 +51,11 @@ func.func @matmul_rank2(
 // CHECK-NEXT:  %[[DYN_A_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DYN_B_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
 // CHECK-NEXT:  %[[DYN_OUT_PTR:.*]] = llvm.extractvalue {{.*}}[1] : !llvm.struct<(ptr<1>,
-// CHECK-NEXT:  %[[DYN_ELEM_SIZE:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-NEXT:  %[[DYN_INPUT_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:  %[[DYN_OUTPUT_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:  llvm.mlir.constant(0 : i64) : i64
-// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmul(%[[DYN_CTX]], %[[DYN_SLOT]], %[[DYN_A_PTR]], %[[DYN_B_PTR]], %[[DYN_OUT_PTR]], %[[DYN_M]], %[[DYN_N]], %[[DYN_K]], %[[DYN_BATCH]], %[[DYN_ELEM_SIZE]], %[[DYN_B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NEXT:  llvm.call @wrap_hipblasLtMatmulTyped(%[[DYN_CTX]], %[[DYN_SLOT]], %[[DYN_A_PTR]], %[[DYN_B_PTR]], %[[DYN_OUT_PTR]], %[[DYN_M]], %[[DYN_N]], %[[DYN_K]], %[[DYN_BATCH]], %[[DYN_INPUT_TYPE]], %[[DYN_OUTPUT_TYPE]], %[[DYN_B_STRIDE]], {{.*}}, {{.*}}) : (!llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 // CHECK-NEXT:  llvm.return
 func.func @matmul_dynamic_batch(
     %ctx: !hipsr.context,
