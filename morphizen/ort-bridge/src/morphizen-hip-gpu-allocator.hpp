@@ -121,11 +121,14 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
-  // All six expect pool_mutex_ held. The first three append buffers the
+  // All expect pool_mutex_ held. The ones taking `out` append buffers the
   // caller must hand to the driver after releasing it.
   void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
   void TrimLarge(std::vector<void *> &out);
   void DrainLarge(std::vector<void *> &out);
+  void TrimPooled(int keep_cls, std::vector<void *> &out);
+  void DrainPooled(std::vector<void *> &out);
+  void NotePooledCheckedOut(int cls);
   void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown);
   bool ReplacesLiveBuffer(size_t size) const;
   bool ReplacedByLiveBuffer(size_t requested) const;
@@ -141,10 +144,16 @@ private:
   // every buffer within a class is interchangeable and any later request
   // mapping to the same class reuses it (100% hit rate after warmup, with at
   // most a few distinct class sizes regardless of how many dynamic shapes the
-  // model sees). Pooled (<= 16 MB) buffers are never returned to the driver in
-  // Free; they are released wholesale in the destructor — matching the
-  // project's per-session "grow-on-demand, never shrink, free at cleanup"
-  // memory contract.
+  // model sees). Free does not return a pooled (<= 16 MB) buffer to the driver
+  // directly; the idle bytes across all free lists are capped instead (see
+  // TrimPooled), and whatever remains is released in the destructor.
+  //
+  // The cap exists because a tensor re-created a little longer on every
+  // inference walks through consecutive classes: each class is used for one
+  // inference and never asked for again, yet its free list would hold a full
+  // set of buffers forever. Pinned host memory counts against the GPU's
+  // shared-memory budget, so the retained classes alone can exhaust it and make
+  // command submission fail on a later, unrelated launch.
   //
   // Requests above 16 MB bypass the classes: each is allocated at exactly its
   // size and returned to the driver on Free. The exception is a tensor that is
@@ -181,6 +190,16 @@ private:
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
   std::array<std::vector<void *>, kNumSizeClasses> free_lists_;
+  // pooled_ops_ value at the last hit or free in each class; read as an age by
+  // TrimPooled.
+  std::array<uint64_t, kNumSizeClasses> class_last_used_{};
+  uint64_t pooled_ops_ = 0;
+  // Class-capacity bytes of pooled buffers checked out / idle on free lists.
+  size_t pooled_live_bytes_ = 0;
+  size_t pooled_free_bytes_ = 0;
+  // Largest pooled_live_bytes_ seen. The idle cap follows it, because the idle
+  // set a steady workload needs never exceeds what it had in flight.
+  size_t peak_pooled_live_bytes_ = 0;
   // Every pointer hipHostMalloc'd by this allocator that is still outstanding
   // -> its allocated byte size (the rounded-up class capacity for pooled
   // buffers, the exact size for large ones). Pooled buffers stay tracked for
