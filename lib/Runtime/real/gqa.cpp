@@ -165,7 +165,39 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     state->seqlens_k_cached_ptr = seqlens_k_ptr;
     state->seqlens_k_cached_valid = true;
   }
+  if (state) {
+    state->seqlens_k_last = seqlens_k_val;
+    state->seqlens_k_last_valid = seqlens_k_val >= 0;
+    state->seqlens_k_hint_pass_val = seqlens_k_val;
+    state->seqlens_k_hint_pass_valid = seqlens_k_val >= 0;
+  }
   return seqlens_k_val;
+}
+
+// seqlens_k for a caller that only uses it to choose a launch configuration:
+// single-token decode against an in-place cache, whose kernels read the real
+// value from device. The first GQA of a pass would otherwise read it back and
+// synchronize the stream, which idles the GPU while the host refills the
+// queue (0.3-0.7 ms per token on gfx1151). Instead the last value read is
+// advanced by one token per pass. Falls back to the read when no value is
+// known yet (the pass after session start) and returns the exact value when
+// this pass has already read it.
+static int32_t seqlens_k_decode_hint(hipStream_t stream,
+                                     const void *seqlens_k_ptr, int64_t B,
+                                     RuntimeState *state) {
+  if (!seqlens_k_ptr || B != 1 || !state)
+    return read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+  if (state->seqlens_k_cached_valid &&
+      state->seqlens_k_cached_ptr == seqlens_k_ptr)
+    return state->seqlens_k_cached_val;
+  if (state->seqlens_k_hint_pass_valid)
+    return state->seqlens_k_hint_pass_val;
+  if (!state->seqlens_k_last_valid)
+    return read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+  state->seqlens_k_last += 1;
+  state->seqlens_k_hint_pass_val = state->seqlens_k_last;
+  state->seqlens_k_hint_pass_valid = true;
+  return state->seqlens_k_hint_pass_val;
 }
 
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
@@ -361,8 +393,14 @@ static int gqa_forward_fused(
   const bool packed_qkv = (!key && !value);
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
+  // Decode into an in-place cache needs no host past_len, only a length for
+  // the split heuristic, so it takes the non-blocking estimate.
+  const bool decode_in_place =
+      sq == 1 && !(past_key && past_key != present_key);
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      decode_in_place
+          ? seqlens_k_decode_hint(stream, seqlens_k_ptr, B, state)
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -532,7 +570,8 @@ static int gqa_forward_fused(
         // measured length either way.
         int effective_skv = static_cast<int>(skv);
         if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
-          effective_skv = seqlens_k_pre + 1;
+          effective_skv = static_cast<int>(
+              std::min<int64_t>(seqlens_k_pre + 1, present_seq));
         const hipdnn_ep::GqaDecodeRequest request{
             kv_dtype,
             static_cast<int>(B),

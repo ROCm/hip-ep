@@ -956,6 +956,92 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
+                                       /*traits=*/[AttrSizedOperandSegments,
+                                                   OpStateOpInterface]> {
+  let summary = "MatMulNBits projections that read the same activation";
+  let description = [{
+    Formed by fusion from 1-3 hip.matmul_nbits ops that share `A`, have no
+    g_idx and no bias, and the same K, bits and block_size. `weights[i]` /
+    `scales[i]` are the B / scales operands of the i-th original op and
+    `N[i]` its output width. `zero_points` is empty for symmetric weights,
+    or holds one packed uint8 zero_points operand per weight
+    (zp_elem_size = 1) when every original op had one.
+
+    `epilogue` selects how the projections are written:
+      0 (concat):   outputs[i] = A @ dequant(weights[i])^T, one output per
+                    weight.
+      1 (silu_mul): two weights with equal N and a single output,
+                    outputs[0] = silu(A @ dequant(weights[0])^T)
+                               * (A @ dequant(weights[1])^T).
+
+    For a single activation row the runtime quantizes A once and computes
+    every projection in one launch; other shapes run each projection
+    through the MatMulNBits kernels.
+
+    Optional `quantized(%a_quant, %a_scale)` names a quantized copy of A
+    written by its producer (hip.skip_rms_norm quant_outputs). The runtime
+    reads it instead of quantizing A whenever hip_norm_quant_supported()
+    holds for A's shape, the same test the producer used to write it.
+
+    Example:
+    ```mlir
+    hip.matmul_nbits_group(%handle) ins(%A : memref<1x1x5120xf16, 1>)
+        weights(%Bq, %Bk, %Bv : memref<5120x160x16xui8, 1>,
+                memref<5120x160x16xui8, 1>, memref<5120x160x16xui8, 1>)
+        scales(%Sq, %Sk, %Sv : memref<5120x160xf16, 1>,
+               memref<5120x160xf16, 1>, memref<5120x160xf16, 1>)
+        outs(%q, %k, %v : memref<1x1x5120xf16, 1>, memref<1x1x5120xf16, 1>,
+             memref<1x1x5120xf16, 1>)
+        {K = 5120, N = [5120, 5120, 5120], bits = 4, block_size = 32,
+         accuracy_level = 4, epilogue = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                      // activation [..., K]
+    Variadic<Hip_TensorOrMemRef>:$weights,      // packed uint8 [N_i, k_blocks, blob_size]
+    Variadic<Hip_TensorOrMemRef>:$scales,       // dequant scales [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$zero_points,  // packed uint8 zero points (none, or one per weight)
+    Optional<Hip_TensorOrMemRef>:$a_quant,      // int8 copy of A (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,      // its group scales (optional)
+    Variadic<Hip_TensorOrMemRef>:$outputs,      // results [..., N_i] (silu_mul: one)
+    I64Attr:$K,
+    I64ArrayAttr:$N,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level,
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // 2=fp16, 4=fp32
+    DefaultValuedAttr<I64Attr, "0">:$epilogue          // 0=concat, 1=silu_mul
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    `weights` `(` $weights `:` type($weights) `)`
+    `scales` `(` $scales `:` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
+    (`quantized` `(` $a_quant^ `,` $a_scale `:` type($a_quant) `,`
+        type($a_scale) `)`)?
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+
+  // Shares MatMulNBits' per-session state: its zero-point unpack cache serves
+  // the grouped kernel, and the per-projection fallback goes through the same
+  // entry point as hip.matmul_nbits.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
                            /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",
@@ -1560,6 +1646,13 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
       outputs[0] = output             (required, T) - normalized result
       outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
 
+    Optional quantized copy of `output` (0 or 2 buffers in `quant_outputs`),
+    attached by fusion when the normalized row feeds hip.matmul_nbits_group:
+      quant_outputs[0] = int8 [..., hidden] in the dp4a deinterleaved layout
+      quant_outputs[1] = f32  [..., hidden / quant_block_size] group scales
+    The runtime fills them only for the shapes hip_norm_quant_supported()
+    accepts; the consumer applies the same test before reading them.
+
     Uses destination-passing style: output buffers are provided as arguments.
 
     Example (without bias, 1 output):
@@ -1597,9 +1690,12 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
 
     // DPS output buffers: [output] or [output, input_skip_bias_sum]
     Variadic<Hip_TensorOrMemRef>:$outputs,
+    // Optional quantized output: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
 
     // Attributes
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1610,6 +1706,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
         ( `,` type($bias)^ )?
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 

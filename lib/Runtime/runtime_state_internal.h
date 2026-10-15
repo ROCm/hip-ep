@@ -164,6 +164,13 @@ struct RuntimeState {
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
 
+  // Per-session scratch for hip.matmul_nbits_group's multi-row path: holds the
+  // up projection that the SiLU epilogue combines with the gate. Same policy as
+  // matmul_dp4a_scratch. Kept apart from it because the per-segment matmuls
+  // that fill it use matmul_dp4a_scratch themselves.
+  void *matmul_group_scratch;
+  size_t matmul_group_scratch_size;
+
   // Per-session scratch for the linear-attention chunk-parallel gated_delta
   // prefill (hip_linear_attention_prefill_chunked). One contiguous device
   // buffer holding the per-(head,chunk) Uloc/W/rlast/alast tiles and the
@@ -257,6 +264,18 @@ struct RuntimeState {
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
+
+  // Host estimate of seqlens_k for single-token decode against an in-place
+  // cache, where the kernels read the real value from device and the host
+  // only needs a length to pick the flash-decode split count. Seeded by the
+  // last real read (`seqlens_k_last`), advanced by one token per forward pass,
+  // so decode never stalls the stream to read it. `seqlens_k_hint_pass_valid`
+  // is cleared by hipdnn_ep_runtime_begin_compute(); `seqlens_k_last_valid`
+  // persists across passes.
+  bool seqlens_k_last_valid;
+  int32_t seqlens_k_last;
+  bool seqlens_k_hint_pass_valid;
+  int32_t seqlens_k_hint_pass_val;
 
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
