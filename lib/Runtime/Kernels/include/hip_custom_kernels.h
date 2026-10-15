@@ -3913,8 +3913,9 @@ HIP_KERNEL_API int hip_gemv_f32_transposed_b(void* stream, const float* A,
                                               const float* B, float* C,
                                               int N, int K);
 
-/* gfx1151 wave32 specialization for measured one-row, small-output,
- * large-reduction F32 projections. */
+/* gfx1151 specialization for one-row F32 projections with N <= 256: one
+ * 256-thread block per output, float4 loads when K % 4 == 0 and the operands
+ * are 16-byte aligned. */
 HIP_KERNEL_API int hip_gemv_f32_transposed_b_multiwave_gfx1151(
     void *stream, const float *A, const float *B, float *C, int N, int K);
 

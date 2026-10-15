@@ -22,8 +22,10 @@ int main() {
       !useF32TransposedBMultiwaveGfx1151(128, 2816) ||
       useF32TransposedBMultiwaveGfx1151(0, 2048) ||
       useF32TransposedBMultiwaveGfx1151(257, 2048) ||
-      useF32TransposedBMultiwaveGfx1151(128, 1024) ||
-      useF32TransposedBMultiwaveGfx1151(128, 4096))
+      !useF32TransposedBMultiwaveGfx1151(128, 1024) ||
+      !useF32TransposedBMultiwaveGfx1151(128, 2880) ||
+      !useF32TransposedBMultiwaveGfx1151(256, 4096) ||
+      useF32TransposedBMultiwaveGfx1151(128, 0))
     return 1;
 
   // Prefill, batched, F16, untransposed, wide, and unrepresentable dimensions

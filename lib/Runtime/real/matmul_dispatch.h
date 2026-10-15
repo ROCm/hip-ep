@@ -25,8 +25,10 @@ inline constexpr bool useF32TransposedBDecodeGemv(
          K <= std::numeric_limits<int>::max();
 }
 
+// The multi-wave kernel covers every decode GEMV shape the caller admits;
+// K is bounded there.
 inline constexpr bool useF32TransposedBMultiwaveGfx1151(int64_t N, int64_t K) {
-  return N > 0 && N <= 256 && (K == 2048 || K == 2816);
+  return N > 0 && N <= 256 && K > 0;
 }
 
 } // namespace hipdnn_ep_real
