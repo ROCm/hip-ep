@@ -525,13 +525,31 @@ input layout) with `_bias` and `_zp` when set, and names its selector,
 descriptor and pipeline cases (`task_policy_fc1`, `launcher_grid`,
 `descriptors_E11_P304_k1`, `pipeline_T20_E5_k2_H32_I16_bs32`).
 
-`time_ms` is the **mean per-launch** time of that case's own timing loop (the
-leaf's `kIters` launches between two HIP events), not a total. It is the only
-timing in the row: the tuner's own figure is a *peak* (minimum) sample taken
-during the sweep, under a different clock state, so it is deliberately not
-carried in `config` where it would read as the same measurement.
-qmoe_ragged_mm checks correctness only and has no timing loop, so its rows
-carry 0.
+`time_ms` is the **mean per-launch** time of that case's timed launches (the
+leaf's fixed count of launches between two HIP events), not a total, and it is
+measured **cold**. In a model a kernel's weights or KV cache are read once per
+step, and the rest of the model streams through the GPU caches before they are
+read again, so every launch reads them from DRAM. The timed launches therefore
+rotate over copies of that operand -- the MatMulNBits and qmoe_ragged_mm
+weights (with their scales and zero points), the GQA K and V caches, of which a
+sliding window copies only the rows it reads -- totalling several times the
+last-level cache, so each launch reads its copy from DRAM the way consecutive
+layers read their own. The activation and the output stay single and warm, as
+they are in a model. Untimed launches over the rotation go first, and the timed
+launches are held on the GPU until all of them are queued, so the reading is
+GPU time rather than the host's submission rate. Flushing the caches between
+launches would not reproduce DRAM reads: a read-only flush leaves the reused
+lines resident, and a write flush leaves dirty lines for the timed launch to
+write back. The copies take a few hundred MB of device memory per case.
+`HIPDNN_KERNEL_UT_WARM=1` in the environment of `hipdnn-kernel-ut.exe` (the
+leaves inherit it) or of a leaf times one copy back to back on warm caches
+instead, for comparison.
+
+`time_ms` is the only timing in the row: the tuner's own figure is a *peak*
+(minimum) sample taken during the sweep, under a different clock state, so it
+is deliberately not carried in `config` where it would read as the same
+measurement. qmoe_ragged_mm times its MatMul cases; its selector, descriptor
+and pipeline rows carry 0.
 
 `config` names the configuration that actually ran, recovered from the op's own
 diagnostics (`HIPDNN_{MATMUL,GQA}_AUTOTUNE_LOG`, `HIPDNN_MATMUL_LUT_LOG`) or,

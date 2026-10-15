@@ -61,6 +61,8 @@ Each case appends one row to `out/results.csv` (see `unit_test/README.md`).
 selectors (`hip_qmoe_ragged_matmul_nbits_get_task_kind` / `_get_launch_config`):
 for a MatMul case, the stage's task policy, the queue policy, the grid and the
 task kinds its row groups ran, e.g. `fixed:p0-current queue=atomic1 grid=20
-tasks=gemv+wmma16`. The leaf checks correctness only, so `time_ms` is 0.
+tasks=gemv+wmma16`. A MatMul case's `time_ms` is the cold mean of 20 launches
+rotating over copies of the expert weights, scales, zero points and bias (see
+`unit_test/README.md`); the selector, descriptor and pipeline rows carry 0.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
