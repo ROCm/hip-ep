@@ -572,8 +572,9 @@ A run is either `lookup` or `autotune`, never both, so a leaf has exactly one
 
 Under `hipdnn-kernel-ut.exe` each leaf reads that output back from its stderr
 log (see "Run" above); a leaf started any other way redirects its own stderr
-to a scratch file under `out/` instead, which captures the kernels only when
-they are linked into the leaf (the local make build). Either way a passing run
+to a scratch file beside its executable instead (so it works from any working
+directory), which captures the kernels only when they are linked into the leaf
+(the local make build). Either way a passing run
 leaves only `out/results.csv`. Because an op logs a selection only on the
 first encounter with a tune key, a later case sharing that key reuses the
 earlier selection silently; the leaf remembers it per key so every row still
