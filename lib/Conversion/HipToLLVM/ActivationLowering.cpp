@@ -245,6 +245,85 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
   }
 };
 
+// hip.lrn(ctx, input, output) {size, alpha, beta, bias}
+//   -> wrap_lrn(state, input, output, n, c, spatial, size, alpha, beta, bias,
+//               data_type)
+// Channel axis is 1. spatial is the product of the remaining dimensions.
+struct LRNOpLowering : public ConvertOpToLLVMPattern<LRNOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(LRNOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    auto createF64Const = [&](double value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                      rewriter.getF64FloatAttr(value));
+    };
+
+    auto outputType = dyn_cast<MemRefType>(op.getOutput().getType());
+    if (!outputType || outputType.getRank() < 2)
+      return op.emitError("hip.lrn output must be a memref of rank >= 2");
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType != HIPDNN_EP_DATATYPE_FLOAT &&
+        dataType != HIPDNN_EP_DATATYPE_HALF &&
+        dataType != HIPDNN_EP_DATATYPE_BFLOAT16 &&
+        dataType != HIPDNN_EP_DATATYPE_DOUBLE)
+      return op.emitError(
+          "hip.lrn element type must be f16, bf16, f32, or f64");
+
+    Value outputDesc = adaptor.getOutput();
+    MemRefDescriptor desc(outputDesc);
+    auto dimSize = [&](int64_t dimIdx) -> Value {
+      if (outputType.isDynamicDim(dimIdx))
+        return desc.size(rewriter, loc, dimIdx);
+      return createI64Const(outputType.getDimSize(dimIdx));
+    };
+
+    Value n = dimSize(0);
+    Value channels = dimSize(1);
+    Value spatial = createI64Const(1);
+    for (int64_t dimIdx : llvm::seq<int64_t>(2, outputType.getRank()))
+      spatial = LLVM::MulOp::create(rewriter, loc, spatial, dimSize(dimIdx));
+
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                        i64Type, i64Type, i64Type, f64Type,
+                                        f64Type, f64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapLRN, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 11> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(outputDesc, rewriter, loc),
+        n,
+        channels,
+        spatial,
+        createI64Const(op.getSize()),
+        createF64Const(op.getAlpha().convertToDouble()),
+        createF64Const(op.getBeta().convertToDouble()),
+        createF64Const(op.getBias().convertToDouble()),
+        createI64Const(dataType)};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.swish(ctx, input, output)
 //   -> wrap_swish(state, input, output, num_elements, data_type, alpha)
 // Supports static and dynamic shapes and the complete ONNX Swish type set.
@@ -306,6 +385,72 @@ struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
 
     SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
                                   numElements, dataTypeVal, alphaConst};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.pow(ctx, input, output) {exponent}
+//   -> wrap_pow(state, input, output, num_elements, data_type, exponent)
+struct PowOpLowering : public ConvertOpToLLVMPattern<PowOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(PowOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize = outputType.isDynamicDim(dimIdx)
+                          ? outputDesc.size(rewriter, loc, dimIdx)
+                          : createI64Const(outputType.getDimSize(dimIdx));
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0 || (dataType > 2 && dataType != 6)) {
+      std::string errorMsg;
+      llvm::raw_string_ostream os(errorMsg);
+      os << "unsupported element type '" << elemType
+         << "' for Pow. Only f32, f16, bf16, and f64 are supported";
+      return rewriter.notifyMatchFailure(op, os.str());
+    }
+
+    Value dataTypeVal = createI64Const(dataType);
+    Value exponentConst = LLVM::ConstantOp::create(
+        rewriter, loc, f64Type,
+        rewriter.getF64FloatAttr(op.getExponent().convertToDouble()));
+
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, f64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapPow, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
+                                  numElements, dataTypeVal, exponentConst};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -410,13 +555,103 @@ struct MiopenSoftmaxOpLowering
   }
 };
 
+// hip.prelu(ctx, x, slope, output)
+//   -> wrap_prelu(state, x, slope, output, x_shape, x_rank, slope_shape,
+//                 slope_rank, out_shape, out_rank, data_type)
+// slope is unidirectional-broadcastable onto x. The runtime left-pads each
+// shape and uses a 0 stride on broadcast axes.
+struct PReluOpLowering : public ConvertOpToLLVMPattern<PReluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(PReluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto xType = cast<MemRefType>(op.getX().getType());
+    auto slopeType = cast<MemRefType>(op.getSlope().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Type elemType = outputType.getElementType();
+    if (elemType != xType.getElementType() ||
+        elemType != slopeType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: x, slope, and output element types must match");
+    if (!elemType.isF32() && !elemType.isF16() && !elemType.isBF16() &&
+        !elemType.isF64())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: only f32, f16, bf16, and f64 are supported");
+    if (outputType.getRank() > 8 || xType.getRank() > outputType.getRank() ||
+        slopeType.getRank() > outputType.getRank())
+      return rewriter.notifyMatchFailure(
+          op, "hip.prelu: rank must be <= 8 and operands must not outrank "
+              "the output");
+
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "hip.prelu: unsupported dtype");
+
+    Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                         rewriter.getI64IntegerAttr(1));
+    auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
+      int rank = type.getRank();
+      int arrLen = std::max(rank, 1);
+      auto arrType = LLVM::LLVMArrayType::get(i64Type, arrLen);
+      Value arr =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, arrType, one, 8);
+      for (int i = 0; i < rank; ++i) {
+        Value dim = getMemRefDimSize(type, i, descriptor, rewriter, loc);
+        Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                             rewriter.getI32IntegerAttr(i));
+        Value elemPtr =
+            LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, arr, idx);
+        LLVM::StoreOp::create(rewriter, loc, dim, elemPtr);
+      }
+      return arr;
+    };
+
+    auto createI64Const = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                        ptrType, i64Type, ptrType, i64Type,
+                                        ptrType, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapPRelu, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 11> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getSlope(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        emitShapeArray(xType, adaptor.getX()),
+        createI64Const(xType.getRank()),
+        emitShapeArray(slopeType, adaptor.getSlope()),
+        createI64Const(slopeType.getRank()),
+        emitShapeArray(outputType, adaptor.getOutput()),
+        createI64Const(outputType.getRank()),
+        createI64Const(dataType)};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
-               SwishOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
-      converter);
+               PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
+               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

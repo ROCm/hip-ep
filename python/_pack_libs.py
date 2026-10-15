@@ -24,6 +24,7 @@ CRT_LIBS = [
 
 ROCM_DLL_GROUPS = [
     ["hipblaslt.dll", "libhipblaslt.dll"],
+    ["tensilelite-host.dll"],
 ]
 
 HIPBLASLT_DATA = ("hipblaslt", "library")
@@ -57,20 +58,11 @@ _GENERIC_MEMBERS = {
 }
 
 
-def _resolve_tensile_arch(library, requested):
+def _resolve_tensile_archs(library, requested):
     if (library / requested).is_dir():
-        return requested
-    members = _GENERIC_MEMBERS.get(requested)
-    if not members:
-        return None
-    present = [a for a in members if (library / a).is_dir()]
-    if not present:
-        return None
-    # gfx1151 is what the pinned dist and the CI GPU are; a dist carrying the
-    # whole family would otherwise resolve to the lowest member.
-    if "gfx1151" in present:
-        return "gfx1151"
-    return present[0]
+        return [requested]
+    members = _GENERIC_MEMBERS.get(requested, ())
+    return [a for a in members if (library / a).is_dir()]
 
 
 def _find_in_lib_env(name: str):
@@ -102,7 +94,7 @@ def _copy_crt_libs(dest: Path) -> int:
     return len(missing)
 
 
-def _copy_rocm_runtime(dist: Path, arch: str, dest: Path) -> int:
+def _copy_rocm_runtime(dist: Path, archs: list, dest: Path) -> int:
     bin_dir = dist / "bin"
     if not bin_dir.is_dir():
         print(f"ERROR: --rocm-dist has no bin/: {dist}", file=sys.stderr)
@@ -122,32 +114,34 @@ def _copy_rocm_runtime(dist: Path, arch: str, dest: Path) -> int:
             print(f"  packaged ROCm dll: {src.name} <- {src}")
 
     library = bin_dir.joinpath(*HIPBLASLT_DATA)
-    tensile_arch = _resolve_tensile_arch(library, arch)
-    if tensile_arch is None:
-        available = []
-        if library.is_dir():
-            available = sorted(p.name for p in library.iterdir() if p.is_dir())
-        hint = f" (available: {', '.join(available)})" if available else ""
+    tensile_archs = []
+    for arch in archs:
+        resolved = _resolve_tensile_archs(library, arch)
+        if not resolved:
+            available = []
+            if library.is_dir():
+                available = sorted(p.name for p in library.iterdir() if p.is_dir())
+            hint = f" (available: {', '.join(available)})" if available else ""
+            print(
+                f"ERROR: hipBLASLt Tensile data for {arch} not found: "
+                f"{library / arch}{hint}",
+                file=sys.stderr,
+            )
+            return 1
+        if resolved != [arch]:
+            print(f"  hipBLASLt Tensile arch {arch} -> {', '.join(resolved)}")
+        tensile_archs += [a for a in resolved if a not in tensile_archs]
+
+    for tensile_arch in tensile_archs:
+        src_data = library / tensile_arch
+        dst_data = dest.joinpath(*HIPBLASLT_DATA, tensile_arch)
+        shutil.copytree(src_data, dst_data)
+        count = sum(1 for p in dst_data.rglob("*") if p.is_file())
         print(
-            f"ERROR: hipBLASLt Tensile data for {arch} not found: "
-            f"{library / arch}{hint}",
-            file=sys.stderr,
+            f"  packaged hipBLASLt Tensile data: "
+            f"{'/'.join(HIPBLASLT_DATA)}/{tensile_arch} "
+            f"({count} files) <- {src_data}"
         )
-        return 1
-    src_data = library / tensile_arch
-    if tensile_arch != arch:
-        print(
-            f"  hipBLASLt Tensile arch {arch} -> {tensile_arch} "
-            f"(device ISA present in dist)"
-        )
-    dst_data = dest.joinpath(*HIPBLASLT_DATA, tensile_arch)
-    shutil.copytree(src_data, dst_data)
-    count = sum(1 for p in dst_data.rglob("*") if p.is_file())
-    print(
-        f"  packaged hipBLASLt Tensile data: "
-        f"{'/'.join(HIPBLASLT_DATA)}/{tensile_arch} "
-        f"({count} files) <- {src_data}"
-    )
     return 0
 
 
@@ -175,12 +169,12 @@ def main():
     )
     ap.add_argument(
         "--rocm-arch",
+        action="append",
         required=True,
         metavar="GFX",
-        help="Device ISA whose hipBLASLt Tensile data to bundle, e.g. gfx1151. "
-        "A generic compile target (gfx11-generic) is mapped to a concrete "
-        "ISA present in the dist. A multi-arch distribution carries every "
-        "arch; the wheel ships one.",
+        help="Device ISA whose hipBLASLt Tensile data to bundle, e.g. gfx1151 "
+        "(repeatable). A generic compile target (gfx11-generic) expands to "
+        "every member ISA present in the dist.",
     )
     ap.add_argument(
         "--extra-lib",

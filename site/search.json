@@ -1,0 +1,19 @@
+---
+layout: null
+permalink: /search.json
+---
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+{%- endcomment -%}
+[
+  {% assign docs_pages = site.pages | where_exp: "p", "p.layout == 'docs'" %}
+  {% for p in docs_pages %}
+  {
+    "title": {{ p.title | default: "Untitled" | jsonify }},
+    "url": {{ p.url | relative_url | jsonify }},
+    "description": {{ p.description | default: "" | replace: '%VERSION%', site.hip_ep_version | jsonify }},
+    "content": {{ p.content | strip_html | normalize_whitespace | jsonify }}
+  }{% unless forloop.last %},{% endunless %}
+  {% endfor %}
+]

@@ -312,7 +312,7 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
                          ValueRange operands, DictionaryAttr attributes,
-                         OpaqueProperties properties, RegionRange regions,
+                         PropertyRef properties, RegionRange regions,
                          SmallVectorImpl<Type> &inferredReturnTypes) {
   LoopOpAdaptor adaptor(operands, attributes, properties, regions);
   auto vInit = adaptor.getVInit();
@@ -391,7 +391,7 @@ LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
 LogicalResult
 IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
                        ValueRange operands, DictionaryAttr attributes,
-                       OpaqueProperties properties, RegionRange regions,
+                       PropertyRef properties, RegionRange regions,
                        SmallVectorImpl<Type> &inferredReturnTypes) {
   IfOpAdaptor adaptor(operands, attributes, properties, regions);
   auto oInit = adaptor.getOInit();
@@ -693,6 +693,174 @@ void QConvOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QLinearConvOp: onnx.QLinearConv, 8-bit grouped 2D
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+static bool isEightBitInt(Type type) {
+  auto integer = dyn_cast<IntegerType>(type);
+  return integer && integer.getWidth() == 8;
+}
+
+static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+                                        StringRef name) {
+  if (attr.size() != 2)
+    return op.emitOpError() << name << " must have 2 entries";
+  for (Attribute entry : attr) {
+    auto intAttr = dyn_cast<IntegerAttr>(entry);
+    if (!intAttr || intAttr.getInt() <= 0)
+      return op.emitOpError() << name << " entries must be positive";
+  }
+  return success();
+}
+
+static LogicalResult verifyQuantParam(QLinearConvOp op, Value scale, Value zp,
+                                      Type storage, StringRef name) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  return success();
+}
+
+LogicalResult QLinearConvOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+
+  if (!isEightBitInt(inputType.getElementType()) ||
+      !isEightBitInt(weightsType.getElementType()) ||
+      !isEightBitInt(outputType.getElementType()))
+    return emitOpError("input, weights, and output must be 8-bit integers");
+
+  if (failed(verifyQuantParam(*this, getInputScale(), getInputZeroPoint(),
+                              inputType.getElementType(), "input")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getWeightScale(), getWeightZeroPoint(),
+                              weightsType.getElementType(), "weight")))
+    return failure();
+  if (failed(verifyQuantParam(*this, getOutputScale(), getOutputZeroPoint(),
+                              outputType.getElementType(), "output")))
+    return failure();
+
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank() || biasType.getRank() != 1 ||
+        !biasType.getElementType().isInteger(32))
+      return emitOpError("bias must be rank-1 i32");
+  }
+
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4)
+    return emitOpError("pads must have 4 entries");
+  for (Attribute entry : getPads()) {
+    if (!isa<IntegerAttr>(entry))
+      return emitOpError("pads entries must be integers");
+  }
+  if (getGroup() < 1)
+    return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QLinearMatMulOp: onnx.QLinearMatMul, rank-2 8-bit
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QLinearMatMulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QLinearMatMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
+                                          Value zp, Type storage,
+                                          StringRef name) {
+  auto scaleType = dyn_cast<ShapedType>(scale.getType());
+  auto zpType = dyn_cast<ShapedType>(zp.getType());
+  if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
+      scaleType.getRank() > 1 || zpType.getRank() > 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be rank 0 or 1";
+  if (!scaleType.getElementType().isF32())
+    return op.emitOpError() << name << " scale must be f32";
+  if (zpType.getElementType() != storage)
+    return op.emitOpError()
+           << name
+           << " zero point element type must match the quantized tensor";
+  if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+      scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+    return op.emitOpError()
+           << name << " scale and zero point must be a single element";
+  return success();
+}
+
+LogicalResult QLinearMatMulOp::verify() {
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto yType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !yType || !aType.hasRank() || !bType.hasRank() ||
+      !yType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      yType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!aType.hasStaticShape() || !bType.hasStaticShape() ||
+      !yType.hasStaticShape())
+    return emitOpError("a, b, and output must have static shapes");
+
+  int64_t m = aType.getDimSize(0);
+  int64_t k = aType.getDimSize(1);
+  int64_t n = bType.getDimSize(1);
+  if (m < 1 || k < 1 || n < 1)
+    return emitOpError("M, K, and N must be positive");
+  if (bType.getDimSize(0) != k)
+    return emitOpError("b rows must equal a columns");
+  if (yType.getDimSize(0) != m || yType.getDimSize(1) != n)
+    return emitOpError("output shape must be [M, N]");
+
+  if (!isEightBitInt(aType.getElementType()) ||
+      !isEightBitInt(bType.getElementType()) ||
+      !isEightBitInt(yType.getElementType()))
+    return emitOpError("a, b, and output must be 8-bit integers");
+
+  if (failed(verifyPerTensorParam(*this, getAScale(), getAZeroPoint(),
+                                  aType.getElementType(), "a")) ||
+      failed(verifyPerTensorParam(*this, getBScale(), getBZeroPoint(),
+                                  bType.getElementType(), "b")) ||
+      failed(verifyPerTensorParam(*this, getYScale(), getYZeroPoint(),
+                                  yType.getElementType(), "y")))
+    return failure();
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1093,6 +1261,121 @@ LogicalResult InstanceNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// BatchNormOp: ins(input, scale, bias, mean, variance), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BatchNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BatchNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult BatchNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(),    getBias(),
+                                  getMean(),  getVariance(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank)
+    return emitOpError("expected ranked input of rank >= 2 (N, C, ...)");
+  if (*inputRank < 2)
+    return emitOpError("expected input rank >= 2 (N, C, ...), got ")
+           << *inputRank;
+
+  auto expectRank1 = [&](Type type, StringRef name) -> LogicalResult {
+    auto rank = rankedShape(type);
+    if (rank && *rank != 1)
+      return emitOpError("expected 1-D ")
+             << name << " of length C, got rank " << *rank;
+    return success();
+  };
+  if (failed(expectRank1(getScale().getType(), "scale")) ||
+      failed(expectRank1(getBias().getType(), "bias")) ||
+      failed(expectRank1(getMean().getType(), "mean")) ||
+      failed(expectRank1(getVariance().getType(), "variance")))
+    return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GroupNormOp: ins(input, scale, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GroupNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GroupNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GroupNormOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getScale(), getBias(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto rankedShape = [](Type t) -> std::optional<int64_t> {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor.getRank();
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref.getRank();
+    return std::nullopt;
+  };
+  auto shapedType = [](Type t) -> ShapedType {
+    if (auto tensor = dyn_cast<RankedTensorType>(t))
+      return tensor;
+    if (auto memref = dyn_cast<MemRefType>(t))
+      return memref;
+    return ShapedType();
+  };
+
+  auto inputRank = rankedShape(getInput().getType());
+  if (!inputRank || *inputRank < 3)
+    return emitOpError("expected input rank >= 3, got ")
+           << (inputRank ? *inputRank : -1);
+  if (getGroups() <= 0)
+    return emitOpError("groups must be positive");
+  if (getActivation() != 0 && getActivation() != 1)
+    return emitOpError("activation must be 0 (none) or 1 (SiLU)");
+  if (getChannelsLast() != 0 && getChannelsLast() != 1)
+    return emitOpError("channels_last must be 0 (NCHW) or 1 (NHWC)");
+
+  int64_t channelAxis = getChannelsLast() ? *inputRank - 1 : 1;
+  ShapedType inputShaped = shapedType(getInput().getType());
+  if (inputShaped && !inputShaped.isDynamicDim(channelAxis)) {
+    int64_t channels = inputShaped.getDimSize(channelAxis);
+    if (channels % getGroups() != 0)
+      return emitOpError("channel extent ")
+             << channels << " is not divisible by groups " << getGroups();
+  }
+
+  auto scaleRank = rankedShape(getScale().getType());
+  auto biasRank = rankedShape(getBias().getType());
+  if (scaleRank && *scaleRank != 1)
+    return emitOpError("expected 1-D scale of length C, got rank ")
+           << *scaleRank;
+  if (biasRank && *biasRank != 1)
+    return emitOpError("expected 1-D bias of length C, got rank ") << *biasRank;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1348,6 +1631,29 @@ void TopKOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// RandomNormalLikeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, input, output). The input is a shape donor; the
+// kernel fills `output` and does not load input elements.
+MutableOperandRange RandomNormalLikeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RandomNormalLikeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  // Tensor-mode DPS effects are empty, so an unseeded fill looks pure and
+  // CSE can merge two calls that must each take a new clock seed. A Write
+  // on the default resource keeps only the seeded (deterministic) form
+  // eligible for CSE.
+  if (!getSeedAttr())
+    effects.emplace_back(MemoryEffects::Write::get(),
+                         SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1461,6 +1767,18 @@ void FastGeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// PReluOp: ins(x, slope), outs(output). slope broadcasts onto x.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PReluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // LeakyReluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1475,12 +1793,73 @@ void LeakyReluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// LRNOp: channel-window normalization, ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LRNOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void LRNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LRNOp::verify() {
+  auto inType = dyn_cast<ShapedType>(getInput().getType());
+  auto outType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inType || !outType || !inType.hasRank() || !outType.hasRank() ||
+      inType.getRank() < 2 || inType.getRank() != outType.getRank())
+    return emitOpError(
+        "input and output must have the same rank of at least 2");
+
+  for (int64_t dim : llvm::seq<int64_t>(inType.getRank())) {
+    if (inType.isDynamicDim(dim) || outType.isDynamicDim(dim))
+      continue;
+    if (inType.getDimSize(dim) != outType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+
+  Type elemType = inType.getElementType();
+  if (elemType != outType.getElementType() ||
+      (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32() &&
+       !elemType.isF64()))
+    return emitOpError("input and output must be f16, bf16, f32, or f64");
+  if (getSize() < 1)
+    return emitOpError("size must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// TriluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TriluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void TriluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SwishOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SwishOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void SwishOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// PowOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PowOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void PowOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -2099,6 +2478,48 @@ void NegOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// IsNaNOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IsNaNOp::getDpsInitsMutable() { return getYMutable(); }
+
+void IsNaNOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult IsNaNOp::verify() {
+  auto inputType = dyn_cast<ShapedType>(getX().getType());
+  auto outputType = dyn_cast<ShapedType>(getY().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      !outputType.hasRank())
+    return emitOpError("expects ranked input and output");
+
+  Type inputElem = inputType.getElementType();
+  if (!inputElem.isF16() && !inputElem.isBF16() && !inputElem.isF32() &&
+      !inputElem.isF64())
+    return emitOpError("input element type must be f16, bf16, f32, or f64");
+
+  // ONNX bool is i1 in hand-written IR and an 8-bit integer in the
+  // ORT/morphizen frontend. Both are one byte per element at runtime.
+  Type outputElem = outputType.getElementType();
+  if (!outputElem.isInteger(1) && !outputElem.isInteger(8))
+    return emitOpError(
+        "output element type must be a 1-byte boolean (i1 or i8/ui8)");
+
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+  for (int64_t dim : llvm::seq<int64_t>(inputType.getRank())) {
+    if (inputType.isDynamicDim(dim) || outputType.isDynamicDim(dim))
+      continue;
+    if (inputType.getDimSize(dim) != outputType.getDimSize(dim))
+      return emitOpError("input and output shapes must match");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

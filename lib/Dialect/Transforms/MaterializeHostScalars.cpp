@@ -92,9 +92,10 @@
 //   - Memrefs larger than 16 elements: the size cap keeps host scratch
 //     bounded and matches the seqlens_k / shape-arith patterns observed
 //     in practice.  Larger buffers stay in the GPU pool where they belong.
-//   - Floating-point element types: rare on the host-fed scalar path,
-//     almost always GPU-consumed in flight, where the GPU pool is the
-//     right home.
+//   - Floating-point buffers without a hip consumer: rare on the host-fed
+//     scalar path, where the GPU pool is the right home.  A host-stored float
+//     that a hip op reads (e.g. the rank-0 fill hip.trilu broadcasts) is
+//     still a candidate, since it faults in the pool like the integer case.
 //   - Functions whose arg 0 is not `!hip.context`: silently skipped.
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
@@ -157,7 +158,8 @@ static int64_t roundUp(int64_t x, int64_t align) {
 /// result aliases the data (not us), so it is a terminal accept, not a recurse.
 /// `memref.copy` is not view-like (it carries Read/Write memory effects); it is
 /// a terminal host-mapping-safe use and does not itself flag host I/O.
-static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
+static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO,
+                                    bool &sawHipUser) {
   for (Operation *user : memrefVal.getUsers()) {
     // Host I/O — the SEGV trigger we're staging away from the GPU pool.
     if (isa<memref::StoreOp, memref::LoadOp>(user)) {
@@ -169,15 +171,17 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
       continue;
     // hip.* consumers are host-mapping-safe (hipHostMallocMapped is
     // GPU-readable at the same VA on UMA targets).
-    if (user->getDialect() && user->getDialect()->getNamespace() == "hip")
+    if (user->getDialect() && user->getDialect()->getNamespace() == "hip") {
+      sawHipUser = true;
       continue;
+    }
     // View/alias ops: recurse ONLY into the result that actually aliases this
     // buffer. getViewSource() pins which operand is the viewed one — critical
     // for memref.reshape, where our buffer may be the SHAPE operand (then the
     // result aliases the DATA, not us → terminal accept, not a recurse).
     if (auto view = dyn_cast<ViewLikeOpInterface>(user)) {
       if (view.getViewSource() == memrefVal) {
-        if (!classifyHostScalarUsers(view->getResult(0), sawHostIO))
+        if (!classifyHostScalarUsers(view->getResult(0), sawHostIO, sawHipUser))
           return false;
       }
       continue;
@@ -195,8 +199,9 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
 /// True if \p allocOp is a tiny host-fed scalar staging buffer: a static,
 /// small (<= 16 elements), integer-or-index memref with at least one host-I/O
 /// user (possibly reached through view ops) whose entire transitive user set
-/// is host I/O, metadata, or hip consumers. See classifyHostScalarUsers and
-/// the file header for why each constraint exists.
+/// is host I/O, metadata, or hip consumers. Float memrefs qualify only when a
+/// hip op consumes them. See classifyHostScalarUsers and the file header for
+/// why each constraint exists.
 static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
@@ -204,13 +209,15 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   if (type.getNumElements() > 16)
     return false;
   Type elem = type.getElementType();
-  if (!elem.isIntOrIndex())
+  bool isFloat = isa<FloatType>(elem);
+  if (!elem.isIntOrIndex() && !isFloat)
     return false;
 
   bool hasHostIO = false;
-  if (!classifyHostScalarUsers(allocOp.getResult(), hasHostIO))
+  bool hasHipUser = false;
+  if (!classifyHostScalarUsers(allocOp.getResult(), hasHostIO, hasHipUser))
     return false;
-  return hasHostIO;
+  return hasHostIO && (!isFloat || hasHipUser);
 }
 
 struct MaterializeHostScalarsPass

@@ -39,7 +39,8 @@
 //
 // Quantize evaluates the spec formula `y = saturate(round(x / scale) + zp)` in
 // that exact order. Dequantize evaluates `y = (x - zp) * scale` with the
-// subtraction kept in int32.
+// subtraction kept in int64, which is wide enough for the int32 storage the
+// dequantize direction accepts.
 //
 // Intermediate arithmetic is fp32 for every storage-type combination; see the
 // `precision` handling in hip_quantize_linear for how that relates to the ONNX
@@ -285,9 +286,14 @@ __global__ void dequantize_linear_kernel(
   int32_t zp = zero_point ? QuantLoad<QuantT>::load(zero_point, p) : 0;
   float s = FloatIO<ScaleT>::load(scale[p]);
 
-  // Subtract in int32 so nothing is lost before the widening; doing it in the
-  // scale's type would round twice for 16-bit storage with an fp16 scale.
-  output[tid] = FloatIO<OutT>::store(static_cast<float>(x - zp) * s);
+  // Keep `x - zp` in integer arithmetic and convert once afterwards; doing the
+  // subtraction in the scale's floating type would round both operands first
+  // and so round twice for 16-bit storage with an fp16 scale. The operands
+  // widen to int64 before subtracting because int32 storage can overflow an
+  // int32 difference, and ONNX only requires a zero point of 0 there rather
+  // than guaranteeing it.
+  int64_t centered = static_cast<int64_t>(x) - static_cast<int64_t>(zp);
+  output[tid] = FloatIO<OutT>::store(static_cast<float>(centered) * s);
 }
 
 // Materialize the device-side parameters consumed by the existing Q/DQ and
@@ -464,6 +470,10 @@ int qdq_storage_bits(int dtype) {
   case HIP_DTYPE_INT16:
   case HIP_DTYPE_UINT16:
     return 16;
+  case HIP_DTYPE_INT32:
+    // Dequantize only; the quantize dispatch has no int32 instantiation, which
+    // matches ONNX giving QuantizeLinear no int32 output.
+    return 32;
   default:
     return 0;
   }
@@ -864,6 +874,13 @@ hip_dequantize_linear(void *stream, const void *input, const void *scale,
                                                zero_point, output, plan,
                                                scale_dtype, out_dtype);
       break;
+    case HIP_DTYPE_INT32:
+      // QDQ exporters quantize a conv/gemm bias to int32 at
+      // input_scale * weight_scale. ONNX requires its zero point to be 0.
+      lrc = dispatch_dequantize_scale<int32_t>(hip_stream, input, scale,
+                                               zero_point, output, plan,
+                                               scale_dtype, out_dtype);
+      break;
     case HIP_DTYPE_UINT16:
       lrc = dispatch_dequantize_scale<uint16_t>(hip_stream, input, scale,
                                                 zero_point, output, plan,
@@ -878,7 +895,7 @@ hip_dequantize_linear(void *stream, const void *input, const void *scale,
     fprintf(stderr,
             "[custom_kernels] hip_dequantize_linear: unsupported dtype "
             "combination (input=%d bits=%d scale=%d output=%d); expected "
-            "int8/uint8/int16/uint16 input (int8/uint8 when bits=4) and "
+            "int8/uint8/int16/uint16/int32 input (int8/uint8 when bits=4) and "
             "float32 or float16 scale and output\n",
             in_dtype, in_bits, scale_dtype, out_dtype);
     return -1;

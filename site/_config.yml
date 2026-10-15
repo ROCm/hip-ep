@@ -1,0 +1,198 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOYMENT TARGET
+#
+# These four values are the ONLY place the site's location is configured.
+# Everything else in the site refers to them via {{ site.url }},
+# {{ site.baseurl }} and {{ site.repo }}.
+#
+# Moving the site is a four-line change:
+#
+#   upstream (current) url: https://rocm.github.io    baseurl: /hip-ep
+#   fork preview       url: https://<owner>.github.io baseurl: /hip-ep
+#   custom domain      url: https://<domain>           baseurl: ""
+#
+# `repo` always points at the canonical upstream repository, even while the
+# site itself is served from somewhere else -- source, issue and release links
+# should never send users to a mirror.
+# ─────────────────────────────────────────────────────────────────────────────
+url: "https://rocm.github.io"
+baseurl: "/hip-ep"
+repo: "ROCm/hip-ep"
+repo_url: "https://github.com/ROCm/hip-ep"
+
+title: "HIP EP"
+tagline: "ONNX Runtime Execution Provider for AMD GPUs"
+description: >-
+  HIP EP is an ONNX Runtime Execution Provider for AMD GPUs. It compiles ONNX
+  graphs through an MLIR pipeline and executes them with hipBLASLt and custom
+  HIP kernels.
+
+# Version currently documented. Referenced by the download blocks and by the
+# benchmark pages' environment block, so it is defined once here.
+#
+# DO NOT BUMP THIS ALONE. Bumping it is the smallest part of moving a release.
+#
+# 1. Two pages build a release-asset filename out of it, and the naming scheme
+#    is not stable across releases. It already changed once:
+#
+#      v0.4.0  gpu-test-package-windows-v0.4.0.zip
+#              hip-python-package-windows-v0.4.0.zip
+#      v0.5.1  hipep_0.5.1_windows.zip
+#              hipep_0.5.1_windows_python.zip
+#              hipep_0.5.1_linux.zip
+#
+#    Note the tag keeps its `v` and the asset names drop it, which is why both
+#    pages write `{{ site.hip_ep_version | remove_first: "v" }}` for the
+#    filename and the bare value for the tag. Check the actual asset names on
+#    the release page before assuming the next one follows this scheme too.
+#
+# 2. The benchmark numbers in _data/benchmarks.yml are tied to this version.
+#    They move in the same change, or the site documents one release and
+#    measures another.
+#
+# 3. The package CONTENTS change between releases, and the Get Started pages
+#    describe them file by file. v0.5.1 restructured the Python package --
+#    four wheels instead of three, a different install order, a different set
+#    of environment variables -- far enough that patching the previous
+#    release's prose is not a repair. Download and inspect the release archives
+#    before updating either package page.
+hip_ep_version: "v0.5.1"
+
+markdown: kramdown
+highlighter: rouge
+permalink: pretty
+
+plugins:
+  - jekyll-sitemap
+
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: 'highlight'
+    block:
+      line_numbers: false
+
+# `site/` is self-contained: nothing outside it is part of the published site.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - README.md
+  # Maintainer note on font provenance; the OFL texts beside it are published
+  # on purpose, since the license requires them to travel with the fonts.
+  - assets/fonts/README.md
+
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: page
+  - scope:
+      path: "docs"
+      type: "pages"
+    values:
+      layout: docs
+      toc: true
+
+# ── Global header navigation ────────────────────────────────────────────────
+# Only pages that exist are listed, so the published site never links into a
+# 404.
+#
+# One entry, because four top-level words next to the brand read as four
+# unrelated destinations when they are really one documentation set. An entry
+# with "children" renders as a dropdown; the children are the sections, in
+# reading order. Models used to point at a standalone /models/ wall that sat
+# between here and the matrix; that page is gone and every Models link on the
+# site now lands on /docs/models/.
+nav_links:
+  - label: Docs
+    children:
+      - label: Overview
+        url: "/docs/"
+      - label: Get Started
+        url: "/docs/get-started/"
+      - label: Models
+        url: "/docs/models/"
+      - label: Benchmarks
+        url: "/docs/benchmarks/"
+
+# Rendered as icon-only buttons in the header, so each needs an "icon" that
+# _includes/header.html knows how to draw -- adding a link with an unknown
+# icon renders a blank button. The label survives as the accessible name.
+# Issues is deliberately not here: it is a place to write, not a place to
+# read, and it stays in the footer.
+cta_links:
+  - label: GitHub
+    url: "https://github.com/ROCm/hip-ep"
+    icon: github
+  - label: Releases
+    url: "https://github.com/ROCm/hip-ep/releases"
+    icon: download
+
+# ── Documentation sidebar ───────────────────────────────────────────────────
+# Hand-maintained, and it also drives the previous/next pager in
+# _layouts/docs.html -- so the order here is the reading order of the site.
+# The sidebar is not generated from the file tree: an unlisted page is
+# reachable only by URL, and a listed-but-missing page is a live 404. Add an
+# entry in the same change that adds the page, never before.
+#
+# No label or URL may contain "|" -- see _layouts/docs.html.
+docs_nav:
+  - label: Overview
+    url: "/docs/"
+
+  # Get Started is one section on purpose. It used to be two -- a Quick Start
+  # that installed hip-ep and a Tutorials set that used it -- and the split
+  # forced every page to be written twice, once for each way the reader might
+  # have installed. Organised by install path instead, each page runs from
+  # "nothing on the machine" to "a model on the GPU" without leaving.
+  - label: Get Started
+    children:
+      - label: Overview
+        url: "/docs/get-started/"
+      # "Binary package", not "C++ package". The archive contains executables
+      # and DLLs and no C++ at all; the old name described what it was built
+      # from, which is the one thing a reader downloading it does not need to
+      # know -- and it collided with the Source build page that used to sit
+      # below, which is where C++ actually was. Renamed on a hip-ep
+      # developer's review; the page URL moved with it.
+      - label: Binary package
+        url: "/docs/get-started/binary-package/"
+      # There was a "Source build" entry here, pointing at
+      # /docs/get-started/source-build/. Page and entry were both removed --
+      # see the comment at the top of site/docs/get-started/index.md. Source
+      # builds are documented in the repository now, not on this site.
+      - label: Python package
+        url: "/docs/get-started/python-package/"
+
+  # The children are the model families, in the order of
+  # _data/model_families.yml -- that file is the one place the order is
+  # decided, and this list has to be re-sorted by hand when it changes. Adding
+  # a family means three edits: the data file, site/docs/models/<slug>.md, and
+  # here. An entry here with no page is a live 404.
+  - label: Models
+    url: "/docs/models/"
+    children:
+      - label: Qwen
+        url: "/docs/models/qwen/"
+      - label: Gemma
+        url: "/docs/models/gemma/"
+      - label: GPT-OSS
+        url: "/docs/models/gpt-oss/"
+      - label: Llama
+        url: "/docs/models/llama/"
+      - label: DeepSeek
+        url: "/docs/models/deepseek/"
+      - label: Mistral
+        url: "/docs/models/mistral/"
+      - label: Phi
+        url: "/docs/models/phi/"
+
+  - label: Benchmarks
+    url: "/docs/benchmarks/"

@@ -241,10 +241,12 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateActivationLoweringPatterns(typeConverter, patterns);
   populateBiasGeluLoweringPatterns(typeConverter, patterns);
   populateFastGeluLoweringPatterns(typeConverter, patterns);
+  populateTriluLoweringPatterns(typeConverter, patterns);
   populateNormLoweringPatterns(typeConverter, patterns);
   populateGatherLoweringPatterns(typeConverter, patterns);
   populateGatherElementsLoweringPatterns(typeConverter, patterns);
   populateTopKLoweringPatterns(typeConverter, patterns);
+  populateRandomNormalLikeLoweringPatterns(typeConverter, patterns);
   populateScatterElementsLoweringPatterns(typeConverter, patterns);
   populateCompressLoweringPatterns(typeConverter, patterns);
   populateOneHotLoweringPatterns(typeConverter, patterns);
@@ -293,6 +295,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateQMatMulLoweringPatterns(typeConverter, patterns);
   populateQGemmLoweringPatterns(typeConverter, patterns);
   populateQConvLoweringPatterns(typeConverter, patterns);
+  populateQLinearConvLoweringPatterns(typeConverter, patterns);
+  populateQLinearMatMulLoweringPatterns(typeConverter, patterns);
   populateQLpNormalizationLoweringPatterns(typeConverter, patterns);
   populateQSigmoidLoweringPatterns(typeConverter, patterns);
 

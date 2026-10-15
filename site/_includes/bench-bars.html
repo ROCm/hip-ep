@@ -1,0 +1,127 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+Generation rate for every model in the snapshot, as a horizontal bar chart.
+
+Inline SVG built from _data/benchmarks.yml rather than a charting library: the
+internal appliance cannot be relied on to reach a CDN, vendoring a library to
+draw sixteen rectangles is not a trade worth making, and a committed image file
+would drift from the data the moment a snapshot is refreshed. This way the
+chart and the table underneath it cannot disagree.
+
+Takes no parameters. It renders nothing at all when the snapshot is a
+placeholder -- a bar chart of zeros is sixteen empty rows that read as a
+measurement of zero. The guard lives here rather than at the call site so that
+a second caller cannot forget it. Prose that points at the chart ("the chart
+above") has to carry the same guard itself, though; the call site in
+docs/benchmarks/index.md does.
+
+The table below the chart is the accessible version of the same data, which is
+why the SVG carries a summary <desc> rather than per-bar annotations.
+{%- endcomment -%}
+{%- assign snap = site.data.benchmarks.snapshot -%}
+{%- unless snap.placeholder -%}
+{%- comment -%}
+Column 1 of `prompt_lengths` is the 2048-token prompt, the length the matrix is
+characterised at and the one the showcase cards quote. One chart, one prompt
+length: overlaying all three would need three bars per model and would bury the
+comparison the chart exists to make.
+{%- endcomment -%}
+{%- assign col = 1 -%}
+{%- assign quoted_len = site.data.benchmarks.prompt_lengths[col] -%}
+{%- assign catalog = site.data.models.llm | concat: site.data.models.vlm -%}
+
+{%- comment -%}
+Sorting by a numeric column, in Liquid, which sorts strings lexically -- "9.56"
+would land above "81.86". So each row is turned into a fixed-width zero-padded
+key (TPS in hundredths, six digits) glued to its id, the whole lot is sorted as
+one string list, and the ids are read back out. Same pipe-delimited accumulator
+the pager in _layouts/docs.html uses, for the same reason: Liquid has no way to
+build an array element by element.
+
+Six digits caps the chart at 9999.99 tokens/s. Widen the pad if that ever
+stops being absurd.
+{%- endcomment -%}
+{%- assign keys = "" -%}
+{%- assign peak = 0 -%}
+{%- for row in site.data.benchmarks.lm -%}
+  {%- assign v = row.tps[col] | times: 1.0 -%}
+  {%- if v > peak -%}{%- assign peak = v -%}{%- endif -%}
+  {%- assign padded = v | times: 100 | round | prepend: "000000" | slice: -6, 6 -%}
+  {%- assign keys = keys | append: padded | append: "~" | append: row.id | append: "|" -%}
+{%- endfor -%}
+{%- assign ordered = keys | split: "|" | sort | reverse -%}
+
+{%- comment -%}
+Geometry, in viewBox units. The SVG scales to its container, so these are
+proportions rather than pixels -- but the text does not rebreak, which is why
+the stylesheet gives the chart a min-width and lets it scroll on a phone
+instead of shrinking the labels to nothing.
+{%- endcomment -%}
+{%- assign label_right = 206 -%}
+{%- assign plot_x = 216 -%}
+{%- assign plot_w = 434 -%}
+{%- assign row_h = 26 -%}
+{%- assign bar_h = 13 -%}
+{%- assign top = 30 -%}
+{%- assign count = site.data.benchmarks.lm | size -%}
+{%- assign plot_h = count | times: row_h -%}
+{%- assign svg_h = top | plus: plot_h | plus: 12 -%}
+{%- assign grid_bottom = top | plus: plot_h | minus: 6 -%}
+{%- comment -%}
+Axis runs to the next multiple of 20 above the fastest model, so the longest
+bar never touches the value labels and the ticks stay round.
+{%- endcomment -%}
+{%- assign axis_max = peak | divided_by: 20.0 | ceil | times: 20 -%}
+{%- assign tick_count = axis_max | divided_by: 20 -%}
+
+<figure class="bench-chart">
+  <div class="bench-chart__scroll">
+    <svg viewBox="0 0 720 {{ svg_h }}" role="img"
+      aria-label="Generation rate for every model in the {{ snap.release }} snapshot, at a {{ quoted_len }}-token prompt">
+      <desc>Horizontal bar chart. Every model in the table below, ordered by
+        tokens generated per second at a {{ quoted_len }}-token prompt on
+        {{ snap.gpu }}. The table carries the same figures at all
+        {{ site.data.benchmarks.prompt_lengths | size }} prompt lengths.</desc>
+
+      {%- for t in (0..tick_count) -%}
+      {%- assign tick_val = t | times: 20 -%}
+      {%- assign tick_x = tick_val | times: 1.0 | divided_by: axis_max | times: plot_w | plus: plot_x -%}
+      <line class="bench-chart__grid" x1="{{ tick_x }}" y1="22" x2="{{ tick_x }}" y2="{{ grid_bottom }}" />
+      <text class="bench-chart__axis" x="{{ tick_x }}" y="15" text-anchor="middle">{{ tick_val }}</text>
+      {%- endfor -%}
+
+      {%- for entry in ordered -%}
+      {%- assign id = entry | split: "~" | last -%}
+      {%- assign row = site.data.benchmarks.lm | where: "id", id | first -%}
+      {%- assign m = catalog | where: "id", id | first -%}
+      {%- assign is_vlm = site.data.models.vlm | where: "id", id | first -%}
+      {%- assign v = row.tps[col] | times: 1.0 -%}
+      {%- assign bar_w = v | divided_by: axis_max | times: plot_w -%}
+      {%- assign bar_y = forloop.index0 | times: row_h | plus: top -%}
+      {%- assign text_y = bar_y | plus: 10 -%}
+      {%- assign value_x = bar_w | plus: plot_x | plus: 7 -%}
+      <text class="bench-chart__label" x="{{ label_right }}" y="{{ text_y }}" text-anchor="end">{{ m.name | default: id | escape }}</text>
+      <rect class="bench-chart__bar{% if is_vlm %} bench-chart__bar--vlm{% endif %}"
+        x="{{ plot_x }}" y="{{ bar_y }}" width="{{ bar_w | round: 1 }}" height="{{ bar_h }}" rx="2" />
+      <text class="bench-chart__value" x="{{ value_x | round: 1 }}" y="{{ text_y }}">{{ row.tps[col] }}</text>
+      {%- endfor -%}
+    </svg>
+  </div>
+
+  <p class="bench-chart__legend" aria-hidden="true">
+    <span class="bench-chart__key"></span> Language model
+    <span class="bench-chart__key bench-chart__key--vlm"></span> Vision-language model
+  </p>
+
+  <figcaption>
+    Tokens generated per second at a {{ quoted_len }}-token prompt, on
+    {{ snap.gpu }}, in {{ snap.release }}. Higher is better. The order is the
+    measured rate at this one prompt length and nothing else — these models
+    differ in size, task and modality, so it is not a ranking of them against
+    each other, and a model that leads here need not lead at
+    {{ site.data.benchmarks.prompt_lengths | last }} tokens.
+  </figcaption>
+</figure>
+{%- endunless -%}

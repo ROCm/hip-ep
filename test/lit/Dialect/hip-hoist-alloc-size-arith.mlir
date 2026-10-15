@@ -5,15 +5,17 @@
 // FileCheck tests for --hip-hoist-alloc-size-arith.
 //
 // The pass moves pure producers of `memref.alloc` dynamic operands
-// above the earliest used `memref.alloc` in the function's single entry block.
-// After the pass, every hoistable dynamic-size value dominates every
-// allocation that `--hip-pool-allocs` may absorb.
+// before the earliest allocation their dependencies permit in the entry block.
+// Reads and non-speculatable operations remain in place.
 //
 // These tests cover the pass in isolation (no PoolAllocs).  PoolAllocs's
 // own LIT remains unchanged — it consumes already-hoisted IR.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-hoist-alloc-size-arith %s 2>&1 | FileCheck %s
+// RUN: hip-mlir-opt --hip-hoist-alloc-size-arith --verify-each %s > %t.once
+// RUN: hip-mlir-opt --hip-hoist-alloc-size-arith --verify-each %t.once > %t.twice
+// RUN: diff %t.once %t.twice
 
 // --- 1. Pure arith.muli between two dynamic allocs. Both `%6` and
 //        `%7` are pure, both are below `%alloc`. After the
@@ -135,8 +137,8 @@ func.func @already_hoisted(%arg0: memref<?xi64>) {
   return
 }
 
-// --- 6. `arith.muli %loaded, %c2` is pure, but its `memref.load` operand is
-//        not. The recursive check therefore keeps the complete chain in place.
+// --- 6. Pure consumers already before the first allocation following their
+//        load need no movement. The load must stay after the initial allocation.
 // CHECK-LABEL: func.func @do_not_hoist_through_load
 // CHECK:         %[[DIM:.*]] = memref.dim
 // CHECK-NEXT:    %[[ALLOC0:.*]] = memref.alloc(%[[DIM]])
@@ -256,17 +258,16 @@ func.func @do_not_hoist_region_capture(
   return
 }
 
-// --- 11. One branch of the size cone is pure and the other depends on a
-//         load. Rejecting the full cone must not move the pure branch alone.
-// CHECK-LABEL: func.func @do_not_hoist_partial_cone
-// CHECK:         %[[STATIC:.*]] = memref.alloc()
-// CHECK-NEXT:    %[[DIM:.*]] = memref.dim
+// --- 11. A late load limits its pure consumers, not an independent pure branch.
+// CHECK-LABEL: func.func @hoist_independent_size_branch
+// CHECK:         %[[DIM:.*]] = memref.dim
 // CHECK-NEXT:    %[[PURE:.*]] = arith.addi
+// CHECK-NEXT:    %[[STATIC:.*]] = memref.alloc()
 // CHECK-NEXT:    %[[LOAD:.*]] = memref.load
 // CHECK-NEXT:    %[[CAST:.*]] = arith.index_cast %[[LOAD]]
 // CHECK-NEXT:    %[[SIZE:.*]] = arith.addi %[[PURE]], %[[CAST]]
 // CHECK-NEXT:    %[[DYNAMIC:.*]] = memref.alloc(%[[SIZE]])
-func.func @do_not_hoist_partial_cone(
+func.func @hoist_independent_size_branch(
     %arg0: memref<?xf32>, %shape: memref<1xi64>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -279,5 +280,119 @@ func.func @do_not_hoist_partial_cone(
   %dynamic = memref.alloc(%size) : memref<?xf32>
   memref.dealloc %static : memref<1xi32>
   memref.dealloc %dynamic : memref<?xf32>
+  return
+}
+
+// A late read bounds the motion of a pure chain. Both consumers can still
+// precede the intervening allocation; shared size users do not duplicate them.
+// CHECK-LABEL: func.func @hoist_after_late_load
+// CHECK: %[[EARLY:.*]] = memref.alloc()
+// CHECK-NEXT: %[[READ:.*]] = memref.load
+// CHECK-NEXT: %[[DIV:.*]] = arith.divsi %[[READ]], %{{.*}}
+// CHECK-NEXT: %[[ADD:.*]] = arith.addi %[[DIV]], %{{.*}}
+// CHECK-NEXT: %[[WORK:.*]] = memref.alloc(%[[READ]])
+// CHECK-NEXT: %[[A:.*]] = memref.alloc(%[[ADD]])
+// CHECK-NEXT: %[[B:.*]] = memref.alloc(%[[ADD]])
+func.func @hoist_after_late_load(%shape: memref<1xindex>) {
+  %c0 = arith.constant 0 : index
+  %c4 = arith.constant 4 : index
+  %early = memref.alloc() : memref<1xf32>
+  %n = memref.load %shape[%c0] : memref<1xindex>
+  %work = memref.alloc(%n) : memref<?xf32>
+  %q = arith.divsi %n, %c4 : index
+  %size = arith.addi %q, %c4 : index
+  %a = memref.alloc(%size) : memref<?xf32>
+  %b = memref.alloc(%size) : memref<?xf32>
+  memref.dealloc %early : memref<1xf32>
+  memref.dealloc %work : memref<?xf32>
+  memref.dealloc %a : memref<?xf32>
+  memref.dealloc %b : memref<?xf32>
+  return
+}
+
+// Moving one operand must not make a later fixed operand appear to dominate it.
+// CHECK-LABEL: func.func @current_operand_order
+// CHECK: %[[PURE:.*]] = arith.muli
+// CHECK-NEXT: %[[EARLY:.*]] = memref.alloc()
+// CHECK-NEXT: %[[LATE:.*]] = call @opaque_helper
+// CHECK-NEXT: %[[SIZE:.*]] = arith.addi %[[LATE]], %[[PURE]]
+// CHECK-NEXT: %[[WORK:.*]] = memref.alloc(%[[LATE]])
+// CHECK-NEXT: %[[TAIL:.*]] = memref.alloc(%[[SIZE]])
+func.func @current_operand_order(%n: index) {
+  %c2 = arith.constant 2 : index
+  %early = memref.alloc() : memref<1xf32>
+  %late = call @opaque_helper(%n) : (index) -> index
+  %work = memref.alloc(%late) : memref<?xf32>
+  %pure = arith.muli %n, %c2 : index
+  %size = arith.addi %late, %pure : index
+  %tail = memref.alloc(%size) : memref<?xf32>
+  memref.dealloc %early : memref<1xf32>
+  memref.dealloc %work : memref<?xf32>
+  memref.dealloc %tail : memref<?xf32>
+  return
+}
+
+// Same-anchor siblings retain source order and a shared predecessor.
+// CHECK-LABEL: func.func @shared_size_dag
+// CHECK: %[[EARLY:.*]] = memref.alloc()
+// CHECK-NEXT: %[[N:.*]] = call @opaque_helper
+// CHECK-NEXT: %[[BASE:.*]] = arith.muli %[[N]], %{{.*}}
+// CHECK-NEXT: %[[LEFT:.*]] = arith.addi %[[BASE]], %{{.*}}
+// CHECK-NEXT: %[[RIGHT:.*]] = arith.subi %[[BASE]], %{{.*}}
+// CHECK-NEXT: %[[SIZE:.*]] = arith.addi %[[LEFT]], %[[RIGHT]]
+// CHECK-NEXT: %[[WORK:.*]] = memref.alloc(%[[N]])
+// CHECK-NEXT: %[[TAIL:.*]] = memref.alloc(%[[SIZE]])
+func.func @shared_size_dag(%input: index) {
+  %c2 = arith.constant 2 : index
+  %early = memref.alloc() : memref<1xf32>
+  %n = call @opaque_helper(%input) : (index) -> index
+  %work = memref.alloc(%n) : memref<?xf32>
+  %base = arith.muli %n, %c2 : index
+  %left = arith.addi %base, %c2 : index
+  %right = arith.subi %base, %c2 : index
+  %size = arith.addi %left, %right : index
+  %tail = memref.alloc(%size) : memref<?xf32>
+  memref.dealloc %early : memref<1xf32>
+  memref.dealloc %work : memref<?xf32>
+  memref.dealloc %tail : memref<?xf32>
+  return
+}
+
+// The runtime-divisor division stays after its preceding allocation. Its pure
+// consumer can cross a subsequent allocation without speculating the division.
+// CHECK-LABEL: func.func @consumer_of_runtime_division
+// CHECK: %[[EARLY:.*]] = memref.alloc()
+// CHECK-NEXT: %[[DIV:.*]] = arith.divsi
+// CHECK-NEXT: %[[SIZE:.*]] = arith.addi %[[DIV]], %{{.*}}
+// CHECK-NEXT: %[[WORK:.*]] = memref.alloc(%[[DIV]])
+// CHECK-NEXT: %[[TAIL:.*]] = memref.alloc(%[[SIZE]])
+func.func @consumer_of_runtime_division(%n: index, %divisor: index) {
+  %c2 = arith.constant 2 : index
+  %early = memref.alloc() : memref<1xf32>
+  %q = arith.divsi %n, %divisor : index
+  %work = memref.alloc(%q) : memref<?xf32>
+  %size = arith.addi %q, %c2 : index
+  %tail = memref.alloc(%size) : memref<?xf32>
+  memref.dealloc %early : memref<1xf32>
+  memref.dealloc %work : memref<?xf32>
+  memref.dealloc %tail : memref<?xf32>
+  return
+}
+
+// A descriptor query cannot precede the allocation that creates its operand.
+// CHECK-LABEL: func.func @allocation_dependency
+// CHECK: %[[SOURCE:.*]] = memref.alloc(
+// CHECK-NEXT: %[[DIM:.*]] = memref.dim %[[SOURCE]]
+// CHECK-NEXT: %[[WORK:.*]] = memref.alloc()
+// CHECK-NEXT: %[[TAIL:.*]] = memref.alloc(%[[DIM]])
+func.func @allocation_dependency(%n: index) {
+  %c0 = arith.constant 0 : index
+  %source = memref.alloc(%n) : memref<?xf32>
+  %work = memref.alloc() : memref<1xf32>
+  %dim = memref.dim %source, %c0 : memref<?xf32>
+  %tail = memref.alloc(%dim) : memref<?xf32>
+  memref.dealloc %source : memref<?xf32>
+  memref.dealloc %work : memref<1xf32>
+  memref.dealloc %tail : memref<?xf32>
   return
 }
