@@ -683,6 +683,22 @@ void matmul_nbits_gemv_kernel_i8(
 #define GEMV4_WAVES_MAX(TN, TM)                                                \
   ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MAX(TM))
 
+// On a 1536-VGPR target (a gfx1151 build) TILE_N = 16 at TILE_M = 1 keeps the
+// col-major code it had before #1240: the single A index in read_a below,
+// and M == 1 without zero points stays on the col-major kernel (see
+// launchGemvConfig). The tile uses 168 of the 170 registers its 9 waves leave
+// there. The per-group A row pointer adds two spilled registers, and storing
+// a just-loaded register to scratch puts an s_waitcnt vmcnt(0) into the K loop,
+// so the 16 B columns are no longer consumed as they arrive; the row-major
+// kernel waits for all its loads at once as well. On gfx1151 both were 8-13%
+// slower than the old code at the LUT's 64-thread TILE_N = 16 decode points
+// (K 5120 x N 17408 / 17920 and the transposed shapes, DRAM-bound). On the
+// 1024-VGPR file of the product binary the row-major kernel is the faster one
+// at TILE_N = 16 (col-major 4-62% slower) and the new A index is what removed
+// the per-element 64-bit multiplies, so nothing changes there.
+#define GEMV4_KEEP_COL_TN16(TN, TM)                                            \
+  ((TM) == 1 && (TN) > 8 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
 __global__ __launch_bounds__(BLOCK_SIZE)
 __attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
@@ -811,9 +827,14 @@ void matmul_nbits_gemv_kernel(
     // TILE_M > 1 the extra live values also pushed the tile into scratch
     // (100-584 bytes per lane, 2-4x slower).
     auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
-        const __half* row = a_base + tm * a_mstep +
-                            static_cast<int64_t>(k_lane) * a_stride;
-        return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
+        if constexpr (COL_MAJOR && GEMV4_KEEP_COL_TN16(TILE_N, TILE_M)) {
+            return static_cast<float>(
+                a_base[tm * a_mstep + static_cast<int64_t>(k_lane + k_const) * a_stride]);
+        } else {
+            const __half* row = a_base + tm * a_mstep +
+                                static_cast<int64_t>(k_lane) * a_stride;
+            return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
+        }
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -1585,6 +1606,24 @@ static constexpr GemvConfig kGemvConfigs[] = {
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
 
+// VGPRs per SIMD of the code object this process runs, which is not always the
+// device's: a gfx1151 runs the gfx11-generic code object (1024) unless the
+// build has a gfx1151 one (1536). Read once from the device.
+__device__ int g_gemv_vgprs_per_simd = HIPDNN_VGPRS_PER_SIMD;
+
+static int gemvCodeObjectVgprsPerSimd()
+{
+    static const int v = [] {
+        int x = 1024;
+        if (hipMemcpyFromSymbol(&x, HIP_SYMBOL(g_gemv_vgprs_per_simd), sizeof(x)) != hipSuccess) {
+            (void)hipGetLastError();
+            x = 1024;
+        }
+        return x;
+    }();
+    return v;
+}
+
 static void launchGemvConfig(
     int config_id, hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1600,7 +1639,11 @@ static void launchGemvConfig(
     // compile-time A stride. The col-major one indexes A with the runtime stride
     // M (see read_a), which ROCm 7.16 compiles to a 64-bit multiply per element:
     // +30% instructions in the decode loop, 1.2x slower on average, up to 1.9x.
-    if (col_major && M == 1 && zp == nullptr && batch == 1) col_major = false;
+    // A gfx1151 build keeps the col-major kernel at TILE_N = 16 (see
+    // GEMV4_KEEP_COL_TN16).
+    if (col_major && M == 1 && zp == nullptr && batch == 1 &&
+        !(c.tile_n > 8 && gemvCodeObjectVgprsPerSimd() >= 1536))
+        col_major = false;
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
               static_cast<unsigned>(col_major ? 1 : batch));
