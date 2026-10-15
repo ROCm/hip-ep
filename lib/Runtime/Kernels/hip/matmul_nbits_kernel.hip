@@ -75,6 +75,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -2527,6 +2528,138 @@ static void launchDp4aConfig(
 #undef DP4A_CASE
 }
 
+// ---------------------------------------------------------------------------
+// Cold, burst-timed probing for the M=1 dp4a GEMV autotune.
+//
+// Two things made the old min-of-5 single-launch probe rank this kernel wrong.
+//
+// The weight was warm: every B up to 32 MB sits in the Infinity Cache after the
+// first launch, and a decode step never sees it that way (see the cold-probing
+// note above tuneGemvConfig). The memset eviction used there is no cure for
+// this kernel: it leaves the cache full of dirty lines whose write-back competes
+// with the timed kernel's reads, inflating readings 1.2-2.3x by a config-
+// dependent amount. On Llama-3.1-8B it picked configs 10-67% slower in-model.
+// What a decode step actually sees is a cache full of *clean* lines of other
+// weights, which is what rotating over copies of B reproduces.
+//
+// And a single event-bracketed launch of a 10-40 us kernel is mostly event and
+// launch jitter; the min over a handful of them selects for that jitter (and
+// for the sub-physical readings the GQA tuner guards against). Bursts of ~0.5 ms
+// of back-to-back launches amortize it, and the median of several bursts
+// rejects outliers either way.
+//
+// Measured against in-model kernel durations of the five Llama-3.1-8B shapes
+// over 10 sweeps: warm probing picked 64x1 for gate/up (7% slower in-model),
+// this probe's picks are within 1% of the in-model best for every shape, and
+// its run-to-run spread is ~1% versus ~2-3%. The K/V projection's shipped row,
+// 32x2, ran 1.78x slower than 128x1 in-model (0.6 ms per token).
+// HIPDNN_EP_MATMUL_TUNE_COLD=0 drops the rotation (one copy, warm) as the A/B
+// control; the burst estimator stays.
+// ---------------------------------------------------------------------------
+
+// The rotation set's total footprint, well past gfx1151's 32 MB cache so that a
+// copy is evicted long before the cycle comes back to it.
+static constexpr size_t kGemvRotationBytes = 192u << 20;
+// A weight this large evicts itself between consecutive launches; no copies.
+static constexpr size_t kGemvRotationSelfColdBytes = 64u << 20;
+
+// Device copies of a GEMV's weight-side operands (B, scales, zero points),
+// laid out back to back in one allocation. With one copy (warm probing, a
+// weight that is already cold, or a failed allocation) the caller's own
+// buffers are used.
+class GemvWeightRotation {
+public:
+    GemvWeightRotation(hipStream_t stream,
+                       const uint8_t* B, size_t b_bytes,
+                       const __half* sc, size_t sc_bytes,
+                       const uint8_t* zp, size_t zp_bytes)
+        : B_(B), sc_(sc), zp_(zp),
+          sc_off_(align(b_bytes)), zp_off_(align(sc_off_ + sc_bytes)),
+          slot_(align(zp_off_ + zp_bytes)) {
+        if (!gemvTuneColdEnabled() || slot_ >= kGemvRotationSelfColdBytes)
+            return;
+        int want = (int)((kGemvRotationBytes + slot_ - 1) / slot_);
+        while (want > 1 && hipMalloc(&buf_, want * slot_) != hipSuccess) {
+            buf_ = nullptr;
+            want /= 2;
+        }
+        if (!buf_) return;
+        copies_ = want;
+        hipMemcpyAsync(buf_, B, b_bytes, hipMemcpyDeviceToDevice, stream);
+        hipMemcpyAsync(buf_ + sc_off_, sc, sc_bytes, hipMemcpyDeviceToDevice, stream);
+        if (zp) hipMemcpyAsync(buf_ + zp_off_, zp, zp_bytes,
+                               hipMemcpyDeviceToDevice, stream);
+        for (int have = 1; have < copies_; have *= 2) {
+            const int n = std::min(have, copies_ - have);
+            hipMemcpyAsync(buf_ + have * slot_, buf_, n * slot_,
+                           hipMemcpyDeviceToDevice, stream);
+        }
+        hipStreamSynchronize(stream);
+    }
+    ~GemvWeightRotation() { if (buf_) (void)hipFree(buf_); }
+    GemvWeightRotation(const GemvWeightRotation&) = delete;
+    GemvWeightRotation& operator=(const GemvWeightRotation&) = delete;
+
+    int copies() const { return copies_; }
+
+    void get(int i, const uint8_t*& B, const __half*& sc, const uint8_t*& zp) const {
+        if (!buf_) { B = B_; sc = sc_; zp = zp_; return; }
+        const uint8_t* p = buf_ + (size_t)(i % copies_) * slot_;
+        B  = p;
+        sc = reinterpret_cast<const __half*>(p + sc_off_);
+        zp = zp_ ? p + zp_off_ : nullptr;
+    }
+
+private:
+    static size_t align(size_t n) { return (n + 255) & ~size_t(255); }
+    const uint8_t* B_;
+    const __half* sc_;
+    const uint8_t* zp_;
+    size_t sc_off_, zp_off_, slot_;
+    uint8_t* buf_ = nullptr;
+    int copies_ = 1;
+};
+
+// Per-launch time of `launch(i)` (i = rotation index): a 3-launch probe sizes
+// the bursts to ~kBurstMs, then the median over kBursts per-launch averages.
+// Readings below half the probe are timer glitches, not durations.
+template <typename LaunchFn>
+static float timeConfigRotated(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                               int copies, LaunchFn&& launch) {
+    constexpr float kBurstMs = 0.5f;
+    constexpr int kBursts = 5;
+    constexpr int kProbe = 3;
+    constexpr int kMaxIters = 256;
+    int idx = 0;
+    for (int w = 0; w < std::min(copies, 4); w++) launch(idx++);
+
+    hipEventRecord(ev0, stream);
+    for (int i = 0; i < kProbe; i++) launch(idx++);
+    hipEventRecord(ev1, stream);
+    hipEventSynchronize(ev1);
+    float probe = 0.0f;
+    hipEventElapsedTime(&probe, ev0, ev1);
+    probe /= kProbe;
+    const int iters = probe > 0.0f
+        ? std::max(1, std::min(kMaxIters, (int)(kBurstMs / probe))) : 16;
+
+    float s[kBursts];
+    int n = 0;
+    for (int b = 0; b < kBursts; b++) {
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < iters; i++) launch(idx++);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        ms /= iters;
+        if (ms > probe * 0.5f) s[n++] = ms;
+    }
+    if (n == 0) return probe;
+    std::sort(s, s + n);
+    return s[n / 2];
+}
+
 static int tuneDp4aConfig(
     hipStream_t stream,
     const int8_t* a_qb, const float* a_scale,
@@ -2539,9 +2672,13 @@ static int tuneDp4aConfig(
     hipEventCreate(&ev1);
     float best_ms = 1e30f;
     int   best_id = 9;  // 128x1 default
-    constexpr int WARMUP = 3;
-    constexpr int ITERS  = 5;
-    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+    const auto t_start = std::chrono::steady_clock::now();
+
+    const int64_t k_blocks = (K + bs - 1) / bs;
+    const GemvWeightRotation rot(
+        stream, B, (size_t)N * k_blocks * (bs / 2),
+        sc, (size_t)N * k_blocks * sizeof(__half),
+        zp, zp ? (size_t)N * k_blocks : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
@@ -2549,9 +2686,11 @@ static int tuneDp4aConfig(
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
-            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+        float cfg_best_ms = timeConfigRotated(ev0, ev1, stream, rot.copies(),
+                                              [&](int i) {
+            const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
+            rot.get(i, Bi, sci, zpi);
+            launchDp4aConfig(cid, stream, a_qb, a_scale, Bi, sci, zpi, bi, out,
                              N, K, bs);
         });
 
@@ -2567,16 +2706,40 @@ static int tuneDp4aConfig(
 
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
+        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter; %d weight copies, "
+        "tuned in %.0f ms)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms);
+        kGemvConfigs[best_id].tile_n, best_ms, rot.copies(),
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_start).count());
 
     return best_id;
 }
 
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
+
+// HIPDNN_EP_MATMUL_DP4A_CFG=<id> pins the single-row dp4a config (an index into
+// kGemvConfigs) for every shape, bypassing LUT and autotune, so a candidate's
+// in-model duration can be measured; HIPDNN_EP_MATMUL_SMALLM_CFG is the M>1 analog.
+static int dp4aConfigOverride() {
+    static const int cfg = [] {
+#ifdef _WIN32
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_DP4A_CFG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        const int v = atoi(buf);
+#else
+        const char* s = getenv("HIPDNN_EP_MATMUL_DP4A_CFG");
+        if (!s) return -1;
+        const int v = atoi(s);
+#endif
+        return (v >= 0 && v < kNumGemvConfigs) ? v : -1;
+    }();
+    return cfg;
+}
 
 static int getOrTuneDp4aConfig(
     hipStream_t stream,
@@ -2585,6 +2748,9 @@ static int getOrTuneDp4aConfig(
     const __half* bi, __half* out,
     int64_t N, int64_t K, int64_t bs)
 {
+    const int forced = dp4aConfigOverride();
+    if (forced >= 0) return forced;
+
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
                       std::to_string(bs) + "_" + (zp ? "1" : "0");
 
