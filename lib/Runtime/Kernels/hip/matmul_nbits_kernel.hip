@@ -671,10 +671,22 @@ void matmul_nbits_gemv_kernel_i8(
 // GEMV_WAVES_MIN/MAX are defined next to the int8 GEMV in section 1a-gemv;
 // both kernels hold the same partial[TILE_M][TILE_N] accumulator and want the
 // same register budget for it.
+//
+// Except TILE_N = 16 at TILE_M = 1. Its ~166 registers are what "9 waves"
+// means on gfx1151's 1536-entry file only; on the 1024-entry file of the
+// gfx11-generic product binary 9 waves is 112, and the tile spilled 184 B
+// (row-major) / 208 B (col-major) per lane under ROCm 7.14 and 192 / 204 B
+// under 7.16. Asking for the registers gives 6 waves there and still 9 on
+// gfx1151.
+#define GEMV4_WAVES_MIN(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MIN(TM))
+#define GEMV4_WAVES_MAX(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MAX(TM))
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
 __global__ __launch_bounds__(BLOCK_SIZE)
-__attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
-                                   GEMV_WAVES_MAX(TILE_M))))
+__attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
+                                   GEMV4_WAVES_MAX(TILE_N, TILE_M))))
 void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,

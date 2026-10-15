@@ -96,6 +96,14 @@
 #  define HIPDNN_VGPRS_PER_SIMD 1024
 #endif
 
+/* The occupancy that gives a kernel R VGPRs on this target. A wave count
+ * worked out for gfx1151's file grants a third fewer registers on the
+ * gfx11-generic binary gfx1150 / 1151 / 1152 run, so a kernel that needs R
+ * registers asks for amdgpu_waves_per_eu(HIPDNN_WAVES_FOR_VGPRS(R)) instead.
+ * The 1024 fallback for unlisted archs can only make the request more
+ * generous (fewer waves, more registers), never cause a spill. */
+#define HIPDNN_WAVES_FOR_VGPRS(R) (HIPDNN_VGPRS_PER_SIMD / (R))
+
 #if HIPDNN_WMMA_GFX12
 #  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12((a), (b), (c))
