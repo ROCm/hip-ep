@@ -103,7 +103,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
+| DynamicQuantizeLinear | Decomposed to single-axis ReduceMin/ReduceMax, scale and zero-point math, and `hip.quantize_linear`. A zero input range selects scale 1 |
 | DequantizeLinear | Custom HIP kernel |
+| ConvInteger | Decomposed to Cast, Sub, and `hip.conv` in f32, then Cast back to i32. Rank-4 NCHW, scalar or per-output-channel weight zero point. The f32 accumulator matches int32 only while the sum fits in the 24-bit mantissa |
+| MatMulInteger | Decomposed to Cast, Sub, and `hip.matmul` in f32, then Cast back to i32. Rank 2–4, scalar or per-row / per-column zero point. The f32 accumulator matches int32 only while the sum fits in the 24-bit mantissa |
 | QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. Separate from the W4A16 `hip.qconv` fusion |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
 | QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
