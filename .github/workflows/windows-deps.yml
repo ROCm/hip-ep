@@ -37,7 +37,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705"
+  OGA_PR_PATCHES: "2685 2691 2705 2712"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -603,7 +603,9 @@ jobs:
           # tag's version of every line the PR did not touch, so unrelated main
           # commits stay out; a hunk needing code absent from the tag conflicts
           # and fails the step. Tests are excluded because OGA does not build
-          # them and their fixtures do conflict.
+          # them and their fixtures do conflict; OGA's own CI workflows are
+          # excluded because the build does not use them and some no longer
+          # exist at the pinned tag.
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
             $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.diff"
@@ -611,7 +613,7 @@ jobs:
             Write-Host "Fetching $url"
             Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
             Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn --3way --exclude='test/*' $tmp
+            git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' $tmp
             if ($LASTEXITCODE -ne 0) {
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }
