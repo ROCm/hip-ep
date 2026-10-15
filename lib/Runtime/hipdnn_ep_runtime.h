@@ -893,7 +893,11 @@ int wrap_group_query_attention(
     // path, where key/value are the full Skv-length KV and must be staged into
     // the BNSD present cache: BSHD and BNSD coincide only at G == 1, so the
     // layout cannot be inferred from the shapes.
-    int64_t kv_bnsd);
+    int64_t kv_bnsd,
+    // Sequence length of the key/value operands (seq_len_q for packed QKV).
+    // 0 with a causal past cache means the call appends nothing and attends
+    // over past_key/past_value only (a layer sharing another layer's cache).
+    int64_t seq_len_new_kv);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
