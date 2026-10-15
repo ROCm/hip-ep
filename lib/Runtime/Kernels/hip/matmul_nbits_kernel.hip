@@ -4505,30 +4505,48 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     const int c0 = wid * CPW;
     const int cnt = FULL ? CPW : min(CPW, (K >> 5) - c0);
 
+    // Scales and zero points for this wave's CPW chunks, loaded up front. The
+    // zero-point mode is tested once around all of its loads: tested per chunk
+    // (if (ok && zp_mode == ...) inside the j loop), the current compiler kept a uniform
+    // branch per chunk and waited for each chunk's scale load inside it (one
+    // s_waitcnt vmcnt(0) per chunk, 55 -> 79 waits at CPW=18), so the
+    // prologue's loads ran one at a time: 3-8% on the gpt-oss expert layers.
     const unsigned char* b_col[TN];
+    size_t ns[TN];
+    int grp[CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; j++)
+        grp[j] = (FULL || j < cnt) ? (c0 + j) >> group_shift : 0;
     _Float16 rs[CPW][TN], rz[CPW][TN];
 #pragma unroll
     for (int tn = 0; tn < TN; tn++) {
         const int n = col0 + tn * 16 + lane;
-        const size_t ns = static_cast<size_t>(n < N ? n : 0);
-        b_col[tn] = B + ns * b_row_bytes + c0 * 16;
-        const _Float16* s_col = scales + ns * num_groups_k;
-        const _Float16* z16 =
-            static_cast<const _Float16*>(zeros) + ns * zp_stride;
-        const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns * zp_stride;
+        ns[tn] = static_cast<size_t>(n < N ? n : 0);
+        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * 16;
+        const _Float16* s_col = scales + ns[tn] * num_groups_k;
 #pragma unroll
         for (int j = 0; j < CPW; j++) {
-            const bool ok = FULL || j < cnt;
-            const int g = ok ? (c0 + j) >> group_shift : 0;
-            rs[j][tn] = ok ? s_col[g] : (_Float16)0;
-            _Float16 z = 8;
-            if (ok && zp_mode == kSmallMZpFp16) {
-                z = z16[g];
-            } else if (ok && zp_mode == kSmallMZpU4) {
-                const uint8_t b = z4[g >> 1];
-                z = static_cast<_Float16>((g & 1) ? (b >> 4) : (b & 0xF));
+            const _Float16 s = s_col[grp[j]];
+            rs[j][tn] = (FULL || j < cnt) ? s : (_Float16)0;
+            rz[j][tn] = 8;
+        }
+    }
+    if (zp_mode == kSmallMZpU4) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const uint8_t* z4 = static_cast<const uint8_t*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) {
+                const uint8_t b = z4[grp[j] >> 1];
+                rz[j][tn] = static_cast<_Float16>((grp[j] & 1) ? (b >> 4) : (b & 0xF));
             }
-            rz[j][tn] = z;
+        }
+    } else if (zp_mode == kSmallMZpFp16) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const _Float16* z16 = static_cast<const _Float16*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++) rz[j][tn] = z16[grp[j]];
         }
     }
     const _Float16* a_row[TM];
