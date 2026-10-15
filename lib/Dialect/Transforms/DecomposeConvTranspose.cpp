@@ -92,10 +92,15 @@ struct DimInfo {
 /// zero-valued positions.
 class DecomposeConvTranspose : public OpRewritePattern<ConvTransposeOp> {
 public:
-  using OpRewritePattern<ConvTransposeOp>::OpRewritePattern;
+  DecomposeConvTranspose(MLIRContext *context, bool allowMemorySources)
+      : OpRewritePattern<ConvTransposeOp>(context),
+        allowMemorySources(allowMemorySources) {}
 
   LogicalResult matchAndRewrite(ConvTransposeOp op,
                                 PatternRewriter &rewriter) const override;
+
+private:
+  bool allowMemorySources;
 };
 
 SmallVector<int64_t> getI64Values(ArrayAttr attr) {
@@ -122,12 +127,17 @@ int64_t flatIndex(ArrayRef<int64_t> shape, int64_t a, int64_t b, int64_t c,
 /// decline nearly every real filter, and a ConvTranspose-only module would
 /// then reach the compiler with no rocMLIR kernel in it at all.
 ///
-/// Memory-address carriers are deliberately not resolved. That address is
+/// Memory-address carriers are what ONNX Runtime hands over for initializers
+/// embedded in the model, so they cover most real filters too. That address is
 /// process-local and valid only while the producer that recorded it is live,
-/// which this pattern cannot establish -- it is equally reachable from textual
-/// pass invocation, where the address would be dereferenced blind.
+/// which this pattern cannot establish on its own -- it is equally reachable
+/// from textual pass invocation, where the address would be dereferenced
+/// blind. It is therefore read only when the caller vouches for it through
+/// `allowMemorySources`.
 FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
-                                          RankedTensorType type) {
+                                          RankedTensorType type,
+                                          bool allowMemorySources) {
+  const int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
   switch (constant.getSourceKind()) {
   case ConstantOp::SourceKind::Inline: {
     // The verifier ties an inline value to the carrier's result type, but a
@@ -137,8 +147,21 @@ FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
       return failure();
     return value;
   }
-  case ConstantOp::SourceKind::Memory:
-    return failure();
+  case ConstantOp::SourceKind::Memory: {
+    if (!allowMemorySources)
+      return failure();
+    const int64_t address = constant.getMemoryAddressAttr().getInt();
+    const int64_t size = constant.getSizeAttr().getInt();
+    if (address == 0 || size != type.getNumElements() * elementBytes)
+      return failure();
+    DenseElementsAttr value = DenseElementsAttr::getFromRawBuffer(
+        type, ArrayRef<char>(reinterpret_cast<const char *>(
+                                 static_cast<uintptr_t>(address)),
+                             static_cast<size_t>(size)));
+    if (!value)
+      return failure();
+    return value;
+  }
   case ConstantOp::SourceKind::File:
     break;
   }
@@ -146,7 +169,6 @@ FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
   StringRef path = constant.getLocationAttr().getValue();
   const int64_t offset = constant.getOffsetAttr().getInt();
   const int64_t size = constant.getSizeAttr().getInt();
-  const int64_t elementBytes = (type.getElementTypeBitWidth() + 7) / 8;
   if (size != type.getNumElements() * elementBytes)
     return failure();
   // The range is validated against the file before mapping: a slice running
@@ -209,7 +231,7 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   if (!weightConst)
     return rewriter.notifyMatchFailure(op, "weights are not a hip.constant");
   FailureOr<DenseElementsAttr> weightData =
-      readConstant(weightConst, weightType);
+      readConstant(weightConst, weightType, allowMemorySources);
   if (failed(weightData))
     return rewriter.notifyMatchFailure(op, "weights are not readable here");
   DenseElementsAttr weightAttr = *weightData;
@@ -418,9 +440,11 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
 
 struct DecomposeConvTransposePass
     : public impl::DecomposeConvTransposePassBase<DecomposeConvTransposePass> {
+  using DecomposeConvTransposePassBase::DecomposeConvTransposePassBase;
+
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<DecomposeConvTranspose>(&getContext());
+    patterns.add<DecomposeConvTranspose>(&getContext(), allowMemorySources);
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
   }

@@ -231,7 +231,17 @@ def DecomposeConvTransposePass
     Restricted to the statically shaped, non-grouped, dilation-1 case with
     `stride <= kernel` (so the residues tile the output with no holes) and a
     compile-time filter. Anything else is left for the MIOpen path.
+
+    Memory-address filters (ONNX Runtime initializers handed over in place)
+    are only read with `allow-memory-sources`, which the caller may set only
+    while the producer that recorded the address is live.
   }];
+  let options = [
+    Option<"allowMemorySources", "allow-memory-sources", "bool",
+           /*default=*/"false",
+           "Read memory-address hip.constant filters by dereferencing the "
+           "recorded host address">
+  ];
   let dependentDialects = [
     "mlir::tensor::TensorDialect"
   ];
