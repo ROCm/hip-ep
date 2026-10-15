@@ -1,0 +1,253 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- RocMlirFusion.cpp --------------------------------------------------===//
+//
+// Native constraint/rewrite backing RocMlirFusion.pdll.
+//
+// A fusable anchor (matmul/conv/gemm) and its trailing chain of pointwise
+// consumers are outlined, in one go, into a rock-kernel func.func and replaced
+// by a hip.rocmlir dispatch. PDLL owns only the match surface (anchor + the
+// fusability constraint); this rewrite body is native because the
+// variable-length chain walk and func.func creation cannot be declarative.
+//===----------------------------------------------------------------------===//
+
+#include "RocMlir/RocMlirFusion.h"
+
+#include "hip/Dialect/IR/HipDialect.h"
+
+#include <atomic>
+
+#include <llvm/ADT/SmallVectorExtras.h>
+#include <mlir/Analysis/TopologicalSortUtils.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
+#include <mlir/Dialect/UB/IR/UBOps.h>
+#include <mlir/IR/BuiltinAttributes.h>
+#include <mlir/IR/BuiltinOps.h>
+#include <mlir/IR/IRMapping.h>
+#include <mlir/Interfaces/DestinationStyleOpInterface.h>
+#include <mlir/Interfaces/SideEffectInterfaces.h>
+#include <mlir/Parser/Parser.h>
+
+namespace mlir::hip::rocmlir {
+
+namespace {
+
+// Rank-0 inline hip.constant used by fused pointwise ops (Relu zero, Clip
+// bounds, residual Mul scale). File- and memory-backed carriers have no dense
+// attr for in-kernel tosa.const and stay kernel arguments.
+bool isInlineScalarConstant(Value v) {
+  auto type = dyn_cast<RankedTensorType>(v.getType());
+  if (!type || type.getRank() != 0)
+    return false;
+  auto constant = v.getDefiningOp<ConstantOp>();
+  return constant && constant.getValueAttr();
+}
+
+// The kernel ABI rocMLIR expects for a scalar: MIGraphX gives one the shape
+// {1}, and rock-flatten-tosa-func-args leaves rank-1 boundaries alone. A rank-0
+// argument reaches rock.transforms_to_ptr with no coordinate to linearize
+// (`affine_map -> ()`), which fails as "Transforms are not well formed";
+// tensor<1xT> still carries the single index 0.
+Type promoteRankZero(Type type) {
+  auto tensorType = dyn_cast<RankedTensorType>(type);
+  if (!tensorType || tensorType.getRank() != 0)
+    return type;
+  return RankedTensorType::get({1}, tensorType.getElementType(),
+                               tensorType.getEncoding());
+}
+
+bool isaPointwiseOp(Operation *op) {
+  return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp,
+                         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
+                         LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
+                         AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
+                         RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
+                         SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
+}
+
+bool isAnchorOp(Operation *op) {
+  return isa_and_present<MatmulOp, ConvOp, GemmOp>(op);
+}
+
+// Module-unique kernel names across every rewrite invocation.
+std::atomic<int> gCounter{0};
+
+} // namespace
+
+bool isFusableRocMlirAnchor(Operation *op) {
+  if (!isAnchorOp(op) || op->getNumOperands() == 0 ||
+      !isa<ContextType>(op->getOperand(0).getType()))
+    return false;
+  for (Value operand : op->getOperands())
+    if (auto t = dyn_cast<TensorType>(operand.getType());
+        t && !t.hasStaticShape())
+      return false;
+  return true;
+}
+
+void outlineRocMlirSubgraph(PatternRewriter &rewriter, Operation *anchorOp) {
+  DestinationStyleOpInterface endOp =
+      cast<DestinationStyleOpInterface>(anchorOp);
+  Operation *prevOp = nullptr;
+  SetVector<Value> operands;
+  SetVector<Operation *> ops;
+
+  // Match all pointwise-ops downstream of the anchor.
+  do {
+    if (prevOp)
+      endOp = dyn_cast<DestinationStyleOpInterface>(*prevOp->user_begin());
+    auto newOperands = endOp.getDpsInputs();
+    if (prevOp)
+      newOperands.erase(newOperands.begin() +
+                        prevOp->use_begin()->getOperandNumber());
+    operands.insert_range(newOperands);
+    for (auto init : endOp.getDpsInits()) {
+      // An init with no producer is a block argument, which cannot be cloned.
+      // It is picked up as a kernel argument below instead.
+      if (Operation *initOp = init.getDefiningOp())
+        ops.insert(initOp);
+    }
+    ops.insert(endOp);
+    prevOp = endOp;
+  } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
+
+  // Remove the hip.context operand.
+  auto context = operands.front();
+  operands.erase(operands.begin());
+
+  // Pointwise scalar literals belong in the outlined subgraph, not the kernel
+  // ABI. A rank-0 buffer argument has no index for rock.transforms_to_ptr.
+  // Clone only inline constants: a dynamic Clip bound remains an argument.
+  SetVector<Value> kernelOperands;
+  for (Value operand : operands) {
+    if (isInlineScalarConstant(operand)) {
+      ops.insert(operand.getDefiningOp());
+      continue;
+    }
+    kernelOperands.insert(operand);
+  }
+  operands = std::move(kernelOperands);
+
+  // `ops` is cloned into an IsolatedFromAbove func, so every value it reads has
+  // to resolve inside that func. The DPS inputs above cover the data, but they
+  // do not cover what the inits are built from: an init is only a bare
+  // tensor.empty when the anchor already has the rank rocMLIR wants. A 1-D
+  // convolution does not -- convert-onnx-to-hip widens it to 2-D by wrapping
+  // the operands *and the init* in tensor.expand_shape -- so the init's
+  // producer is a reshape whose own operand is the empty. Cloning just the
+  // reshape leaves it pointing at an empty back in main_graph.
+  //
+  // Absorb producers that carry no operands and no side effects, so a
+  // materialised destination travels with the ops that use it instead of
+  // becoming a kernel argument.
+  SmallVector<Operation *> worklist(ops.begin(), ops.end());
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    for (Value operand : op->getOperands()) {
+      if (operands.contains(operand))
+        continue;
+      Operation *producer = operand.getDefiningOp();
+      if (!producer || ops.contains(producer))
+        continue;
+      if (producer->getNumOperands() != 0 || !isMemoryEffectFree(producer))
+        continue;
+      ops.insert(producer);
+      worklist.push_back(producer);
+    }
+  }
+
+  // Whatever is still read from outside has to be passed in, which costs one
+  // more kernel argument and is what any init producer that cannot be
+  // rematerialized -- a caller-supplied buffer, say -- falls back on.
+  for (Operation *op : ops)
+    for (Value operand : op->getOperands())
+      if (operand != context && !ops.contains(operand.getDefiningOp()))
+        operands.insert(operand);
+
+  // Cloning follows this order, so a producer absorbed above has to come before
+  // the op that reads it.
+  ops = topologicalSort(ops);
+
+  auto parentModule = anchorOp->getParentOfType<ModuleOp>();
+  func::FuncOp newFunc;
+  {
+    PatternRewriter::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(parentModule.getBody());
+    auto funcType = rewriter.getFunctionType(
+        llvm::map_to_vector(
+            operands, [](Value v) { return promoteRankZero(v.getType()); }),
+        endOp->getResultTypes());
+
+    newFunc =
+        func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
+                             "rocMlir" + std::to_string(gCounter++), funcType);
+    newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
+    newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
+    auto *funcBlock = newFunc.addEntryBlock();
+    rewriter.setInsertionPointToStart(funcBlock);
+    IRMapping mapping;
+
+    // Map the hip.context to ub.poison.
+    mapping.map(context,
+                ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     context.getType()));
+
+    for (auto [idx, operand] : llvm::enumerate(operands))
+      mapping.map(operand, funcBlock->getArgument(idx));
+
+    for (auto *op : ops)
+      rewriter.clone(*op, mapping);
+    auto returns = llvm::map_to_vector(
+        endOp->getResults(), [&mapping](Value v) { return mapping.lookup(v); });
+    func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
+  }
+
+  rewriter.setInsertionPointAfter(endOp);
+
+  // The graph outside keeps its rank-0 value; only what crosses into the kernel
+  // is reshaped, so the dispatch matches the signature built above.
+  SmallVector<Value> dispatchOperands;
+  dispatchOperands.reserve(operands.size());
+  Value rankOneShape;
+  for (Value operand : operands) {
+    Type promoted = promoteRankZero(operand.getType());
+    if (promoted == operand.getType()) {
+      dispatchOperands.push_back(operand);
+      continue;
+    }
+    if (!rankOneShape) {
+      auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
+      rankOneShape = arith::ConstantOp::create(
+          rewriter, rewriter.getUnknownLoc(), shapeType,
+          DenseIntElementsAttr::get(shapeType, ArrayRef<int64_t>{1}));
+    }
+    dispatchOperands.push_back(tensor::ReshapeOp::create(
+        rewriter, rewriter.getUnknownLoc(), promoted, operand, rankOneShape));
+  }
+
+  auto rocMlirOp =
+      RocMlirOp::create(rewriter, rewriter.getUnknownLoc(),
+                        endOp->getResultTypes(), SymbolRefAttr::get(newFunc),
+                        context, dispatchOperands, endOp.getDpsInits().front());
+
+  rewriter.replaceOp(endOp, rocMlirOp);
+}
+
+//===----------------------------------------------------------------------===//
+// Generated pattern
+//===----------------------------------------------------------------------===//
+
+// mlir-pdll -x cpp emits the pattern struct plus populateGeneratedPDLLPatterns,
+// and registers the trampolines above by name.
+#include "RocMlirFusion.pdll.h.inc"
+
+void populateRocMlirFusionPatterns(RewritePatternSet &patterns) {
+  populateGeneratedPDLLPatterns(patterns);
+}
+
+} // namespace mlir::hip::rocmlir
