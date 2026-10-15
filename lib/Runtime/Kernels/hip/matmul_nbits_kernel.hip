@@ -2880,9 +2880,10 @@ extern "C" int hip_matmul_nbits_dp4a_prequant(
  * The launch config is the widest segment's single-weight config
  * (getOrTuneDp4aConfig: the offline LUT, else its one-time sweep). The widest
  * segment dominates the group's bytes, and a narrow segment's config can
- * leave it badly under-occupied. The SiLU form keeps that config's columns
- * per weight, capped at 8 per weight so the 2x accumulators stay within the
- * 16 columns the table was bounded by.
+ * leave it badly under-occupied. The SiLU form splits that config's columns
+ * between gate and up (TN / 2 of each, at least 1), so for TN >= 2 a block
+ * holds as many accumulators and reads as many weight bytes as the tuned
+ * single-weight kernel.
  * ----------------------------------------------------------------------- */
 
 struct Dp4aGroupArgs {
@@ -3058,7 +3059,7 @@ static void launchDp4aGroupKernel(hipStream_t stream, const int8_t* a_qb,
 }
 
 // The config id indexes kGemvConfigs; the (BS, TN) at every case MUST match
-// it. The SiLU form computes TN columns of each weight, at most 8.
+// it. The SiLU form computes TN / 2 columns of each weight (at least 1).
 template <int EPI, bool HAS_ZP>
 static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
                                   const int8_t* a_qb, const float* a_sc,
@@ -3067,7 +3068,7 @@ static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
 #define DP4A_GROUP_CASE(ID, BS, TN)                                            \
     case ID: {                                                                 \
         constexpr int kTn =                                                    \
-            (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL && TN > 8) ? 8 : TN;         \
+            (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL && TN > 1) ? TN / 2 : TN;    \
         launchDp4aGroupKernel<BS, kTn, EPI, HAS_ZP>(stream, a_qb, a_sc, g, K,  \
                                                     bs);                       \
     } break
