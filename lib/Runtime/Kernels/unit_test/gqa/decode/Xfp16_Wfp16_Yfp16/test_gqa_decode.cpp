@@ -38,6 +38,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -156,6 +157,182 @@ inline std::vector<std::string> captureLogLines(
   }
   if (redirect) std::remove(path.c_str());
   return lines;
+}
+}  // namespace hipdnn_ep_test
+
+// ---- Cold-cache timing ----
+// In a model, a layer's KV cache is read once per step and the rest of the
+// model streams through the GPU caches before it is read again, so every
+// launch reads it from DRAM. Back-to-back launches on one cache find it in
+// L2 / the Infinity Cache instead, and flushing the caches between launches
+// does not restore DRAM reads either: a read-only flush leaves the reused lines
+// resident, and a write flush leaves dirty lines for the timed launch to write
+// back. So the timed launches rotate over copies of the KV cache, back to back,
+// the way consecutive layers read their own: each copy is read again only after
+// kColdRotationBytes of other copies. HIPDNN_KERNEL_UT_WARM=1 times one copy
+// back to back instead.
+namespace hipdnn_ep_test {
+// Several times the largest last-level cache among the targets (96 MB on
+// gfx1100).
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+// Bounds the copies of operands of a few KB, whose launches are bound by
+// latency rather than DRAM bandwidth; that many copies still keep each one out
+// of L2 between its reads.
+constexpr int kColdMaxCopies = 4096;
+// Rows below the first attended one that a kernel may still load as part of a
+// tile; the copies carry them so those loads stay inside the copy.
+constexpr int kColdRowMargin = 64;
+
+inline bool warmTiming() {
+  const char* v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of a K and a V cache laid out [planes, rows, row_bytes], of which a
+// launch reads rows [lo, hi) of every plane. Copy c keeps those rows
+// c * (hi - lo) rows further into each plane of a buffer whose plane stride is
+// rows(), so the copies cost what a launch reads rather than the whole cache
+// (a sliding window reads a small part of it). A launch on copy c passes k(c),
+// v(c) and rows() in place of the cache pointers and their max_seq.
+class ColdKvCopies {
+ public:
+  ColdKvCopies(const void* k, const void* v, int planes, int rows,
+               size_t row_bytes, int lo, int hi)
+      : k_(k), v_(v), rows_(rows), row_bytes_(row_bytes) {
+    lo = std::max(0, lo - kColdRowMargin);
+    span_ = hi - lo;
+    bytes_ = 2 * static_cast<size_t>(planes) * span_ * row_bytes;
+    if (warmTiming() || bytes_ == 0) return;
+    const int n = 1 + static_cast<int>(std::min<size_t>(
+                          kColdMaxCopies - 1,
+                          (kColdRotationBytes + bytes_ - 1) / bytes_));
+    const int copy_rows = hi + (n - 1) * span_;
+    const size_t buf_bytes = static_cast<size_t>(planes) * copy_rows * row_bytes;
+    if (hipMalloc(&kbuf_, buf_bytes) != hipSuccess ||
+        hipMalloc(&vbuf_, buf_bytes) != hipSuccess) {
+      std::fprintf(stderr, "cold-cache copies do not fit; timing on warm caches\n");
+      release();
+      return;
+    }
+    (void)hipMemset(kbuf_, 0, buf_bytes);
+    (void)hipMemset(vbuf_, 0, buf_bytes);
+    // The copies sit back to back from row lo of every plane: copy 0 comes
+    // from the cache, then the run of filled copies doubles until all n are.
+    const size_t src_pitch = static_cast<size_t>(rows) * row_bytes;
+    const size_t dst_pitch = static_cast<size_t>(copy_rows) * row_bytes;
+    const size_t off = static_cast<size_t>(lo) * row_bytes;
+    const size_t span_bytes = static_cast<size_t>(span_) * row_bytes;
+    (void)hipMemcpy2D(kbuf_ + off, dst_pitch, static_cast<const char*>(k) + off,
+                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+    (void)hipMemcpy2D(vbuf_ + off, dst_pitch, static_cast<const char*>(v) + off,
+                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+    for (int filled = 1; filled < n;) {
+      const int more = std::min(filled, n - filled);
+      (void)hipMemcpy2D(kbuf_ + off + filled * span_bytes, dst_pitch,
+                        kbuf_ + off, dst_pitch, more * span_bytes, planes,
+                        hipMemcpyDeviceToDevice);
+      (void)hipMemcpy2D(vbuf_ + off + filled * span_bytes, dst_pitch,
+                        vbuf_ + off, dst_pitch, more * span_bytes, planes,
+                        hipMemcpyDeviceToDevice);
+      filled += more;
+    }
+    count_ = n;
+    rows_ = copy_rows;
+  }
+  ~ColdKvCopies() { release(); }
+  ColdKvCopies(const ColdKvCopies&) = delete;
+  ColdKvCopies& operator=(const ColdKvCopies&) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  int rows() const { return rows_; }
+  const void* k(int c) const { return kbuf_ ? kbuf_ + offset(c) : k_; }
+  const void* v(int c) const { return vbuf_ ? vbuf_ + offset(c) : v_; }
+
+ private:
+  size_t offset(int c) const {
+    return static_cast<size_t>(c) * span_ * row_bytes_;
+  }
+  void release() {
+    if (kbuf_) (void)hipFree(kbuf_);
+    if (vbuf_) (void)hipFree(vbuf_);
+    kbuf_ = vbuf_ = nullptr;
+  }
+
+  const void* k_;
+  const void* v_;
+  int rows_;
+  size_t row_bytes_;
+  int span_ = 0;
+  size_t bytes_ = 0;
+  int count_ = 1;
+  char* kbuf_ = nullptr;
+  char* vbuf_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs and the reading is the GPU's time rather
+// than the host's submission rate. Gives up after about 0.25 s in case the
+// queue cannot take all the launches.
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin)
+    __builtin_amdgcn_s_sleep(127);
+}
+
+// Host-mapped release flag for holdStreamKernel, or null if it is unavailable.
+// Coherent, so the spinning kernel sees the host's write without a flush.
+inline int* holdReleaseFlag() {
+  static int* flag = [] {
+    void* p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int*>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
+// launch(c) reading copy c. Untimed launches over the rotation go first, until
+// kColdSettleBytes have been read.
+template <class Launch>
+double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
+                     Launch&& launch) {
+  const int n = copies.count();
+  int turn = 0;
+  if (n > 1) {
+    const size_t settle = std::min<size_t>(
+        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
+    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
+  }
+  // Drained, so the hold below holds the timed launches rather than being
+  // released while earlier launches are still queued ahead of it.
+  (void)hipStreamSynchronize(stream);
+  volatile int* release = holdReleaseFlag();
+  void* release_dev = nullptr;
+  if (release &&
+      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
+          hipSuccess) {
+    *release = 0;
+    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
+  }
+  hipEvent_t start, stop;
+  (void)hipEventCreate(&start);
+  (void)hipEventCreate(&stop);
+  (void)hipEventRecord(start, stream);
+  for (int i = 0; i < iters; ++i) launch(turn++ % n);
+  (void)hipEventRecord(stop, stream);
+  if (release) *release = 1;
+  (void)hipEventSynchronize(stop);
+  float ms = 0.0f;
+  (void)hipEventElapsedTime(&ms, start, stop);
+  (void)hipEventDestroy(start);
+  (void)hipEventDestroy(stop);
+  return iters > 0 ? ms / iters : 0.0;
 }
 }  // namespace hipdnn_ep_test
 
@@ -389,6 +566,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          const __half* dQ, const __half* dK, const __half* dV,
                          __half* dO, float* dPart, const int* dSeq,
                          const __half* dSink, int iters,
+                         const hipdnn_ep_test::ColdKvCopies& kv,
                          std::vector<float>& host_O) {
   set_mode_env(mode);
 
@@ -410,22 +588,11 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
-  hipEvent_t a, b;
-  HIP_CHECK(hipEventCreate(&a));
-  HIP_CHECK(hipEventCreate(&b));
-  HIP_CHECK(hipEventRecord(a));
-  for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
-                            max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
-                            c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
-  }
-  HIP_CHECK(hipEventRecord(b));
-  HIP_CHECK(hipEventSynchronize(b));
-  float ms = 0.0f;
-  HIP_CHECK(hipEventElapsedTime(&ms, a, b));
-  HIP_CHECK(hipEventDestroy(a));
-  HIP_CHECK(hipEventDestroy(b));
-  return ms / iters;
+  return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
+    hip_gqa_flash_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart, B, H, G, D,
+                         c.total, kv.rows(), MAX_SPLITS, scale, dSeq, c.window,
+                         sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
+  });
 }
 
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
@@ -436,6 +603,7 @@ static double run_kernel_lut(const Case& c, float scale,
                              const __half* dQ, const __half* dK, const __half* dV,
                              __half* dO, float* dPart, const int* dSeq,
                              const __half* dSink, int iters,
+                             const hipdnn_ep_test::ColdKvCopies& kv,
                              std::vector<float>& host_O,
                              hipdnn_ep::GqaTuneSource& out_source,
                              hipdnn_ep::GqaDecodeConfig& out_config) {
@@ -477,24 +645,13 @@ static double run_kernel_lut(const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
-  hipEvent_t a, b;
-  HIP_CHECK(hipEventCreate(&a));
-  HIP_CHECK(hipEventCreate(&b));
-  HIP_CHECK(hipEventRecord(a));
-  for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode_configured(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D,
-                                    c.total, max_seq, MAX_SPLITS, scale, dSeq,
-                                    c.window, sinkp, c.smooth,
+  return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
+    hip_gqa_flash_decode_configured(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart,
+                                    B, H, G, D, c.total, kv.rows(), MAX_SPLITS,
+                                    scale, dSeq, c.window, sinkp, c.smooth,
                                     HIP_KV_DTYPE_FP16, nullptr, nullptr,
                                     use_wmma, splits, bkv);
-  }
-  HIP_CHECK(hipEventRecord(b));
-  HIP_CHECK(hipEventSynchronize(b));
-  float ms = 0.0f;
-  HIP_CHECK(hipEventElapsedTime(&ms, a, b));
-  HIP_CHECK(hipEventDestroy(a));
-  HIP_CHECK(hipEventDestroy(b));
-  return ms / iters;
+  });
 }
 #endif  // HIPDNN_LUT_LINKED_EXTERNALLY
 
@@ -502,6 +659,7 @@ static double run_kernel_lut(const Case& c, float scale,
 static double run_fused(const Case& c, float scale,
                         const __half* dQ, const __half* dK, const __half* dV,
                         __half* dO, const int* dSeq, int iters,
+                        const hipdnn_ep_test::ColdKvCopies& kv,
                         std::vector<float>& host_O) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   HIP_CHECK((hipError_t)hip_gqa_fused_decode(
@@ -514,20 +672,10 @@ static double run_fused(const Case& c, float scale,
                         hipMemcpyDeviceToHost));
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
-  hipEvent_t a, b;
-  HIP_CHECK(hipEventCreate(&a));
-  HIP_CHECK(hipEventCreate(&b));
-  HIP_CHECK(hipEventRecord(a));
-  for (int it = 0; it < iters; ++it)
-    hip_gqa_fused_decode(nullptr, dQ, dK, dV, dO, B, H, G, D, c.total, max_seq,
-                         scale, dSeq);
-  HIP_CHECK(hipEventRecord(b));
-  HIP_CHECK(hipEventSynchronize(b));
-  float ms = 0.0f;
-  HIP_CHECK(hipEventElapsedTime(&ms, a, b));
-  HIP_CHECK(hipEventDestroy(a));
-  HIP_CHECK(hipEventDestroy(b));
-  return ms / iters;
+  return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
+    hip_gqa_fused_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, B, H, G, D,
+                         c.total, kv.rows(), scale, dSeq);
+  });
 }
 
 static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
@@ -575,6 +723,11 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   std::vector<float> ref;
   cpu_reference(c, Q, K, Vv, Seq, Sink, scale, ref);
 
+  // The rows a launch reads: the window when there is one, else every key.
+  const hipdnn_ep_test::ColdKvCopies kv(
+      dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
+      c.window > 0 ? std::max(0, c.total - c.window) : 0, c.total);
+
   // ours = autotuned (impl + dynamic split-K); ori = production baseline
   // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
   // --prod-only drops all three: when comparing two builds, the extra configs
@@ -591,7 +744,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
     const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
         "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
           ms = run_kernel(mode, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
-                          iters, out);
+                          iters, kv, out);
         });
     if (cfg)
       for (const std::string& line : lines) {
@@ -627,7 +780,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   if (fused_ok_shape) {
     std::vector<float> O_fused;
     int fiters = iters < 16 ? iters : 16;
-    ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, fiters, O_fused);
+    ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, fiters, kv, O_fused);
     l2_fused = rel_l2(O_fused, ref);
     fused_ran = true;
   }
@@ -650,7 +803,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
     // per-dispatch diagnostic off the console.
     captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
       ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
-                              iters, O_lut, src, lut_cfg);
+                              iters, kv, O_lut, src, lut_cfg);
     });
     char lut_config[96];
     std::snprintf(lut_config, sizeof(lut_config),
