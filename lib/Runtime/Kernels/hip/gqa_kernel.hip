@@ -3396,7 +3396,25 @@ typedef _Float16 half16_raw_t __attribute__((ext_vector_type(16)));
 // ds_bpermute and the LDS queue). Archs without WMMA only need this to
 // compile, since the kernel traps there.
 __device__ __forceinline__ int v6_swap_halves(int x) {
-#if HIPDNN_HAS_WMMA
+#if HIPDNN_HAS_WMMA && !HIPDNN_WMMA_GFX12
+    // The "old" operand is never read (every lane is active), but it is tied
+    // to the result, so the compiler copies x into the result register first
+    // and the swap then reads that copy. On gfx11 / gfx11.5 the copy can be
+    // dual-issued (VOPD) with an unrelated move, and a VOPD pair whose two
+    // sources in the same slot are distinct VGPRs of the same parity can lose
+    // the interlock on a source written by the instruction before it (LLVM
+    // #220348, not in ROCm 7.14 or 7.16). The swap then exchanges a stale
+    // value: ROCm 7.14 paired `v4 = v3` with `v105 = v101` right after
+    // `v3 = v4 + v3` in the v8x d256 ND=4 row-sum swap, and that kernel wrote
+    // inf / NaN rows, different ones on every run, at a 4K-query x 64K-key
+    // prefill; under ROCm 7.16 the d64 block of 8 heads did the same from 128
+    // tokens up. An inline-asm copy is never paired and fixes both. (Passing
+    // 0 as "old" avoids it too, but the zeros all get hoisted ahead of the
+    // swaps.) gfx11.7 and the gfx12-style encoding do not have the hazard.
+    int old;
+    asm("v_mov_b32 %0, %1" : "=v"(old) : "v"(x));
+    return __builtin_amdgcn_permlanex16(old, x, 0x76543210u, 0xfedcba98u, false, false);
+#elif HIPDNN_HAS_WMMA
     return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false, false);
 #else
     return __shfl_xor(x, 16);
