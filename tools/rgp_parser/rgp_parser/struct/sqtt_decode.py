@@ -24,6 +24,8 @@ Source of truth (all in-tree under rocm-systems/projects/rocprof-trace-decoder):
 
 from __future__ import annotations
 
+import os
+
 MASK64 = (1 << 64) - 1
 MASK32 = 0xFFFFFFFF
 BITMASK48 = (1 << 48) - 1
@@ -377,14 +379,19 @@ class CSRegister:
         }
 
 
-def parse_se(blob, se_index, collect_de):
+def parse_se(blob, se_index, collect_de, collect_disp=False):
     """One shader-engine parse pass.
 
-    Returns (dispatches, events, realtime, occupancy). ``dispatches``/``events``/
-    ``realtime`` are only populated when ``collect_de`` is set (they are global
-    and read from SE0 only, mirroring the C++ parse loop). ``occupancy`` is always
-    collected: a list of [time, start, cu, simd, wid, me, pipe, pc] in the exact
-    delivery order (synthetic pre-capture starts pushed to the front).
+    Returns (dispatches, events, realtime, occupancy). ``dispatches``/``events``
+    are only populated when ``collect_de`` is set: the command processor
+    broadcasts them into every SE's stream, so they are read from SE0 only,
+    mirroring the C++ parse loop. ``collect_disp`` collects only the dispatch
+    records, without changing anything else the pass does, so an SE>0 can report
+    its own launch times (the same dispatches, stamped with that SE's clock).
+    ``realtime`` and ``occupancy`` are always collected because they are per SE:
+    ``realtime`` is that SE's (shader_clock, realtime_clock) pairs, and
+    ``occupancy`` is a list of [time, start, cu, simd, wid, me, pipe, pc] in the
+    exact delivery order (synthetic pre-capture starts pushed to the front).
     """
     gen = TokenGen(blob)
     cs = CSRegister()
@@ -482,7 +489,7 @@ def parse_se(blob, se_index, collect_de):
         elif typ == REG_INIT:
             rtype = (c >> 18) & 3
             data = (c >> 20) & MASK32
-            if rtype == 2 and (data & 1) == 1 and collect_de:
+            if rtype == 2 and (data & 1) == 1 and (collect_de or collect_disp):
                 me = (c >> 16) & 3
                 pipe = (c >> 14) & 3
                 disps.append(cs.populate_dispatch(t, me, pipe, se_index))
@@ -510,6 +517,42 @@ def parse_se(blob, se_index, collect_de):
     return disps, events, gen.realtime, list(occ)
 
 
+def _se_to_se0(rts_se, rts_0):
+    """Return f(shader_clock_seN) -> shader_clock_se0, piecewise linear through
+    realtime. None when either SE has fewer than two realtime pairs."""
+    import bisect
+
+    a = sorted(rts_se)
+    b = sorted(rts_0, key=lambda p: p[1])
+    if len(a) < 2 or len(b) < 2:
+        return None
+    a_sc = [p[0] for p in a]
+    b_rt = [p[1] for p in b]
+
+    def interp(xs, pts, x, xi, yi):
+        j = min(max(1, bisect.bisect_left(xs, x)), len(pts) - 1)
+        p0, p1 = pts[j - 1], pts[j]
+        dx = p1[xi] - p0[xi]
+        return p0[yi] + (x - p0[xi]) * (p1[yi] - p0[yi]) / dx if dx else p0[yi]
+
+    def conv(sc):
+        return int(round(interp(b_rt, b, interp(a_sc, a, sc, 0, 1), 1, 0)))
+
+    return conv
+
+
+def _own_launches(disps_se, disps_0):
+    """SE<i>'s own launch time for each of SE0's (time-sorted) dispatches, or
+    None when SE<i>'s dispatch records don't line up with SE0's."""
+    ds = sorted(disps_se, key=lambda d: d["t"])
+    if len(ds) != len(disps_0):
+        return None
+    for a, b in zip(ds, disps_0):
+        if a["pc"] != b["pc"] or a["me"] != b["me"] or a["pipe"] != b["pipe"]:
+            return None
+    return [d["t"] for d in ds]
+
+
 def decode(blobs, wave_size=32):
     """Decode one SQTT blob per shader engine into raw records.
 
@@ -519,14 +562,23 @@ def decode(blobs, wave_size=32):
     import bisect
 
     disps, ev_raw, rts, occ0 = parse_se(blobs[0], 0, True)
+    disps.sort(key=lambda d: d["t"])
     occ_all = [occ0]
+    se_clock = [None]
+    se_launch = [None]
+    per_se = os.environ.get("RGP_PARSER_PER_SE_CLOCK", "1") != "0"
     for i in range(1, len(blobs)):
-        _, _, _, occ_i = parse_se(blobs[i], i, False)
+        disps_i, _, rts_i, occ_i = parse_se(blobs[i], i, False, collect_disp=per_se)
         occ_all.append(occ_i)
+        # Each SE counts its own shader clock, and they drift apart by an amount
+        # that varies per capture (+0.66% and -1.37% seen on gfx1151, up to ms
+        # over a capture). Map SE<i> times into SE0's shader clock through
+        # realtime, using that SE's own pairs.
+        se_clock.append(_se_to_se0(rts_i, rts) if per_se else None)
+        se_launch.append(_own_launches(disps_i, disps) if per_se else None)
 
     rt_freq = 100_000_000  # RGP capture: decoder emits no RT_FREQUENCY -> fallback
 
-    disps.sort(key=lambda d: d["t"])
     for d in disps:
         d["exp_waves"] = 0
         d["wf"] = 0
@@ -539,23 +591,25 @@ def decode(blobs, wave_size=32):
     occ_ev = [[] for _ in blobs]
     for se, occ in enumerate(occ_all):
         oe = occ_ev[se]
+        conv = se_clock[se]
         for rec in occ:
-            time, start, cu, simd, wid, me, pipe, pc = rec
+            raw, start, cu, simd, wid, me, pipe, pc = rec
+            time = conv(raw) if conv is not None and raw else raw
             sk = (se << 24) | ((cu & 0x7F) << 16) | ((simd & 0xF) << 8) | (wid & 0xFF)
             oe.append((time, 1 if start else -1))
             if start:
-                slot_pend[sk] = (time, pc, me, pipe)
+                slot_pend[sk] = (time, pc, me, pipe, raw)
             else:
                 p = slot_pend.pop(sk, None)
                 if p is None:
                     continue
-                st, ppc, pme, ppipe = p
+                st, ppc, pme, ppipe, st_raw = p
                 key = (ppc << 8) | (((pme & 7) << 4) | (ppipe & 0xF))
                 lst = pipe_waves.get(key)
                 if lst is None:
-                    pipe_waves[key] = [(st, time)]
+                    pipe_waves[key] = [(st, time, se, st_raw)]
                 else:
-                    lst.append((st, time))
+                    lst.append((st, time, se, st_raw))
 
     # --- exp_waves from RGP markers (USERDATA_2/3), per (me,pipe) ------------
     # Reassemble the type-15 marker dwords in capture
@@ -616,9 +670,16 @@ def decode(blobs, wave_size=32):
         if not wv:
             continue
         times = [disps[i]["t"] for i in idxs]
+        own = [None if sl is None else [sl[i] for i in idxs] for sl in se_launch]
         wv.sort(key=lambda w: w[0])
-        for ws, we in wv:
-            k = bisect.bisect_right(times, ws) - 1
+        for ws, we, se, ws_raw in wv:
+            # Match an SE<i> wave against SE<i>'s own launch records: after the
+            # clock mapping, the waves of a short kernel can land a fraction of
+            # a us before SE0's launch record and fall into the previous launch.
+            if own[se] is not None:
+                k = bisect.bisect_right(own[se], ws_raw) - 1
+            else:
+                k = bisect.bisect_right(times, ws) - 1
             if k < 0:
                 k = 0
             d = disps[idxs[k]]
