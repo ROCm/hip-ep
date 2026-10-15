@@ -15,7 +15,9 @@
  *         every row shares one gain vector.
  *
  * Algorithm: one block per row, two passes with a shared-memory block
- * reduction.
+ * reduction. F32 rows instead use hip_rms_norm_f32_kernel: a block sized to
+ * the row (32, 256 or 1024 threads; see the launcher), float4 accesses
+ * and a wave-shuffle reduction.
  *   Pass A: each block sums x^2 over `norm_size`, in FP32.
  *   Pass B: each thread writes y in the input dtype, using FP32 math.
  *
@@ -269,6 +271,64 @@ inline bool rms_can_vectorize(const void *input, const void *scale,
   return aligned(input) && aligned(scale) && aligned(output);
 }
 
+// F32 rows: a block of Threads per row, float4 accesses when the row allows,
+// and a wave-shuffle reduction with one barrier. Decode norms one row of a
+// few thousand values, which the tree reduction above spends most of its time
+// synchronising for.
+template <int Threads>
+__global__ void __launch_bounds__(Threads)
+    hip_rms_norm_f32_kernel(const float *__restrict__ input,
+                            const float *__restrict__ scale,
+                            float *__restrict__ output, int64_t norm_size,
+                            int64_t scale_rows, float epsilon, bool vec4) {
+  constexpr int kWave = 32;
+  const int64_t row = blockIdx.x;
+  const float *x_row = input + row * norm_size;
+  float *y_row = output + row * norm_size;
+  const float *g_row = scale + (row % scale_rows) * norm_size;
+
+  float sumsq = 0.0f;
+  if (vec4) {
+    const float4 *x4 = reinterpret_cast<const float4 *>(x_row);
+    for (int64_t i = threadIdx.x; i < norm_size / 4; i += Threads) {
+      const float4 v = x4[i];
+      sumsq += v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+    }
+  } else {
+    for (int64_t i = threadIdx.x; i < norm_size; i += Threads)
+      sumsq += x_row[i] * x_row[i];
+  }
+  for (int offset = kWave / 2; offset > 0; offset >>= 1)
+    sumsq += __shfl_xor(sumsq, offset, kWave);
+  if constexpr (Threads > kWave) {
+    __shared__ float s_waves[Threads / kWave];
+    if (threadIdx.x % kWave == 0)
+      s_waves[threadIdx.x / kWave] = sumsq;
+    __syncthreads();
+    const int lane = threadIdx.x % kWave;
+    sumsq = lane < Threads / kWave ? s_waves[lane] : 0.0f;
+    for (int offset = kWave / 2; offset > 0; offset >>= 1)
+      sumsq += __shfl_xor(sumsq, offset, kWave);
+  }
+  const float inv_rms =
+      rsqrtf(sumsq / static_cast<float>(norm_size) + epsilon);
+
+  if (vec4) {
+    const float4 *x4 = reinterpret_cast<const float4 *>(x_row);
+    const float4 *g4 = reinterpret_cast<const float4 *>(g_row);
+    float4 *y4 = reinterpret_cast<float4 *>(y_row);
+    for (int64_t i = threadIdx.x; i < norm_size / 4; i += Threads) {
+      const float4 v = x4[i];
+      const float4 g = g4[i];
+      y4[i] = make_float4(v.x * inv_rms * g.x, v.y * inv_rms * g.y,
+                          v.z * inv_rms * g.z, v.w * inv_rms * g.w);
+    }
+  } else {
+    for (int64_t i = threadIdx.x; i < norm_size; i += Threads)
+      y_row[i] = x_row[i] * inv_rms * g_row[i];
+  }
+}
+
 } // namespace
 
 extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
@@ -319,11 +379,27 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
                          scale_rows, epsilon);
     }
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_kernel<float, false>), grid,
-                       block, 0, hip_stream, static_cast<const float *>(input),
-                       static_cast<const float *>(scale),
-                       static_cast<float *>(output), outer, norm_size,
-                       scale_rows, epsilon);
+    // The block grows with the row: a wave for a head-sized row, a full
+    // block for a hidden-sized one.
+    const bool vec4 = norm_size % 4 == 0 &&
+                      reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(scale) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(output) % 16 == 0;
+    const auto *x = static_cast<const float *>(input);
+    const auto *g = static_cast<const float *>(scale);
+    auto *y = static_cast<float *>(output);
+    if (norm_size >= 2048)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_f32_kernel<1024>), grid,
+                         dim3(1024), 0, hip_stream, x, g, y, norm_size,
+                         scale_rows, epsilon, vec4);
+    else if (norm_size >= 512)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_f32_kernel<256>), grid,
+                         dim3(256), 0, hip_stream, x, g, y, norm_size,
+                         scale_rows, epsilon, vec4);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_f32_kernel<32>), grid,
+                         dim3(32), 0, hip_stream, x, g, y, norm_size,
+                         scale_rows, epsilon, vec4);
   } else {
     fprintf(stderr, "[custom_kernels] hip_rms_norm: unsupported dtype=%d\n",
             hip_dtype);
