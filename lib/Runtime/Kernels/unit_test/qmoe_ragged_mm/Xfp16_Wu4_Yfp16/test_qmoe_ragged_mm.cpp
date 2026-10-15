@@ -23,6 +23,159 @@
 #include <utility>
 #include <vector>
 
+// ---- Cold-cache timing ----
+// In a model, a kernel's weights are read once per step and the rest of the
+// model streams through the GPU caches before they are read again, so every
+// launch reads them from DRAM. Back-to-back launches on one buffer find them in
+// L2 / the Infinity Cache instead, and flushing the caches between launches
+// does not restore DRAM reads either: a read-only flush leaves the reused lines
+// resident, and a write flush leaves dirty lines for the timed launch to write
+// back. So the timed launches rotate over copies of the weights, back to back,
+// the way consecutive layers read their own: each copy is read again only after
+// kColdRotationBytes of other copies. HIPDNN_KERNEL_UT_WARM=1 times one copy
+// back to back instead.
+namespace hipdnn_ep_test {
+// Several times the largest last-level cache among the targets (96 MB on
+// gfx1100).
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+// Bounds the copies of operands of a few KB, whose launches are bound by
+// latency rather than DRAM bandwidth; that many copies still keep each one out
+// of L2 between its reads.
+constexpr int kColdMaxCopies = 4096;
+
+inline bool warmTiming() {
+  const char* v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of the buffers one launch reads. Copy 0 is the buffers themselves;
+// the others share one allocation.
+class ColdCopies {
+ public:
+  struct Part {
+    const void* src;
+    size_t bytes;
+  };
+
+  explicit ColdCopies(std::initializer_list<Part> parts) : parts_(parts) {
+    size_t stride = 0;
+    for (const Part& p : parts_) {
+      offsets_.push_back(stride);
+      stride += (p.bytes + 255) & ~size_t(255);
+      bytes_ += p.bytes;
+    }
+    if (warmTiming() || bytes_ == 0) return;
+    count_ = 1 + static_cast<int>(std::min<size_t>(
+                     kColdMaxCopies - 1,
+                     (kColdRotationBytes + bytes_ - 1) / bytes_));
+    stride_ = stride;
+    if (hipMalloc(&slab_, stride_ * (count_ - 1)) != hipSuccess) {
+      std::fprintf(stderr, "cold-cache copies do not fit; timing on warm caches\n");
+      slab_ = nullptr;
+      count_ = 1;
+      return;
+    }
+    // Copy 1 from the buffers, then double the run of filled copies.
+    for (size_t i = 0; i < parts_.size(); ++i)
+      if (parts_[i].bytes)
+        (void)hipMemcpy(part(1, i), parts_[i].src, parts_[i].bytes,
+                        hipMemcpyDeviceToDevice);
+    for (int filled = 1; filled < count_ - 1;) {
+      const int more = std::min(filled, count_ - 1 - filled);
+      (void)hipMemcpy(static_cast<char*>(slab_) + stride_ * filled, slab_,
+                      stride_ * more, hipMemcpyDeviceToDevice);
+      filled += more;
+    }
+  }
+  ~ColdCopies() {
+    if (slab_) (void)hipFree(slab_);
+  }
+  ColdCopies(const ColdCopies&) = delete;
+  ColdCopies& operator=(const ColdCopies&) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  // Part `i` of copy `c`.
+  void* part(int c, size_t i) const {
+    if (c == 0 || parts_[i].bytes == 0) return const_cast<void*>(parts_[i].src);
+    return static_cast<char*>(slab_) + stride_ * (c - 1) + offsets_[i];
+  }
+
+ private:
+  std::vector<Part> parts_;
+  std::vector<size_t> offsets_;
+  size_t bytes_ = 0;
+  size_t stride_ = 0;
+  int count_ = 1;
+  void* slab_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs and the reading is the GPU's time rather
+// than the host's submission rate. Gives up after about 0.25 s in case the
+// queue cannot take all the launches.
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin)
+    __builtin_amdgcn_s_sleep(127);
+}
+
+// Host-mapped release flag for holdStreamKernel, or null if it is unavailable.
+// Coherent, so the spinning kernel sees the host's write without a flush.
+inline int* holdReleaseFlag() {
+  static int* flag = [] {
+    void* p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int*>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
+// launch(c) reading copy c. Untimed launches over the rotation go first, until
+// kColdSettleBytes have been read.
+template <class Launch>
+double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
+                     Launch&& launch) {
+  const int n = copies.count();
+  int turn = 0;
+  if (n > 1) {
+    const size_t settle = std::min<size_t>(
+        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
+    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
+  }
+  // Drained, so the hold below holds the timed launches rather than being
+  // released while earlier launches are still queued ahead of it.
+  (void)hipStreamSynchronize(stream);
+  volatile int* release = holdReleaseFlag();
+  void* release_dev = nullptr;
+  if (release &&
+      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
+          hipSuccess) {
+    *release = 0;
+    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
+  }
+  hipEvent_t start, stop;
+  (void)hipEventCreate(&start);
+  (void)hipEventCreate(&stop);
+  (void)hipEventRecord(start, stream);
+  for (int i = 0; i < iters; ++i) launch(turn++ % n);
+  (void)hipEventRecord(stop, stream);
+  if (release) *release = 1;
+  (void)hipEventSynchronize(stop);
+  float ms = 0.0f;
+  (void)hipEventElapsedTime(&ms, start, stop);
+  (void)hipEventDestroy(start);
+  (void)hipEventDestroy(stop);
+  return iters > 0 ? ms / iters : 0.0;
+}
+}  // namespace hipdnn_ep_test
+
 namespace {
 
 #define HIP_CHECK(call)                                                        \
@@ -365,8 +518,8 @@ class CsvWriter {
 };
 
 // One case's results.csv row, written when it goes out of scope so that a
-// case returning early still reports FAIL. The leaf has no timing loop, so
-// time_ms stays 0.
+// case returning early still reports FAIL. Only the MatMul cases are timed;
+// the selector, descriptor and pipeline rows keep time_ms at 0.
 struct ResultRow {
   CsvRow row;
   ResultRow(std::string shape, std::string config) {
@@ -614,6 +767,33 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
   const Metrics metrics = compare(actual, expected);
   const bool pass = guards_ok && metrics.finite && metrics.max_abs <= 0.02 &&
                     metrics.rel_l2 <= 0.01;
+
+  // The expert weights are what a model streams from DRAM; the input, the
+  // row groups and the output stay single, as they do in a model. Each launch
+  // takes its own zeroed queue head, so nothing is reset inside the timed loop.
+  constexpr int kIters = 20;
+  const hipdnn_ep_test::ColdCopies expert_weights(
+      {{d_weights.get(), weights.size()},
+       {d_scales.get(), scales.size() * sizeof(__half)},
+       {d_zero_points.get(), use_zero_points ? zero_points.size() : 0},
+       {d_bias.get(), use_bias ? bias.size() * sizeof(__half) : 0}});
+  const int launches = expert_weights.count() + kIters;
+  DeviceBuffer<uint32_t> d_queue_heads(launches);
+  HIP_CHECK(hipMemset(d_queue_heads.get(), 0, launches * sizeof(uint32_t)));
+  int next_head = 0;
+  const double time_ms = hipdnn_ep_test::rotatedMeanMs(
+      stream, kIters, expert_weights, [&](int c) {
+        hip_qmoe_ragged_matmul_nbits(
+            reinterpret_cast<void*>(stream), d_input.get(),
+            gather ? static_cast<const void*>(d_input_row_ids.get()) : nullptr,
+            d_groups.get(), d_group_count.get(),
+            d_queue_heads.get() + next_head++, expert_weights.part(c, 0),
+            expert_weights.part(c, 1),
+            use_zero_points ? expert_weights.part(c, 2) : nullptr,
+            use_bias ? expert_weights.part(c, 3) : nullptr, output, shape.rows,
+            shape.experts, shape.n, shape.k, shape.block_size, sizeof(__half));
+      });
+
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
             << " n=" << output_elements << " shape=" << shape.name
             << " routing=" << routing_name(routing)
@@ -621,7 +801,9 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             << " bias=" << (use_bias ? "on" : "off")
             << " zp=" << (use_zero_points ? "on" : "off")
             << " maxAbs=" << metrics.max_abs
-            << " guards=" << (guards_ok ? "PASS" : "FAIL") << '\n';
+            << " guards=" << (guards_ok ? "PASS" : "FAIL")
+            << " time_ms=" << time_ms << '\n';
+  result.row.time_ms = time_ms;
   result.finish(metrics.rel_l2, pass);
   return pass;
 }
