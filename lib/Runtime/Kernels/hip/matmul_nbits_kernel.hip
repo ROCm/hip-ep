@@ -699,6 +699,16 @@ void matmul_nbits_gemv_kernel_i8(
 #define GEMV4_KEEP_COL_TN16(TN, TM)                                            \
   ((TM) == 1 && (TN) > 8 && HIPDNN_VGPRS_PER_SIMD >= 1536)
 
+// The M-blocked TILE_M = 8, TILE_N = 2 tile, the lookup-mode pick for
+// M = 5..7, keeps the single A index on a 1536-VGPR target as well. There the
+// per-group row pointer lets the compiler take it from 167 VGPRs (9 waves) to
+// 107 (12 waves), and at M = 6 it ran 0.78-1.31x the original's time on
+// gfx1151 depending on the shape (1.24x and 1.31x on the Llama-3.1 FFN with
+// zero points). On the 1024-VGPR file the old index spilled the tile (584
+// B/lane under ROCm 7.16), so the product binary keeps the new one.
+#define GEMV4_KEEP_OLD_A_TM8(TN, TM)                                           \
+  ((TM) == 8 && (TN) == 2 && HIPDNN_VGPRS_PER_SIMD >= 1536)
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
 __global__ __launch_bounds__(BLOCK_SIZE)
 __attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
@@ -827,7 +837,8 @@ void matmul_nbits_gemv_kernel(
     // TILE_M > 1 the extra live values also pushed the tile into scratch
     // (100-584 bytes per lane, 2-4x slower).
     auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
-        if constexpr (COL_MAJOR && GEMV4_KEEP_COL_TN16(TILE_N, TILE_M)) {
+        if constexpr (COL_MAJOR && (GEMV4_KEEP_COL_TN16(TILE_N, TILE_M) ||
+                                    GEMV4_KEEP_OLD_A_TM8(TILE_N, TILE_M))) {
             return static_cast<float>(
                 a_base[tm * a_mstep + static_cast<int64_t>(k_lane + k_const) * a_stride]);
         } else {
