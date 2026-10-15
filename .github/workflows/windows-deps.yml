@@ -31,7 +31,7 @@ env:
   # rocmlirTriton (external/llvm-project). The repo + pinned commit are read
   # from cmake/deps.txt (single source of truth with the from-source fallback
   # in cmake/deps.cmake); the commit is the llvm-install cache key.
-  ONNXRUNTIME_VERSION: "1.30.0"
+  ONNXRUNTIME_VERSION: "1.31.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.17.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
@@ -274,7 +274,7 @@ jobs:
           cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
           # Cache the cp314 ORT Python wheel inside ort-install so it
           # rides the same cache key as the rest of the ORT artifacts.
-          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.30.0-cp314-cp314-win_amd64.whl
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.31.0-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ]; then
