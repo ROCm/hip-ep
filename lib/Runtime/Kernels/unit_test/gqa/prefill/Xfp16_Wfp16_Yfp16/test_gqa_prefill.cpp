@@ -103,26 +103,40 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
+// `name` in this executable's directory. The capture file must not follow the
+// working directory: started anywhere but the leaf directory, a relative
+// "out/..." names a folder that is not there, freopen() fails and leaves
+// stderr closed, and the next diagnostic ends the process with 0xC0000409
+// before it prints anything.
+inline std::string besideExe(const std::string& name) {
+  char* exe = nullptr;
+  if (_get_pgmptr(&exe) != 0 || !exe) return name;
+  const std::string path(exe);
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? name : path.substr(0, slash + 1) + name;
+}
+
 // Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
 // own diagnostics, which it prints while that variable is set. The kernels log
 // from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
 // the handle this process started with, so freopen() here would not move it.
 // hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
 // HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
-// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
-// kernels only when they are linked into this executable (the local make
-// build).
+// other way, the leaf falls back to freopen() on `tmp_name` beside the
+// executable, which captures the kernels only when they are linked into this
+// executable (the local make build).
 inline std::vector<std::string> captureLogLines(
-    const char* env_var, const std::string& tmp_path,
+    const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
-  const std::string path = redirect ? tmp_path : leaf_stderr;
+  const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
   std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
   if (redirect) {
     if (!std::freopen(path.c_str(), "w", stderr)) {
+      std::freopen("CON", "w", stderr);  // the failed freopen closed it
       fn();
       _putenv_s(env_var, "");
       return {};
@@ -626,7 +640,7 @@ static bool run_case(const Case& c, int iters) {
   int rc = 0;
   {
     const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
-        "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+        "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
           // First call self-tunes (or resolves from the LUT).
           rc = launch(dK, dV, max_seq);
           HIP_CHECK(hipDeviceSynchronize());
@@ -672,7 +686,7 @@ static bool run_case(const Case& c, int iters) {
       c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
   double ms = 0.0;
   hipdnn_ep_test::captureLogLines(
-      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+      "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
         ms = hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
