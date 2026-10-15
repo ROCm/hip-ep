@@ -3398,7 +3398,6 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 4.0f;  // 2^(bits-1)
 
         uint3 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3407,6 +3406,21 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
             b_pk[tn] = *reinterpret_cast<const uint3*>(
                             &b_base_arr[tn][idx * 12]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // The zero points load next to B and the scales, all under one
+        // uniform branch, so their latency hides behind the dot products.
+        // Tested per column after each dot product, every column got its own
+        // branch holding one load and a full wait, and ROCm 7.16 turns each
+        // of those branches into more scalar code than 7.14 did.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 4.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3427,13 +3441,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
                 }
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
@@ -3812,7 +3820,6 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 2.0f;  // 2^(bits-1)
 
         uint2 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3821,6 +3828,17 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
             b_pk[tn] = *reinterpret_cast<const uint2*>(
                             &b_base_arr[tn][idx * 8]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // See matmul_nbits_gemv_kernel_u3 for why the zero points load here.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 2.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3836,13 +3854,7 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
                 uint32_t qv = (lo >> bitOff) & 0x3u;
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
