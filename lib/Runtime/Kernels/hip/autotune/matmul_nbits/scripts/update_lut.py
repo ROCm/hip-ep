@@ -517,7 +517,166 @@ def choose_fallbacks(points):
     return out
 
 
+def _answer_of(cfg: dict):
+    """A table config entry -> answer_key, the inverse of config_entry()."""
+    if cfg["kind"] == "Wmma":
+        return ("Wmma", cfg["bm16"] * 16, cfg["bn16"] * 16, cfg["swizzle"],
+                cfg["wt_m"], cfg["wt_n"], cfg["bk"], cfg["fused"])
+    return ("Gemv", cfg["threads"], cfg["tile_n"])
+
+
+def _fmt_answer(ans) -> str:
+    if ans[0] == "Gemv":
+        return f"{ans[1]}x{ans[2]}"
+    return "wmma" + "/".join(str(v) for v in ans[1:])
+
+
+def _geomean_slowdown(ans, pts):
+    logs = [math.log(t[ans] / min(t.values())) for t in pts if ans in t]
+    return math.exp(sum(logs) / len(logs)) if logs else float("inf")
+
+
+def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
+    # One entry per line: compact enough to keep the file reviewable and to make
+    # a regeneration diff readable, without the 20x blowup of indent=1.
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("{\n")
+        for k in doc:
+            f.write(f' "{k}": {json.dumps(doc[k])},\n')
+        f.write(' "configs": [\n')
+        f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in configs))
+        f.write("\n ],\n \"fallbacks\": [\n")
+        f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
+                           for r in fallbacks))
+        f.write("\n ],\n \"points\": [\n")
+        f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
+                           for r in points))
+        f.write("\n ]\n}\n")
+
+
+def cmd_merge(args) -> int:
+    """Re-measure one phase and change only the rows a new sweep clearly beats.
+
+    Every other phase's rows, the header and the distance weights are kept as
+    they are. For each measured point of --phase, the existing row is replaced
+    only if the new winner is at least --min-gain faster than the row's current
+    config *in the same sweep*; a near-tie stays put, so a regeneration diff
+    shows real changes rather than timing noise. Points the table did not have
+    are added. The phase fallback follows the same rule on its geomean slowdown.
+    """
+    readings = load_readings(args)
+    if readings is None:
+        return 1
+    phase = args.phase
+    measured = {k: v for k, v in collate(readings).items() if k[0][0] == phase}
+    print(f"[merge] {len(measured)} measured {phase} points")
+    src = LUT_DIR / f"{args.arch}.json"
+    old = json.loads(src.read_text(encoding="utf-8"))
+    pool = old["configs"]
+    gain = 1.0 + args.min_gain
+
+    def row_key(r):
+        return ((r["phase"], r.get("group_size", "Any"),
+                 r.get("zero_point", "Symmetric"), r.get("row_stride", "Any")),
+                r["m"], r["n"], r["k"])
+
+    changes, kept_ties, seen = [], 0, set()
+    rows = []
+    for r in old["points"]:
+        key = row_key(r)
+        if key not in measured:
+            rows.append((r, None))
+            continue
+        seen.add(key)
+        winner, times = measured[key]
+        cur = _answer_of(pool[r["config"]])
+        if winner == cur or not times:
+            rows.append((r, None))
+        elif cur not in times or times[cur] >= gain * times[winner]:
+            rows.append((r, winner))
+            changes.append((key, cur, winner, times.get(cur), times[winner]))
+        else:
+            rows.append((r, None))
+            kept_ties += 1
+    for key in sorted(set(measured) - seen):
+        (ph, gs, zp, stride), m, n, k = key
+        r = {"phase": ph, "bits": "B4", "group_size": gs, "zero_point": zp,
+             "row_stride": stride, "m": m, "n": n, "k": k, "config": -1}
+        rows.append((r, measured[key][0]))
+        changes.append((key, None, measured[key][0], None,
+                        measured[key][1].get(measured[key][0])))
+
+    fb_rows = []
+    fb_change = None
+    new_fb = choose_fallbacks(measured).get(phase)
+    for r in old["fallbacks"]:
+        if r["phase"] == phase and new_fb is not None:
+            pts = [t for _w, t in measured.values() if t]
+            cur = _answer_of(pool[r["config"]])
+            g_cur, g_new = (_geomean_slowdown(cur, pts),
+                            _geomean_slowdown(new_fb, pts))
+            if new_fb != cur and g_cur >= gain * g_new:
+                fb_rows.append((r, new_fb))
+                fb_change = (cur, new_fb, g_cur, g_new)
+                continue
+        fb_rows.append((r, None))
+
+    # Existing pool indices and row order are kept and new configs appended, so
+    # the json diff is just the changed rows. A config no row uses any more
+    # stays in the pool; the next full build drops it.
+    new_pool = list(pool)
+    index = {json.dumps(c, sort_keys=True): i for i, c in enumerate(pool)}
+
+    def idx_of(entry: dict) -> int:
+        key = json.dumps(entry, sort_keys=True)
+        if key not in index:
+            index[key] = len(new_pool)
+            new_pool.append(entry)
+        return index[key]
+
+    def resolved(r, ans):
+        out = dict(r)
+        if ans is not None:
+            out["config"] = idx_of(config_entry(ans))
+        return out
+
+    fallback_rows = [resolved(r, a) for r, a in fb_rows]
+    point_rows = [resolved(r, a) for r, a in rows]
+    doc = {k: v for k, v in old.items()
+           if k not in ("configs", "fallbacks", "points")}
+    out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
+    write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
+    print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
+          f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
+
+    if args.report:
+        lines = [f"# {phase} LUT merge ({args.arch})", "",
+                 f"Rows change only when the new winner is at least "
+                 f"{args.min_gain:.0%} faster than the row's config in the same "
+                 f"sweep. {len(measured)} points measured, {len(changes)} "
+                 f"changed, {kept_ties} kept as near-ties.", ""]
+        if fb_change:
+            cur, new, g_cur, g_new = fb_change
+            lines += [f"Fallback: {_fmt_answer(cur)} -> {_fmt_answer(new)} "
+                      f"(geomean slowdown {g_cur:.3f}x -> {g_new:.3f}x)", ""]
+        lines += ["| group | M | N | K | old | new | old ms | new ms | gain |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for (grp, m, n, k), cur, new, t_cur, t_new in sorted(
+                changes, key=lambda c: -(c[3] or 0) / (c[4] or 1)):
+            g = f"{t_cur / t_new:.2f}x" if t_cur and t_new else "new row"
+            lines.append(
+                f"| {grp[1]} {grp[2]} | {m} | {n} | {k} | "
+                f"{_fmt_answer(cur) if cur else '-'} | {_fmt_answer(new)} | "
+                f"{t_cur if t_cur is None else f'{t_cur:.5f}'} | "
+                f"{t_new if t_new is None else f'{t_new:.5f}'} | {g} |")
+        Path(args.report).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[merge] report -> {args.report}")
+    return 0
+
+
 def cmd_build(args) -> int:
+    if args.merge_existing:
+        return cmd_merge(args)
     readings = load_readings(args)
     if readings is None:
         return 1
@@ -583,21 +742,7 @@ def cmd_build(args) -> int:
     }
     LUT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
-    # One entry per line: compact enough to keep the file reviewable and to make
-    # a regeneration diff readable, without the 20x blowup of indent=1.
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("{\n")
-        for k in doc:
-            f.write(f' "{k}": {json.dumps(doc[k])},\n')
-        f.write(' "configs": [\n')
-        f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in pool))
-        f.write("\n ],\n \"fallbacks\": [\n")
-        f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
-                           for r in fallback_rows))
-        f.write("\n ],\n \"points\": [\n")
-        f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
-                           for r in point_rows))
-        f.write("\n ]\n}\n")
+    write_lut_json(out, doc, pool, fallback_rows, point_rows)
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
                    r["row_stride"]) for r in point_rows})
@@ -670,6 +815,17 @@ def main() -> int:
     ap.add_argument("--weight-m", type=float, default=1.0)
     ap.add_argument("--weight-n", type=float, default=1.0)
     ap.add_argument("--weight-k", type=float, default=1.0)
+    ap.add_argument("--merge-existing", action="store_true",
+                    help="build: keep the current table and replace only the "
+                         "--phase rows the readings beat by --min-gain")
+    ap.add_argument("--phase", default="DecodeDp4a",
+                    choices=["Prefill", "Decode", "DecodeDp4a"],
+                    help="build --merge-existing: the phase to update")
+    ap.add_argument("--min-gain", type=float, default=0.03,
+                    help="build --merge-existing: required speedup of the new "
+                         "winner over the row's current config")
+    ap.add_argument("--report", default=None,
+                    help="build --merge-existing: write a markdown diff here")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 

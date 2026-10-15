@@ -2725,7 +2725,7 @@ static int tuneDp4aConfig(
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
-            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
+            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.5f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             cfg_best_ms);
 
@@ -2736,7 +2736,7 @@ static int tuneDp4aConfig(
 
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter; %d weight copies, "
+        "best config[%d] threads=%d tile_n=%d (%.5f ms/iter; %d weight copies, "
         "tuned in %.0f ms)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
