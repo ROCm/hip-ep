@@ -106,26 +106,40 @@ class CsvWriter {
   FILE* f_ = nullptr;
 };
 
+// `name` in this executable's directory. The capture file must not follow the
+// working directory: started anywhere but the leaf directory, a relative
+// "out/..." names a folder that is not there, freopen() fails and leaves
+// stderr closed, and the next diagnostic ends the process with 0xC0000409
+// before it prints anything.
+inline std::string besideExe(const std::string& name) {
+  char* exe = nullptr;
+  if (_get_pgmptr(&exe) != 0 || !exe) return name;
+  const std::string path(exe);
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? name : path.substr(0, slash + 1) + name;
+}
+
 // Runs `fn` with `env_var=1` and returns the stderr lines it produced: the op's
 // own diagnostics, which it prints while that variable is set. The kernels log
 // from custom_kernels_<arch>.dll, which links its own static CRT: its stderr is
 // the handle this process started with, so freopen() here would not move it.
 // hipdnn-kernel-ut.exe starts each leaf with stderr on the file named in
 // HIPDNN_KERNEL_UT_STDERR, and this reads back what `fn` appended. Started any
-// other way, the leaf falls back to freopen() on `tmp_path`, which captures the
-// kernels only when they are linked into this executable (the local make
-// build).
+// other way, the leaf falls back to freopen() on `tmp_name` beside the
+// executable, which captures the kernels only when they are linked into this
+// executable (the local make build).
 inline std::vector<std::string> captureLogLines(
-    const char* env_var, const std::string& tmp_path,
+    const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
-  const std::string path = redirect ? tmp_path : leaf_stderr;
+  const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
   std::streamoff start = 0;
   _putenv_s(env_var, "1");
   std::fflush(stderr);
   if (redirect) {
     if (!std::freopen(path.c_str(), "w", stderr)) {
+      std::freopen("CON", "w", stderr);  // the failed freopen closed it
       fn();
       _putenv_s(env_var, "");
       return {};
@@ -478,7 +492,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   // process -- and once on it prints per dispatch, which would otherwise reach
   // the console.
   hipdnn_ep_test::captureLogLines(
-      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+      "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         run_int8_path();
         HIP_CHECK(hipDeviceSynchronize());
       });
@@ -491,7 +505,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     hip_gqa_flash_prefill_v2(nullptr, dQ, dKbnsd, dVbnsd, dO16, B, H, G, sq, skv, D, max_seq, past_len, scale);
   };
   hipdnn_ep_test::captureLogLines(
-      "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp", [&]() {
+      "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         run_fp16();
         HIP_CHECK(hipDeviceSynchronize());
       });
@@ -515,7 +529,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   double ms_int8 = 0.0;
   {
     const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
-        "HIPDNN_GQA_AUTOTUNE_LOG", "out/_cfg_capture.tmp",
+        "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp",
         [&]() { ms_int8 = bench(run_int8_path); });
     for (const std::string& line : lines) {
       const size_t knobs = line.find("-> ");
@@ -526,7 +540,7 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   }
   double ms_fp16 = 0.0;
   hipdnn_ep_test::captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG",
-                                  "out/_cfg_capture.tmp",
+                                  "_cfg_capture.tmp",
                                   [&]() { ms_fp16 = bench(run_fp16); });
   double ms_deq = bench([&]() {
     hip_gqa_dequant_kv_i8_to_fp16(nullptr, dK8, dKf16, dKsc, B, sq, G, D, max_seq, max_seq);
