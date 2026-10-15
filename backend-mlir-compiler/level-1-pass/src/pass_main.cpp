@@ -4,6 +4,7 @@
  */
 
 #include "MlirCompiler.h"
+#include "hip/Compiler/RocMlirArtifactTarget.h"
 
 // Morphizen headers
 #include "hip/timing.h"
@@ -162,6 +163,9 @@ static std::string build_metadata_json(const CompilationArtifact &artifact,
   // artifact and cannot drive the load decision).
   metadata.set_artifact_format(
       artifact.format == ArtifactFormat::NATIVE ? "NATIVE" : "LLVM_IR");
+  // Same process and env as the compile that just ran, so this is the arch
+  // CompilerDriver embedded rocMLIR kernels for (empty if it did not).
+  metadata.set_rocmlir_arch(hip::compiler::rocMlirArtifactTarget());
 
   GraphRef graphRef(graph);
 
