@@ -308,6 +308,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/rocmlir.cpp runtime_rocmlir.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
+    compile_to_bitcode(real/trilu.cpp runtime_trilu.bc)
     compile_to_bitcode(real/bias_gelu.cpp runtime_bias_gelu.bc)
     compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
@@ -323,6 +324,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
     compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
+    compile_to_bitcode(real/random_normal_like.cpp runtime_random_normal_like.bc)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
@@ -385,6 +387,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qmatmul.cpp runtime_qmatmul.bc)
     compile_to_bitcode(real/qgemm.cpp runtime_qgemm.bc)
     compile_to_bitcode(real/qconv.cpp runtime_qconv.bc)
+    compile_to_bitcode(real/qlinear_conv.cpp runtime_qlinear_conv.bc)
+    compile_to_bitcode(real/qlinear_matmul.cpp runtime_qlinear_matmul.bc)
     compile_to_bitcode(real/qlpnormalization.cpp runtime_qlpnormalization.bc)
     compile_to_bitcode(real/qsigmoid.cpp runtime_qsigmoid.bc)
 
@@ -405,6 +409,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_rocmlir.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_trilu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_bias_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
@@ -420,6 +425,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_random_normal_like.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
@@ -482,6 +488,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmatmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qgemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qconv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlinear_conv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlinear_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qsigmoid.bc
     )

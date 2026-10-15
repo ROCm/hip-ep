@@ -113,3 +113,55 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   std::abort();
   return -1;
 }
+
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent) {
+  OP_PROFILE(
+      "pow",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !output) {
+    fprintf(stderr, "[REAL] wrap_pow: null argument\n");
+    return -1;
+  }
+
+  int hip_dtype = -1;
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    hip_dtype = HIP_DTYPE_FLOAT32;
+    break;
+  case HIPDNN_EP_DATATYPE_HALF:
+    hip_dtype = HIP_DTYPE_FLOAT16;
+    break;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    hip_dtype = HIP_DTYPE_BFLOAT16;
+    break;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    hip_dtype = HIP_DTYPE_FLOAT64;
+    break;
+  default:
+    fprintf(stderr, "[REAL] wrap_pow: unsupported data_type %lld (%s)\n",
+            (long long)data_type, hipdnn_ep_datatype_name(data_type));
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_pow: num_elements=%lld, data_type=%s(%lld), "
+                    "exponent=%f\n",
+                    (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+                    (long long)data_type, exponent);
+
+  int result =
+      hip_pow(stream, input, output, num_elements, hip_dtype, exponent);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_pow: kernel launch failed (%d)\n", result);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_pow: completed successfully\n");
+  return 0;
+}

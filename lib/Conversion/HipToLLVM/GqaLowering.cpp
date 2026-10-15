@@ -191,9 +191,16 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     // coincide only at G == 1, so the shapes alone cannot distinguish them.
     // Absent key means packed QKV, which is always BSHD.
     Value kvBnsdVal = createI64Const(0);
+    // seq_len_new_kv: tokens carried by key/value. A KV-sharing layer passes a
+    // zero-length key/value next to a past cache produced by another layer,
+    // and the runtime must then attend over the past without appending.
+    Value seqLenNewKVVal = seqLenQVal;
     if (op.getKey()) {
       auto keyMemRefType = cast<MemRefType>(op.getKey().getType());
       kvBnsdVal = createI64Const(keyMemRefType.getRank() == 4 ? 1 : 0);
+      unsigned keySeqDim = (keyMemRefType.getRank() == 4) ? 2 : 1;
+      seqLenNewKVVal = getMemRefDimSize(keyMemRefType, keySeqDim,
+                                        adaptor.getKey(), rewriter, loc);
     }
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
@@ -249,7 +256,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
         i32Type, // no_causal
-        // Shape info (6 values)
+        // Shape info (10 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
@@ -258,7 +265,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // element_size_bytes
         i64Type, // attn_bias_batch
         i64Type, // attn_bias_num_heads
-        i64Type  // kv_bnsd
+        i64Type, // kv_bnsd
+        i64Type  // seq_len_new_kv
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -280,9 +288,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (9 values)
+        // Shape info (10 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
+        seqLenNewKVVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

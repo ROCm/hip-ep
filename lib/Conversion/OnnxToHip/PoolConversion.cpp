@@ -106,10 +106,14 @@ struct PoolToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "only 1D / 2D / 3D pool supported (spatial_rank in {1,2,3})");
 
-    if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
-        inputType.getElementType() != outputType.getElementType())
+    // Average and LP accumulate in float. Max compares elements directly, so
+    // the 8-bit integers used by quantized graphs (ui8 / i8) are legal too.
+    mlir::Type elemType = inputType.getElementType();
+    bool floatElem = mlir::isa<mlir::FloatType>(elemType);
+    bool int8Max = poolMode == kPoolMax && elemType.isInteger(8);
+    if (elemType != outputType.getElementType() || !(floatElem || int8Max))
       return rewriter.notifyMatchFailure(
-          op, "pool runtime supports only float types and matching in/out");
+          op, "pool runtime supports float types, plus i8/ui8 for MaxPool");
 
     // Optional Indices output (MAX only) must be i64.
     if (numResults == 2) {
