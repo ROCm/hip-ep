@@ -86,6 +86,8 @@ inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
+inline constexpr const char *kWrapSigmoidMul =
+    "wrap_sigmoid_mul"; // hip.sigmoid_mul
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";

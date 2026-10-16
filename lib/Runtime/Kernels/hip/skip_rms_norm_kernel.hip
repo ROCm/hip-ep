@@ -33,6 +33,7 @@
  * than in rms_norm_kernel.hip.
  */
 
+#include "activation_quant_i8.h"
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
@@ -166,21 +167,8 @@ hip_skip_rms_norm_kernel(const T *__restrict__ input,
       r.y = t.y * inv_rms * g.y;
       const __half2 yh = __float22half2_rn(r);
       y2[i] = yh;
-      if constexpr (QUANT) {
-        const float2 y = __half22float2(yh);
-        float m = fmaxf(fabsf(y.x), fabsf(y.y));
-        for (int off = 8; off > 0; off >>= 1)
-          m = fmaxf(m, __shfl_xor(m, off, 16));
-        const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
-        const int q0 = max(-127, min(127, __float2int_rn(y.x * inv_scale)));
-        const int q1 = max(-127, min(127, __float2int_rn(y.y * inv_scale)));
-        // Elements 2i (even) and 2i+1 (odd) of chunk i/4.
-        const int64_t base = (i >> 2) * 8 + (i & 3);
-        q_row[base] = static_cast<int8_t>(q0);
-        q_row[base + 4] = static_cast<int8_t>(q1);
-        if ((i & 15) == 0)
-          qs_row[i >> 4] = (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
-      }
+      if constexpr (QUANT)
+        quant_act_i8_pair(__half22float2(yh), i, q_row, qs_row);
     }
   } else {
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {

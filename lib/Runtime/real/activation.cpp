@@ -399,3 +399,40 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   RUNTIME_DEBUG_LOG("[REAL] wrap_swiglu: completed successfully\n");
   return 0;
 }
+
+int wrap_sigmoid_mul(RuntimeState *state, void *x, void *gate, void *output,
+                     void *q_out, void *q_scale_out, int64_t num_elements,
+                     int64_t row_size, int64_t quant_block_size) {
+  OP_PROFILE(
+      "sigmoid_mul",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
+        return std::string(b);
+      },
+      state);
+  if (!state || !x || !gate || !output || row_size <= 0 ||
+      num_elements % row_size != 0) {
+    fprintf(stderr, "[REAL] wrap_sigmoid_mul: invalid arguments (num=%lld, "
+                    "row=%lld)\n",
+            (long long)num_elements, (long long)row_size);
+    return -1;
+  }
+
+  const int64_t rows = num_elements / row_size;
+  const bool quant = q_out && q_scale_out && quant_block_size > 0 &&
+                     hipdnn_ep_matmul_prequant_active(rows);
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int rc = hip_sigmoid_mul(stream, x, gate, output, quant ? q_out : nullptr,
+                           quant ? q_scale_out : nullptr, num_elements,
+                           row_size, quant_block_size);
+  if (rc != hipErrorNotSupported || !quant)
+    return rc;
+  // The kernel cannot quantize this layout; quantize its output separately.
+  rc = hip_sigmoid_mul(stream, x, gate, output, nullptr, nullptr, num_elements,
+                       row_size, 0);
+  if (rc != 0)
+    return rc;
+  return hip_matmul_nbits_quant_act_i8(stream, output, q_out, q_scale_out,
+                                       rows, row_size, quant_block_size);
+}

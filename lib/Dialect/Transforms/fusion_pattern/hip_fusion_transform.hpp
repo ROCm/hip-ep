@@ -35,6 +35,7 @@
 #include "patch_embed_conv_to_gemm.hpp"
 #include "qmoe_shared_expert_fusion.hpp"
 #include "rope_layout_fusion.hpp"
+#include "sigmoid_mul_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -836,11 +837,12 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 
-/// The SwiGLU fusion is the only pattern in this set rooted at `hip.mul`, so
-/// this benefit is never ranked against another pattern. `HipQMul` also
-/// matches a `hip.mul`, but it roots at the `hip.quantize_linear` that
-/// consumes it.
+/// The SwiGLU and sigmoid-mul fusions both root at `hip.mul` but match
+/// disjoint products: SwiGLU's outer mul has no sigmoid operand, and the
+/// sigmoid-mul fusion declines SiLU (x * sigmoid(x)). `HipQMul` also matches
+/// a `hip.mul`, but it roots at the `hip.quantize_linear` that consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
+constexpr unsigned kSigmoidMulFusionBenefit = 2;
 
 /// Rooted at `hip.add`, which no other pattern here roots at (`HipQAdd` roots
 /// at the `hip.quantize_linear` that consumes its add). It needs the
@@ -880,6 +882,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kGatedRmsNormFusionBenefit));
   populateRopeLayoutFusionPattern(
       patterns, mlir::PatternBenefit(kRopeLayoutFusionBenefit));
+  populateSigmoidMulFusionPattern(
+      patterns, mlir::PatternBenefit(kSigmoidMulFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

@@ -30,6 +30,7 @@
  * shape) minus the mean subtraction and the bias term.
  */
 
+#include "activation_quant_i8.h"
 #include "hip_custom_kernels.h"
 #include "debug_log.h"
 
@@ -197,24 +198,10 @@ __global__ void __launch_bounds__(kRmsNormBlockSize)
     o.y = n.y * (z.y * sy);
     const __half2 yh = __float22half2_rn(o);
     y2[i] = yh;
-    if constexpr (QUANT) {
-      const float2 y = __half22float2(yh);
-      float m = fmaxf(fabsf(y.x), fabsf(y.y));
-      for (int off = 8; off > 0; off >>= 1)
-        m = fmaxf(m, __shfl_xor(m, off, 16));
-      const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
-      const int q0 = max(-127, min(127, __float2int_rn(y.x * inv_scale)));
-      const int q1 = max(-127, min(127, __float2int_rn(y.y * inv_scale)));
-      // Elements 2p (even) and 2p+1 (odd) of chunk p/4 of the row.
-      const int64_t p = row_pair + i;
-      int8_t *q_row = q_out + row * row_size;
-      const int64_t base = (p >> 2) * 8 + (p & 3);
-      q_row[base] = static_cast<int8_t>(q0);
-      q_row[base + 4] = static_cast<int8_t>(q1);
-      if ((p & 15) == 0)
-        q_scale[row * (row_size / 32) + (p >> 4)] =
-            (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
-    }
+    if constexpr (QUANT)
+      quant_act_i8_pair(__half22float2(yh), row_pair + i,
+                        q_out + row * row_size,
+                        q_scale + row * (row_size / 32));
   }
 }
 

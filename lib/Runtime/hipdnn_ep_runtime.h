@@ -1359,6 +1359,13 @@ int wrap_pow(RuntimeState *state, void *input, void *output,
 int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
                 int64_t num_elements, int64_t data_type);
 
+// hip.sigmoid_mul (fp16): output = x * sigmoid(gate), x / gate / output of
+// num_elements in rows of row_size. q_out / q_scale_out (may be nullptr) as
+// for wrap_skip_simplified_layer_norm.
+int wrap_sigmoid_mul(RuntimeState *state, void *x, void *gate, void *output,
+                     void *q_out, void *q_scale_out, int64_t num_elements,
+                     int64_t row_size, int64_t quant_block_size);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
