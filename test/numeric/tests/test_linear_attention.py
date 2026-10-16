@@ -47,7 +47,7 @@ exactly rather than forcing a strictly self-consistent breakdown.
 
 import numpy as np
 import pytest
-from onnx import TensorProto, helper
+from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
@@ -149,6 +149,102 @@ def _make_linear_attention_model(
         [Y, Present],
         opset=17,
         extra_opsets=[ms_opset],
+    )
+
+
+def _make_prepared_inputs_model(
+    seq_len: int,
+    q_heads: int,
+    k_heads: int,
+    kv_heads: int,
+    d_k: int,
+    d_v: int,
+    q_scale: float,
+    rng: np.random.Generator,
+):
+    """LinearAttention fed the way a Qwen3.5 gated-delta-net layer feeds it.
+
+    q/k/v are Split off one packed tensor, q and k get a per-head
+    SimplifiedLayerNormalization with a splat gamma (the L2 norm), q a
+    scalar scale, beta is Sigmoid(b) and decay is
+    Cast(neg_exp_a * Softplus(Cast(a) + dt_bias)). hip-fusion-transform folds
+    all of it into hip.linear_attention.
+    """
+    tp = TensorProto.FLOAT16
+    q_dim, k_dim, v_dim = q_heads * d_k, k_heads * d_k, kv_heads * d_v
+    width = q_dim + k_dim + v_dim
+
+    inits = [
+        helper.make_tensor("split", TensorProto.INT64, [3], [q_dim, k_dim, v_dim]),
+        helper.make_tensor("q_heads_shape", TensorProto.INT64, [4], [0, 0, q_heads, d_k]),
+        helper.make_tensor("k_heads_shape", TensorProto.INT64, [4], [0, 0, k_heads, d_k]),
+        helper.make_tensor("flat_shape", TensorProto.INT64, [3], [0, 0, -1]),
+        numpy_helper.from_array(np.full(d_k, d_k**-0.5, np.float16), "gamma"),
+        numpy_helper.from_array(np.array([q_scale], np.float16), "q_scale"),
+        numpy_helper.from_array(
+            (rng.standard_normal(kv_heads) * 0.5).astype(np.float32), "dt_bias"
+        ),
+        numpy_helper.from_array(
+            (-np.exp(rng.uniform(-1.0, 0.5, kv_heads))).astype(np.float32),
+            "neg_exp_a",
+        ),
+    ]
+
+    def norm(name, heads_shape):
+        return [
+            helper.make_node("Reshape", [name, heads_shape], [f"{name}_h"]),
+            helper.make_node(
+                "SimplifiedLayerNormalization",
+                [f"{name}_h", "gamma"],
+                [f"{name}_hn"],
+                axis=-1,
+                epsilon=1e-6,
+                stash_type=1,
+            ),
+            helper.make_node("Reshape", [f"{name}_hn", "flat_shape"], [f"{name}_n"]),
+        ]
+
+    nodes = [
+        helper.make_node("Split", ["qkv", "split"], ["q", "k", "v"], axis=-1),
+        *norm("q", "q_heads_shape"),
+        *norm("k", "k_heads_shape"),
+        helper.make_node("Mul", ["q_n", "q_scale"], ["q_s"]),
+        helper.make_node("Sigmoid", ["b"], ["beta"]),
+        helper.make_node("Cast", ["a"], ["a32"], to=TensorProto.FLOAT),
+        helper.make_node("Add", ["a32", "dt_bias"], ["a_b"]),
+        helper.make_node("Softplus", ["a_b"], ["a_sp"]),
+        helper.make_node("Mul", ["neg_exp_a", "a_sp"], ["g32"]),
+        helper.make_node("Cast", ["g32"], ["decay"], to=TensorProto.FLOAT16),
+        helper.make_node(
+            "LinearAttention",
+            ["q_s", "k_n", "v", "past_state", "decay", "beta"],
+            ["output", "present_state"],
+            domain="com.microsoft",
+            kv_num_heads=kv_heads,
+            q_num_heads=q_heads,
+            scale=1.0,
+            update_rule="gated_delta",
+        ),
+    ]
+    inputs = [
+        helper.make_tensor_value_info("qkv", tp, [1, seq_len, width]),
+        helper.make_tensor_value_info("past_state", tp, [1, kv_heads, d_k, d_v]),
+        helper.make_tensor_value_info("a", tp, [1, seq_len, kv_heads]),
+        helper.make_tensor_value_info("b", tp, [1, seq_len, kv_heads]),
+    ]
+    outputs = [
+        helper.make_tensor_value_info(
+            "output", tp, [1, seq_len, max(q_heads, kv_heads) * d_v]
+        ),
+        helper.make_tensor_value_info("present_state", tp, [1, kv_heads, d_k, d_v]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        inputs,
+        outputs,
+        initializers=inits,
+        opset=17,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
     )
 
 
@@ -396,4 +492,33 @@ class TestLinearAttention:
             atol=2e-1,
             rtol=1e-2,
             cos_threshold=0.999,
+        )
+
+    @pytest.mark.parametrize(
+        "seq_len,q_heads,k_heads,kv_heads,d_k,d_v",
+        [
+            (1, 16, 16, 32, 128, 128),  # Qwen3.5 decode
+            (128, 16, 16, 32, 128, 128),  # Qwen3.5 prefill (chunked path)
+            (3, 2, 2, 2, 8, 8),  # tiny: per-token prefill loop
+        ],
+    )
+    def test_la_prepared_inputs(
+        self, model_runner, seq_len, q_heads, k_heads, kv_heads, d_k, d_v
+    ):
+        """Packed QKV, q/k head norms, q scale, softplus decay and sigmoid
+        beta, all folded into the op and prepared by the runtime."""
+        rng = np.random.default_rng(41)
+        model = _make_prepared_inputs_model(
+            seq_len, q_heads, k_heads, kv_heads, d_k, d_v, d_k**-0.5, rng
+        )
+        width = (q_heads + k_heads) * d_k + kv_heads * d_v
+        inputs = [
+            rng.standard_normal((1, seq_len, width)).astype(np.float16),
+            (rng.standard_normal((1, kv_heads, d_k, d_v)) * 0.05).astype(np.float16),
+            rng.standard_normal((1, seq_len, kv_heads)).astype(np.float16),
+            rng.standard_normal((1, seq_len, kv_heads)).astype(np.float16),
+        ]
+        actual, expected = model_runner.run_sample(model, inputs)
+        compare_outputs(
+            actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.9995
         )

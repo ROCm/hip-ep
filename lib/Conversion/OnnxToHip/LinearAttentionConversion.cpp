@@ -158,7 +158,8 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   state.addTypes(resultTypes);
 
   // Segments: [ctx(1), query(1), key(1), value(1), past_state(0|1),
-  //            decay(0|1), beta(0|1), output(1), present_state(1)]
+  //            decay(0|1), beta(0|1), decay_bias(0), decay_scale(0),
+  //            qk_norm_weight(0), output(1), present_state(1)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(1); // ctx
   segmentSizes.push_back(1); // query
@@ -167,6 +168,9 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
   segmentSizes.push_back(pastState ? 1 : 0);
   segmentSizes.push_back(decay ? 1 : 0);
   segmentSizes.push_back(beta ? 1 : 0);
+  segmentSizes.push_back(0); // decay_bias
+  segmentSizes.push_back(0); // decay_scale
+  segmentSizes.push_back(0); // qk_norm_weight
   segmentSizes.push_back(1); // output
   segmentSizes.push_back(1); // present_state
 

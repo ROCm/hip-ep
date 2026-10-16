@@ -4374,6 +4374,23 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
       output        (required, T) - [B, T, max(H_q, H_kv) * d_v]
       present_state (required, S) - [B, H_kv, d_k, d_v]
 
+    Input preparation the op can do itself (all optional), so a model's
+    projection outputs feed it directly:
+      - Packed QKV: with key and value absent, `query` is
+        [B, T, H_q * d_k + n_k * d_k + H_kv * d_v] holding q, k and v side
+        by side (d_k and d_v from present_state, n_k from the remainder).
+      - `qk_norm(weight)` ([d_k], element type): q and k are RMS-normalized
+        per head before use, x * rsqrt(mean(x^2) + qk_norm_epsilon) * weight,
+        rounded to the element type (a splat 1/sqrt(d_k) weight is the L2
+        norm). `q_scale` then multiplies q, rounded again.
+      - `decay_softplus(decay_bias, decay_scale)` (f32 [H_kv] each, per-head
+        decay only): `decay` holds raw gate logits a and the op uses
+        g = decay_scale * softplus(a + decay_bias), rounded to the element
+        type.
+      - `beta_sigmoid`: `beta` holds logits and the op uses sigmoid(beta),
+        rounded to the element type.
+    The roundings reproduce the unfused fp16 graph.
+
     Example:
     ```mlir
     hip.linear_attention(%ctx)
@@ -4393,15 +4410,22 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   let arguments = (ins
     Hip_ContextType:$ctx,
 
-    // Required inputs (spec order 1-3)
+    // Spec inputs 1-3 (key/value absent: packed QKV in query)
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
 
     // Optional inputs (spec order 4-6)
     Optional<Hip_TensorOrMemRef>:$past_state,
     Optional<Hip_TensorOrMemRef>:$decay,
     Optional<Hip_TensorOrMemRef>:$beta,
+
+    // decay_softplus: f32 [H_kv] each, both or neither
+    Optional<Hip_TensorOrMemRef>:$decay_bias,
+    Optional<Hip_TensorOrMemRef>:$decay_scale,
+
+    // qk_norm: [d_k] weight of the q/k head RMS norms
+    Optional<Hip_TensorOrMemRef>:$qk_norm_weight,
 
     // DPS output buffers
     Hip_TensorOrMemRef:$output,
@@ -4414,21 +4438,35 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
     // Optional attributes (with defaults)
     DefaultValuedAttr<F32Attr, "0.0">:$scale,
     DefaultValuedAttr<I64Attr, "0">:$chunk_size,
-    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule
+    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule,
+
+    // Input preparation (see description)
+    DefaultValuedAttr<F32Attr, "0.0">:$qk_norm_epsilon,
+    DefaultValuedAttr<F32Attr, "1.0">:$q_scale,
+    UnitAttr:$beta_sigmoid
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `:`
-        type($query) `,` type($key) `,` type($value)
+        $query ( `,` $key^ )? ( `,` $value^ )? `:`
+        type($query) ( `,` type($key)^ )? ( `,` type($value)^ )?
     `)`
     (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     (`decay` `(` $decay^ `:` type($decay) `)`)?
     (`beta` `(` $beta^ `:` type($beta) `)`)?
+    (`decay_softplus` `(` $decay_bias^ `,` $decay_scale `:`
+        type($decay_bias) `,` type($decay_scale) `)`)?
+    (`qk_norm` `(` $qk_norm_weight^ `:` type($qk_norm_weight) `)`)?
     `outs` `(` $output `,` $present_state `:`
               type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let extraClassDeclaration = [{
+    bool isPackedQKV() { return !getKey() && !getValue(); }
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],

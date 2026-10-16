@@ -3346,6 +3346,27 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// fp16 input preparation for linear attention, one launch for `tokens`
+// (= B * T) tokens. Reads q/k/v at per-token element strides (packed QKV or
+// separate tensors) and writes contiguous [tokens, H * d] tensors:
+//   q_out/k_out: per-head RMS norm when qk_norm_weight ([dk]) is given,
+//                x * rsqrt(mean(x^2) + eps) * w rounded, then q *= q_scale
+//                (rounded);
+//   v_out:       plain copy;
+//   decay_out:   half(decay_scale[h] * softplus(decay + decay_bias[h])),
+//                per-head [tokens, Hkv] decay;
+//   beta_out:    half(sigmoid(beta)), beta_width = Hkv or 1.
+// Null outputs are skipped (the caller keeps using its input). Each step
+// matches the standalone kernel it replaces bit for bit.
+HIP_KERNEL_API int hip_linear_attention_prepare(
+    void* stream, const void* q_src, const void* k_src, const void* v_src,
+    int64_t q_stride, int64_t k_stride, int64_t v_stride, const void* decay,
+    const void* beta, const void* decay_bias, const void* decay_scale,
+    void* q_out, void* k_out, void* v_out, void* decay_out, void* beta_out,
+    int64_t tokens, int64_t Hq, int64_t Nk, int64_t Hkv, int64_t dk,
+    int64_t dv, const void* qk_norm_weight, float qk_norm_epsilon,
+    float q_scale, int64_t beta_width);
+
 // Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
 // processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.

@@ -1797,20 +1797,33 @@ int wrap_causal_conv_with_state(
 //   beta_per_head     = 1  -> beta  is [B, T, H_kv]
 //                     = 0  -> beta  is [B, T, 1]          (broadcast over
 //                     heads)
+//
+// Input preparation (fp16 only), applied before the recurrence:
+//   key == value == nullptr -> query is packed [B, T, (Hq + Nk) * dk + Hkv*dv]
+//   qk_norm_weight          -> q, k = half(x * rsqrt(mean(x^2) + eps) * w)
+//                              per head ([dk] fp16 w)
+//   q_scale != 1            -> q = half(q * q_scale)
+//   decay_bias/decay_scale  -> decay = half(scale[h] * softplus(a + bias[h]))
+//                              (per-head decay only)
+//   beta_sigmoid            -> beta = half(sigmoid(beta))
 int wrap_linear_attention(
     RuntimeState *state,
-    const void *query,      // [B, T, Hq * dk]
-    const void *key,        // [B, T, Nk * dk]
-    const void *value,      // [B, T, H_kv * d_v]
-    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
-    const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
-    const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
-    void *output,           // [B, T, max(H_q, H_kv) * d_v]
-    void *present_state,    // [B, H_kv, d_k, d_v]
+    const void *query,       // [B, T, Hq * dk], or packed QKV
+    const void *key,         // [B, T, Nk * dk] (nullable: packed QKV)
+    const void *value,       // [B, T, H_kv * d_v] (nullable: packed QKV)
+    const void *past_state,  // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,       // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,        // [B, T, H_kv] or [B, T, 1] (nullable)
+    const void *decay_bias,  // f32 [H_kv] (nullable)
+    const void *decay_scale, // f32 [H_kv] (nullable)
+    const void *qk_norm_weight, // [d_k] (nullable)
+    void *output,            // [B, T, max(H_q, H_kv) * d_v]
+    void *present_state,     // [B, H_kv, d_k, d_v]
     int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
-    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type,
+    float qk_norm_epsilon, float q_scale, int64_t beta_sigmoid);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

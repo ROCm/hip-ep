@@ -30,6 +30,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "linear_attention_input_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "qmoe_shared_expert_fusion.hpp"
 #include "swiglu_fusion.hpp"
@@ -844,6 +845,10 @@ constexpr unsigned kSwigluFusionBenefit = 2;
 /// `hip.swiglu` above; the greedy driver revisits the add once that exists.
 constexpr unsigned kQMoESharedExpertFusionBenefit = 2;
 
+/// Rooted at `hip.linear_attention`, which only these (mutually independent)
+/// patterns root at.
+constexpr unsigned kLinearAttentionInputFusionBenefit = 2;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -861,6 +866,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateQMoESharedExpertFusionPattern(
       patterns, mlir::PatternBenefit(kQMoESharedExpertFusionBenefit));
+  populateLinearAttentionInputFusionPatterns(
+      patterns, mlir::PatternBenefit(kLinearAttentionInputFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
