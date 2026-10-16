@@ -1871,6 +1871,10 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
       per-token cos/sin via a Gather, leaving the RotaryEmbedding node with
       no position_ids operand.)
 
+    The rotation runs in the element type of the caches. An f16 input and
+    output with f32 caches are rotated in f32 and rounded once to f16, the
+    exact equivalent of casting to f32, rotating and casting back.
+
     Attributes:
     - interleaved: Rotary embedding interleaved format (0 or 1)
     - num_heads: Number of attention heads

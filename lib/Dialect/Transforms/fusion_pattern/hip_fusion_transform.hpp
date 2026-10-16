@@ -34,6 +34,7 @@
 #include "linear_attention_input_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "qmoe_shared_expert_fusion.hpp"
+#include "rope_layout_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -853,6 +854,9 @@ constexpr unsigned kLinearAttentionInputFusionBenefit = 2;
 /// Rooted at `hip.cast`, which no other pattern here roots at.
 constexpr unsigned kGatedRmsNormFusionBenefit = 2;
 
+/// Rooted at `hip.rope`, which no other pattern here roots at.
+constexpr unsigned kRopeLayoutFusionBenefit = 2;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -874,6 +878,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kLinearAttentionInputFusionBenefit));
   populateGatedRmsNormFusionPattern(
       patterns, mlir::PatternBenefit(kGatedRmsNormFusionBenefit));
+  populateRopeLayoutFusionPattern(
+      patterns, mlir::PatternBenefit(kRopeLayoutFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

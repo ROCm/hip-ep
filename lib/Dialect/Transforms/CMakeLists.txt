@@ -29,6 +29,7 @@ add_library(HipDialectTransforms STATIC
   fusion_pattern/linear_attention_input_fusion.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
   fusion_pattern/qmoe_shared_expert_fusion.cpp
+  fusion_pattern/rope_layout_fusion.cpp
   fusion_pattern/swiglu_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
