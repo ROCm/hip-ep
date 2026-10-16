@@ -714,3 +714,80 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=3e-1, rtol=1e-2, cos_threshold=0.9995)
+
+
+def _make_shared_input_matmul_nbits_model(
+    seq_len: int, K: int, Ns: list[int], scale_range=(-0.02, 0.02), seed: int = 7
+):
+    """Several bits=4 MatMulNBits nodes reading the same activation X.
+
+    The compiler folds these into hip.matmul_nbits_group (at most 4 members
+    per group); output i is X @ dequant(W_i)^T.
+    """
+    n_blocks = K // BLOCK_SIZE
+    rng = np.random.default_rng(seed)
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+    outputs, nodes, initializers = [], [], []
+    for i, N in enumerate(Ns):
+        w = rng.integers(0, 256, [N, n_blocks, BLOCK_SIZE // 2], dtype=np.uint8)
+        s = rng.uniform(scale_range[0], scale_range[1], [N, n_blocks]).astype(
+            np.float16
+        )
+        initializers += [
+            numpy_helper.from_array(w, name=f"W{i}"),
+            numpy_helper.from_array(s, name=f"S{i}"),
+        ]
+        nodes.append(
+            helper.make_node(
+                "MatMulNBits",
+                ["X", f"W{i}", f"S{i}"],
+                [f"Y{i}"],
+                domain="com.microsoft",
+                K=K,
+                N=N,
+                bits=BITS,
+                block_size=BLOCK_SIZE,
+                accuracy_level=4,
+            )
+        )
+        outputs.append(
+            helper.make_tensor_value_info(f"Y{i}", TensorProto.FLOAT16, [1, seq_len, N])
+        )
+    return make_model_from_nodes(
+        nodes,
+        [x],
+        outputs,
+        initializers=initializers,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestMatMulNBitsGroup:
+    """Projections sharing one input (hip.matmul_nbits_group).
+
+    S=1 runs the grouped dp4a GEMV, S=128 the per-member fallback. The member
+    sets are Qwen3.5-35B-A3B's: linear-attention in_proj_{qkv,z,b,a}, GQA
+    q/k/v, and the MoE router next to the shared expert's gate/up/gate-logit.
+    Five members exercise a full group plus a leftover plain op.
+    """
+
+    @pytest.mark.parametrize("seq_len", [1, 128])
+    @pytest.mark.parametrize(
+        "Ns",
+        [
+            [8192, 4096, 32, 32],
+            [8192, 512, 512],
+            [256, 512, 512, 1],
+            [64, 96, 32, 160, 128],
+        ],
+        ids=["linear_attn", "gqa_qkv", "moe_router_shared", "five"],
+    )
+    def test_shared_input(self, model_runner, seq_len, Ns):
+        K = 2048
+        model = _make_shared_input_matmul_nbits_model(seq_len, K, Ns)
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
