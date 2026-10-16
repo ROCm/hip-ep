@@ -1490,6 +1490,18 @@ int wrap_skip_simplified_layer_norm(
     int64_t input_num_elements, int64_t gamma_num_elements,
     int64_t element_size_bytes, float epsilon, int64_t quant_block_size);
 
+// hip.gated_rms_norm (fp16): RMS-normalizes every group_size slice of each
+// row_size row of `input`, scales it by `weight`, and multiplies it by the
+// SiLU of `gate` in fp32. `gate` must have as many elements as `input`.
+// q_out / q_scale_out (may be nullptr) as for
+// wrap_skip_simplified_layer_norm.
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *gate,
+                        void *weight, void *output, void *q_out,
+                        void *q_scale_out, int64_t input_num_elements,
+                        int64_t gate_num_elements, int64_t row_size,
+                        int64_t group_size, float epsilon,
+                        int64_t quant_block_size);
+
 // DynamicQuantI8 wrapper: quantizes the fp16 activation A [rows x K] to int8
 // for the integer dot-product GEMV (q [rows x K], scale [rows x K/block_size],
 // f32), when that path runs for `rows`; otherwise q and scale are left

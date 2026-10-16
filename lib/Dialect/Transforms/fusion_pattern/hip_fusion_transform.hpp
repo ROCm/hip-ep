@@ -30,6 +30,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "gated_rms_norm_fusion.hpp"
 #include "linear_attention_input_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "qmoe_shared_expert_fusion.hpp"
@@ -849,6 +850,9 @@ constexpr unsigned kQMoESharedExpertFusionBenefit = 2;
 /// patterns root at.
 constexpr unsigned kLinearAttentionInputFusionBenefit = 2;
 
+/// Rooted at `hip.cast`, which no other pattern here roots at.
+constexpr unsigned kGatedRmsNormFusionBenefit = 2;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -868,6 +872,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kQMoESharedExpertFusionBenefit));
   populateLinearAttentionInputFusionPatterns(
       patterns, mlir::PatternBenefit(kLinearAttentionInputFusionBenefit));
+  populateGatedRmsNormFusionPattern(
+      patterns, mlir::PatternBenefit(kGatedRmsNormFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

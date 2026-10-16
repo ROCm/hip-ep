@@ -10,8 +10,9 @@
 // projection group and the routed experts), and each quantizes it again.
 //
 // This pass makes the quantized activation an SSA value that every consumer
-// shares. When the activation is the output of a hip.skip_rms_norm, the norm
-// writes it alongside its fp16 output, which removes the launch altogether;
+// shares. When the activation is the output of a hip.skip_rms_norm or a
+// hip.gated_rms_norm, the norm writes it alongside its fp16 output, which
+// removes the launch altogether;
 // otherwise one hip.dynamic_quant_i8 serves all consumers, which only pays
 // when there are at least two.
 //
@@ -128,28 +129,45 @@ Value createInit(OpBuilder &b, Location loc, Value like,
 // that can.
 std::optional<std::pair<Value, Value>> foldIntoNorm(Value activation,
                                                     int64_t blockSize) {
-  auto norm = activation.getDefiningOp<SkipRmsNormOp>();
-  if (!norm || norm.hasQuantOutputs() ||
-      cast<OpResult>(activation).getResultNumber() != 0 ||
-      norm->getNumResults() != norm.getOutputs().size())
+  auto result = dyn_cast<OpResult>(activation);
+  if (!result || result.getResultNumber() != 0)
+    return std::nullopt;
+  Operation *norm = result.getOwner();
+  auto skipNorm = dyn_cast<SkipRmsNormOp>(norm);
+  auto gatedNorm = dyn_cast<GatedRmsNormOp>(norm);
+  if (skipNorm ? skipNorm.hasQuantOutputs()
+               : !gatedNorm || gatedNorm.hasQuantOutputs())
+    return std::nullopt;
+  auto outputsOf = [&]() -> OperandRange {
+    return skipNorm ? skipNorm.getOutputs() : gatedNorm.getOutputs();
+  };
+  if (norm->getNumResults() != outputsOf().size())
     return std::nullopt;
 
   auto type = cast<RankedTensorType>(activation.getType());
   OpBuilder b(norm);
-  Location loc = norm.getLoc();
-  SmallVector<Value> outputs(norm.getOutputs());
+  Location loc = norm->getLoc();
+  Value input = skipNorm ? skipNorm.getInput() : gatedNorm.getInput();
+  SmallVector<Value> outputs(outputsOf());
   SmallVector<Type> resultTypes(norm->getResultTypes());
   for (RankedTensorType t : {quantType(type), scaleType(type, blockSize)}) {
-    outputs.push_back(createInit(b, loc, norm.getInput(), t));
+    outputs.push_back(createInit(b, loc, input, t));
     resultTypes.push_back(t);
   }
-  auto fused = SkipRmsNormOp::create(
-      b, loc, resultTypes, norm.getCtx(), norm.getInput(), norm.getSkip(),
-      norm.getGamma(), norm.getBias(), outputs, norm.getEpsilonAttr(),
-      b.getI64IntegerAttr(blockSize));
+  Operation *fused;
+  if (skipNorm)
+    fused = SkipRmsNormOp::create(
+        b, loc, resultTypes, skipNorm.getCtx(), skipNorm.getInput(),
+        skipNorm.getSkip(), skipNorm.getGamma(), skipNorm.getBias(), outputs,
+        skipNorm.getEpsilonAttr(), b.getI64IntegerAttr(blockSize));
+  else
+    fused = GatedRmsNormOp::create(
+        b, loc, resultTypes, gatedNorm.getCtx(), gatedNorm.getInput(),
+        gatedNorm.getGate(), gatedNorm.getWeight(), outputs,
+        gatedNorm.getEpsilonAttr(), b.getI64IntegerAttr(blockSize));
   for (auto [from, to] : llvm::zip(norm->getResults(), fused->getResults()))
     from.replaceAllUsesWith(to);
-  norm.erase();
+  norm->erase();
 
   const unsigned n = fused->getNumResults();
   ++NumNormFolds;

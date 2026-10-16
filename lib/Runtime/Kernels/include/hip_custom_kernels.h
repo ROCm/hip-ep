@@ -2153,6 +2153,19 @@ HIP_KERNEL_API int hip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip.gated_rms_norm, fp16 only:
+ *   n = half(rms_norm(x over each group_size slice) * weight)
+ *   y = half(float(n) * silu(float(gate)))
+ * with input / gate / output [rows, row_size] and weight [group_size].
+ * Non-null q_out / q_scale also receive y quantized as by
+ * hip_skip_rms_norm_quant_i8 (quant_block_size 32, group_size % 32 == 0).
+ * Needs an even group_size dividing row_size and 4-byte aligned tensors;
+ * returns hipErrorNotSupported otherwise, launching nothing. */
+HIP_KERNEL_API int hip_gated_rms_norm(
+    void* stream, const void* input, const void* gate, const void* weight,
+    void* output, void* q_out, void* q_scale, int64_t rows, int64_t row_size,
+    int64_t group_size, float epsilon, int64_t quant_block_size);
+
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
