@@ -791,3 +791,60 @@ class TestMatMulNBitsGroup:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+def _make_norm_projections_model(seq_len: int, K: int, Ns: list[int]):
+    """SkipSimplifiedLayerNormalization feeding several MatMulNBits.
+
+    The norm output is the projections' shared activation, so the compiler
+    has the norm write its int8 quantization for them; the residual sum is a
+    second graph output.
+    """
+    # The normalized activation is ~4x the uniform inputs of the group test;
+    # smaller scales keep the outputs in the same range.
+    base = _make_shared_input_matmul_nbits_model(
+        seq_len, K, Ns, scale_range=(-0.005, 0.005)
+    )
+    graph = base.graph
+    rng = np.random.default_rng(5)
+    gamma = rng.uniform(0.5, 1.5, [K]).astype(np.float16)
+    graph.initializer.append(numpy_helper.from_array(gamma, name="gamma"))
+    norm = helper.make_node(
+        "SkipSimplifiedLayerNormalization",
+        ["H", "R", "gamma"],
+        ["X", "", "", "Sum"],
+        domain="com.microsoft",
+        epsilon=1e-6,
+    )
+    graph.node.insert(0, norm)
+    del graph.input[:]
+    graph.input.extend(
+        [
+            helper.make_tensor_value_info(n, TensorProto.FLOAT16, [1, seq_len, K])
+            for n in ("H", "R")
+        ]
+    )
+    graph.output.append(
+        helper.make_tensor_value_info("Sum", TensorProto.FLOAT16, [1, seq_len, K])
+    )
+    return base
+
+
+class TestNormQuantizedProjections:
+    """A norm writing the projections' int8 activation (hip-hoist-dynamic-quant).
+
+    S=1 runs the grouped dp4a GEMV and the leftover plain op on the norm's
+    quantization, S=2 the M-blocked dp4a GEMV per member on it, and S=128 the
+    fp paths, for which the norm writes no quantization.
+    """
+
+    @pytest.mark.parametrize("seq_len", [1, 2, 128])
+    def test_norm_projections(self, model_runner, seq_len):
+        K = 2048
+        model = _make_norm_projections_model(seq_len, K, [64, 96, 32, 160, 128])
+        rng = np.random.default_rng(17)
+        h = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+        r = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [h, r])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)

@@ -152,13 +152,27 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value gammaPtr =
         extractContiguousMemRefPtr(adaptor.getGamma(), rewriter, loc);
     Value biasPtr = getNullableMemRefPtr(adaptor.getBias(), rewriter, loc);
-    // DPS outputs: outputs[0]=output, outputs[1]=input_skip_bias_sum (optional)
+    // DPS outputs: outputs[0]=output, outputs[1]=input_skip_bias_sum
+    // (optional), then the quantized output and its scales when
+    // quant_block_size is set.
     auto outputs = adaptor.getOutputs();
+    const size_t numQuant = op.hasQuantOutputs() ? 2 : 0;
     Value outputPtr = extractContiguousMemRefPtr(outputs[0], rewriter, loc);
     Value skipOutputPtr =
-        outputs.size() > 1
+        outputs.size() - numQuant > 1
             ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
             : nullPtr;
+    Value quantPtr = nullPtr;
+    Value quantScalePtr = nullPtr;
+    if (numQuant) {
+      quantPtr = extractContiguousMemRefPtr(outputs[outputs.size() - 2],
+                                            rewriter, loc);
+      quantScalePtr = extractContiguousMemRefPtr(outputs[outputs.size() - 1],
+                                                 rewriter, loc);
+    }
+    Value quantBlockSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getQuantBlockSize().value_or(0)));
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -179,7 +193,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
-    // Runtime function signature (11 params)
+    // Runtime function signature (14 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
         ptrType, // input
@@ -188,10 +202,13 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         ptrType, // bias (may be nullptr)
         ptrType, // output
         ptrType, // input_skip_bias_sum (may be nullptr)
+        ptrType, // quantized output (may be nullptr)
+        ptrType, // quantization scales (may be nullptr)
         i64Type, // input_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
-        f32Type  // epsilon
+        f32Type, // epsilon
+        i64Type  // quant_block_size (0 without quantized outputs)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -203,9 +220,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     SmallVector<Value> args = {statePtr,         inputPtr,
                                skipPtr,          gammaPtr,
                                biasPtr,          outputPtr,
-                               skipOutputPtr,    inputNumElements,
+                               skipOutputPtr,    quantPtr,
+                               quantScalePtr,    inputNumElements,
                                gammaNumElements, elementSizeBytesVal,
-                               epsilonVal};
+                               epsilonVal,       quantBlockSize};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -1179,7 +1179,32 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+/// A pre-quantized activation operand pair (see hip.dynamic_quant_i8): both
+/// or neither, int8 values and f32 scales.
+static LogicalResult verifyActivationQuant(Operation *op, Value q, Value scale,
+                                           StringRef name) {
+  if (!q && !scale)
+    return success();
+  if (!q || !scale)
+    return op->emitOpError(name) << " needs both the values and the scales";
+  auto qType = dyn_cast<ShapedType>(q.getType());
+  auto sType = dyn_cast<ShapedType>(scale.getType());
+  if (!qType || !sType || !qType.getElementType().isInteger(8) ||
+      !sType.getElementType().isF32())
+    return op->emitOpError(name) << " must be i8 values with f32 scales";
+  return success();
+}
+
+LogicalResult SkipRmsNormOp::verify() {
+  if (!hasQuantOutputs())
+    return success();
+  const size_t outputs = getOutputs().size();
+  if (outputs < 3 || outputs > 4 || *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size needs the output, an optional "
+                       "residual sum and the quantized pair as outputs");
+  return verifyActivationQuant(*this, getOutputs()[outputs - 2],
+                               getOutputs()[outputs - 1], "quant outputs");
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -2139,6 +2164,39 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  return verifyActivationQuant(*this, getAQ(), getAScale(), "a_quant");
+}
+
+//===----------------------------------------------------------------------===//
+// DynamicQuantI8Op: ins(input) outs(q, scale)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicQuantI8Op::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void DynamicQuantI8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicQuantI8Op::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected the quantized values and the scales as "
+                       "outputs, got ")
+           << getOutputs().size();
+  if (getBlockSize() <= 0)
+    return emitOpError("block_size must be positive");
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getOutputs()[0], getOutputs()[1]},
+          /*numInits=*/2)))
+    return failure();
+  return verifyActivationQuant(*this, getOutputs()[0], getOutputs()[1],
+                               "outputs");
+}
+
 //===----------------------------------------------------------------------===//
 // MatMulNBitsGroupOp: ins(A) weights(B...) scales(S...) outs(Y...)
 //===----------------------------------------------------------------------===//
@@ -2162,6 +2220,9 @@ LogicalResult MatMulNBitsGroupOp::verify() {
       getNs().size() != members)
     return emitOpError("weights, scales, outputs and Ns must have one entry "
                        "per member");
+
+  if (failed(verifyActivationQuant(*this, getAQ(), getAScale(), "a_quant")))
+    return failure();
 
   SmallVector<Value> dataOperands{getA()};
   llvm::append_range(dataOperands, getB());
@@ -2192,7 +2253,8 @@ LogicalResult QMoEOp::verify() {
   if (present != 0 && present != std::size(shared))
     return emitOpError("shared expert needs all seven operands or none, got ")
            << present;
-  return success();
+  return verifyActivationQuant(*this, getInputQ(), getInputScale(),
+                               "input_quant");
 }
 
 //===----------------------------------------------------------------------===//

@@ -194,7 +194,7 @@ struct QMoESharedExpertFusion : public mlir::OpRewritePattern<AddOp> {
         moe.getFc2ZeroPoints(), moe.getFc3ZeroPoints(),
         moe.getRouterWeights(), gate.getB(), gate.getScales(), up.getB(),
         up.getScales(), down.getB(), down.getScales(), logit->getResult(0),
-        add.getOutput(), moe.getExpertWeightBitsAttr(), moe.getKAttr(),
+        moe.getInputQ(), moe.getInputScale(), add.getOutput(), moe.getExpertWeightBitsAttr(), moe.getKAttr(),
         moe.getBlockSizeAttr(), moe.getNormalizeRoutingWeightsAttr(),
         moe.getSwigluFusionAttr(), moe.getUseSparseMixerAttr(),
         moe.getActivationAlphaAttr(), moe.getActivationBetaAttr(),

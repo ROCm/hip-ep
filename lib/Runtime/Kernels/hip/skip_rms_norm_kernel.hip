@@ -65,14 +65,23 @@ __device__ inline float skip_block_sum(float partial, float *s_reduce) {
 // One block per row. blockDim.x == kSkipRmsNormBlockSize.
 // `bias` and `sum_out` may be null. VEC2 requires an even norm_size and
 // 4-byte aligned bases on every non-null pointer; the launcher checks both.
-template <typename T, bool VEC2>
+//
+// QUANT (VEC2 only, norm_size % 32 == 0) also writes y quantized for the
+// dp4a GEMV in 32-element groups, bit-identical to
+// matmul_nbits_quant_act_i8_kernel on the fp16 y: q_out [outer, norm_size]
+// in its deinterleaved byte order and q_scale [outer, norm_size / 32]. A
+// group is 16 consecutive lanes of one iteration, so its max is a 16-wide
+// shuffle reduction.
+template <typename T, bool VEC2, bool QUANT = false>
 __global__ void
 hip_skip_rms_norm_kernel(const T *__restrict__ input,
                          const T *__restrict__ skip,
                          const T *__restrict__ gamma,
                          const T *__restrict__ bias, T *__restrict__ output,
-                         T *__restrict__ sum_out, int64_t outer,
+                         T *__restrict__ sum_out, int8_t *__restrict__ q_out,
+                         float *__restrict__ q_scale, int64_t outer,
                          int64_t norm_size, float epsilon) {
+  static_assert(!QUANT || VEC2, "the quantized output needs the packed body");
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
@@ -81,6 +90,8 @@ hip_skip_rms_norm_kernel(const T *__restrict__ input,
   const T *s_row = skip + row * norm_size;
   T *y_row = output + row * norm_size;
   T *sum_row = sum_out ? sum_out + row * norm_size : nullptr;
+  int8_t *q_row = QUANT ? q_out + row * norm_size : nullptr;
+  float *qs_row = QUANT ? q_scale + row * (norm_size / 32) : nullptr;
 
   __shared__ float s_reduce[kSkipRmsNormBlockSize];
   __shared__ float s_inv_rms;
@@ -153,7 +164,23 @@ hip_skip_rms_norm_kernel(const T *__restrict__ input,
       float2 r;
       r.x = t.x * inv_rms * g.x;
       r.y = t.y * inv_rms * g.y;
-      y2[i] = __float22half2_rn(r);
+      const __half2 yh = __float22half2_rn(r);
+      y2[i] = yh;
+      if constexpr (QUANT) {
+        const float2 y = __half22float2(yh);
+        float m = fmaxf(fabsf(y.x), fabsf(y.y));
+        for (int off = 8; off > 0; off >>= 1)
+          m = fmaxf(m, __shfl_xor(m, off, 16));
+        const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
+        const int q0 = max(-127, min(127, __float2int_rn(y.x * inv_scale)));
+        const int q1 = max(-127, min(127, __float2int_rn(y.y * inv_scale)));
+        // Elements 2i (even) and 2i+1 (odd) of chunk i/4.
+        const int64_t base = (i >> 2) * 8 + (i & 3);
+        q_row[base] = static_cast<int8_t>(q0);
+        q_row[base + 4] = static_cast<int8_t>(q1);
+        if ((i & 15) == 0)
+          qs_row[i >> 4] = (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
+      }
     }
   } else {
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -225,8 +252,8 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
           static_cast<const __half *>(skip),
           static_cast<const __half *>(gamma),
           static_cast<const __half *>(bias), static_cast<__half *>(output),
-          static_cast<__half *>(input_skip_bias_sum), outer, norm_size,
-          epsilon);
+          static_cast<__half *>(input_skip_bias_sum), nullptr, nullptr, outer,
+          norm_size, epsilon);
     } else {
       hipLaunchKernelGGL(
           HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half, false>), grid, block,
@@ -234,8 +261,8 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
           static_cast<const __half *>(skip),
           static_cast<const __half *>(gamma),
           static_cast<const __half *>(bias), static_cast<__half *>(output),
-          static_cast<__half *>(input_skip_bias_sum), outer, norm_size,
-          epsilon);
+          static_cast<__half *>(input_skip_bias_sum), nullptr, nullptr, outer,
+          norm_size, epsilon);
     }
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<float, false>),
@@ -245,8 +272,8 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
                        static_cast<const float *>(gamma),
                        static_cast<const float *>(bias),
                        static_cast<float *>(output),
-                       static_cast<float *>(input_skip_bias_sum), outer,
-                       norm_size, epsilon);
+                       static_cast<float *>(input_skip_bias_sum), nullptr,
+                       nullptr, outer, norm_size, epsilon);
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_skip_rms_norm: unsupported dtype=%d\n",
@@ -257,6 +284,36 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_skip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_skip_rms_norm_quant_i8(
+    void *stream, const void *input, const void *skip, const void *gamma,
+    const void *bias, void *output, void *input_skip_bias_sum, void *q_out,
+    void *q_scale, int64_t outer, int64_t norm_size, float epsilon,
+    int64_t quant_block_size) {
+  if (quant_block_size != 32 || norm_size % 32 != 0 || !q_out || !q_scale ||
+      !skip_can_vectorize(input, skip, gamma, bias, output,
+                          input_skip_bias_sum, norm_size))
+    return hipErrorNotSupported;
+  if (outer <= 0)
+    return 0;
+
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half, true, true>),
+      dim3(static_cast<unsigned int>(outer)), dim3(kSkipRmsNormBlockSize), 0,
+      static_cast<hipStream_t>(stream), static_cast<const __half *>(input),
+      static_cast<const __half *>(skip), static_cast<const __half *>(gamma),
+      static_cast<const __half *>(bias), static_cast<__half *>(output),
+      static_cast<__half *>(input_skip_bias_sum), static_cast<int8_t *>(q_out),
+      static_cast<float *>(q_scale), outer, norm_size, epsilon);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_skip_rms_norm_quant_i8 launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

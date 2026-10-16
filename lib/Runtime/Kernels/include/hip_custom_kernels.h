@@ -2183,6 +2183,17 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip_skip_rms_norm for fp16 that also writes `output` quantized for the
+ * dp4a GEMV, exactly as hip_matmul_nbits_quant_act_i8 would quantize it:
+ * q_out int8 [outer, norm_size], q_scale f32 [outer, norm_size / 32].
+ * Only quant_block_size == 32 with norm_size % 32 == 0 and 4-byte aligned
+ * tensors; returns hipErrorNotSupported otherwise, launching nothing. */
+HIP_KERNEL_API int hip_skip_rms_norm_quant_i8(
+    void* stream, const void* input, const void* skip, const void* gamma,
+    const void* bias, void* output, void* input_skip_bias_sum, void* q_out,
+    void* q_scale, int64_t outer, int64_t norm_size, float epsilon,
+    int64_t quant_block_size);
+
 /* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
@@ -2442,6 +2453,8 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
  *   out        : fp16 [M, N]
  *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
  *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
+ * A == nullptr means the scratch already holds the quantized rows, as
+ * written by hip_matmul_nbits_quant_act_i8 or a fused producer.
  * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
@@ -2459,7 +2472,8 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
  *   B[i]       : packed int4 weights [N[i], K/2]
  *   scales[i]  : fp16 [N[i], ceil(K/block_size)]
  *   out[i]     : fp16 [1, N[i]]
- *   scratch    : as for hip_matmul_nbits_dp4a with M == 1
+ *   scratch    : as for hip_matmul_nbits_dp4a with M == 1, including
+ *                A == nullptr for an already quantized row
  * Returns a hipError_t; hipErrorInvalidValue if K%32 or count is out of range.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
@@ -2467,6 +2481,14 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
     const void* const* B, const void* const* scales, void* const* out,
     const int64_t* N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
+
+/* The activation quantization of the dp4a GEMVs on its own: fp16 A
+ * [rows, K] to int8 a_qb [rows, K] in the deinterleaved dp4a layout and f32
+ * a_scale [rows, ceil(K/block_size)]. block_size must be a power of two
+ * >= 32 and K a multiple of 32; returns hipErrorInvalidValue otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
+    void* stream, const void* A, void* a_qb, void* a_scale,
+    int64_t rows, int64_t K, int64_t block_size);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
@@ -2989,7 +3011,8 @@ typedef struct HipQmoeSharedExpert {
 // fc2 slot activations ([slots, inter]). fp16 only; block_size a multiple of
 // 32. A non-null shared_expert (same inter_size as the routed experts) runs
 // as one extra slot, so act_out, slot_buf, a_qb_mid and a_scale_mid must
-// hold k+1 slots.
+// hold k+1 slots. input == nullptr means a_qb_in/a_scale_in already hold the
+// quantized input (same layout as hip_matmul_nbits_quant_act_i8).
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,

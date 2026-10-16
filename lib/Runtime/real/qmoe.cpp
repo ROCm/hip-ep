@@ -27,7 +27,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *shared_gate_scales, const void *shared_up_weights,
               const void *shared_up_scales, const void *shared_down_weights,
               const void *shared_down_scales, const void *shared_gate_logit,
-              void *output, int64_t num_tokens, int64_t hidden_size,
+              const void *input_q, const void *input_scale, void *output,
+              int64_t num_tokens, int64_t hidden_size,
               int64_t inter_size, int64_t num_experts, int64_t k,
               int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
@@ -311,11 +312,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           shared_gate_weights, shared_gate_scales,  shared_up_weights,
           shared_up_scales,    shared_down_weights, shared_down_scales,
           shared_gate_logit};
+      // A producer-written quantization replaces the input quant launch.
+      const bool prequant =
+          input_q && input_scale && hipdnn_ep_matmul_prequant_active(1);
       HIP_CHECK(hip_qmoe_decode_fused_dp4a(
-          stream, input, d_expert_indices, d_expert_weights, fc1_weights,
-          fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
-          fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
-          d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
+          stream, prequant ? nullptr : input, d_expert_indices,
+          d_expert_weights, fc1_weights, fc1_scales, fc1_zero_points,
+          fc1_bias, fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
+          d_fc2_buf, d_act_buf, output,
+          prequant ? const_cast<void *>(input_q) : d_a_qb_in,
+          prequant ? const_cast<void *>(input_scale) : d_a_scale_in,
+          d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
           block_size, activation_alpha, activation_beta, swiglu_limit,
           elem_size, shared_in_slot ? &shared : nullptr));
       goto shared_expert;
@@ -460,7 +467,8 @@ shared_expert:
                       "(tokens=%lld, shared_inter=%lld)\n",
                       (long long)num_tokens, (long long)shared_inter_size);
     HIP_CHECK(wrap_matmul_nbits_group(
-        state, /*op_state_slot=*/-1, input, /*count=*/2, shared_gate_weights,
+        state, /*op_state_slot=*/-1, input, input_q, input_scale,
+        /*count=*/2, shared_gate_weights,
         shared_gate_scales, d_shared_gate, shared_inter_size,
         shared_up_weights, shared_up_scales, d_shared_up, shared_inter_size,
         nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0,
@@ -471,7 +479,8 @@ shared_expert:
     HIP_CHECK(wrap_matmul_nbits(
         state, /*op_state_slot=*/-1, d_shared_act, shared_down_weights,
         shared_down_scales, /*zero_points=*/nullptr, /*g_idx=*/nullptr,
-        /*bias=*/nullptr, d_shared_out, num_tokens, hidden_size,
+        /*bias=*/nullptr, /*a_q=*/nullptr, /*a_scale=*/nullptr, d_shared_out,
+        num_tokens, hidden_size,
         shared_inter_size, /*batch_count=*/1, /*bits=*/4, block_size,
         elem_size, /*zp_elem_size=*/2, /*scale_elem_size=*/2));
     HIP_CHECK(hip_qmoe_shared_combine(stream, output, d_shared_out,

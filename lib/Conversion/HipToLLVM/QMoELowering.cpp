@@ -80,6 +80,10 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getSharedDownScales(), rewriter, loc);
     Value sharedLogitPtr =
         extractOptionalMemRefPtr(adaptor.getSharedGateLogit(), rewriter, loc);
+    Value inputQPtr =
+        extractOptionalMemRefPtr(adaptor.getInputQ(), rewriter, loc);
+    Value inputScalePtr =
+        extractOptionalMemRefPtr(adaptor.getInputScale(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -145,7 +149,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
           sharedGateType, 0, adaptor.getSharedGateWeights(), rewriter, loc);
     }
 
-    SmallVector<Type, 39> paramTypes = {
+    SmallVector<Type, 41> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -169,6 +173,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         ptrType, // shared_down_weights (nullable)
         ptrType, // shared_down_scales (nullable)
         ptrType, // shared_gate_logit (nullable)
+        ptrType, // input_q (nullable)
+        ptrType, // input_scale (nullable)
         ptrType, // output
         i64Type, // num_tokens
         i64Type, // hidden_size
@@ -193,7 +199,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 39> args = {statePtr,
+    SmallVector<Value, 41> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -216,6 +222,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    sharedDownWPtr,
                                    sharedDownSPtr,
                                    sharedLogitPtr,
+                                   inputQPtr,
+                                   inputScalePtr,
                                    outputPtr,
                                    numTokensVal,
                                    hiddenSizeVal,

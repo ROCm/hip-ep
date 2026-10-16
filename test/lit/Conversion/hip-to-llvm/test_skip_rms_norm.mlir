@@ -45,7 +45,7 @@ func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
   // Verify runtime function call with 11 params (bias and input_skip_bias_sum may be nullptr)
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
       outs(%output, %skip_output : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
@@ -63,7 +63,7 @@ func.func @skip_rms_norm_static_f16(%ctx: !hip.context) {
   %skip_output = memref.alloc() : memref<1024xf16, 1>
 
   // 1D tensor test case
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<1024xf16, 1>, memref<1024xf16, 1>, memref<1024xf16, 1>)
       outs(%output, %skip_output : memref<1024xf16, 1>, memref<1024xf16, 1>)
@@ -84,7 +84,7 @@ func.func @skip_rms_norm_3d(%ctx: !hip.context) {
   // CHECK: llvm.mlir.constant(2 : i64) : i64
   // CHECK: llvm.mlir.constant(64 : i64) : i64
   // CHECK: llvm.mlir.constant(128 : i64) : i64
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>, memref<128xf32, 1>)
       outs(%output, %skip_output : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
@@ -107,7 +107,7 @@ func.func @skip_rms_norm_dynamic(%ctx: !hip.context, %input: memref<?x512xf16, 1
   // Verify dynamic dimension extraction from memref descriptor
   // CHECK: llvm.extractvalue {{.*}}[3, 0]
 
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<?x512xf16, 1>, memref<?x512xf16, 1>, memref<?xf16, 1>)
       outs(%output, %skip_output : memref<?x512xf16, 1>, memref<?x512xf16, 1>)
@@ -130,7 +130,7 @@ func.func @skip_rms_norm_fully_dynamic(%ctx: !hip.context, %input: memref<?x?xf1
   // CHECK: llvm.extractvalue {{.*}}[3, 0]
   // CHECK: llvm.extractvalue {{.*}}[3, 1]
 
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<?x?xf16, 1>, memref<?x?xf16, 1>, memref<?xf16, 1>)
       outs(%output, %skip_output : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
@@ -151,7 +151,7 @@ func.func @skip_rms_norm_with_bias(%ctx: !hip.context) {
   %skip_output = memref.alloc() : memref<1x128x4096xf16, 1>
 
   // With bias: all 7 pointers are valid memref pointers
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma, %bias :
           memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
@@ -173,11 +173,38 @@ func.func @skip_rms_norm_output_only(%ctx: !hip.context) {
   %output = memref.alloc() : memref<128x512xf32, 1>
 
   // When input_skip_bias_sum is not provided, bias and skip_output pointers are nullptr
-  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
       outs(%output : memref<128x512xf32, 1>)
       {epsilon = 1.0e-05 : f32}
+
+  return
+}
+
+// ===== Quantized output (quant_block_size) =====
+
+// The int8 output and its scales are the last two pointers, and the block
+// size is the trailing i64 (0 in every test above).
+// CHECK-LABEL: @skip_rms_norm_quant
+func.func @skip_rms_norm_quant(%ctx: !hip.context) {
+  %input = memref.alloc() : memref<1x1x2048xf16, 1>
+  %skip = memref.alloc() : memref<1x1x2048xf16, 1>
+  %gamma = memref.alloc() : memref<2048xf16, 1>
+  %output = memref.alloc() : memref<1x1x2048xf16, 1>
+  %sum = memref.alloc() : memref<1x1x2048xf16, 1>
+  %q = memref.alloc() : memref<1x1x2048xi8, 1>
+  %s = memref.alloc() : memref<1x1x64xf32, 1>
+
+  // CHECK: %[[BS:.*]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[BS]])
+  hip.skip_rms_norm(%ctx)
+      ins(%input, %skip, %gamma :
+          memref<1x1x2048xf16, 1>, memref<1x1x2048xf16, 1>, memref<2048xf16, 1>)
+      outs(%output, %sum, %q, %s :
+          memref<1x1x2048xf16, 1>, memref<1x1x2048xf16, 1>,
+          memref<1x1x2048xi8, 1>, memref<1x1x64xf32, 1>)
+      {epsilon = 9.99999974e-06 : f32, quant_block_size = 32 : i64}
 
   return
 }
