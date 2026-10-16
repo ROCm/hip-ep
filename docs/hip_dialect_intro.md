@@ -117,6 +117,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.transpose` | `(%ctx) ins(%input : ...) outs(%output : ...) {perm = [...]}` | N-D transpose with arbitrary permutation | Full impl |
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
+| `hip.sigmoid_mul` | `(%ctx) ins(%x, %gate : ...) outs(%output : ...)` | Sigmoid gate `x * sigmoid(gate)` (fp16), optionally also writing the int8 activation of an int4 consumer | Full impl |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 
 ---

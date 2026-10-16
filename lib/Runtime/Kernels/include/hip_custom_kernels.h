@@ -858,6 +858,19 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
                               void *output, int64_t num_elements,
                               int hip_dtype);
 
+/* Sigmoid-gated product (hip.sigmoid_mul), fp16 with fp32 math:
+ *   output = x * half(sigmoid(gate)), rounded to fp16
+ * which is what hip.sigmoid followed by hip.mul compute. x, gate and output
+ * hold num_elements, rows of row_size. When q_out and q_scale are non-null
+ * the kernel also writes output quantized as hip_matmul_nbits_quant_act_i8
+ * does (q_out int8 [rows, row_size], q_scale f32 [rows, row_size / 32]);
+ * that needs quant_block_size == 32, row_size % 32 == 0 and 4-byte aligned
+ * tensors, otherwise it returns hipErrorNotSupported and launches nothing. */
+HIP_KERNEL_API int hip_sigmoid_mul(void *stream, const void *x,
+                                   const void *gate, void *output, void *q_out,
+                                   void *q_scale, int64_t num_elements,
+                                   int64_t row_size, int64_t quant_block_size);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================

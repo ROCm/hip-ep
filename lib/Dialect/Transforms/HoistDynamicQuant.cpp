@@ -10,9 +10,9 @@
 // projection group and the routed experts), and each quantizes it again.
 //
 // This pass makes the quantized activation an SSA value that every consumer
-// shares. When the activation is the output of a hip.skip_rms_norm or a
-// hip.gated_rms_norm, the norm writes it alongside its fp16 output, which
-// removes the launch altogether;
+// shares. When the activation is the output of a hip.skip_rms_norm, a
+// hip.gated_rms_norm or a hip.sigmoid_mul, that op writes it alongside its
+// fp16 output, which removes the launch altogether;
 // otherwise one hip.dynamic_quant_i8 serves all consumers, which only pays
 // when there are at least two.
 //
@@ -38,13 +38,15 @@
 
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <optional>
 
 #define DEBUG_TYPE "hip-hoist-dynamic-quant"
 
-STATISTIC(NumNormFolds, "Number of norms that also write the quantization");
+STATISTIC(NumProducerFolds,
+          "Number of producers that also write the quantization");
 STATISTIC(NumQuantOps, "Number of hip.dynamic_quant_i8 ops created");
 
 namespace mlir {
@@ -124,53 +126,73 @@ Value createInit(OpBuilder &b, Location loc, Value like,
                                  type.getElementType(), dynSizes);
 }
 
-// Rebuilds the norm producing `activation` with the quantized pair as two
-// more outputs and returns them, or returns nothing when it is not a norm
-// that can.
-std::optional<std::pair<Value, Value>> foldIntoNorm(Value activation,
-                                                    int64_t blockSize) {
+// An op that can also write the quantization of its first output, and does
+// not yet: its input, shaped like that output, and its variadic outputs.
+struct FoldableProducer {
+  Value input;
+  OperandRange outputs;
+};
+
+std::optional<FoldableProducer> asFoldableProducer(Operation *op) {
+  return TypeSwitch<Operation *, std::optional<FoldableProducer>>(op)
+      .Case<SkipRmsNormOp, GatedRmsNormOp, SigmoidMulOp>(
+          [](auto producer) -> std::optional<FoldableProducer> {
+            if (producer.hasQuantOutputs())
+              return std::nullopt;
+            return FoldableProducer{producer.getInput(),
+                                    producer.getOutputs()};
+          })
+      .Default([](Operation *) { return std::nullopt; });
+}
+
+// Rebuilds the op producing `activation` with the quantized pair as two more
+// outputs and returns them, or returns nothing when it is not an op that can.
+std::optional<std::pair<Value, Value>> foldIntoProducer(Value activation,
+                                                        int64_t blockSize) {
   auto result = dyn_cast<OpResult>(activation);
   if (!result || result.getResultNumber() != 0)
     return std::nullopt;
-  Operation *norm = result.getOwner();
-  auto skipNorm = dyn_cast<SkipRmsNormOp>(norm);
-  auto gatedNorm = dyn_cast<GatedRmsNormOp>(norm);
-  if (skipNorm ? skipNorm.hasQuantOutputs()
-               : !gatedNorm || gatedNorm.hasQuantOutputs())
-    return std::nullopt;
-  auto outputsOf = [&]() -> OperandRange {
-    return skipNorm ? skipNorm.getOutputs() : gatedNorm.getOutputs();
-  };
-  if (norm->getNumResults() != outputsOf().size())
+  Operation *producer = result.getOwner();
+  std::optional<FoldableProducer> foldable = asFoldableProducer(producer);
+  if (!foldable || producer->getNumResults() != foldable->outputs.size())
     return std::nullopt;
 
   auto type = cast<RankedTensorType>(activation.getType());
-  OpBuilder b(norm);
-  Location loc = norm->getLoc();
-  Value input = skipNorm ? skipNorm.getInput() : gatedNorm.getInput();
-  SmallVector<Value> outputs(outputsOf());
-  SmallVector<Type> resultTypes(norm->getResultTypes());
+  OpBuilder b(producer);
+  Location loc = producer->getLoc();
+  SmallVector<Value> outputs(foldable->outputs);
+  SmallVector<Type> resultTypes(producer->getResultTypes());
   for (RankedTensorType t : {quantType(type), scaleType(type, blockSize)}) {
-    outputs.push_back(createInit(b, loc, input, t));
+    outputs.push_back(createInit(b, loc, foldable->input, t));
     resultTypes.push_back(t);
   }
-  Operation *fused;
-  if (skipNorm)
-    fused = SkipRmsNormOp::create(
-        b, loc, resultTypes, skipNorm.getCtx(), skipNorm.getInput(),
-        skipNorm.getSkip(), skipNorm.getGamma(), skipNorm.getBias(), outputs,
-        skipNorm.getEpsilonAttr(), b.getI64IntegerAttr(blockSize));
-  else
-    fused = GatedRmsNormOp::create(
-        b, loc, resultTypes, gatedNorm.getCtx(), gatedNorm.getInput(),
-        gatedNorm.getGate(), gatedNorm.getWeight(), outputs,
-        gatedNorm.getEpsilonAttr(), b.getI64IntegerAttr(blockSize));
-  for (auto [from, to] : llvm::zip(norm->getResults(), fused->getResults()))
+  IntegerAttr blockSizeAttr = b.getI64IntegerAttr(blockSize);
+  Operation *fused =
+      TypeSwitch<Operation *, Operation *>(producer)
+          .Case([&](SkipRmsNormOp norm) {
+            return SkipRmsNormOp::create(
+                b, loc, resultTypes, norm.getCtx(), norm.getInput(),
+                norm.getSkip(), norm.getGamma(), norm.getBias(), outputs,
+                norm.getEpsilonAttr(), blockSizeAttr);
+          })
+          .Case([&](GatedRmsNormOp norm) {
+            return GatedRmsNormOp::create(
+                b, loc, resultTypes, norm.getCtx(), norm.getInput(),
+                norm.getGate(), norm.getWeight(), outputs,
+                norm.getEpsilonAttr(), blockSizeAttr);
+          })
+          .Case([&](SigmoidMulOp gated) {
+            return SigmoidMulOp::create(b, loc, resultTypes, gated.getCtx(),
+                                        gated.getInput(), gated.getGate(),
+                                        outputs, blockSizeAttr);
+          });
+  for (auto [from, to] :
+       llvm::zip(producer->getResults(), fused->getResults()))
     from.replaceAllUsesWith(to);
-  norm->erase();
+  producer->erase();
 
   const unsigned n = fused->getNumResults();
-  ++NumNormFolds;
+  ++NumProducerFolds;
   return std::make_pair(fused->getResult(n - 2), fused->getResult(n - 1));
 }
 
@@ -209,18 +231,18 @@ struct HoistDynamicQuantPass
       }
     });
 
-    // Folding rebuilds a norm, which replaces values other entries are keyed
-    // on, so each entry re-reads its activation from a consumer.
+    // Folding rebuilds the producer, which replaces values other entries are
+    // keyed on, so each entry re-reads its activation from a consumer.
     SmallVector<std::tuple<SmallVector<Operation *>, int64_t, bool>> entries;
     for (auto &[key, ops] : consumers)
       entries.emplace_back(ops, key.second, numBlockSizes[key.first] == 1);
 
     for (auto &[ops, blockSize, foldable] : entries) {
       Value activation = quantizableInput(ops.front())->first;
-      // A norm writes a single quantization.
+      // A producer writes a single quantization.
       std::optional<std::pair<Value, Value>> quant;
       if (foldable)
-        quant = foldIntoNorm(activation, blockSize);
+        quant = foldIntoProducer(activation, blockSize);
       // Every hip op takes the context handle as its first operand.
       if (!quant && ops.size() >= 2)
         quant = createQuant(ops.front()->getOperand(0), activation, blockSize);

@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "activation_quant_i8.h"
 #include "debug_log.h"
 #include "hip_custom_kernels.h"
 
@@ -181,6 +182,99 @@ extern "C" int hip_swiglu(void *stream, const void *gate, const void *up,
   hipError_t error = hipGetLastError();
   if (error != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_swiglu launch failed: %s\n",
+            hipGetErrorString(error));
+  return static_cast<int>(error);
+}
+
+// hip.sigmoid_mul: y = x * sigmoid(gate), rounding sigmoid(gate) to fp16 as
+// hip.sigmoid followed by hip.mul do.
+__device__ __forceinline__ float sigmoidMulF16(float x, float gate) {
+  const float s = __half2float(__float2half(1.0f / (1.0f + expf(-gate))));
+  return x * s;
+}
+
+__global__ void sigmoidMulKernel(const __half *__restrict__ x,
+                                 const __half *__restrict__ gate,
+                                 __half *__restrict__ output,
+                                 int64_t numElements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < numElements)
+    output[idx] = __float2half(
+        sigmoidMulF16(__half2float(x[idx]), __half2float(gate[idx])));
+}
+
+// One __half2 pair per thread. QUANT also writes y's int8 quantization: a
+// row is a whole number of 32-element groups, so every group is 16
+// consecutive, 16-aligned lanes, all of them in range.
+template <bool QUANT>
+__global__ void sigmoidMulPairKernel(const __half2 *__restrict__ x,
+                                     const __half2 *__restrict__ gate,
+                                     __half2 *__restrict__ output,
+                                     int8_t *__restrict__ qOut,
+                                     float *__restrict__ qScale,
+                                     int64_t numPairs, int64_t rowPairs) {
+  int64_t p = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (p >= numPairs)
+    return;
+  const float2 xv = __half22float2(x[p]);
+  const float2 g = __half22float2(gate[p]);
+  const __half2 y = __float22half2_rn(
+      make_float2(sigmoidMulF16(xv.x, g.x), sigmoidMulF16(xv.y, g.y)));
+  output[p] = y;
+  if constexpr (QUANT) {
+    const int64_t row = p / rowPairs;
+    quant_act_i8_pair(__half22float2(y), p - row * rowPairs,
+                      qOut + row * 2 * rowPairs,
+                      qScale + row * (2 * rowPairs / 32));
+  }
+}
+
+extern "C" int hip_sigmoid_mul(void *stream, const void *x, const void *gate,
+                               void *output, void *q_out, void *q_scale,
+                               int64_t num_elements, int64_t row_size,
+                               int64_t quant_block_size) {
+  if (num_elements <= 0)
+    return 0;
+  hipStream_t hipStream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  auto aligned4 = [](const void *ptr) {
+    return reinterpret_cast<uintptr_t>(ptr) % 4 == 0;
+  };
+  const bool pairs = num_elements % 2 == 0 && row_size % 2 == 0 &&
+                     aligned4(x) && aligned4(gate) && aligned4(output);
+  const bool quant = q_out && q_scale;
+  if (quant && (!pairs || quant_block_size != 32 || row_size % 32 != 0 ||
+                num_elements % row_size != 0))
+    return hipErrorNotSupported;
+
+  (void)hipGetLastError();
+  if (pairs) {
+    const int64_t numPairs = num_elements / 2;
+    const int grid = static_cast<int>((numPairs + kBlockSize - 1) / kBlockSize);
+    auto kernel = quant ? sigmoidMulPairKernel<true> : sigmoidMulPairKernel<false>;
+    hipLaunchKernelGGL(kernel, dim3(grid), dim3(kBlockSize), 0, hipStream,
+                       static_cast<const __half2 *>(x),
+                       static_cast<const __half2 *>(gate),
+                       static_cast<__half2 *>(output),
+                       static_cast<int8_t *>(q_out),
+                       static_cast<float *>(q_scale), numPairs, row_size / 2);
+  } else {
+    const int grid =
+        static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+    hipLaunchKernelGGL(sigmoidMulKernel, dim3(grid), dim3(kBlockSize), 0,
+                       hipStream, static_cast<const __half *>(x),
+                       static_cast<const __half *>(gate),
+                       static_cast<__half *>(output), num_elements);
+  }
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_sigmoid_mul: num=%lld, row=%lld, pairs=%d, "
+      "quant=%d\n",
+      (long long)num_elements, (long long)row_size, pairs ? 1 : 0,
+      quant ? 1 : 0);
+  hipError_t error = hipGetLastError();
+  if (error != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_sigmoid_mul launch failed: %s\n",
             hipGetErrorString(error));
   return static_cast<int>(error);
 }

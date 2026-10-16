@@ -119,6 +119,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     GatedRmsNormOp::attachInterface<HipDstBufferizableModel<GatedRmsNormOp>>(
         *ctx);
+    SigmoidMulOp::attachInterface<HipDstBufferizableModel<SigmoidMulOp>>(*ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
     AddOp::attachInterface<HipDstBufferizableModel<AddOp>>(*ctx);

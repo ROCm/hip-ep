@@ -248,8 +248,8 @@ def HoistDynamicQuantPass
     SSA value the consumers share through their `a_quant` / `input_quant`
     operands, keyed on the activation and the quantization block size.
 
-    When the activation is result #0 of a `hip.skip_rms_norm` or a
-    `hip.gated_rms_norm`, the norm is
+    When the activation is result #0 of a `hip.skip_rms_norm`, a
+    `hip.gated_rms_norm` or a `hip.sigmoid_mul`, that op is
     rebuilt with `quant_block_size` and writes the int8 activation and its
     per-block scales as two more outputs, so no quantization launch remains.
     Otherwise, when at least two consumers share the activation, one

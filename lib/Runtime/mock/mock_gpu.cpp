@@ -1291,6 +1291,24 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   return 0;
 }
 
+int wrap_sigmoid_mul(RuntimeState *state, void *x, void *gate, void *output,
+                     void *q_out, void *q_scale_out, int64_t num_elements,
+                     int64_t row_size, int64_t quant_block_size) {
+  (void)x;
+  (void)gate;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sigmoid_mul\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_sigmoid_mul(num_elements=%lld, row_size=%lld, "
+             "quant=%s, quant_block_size=%lld)\n",
+             (long long)num_elements, (long long)row_size,
+             q_out && q_scale_out ? "yes" : "no", (long long)quant_block_size);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,

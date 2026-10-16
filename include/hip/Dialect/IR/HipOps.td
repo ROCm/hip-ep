@@ -2887,6 +2887,55 @@ def Hip_SwigluOp : Hip_DpsOp<"swiglu"> {
   }];
 }
 
+def Hip_SigmoidMulOp : Hip_DpsOp<"sigmoid_mul", /*traits=*/[],
+                                 /*outsAccessor=*/"Outputs"> {
+  let summary = "Sigmoid-gated product";
+  let description = [{
+    Multiplies `input` by the sigmoid of `gate`, element-wise:
+
+      y = half(x * half(sigmoid(gate)))
+
+    The rounding is that of hip.sigmoid followed by hip.mul, so the op is an
+    exact replacement for that pair (the output gate of a gated attention
+    layer). The math runs in fp32; `input`, `gate` and `outputs[0]` are fp16
+    of one shape.
+
+    When `quant_block_size` is set, two more outputs carry `outputs[0]`
+    quantized to int8 per `quant_block_size` group and the group scales,
+    laid out as `hip.dynamic_quant_i8` writes them. The runtime fills them
+    only when a consumer can use them (decode-sized row counts with the
+    integer dot-product matmuls on).
+
+    Example:
+    ```mlir
+    %y = hip.sigmoid_mul(%ctx)
+        ins(%x, %g : tensor<1x1x4096xf16>, tensor<1x1x4096xf16>)
+        outs(%e : tensor<1x1x4096xf16>) : tensor<1x1x4096xf16>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$gate,
+    // [output] or [output, output_q, output_scale] with quant_block_size
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    OptionalAttr<I64Attr>:$quant_block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $gate `:` type($input) `,` type($gate) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
                                  /*autoReify=*/1,

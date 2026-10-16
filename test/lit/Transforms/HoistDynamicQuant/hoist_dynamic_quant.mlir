@@ -117,6 +117,33 @@ func.func @gated_norm_producer(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
 
 // -----
 
+// So does a sigmoid gate (the output gate of gated attention).
+// CHECK-LABEL: func.func @sigmoid_mul_producer
+// CHECK: %[[EQ:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x64xi8>
+// CHECK: %[[ES:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x2xf32>
+// CHECK: %[[Y:.*]]:3 = hip.sigmoid_mul(%{{[^)]*}}) ins(
+// CHECK-SAME: outs(%{{[^,]*}}, %[[EQ]], %[[ES]] :
+// CHECK-SAME: quant_block_size = 32 : i64
+// CHECK: hip.matmul_nbits(%{{.*}}) ins(%[[Y]]#0,
+// CHECK-SAME: a_quant(%[[Y]]#1, %[[Y]]#2 : tensor<1x?x64xi8>, tensor<1x?x2xf32>)
+// CHECK-NOT: hip.dynamic_quant_i8
+func.func @sigmoid_mul_producer(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
+    %g: tensor<1x?x64xf16>,
+    %w0: tensor<16x2x16xui8>, %s0: tensor<16x2xf16>) -> tensor<1x?x16xf16> {
+  %c1 = arith.constant 1 : index
+  %t = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %e = tensor.empty(%t) : tensor<1x?x64xf16>
+  %y = hip.sigmoid_mul(%ctx) ins(%x, %g : tensor<1x?x64xf16>, tensor<1x?x64xf16>)
+      outs(%e : tensor<1x?x64xf16>) : tensor<1x?x64xf16>
+  %e0 = tensor.empty(%t) : tensor<1x?x16xf16>
+  %y0 = hip.matmul_nbits(%ctx) ins(%y, %w0, %s0 : tensor<1x?x64xf16>, tensor<16x2x16xui8>, tensor<16x2xf16>)
+      outs(%e0 : tensor<1x?x16xf16>)
+      {K = 64 : i64, N = 16 : i64, accuracy_level = 4 : i64, bits = 4 : i64, block_size = 32 : i64, zp_elem_size = 2 : i64} : tensor<1x?x16xf16>
+  return %y0 : tensor<1x?x16xf16>
+}
+
+// -----
+
 // A single consumer already quantizes in its own launch, so a separate one
 // would not pay.
 // CHECK-LABEL: func.func @single_consumer

@@ -1261,6 +1261,51 @@ LogicalResult GatedRmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// SigmoidMulOp: ins(input, gate) outs(output, [q, scale])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SigmoidMulOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SigmoidMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SigmoidMulOp::verify() {
+  const size_t outputs = getOutputs().size();
+  if (outputs != (hasQuantOutputs() ? 3u : 1u))
+    return emitOpError("expected the output")
+           << (hasQuantOutputs() ? " and the quantized pair" : "")
+           << " as outputs, got " << outputs;
+  if (hasQuantOutputs() && *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size must be positive");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutputs()[0].getType());
+  if (!inputType.getElementType().isF16() ||
+      getGate().getType() != getInput().getType() ||
+      outputType.getShape() != inputType.getShape() ||
+      outputType.getElementType() != inputType.getElementType())
+    return emitOpError("input, gate and output must be f16 of one shape");
+  if (inputType.getRank() < 1 ||
+      inputType.isDynamicDim(inputType.getRank() - 1))
+    return emitOpError("needs a static last axis");
+
+  SmallVector<Value> dataOperands = {getInput(), getGate()};
+  llvm::append_range(dataOperands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/static_cast<unsigned>(outputs))))
+    return failure();
+  if (!hasQuantOutputs())
+    return success();
+  return verifyActivationQuant(*this, getOutputs()[1], getOutputs()[2],
+                               "quant outputs");
+}
+
+//===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
 //===----------------------------------------------------------------------===//
 
