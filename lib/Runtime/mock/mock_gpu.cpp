@@ -1387,6 +1387,35 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, int64_t count, const void *B0,
+                            const void *S0, void *Y0, int64_t N0,
+                            const void *B1, const void *S1, void *Y1,
+                            int64_t N1, const void *B2, const void *S2,
+                            void *Y2, int64_t N2, const void *B3,
+                            const void *S3, void *Y3, int64_t N3, int64_t M,
+                            int64_t K, int64_t batch_count, int64_t bits,
+                            int64_t block_size, int64_t elem_size) {
+  (void)op_state_slot;
+  (void)A;
+  (void)B0, (void)S0, (void)Y0, (void)B1, (void)S1, (void)Y1;
+  (void)B2, (void)S2, (void)Y2, (void)B3, (void)S3, (void)Y3;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_nbits_group\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_matmul_nbits_group(count=%lld, N=[%lld,%lld,%lld,"
+             "%lld], M=%lld, K=%lld, batch=%lld, bits=%lld, block_size=%lld, "
+             "elem_size=%lld)\n",
+             (long long)count, (long long)N0, (long long)N1, (long long)N2,
+             (long long)N3, (long long)M, (long long)K,
+             (long long)batch_count, (long long)bits, (long long)block_size,
+             (long long)elem_size);
+
+  return 0;
+}
+
 int wrap_gather_block_quantized(
     RuntimeState *state, const void *data, const void *indices,
     const void *scales, const void *zero_points, void *output,

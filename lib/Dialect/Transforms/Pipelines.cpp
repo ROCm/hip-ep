@@ -131,6 +131,12 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // 1b**. Horizontal fusion of int4 projections that share an activation.
+  //       After hip-fusion-transform so subgraph fusions claim individual
+  //       projections first; before externalization like every hip-to-hip
+  //       rewrite.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createGroupMatMulNBitsPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing

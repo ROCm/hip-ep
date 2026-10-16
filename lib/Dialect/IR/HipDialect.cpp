@@ -2140,6 +2140,38 @@ void MatMulNBitsOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp: ins(A) weights(B...) scales(S...) outs(Y...)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  const size_t members = getOutputs().size();
+  if (members < 1 || members > kMaxMembers)
+    return emitOpError("expected 1 to ")
+           << kMaxMembers << " members, got " << members;
+  if (getB().size() != members || getScales().size() != members ||
+      getNs().size() != members)
+    return emitOpError("weights, scales, outputs and Ns must have one entry "
+                       "per member");
+
+  SmallVector<Value> dataOperands{getA()};
+  llvm::append_range(dataOperands, getB());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getOutputs());
+  return verifyDpsComputeOp(*this, dataOperands,
+                            static_cast<unsigned>(members));
+}
+
+//===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
 

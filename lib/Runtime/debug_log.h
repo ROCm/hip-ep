@@ -48,6 +48,15 @@ inline int hipdnn_ep_matmul_dp4a_max_m() {
   return m;
 }
 
+// Grouped single-row dp4a GEMV for hip.matmul_nbits_group (one activation
+// quant, one GEMV launch per group). HIPDNN_EP_MATMUL_GROUP=0 runs each member
+// as its own wrap_matmul_nbits, which is the A/B control for the grouping.
+inline bool hipdnn_ep_matmul_group_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_GROUP");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

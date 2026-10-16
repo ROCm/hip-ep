@@ -118,11 +118,94 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroup Lowering
+//
+//   hip.matmul_nbits_group(%ctx) ins(%A) weights(%B0, %B1) scales(%S0, %S1)
+//       outs(%Y0, %Y1) {K, Ns = [N0, N1], ...}
+//   -> wrap_matmul_nbits_group(state, slot, A, count,
+//                              B0, S0, Y0, N0, B1, S1, Y1, N1,
+//                              null, null, null, 0, null, null, null, 0,
+//                              M, K, batch_count, bits, block_size, elem_size)
+//
+// The member slots are fixed at kMaxMembers so the ABI needs no arrays;
+// unused slots pass null pointers and N = 0.
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsGroupOpLowering
+    : public ConvertOpToLLVMPattern<MatMulNBitsGroupOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MatMulNBitsGroupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    int64_t ARank = AType.getRank();
+    int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                              rewriter, loc)
+                           : createI64Const(1);
+    Value batch = createI64Const(1);
+    for (int64_t i = 0; i < ARank - 2; ++i)
+      batch = LLVM::MulOp::create(
+          rewriter, loc, batch,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+
+    const unsigned count = op.getOutputs().size();
+    SmallVector<Type> paramTypes = {ptrType, i32Type, ptrType, i64Type};
+    SmallVector<Value> args = {adaptor.getHandle(),
+                               getOpStateSlotValue(op, rewriter, loc),
+                               extractContiguousMemRefPtr(adaptor.getA(),
+                                                          rewriter, loc),
+                               createI64Const(count)};
+    for (unsigned i = 0; i < MatMulNBitsGroupOp::kMaxMembers; ++i) {
+      paramTypes.append({ptrType, ptrType, ptrType, i64Type});
+      if (i < count) {
+        args.push_back(
+            extractContiguousMemRefPtr(adaptor.getB()[i], rewriter, loc));
+        args.push_back(
+            extractContiguousMemRefPtr(adaptor.getScales()[i], rewriter, loc));
+        args.push_back(
+            extractContiguousMemRefPtr(adaptor.getOutputs()[i], rewriter, loc));
+        args.push_back(createI64Const(op.getNs()[i]));
+      } else {
+        for (int j = 0; j < 3; ++j)
+          args.push_back(extractOptionalMemRefPtr(Value(), rewriter, loc));
+        args.push_back(createI64Const(0));
+      }
+    }
+    paramTypes.append(6, i64Type);
+    args.append({m, createI64Const(op.getK()), batch,
+                 createI64Const(op.getBits()),
+                 createI64Const(op.getBlockSize()), createI64Const(elemSize)});
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMatMulNBitsGroup, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
-  patterns.add<MatMulNBitsOpLowering>(converter);
+  patterns.add<MatMulNBitsOpLowering, MatMulNBitsGroupOpLowering>(converter);
 }
 
 } // namespace hip
