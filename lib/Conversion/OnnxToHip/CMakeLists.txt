@@ -113,6 +113,9 @@ add_library(OnnxToHip STATIC
   FlattenConversion.cpp
   DepthToSpaceConversion.cpp
   QdqConversion.cpp
+  DynamicQuantizeLinearConversion.cpp
+  ConvIntegerConversion.cpp
+  MatMulIntegerConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp

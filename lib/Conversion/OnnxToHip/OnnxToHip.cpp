@@ -351,6 +351,9 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateFlattenConversionPatterns(patterns, ctx);
   populateDepthToSpaceConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
+  populateDynamicQuantizeLinearConversionPatterns(patterns, ctx);
+  populateConvIntegerConversionPatterns(patterns, ctx);
+  populateMatMulIntegerConversionPatterns(patterns, ctx);
 
   for (std::unique_ptr<mlir::RewritePattern> &pattern :
        patterns.getNativePatterns())

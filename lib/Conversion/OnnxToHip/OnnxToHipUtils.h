@@ -500,6 +500,12 @@ void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateDynamicQuantizeLinearConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
+void populateConvIntegerConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+void populateMatMulIntegerConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 
 /// Canonicalize com.microsoft QuantizeLinear / DequantizeLinear represented as
 /// onnx.Custom into native ONNX QDQ ops. Must run before QDQ conversion, which
