@@ -2451,6 +2451,23 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* Grouped W4A8 dp4a GEMV for one decode row (M==1): `count` (1..4) symmetric
+ * int4 projections of the same fp16 activation. The row is quantized once and
+ * a single GEMV launch covers every member's columns, each member writing its
+ * own output.
+ *   A          : fp16 activations [1, K]
+ *   B[i]       : packed int4 weights [N[i], K/2]
+ *   scales[i]  : fp16 [N[i], ceil(K/block_size)]
+ *   out[i]     : fp16 [1, N[i]]
+ *   scratch    : as for hip_matmul_nbits_dp4a with M == 1
+ * Returns a hipError_t; hipErrorInvalidValue if K%32 or count is out of range.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
+    void* stream, const void* A, int64_t count,
+    const void* const* B, const void* const* scales, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *

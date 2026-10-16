@@ -1330,11 +1330,12 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
 #define DP4A_WAVES_MIN(TM) 1
 #define DP4A_WAVES_MAX(TM) ((TM) > 1 ? 4 : 16)
 
-template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
-__global__
-__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
-                                   DP4A_WAVES_MAX(TILE_M))))
-void matmul_nbits_gemv_dp4a_kernel(
+// One block's tile: columns [n_base, n_base + TILE_N), rows [m0, m0 + TILE_M).
+// Shared by the single-matrix kernel and the grouped kernel below, which only
+// differ in how a block finds its weight and column range.
+template <int BLOCK_SIZE, int TILE_N, int TILE_M>
+__device__ __forceinline__
+void dp4a_gemv_tile(
     const int8_t*  __restrict__ a_qb,
     const float*   __restrict__ a_scale,
     const uint8_t* __restrict__ B,
@@ -1342,10 +1343,9 @@ void matmul_nbits_gemv_dp4a_kernel(
     const uint8_t* __restrict__ zp,
     const __half*  __restrict__ bias,
     __half*        __restrict__ output,
-    int64_t M, int64_t N, int64_t K, int64_t block_size)
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    int64_t n_base, int64_t m0)
 {
-    const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
-    const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int     tid    = threadIdx.x;
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift =
@@ -1523,6 +1523,63 @@ void matmul_nbits_gemv_dp4a_kernel(
             }
         }
     }
+}
+
+template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
+__global__
+__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
+                                   DP4A_WAVES_MAX(TILE_M))))
+void matmul_nbits_gemv_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t M, int64_t N, int64_t K, int64_t block_size)
+{
+    dp4a_gemv_tile<BLOCK_SIZE, TILE_N, TILE_M>(
+        a_qb, a_scale, B, scales, zp, bias, output, M, N, K, block_size,
+        static_cast<int64_t>(blockIdx.x) * TILE_N,
+        static_cast<int64_t>(blockIdx.y) * TILE_M);
+}
+
+/* Grouped single-row dp4a GEMV. Members are laid out back to back along
+ * blockIdx.x; tile_end[i] is the exclusive end of member i's block range. */
+constexpr int kDp4aGroupMaxMembers = 4;
+
+struct Dp4aGroupArgs {
+    const uint8_t* B[kDp4aGroupMaxMembers];
+    const __half*  scales[kDp4aGroupMaxMembers];
+    __half*        out[kDp4aGroupMaxMembers];
+    int64_t        N[kDp4aGroupMaxMembers];
+    int            tile_end[kDp4aGroupMaxMembers];
+};
+
+template <int BLOCK_SIZE, int TILE_N>
+__global__
+__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(1), DP4A_WAVES_MAX(1))))
+void matmul_nbits_gemv_dp4a_group_kernel(
+    const int8_t* __restrict__ a_qb,
+    const float*  __restrict__ a_scale,
+    Dp4aGroupArgs g, int64_t K, int64_t block_size)
+{
+    const int bx = static_cast<int>(blockIdx.x);
+    // Constant-index selects keep the kernarg struct out of scratch memory.
+    const int s = (bx >= g.tile_end[0]) + (bx >= g.tile_end[1]) +
+                  (bx >= g.tile_end[2]);
+    const int tile0 = s == 0 ? 0
+                    : s == 1 ? g.tile_end[0]
+                    : s == 2 ? g.tile_end[1]
+                             : g.tile_end[2];
+#define DP4A_GROUP_PICK(f) \
+    (s == 0 ? g.f[0] : s == 1 ? g.f[1] : s == 2 ? g.f[2] : g.f[3])
+    dp4a_gemv_tile<BLOCK_SIZE, TILE_N, 1>(
+        a_qb, a_scale, DP4A_GROUP_PICK(B), DP4A_GROUP_PICK(scales), nullptr,
+        nullptr, DP4A_GROUP_PICK(out), 1, DP4A_GROUP_PICK(N), K, block_size,
+        static_cast<int64_t>(bx - tile0) * TILE_N, 0);
+#undef DP4A_GROUP_PICK
 }
 
 /* -----------------------------------------------------------------------
@@ -2528,6 +2585,61 @@ static void launchDp4aConfig(
 #undef DP4A_CASE
 }
 
+// Grouped analog of launchDp4aConfig: one launch over every member's tiles.
+static void launchDp4aGroupConfig(
+    int config_id, hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    int count, const uint8_t* const* B, const __half* const* sc,
+    __half* const* out, const int64_t* N, int64_t K, int64_t bs)
+{
+    auto& c = kGemvConfigs[config_id];
+    Dp4aGroupArgs g{};
+    int tiles = 0;
+    for (int i = 0; i < kDp4aGroupMaxMembers; i++) {
+        if (i < count) {
+            g.B[i] = B[i];
+            g.scales[i] = sc[i];
+            g.out[i] = out[i];
+            g.N[i] = N[i];
+            tiles += static_cast<int>((N[i] + c.tile_n - 1) / c.tile_n);
+            g.tile_end[i] = tiles;
+        } else {
+            g.tile_end[i] = INT_MAX;
+        }
+    }
+    dim3 grid(static_cast<unsigned>(tiles), 1u, 1u);
+    dim3 block(c.threads);
+
+#define DP4A_GROUP_CASE(ID, BS, TN) \
+    case ID: \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_group_kernel<BS, TN>), \
+            grid, block, 0, stream, a_qb, a_scale, g, K, bs); \
+        break
+
+    switch (config_id) {
+        DP4A_GROUP_CASE( 0,  32,  1);  DP4A_GROUP_CASE( 1,  32,  2);
+        DP4A_GROUP_CASE( 2,  32,  4);  DP4A_GROUP_CASE( 3,  32,  8);
+        DP4A_GROUP_CASE( 4,  64,  1);  DP4A_GROUP_CASE( 5,  64,  2);
+        DP4A_GROUP_CASE( 6,  64,  4);  DP4A_GROUP_CASE( 7,  64,  8);
+        DP4A_GROUP_CASE( 8,  64, 16);
+        DP4A_GROUP_CASE( 9, 128,  1);  DP4A_GROUP_CASE(10, 128,  2);
+        DP4A_GROUP_CASE(11, 128,  4);  DP4A_GROUP_CASE(12, 128,  8);
+        DP4A_GROUP_CASE(13, 128, 16);
+        DP4A_GROUP_CASE(14, 256,  1);  DP4A_GROUP_CASE(15, 256,  2);
+        DP4A_GROUP_CASE(16, 256,  4);  DP4A_GROUP_CASE(17, 256,  8);
+        DP4A_GROUP_CASE(18, 256, 16);
+        DP4A_GROUP_CASE(19, 512,  1);  DP4A_GROUP_CASE(20, 512,  2);
+        DP4A_GROUP_CASE(21, 512,  4);  DP4A_GROUP_CASE(22, 512,  8);
+        DP4A_GROUP_CASE(23, 512, 16);
+        DP4A_GROUP_CASE(24, 1024,  1); DP4A_GROUP_CASE(25, 1024,  2);
+        DP4A_GROUP_CASE(26, 1024,  4); DP4A_GROUP_CASE(27, 1024,  8);
+        DP4A_GROUP_CASE(28, 1024, 16);
+        default: break;
+    }
+#undef DP4A_GROUP_CASE
+}
+
 // ---------------------------------------------------------------------------
 // Cold, burst-timed probing for the M=1 dp4a GEMV autotune.
 //
@@ -2993,6 +3105,84 @@ extern "C" int hip_matmul_nbits_dp4a(
         launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
                           M, N, K, block_size);
     }
+    return hipGetLastError();
+}
+
+// A group streams the same bytes as one matrix of the summed height, so it is
+// keyed in the LUT by total N. Without a LUT answer (online mode, empty
+// table) the largest member's config is used, which tunes on a real shape.
+static int getDp4aGroupConfig(
+    hipStream_t stream, const int8_t* a_qb, const float* a_scale,
+    int count, const uint8_t* const* B, const __half* const* sc,
+    __half* const* out, const int64_t* N, int64_t K, int64_t bs)
+{
+    const int forced = dp4aConfigOverride();
+    if (forced >= 0) return forced;
+
+    int64_t n_total = 0;
+    int largest = 0;
+    std::string key = "g";
+    for (int i = 0; i < count; i++) {
+        n_total += N[i];
+        if (N[i] > N[largest]) largest = i;
+        key += std::to_string(N[i]) + ",";
+    }
+    key += "_" + std::to_string(K) + "_" + std::to_string(bs);
+
+    {
+        std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+        auto it = dp4a_cache.find(key);
+        if (it != dp4a_cache.end())
+            return it->second;
+    }
+
+    int cfg = matmulNbitsLutGemvConfig(matmul_lut::Phase::DecodeDp4a, 1,
+                                       static_cast<int>(n_total),
+                                       static_cast<int>(K),
+                                       static_cast<int>(bs), false);
+    if (cfg < 0)
+        cfg = getOrTuneDp4aConfig(stream, a_qb, a_scale, B[largest],
+                                  sc[largest], nullptr, nullptr, out[largest],
+                                  N[largest], K, bs);
+
+    std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+    dp4a_cache[key] = cfg;
+    return cfg;
+}
+
+extern "C" int hip_matmul_nbits_dp4a_group(
+    void* stream_v, const void* A, int64_t count,
+    const void* const* B, const void* const* scales, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    if (K % 32 != 0) return hipErrorInvalidValue;
+    if (count < 1 || count > kDp4aGroupMaxMembers) return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+
+    const int n = static_cast<int>(count);
+    const uint8_t* Bp[kDp4aGroupMaxMembers];
+    const __half*  sc[kDp4aGroupMaxMembers];
+    __half*        outp[kDp4aGroupMaxMembers];
+    for (int i = 0; i < n; i++) {
+        Bp[i] = static_cast<const uint8_t*>(B[i]);
+        sc[i] = static_cast<const __half*>(scales[i]);
+        outp[i] = static_cast<__half*>(out[i]);
+    }
+    int8_t* a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*  a_sc = static_cast<float*>(a_scale_scratch);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                       dim3(static_cast<unsigned>(k_blocks), 1u), dim3(128), 0,
+                       stream, static_cast<const __half*>(A), a_qb, a_sc, K,
+                       block_size, k_blocks);
+
+    const int cfg = getDp4aGroupConfig(stream, a_qb, a_sc, n, Bp, sc, outp, N,
+                                       K, block_size);
+    launchDp4aGroupConfig(cfg, stream, a_qb, a_sc, n, Bp, sc, outp, N, K,
+                          block_size);
     return hipGetLastError();
 }
 

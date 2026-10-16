@@ -36,6 +36,7 @@ add_library(HipDialectTransforms STATIC
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
+  GroupMatMulNBits.cpp
   HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp

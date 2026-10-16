@@ -956,6 +956,73 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
+                                       /*traits=*/[AttrSizedOperandSegments,
+                                                   OpStateOpInterface],
+                                       /*outsAccessor=*/"Outputs",
+                                       /*autoReify=*/0> {
+  let summary = "Several MatMulNBits projections of one activation";
+  let description = [{
+    Computes `outputs[i] = A @ dequant(B[i])^T` for every member `i`. Each
+    member is a complete `hip.matmul_nbits` with its own packed weight,
+    scales, output and `N` (`Ns[i]`); the members share the activation and
+    the `K`, `bits`, `block_size` and `accuracy_level` attributes. Zero
+    points, `g_idx` and bias are not supported, and scales are fp16.
+
+    The members write separate destinations, so no result is a slice of
+    another. On the decode path the runtime quantizes `A` once and runs a
+    single GEMV launch over all members; every other path computes the
+    members one after another exactly as `hip.matmul_nbits` would.
+
+    Example:
+    ```mlir
+    hip.matmul_nbits_group(%ctx) ins(%A : memref<1x1x2048xf16, 1>)
+        weights(%B0, %B1 : memref<8192x64x16xui8, 1>, memref<32x64x16xui8, 1>)
+        scales(%S0, %S1 : memref<8192x64xf16, 1>, memref<32x64xf16, 1>)
+        outs(%Y0, %Y1 : memref<1x1x8192xf16, 1>, memref<1x1x32xf16, 1>)
+        {K = 2048, Ns = array<i64: 8192, 32>, bits = 4, block_size = 32,
+         accuracy_level = 4}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                     // activation [..., K]
+    Variadic<Hip_TensorOrMemRef>:$B,           // packed uint8 [N_i, k_blocks, blob_size]
+    Variadic<Hip_TensorOrMemRef>:$scales,      // fp16 [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$outputs,     // results [..., N_i]
+    I64Attr:$K,
+    DenseI64ArrayAttr:$Ns,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    `weights` `(` $B `:` type($B) `)`
+    `scales` `(` $scales `:` type($scales) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  // Members share one MatmulNbitsState: its caches are keyed by weight
+  // pointer and shape, so they never collide across members.
+  let extraClassDeclaration = [{
+    static constexpr unsigned kMaxMembers = 4;
+
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
                            /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",

@@ -1512,6 +1512,22 @@ int wrap_matmul_nbits(
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
+// MatMulNBitsGroup wrapper: `count` (1..4) symmetric int4 projections of one
+// fp16 activation A [batch_count x M x K], member i computing
+// Y_i = A @ dequant(B_i)^T with B_i [N_i x k_blocks x blob_size] and fp16
+// scales S_i [N_i x k_blocks]. Slots i >= count are null with N_i = 0.
+// Decode (M within the dp4a band) quantizes A once and runs one grouped GEMV;
+// otherwise each member runs as wrap_matmul_nbits would.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, int64_t count, const void *B0,
+                            const void *S0, void *Y0, int64_t N0,
+                            const void *B1, const void *S1, void *Y1,
+                            int64_t N1, const void *B2, const void *S2,
+                            void *Y2, int64_t N2, const void *B3,
+                            const void *S3, void *Y3, int64_t N3, int64_t M,
+                            int64_t K, int64_t batch_count, int64_t bits,
+                            int64_t block_size, int64_t elem_size);
+
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
 // `gather_axis` using `indices`, then dequantize the gathered rows using
