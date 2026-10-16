@@ -923,7 +923,10 @@ HIP_KERNEL_API int hip_softplus(
  *   rotary_dim         - number of dimensions to rotate (<= head_dim)
  *   max_seq_len        - max sequence length in cos/sin cache (for bounds clamping)
  *   interleaved        - 0 = half-rotated, 1 = interleaved
- *   element_size_bytes - 2 for fp16, 4 for fp32
+ *   element_size_bytes - input/output: 2 for fp16, 4 for fp32
+ *   cache_element_size_bytes - cos/sin: 2 for fp16, 4 for fp32. The rotation
+ *                        runs in this type, so fp16 input with fp32 caches
+ *                        is rotated in fp32 and rounded once to fp16.
  *   is_bnsh            - layout flag, see input above (0 = BSNH/3D, 1 = BNSH)
  *
  * Returns: 0 on success, non-zero on error
@@ -943,6 +946,7 @@ HIP_KERNEL_API int hip_rope_forward(
     int64_t max_seq_len,
     int64_t interleaved,
     int64_t element_size_bytes,
+    int64_t cache_element_size_bytes,
     int64_t is_bnsh);
 
 /* =========================================================================

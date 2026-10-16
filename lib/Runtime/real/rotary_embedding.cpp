@@ -35,7 +35,8 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t interleaved, int64_t batch_size,
                           int64_t seq_len, int64_t num_heads, int64_t head_dim,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes, int64_t is_bnsh) {
+                          int64_t element_size_bytes,
+                          int64_t cache_element_size_bytes, int64_t is_bnsh) {
   OP_PROFILE(
       "rotary_emb",
       [&] {
@@ -90,7 +91,8 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
   int rc = hip_rope_forward(stream, input, position_ids, cos_cache, sin_cache,
                             output, batch_size, seq_len, num_heads, head_dim,
                             rotary_dim, max_seq_len, interleaved,
-                            element_size_bytes, is_bnsh);
+                            element_size_bytes, cache_element_size_bytes,
+                            is_bnsh);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_rotary_embedding: hip_rope_forward failed (rc=%d)\n",

@@ -57,6 +57,19 @@ inline bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
   return seen == consumer;
 }
 
+// The one op other than tensor.dim using `value`, if there is exactly one.
+inline mlir::Operation *soleValueUser(mlir::Value value) {
+  mlir::Operation *seen = nullptr;
+  for (mlir::OpOperand &use : value.getUses()) {
+    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
+      continue;
+    if (seen && seen != use.getOwner())
+      return nullptr;
+    seen = use.getOwner();
+  }
+  return seen;
+}
+
 // Binds `op` to whichever of lhs / rhs an OpT defines and `other` to the
 // remaining operand.
 template <typename OpT>

@@ -1429,12 +1429,15 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 // without position_ids ships cos/sin already position-expanded to
 // [batch, seq_len, rotary_dim/2], and the kernel indexes them by the flat
 // token position b*seq+s instead of looking up position_ids.
+// cache_element_size_bytes is that of cos/sin; fp16 input with fp32 caches
+// is rotated in fp32.
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
                           int64_t seq_len, int64_t num_heads, int64_t head_dim,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes, int64_t is_bnsh);
+                          int64_t element_size_bytes,
+                          int64_t cache_element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`

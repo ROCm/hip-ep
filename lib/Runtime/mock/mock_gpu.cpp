@@ -1314,7 +1314,8 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t interleaved, int64_t batch_size,
                           int64_t seq_len, int64_t num_heads, int64_t head_dim,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes, int64_t is_bnsh) {
+                          int64_t element_size_bytes,
+                          int64_t cache_element_size_bytes, int64_t is_bnsh) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rotary_embedding\n");
     return -1;
@@ -1322,11 +1323,12 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
 
   MOCK_PRINT("[MOCK] wrap_rotary_embedding(interleaved=%lld, batch=%lld, "
              "seq_len=%lld, num_heads=%lld, head_dim=%lld, rotary_dim=%lld, "
-             "cos_cache_num_elements=%lld, element_size=%lld, is_bnsh=%lld)\n",
+             "cos_cache_num_elements=%lld, element_size=%lld, "
+             "cache_element_size=%lld, is_bnsh=%lld)\n",
              (long long)interleaved, (long long)batch_size, (long long)seq_len,
              (long long)num_heads, (long long)head_dim, (long long)rotary_dim,
              (long long)cos_cache_num_elements, (long long)element_size_bytes,
-             (long long)is_bnsh);
+             (long long)cache_element_size_bytes, (long long)is_bnsh);
 
   return 0;
 }
