@@ -3113,14 +3113,15 @@ extern "C" int hip_matmul_nbits_dp4a(
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
-    // Step 1: dynamic per-group int8 quantization of the activations.
+    // Step 1: dynamic per-group int8 quantization of the activations, unless
+    // the producer already wrote them (A == nullptr).
     // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks),
-                            static_cast<unsigned>(M)),
-                       dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    if (Ah)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), static_cast<unsigned>(M)),
+            dim3(128), 0, stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
 
     // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
     // launcher and its own tune cache, which has more history behind it.
@@ -3204,15 +3205,36 @@ extern "C" int hip_matmul_nbits_dp4a_group(
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks), 1u), dim3(128), 0,
-                       stream, static_cast<const __half*>(A), a_qb, a_sc, K,
-                       block_size, k_blocks);
+    if (A)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), 1u), dim3(128), 0, stream,
+            static_cast<const __half*>(A), a_qb, a_sc, K, block_size,
+            k_blocks);
 
     const int cfg = getDp4aGroupConfig(stream, a_qb, a_sc, n, Bp, sc, outp, N,
                                        K, block_size);
     launchDp4aGroupConfig(cfg, stream, a_qb, a_sc, n, Bp, sc, outp, N, K,
                           block_size);
+    return hipGetLastError();
+}
+
+extern "C" int hip_matmul_nbits_quant_act_i8(
+    void* stream_v, const void* A, void* a_qb, void* a_scale,
+    int64_t rows, int64_t K, int64_t block_size)
+{
+    if (K % 32 != 0 || rows < 1 || block_size < 32 ||
+        (block_size & (block_size - 1)) != 0)
+        return hipErrorInvalidValue;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                       dim3(static_cast<unsigned>(k_blocks),
+                            static_cast<unsigned>(rows)),
+                       dim3(128), 0, static_cast<hipStream_t>(stream_v),
+                       static_cast<const __half*>(A),
+                       static_cast<int8_t*>(a_qb), static_cast<float*>(a_scale),
+                       K, block_size, k_blocks);
     return hipGetLastError();
 }
 

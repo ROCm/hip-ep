@@ -63,7 +63,7 @@ namespace {
 // The grouped decode kernel is the dp4a GEMV, so only ops it can run are
 // worth grouping; anything else would just be computed member by member.
 bool isGroupable(MatMulNBitsOp op) {
-  if (op.getZeroPoints() || op.getGIdx() || op.getBias())
+  if (op.getZeroPoints() || op.getGIdx() || op.getBias() || op.getAQ())
     return false;
   if (op.getBits() != 4 || op.getK() % 32 != 0 || op.getScaleElemSize() != 2)
     return false;
@@ -143,9 +143,9 @@ void emitGroup(ArrayRef<MatMulNBitsOp> members) {
   }
 
   auto group = MatMulNBitsGroupOp::create(
-      b, loc, resultTypes, first.getHandle(), first.getA(), weights, scales,
-      inits, first.getK(), ns, first.getBits(), first.getBlockSize(),
-      first.getAccuracyLevel());
+      b, loc, resultTypes, first.getHandle(), first.getA(), /*a_q=*/Value(),
+      /*a_scale=*/Value(), weights, scales, inits, first.getK(), ns,
+      first.getBits(), first.getBlockSize(), first.getAccuracyLevel());
 
   for (auto [m, result] : llvm::zip_equal(members, group.getResults())) {
     MatMulNBitsOp member = m;

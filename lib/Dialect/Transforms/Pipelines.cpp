@@ -137,6 +137,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //       rewrite.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createGroupMatMulNBitsPass());
 
+  // 1b***. One activation quantization per (activation, block size), written
+  //        by the producing norm where possible. After grouping, whose groups
+  //        are the main consumers.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistDynamicQuantPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing

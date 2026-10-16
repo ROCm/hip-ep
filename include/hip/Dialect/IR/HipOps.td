@@ -901,6 +901,11 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
       g_idx: GPTQ group ordering indices (deprecated)
       bias: output bias vector [N]
 
+    Optional `a_quant(a_q, a_scale)`: `A` already quantized to int8 per
+    `block_size` group by its producer (see `hip.dynamic_quant_i8`). The
+    runtime reads it instead of quantizing `A` whenever it runs the integer
+    dot-product path.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -921,6 +926,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     Optional<Hip_TensorOrMemRef>:$zero_points,  // dequant zero points (optional)
     Optional<Hip_TensorOrMemRef>:$g_idx,        // GPTQ group indices (optional, deprecated)
     Optional<Hip_TensorOrMemRef>:$bias,         // output bias [N] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_q,          // int8 A [..., K] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,      // f32 [..., K/block_size]
     Hip_TensorOrMemRef:$output,                 // result [..., N]
     I64Attr:$K,
     I64Attr:$N,
@@ -937,9 +944,12 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
     (`g_idx` `(` $g_idx^ `:` type($g_idx) `)`)?
     (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`a_quant` `(` $a_q^ `,` $a_scale `:` type($a_q) `,` type($a_scale) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 
   // OpStateOpInterface: construct this MatMulNBits instance's per-session
   // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
@@ -970,9 +980,10 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
     points, `g_idx` and bias are not supported, and scales are fp16.
 
     The members write separate destinations, so no result is a slice of
-    another. On the decode path the runtime quantizes `A` once and runs a
-    single GEMV launch over all members; every other path computes the
-    members one after another exactly as `hip.matmul_nbits` would.
+    another. On the decode path the runtime quantizes `A` once (or reads the
+    optional `a_quant(a_q, a_scale)` its producer wrote) and runs a single
+    GEMV launch over all members; every other path computes the members one
+    after another exactly as `hip.matmul_nbits` would.
 
     Example:
     ```mlir
@@ -988,6 +999,8 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
   let arguments = (ins
     Hip_ContextType:$handle,
     Hip_TensorOrMemRef:$A,                     // activation [..., K]
+    Optional<Hip_TensorOrMemRef>:$a_q,         // int8 A [..., K] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,     // f32 [..., K/block_size]
     Variadic<Hip_TensorOrMemRef>:$B,           // packed uint8 [N_i, k_blocks, blob_size]
     Variadic<Hip_TensorOrMemRef>:$scales,      // fp16 [N_i, k_blocks]
     Variadic<Hip_TensorOrMemRef>:$outputs,     // results [..., N_i]
@@ -1000,6 +1013,7 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
 
   let assemblyFormat = [{
     `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    (`a_quant` `(` $a_q^ `,` $a_scale `:` type($a_q) `,` type($a_scale) `)`)?
     `weights` `(` $B `:` type($B) `)`
     `scales` `(` $scales `:` type($scales) `)`
     `outs` `(` $outputs `:` type($outputs) `)`
@@ -1021,6 +1035,49 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+}
+
+def Hip_DynamicQuantI8Op : Hip_DpsOp<"dynamic_quant_i8",
+                                     /*traits=*/[],
+                                     /*outsAccessor=*/"Outputs"> {
+  let summary = "Per-group int8 quantization of an fp16 activation";
+  let description = [{
+    Quantizes every `block_size` group of each row of `input` [..., K] to
+    int8 with a symmetric scale `max|x| / 127`, the activation format of the
+    integer dot-product int4 matmuls. `outputs[0]` (i8, same shape as
+    `input`) holds each row's values with every 8-element chunk stored as
+    its 4 even elements followed by its 4 odd ones, which is how the weight
+    nibbles split. `outputs[1]` (f32, [..., ceil(K / block_size)]) holds the
+    scales.
+
+    Consumers take the pair as `a_quant` / `input_quant` operands, so one
+    quantization serves every projection of the activation. The runtime
+    quantizes only when a consumer can use the result (decode-sized row
+    counts with the integer dot-product matmuls on) and leaves the buffers
+    untouched otherwise; consumers make the same decision.
+
+    Example:
+    ```mlir
+    %q, %s = hip.dynamic_quant_i8(%ctx) ins(%x : tensor<1x1x2048xf16>)
+        outs(%eq, %es : tensor<1x1x2048xi8>, tensor<1x1x64xf32>)
+        {block_size = 32 : i64} : tensor<1x1x2048xi8>, tensor<1x1x64xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,             // f16 [..., K]
+    Variadic<Hip_TensorOrMemRef>:$outputs, // i8 [..., K], f32 [..., K/bs]
+    I64Attr:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
@@ -1062,6 +1119,10 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     [inter_s, hidden/bs]; down is [hidden, inter_s/bs, bs/2]; the logit is
     one value per token with the input's leading shape.
 
+    Optional `input_quant(input_q, input_scale)`: the input already
+    quantized to int8 per `block_size` group (see `hip.dynamic_quant_i8`),
+    read by the integer dot-product decode instead of quantizing the input.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -1102,6 +1163,8 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     Optional<Hip_TensorOrMemRef>:$shared_down_weights,    // [hidden, inter_s/bs, bs/2]
     Optional<Hip_TensorOrMemRef>:$shared_down_scales,     // [hidden, inter_s/bs]
     Optional<Hip_TensorOrMemRef>:$shared_gate_logit,      // [batch, seq, 1]
+    Optional<Hip_TensorOrMemRef>:$input_q,                // int8 [batch, seq, hidden]
+    Optional<Hip_TensorOrMemRef>:$input_scale,            // f32 [batch, seq, hidden/bs]
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -1142,6 +1205,8 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
         type($shared_up_weights) `,` type($shared_up_scales) `,`
         type($shared_down_weights) `,` type($shared_down_scales) `,`
         type($shared_gate_logit) `)`)?
+    (`input_quant` `(` $input_q^ `,` $input_scale `:`
+        type($input_q) `,` type($input_scale) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -1654,9 +1719,15 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
       3. gamma   (required, T) - 1D normalization weight (hidden_size)
       4. bias    (optional, T) - 1D bias (hidden_size)
 
-    DPS output buffers (1-2, passed as Variadic `outputs`):
+    DPS output buffers (1-4, passed as Variadic `outputs`):
       outputs[0] = output             (required, T) - normalized result
       outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
+      last two, when `quant_block_size` is set: `output` quantized to int8
+        per `quant_block_size` group (i8, same shape as `output`) and the
+        group scales (f32, last dim hidden / quant_block_size), laid out as
+        `hip.dynamic_quant_i8` writes them. The runtime fills them only when
+        a consumer can use them (decode-sized row counts with the integer
+        dot-product matmuls on).
 
     Uses destination-passing style: output buffers are provided as arguments.
 
@@ -1693,11 +1764,13 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     // MS spec input 4 (optional)
     Optional<Hip_TensorOrMemRef>:$bias,
 
-    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    // DPS output buffers: [output] or [output, input_skip_bias_sum], then
+    // [output_q, output_scale] when quant_block_size is set
     Variadic<Hip_TensorOrMemRef>:$outputs,
 
     // Attributes
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    OptionalAttr<I64Attr>:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1712,6 +1785,10 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   }];
 
   let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
+  }];
 }
 
 def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],

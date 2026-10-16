@@ -2203,8 +2203,9 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   }
   const int slots = static_cast<int>(k) + (sh.gate_w ? 1 : 0);
 
-  // Quantize the shared [hidden] input once (grid = n_blk_in groups x 1 row).
-  {
+  // Quantize the shared [hidden] input once (grid = n_blk_in groups x 1 row),
+  // unless the producer already did (input == nullptr).
+  if (input) {
     dim3 grid(static_cast<unsigned>(n_blk_in), 1u);
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
                        dim3(128), 0, s, static_cast<const __half*>(input),

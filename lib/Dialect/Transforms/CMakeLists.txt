@@ -40,6 +40,7 @@ add_library(HipDialectTransforms STATIC
   GroupMatMulNBits.cpp
   HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
+  HoistDynamicQuant.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
   LoopBodyToOutParams.cpp

@@ -66,6 +66,18 @@ inline bool hipdnn_ep_qmoe_shared_fused_enabled() {
   return enabled;
 }
 
+// Whether producers of a pre-quantized activation (hip.skip_rms_norm with
+// quant outputs, hip.dynamic_quant_i8) write it for `rows` rows, and so
+// whether its dp4a consumers may read it instead of quantizing. Producer and
+// consumers must agree, so both ask this. HIPDNN_EP_MATMUL_PREQUANT=0 leaves
+// the quantization to every consumer, which is the A/B control.
+inline bool hipdnn_ep_matmul_prequant_active(int64_t rows) {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_PREQUANT");
+  return enabled && hipdnn_ep_matmul_dp4a_enabled() && rows >= 1 &&
+         rows <= hipdnn_ep_matmul_dp4a_max_m();
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

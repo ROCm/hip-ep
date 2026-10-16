@@ -1480,18 +1480,31 @@ int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+// With quant_block_size > 0, also writes `output` quantized to int8 for the
+// integer dot-product GEMV (q_out [rows x hidden], q_scale_out
+// [rows x hidden/quant_block_size], f32) when that path runs for these rows;
+// otherwise both are left unwritten.
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, void *q_out, void *q_scale_out,
+    int64_t input_num_elements, int64_t gamma_num_elements,
+    int64_t element_size_bytes, float epsilon, int64_t quant_block_size);
+
+// DynamicQuantI8 wrapper: quantizes the fp16 activation A [rows x K] to int8
+// for the integer dot-product GEMV (q [rows x K], scale [rows x K/block_size],
+// f32), when that path runs for `rows`; otherwise q and scale are left
+// unwritten and consumers read A.
+int wrap_dynamic_quant_i8(RuntimeState *state, const void *A, void *q,
+                          void *scale, int64_t rows, int64_t K,
+                          int64_t block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
 // scales: [N x k_blocks], output: [batch_count x M x N]
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+// a_q/a_scale: A already quantized by its producer (nullable), read instead
+// of quantizing A when the integer dot-product path runs.
 int wrap_matmul_nbits(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (zp-cache home)
@@ -1501,6 +1514,8 @@ int wrap_matmul_nbits(
     const void *zero_points, // per-block zero points (nullable)
     const void *g_idx,       // GPTQ group indices (nullable, deprecated)
     const void *bias,        // output bias [N] (nullable)
+    const void *a_q,         // int8 A (nullable)
+    const void *a_scale,     // f32 per-block scales of a_q (nullable)
     void *output,            // result tensor
     int64_t M,               // rows per batch
     int64_t N,               // output columns
@@ -1517,9 +1532,11 @@ int wrap_matmul_nbits(
 // Y_i = A @ dequant(B_i)^T with B_i [N_i x k_blocks x blob_size] and fp16
 // scales S_i [N_i x k_blocks]. Slots i >= count are null with N_i = 0.
 // Decode (M within the dp4a band) quantizes A once and runs one grouped GEMV;
-// otherwise each member runs as wrap_matmul_nbits would.
+// otherwise each member runs as wrap_matmul_nbits would. a_q/a_scale as for
+// wrap_matmul_nbits.
 int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
-                            const void *A, int64_t count, const void *B0,
+                            const void *A, const void *a_q,
+                            const void *a_scale, int64_t count, const void *B0,
                             const void *S0, void *Y0, int64_t N0,
                             const void *B1, const void *S1, void *Y1,
                             int64_t N1, const void *B2, const void *S2,
@@ -1660,7 +1677,9 @@ int wrap_qmoe(
     const void *shared_up_weights, const void *shared_up_scales,
     const void *shared_down_weights, const void *shared_down_scales,
     const void *shared_gate_logit,
-    void *output, // [num_tokens, hidden_size]
+    const void *input_q,     // int8 input (nullable), as a_q of matmul_nbits
+    const void *input_scale, // f32 per-block scales of input_q (nullable)
+    void *output,            // [num_tokens, hidden_size]
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
