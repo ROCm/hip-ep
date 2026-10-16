@@ -1053,6 +1053,15 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
       router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
 
+    Optional shared expert (all seven or none), set by the hip fusion
+    transform from the subgraph a Qwen-MoE style model adds to the routed
+    output:
+      s = down(silu(gate(input)) * up(input))      // symmetric int4 GEMMs
+      output = moe(input) + sigmoid(shared_gate_logit) * s
+    gate/up weights are [inter_s, hidden/bs, bs/2] with scales
+    [inter_s, hidden/bs]; down is [hidden, inter_s/bs, bs/2]; the logit is
+    one value per token with the input's leading shape.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -1086,6 +1095,13 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$shared_gate_weights,    // [inter_s, hidden/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_gate_scales,     // [inter_s, hidden/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_up_weights,      // [inter_s, hidden/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_up_scales,       // [inter_s, hidden/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_down_weights,    // [hidden, inter_s/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_down_scales,     // [hidden, inter_s/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_gate_logit,      // [batch, seq, 1]
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -1117,8 +1133,23 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
+    (`shared_expert` `(`
+        $shared_gate_weights^ `,` $shared_gate_scales `,`
+        $shared_up_weights `,` $shared_up_scales `,`
+        $shared_down_weights `,` $shared_down_scales `,`
+        $shared_gate_logit `:`
+        type($shared_gate_weights) `,` type($shared_gate_scales) `,`
+        type($shared_up_weights) `,` type($shared_up_scales) `,`
+        type($shared_down_weights) `,` type($shared_down_scales) `,`
+        type($shared_gate_logit) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasSharedExpert() { return static_cast<bool>(getSharedGateWeights()); }
   }];
 }
 

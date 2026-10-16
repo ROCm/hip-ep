@@ -52,14 +52,16 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
-  // Verify 30 parameters:
-  // - 16 pointers: state, input, router, fc1_w, fc1_s, fc1_b, fc2_w, fc2_s, fc2_b,
-  //                fc3_w(null), fc3_s(null), fc3_b(null), fc1_zp(null), fc2_zp(null), fc3_zp(null), output
-  // - 11 i64 + 3 f32: num_tokens, hidden_size, inter_size, num_experts, k,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, i64) -> i32
+  // Verify 39 parameters:
+  // - 24 pointers: state, input, router, router_weights(null), fc1_w, fc1_s, fc1_b,
+  //                fc2_w, fc2_s, fc2_b, fc3_w(null), fc3_s(null), fc3_b(null),
+  //                fc1_zp(null), fc2_zp(null), fc3_zp(null), 7 shared expert (null), output
+  // - 12 i64 + 3 f32: num_tokens, hidden_size, inter_size, num_experts, k,
   //                    expert_weight_bits, block_size, swiglu_fusion, activation_type,
   //                    activation_alpha, activation_beta, swiglu_limit,
-  //                    normalize_routing_weights, elem_size
+  //                    normalize_routing_weights, elem_size, shared_inter_size
 
   // ===== Test 2: QMoE without optional biases =====
 
@@ -91,6 +93,45 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, i64) -> i32
   // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
+
+  // ===== Test 3: QMoE with a shared expert =====
+
+  func.func @test_qmoe_shared_expert(%ctx: !hip.context,
+      %input: memref<1x1x2048xf16, 1>,
+      %router: memref<1x16xf16, 1>,
+      %fc1_w: memref<16x768x1024xui8, 1>,
+      %fc1_s: memref<16x768x64xf16, 1>,
+      %fc2_w: memref<16x2048x192xui8, 1>,
+      %fc2_s: memref<16x2048x12xf16, 1>,
+      %sg_w: memref<384x64x16xui8, 1>, %sg_s: memref<384x64xf16, 1>,
+      %su_w: memref<384x64x16xui8, 1>, %su_s: memref<384x64xf16, 1>,
+      %sd_w: memref<2048x12x16xui8, 1>, %sd_s: memref<2048x12xf16, 1>,
+      %logit: memref<1x1x1xf16, 1>,
+      %output: memref<1x1x2048xf16, 1>) {
+    hip.qmoe(%ctx) ins(%input, %router, %fc1_w, %fc1_s, %fc2_w, %fc2_s :
+        memref<1x1x2048xf16, 1>, memref<1x16xf16, 1>,
+        memref<16x768x1024xui8, 1>, memref<16x768x64xf16, 1>,
+        memref<16x2048x192xui8, 1>, memref<16x2048x12xf16, 1>)
+        shared_expert(%sg_w, %sg_s, %su_w, %su_s, %sd_w, %sd_s, %logit :
+          memref<384x64x16xui8, 1>, memref<384x64xf16, 1>,
+          memref<384x64x16xui8, 1>, memref<384x64xf16, 1>,
+          memref<2048x12x16xui8, 1>, memref<2048x12xf16, 1>,
+          memref<1x1x1xf16, 1>)
+        outs(%output : memref<1x1x2048xf16, 1>)
+        {expert_weight_bits = 4 : i64, k = 4 : i64, block_size = 32 : i64,
+         normalize_routing_weights = 1 : i64, swiglu_fusion = 1 : i64,
+         use_sparse_mixer = 0 : i64,
+         activation_alpha = 1.000000e+00 : f32, activation_beta = 0.000000e+00 : f32,
+         swiglu_limit = 0x7F800000 : f32, activation_type = "swiglu"}
+    return
+  }
+
+  // The shared expert's intermediate size (gate weights dim 0) is the last
+  // argument.
+  // CHECK-LABEL: llvm.func @test_qmoe_shared_expert
+  // CHECK: %[[SI:.*]] = llvm.mlir.constant(384 : i64) : i64
+  // CHECK: llvm.call @wrap_qmoe(%arg0, {{(%[0-9]+, )+}}%[[SI]]) :
 }

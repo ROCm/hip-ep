@@ -66,6 +66,20 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
     Value routerWeightsPtr =
         extractOptionalMemRefPtr(adaptor.getRouterWeights(), rewriter, loc);
+    Value sharedGateWPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedGateWeights(), rewriter, loc);
+    Value sharedGateSPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedGateScales(), rewriter, loc);
+    Value sharedUpWPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedUpWeights(), rewriter, loc);
+    Value sharedUpSPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedUpScales(), rewriter, loc);
+    Value sharedDownWPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedDownWeights(), rewriter, loc);
+    Value sharedDownSPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedDownScales(), rewriter, loc);
+    Value sharedLogitPtr =
+        extractOptionalMemRefPtr(adaptor.getSharedGateLogit(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -124,8 +138,14 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value swigluLimitVal = createF32Const(op.getSwigluLimit().convertToFloat());
     Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
     Value elemSizeVal = createI64Const(elemSize);
+    Value sharedInterVal = createI64Const(0);
+    if (op.hasSharedExpert()) {
+      auto sharedGateType = cast<MemRefType>(op.getSharedGateWeights().getType());
+      sharedInterVal = getMemRefDimSize(
+          sharedGateType, 0, adaptor.getSharedGateWeights(), rewriter, loc);
+    }
 
-    SmallVector<Type, 31> paramTypes = {
+    SmallVector<Type, 39> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -142,6 +162,13 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         ptrType, // fc1_zero_points (nullable)
         ptrType, // fc2_zero_points (nullable)
         ptrType, // fc3_zero_points (nullable)
+        ptrType, // shared_gate_weights (nullable)
+        ptrType, // shared_gate_scales (nullable)
+        ptrType, // shared_up_weights (nullable)
+        ptrType, // shared_up_scales (nullable)
+        ptrType, // shared_down_weights (nullable)
+        ptrType, // shared_down_scales (nullable)
+        ptrType, // shared_gate_logit (nullable)
         ptrType, // output
         i64Type, // num_tokens
         i64Type, // hidden_size
@@ -156,7 +183,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         f32Type, // activation_beta
         f32Type, // swiglu_limit
         i64Type, // normalize_routing_weights
-        i64Type  // elem_size
+        i64Type, // elem_size
+        i64Type  // shared_inter_size (0 without a shared expert)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -165,7 +193,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 31> args = {statePtr,
+    SmallVector<Value, 39> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -181,6 +209,13 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    fc1ZpPtr,
                                    fc2ZpPtr,
                                    fc3ZpPtr,
+                                   sharedGateWPtr,
+                                   sharedGateSPtr,
+                                   sharedUpWPtr,
+                                   sharedUpSPtr,
+                                   sharedDownWPtr,
+                                   sharedDownSPtr,
+                                   sharedLogitPtr,
                                    outputPtr,
                                    numTokensVal,
                                    hiddenSizeVal,
@@ -195,7 +230,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    activationBetaVal,
                                    swigluLimitVal,
                                    normalizeVal,
-                                   elemSizeVal};
+                                   elemSizeVal,
+                                   sharedInterVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

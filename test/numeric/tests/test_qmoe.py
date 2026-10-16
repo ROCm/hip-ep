@@ -171,6 +171,127 @@ def _make_qmoe_model(
     )
 
 
+def _make_qmoe_shared_expert_model(
+    seq_len: int,
+    hidden: int,
+    inter: int,
+    num_experts: int,
+    top_k: int,
+    shared_inter: int,
+    block_size: int = 32,
+    seed: int = 5,
+):
+    """Qwen3.5-MoE block: QMoE plus a sigmoid-gated shared expert.
+
+      y = QMoE(x) + Sigmoid(x @ Wl) * ((x @ Wg) * Sigmoid(x @ Wg) * (x @ Wu)) @ Wd
+
+    All shared projections are plain int4 MatMulNBits reading x, as in the
+    exported model; the compiler folds them into the hip.qmoe.
+    """
+    rng = np.random.default_rng(seed)
+    ms = "com.microsoft"
+    x = helper.make_tensor_value_info(
+        "input", TensorProto.FLOAT16, [1, seq_len, hidden]
+    )
+    router = helper.make_tensor_value_info(
+        "router_weights", TensorProto.FLOAT16, [seq_len, num_experts]
+    )
+    output = helper.make_tensor_value_info(
+        "output", TensorProto.FLOAT16, [1, seq_len, hidden]
+    )
+
+    def expert_weights(name, rows, k, scale_range):
+        w = rng.integers(0, 256, [num_experts, rows, k // 2], dtype=np.uint8)
+        s = rng.uniform(*scale_range, [num_experts, rows, k // block_size])
+        b = rng.uniform(-0.2, 0.2, [num_experts, rows])
+        return [
+            numpy_helper.from_array(w, name=f"{name}_qweight"),
+            numpy_helper.from_array(s.astype(np.float16), name=f"{name}_scales"),
+            numpy_helper.from_array(b.astype(np.float16), name=f"{name}_bias"),
+        ]
+
+    # Without a swiglu_limit nothing clamps the activations, so the scales are
+    # chosen to keep outputs O(1) like the real model's.
+    initializers = expert_weights("gate_up", 2 * inter, hidden, (0.001, 0.01))
+    initializers += expert_weights("down", hidden, inter, (0.001, 0.01))
+    nodes = [
+        helper.make_node(
+            "QMoE",
+            [
+                "input",
+                "router_weights",
+                "gate_up_qweight",
+                "gate_up_scales",
+                "gate_up_bias",
+                "down_qweight",
+                "down_scales",
+                "down_bias",
+                "",
+                "",
+                "",
+            ],
+            ["routed"],
+            domain=ms,
+            activation_type="swiglu",
+            activation_alpha=1.0,
+            activation_beta=0.0,
+            expert_weight_bits=4,
+            k=top_k,
+            normalize_routing_weights=1,
+            swiglu_fusion=1,
+            use_sparse_mixer=0,
+            block_size=block_size,
+            swiglu_limit=float("inf"),
+        )
+    ]
+
+    def projection(name, a, n, k, scale_range=(-0.01, 0.01)):
+        w = rng.integers(0, 256, [n, k // block_size, block_size // 2], dtype=np.uint8)
+        s = rng.uniform(*scale_range, [n, k // block_size]).astype(np.float16)
+        initializers.extend(
+            [
+                numpy_helper.from_array(w, name=f"{name}_w"),
+                numpy_helper.from_array(s, name=f"{name}_s"),
+            ]
+        )
+        nodes.append(
+            helper.make_node(
+                "MatMulNBits",
+                [a, f"{name}_w", f"{name}_s"],
+                [name],
+                domain=ms,
+                K=k,
+                N=n,
+                bits=4,
+                block_size=block_size,
+                accuracy_level=4,
+            )
+        )
+
+    projection("sh_gate", "input", shared_inter, hidden)
+    projection("sh_up", "input", shared_inter, hidden)
+    nodes += [
+        helper.make_node("Sigmoid", ["sh_gate"], ["sh_gate_sig"]),
+        helper.make_node("Mul", ["sh_gate", "sh_gate_sig"], ["sh_silu"]),
+        helper.make_node("Mul", ["sh_silu", "sh_up"], ["sh_act"]),
+    ]
+    projection("sh_down", "sh_act", hidden, shared_inter)
+    projection("sh_logit", "input", 1, hidden, scale_range=(-0.1, 0.1))
+    nodes += [
+        helper.make_node("Sigmoid", ["sh_logit"], ["sh_prob"]),
+        helper.make_node("Mul", ["sh_down", "sh_prob"], ["shared"]),
+        helper.make_node("Add", ["routed", "shared"], ["output"]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [x, router],
+        [output],
+        initializers=initializers,
+        opset=21,
+        extra_opsets=[helper.make_opsetid(ms, 1)],
+    )
+
+
 class TestQMoE:
     @pytest.mark.parametrize(
         "seq_len,hidden,intermediate,num_experts,top_k",
@@ -264,6 +385,33 @@ class TestQMoE:
         # A tie at the k-th logit makes the expert choice backend-defined.
         ranked = -np.sort(-router.astype(np.float32), axis=1)
         assert not (ranked[:, TOP_K - 1] == ranked[:, TOP_K]).any()
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    @pytest.mark.parametrize(
+        "shared_inter", [512, 256], ids=["shared_slot", "shared_separate"]
+    )
+    def test_qmoe_shared_expert_qwen35_shape(self, model_runner, seq_len, shared_inter):
+        """Qwen3.5-35B-A3B MoE block (hidden 2048, expert inter 512, top-8)
+        with its sigmoid-gated shared expert, at 32 instead of 256 experts.
+
+        A shared expert as wide as the routed ones runs as one more slot of
+        the fused decode at S=1; a narrower one, and every S=128 run, goes
+        through the separate gate/up, swiglu, down and combine launches.
+        """
+        hidden, inter, num_experts, top_k = 2048, 512, 32, 8
+        model = _make_qmoe_shared_expert_model(
+            seq_len, hidden, inter, num_experts, top_k, shared_inter
+        )
+        rng = np.random.default_rng(17)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = (rng.standard_normal([seq_len, num_experts]) * 1.2).astype(
+            np.float16
+        )
+        ranked = -np.sort(-router.astype(np.float32), axis=1)
+        assert not (ranked[:, top_k - 1] == ranked[:, top_k]).any()
 
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)

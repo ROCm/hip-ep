@@ -1652,13 +1652,22 @@ int wrap_qmoe(
     const void *fc1_zero_points, // (nullable) fc1 dequant zero points
     const void *fc2_zero_points, // (nullable) fc2 dequant zero points
     const void *fc3_zero_points, // (nullable) fc3 dequant zero points
-    void *output,                // [num_tokens, hidden_size]
+    // Sigmoid-gated shared expert (all null or all set): plain int4
+    // MatMulNBits gate/up [shared_inter, hidden/2] and down
+    // [hidden, shared_inter/2] with fp16 scales, and the pre-sigmoid gate
+    // logit [num_tokens]. Adds sigmoid(logit) * down(silu(gate) * up).
+    const void *shared_gate_weights, const void *shared_gate_scales,
+    const void *shared_up_weights, const void *shared_up_scales,
+    const void *shared_down_weights, const void *shared_down_scales,
+    const void *shared_gate_logit,
+    void *output, // [num_tokens, hidden_size]
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    int64_t shared_inter_size); // 0 without a shared expert
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //
