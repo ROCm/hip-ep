@@ -1791,6 +1791,63 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   }];
 }
 
+def Hip_GatedRmsNormOp : Hip_DpsOp<"gated_rms_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Outputs"> {
+  let summary = "Grouped RMS normalization gated by SiLU of a second input";
+  let description = [{
+    Normalizes every `weight`-sized group of the last axis of `input` and
+    multiplies it by the SiLU of the matching `gate` element:
+
+      n = half(x * rsqrt(mean(x^2 over the group) + epsilon) * weight)
+      y = half(float(n) * (g * sigmoid(g)))      with g = float(gate)
+
+    The rounding is that of hip.rms_norm followed by an fp32 SiLU gate,
+    so the op is an exact replacement for that chain (the output gate of a
+    gated-delta-net layer). Reductions and the gate run in fp32; the
+    tensors are fp16. `input`, `gate` and `outputs[0]` share one shape
+    [..., G * D] and `weight` is [D].
+
+    When `quant_block_size` is set, two more outputs carry `outputs[0]`
+    quantized to int8 per `quant_block_size` group and the group scales,
+    laid out as `hip.dynamic_quant_i8` writes them. The runtime fills them
+    only when a consumer can use them (decode-sized row counts with the
+    integer dot-product matmuls on).
+
+    Example:
+    ```mlir
+    %y = hip.gated_rms_norm(%ctx)
+        ins(%x, %z, %w : tensor<1x1x4096xf16>, tensor<1x1x4096xf16>,
+                         tensor<128xf16>)
+        outs(%e : tensor<1x1x4096xf16>) {epsilon = 1.0e-06 : f32}
+        : tensor<1x1x4096xf16>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,             // f16 [..., G * D]
+    Hip_TensorOrMemRef:$gate,              // f16 [..., G * D]
+    Hip_TensorOrMemRef:$weight,            // f16 [D]
+    // [output] or [output, output_q, output_scale] with quant_block_size
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    F32Attr:$epsilon,
+    OptionalAttr<I64Attr>:$quant_block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $gate `,` $weight `:`
+        type($input) `,` type($gate) `,` type($weight) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
+  }];
+}
+
 def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,

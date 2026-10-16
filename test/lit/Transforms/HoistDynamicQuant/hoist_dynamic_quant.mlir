@@ -89,6 +89,34 @@ func.func @two_consumers(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
 
 // -----
 
+// A gated norm writes the quantization of its output for even a single
+// consumer, which then needs no launch of its own.
+// CHECK-LABEL: func.func @gated_norm_producer
+// CHECK: %[[EQ:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x64xi8>
+// CHECK: %[[ES:.*]] = tensor.empty(%{{.*}}) : tensor<1x?x2xf32>
+// CHECK: %[[N:.*]]:3 = hip.gated_rms_norm(%{{[^)]*}}) ins(
+// CHECK-SAME: outs(%{{[^,]*}}, %[[EQ]], %[[ES]] :
+// CHECK-SAME: quant_block_size = 32 : i64
+// CHECK: hip.matmul_nbits(%{{.*}}) ins(%[[N]]#0,
+// CHECK-SAME: a_quant(%[[N]]#1, %[[N]]#2 : tensor<1x?x64xi8>, tensor<1x?x2xf32>)
+// CHECK-NOT: hip.dynamic_quant_i8
+func.func @gated_norm_producer(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
+    %z: tensor<1x?x64xf16>, %w: tensor<32xf16>,
+    %w0: tensor<16x2x16xui8>, %s0: tensor<16x2xf16>) -> tensor<1x?x16xf16> {
+  %c1 = arith.constant 1 : index
+  %t = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %e = tensor.empty(%t) : tensor<1x?x64xf16>
+  %n = hip.gated_rms_norm(%ctx) ins(%x, %z, %w : tensor<1x?x64xf16>, tensor<1x?x64xf16>, tensor<32xf16>)
+      outs(%e : tensor<1x?x64xf16>) {epsilon = 9.99999997E-7 : f32} : tensor<1x?x64xf16>
+  %e0 = tensor.empty(%t) : tensor<1x?x16xf16>
+  %y0 = hip.matmul_nbits(%ctx) ins(%n, %w0, %s0 : tensor<1x?x64xf16>, tensor<16x2x16xui8>, tensor<16x2xf16>)
+      outs(%e0 : tensor<1x?x16xf16>)
+      {K = 64 : i64, N = 16 : i64, accuracy_level = 4 : i64, bits = 4 : i64, block_size = 32 : i64, zp_elem_size = 2 : i64} : tensor<1x?x16xf16>
+  return %y0 : tensor<1x?x16xf16>
+}
+
+// -----
+
 // A single consumer already quantizes in its own launch, so a separate one
 // would not pay.
 // CHECK-LABEL: func.func @single_consumer

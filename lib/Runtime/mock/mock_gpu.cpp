@@ -1373,6 +1373,32 @@ int wrap_skip_simplified_layer_norm(
   return 0;
 }
 
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *gate,
+                        void *weight, void *output, void *q_out,
+                        void *q_scale_out, int64_t input_num_elements,
+                        int64_t gate_num_elements, int64_t row_size,
+                        int64_t group_size, float epsilon,
+                        int64_t quant_block_size) {
+  (void)input;
+  (void)gate;
+  (void)weight;
+  (void)output;
+  (void)gate_num_elements;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gated_rms_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gated_rms_norm(input_num_elements=%lld, "
+             "row_size=%lld, group_size=%lld, epsilon=%f, quant=%s, "
+             "quant_block_size=%lld)\n",
+             (long long)input_num_elements, (long long)row_size,
+             (long long)group_size, (double)epsilon,
+             q_out && q_scale_out ? "yes" : "no", (long long)quant_block_size);
+
+  return 0;
+}
+
 int wrap_dynamic_quant_i8(RuntimeState *state, const void *A, void *q,
                           void *scale, int64_t rows, int64_t K,
                           int64_t block_size) {

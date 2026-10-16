@@ -32,65 +32,22 @@
 
 #include "linear_attention_input_fusion.hpp"
 
-#include "hip/Dialect/IR/HipDialect.h"
+#include "fusion_utils.hpp"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
-
-#include <optional>
 
 namespace hip {
 namespace fusion_transform {
 namespace {
 
+using namespace utils;
 using mlir::hip::AddOp;
 using mlir::hip::CastOp;
 using mlir::hip::ConstantOp;
 using mlir::hip::LinearAttentionOp;
 using mlir::hip::MulOp;
-using mlir::hip::RmsNormOp;
 using mlir::hip::SigmoidOp;
 using mlir::hip::SoftplusOp;
-
-// ONNX TensorProto element types used by hip.cast's `to`.
-constexpr int64_t kOnnxFloat = 1;
-constexpr int64_t kOnnxFloat16 = 10;
-
-// True when every use is either `consumer` or a tensor.dim.
-bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
-  mlir::Operation *seen = nullptr;
-  for (mlir::OpOperand &use : value.getUses()) {
-    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
-      continue;
-    if (seen)
-      return false;
-    seen = use.getOwner();
-  }
-  return seen == consumer;
-}
-
-template <typename OpT>
-bool matchEither(mlir::Value lhs, mlir::Value rhs, OpT &op,
-                 mlir::Value &other) {
-  if ((op = lhs.getDefiningOp<OpT>())) {
-    other = rhs;
-    return true;
-  }
-  if ((op = rhs.getDefiningOp<OpT>())) {
-    other = lhs;
-    return true;
-  }
-  return false;
-}
-
-mlir::RankedTensorType rankedType(mlir::Value v) {
-  return mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
-}
 
 // Value of an inline floating-point splat hip.constant, widened to f32.
 std::optional<float> splatValue(mlir::Value v) {
@@ -107,64 +64,6 @@ std::optional<float> splatValue(mlir::Value v) {
   value.convert(llvm::APFloat::IEEEsingle(),
                 llvm::APFloat::rmNearestTiesToEven, &losesInfo);
   return value.convertToFloat();
-}
-
-// Shape queries of `old` ask only for axes it shares with `replacement`:
-// static axes, or dynamic ones ahead of the replacement's last axis.
-bool shapeQueriesRetargetable(mlir::Value old, mlir::Value replacement) {
-  auto oldType = rankedType(old);
-  auto newType = rankedType(replacement);
-  if (!oldType || !newType)
-    return false;
-  for (mlir::Operation *user : old.getUsers()) {
-    auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(user);
-    if (!dim)
-      continue;
-    std::optional<int64_t> index = dim.getConstantIndex();
-    if (!index || *index >= oldType.getRank())
-      return false;
-    if (oldType.isDynamicDim(*index) && *index >= newType.getRank() - 1)
-      return false;
-  }
-  return true;
-}
-
-void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value old,
-                          mlir::Value replacement) {
-  auto oldType = mlir::cast<mlir::RankedTensorType>(old.getType());
-  for (mlir::OpOperand &use : llvm::make_early_inc_range(old.getUses())) {
-    auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(use.getOwner());
-    if (!dim)
-      continue;
-    int64_t index = *dim.getConstantIndex();
-    rewriter.setInsertionPoint(dim);
-    if (oldType.isDynamicDim(index))
-      rewriter.modifyOpInPlace(dim, [&] { use.set(replacement); });
-    else
-      rewriter.replaceOp(dim, mlir::arith::ConstantIndexOp::create(
-                                  rewriter, dim.getLoc(),
-                                  oldType.getDimSize(index)));
-  }
-}
-
-// Erase `chain` (consumers before producers, each left with no uses) and
-// the destinations only they used.
-void eraseChain(mlir::PatternRewriter &rewriter,
-                llvm::ArrayRef<mlir::Operation *> chain) {
-  llvm::SmallVector<mlir::Operation *> inits;
-  for (mlir::Operation *op : chain) {
-    if (auto dps = mlir::dyn_cast<mlir::DestinationStyleOpInterface>(op))
-      for (mlir::Value init : dps.getDpsInits())
-        if (mlir::Operation *def = init.getDefiningOp())
-          inits.push_back(def);
-    rewriter.eraseOp(op);
-  }
-  llvm::SmallPtrSet<mlir::Operation *, 8> dropped;
-  for (mlir::Operation *def : inits)
-    if (!dropped.contains(def) && mlir::isOpTriviallyDead(def)) {
-      dropped.insert(def);
-      rewriter.eraseOp(def);
-    }
 }
 
 // The rewritable parts of a hip.linear_attention.
@@ -196,23 +95,9 @@ void replaceWith(mlir::PatternRewriter &rewriter, LinearAttentionOp op,
   rewriter.replaceOp(op, fused->getResults());
 }
 
-bool isF16(mlir::Value v) {
-  auto t = rankedType(v);
-  return t && t.getElementType().isF16();
-}
-
 //===----------------------------------------------------------------------===//
 // q/k head norms and q scale
 //===----------------------------------------------------------------------===//
-
-// collapse(hip.rms_norm(expand(x) : [..., H, d], weight [d])) with the
-// expand splitting and the collapse merging only the last axis.
-struct HeadNorm {
-  mlir::Value input;
-  mlir::Value weight;
-  float epsilon;
-  llvm::SmallVector<mlir::Operation *, 3> chain; // collapse, norm, expand
-};
 
 // q and k norms use one weight: the same value or equal splats.
 bool sameWeight(mlir::Value a, mlir::Value b) {
@@ -221,52 +106,6 @@ bool sameWeight(mlir::Value a, mlir::Value b) {
   std::optional<float> sa = splatValue(a);
   std::optional<float> sb = splatValue(b);
   return sa && sb && *sa == *sb && a.getType() == b.getType();
-}
-
-bool splitsLastAxisOnly(llvm::ArrayRef<mlir::ReassociationIndices> groups,
-                        int64_t rank) {
-  if ((int64_t)groups.size() != rank)
-    return false;
-  for (int64_t i = 0; i + 1 < rank; ++i)
-    if (groups[i].size() != 1 || groups[i][0] != i)
-      return false;
-  return groups.back().size() == 2 && groups.back()[0] == rank - 1;
-}
-
-std::optional<HeadNorm> matchHeadNorm(mlir::Value v, mlir::Operation *consumer,
-                                      int64_t dk, mlir::Value ctx) {
-  auto collapse = v.getDefiningOp<mlir::tensor::CollapseShapeOp>();
-  if (!collapse || !hasSingleValueUse(v, consumer))
-    return std::nullopt;
-  auto norm = collapse.getSrc().getDefiningOp<RmsNormOp>();
-  if (!norm || norm.getCtx() != ctx ||
-      !hasSingleValueUse(norm->getResult(0), collapse))
-    return std::nullopt;
-  auto expand = norm.getInput().getDefiningOp<mlir::tensor::ExpandShapeOp>();
-  if (!expand || !hasSingleValueUse(expand.getResult(), norm))
-    return std::nullopt;
-
-  auto inType = rankedType(expand.getSrc());
-  auto headType = rankedType(expand.getResult());
-  if (!inType || !headType || !isF16(expand.getSrc()) ||
-      collapse.getResult().getType() != inType ||
-      headType.getDimSize(headType.getRank() - 1) != dk ||
-      !splitsLastAxisOnly(collapse.getReassociationIndices(),
-                          inType.getRank()) ||
-      !splitsLastAxisOnly(expand.getReassociationIndices(), inType.getRank()))
-    return std::nullopt;
-  const int64_t axis = norm.getAxis();
-  if (axis != -1 && axis != headType.getRank() - 1)
-    return std::nullopt;
-  auto weightType = rankedType(norm.getScale());
-  if (!weightType || weightType.getRank() != 1 ||
-      weightType.getDimSize(0) != dk || !isF16(norm.getScale()))
-    return std::nullopt;
-
-  HeadNorm match{expand.getSrc(), norm.getScale(),
-                 norm.getEpsilon().convertToFloat(), {}};
-  match.chain = {collapse, norm, expand};
-  return match;
 }
 
 struct QkNormFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
@@ -303,11 +142,10 @@ struct QkNormFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
     if (!qScale)
       qMul = nullptr;
 
-    std::optional<HeadNorm> qNorm =
-        matchHeadNorm(q, qMul ? qMul.getOperation() : op.getOperation(), dk,
-                      ctx);
-    std::optional<HeadNorm> kNorm = matchHeadNorm(op.getKey(), op, dk, ctx);
-    if (!qNorm || !kNorm)
+    std::optional<HeadNorm> qNorm = matchHeadNorm(
+        q, qMul ? qMul.getOperation() : op.getOperation(), ctx);
+    std::optional<HeadNorm> kNorm = matchHeadNorm(op.getKey(), op, ctx);
+    if (!qNorm || !kNorm || qNorm->headSize != dk || kNorm->headSize != dk)
       return rewriter.notifyMatchFailure(op, "q/k are not head-normalized");
     if (!sameWeight(qNorm->weight, kNorm->weight) ||
         qNorm->epsilon != kNorm->epsilon)

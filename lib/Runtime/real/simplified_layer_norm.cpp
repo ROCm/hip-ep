@@ -117,3 +117,56 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return hip_rms_norm(hipdnn_ep_state_get_stream(state), input, scale, output,
                       num_rows, norm_size, scale_rows, epsilon, hip_dtype);
 }
+
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *gate,
+                        void *weight, void *output, void *q_out,
+                        void *q_scale_out, int64_t input_num_elements,
+                        int64_t gate_num_elements, int64_t row_size,
+                        int64_t group_size, float epsilon,
+                        int64_t quant_block_size) {
+  OP_PROFILE(
+      "gated_rms_norm",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld",
+                 (long long)(group_size > 0 ? input_num_elements / group_size
+                                            : 0),
+                 (long long)group_size);
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !input || !gate || !weight || !output) {
+    fprintf(stderr, "wrap_gated_rms_norm: null required argument\n");
+    return -1;
+  }
+  // The fused chain multiplied same-shaped tensors; a gate that would have
+  // broadcast is not this op.
+  if (gate_num_elements != input_num_elements || row_size <= 0 ||
+      group_size <= 0 || row_size % group_size != 0 ||
+      input_num_elements % row_size != 0) {
+    fprintf(stderr,
+            "wrap_gated_rms_norm: input=%lld gate=%lld row=%lld group=%lld\n",
+            (long long)input_num_elements, (long long)gate_num_elements,
+            (long long)row_size, (long long)group_size);
+    return -1;
+  }
+
+  const int64_t rows = input_num_elements / row_size;
+  const bool quant = q_out && q_scale_out && quant_block_size > 0 &&
+                     hipdnn_ep_matmul_prequant_active(rows);
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int rc = hip_gated_rms_norm(stream, input, gate, weight, output,
+                              quant ? q_out : nullptr,
+                              quant ? q_scale_out : nullptr, rows, row_size,
+                              group_size, epsilon, quant_block_size);
+  if (rc != hipErrorNotSupported || !quant)
+    return rc;
+  // The norm cannot quantize this layout; quantize its output separately.
+  rc = hip_gated_rms_norm(stream, input, gate, weight, output, nullptr,
+                          nullptr, rows, row_size, group_size, epsilon, 0);
+  if (rc != 0)
+    return rc;
+  return hip_matmul_nbits_quant_act_i8(stream, output, q_out, q_scale_out,
+                                       rows, row_size, quant_block_size);
+}

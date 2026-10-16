@@ -128,6 +128,96 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// hip.gated_rms_norm: every `group`-wide slice of the input is one item, R
+// threads per item and kRmsNormBlockSize / R items per block. R covers the
+// half2 pairs of a group in one stride when the group fits (R >= group / 2),
+// so the R-wide tree adds the same partials in the same order as
+// hip_rms_norm_kernel's 256-wide one, whose other lanes hold zeros: n is
+// bit-identical. The gate then repeats hip.sigmoid, hip.mul and hip.cast in
+// fp32.
+//
+// QUANT (group % 32 == 0) also quantizes y as hip_skip_rms_norm_kernel does:
+// a 32-element quantization group is 16 lanes of one item, aligned to 16.
+template <int R, bool QUANT>
+__global__ void __launch_bounds__(kRmsNormBlockSize)
+    hip_gated_rms_norm_kernel(const __half2 *__restrict__ input,
+                              const __half2 *__restrict__ gate,
+                              const __half2 *__restrict__ weight,
+                              __half2 *__restrict__ output,
+                              int8_t *__restrict__ q_out,
+                              float *__restrict__ q_scale, int64_t items,
+                              int64_t groups_per_row, int64_t half_group,
+                              int64_t row_size, float epsilon) {
+  static_assert(R >= 16 && R % 16 == 0 && kRmsNormBlockSize % R == 0,
+                "an item spans whole 16-lane quantization groups");
+  __shared__ float s_reduce[kRmsNormBlockSize];
+  const int lane = threadIdx.x % R;
+  const int64_t item = static_cast<int64_t>(blockIdx.x) *
+                           (kRmsNormBlockSize / R) +
+                       threadIdx.x / R;
+  const bool active = item < items;
+  const __half2 *x2 = input + item * half_group;
+
+  float local_sumsq = 0.0f;
+  if (active)
+    for (int64_t i = lane; i < half_group; i += R) {
+      float2 v = __half22float2(x2[i]);
+      local_sumsq += v.x * v.x + v.y * v.y;
+    }
+  s_reduce[threadIdx.x] = local_sumsq;
+  __syncthreads();
+  for (int stride = R / 2; stride > 0; stride >>= 1) {
+    if (lane < stride)
+      s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
+    __syncthreads();
+  }
+  if (!active)
+    return;
+  const float inv_rms =
+      rsqrtf(s_reduce[threadIdx.x - lane] /
+                 static_cast<float>(2 * half_group) +
+             epsilon);
+
+  const __half2 *z2 = gate + item * half_group;
+  __half2 *y2 = output + item * half_group;
+  const int64_t row = item / groups_per_row;
+  const int64_t row_pair = (item % groups_per_row) * half_group;
+  for (int64_t i = lane; i < half_group; i += R) {
+    float2 v = __half22float2(x2[i]);
+    float2 g = __half22float2(weight[i]);
+    float2 r;
+    r.x = v.x * inv_rms * g.x;
+    r.y = v.y * inv_rms * g.y;
+    const float2 n = __half22float2(__float22half2_rn(r));
+    const float2 z = __half22float2(z2[i]);
+    const float sx = 1.0f / (1.0f + expf(-z.x));
+    const float sy = 1.0f / (1.0f + expf(-z.y));
+    float2 o;
+    o.x = n.x * (z.x * sx);
+    o.y = n.y * (z.y * sy);
+    const __half2 yh = __float22half2_rn(o);
+    y2[i] = yh;
+    if constexpr (QUANT) {
+      const float2 y = __half22float2(yh);
+      float m = fmaxf(fabsf(y.x), fabsf(y.y));
+      for (int off = 8; off > 0; off >>= 1)
+        m = fmaxf(m, __shfl_xor(m, off, 16));
+      const float inv_scale = (m > 0.0f) ? (127.0f / m) : 0.0f;
+      const int q0 = max(-127, min(127, __float2int_rn(y.x * inv_scale)));
+      const int q1 = max(-127, min(127, __float2int_rn(y.y * inv_scale)));
+      // Elements 2p (even) and 2p+1 (odd) of chunk p/4 of the row.
+      const int64_t p = row_pair + i;
+      int8_t *q_row = q_out + row * row_size;
+      const int64_t base = (p >> 2) * 8 + (p & 3);
+      q_row[base] = static_cast<int8_t>(q0);
+      q_row[base + 4] = static_cast<int8_t>(q1);
+      if ((p & 15) == 0)
+        q_scale[row * (row_size / 32) + (p >> 4)] =
+            (m > 0.0f) ? (m * (1.0f / 127.0f)) : 1.0f;
+    }
+  }
+}
+
 // Packed __half2 requires an even row and 4-byte aligned bases. Row starts stay
 // aligned across rows when norm_size is even, so checking the bases is enough.
 inline bool rms_can_vectorize(const void *input, const void *scale,
@@ -204,6 +294,83 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+namespace {
+
+template <int R>
+void launch_gated_rms_norm(hipStream_t stream, const void *input,
+                           const void *gate, const void *weight, void *output,
+                           void *q_out, void *q_scale, int64_t items,
+                           int64_t groups_per_row, int64_t half_group,
+                           int64_t row_size, float epsilon) {
+  constexpr int64_t kItemsPerBlock = kRmsNormBlockSize / R;
+  dim3 grid(
+      static_cast<unsigned int>((items + kItemsPerBlock - 1) / kItemsPerBlock));
+  auto args = [&](auto kernel) {
+    hipLaunchKernelGGL(kernel, grid, dim3(kRmsNormBlockSize), 0, stream,
+                       static_cast<const __half2 *>(input),
+                       static_cast<const __half2 *>(gate),
+                       static_cast<const __half2 *>(weight),
+                       static_cast<__half2 *>(output),
+                       static_cast<int8_t *>(q_out),
+                       static_cast<float *>(q_scale), items, groups_per_row,
+                       half_group, row_size, epsilon);
+  };
+  if (q_out)
+    args(hip_gated_rms_norm_kernel<R, true>);
+  else
+    args(hip_gated_rms_norm_kernel<R, false>);
+}
+
+} // namespace
+
+extern "C" int hip_gated_rms_norm(void *stream, const void *input,
+                                  const void *gate, const void *weight,
+                                  void *output, void *q_out, void *q_scale,
+                                  int64_t rows, int64_t row_size,
+                                  int64_t group_size, float epsilon,
+                                  int64_t quant_block_size) {
+  auto aligned = [](const void *p) {
+    return (reinterpret_cast<uintptr_t>(p) % 4) == 0;
+  };
+  if (group_size <= 0 || group_size % 2 != 0 || row_size % group_size != 0 ||
+      !aligned(input) || !aligned(gate) || !aligned(weight) || !aligned(output))
+    return hipErrorNotSupported;
+  if ((q_out != nullptr) != (q_scale != nullptr) ||
+      (q_out && (quant_block_size != 32 || group_size % 32 != 0)))
+    return hipErrorNotSupported;
+  if (rows <= 0)
+    return 0;
+
+  const int64_t half_group = group_size / 2;
+  const int64_t groups_per_row = row_size / group_size;
+  const int64_t items = rows * groups_per_row;
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
+  if (half_group <= 32)
+    launch_gated_rms_norm<32>(hip_stream, input, gate, weight, output, q_out,
+                              q_scale, items, groups_per_row, half_group,
+                              row_size, epsilon);
+  else if (half_group <= 64)
+    launch_gated_rms_norm<64>(hip_stream, input, gate, weight, output, q_out,
+                              q_scale, items, groups_per_row, half_group,
+                              row_size, epsilon);
+  else if (half_group <= 128)
+    launch_gated_rms_norm<128>(hip_stream, input, gate, weight, output, q_out,
+                               q_scale, items, groups_per_row, half_group,
+                               row_size, epsilon);
+  else
+    launch_gated_rms_norm<256>(hip_stream, input, gate, weight, output, q_out,
+                               q_scale, items, groups_per_row, half_group,
+                               row_size, epsilon);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_gated_rms_norm launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

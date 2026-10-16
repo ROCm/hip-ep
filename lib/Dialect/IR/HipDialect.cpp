@@ -1207,6 +1207,60 @@ LogicalResult SkipRmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// GatedRmsNormOp: ins(input, gate, weight) outs(output, [q, scale])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedRmsNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void GatedRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedRmsNormOp::verify() {
+  const size_t outputs = getOutputs().size();
+  if (outputs != (hasQuantOutputs() ? 3u : 1u))
+    return emitOpError("expected the output")
+           << (hasQuantOutputs() ? " and the quantized pair" : "")
+           << " as outputs, got " << outputs;
+  if (hasQuantOutputs() && *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size must be positive");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  auto outputType = cast<ShapedType>(getOutputs()[0].getType());
+  if (!inputType.getElementType().isF16() ||
+      getGate().getType() != getInput().getType() ||
+      outputType.getShape() != inputType.getShape() ||
+      outputType.getElementType() != inputType.getElementType() ||
+      weightType.getElementType() != inputType.getElementType())
+    return emitOpError("input, gate, weight and output must be f16, and "
+                       "input, gate and output must share a shape");
+  if (inputType.getRank() < 1 || weightType.getRank() != 1 ||
+      weightType.isDynamicDim(0) || inputType.isDynamicDim(inputType.getRank() - 1))
+    return emitOpError("needs a static last axis and a static 1-D weight");
+  const int64_t group = weightType.getDimSize(0);
+  const int64_t width = inputType.getDimSize(inputType.getRank() - 1);
+  if (group <= 0 || group % 2 != 0 || width % group != 0)
+    return emitOpError("the last axis (")
+           << width << ") must be a multiple of the even weight size ("
+           << group << ")";
+
+  SmallVector<Value> dataOperands = {getInput(), getGate(), getWeight()};
+  llvm::append_range(dataOperands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/static_cast<unsigned>(outputs))))
+    return failure();
+  if (!hasQuantOutputs())
+    return success();
+  return verifyActivationQuant(*this, getOutputs()[1], getOutputs()[2],
+                               "quant outputs");
+}
+
+//===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
 //===----------------------------------------------------------------------===//
 
