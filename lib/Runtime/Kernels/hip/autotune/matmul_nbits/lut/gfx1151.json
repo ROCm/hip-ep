@@ -107,7 +107,7 @@
  ],
  "fallbacks": [
   {"bits": "B4", "config": 2, "phase": "Decode"},
-  {"bits": "B4", "config": 15, "phase": "DecodeDp4a"},
+  {"bits": "B4", "config": 17, "phase": "DecodeDp4a"},
   {"bits": "B4", "config": 41, "phase": "Prefill"}
  ],
  "points": [

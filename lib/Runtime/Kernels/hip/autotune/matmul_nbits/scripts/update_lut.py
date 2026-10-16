@@ -562,7 +562,14 @@ def cmd_merge(args) -> int:
     only if the new winner is at least --min-gain faster than the row's current
     config *in the same sweep*; a near-tie stays put, so a regeneration diff
     shows real changes rather than timing noise. Points the table did not have
-    are added. The phase fallback follows the same rule on its geomean slowdown.
+    are added.
+
+    The phase fallback is kept unless --update-fallback is given. It only
+    answers keys nothing was measured for (a group size absent from the
+    table), so a geomean over the measured shapes is no evidence for it:
+    moving the gfx1151 DecodeDp4a fallback from 32x1 to 64x1 on that basis
+    made Nemotron-3.5-Lightning (all G64) 3% slower in-model. With the flag it
+    follows the same --min-gain rule on its geomean slowdown.
     """
     readings = load_readings(args)
     if readings is None:
@@ -616,9 +623,10 @@ def cmd_merge(args) -> int:
             g_cur, g_new = (_geomean_slowdown(cur, pts),
                             _geomean_slowdown(new_fb, pts))
             if new_fb != cur and g_cur >= gain * g_new:
-                fb_rows.append((r, new_fb))
                 fb_change = (cur, new_fb, g_cur, g_new)
-                continue
+                if args.update_fallback:
+                    fb_rows.append((r, new_fb))
+                    continue
         fb_rows.append((r, None))
 
     # Existing pool indices and row order are kept and new configs appended, so
@@ -657,8 +665,10 @@ def cmd_merge(args) -> int:
                  f"changed, {kept_ties} kept as near-ties.", ""]
         if fb_change:
             cur, new, g_cur, g_new = fb_change
-            lines += [f"Fallback: {_fmt_answer(cur)} -> {_fmt_answer(new)} "
-                      f"(geomean slowdown {g_cur:.3f}x -> {g_new:.3f}x)", ""]
+            verb = "->" if args.update_fallback else "kept; candidate"
+            lines += [f"Fallback: {_fmt_answer(cur)} {verb} {_fmt_answer(new)} "
+                      f"(geomean slowdown over the measured shapes {g_cur:.3f}x "
+                      f"-> {g_new:.3f}x)", ""]
         lines += ["| group | M | N | K | old | new | old ms | new ms | gain |",
                   "|---|---|---|---|---|---|---|---|---|"]
         for (grp, m, n, k), cur, new, t_cur, t_new in sorted(
@@ -826,6 +836,10 @@ def main() -> int:
                          "winner over the row's current config")
     ap.add_argument("--report", default=None,
                     help="build --merge-existing: write a markdown diff here")
+    ap.add_argument("--update-fallback", action="store_true",
+                    help="build --merge-existing: also move the phase fallback; "
+                         "it serves only unmeasured group sizes, so check those "
+                         "in-model first")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
