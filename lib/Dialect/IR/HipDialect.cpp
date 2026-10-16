@@ -2333,20 +2333,56 @@ void GemmOp::getEffects(
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange LinearAttentionOp::getDpsInitsMutable() {
-  // Operand segments:
-  //   ctx(1), query(1), key(1), value(1),
-  //   past_state(0|1), decay(0|1), beta(0|1),
-  //   output(1), present_state(1)
-  unsigned numInputs = 4; // ctx, query, key, value
-  if (getPastState())
-    ++numInputs;
-  if (getDecay())
-    ++numInputs;
-  if (getBeta())
-    ++numInputs;
+  // DPS inits: output, present_state (always 2, adjacent)
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
+}
 
-  // DPS inits: output, present_state (always 2)
-  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+LogicalResult LinearAttentionOp::verify() {
+  if (!getKey() != !getValue())
+    return emitOpError("key and value must be both present or both absent");
+  if (!getDecayBias() != !getDecayScale())
+    return emitOpError("decay_bias and decay_scale go together");
+
+  auto elemType = getElementTypeOrSelf(getQuery().getType());
+  const bool prepares = isPackedQKV() || getQkNormWeight() || getDecayBias() ||
+                        getBetaSigmoid() || getQScale().convertToFloat() != 1.f;
+  if (prepares && !elemType.isF16())
+    return emitOpError("input preparation requires f16 inputs");
+
+  if (Value weight = getQkNormWeight()) {
+    auto t = dyn_cast<ShapedType>(weight.getType());
+    auto stateType = dyn_cast<ShapedType>(getPresentState().getType());
+    if (!t || !t.hasRank() || t.getRank() != 1 ||
+        t.getElementType() != elemType)
+      return emitOpError("qk_norm weight must be a 1-D tensor of the input "
+                         "element type");
+    if (stateType && stateType.hasRank() && stateType.getRank() == 4 &&
+        !t.isDynamicDim(0) && !stateType.isDynamicDim(2) &&
+        t.getDimSize(0) != stateType.getDimSize(2))
+      return emitOpError("qk_norm weight must have d_k elements");
+  }
+
+  if (getDecayBias()) {
+    if (!getDecay())
+      return emitOpError("decay_softplus requires decay");
+    const int64_t hkv = getKvNumHeads();
+    auto decayType = dyn_cast<ShapedType>(getDecay().getType());
+    if (!decayType || !decayType.hasRank() ||
+        decayType.getShape().back() != hkv)
+      return emitOpError("decay_softplus requires per-head decay [B, T, ")
+             << hkv << "]";
+    for (Value v : {getDecayBias(), getDecayScale()}) {
+      auto t = dyn_cast<ShapedType>(v.getType());
+      if (!t || !t.hasRank() || t.getRank() != 1 || t.getDimSize(0) != hkv ||
+          !t.getElementType().isF32())
+        return emitOpError("decay_bias / decay_scale must be f32 [")
+               << hkv << "]";
+    }
+  }
+  if (getBetaSigmoid() && !getBeta())
+    return emitOpError("beta_sigmoid requires beta");
+  return success();
 }
 
 void LinearAttentionOp::getEffects(

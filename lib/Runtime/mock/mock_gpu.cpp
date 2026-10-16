@@ -610,13 +610,16 @@ int wrap_multi_head_attention(
 int wrap_linear_attention(RuntimeState *state, const void *query,
                           const void *key, const void *value,
                           const void *past_state, const void *decay,
-                          const void *beta, void *output, void *present_state,
-                          int64_t Hq, int64_t Hkv, int64_t Nk,
-                          int64_t decay_per_key_dim, int64_t beta_per_head,
-                          float scale, int64_t chunk_size, int64_t update_rule,
-                          int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
-                          int64_t type) {
-  if (!state || !query || !key || !value || !output || !present_state) {
+                          const void *beta, const void *decay_bias,
+                          const void *decay_scale, const void *qk_norm_weight,
+                          void *output, void *present_state, int64_t Hq,
+                          int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
+                          int64_t beta_per_head, float scale,
+                          int64_t chunk_size, int64_t update_rule, int64_t B,
+                          int64_t seq_len, int64_t dk, int64_t dv, int64_t type,
+                          float qk_norm_epsilon, float q_scale,
+                          int64_t beta_sigmoid) {
+  if (!state || !query || !key != !value || !output || !present_state) {
     fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
     return -1;
   }
@@ -651,9 +654,15 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
              (double)scale, (long long)chunk_size, rule_name,
              (long long)update_rule);
   MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
-  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
+  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s,\n",
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   packed_qkv=%s, qk_norm=%s(eps=%g), q_scale=%f, "
+             "decay_softplus=%s, beta_sigmoid=%lld)\n",
+             key ? "no" : "yes", qk_norm_weight ? "yes" : "no",
+             (double)qk_norm_epsilon, (double)q_scale,
+             decay_bias && decay_scale ? "yes" : "no",
+             (long long)beta_sigmoid);
 
   return 0;
 }
