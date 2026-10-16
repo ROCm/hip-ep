@@ -2183,6 +2183,18 @@ void QMoEOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult QMoEOp::verify() {
+  Value shared[] = {getSharedGateWeights(), getSharedGateScales(),
+                    getSharedUpWeights(),   getSharedUpScales(),
+                    getSharedDownWeights(), getSharedDownScales(),
+                    getSharedGateLogit()};
+  unsigned present = llvm::count_if(shared, [](Value v) { return bool(v); });
+  if (present != 0 && present != std::size(shared))
+    return emitOpError("shared expert needs all seven operands or none, got ")
+           << present;
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEAmdOp
 //===----------------------------------------------------------------------===//

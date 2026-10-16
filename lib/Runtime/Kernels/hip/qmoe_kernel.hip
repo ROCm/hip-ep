@@ -1248,6 +1248,34 @@ __global__ void qmoe_decode_reduce_kernel(
   output[n] = static_cast<__half>(acc);
 }
 
+__global__ void qmoe_shared_combine_kernel(
+    __half*       __restrict__ output,      // [T, hidden]
+    const __half* __restrict__ shared_out,  // [T, hidden]
+    const __half* __restrict__ gate_logit,  // [T]
+    int64_t total, int hidden) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  const float g = static_cast<float>(gate_logit[i / hidden]);
+  const float wt = 1.0f / (1.0f + expf(-g));
+  output[i] = static_cast<__half>(static_cast<float>(output[i]) +
+                                  wt * static_cast<float>(shared_out[i]));
+}
+
+extern "C" int hip_qmoe_shared_combine(
+    void* stream, void* output, const void* shared_out,
+    const void* gate_logit, int64_t num_tokens, int64_t hidden_size) {
+  const int64_t total = num_tokens * hidden_size;
+  if (total <= 0) return 0;
+  const int grid = static_cast<int>((total + kBlock - 1) / kBlock);
+  hipLaunchKernelGGL(qmoe_shared_combine_kernel, dim3(grid), dim3(kBlock), 0,
+                     static_cast<hipStream_t>(stream),
+                     static_cast<__half*>(output),
+                     static_cast<const __half*>(shared_out),
+                     static_cast<const __half*>(gate_logit), total,
+                     static_cast<int>(hidden_size));
+  return static_cast<int>(hipGetLastError());
+}
+
 // ---------------------------------------------------------------------------
 // Decode launchers. Hand-picked BLOCK_SIZE=256, TILE_N=8 (a strong default
 // for matmul_nbits autotune at gpt-oss-20b shapes; can later wrap in a
@@ -1679,9 +1707,26 @@ __global__ void qmoe_quant_act_i8_kernel(
   }
 }
 
+// The shared expert's weights, passed by value. gate_w == nullptr means the
+// launch has only routed slots.
+struct QmoeSharedExpert {
+  const uint8_t* gate_w;  // [inter, hidden/2]
+  const __half*  gate_s;  // [inter, n_blk_in]
+  const uint8_t* up_w;
+  const __half*  up_s;
+  const uint8_t* down_w;  // [hidden, inter/2]
+  const __half*  down_s;  // [hidden, n_blk_mid]
+  const __half*  logit;   // [1]
+};
+
 // FC1 + SwiGLU, dp4a. a_qb/a_scale are the quantized [hidden] input (shared
 // across slots). Output/SwiGLU/reduction logic is identical to
 // qmoe_decode_fc1_kernel; only the dot loop uses sudot4.
+//
+// Slot k_routed, when launched, is the shared expert: its gate and up are
+// separate [inter, hidden/2] matrices, so even output columns read gate row
+// n/2 and odd ones up row n/2 -- the interleaved layout the routed experts
+// store. It has no bias and a plain silu(gate) * up.
 template <int BLOCK_SIZE, int TILE_N>
 __global__ void qmoe_decode_fc1_dp4a_kernel(
     const int8_t*  __restrict__ a_qb,            // [hidden] deinterleaved int8
@@ -1691,22 +1736,30 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
     const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, ceil/2] or null
     const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
-    __half*        __restrict__ act_out,         // [k, inter]
+    __half*        __restrict__ act_out,         // [slots, inter]
     int hidden, int fusion_inter, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int k_routed, QmoeSharedExpert sh) {
   const int n_base = blockIdx.x * TILE_N;
   const int slot   = blockIdx.y;
   const int tid    = threadIdx.x;
-  const int E      = expert_indices[slot];
+  const bool shared = slot >= k_routed;
+  const int E      = shared ? 0 : expert_indices[slot];
 
   const size_t   W_row_bytes = static_cast<size_t>(hidden) / 2;
   const uint8_t* W = fc1_w + static_cast<size_t>(E) * fusion_inter * W_row_bytes;
   const __half*  S = fc1_s + static_cast<size_t>(E) * fusion_inter * n_blk_in;
   const int      packed_zp_stride = (n_blk_in + 1) / 2;
-  const uint8_t* Z = fc1_zp_packed
+  const uint8_t* Z = (fc1_zp_packed && !shared)
                        ? fc1_zp_packed + static_cast<size_t>(E) * fusion_inter * packed_zp_stride
                        : nullptr;
-  const __half*  Bv = fc1_b ? fc1_b + static_cast<size_t>(E) * fusion_inter : nullptr;
+  const __half*  Bv = (fc1_b && !shared)
+                       ? fc1_b + static_cast<size_t>(E) * fusion_inter : nullptr;
+  if (shared) {
+    swiglu_alpha = 1.0f;
+    swiglu_beta = 0.0f;
+    swiglu_limit = INFINITY;
+  }
   const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
 
   float partial[TILE_N];
@@ -1720,8 +1773,14 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
   for (int t = 0; t < TILE_N; t++) {
     int n  = n_base + t;
     int sn = (n < fusion_inter) ? n : 0;
-    W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
-    S_rows[t] = S + static_cast<size_t>(sn) * n_blk_in;
+    if (shared) {
+      const size_t r = static_cast<size_t>(sn >> 1);
+      W_rows[t] = ((t & 1) ? sh.up_w : sh.gate_w) + r * W_row_bytes;
+      S_rows[t] = ((t & 1) ? sh.up_s : sh.gate_s) + r * n_blk_in;
+    } else {
+      W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+      S_rows[t] = S + static_cast<size_t>(sn) * n_blk_in;
+    }
     Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
   }
   const bool has_zp = (Z != nullptr);
@@ -1842,37 +1901,46 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
   }
 }
 
-// FC2, dp4a. a_qb/a_scale are the quantized [k, inter] slot activations
+// FC2, dp4a. a_qb/a_scale are the quantized [slots, inter] slot activations
 // (per-slot). Weighted write to slot_buf is identical to qmoe_decode_fc2_kernel.
+// The shared-expert slot (k_routed) reads the shared down projection and is
+// weighted by sigmoid(logit), so the reduce stays a plain sum over slots.
 template <int BLOCK_SIZE, int TILE_N>
 __global__ void qmoe_decode_fc2_dp4a_kernel(
-    const int8_t*  __restrict__ a_qb,            // [k, inter] deinterleaved int8
-    const float*   __restrict__ a_scale,         // [k, n_blk_mid]
+    const int8_t*  __restrict__ a_qb,            // [slots, inter] deinterleaved int8
+    const float*   __restrict__ a_scale,         // [slots, n_blk_mid]
     const int32_t* __restrict__ expert_indices,  // [k]
     const __half*  __restrict__ expert_weights,  // [k]
     const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
     const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
     const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil/2] or null
     const __half*  __restrict__ fc2_b,           // [E, hidden] or null
-    __half*        __restrict__ slot_buf,        // [k, hidden]
-    int inter, int hidden, int n_blk_mid, int block_size) {
+    __half*        __restrict__ slot_buf,        // [slots, hidden]
+    int inter, int hidden, int n_blk_mid, int block_size,
+    int k_routed, QmoeSharedExpert sh) {
   const int n_base = blockIdx.x * TILE_N;
   const int slot   = blockIdx.y;
   const int tid    = threadIdx.x;
-  const int E      = expert_indices[slot];
-  const float wt   = static_cast<float>(expert_weights[slot]);
+  const bool shared = slot >= k_routed;
+  const int E      = shared ? 0 : expert_indices[slot];
+  const float wt   = shared
+      ? 1.0f / (1.0f + expf(-static_cast<float>(sh.logit[0])))
+      : static_cast<float>(expert_weights[slot]);
 
   const int8_t* aq_slot = a_qb + static_cast<size_t>(slot) * inter;
   const float*  as_slot = a_scale + static_cast<size_t>(slot) * n_blk_mid;
 
   const size_t   W_row_bytes = static_cast<size_t>(inter) / 2;
-  const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
-  const __half*  S = fc2_s + static_cast<size_t>(E) * hidden * n_blk_mid;
+  const uint8_t* W = shared ? sh.down_w
+                            : fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
+  const __half*  S = shared ? sh.down_s
+                            : fc2_s + static_cast<size_t>(E) * hidden * n_blk_mid;
   const int      packed_zp_stride = (n_blk_mid + 1) / 2;
-  const uint8_t* Z = fc2_zp_packed
+  const uint8_t* Z = (fc2_zp_packed && !shared)
                        ? fc2_zp_packed + static_cast<size_t>(E) * hidden * packed_zp_stride
                        : nullptr;
-  const __half*  Bv = fc2_b ? fc2_b + static_cast<size_t>(E) * hidden : nullptr;
+  const __half*  Bv = (fc2_b && !shared)
+                       ? fc2_b + static_cast<size_t>(E) * hidden : nullptr;
   const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
 
   float partial[TILE_N];
@@ -1991,9 +2059,10 @@ static hipError_t launch_qmoe_fc1_dp4a(
     const void* a_scale, const void* expert_indices, const void* fc1_weights,
     const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
     void* act_out, int hidden_size, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    const QmoeSharedExpert& sh) {
   dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
-            static_cast<unsigned>(k));
+            static_cast<unsigned>(k + (sh.gate_w ? 1 : 0)));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_kernel<BS, TN>), grid,
                      dim3(BS), 0, s, static_cast<const int8_t*>(a_qb),
                      static_cast<const float*>(a_scale),
@@ -2004,7 +2073,7 @@ static hipError_t launch_qmoe_fc1_dp4a(
                      static_cast<const __half*>(fc1_bias),
                      static_cast<__half*>(act_out), hidden_size, fusion_inter,
                      n_blk_in, block_size, swiglu_alpha, swiglu_beta,
-                     swiglu_limit);
+                     swiglu_limit, k, sh);
   return hipGetLastError();
 }
 
@@ -2014,9 +2083,10 @@ static hipError_t launch_qmoe_fc2_dp4a(
     const void* expert_indices, const void* expert_weights,
     const void* fc2_weights, const void* fc2_scales,
     const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
-    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+    int inter_size, int hidden_size, int n_blk_mid, int block_size,
+    const QmoeSharedExpert& sh) {
   dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
-            static_cast<unsigned>(k));
+            static_cast<unsigned>(k + (sh.gate_w ? 1 : 0)));
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_dp4a_kernel<BS, TN>), grid,
                      dim3(BS), 0, s, static_cast<const int8_t*>(a_qb),
                      static_cast<const float*>(a_scale),
@@ -2027,7 +2097,7 @@ static hipError_t launch_qmoe_fc2_dp4a(
                      static_cast<const uint8_t*>(fc2_zero_points),
                      static_cast<const __half*>(fc2_bias),
                      static_cast<__half*>(slot_buf), inter_size, hidden_size,
-                     n_blk_mid, block_size);
+                     n_blk_mid, block_size, k, sh);
   return hipGetLastError();
 }
 
@@ -2036,19 +2106,20 @@ static hipError_t dispatch_qmoe_fc1_dp4a(
     const void* a_scale, const void* expert_indices, const void* fc1_weights,
     const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
     void* act_out, int hidden_size, int n_blk_in, int block_size,
-    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    const QmoeSharedExpert& sh) {
 #define X(B, T)                                                                \
   if (bs == (B) && tn == (T))                                                  \
     return launch_qmoe_fc1_dp4a<B, T>(                                         \
         s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,        \
         fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, \
-        block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+        block_size, swiglu_alpha, swiglu_beta, swiglu_limit, sh);
   QMOE_CFG_LIST(X)
 #undef X
   return launch_qmoe_fc1_dp4a<64, 8>(
       s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,
       fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in,
-      block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+      block_size, swiglu_alpha, swiglu_beta, swiglu_limit, sh);
 }
 
 static hipError_t dispatch_qmoe_fc2_dp4a(
@@ -2056,19 +2127,20 @@ static hipError_t dispatch_qmoe_fc2_dp4a(
     const void* a_scale, const void* expert_indices, const void* expert_weights,
     const void* fc2_weights, const void* fc2_scales,
     const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
-    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+    int inter_size, int hidden_size, int n_blk_mid, int block_size,
+    const QmoeSharedExpert& sh) {
 #define X(B, T)                                                                \
   if (bs == (B) && tn == (T))                                                  \
     return launch_qmoe_fc2_dp4a<B, T>(                                         \
         s, k, a_qb, a_scale, expert_indices, expert_weights, fc2_weights,      \
         fc2_scales, fc2_zero_points, fc2_bias, slot_buf, inter_size,           \
-        hidden_size, n_blk_mid, block_size);
+        hidden_size, n_blk_mid, block_size, sh);
   QMOE_CFG_LIST(X)
 #undef X
   return launch_qmoe_fc2_dp4a<64, 8>(
       s, k, a_qb, a_scale, expert_indices, expert_weights, fc2_weights,
       fc2_scales, fc2_zero_points, fc2_bias, slot_buf, inter_size, hidden_size,
-      n_blk_mid, block_size);
+      n_blk_mid, block_size, sh);
 }
 
 // Separate online-autotune state for the dp4a kernels (their per-config
@@ -2093,7 +2165,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes,
+    const HipQmoeSharedExpert* shared_expert) {
   if (element_size_bytes != 2) {
     fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: only fp16 "
                     "supported (got element_size %lld)\n",
@@ -2118,6 +2191,17 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
+  QmoeSharedExpert sh{};
+  if (shared_expert) {
+    sh.gate_w = static_cast<const uint8_t*>(shared_expert->gate_weights);
+    sh.gate_s = static_cast<const __half*>(shared_expert->gate_scales);
+    sh.up_w   = static_cast<const uint8_t*>(shared_expert->up_weights);
+    sh.up_s   = static_cast<const __half*>(shared_expert->up_scales);
+    sh.down_w = static_cast<const uint8_t*>(shared_expert->down_weights);
+    sh.down_s = static_cast<const __half*>(shared_expert->down_scales);
+    sh.logit  = static_cast<const __half*>(shared_expert->gate_logit);
+  }
+  const int slots = static_cast<int>(k) + (sh.gate_w ? 1 : 0);
 
   // Quantize the shared [hidden] input once (grid = n_blk_in groups x 1 row).
   {
@@ -2149,7 +2233,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
         c1.bs, c1.tn, s, static_cast<int>(k), fusion_inter, a_qb_in,
         a_scale_in, expert_indices, fc1_weights, fc1_scales, fc1_zero_points,
         fc1_bias, act_out, static_cast<int>(hidden_size), n_blk_in,
-        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit);
+        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit,
+        sh);
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc1_dp4a failed: %s\n",
               hipGetErrorString(e));
@@ -2165,9 +2250,9 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     }
   }
 
-  // Quantize the k [inter] expert-slot activations (grid = n_blk_mid x k).
+  // Quantize the [inter] slot activations (grid = n_blk_mid x slots).
   {
-    dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(k));
+    dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(slots));
     hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
                        dim3(128), 0, s, static_cast<const __half*>(act_out),
                        static_cast<int8_t*>(a_qb_mid),
@@ -2195,7 +2280,8 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
         c2.bs, c2.tn, s, static_cast<int>(k), a_qb_mid, a_scale_mid,
         expert_indices, expert_weights, fc2_weights, fc2_scales,
         fc2_zero_points, fc2_bias, slot_buf, static_cast<int>(inter_size),
-        static_cast<int>(hidden_size), n_blk_mid, static_cast<int>(block_size));
+        static_cast<int>(hidden_size), n_blk_mid, static_cast<int>(block_size),
+        sh);
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc2_dp4a failed: %s\n",
               hipGetErrorString(e));
@@ -2218,7 +2304,7 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
                        static_cast<const __half*>(slot_buf),
                        static_cast<__half*>(output),
-                       static_cast<int>(hidden_size), static_cast<int>(k));
+                       static_cast<int>(hidden_size), slots);
     hipError_t e = hipGetLastError();
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_reduce(dp4a) failed: %s\n",

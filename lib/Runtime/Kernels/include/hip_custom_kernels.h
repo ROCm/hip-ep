@@ -2969,10 +2969,27 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
+// Sigmoid-gated shared expert of a QMoE layer: plain int4 MatMulNBits
+// weights (no zero points or bias) for separate gate/up [inter, hidden/2]
+// and down [hidden, inter/2] projections, plus the fp16 [num_tokens]
+// pre-sigmoid gate logit. Contributes sigmoid(logit) * down(silu(gate) * up).
+typedef struct HipQmoeSharedExpert {
+  const void* gate_weights;
+  const void* gate_scales;
+  const void* up_weights;
+  const void* up_scales;
+  const void* down_weights;
+  const void* down_scales;
+  const void* gate_logit;
+} HipQmoeSharedExpert;
+
 // W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
-// fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// fc2 slot activations ([slots, inter]). fp16 only; block_size a multiple of
+// 32. A non-null shared_expert (same inter_size as the routed experts) runs
+// as one extra slot, so act_out, slot_buf, a_qb_mid and a_scale_mid must
+// hold k+1 slots.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,
@@ -2990,7 +3007,15 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    const HipQmoeSharedExpert* shared_expert);
+
+// output[t, n] += sigmoid(gate_logit[t]) * shared_out[t, n], fp16 in/out with
+// fp32 math. Folds a separately computed shared-expert output into the
+// routed QMoE output.
+HIP_KERNEL_API int hip_qmoe_shared_combine(
+    void* stream, void* output, const void* shared_out,
+    const void* gate_logit, int64_t num_tokens, int64_t hidden_size);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)

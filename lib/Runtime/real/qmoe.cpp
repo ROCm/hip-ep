@@ -23,12 +23,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *fc2_bias, const void *fc3_weights,
               const void *fc3_scales, const void *fc3_bias,
               const void *fc1_zero_points, const void *fc2_zero_points,
-              const void *fc3_zero_points, void *output, int64_t num_tokens,
-              int64_t hidden_size, int64_t inter_size, int64_t num_experts,
-              int64_t k, int64_t expert_weight_bits, int64_t block_size,
+              const void *fc3_zero_points, const void *shared_gate_weights,
+              const void *shared_gate_scales, const void *shared_up_weights,
+              const void *shared_up_scales, const void *shared_down_weights,
+              const void *shared_down_scales, const void *shared_gate_logit,
+              void *output, int64_t num_tokens, int64_t hidden_size,
+              int64_t inter_size, int64_t num_experts, int64_t k,
+              int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              int64_t shared_inter_size) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -57,6 +62,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   if (fc3_weights || fc3_scales || fc3_bias || fc3_zero_points) {
     fprintf(stderr, "wrap_qmoe: fc3 (unfused SwiGLU) not supported, "
                     "use swiglu_fusion=1\n");
+    return -1;
+  }
+
+  const bool has_shared = shared_gate_weights != nullptr;
+  if (has_shared &&
+      (!shared_gate_scales || !shared_up_weights || !shared_up_scales ||
+       !shared_down_weights || !shared_down_scales || !shared_gate_logit ||
+       shared_inter_size <= 0 || elem_size != 2)) {
+    fprintf(stderr, "wrap_qmoe: incomplete or non-fp16 shared expert "
+                    "(shared_inter=%lld elem=%lld)\n",
+            (long long)shared_inter_size, (long long)elem_size);
     return -1;
   }
 
@@ -101,6 +117,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t routed_rows = num_tokens * k;
 
+  // The fused decode runs the shared expert as slot k of the routed fc1/fc2
+  // launches; everything else runs it after the routed experts.
+  const bool dp4a_decode = num_tokens == 1 &&
+                           hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
+                           (block_size % 32 == 0) &&
+                           (hidden_size % 32 == 0) && (inter_size % 32 == 0);
+  const bool shared_in_slot = has_shared && dp4a_decode &&
+                              shared_inter_size == inter_size &&
+                              hipdnn_ep_qmoe_shared_fused_enabled();
+  const bool shared_separate = has_shared && !shared_in_slot;
+  const int64_t decode_slots = k + (shared_in_slot ? 1 : 0);
+
   // Grouped prefill: fc1/fc2 run as two direct-B small-M WMMA launches each
   // over a device-built row-tile list (experts of <= 16 rows as one 16-row
   // tile, larger ones as 32-row tiles) instead of the ragged persistent GEMM.
@@ -141,7 +169,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // kernel, indexed by expert_indices). For num_tokens > 1 the multi-pass
   // path uses [num_tokens, ...] sizing. Take the max so the per-state
   // scratch is never under-sized regardless of which path runs.
-  int64_t act_slots = std::max<int64_t>(routed_rows, k);
+  int64_t act_slots = std::max<int64_t>(routed_rows, decode_slots);
   size_t sz_act_buf = align_up_64(act_slots * inter_size * elem_size);
   size_t sz_fc2_buf = align_up_64(act_slots * hidden_size * elem_size);
   // Device bucket outputs: per-expert counts/offsets, sorted routed pairs,
@@ -162,8 +190,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // them. k_blocks_fc1 == n_blk_in, k_blocks_fc2 == n_blk_mid.
   size_t sz_a_qb_in = align_up_64(hidden_size * sizeof(int8_t));
   size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
-  size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
-  size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
+  size_t sz_a_qb_mid =
+      align_up_64(decode_slots * inter_size * sizeof(int8_t));
+  size_t sz_a_scale_mid =
+      align_up_64(decode_slots * k_blocks_fc2 * sizeof(float));
   // Grouped prefill only: the gathered fc1 input rows, the two row-tile lists
   // (3 int32 per tile) and their device-side lengths.
   size_t sz_gather_buf =
@@ -173,6 +203,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_tiles_big =
       grouped ? align_up_64(max_big_tiles * 3 * sizeof(int32_t)) : 0;
   size_t sz_num_tiles = grouped ? align_up_64(2 * sizeof(int32_t)) : 0;
+  // Separate shared expert only: gate, up and swiglu [num_tokens,
+  // shared_inter] and the down output [num_tokens, hidden].
+  size_t sz_shared_inter =
+      shared_separate ? align_up_64(num_tokens * shared_inter_size * elem_size)
+                      : 0;
+  size_t sz_shared_out =
+      shared_separate ? align_up_64(num_tokens * hidden_size * elem_size) : 0;
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -196,7 +233,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_tiles_small = off_gather_buf + sz_gather_buf;
   size_t off_tiles_big = off_tiles_small + sz_tiles_small;
   size_t off_num_tiles = off_tiles_big + sz_tiles_big;
-  size_t total_scratch = off_num_tiles + sz_num_tiles;
+  size_t off_shared_gate = off_num_tiles + sz_num_tiles;
+  size_t off_shared_up = off_shared_gate + sz_shared_inter;
+  size_t off_shared_act = off_shared_up + sz_shared_inter;
+  size_t off_shared_out = off_shared_act + sz_shared_inter;
+  size_t total_scratch = off_shared_out + sz_shared_out;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -236,6 +277,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_tiles_big = scratch_base + off_tiles_big;
   int32_t *d_num_tiles =
       reinterpret_cast<int32_t *>(scratch_base + off_num_tiles);
+  void *d_shared_gate = scratch_base + off_shared_gate;
+  void *d_shared_up = scratch_base + off_shared_up;
+  void *d_shared_act = scratch_base + off_shared_act;
+  void *d_shared_out = scratch_base + off_shared_out;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -258,20 +303,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
     // slot activations to int8 once, then runs the fc1/fc2 GEMVs via sudot4.
     // Falls through to the fp fused path otherwise.
-    const bool dp4a_ok = hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
-                         block_size > 0 && (block_size % 32 == 0) &&
-                         (hidden_size % 32 == 0) && (inter_size % 32 == 0);
-    if (dp4a_ok) {
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld)\n",
-                        (long long)k);
+    if (dp4a_decode) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld, "
+                        "shared slot=%d)\n",
+                        (long long)k, shared_in_slot ? 1 : 0);
+      const HipQmoeSharedExpert shared = {
+          shared_gate_weights, shared_gate_scales,  shared_up_weights,
+          shared_up_scales,    shared_down_weights, shared_down_scales,
+          shared_gate_logit};
       HIP_CHECK(hip_qmoe_decode_fused_dp4a(
           stream, input, d_expert_indices, d_expert_weights, fc1_weights,
           fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
           fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
           d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
           block_size, activation_alpha, activation_beta, swiglu_limit,
-          elem_size));
-      return 0;
+          elem_size, shared_in_slot ? &shared : nullptr));
+      goto shared_expert;
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
                       (long long)k);
@@ -281,7 +328,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, hidden_size,
         inter_size, k, block_size, activation_alpha, activation_beta,
         swiglu_limit, elem_size));
-    return 0;
+    goto shared_expert;
   }
 
   // Device-driven prefill path. The bucket launch creates every descriptor
@@ -383,7 +430,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
           stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
           d_expert_weights, output, num_tokens, hidden_size, k, elem_size));
-      return 0;
+      goto shared_expert;
     }
 
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
@@ -405,7 +452,31 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
         stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
         output, num_tokens, hidden_size, k, elem_size));
-    return 0;
+  }
+
+shared_expert:
+  if (shared_separate) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: separate shared expert "
+                      "(tokens=%lld, shared_inter=%lld)\n",
+                      (long long)num_tokens, (long long)shared_inter_size);
+    HIP_CHECK(wrap_matmul_nbits_group(
+        state, /*op_state_slot=*/-1, input, /*count=*/2, shared_gate_weights,
+        shared_gate_scales, d_shared_gate, shared_inter_size,
+        shared_up_weights, shared_up_scales, d_shared_up, shared_inter_size,
+        nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, 0,
+        num_tokens, hidden_size, /*batch_count=*/1, /*bits=*/4, block_size,
+        elem_size));
+    HIP_CHECK(hip_swiglu(stream, d_shared_gate, d_shared_up, d_shared_act,
+                         num_tokens * shared_inter_size, HIP_DTYPE_FLOAT16));
+    HIP_CHECK(wrap_matmul_nbits(
+        state, /*op_state_slot=*/-1, d_shared_act, shared_down_weights,
+        shared_down_scales, /*zero_points=*/nullptr, /*g_idx=*/nullptr,
+        /*bias=*/nullptr, d_shared_out, num_tokens, hidden_size,
+        shared_inter_size, /*batch_count=*/1, /*bits=*/4, block_size,
+        elem_size, /*zp_elem_size=*/2, /*scale_elem_size=*/2));
+    HIP_CHECK(hip_qmoe_shared_combine(stream, output, d_shared_out,
+                                      shared_gate_logit, num_tokens,
+                                      hidden_size));
   }
 
 cleanup:

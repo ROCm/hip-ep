@@ -168,7 +168,11 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   auto hipOp = mlir::hip::QMoEOp::create(
       rewriter, loc, context, input, routerProbs, fc1Weights, fc1Scales,
       fc2Weights, fc2Scales, fc1Bias, fc2Bias, fc3Weights, fc3Scales, fc3Bias,
-      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints, routerWeights, init,
+      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints, routerWeights,
+      /*shared_gate_weights=*/Value(), /*shared_gate_scales=*/Value(),
+      /*shared_up_weights=*/Value(), /*shared_up_scales=*/Value(),
+      /*shared_down_weights=*/Value(), /*shared_down_scales=*/Value(),
+      /*shared_gate_logit=*/Value(), init,
       expertWeightBitsAttr, kAttr, blockSizeAttr, normalizeAttr,
       swigluFusionAttr, useSparseAttr, activationAlphaAttr, activationBetaAttr,
       swigluLimitAttr, activationTypeAttr);

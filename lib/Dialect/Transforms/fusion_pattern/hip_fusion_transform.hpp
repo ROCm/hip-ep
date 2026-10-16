@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "patch_embed_conv_to_gemm.hpp"
+#include "qmoe_shared_expert_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -838,6 +839,11 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
 
+/// Rooted at `hip.add`, which no other pattern here roots at (`HipQAdd` roots
+/// at the `hip.quantize_linear` that consumes its add). It needs the
+/// `hip.swiglu` above; the greedy driver revisits the add once that exists.
+constexpr unsigned kQMoESharedExpertFusionBenefit = 2;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -853,6 +859,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateQMoESharedExpertFusionPattern(
+      patterns, mlir::PatternBenefit(kQMoESharedExpertFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

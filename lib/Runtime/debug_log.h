@@ -57,6 +57,15 @@ inline bool hipdnn_ep_matmul_group_enabled() {
   return enabled;
 }
 
+// Shared expert of a hip.qmoe as an extra slot of the dp4a fused decode.
+// HIPDNN_EP_QMOE_SHARED_FUSED=0 runs it as separate gate/up, swiglu, down and
+// combine launches after the routed experts, which is the A/B control.
+inline bool hipdnn_ep_qmoe_shared_fused_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_QMOE_SHARED_FUSED");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
