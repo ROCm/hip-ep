@@ -137,6 +137,103 @@ __global__ void topk_routing_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Single-wave top-k routing for num_experts <= 32 * VPL. Same semantics as
+// topk_routing_kernel, but the block-wide LDS tree reductions (about ten of
+// them, eight barrier levels each, ~10 us per decode layer) are replaced by
+// register-resident values and 32-lane shuffles. Each argmax round reduces a
+// packed (orderable exp value, inverted expert index) key, so ties still go to
+// the lower expert index.
+// ---------------------------------------------------------------------------
+static constexpr int kRoutingWave = 32;
+
+__device__ __forceinline__ uint32_t topk_orderable(float f) {
+  const uint32_t u = __float_as_uint(f);
+  return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+__device__ __forceinline__ float topk_from_orderable(uint32_t u) {
+  return __uint_as_float((u & 0x80000000u) ? (u & 0x7FFFFFFFu) : ~u);
+}
+
+template <int VPL>
+__global__ void __launch_bounds__(kRoutingWave) topk_routing_wave_kernel(
+    const __half* __restrict__ router_probs,
+    int32_t* __restrict__ expert_indices,
+    __half* __restrict__ expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize) {
+  const int64_t token = blockIdx.x;
+  if (token >= num_tokens) return;
+  const int lane = static_cast<int>(threadIdx.x);
+  const int ne = static_cast<int>(num_experts);
+  const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
+  const __half* logits = router_probs + token * num_experts;
+
+  float v[VPL];
+  float lmax = -1e30f;
+#pragma unroll
+  for (int q = 0; q < VPL; q++) {
+    const int e = q * kRoutingWave + lane;
+    v[q] = e < ne ? static_cast<float>(logits[e]) : -1e30f;
+    lmax = fmaxf(lmax, v[q]);
+  }
+#pragma unroll
+  for (int m = kRoutingWave / 2; m > 0; m >>= 1)
+    lmax = fmaxf(lmax, __shfl_xor(lmax, m, kRoutingWave));
+
+  // Masked/taken slots hold -1 so they order below every exp value (>= 0).
+  float lsum = 0.0f;
+#pragma unroll
+  for (int q = 0; q < VPL; q++) {
+    const int e = q * kRoutingWave + lane;
+    const float ev = e < ne ? expf(v[q] - lmax) : 0.0f;
+    v[q] = e < ne ? ev : -1.0f;
+    lsum += ev;
+  }
+#pragma unroll
+  for (int m = kRoutingWave / 2; m > 0; m >>= 1)
+    lsum += __shfl_xor(lsum, m, kRoutingWave);
+
+  float w[kMaxK];
+  for (int r = 0; r < ik; r++) {
+    unsigned long long best = 0ull;
+#pragma unroll
+    for (int q = 0; q < VPL; q++) {
+      const uint32_t e = static_cast<uint32_t>(q * kRoutingWave + lane);
+      const unsigned long long key =
+          (static_cast<unsigned long long>(topk_orderable(v[q])) << 32) |
+          (0xFFFFFFFFu - e);
+      best = key > best ? key : best;
+    }
+#pragma unroll
+    for (int m = kRoutingWave / 2; m > 0; m >>= 1) {
+      const unsigned long long o = __shfl_xor(best, m, kRoutingWave);
+      best = o > best ? o : best;
+    }
+    const int win = static_cast<int>(0xFFFFFFFFu - static_cast<uint32_t>(best));
+    const float val = topk_from_orderable(static_cast<uint32_t>(best >> 32));
+#pragma unroll
+    for (int q = 0; q < VPL; q++)
+      if (q * kRoutingWave + lane == win) v[q] = -1.0f;
+    w[r] = static_cast<float>(static_cast<__half>(val / lsum));
+    if (lane == 0) {
+      expert_indices[token * k + r] = win;
+      expert_weights[token * k + r] = static_cast<__half>(w[r]);
+    }
+  }
+
+  if (normalize && lane == 0) {
+    float sum = 0.0f;
+    for (int r = 0; r < ik; r++) sum += w[r];
+    if (sum > 0.0f)
+      for (int r = 0; r < ik; r++)
+        expert_weights[token * k + r] = static_cast<__half>(w[r] / sum);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
 // ---------------------------------------------------------------------------
@@ -372,6 +469,30 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
+  (void)hipGetLastError();
+  if (num_experts <= 32 * kRoutingWave && k <= kMaxK) {
+    const dim3 grid(static_cast<unsigned>(num_tokens));
+    const dim3 block(kRoutingWave);
+#define TOPK_WAVE(VPL)                                                         \
+    hipLaunchKernelGGL(topk_routing_wave_kernel<VPL>, grid, block, 0, s,       \
+                       static_cast<const __half*>(router_probs),               \
+                       static_cast<int32_t*>(expert_indices),                  \
+                       static_cast<__half*>(expert_weights), num_tokens,       \
+                       num_experts, k, normalize)
+    if (num_experts <= 1 * kRoutingWave) TOPK_WAVE(1);
+    else if (num_experts <= 2 * kRoutingWave) TOPK_WAVE(2);
+    else if (num_experts <= 4 * kRoutingWave) TOPK_WAVE(4);
+    else if (num_experts <= 8 * kRoutingWave) TOPK_WAVE(8);
+    else if (num_experts <= 16 * kRoutingWave) TOPK_WAVE(16);
+    else TOPK_WAVE(32);
+#undef TOPK_WAVE
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess)
+      fprintf(stderr, "[custom_kernels] hip_qmoe_topk_routing failed: %s\n",
+              hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+
   // One block per token, kRoutingBlock threads cooperating over experts.
   // Dynamic shared memory holds num_experts fp32 exp values (no expert cap;
   // e.g. 256 experts = 1 KB, well within the per-block shared limit).
