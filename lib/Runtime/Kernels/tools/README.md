@@ -102,11 +102,6 @@ prototyped fixes):
 
 In `matmul_nbits_kernel` and `gqa_kernel`:
 
-- GQA prefill v6x / v8x tiles at the 256-VGPR architectural limit (9 kernels on
-  gfx11-generic, 12 on gfx1170, 14 on gfx1151), e.g. v6x `<2, 32, 64, true, *>`
-  0 -> 100 B and v8x `<16, 2, 1, 256>` 0 -> 64 B on gfx11-generic, v6x
-  `<2, 64, 64, false, 1, 4>` 184 -> 460 B on gfx1151. They spill loop-invariant
-  values; a design below 256 VGPRs is a separate change.
 - GEMV candidates that already spilled with the previous SDK: i8 TILE_N = 16
   256 -> 268 B, dp4a M-blocked `<*, 4, 8>` 80 -> 84 B and `<*, 8, 8>`
   360 -> 364 B (48 -> 52 B on gfx1151). None is a LUT or heuristic pick.
