@@ -1014,3 +1014,46 @@ def test_gqa_ring_long_context(model_runner, tmp_path, query_length, past_length
     np.testing.assert_allclose(
         actual[0].reshape(qlen, 24, 256)[indices], expected, atol=0.005, rtol=0.005
     )
+
+
+@pytest.mark.parametrize(
+    "total", [15, 16, 17, 31, 32, 33, 127, 128, 129, 1023, 1024, 1025]
+)
+def test_gqa_ring_decode_regimes(model_runner, tmp_path, total):
+    """Exercise partial tiles and both sides of partition dispatch boundaries."""
+    test_gqa_ring_geometry(model_runner, tmp_path, True, 1, total - 1)
+
+
+def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
+    """A tiny probability times a large FP16 value must survive decode.
+
+    exp(-18) rounds to zero in FP16, but its FP32 product with 60000 is
+    representable in the output. This catches FP16 probability narrowing.
+    """
+    import onnx
+
+    capacity = 19
+    model = _make_gqa_fixed_cache_model(1, 1, capacity, 6144, 1024, 24, 4)
+    query = np.zeros((1, 1, 6144), dtype=np.float16)
+    query.reshape(24, 256)[:, 0] = 16
+    key = np.zeros((1, 1, 1024), dtype=np.float16)
+    key.reshape(4, 256)[:, 0] = -18
+    value = np.full((1, 1, 1024), 60000, dtype=np.float16)
+    old_k = np.zeros((1, 4, capacity, 256), dtype=np.float16)
+    old_v = np.zeros_like(old_k)
+    path = tmp_path / "ring_decode_probability_precision.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.array([1], dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    expected = 60000 * np.exp(-18.0) / (1 + np.exp(-18.0))
+    np.testing.assert_allclose(actual[0], expected, atol=0.000002, rtol=0.001)

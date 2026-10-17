@@ -11,6 +11,17 @@
 
 #pragma clang fp contract(off)
 
+// Shared by workspace sizing and dispatch; measured for gfx1151 B1/H24/G4/D256.
+static int ring_decode_partitions(int total) {
+  if (total <= 32)
+    return 1;
+  if (total <= 128)
+    return 4;
+  if (total <= 1024)
+    return 8;
+  return 16;
+}
+
 #if HIP_EP_RING_DEVICE_ENABLED
 namespace {
 struct RingTensor {
@@ -441,139 +452,199 @@ __global__ __launch_bounds__(NT) void ring_kv_outer_parallel(RingCall c) {
 #endif
 } // namespace prefill
 namespace decode {
-// SPDX-License-Identifier: MIT
-// Native FP16 adaptation of the METIS Ring implementations supplied by the
-// contributor. WMMA score ownership and V swizzle derive from hip-ep v8x (MIT).
+
 using I = int64_t;
 using U = uint16_t;
-constexpr int D = 256, HQ = 24, HK = 4;
-constexpr int NT = 128, R = D / 32, O = D / NT, T = 32;
-static_assert(D == 128 || D == 256, "four-wave D ownership");
-static_assert(T == 16 || T == 32, "bounded temporal microtile");
-static_assert(8 >= 1 && 8 <= 128, "bounded summary merge");
-struct alignas(2 * R) Vector {
-  U x[R];
-};
-__device__ float widen(U x) { return __half2float(__ushort_as_half(x)); }
+using V16 = short __attribute__((ext_vector_type(16)));
+using F8 = float __attribute__((ext_vector_type(8)));
+using H16 = _Float16 __attribute__((ext_vector_type(16)));
+__device__ __forceinline__ F8 ring_fp16_wmma(V16 a, V16 b, F8 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+      __builtin_bit_cast(H16, a), __builtin_bit_cast(H16, b), c);
+}
+using Pack = U __attribute__((ext_vector_type(16), aligned(16)));
+constexpr int ND = 4, HB = 1, KV = 16, D = 256, HQ = 24, HK = 4,
+              DT = D / (16 * ND), NT = 32 * ND * HB, KS = D + 8, VS = KV + 8,
+              KT = KV / 16;
+static_assert(6 % HB == 0 && D % (16 * ND) == 0 && KV % 16 == 0,
+              "WMMA geometry");
 __device__ U narrow(float x) { return __half_as_ushort(__float2half_rn(x)); }
-__device__ I at(const RingTensor &t, I b, I h, I r, I d) {
-  return b * t.stride[0] + h * t.stride[1] + r * t.stride[2] + d * t.stride[3];
+__device__ I at(const RingTensor &t, int h, I r, int d) {
+  return h * t.stride[1] + r * t.stride[2] + d * t.stride[3];
 }
-__device__ Vector read_vector(const RingTensor &t, I b, I h, I row, int d) {
-  const U *p = static_cast<const U *>(t.data) + at(t, b, h, row, d);
-  Vector v;
-  if (t.stride[3] == 1 && uintptr_t(p) % (2 * R) == 0)
-    v = *reinterpret_cast<const Vector *>(p);
-  else
-    for (int j = 0; j < R; ++j)
-      v.x[j] = p[j * t.stride[3]];
-  return v;
+__device__ U raw(const RingTensor &t, int h, I r, int d) {
+  return static_cast<const U *>(t.data)[at(t, h, r, d)];
 }
-template <int Delta> __device__ __forceinline__ float permute(float value) {
-  constexpr uint32_t lo = Delta == 1   ? 0x67452301u
-                          : Delta == 2 ? 0x54761032u
-                          : Delta == 4 ? 0x32107654u
-                                       : 0xfedcba98u;
-  constexpr uint32_t hi = Delta == 1   ? 0xefcdab89u
-                          : Delta == 2 ? 0xdcfe98bau
-                          : Delta == 4 ? 0xba98fedcu
-                                       : 0x76543210u;
-  return __uint_as_float(__builtin_amdgcn_permlane16(
-      __float_as_uint(value), __float_as_uint(value), lo, hi, false, false));
+__device__ int swizzle(int d, int k) {
+  return (k & ~15) | (((k ^ d) & 1) << 3) | ((k & 15) >> 1);
 }
-__device__ __forceinline__ float sum32(float x) {
-  x += permute<1>(x);
-  x += permute<2>(x);
-  x += permute<4>(x);
-  x += permute<8>(x);
-  return x + __uint_as_float(__builtin_amdgcn_permlanex16(
-                 __float_as_uint(x), __float_as_uint(x), 0x76543210u,
-                 0xfedcba98u, false, false));
-}
-__global__ void ring_decode_scan(RingCall c, int parts) {
-  int tid = threadIdx.x, lane = tid % 32, wave = tid / 32;
-  I h = blockIdx.x % HQ, b = blockIdx.x / HQ, C = c.P + c.Q, kh = h / (HQ / HK);
-  I span = ((C + parts - 1) / parts + T - 1) / T * T,
-    begin = I(blockIdx.y) * span;
-  I end = begin + span < C ? begin + span : C;
-  // Shared state contains no K/V staging. All lanes cross all three tile
-  // barriers.
-  __shared__ float scores[T], weights[T], maximum, denominator, rescale;
-  if (tid == 0) {
-    maximum = -INFINITY;
-    denominator = 0.f;
+// Six query heads reuse one staged KV tile. QK uses WMMA with FP32
+// accumulation; probabilities and weighted V accumulation stay in FP32.
+__global__ __launch_bounds__(NT) void ring_decode_scan(RingCall c, int parts) {
+  int tid = threadIdx.x, lh = __builtin_amdgcn_readfirstlane(tid / (32 * ND)),
+      dw = __builtin_amdgcn_readfirstlane((tid / 32) % ND), lane = tid % 16,
+      par = (tid % 32) / 16;
+  int group=blockIdx.x, h=group*6+lane;
+  I C=c.P+1, span=((C+parts-1)/parts+KV-1)/KV*KV;
+  I begin=blockIdx.y*span, stop=begin+span<C?begin+span:C, end=stop;
+  I q=0;
+  __shared__ __align__(16) U key[KV][KS], value[D][VS];
+  __shared__ F8 partial[HB][ND][KT][32];
+  V16 qr[DT];
+  F8 out[DT];
+  float maximum = -INFINITY, denom = 0;
+  _Pragma("unroll") for (int t = 0; t < DT; ++t) {
+    out[t] = F8{};
+    qr[t] = V16{};
+    if (lane < 6) {
+      const U *ptr = static_cast<const U *>(c.tensors[0].data) +
+                     at(c.tensors[0], h, q, (dw * DT + t) * 16);
+      if (c.tensors[0].stride[3] == 1 && uintptr_t(ptr) % 32 == 0)
+        qr[t] = *reinterpret_cast<const V16 *>(ptr);
+      else
+        _Pragma("unroll") for (int j = 0; j < 16; ++j) qr[t][j] =
+            short(raw(c.tensors[0], h, q, (dw * DT + t) * 16 + j));
+    }
   }
-  Vector q = read_vector(c.tensors[0], b, h, 0, lane * R);
-  float output[O] = {};
-  for (I base = begin; base < end; base += T) {
-    for (int t = wave; t < T; t += 4) {
-      float score = -INFINITY;
-      if (base + t < end) {
-        Vector key = read_vector(c.tensors[1], b, kh, base + t, lane * R);
-        float dot = 0.f;
-#pragma unroll
-        for (int j = 0; j < R; ++j)
-          dot += widen(q.x[j]) * widen(key.x[j]);
-        score = sum32(dot) * 0.0625f;
+
+  constexpr int CHUNKS = KV * (D / 16), PER = (2 * CHUNKS + NT - 1) / NT,
+                PF = PER < 2 ? PER : 2;
+  Pack pending[PF];
+  auto prefetch = [&](I k0, int base, int n) {
+    _Pragma("unroll") for (int r = 0; r < n; ++r) {
+      int z = tid + (base + r) * NT;
+      bool isk = z < CHUNKS;
+      int j = isk ? z : z - CHUNKS;
+      int kr = isk ? j / (D / 16) : j % KV,
+          d = (isk ? j % (D / 16) : j / KV) * 16;
+      Pack pack{};
+      if (z < 2 * CHUNKS && k0 + kr < C && k0 + kr < end) {
+        const RingTensor &src = c.tensors[isk ? 1 : 2];
+
+        const U *ptr =
+            static_cast<const U *>(src.data) + at(src, group, k0 + kr, d);
+        if (src.stride[3] == 1 && uintptr_t(ptr) % 16 == 0)
+          pack = *reinterpret_cast<const Pack *>(ptr);
+        else
+          _Pragma("unroll") for (int e = 0; e < 16; ++e) pack[e] =
+              raw(src, group, k0 + kr, d + e);
       }
-      if (lane == 0)
-        scores[t] = score;
+      pending[r] = pack;
     }
-    __syncthreads(); // All scores ready; previous weights are no longer live.
-    if (tid == 0) {
-      float next = maximum;
-      bool bad = isnan(maximum);
-      for (int t = 0; t < T; ++t) {
-        bad |= isnan(scores[t]) || scores[t] == INFINITY;
-        next = fmaxf(next, scores[t]);
+  };
+  auto commit = [&](int base, int n) {
+    _Pragma("unroll") for (int r = 0; r < n; ++r) {
+      int z = tid + (base + r) * NT;
+      if (z < CHUNKS) {
+        _Pragma("unroll") for (int e = 0; e < 16; ++e)
+            key[z / (D / 16)][(z % (D / 16)) * 16 + e] = pending[r][e];
+      } else if (z < 2 * CHUNKS) {
+        int j = z - CHUNKS;
+        _Pragma("unroll") for (int e = 0; e < 16; ++e) {
+          int d = (j / KV) * 16 + e;
+          value[d][swizzle(d, j % KV)] = pending[r][e];
+        }
       }
-      if (bad)
-        next = NAN;
-      rescale = bad ? NAN : maximum == -INFINITY ? 0.f : expf(maximum - next);
-      float total = 0.f;
-      for (int t = 0; t < T; ++t) {
-        float p = bad ? NAN : next == -INFINITY ? 0.f : expf(scores[t] - next);
-        weights[t] = p;
-        total += p;
+    }
+  };
+  if (begin < stop)
+    prefetch(begin, 0, PF);
+  for (I k0 = begin; k0 < stop; k0 += KV) {
+    commit(0, PF);
+    _Pragma("unroll 1") for (int r = PF; r < PER; ++r) {
+      prefetch(k0, r, 1);
+      commit(r, 1);
+    }
+    __syncthreads();
+    if (k0 + KV < stop)
+      prefetch(k0 + KV, 0, PF);
+    F8 s[KT];
+    _Pragma("unroll") for (int kt = 0; kt < KT; ++kt) {
+      s[kt] = F8{};
+      _Pragma("unroll") for (int t = 0; t < DT; ++t) {
+        V16 kr;
+        _Pragma("unroll") for (int j = 0; j < 16; ++j) kr[j] =
+            short(key[kt * 16 + lane][(dw * DT + t) * 16 + j]);
+        s[kt] = ring_fp16_wmma(kr, qr[t], s[kt]);
       }
-      denominator = rescale * denominator + total;
-      maximum = next;
+      if constexpr (ND > 1)
+        partial[lh][dw][kt][tid % 32] = s[kt];
     }
-    __syncthreads(); // Weights/statistics visible to every D owner.
-#pragma unroll
-    for (int j = 0; j < O; ++j) {
-      float value = rescale * output[j];
-      int d = tid + j * NT;
-      for (int t = 0; t < T && base + t < end; ++t)
-        value += weights[t] *
-                 widen(static_cast<const U *>(
-                     c.tensors[2].data)[at(c.tensors[2], b, kh, base + t, d)]);
-      output[j] = value;
+    if constexpr (ND > 1) {
+      __syncthreads();
+      // Every output slice must use the same score and denominator.
+      _Pragma("unroll") for(int kt=0;kt<KT;++kt) {
+        s[kt]=partial[lh][0][kt][tid%32];
+        _Pragma("unroll") for(int w=1;w<ND;++w)
+          s[kt]+=partial[lh][w][kt][tid%32];
+      }
     }
-    __syncthreads(); // Last PV read before any thread overwrites weights.
+    float m = -INFINITY;
+    _Pragma("unroll") for (int kt = 0; kt < KT; ++kt)
+        _Pragma("unroll") for (int e = 0; e < 8; ++e) {
+      I k = k0 + kt * 16 + 2 * e + par;
+      float x = s[kt][e] * 0.0625f;
+      if (k >= end || k >= C)
+        x = -INFINITY;
+      s[kt][e] = x;
+      m = fmaxf(m, x);
+    }
+    m = fmaxf(m, __shfl_xor(m, 16, 32));
+    float next = fmaxf(maximum, m),
+          alpha = next == maximum
+                      ? 1.f
+                      : (maximum == -INFINITY ? 0.f : expf(maximum - next)),
+          sum = 0;
+    float prob[KT][16];
+    _Pragma("unroll") for (int kt = 0; kt < KT; ++kt) {
+      float own[8];
+      _Pragma("unroll") for (int e = 0; e < 8; ++e) {
+        float p = next == -INFINITY ? 0.f : expf(s[kt][e] - next);
+        sum += p;
+        own[e] = p;
+      }
+      _Pragma("unroll") for(int e=0;e<8;++e) {
+        float other=__shfl_xor(own[e],16,32);
+        prob[kt][2*e]=par?other:own[e];
+        prob[kt][2*e+1]=par?own[e]:other;
+      }
+    }
+
+    sum += __shfl_xor(sum, 16, 32);
+    denom = denom * alpha + sum;
+    maximum = next;
+    if (__any(alpha != 1.f)) {
+      _Pragma("unroll") for (int t = 0; t < DT; ++t) out[t] *= alpha;
+    }
+    _Pragma("unroll") for(int t=0;t<DT;++t) {
+      _Pragma("unroll") for(int e=0;e<8;++e) {
+        int d=(dw*DT+t)*16+2*e+par;
+        float val=out[t][e];
+        _Pragma("unroll") for(int kt=0;kt<KT;++kt)
+          _Pragma("unroll") for(int k=0;k<16;++k)
+            val+=prob[kt][k]*__half2float(__ushort_as_half(value[d][kt*16+swizzle(d,k)]));
+        out[t][e]=val;
+      }
+    }
+    __syncthreads();
   }
-  if (parts == 1) {
-#pragma unroll
-    for (int j = 0; j < O; ++j)
-      static_cast<U *>(c.tensors[3].data)[(b * HQ + h) * D + tid + j * NT] =
-          narrow(output[j] / denominator);
-  } else {
-    float *state = static_cast<float *>(c.workspace) +
-                   (I(blockIdx.x) * parts + blockIdx.y) * (D + 2);
-    if (tid == 0) {
-      state[D] = maximum;
-      state[D + 1] = denominator;
-    }
-#pragma unroll
-    for (int j = 0; j < O; ++j)
-      state[tid + j * NT] = output[j];
+  if (lane < 6) {
+    float *state=parts>1 ? static_cast<float*>(c.workspace)+(I(h)*parts+blockIdx.y)*(D+2) : nullptr;
+    if(parts>1 && dw==0 && par==0) {state[D]=maximum;state[D+1]=denom;}
+    _Pragma("unroll") for(int t=0;t<DT;++t)
+      _Pragma("unroll") for(int e=0;e<8;++e) {
+        int d=(dw*DT+t)*16+2*e+par;
+        if(parts==1) static_cast<U*>(c.tensors[3].data)[h*D+d]=narrow(out[t][e]/denom);
+        else state[d]=out[t][e];
+      }
   }
 }
 __global__ void ring_decode_merge(RingCall c, int parts) {
+  constexpr int O = D / NT;
   int tid = threadIdx.x;
   float *state =
       static_cast<float *>(c.workspace) + I(blockIdx.x) * parts * (D + 2);
-  __shared__ float weights[8], denominator;
+  __shared__ float weights[16], denominator;
   if (tid == 0) {
     float maximum = -INFINITY, total = 0.f;
     bool bad = false;
@@ -601,34 +672,17 @@ __global__ void ring_decode_merge(RingCall c, int parts) {
         narrow(out / denominator);
   }
 }
-static int ring_decode_parts(const RingCall *c) {
-  if constexpr (256 > 0) {
-    I n = (c->P + c->Q + 256 - 1) / 256;
-    return int(n < 8 ? n : 8);
-  } else
-    return 1;
-}
-static size_t ring_decode_workspace(const RingCall *c) {
-  int parts = ring_decode_parts(c);
-  if (parts > 8)
-    return SIZE_MAX;
-  return parts == 1
-             ? 0
-             : ((size_t(c->B) * HQ * parts * (D + 2) * sizeof(float) + 15) &
-                ~size_t(15));
-}
 static int ring_decode_launch(RingCall c) {
-  int parts = ring_decode_parts(&c);
-  hipLaunchKernelGGL(ring_decode_scan, dim3(c.B * HQ, parts), dim3(NT), 0,
-                     c.stream, c, parts);
+  int parts = ring_decode_partitions(int(c.P + c.Q));
+  hipLaunchKernelGGL(ring_decode_scan, dim3(4, parts), dim3(NT), 0,
+                    c.stream, c, parts);
   if (hipPeekAtLastError() != hipSuccess)
     return int(hipGetLastError());
   if (parts > 1)
-    hipLaunchKernelGGL(ring_decode_merge, dim3(c.B * HQ), dim3(NT), 0, c.stream,
-                       c, parts);
+    hipLaunchKernelGGL(ring_decode_merge, dim3(24), dim3(NT), 0,
+                      c.stream, c, parts);
   return int(hipGetLastError());
 }
-
 } // namespace decode
 } // namespace
 #endif
@@ -656,10 +710,10 @@ extern "C" HIP_KERNEL_API int hip_gqa_ring_device_supported() {
 }
 
 extern "C" HIP_KERNEL_API size_t hip_gqa_ring_workspace(int nq, int total) {
-  if (nq != 1 || total <= 256)
+  if (nq != 1 || total < 1 || total > 65664)
     return 0;
-  const int parts = (total + 255) / 256 < 8 ? (total + 255) / 256 : 8;
-  return size_t(24) * parts * 258 * sizeof(float);
+  const int parts = ring_decode_partitions(total);
+  return parts == 1 ? 0 : size_t(24) * parts * 258 * sizeof(float);
 }
 
 extern "C" HIP_KERNEL_API int

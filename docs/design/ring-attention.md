@@ -19,8 +19,26 @@ Ring accepts FP16 separate Q/K/V with external RoPE, B=1, 24 query heads,
 4 KV heads, head dimension 256, scale 1/16, causal attention, 1..65536 new tokens,
 and at most 65664 valid cache tokens (a 64K prompt plus 128 output tokens).
 It targets a concrete gfx1151 build and checks the active device. Unquantized caches use BNSD layout; Q/output use BSHD.
-Both prefill variants accumulate in FP32. Decode uses up to 198144 bytes of
+Both prefill variants accumulate in FP32. Decode uses up to 396288 bytes of
 runtime-owned scratch; prefill uses none. Calls use the existing runtime stream.
+
+Decode shares each 16-token KV tile across six query heads, uses four waves
+per workgroup and WMMA for QK, and merges FP32 partition summaries. Scores,
+softmax probabilities and weighted V accumulation remain FP32; only final
+outputs are rounded to FP16. Every wave reduces QK partials in the same order,
+so all output slices share the same softmax denominator. The prefill schedules
+are unchanged.
+
+| Valid KV tokens | Partitions | Scratch bytes |
+| --- | --- | --- |
+| 1..32 | 1 | 0 |
+| 33..128 | 4 | 99072 |
+| 129..1024 | 8 | 198144 |
+| 1025..65664 | 16 | 396288 |
+
+The workspace query and launch use the same partition helper. This policy is
+specific to gfx1151 and this geometry. A trial using FP16 probabilities for
+WMMA PV failed the 64K full-model numerical check and is not included.
 
 Other geometries, architectures, quantized caches, packed inputs, in-op RoPE,
 bias, windows, and sinks retain existing GQA routing. Ring builds reject softcap
@@ -33,7 +51,7 @@ Invalidate model caches after changing the selection. Validate with
 `HIPDNN_EP_STRICT=1`, CPU fallback disabled, and temporary `HIPDNN_EP_DEBUG=1`;
 Ring dispatch reports the selection and lengths. Disable debug for timing.
 Run `test_gqa_ring_geometry`, `test_gqa_ring_shared_cache_transitions`, and
-`test_gqa_ring_long_context` in the numeric suite against all three builds,
+`test_gqa_ring_long_context`, and `test_gqa_ring_decode_regimes` in the numeric suite against all three builds,
 and the Ring-only dtype rejection LIT tests. Direct kernel checks do not
 establish ONNX integration or a performance improvement.
 
