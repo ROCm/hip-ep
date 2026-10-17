@@ -11,7 +11,40 @@
 using hipdnn_ep_real::useF32TransposedBDecodeGemv;
 using hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151;
 
+namespace {
+// The fields of hipblasLtMatmulHeuristicResult_t the ordering reads.
+struct FakeResult {
+  struct {
+    uint8_t data[16];
+  } algo;
+  float wavesCount;
+};
+
+FakeResult fake(uint8_t index, float waves) {
+  FakeResult r{};
+  r.algo.data[0] = index;
+  r.wavesCount = waves;
+  return r;
+}
+
+bool unrankedCandidatesAreOrdered() {
+  FakeResult unranked[] = {fake(6, 1.0f), fake(4, 1.0f), fake(7, 1.0f),
+                           fake(5, 1.0f)};
+  hipdnn_ep_real::orderUnrankedCandidates(unranked, 4);
+  for (int i = 0; i < 4; ++i)
+    if (unranked[i].algo.data[0] != 4 + i)
+      return false;
+  // A ranked list keeps hipBLASLt's order.
+  FakeResult ranked[] = {fake(9, 0.0f), fake(3, 0.0f)};
+  hipdnn_ep_real::orderUnrankedCandidates(ranked, 2);
+  return ranked[0].algo.data[0] == 9 && ranked[1].algo.data[0] == 3;
+}
+} // namespace
+
 int main() {
+  if (!unrankedCandidatesAreOrdered())
+    return 1;
+
   if (!useF32TransposedBDecodeGemv(true, 1, 1, 256, 1, 4, 0, 1) ||
       !useF32TransposedBDecodeGemv(true, 1, 256, 4096, 1, 4, 0, 1))
     return 1;

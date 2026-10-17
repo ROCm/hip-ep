@@ -266,7 +266,10 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   //   4. (0,     MAX)         non-workspace + broader sweep
   {
     bool do_autotune = autotune_enabled();
-    int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
+    // Every candidate, so that an unranked answer can be put in a stable
+    // order (orderUnrankedCandidates); a ranked one leads with the same
+    // algorithm a single-candidate request returns.
+    int request_count = MAX_ALGO_CANDIDATES;
 
     int returned = 0;
     auto try_heuristic = [&](size_t ws_bytes, int req_count) -> bool {
@@ -308,6 +311,7 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
       entry.use_default_algo = true;
       entry.tuned = true;
     } else {
+      hipdnn_ep_real::orderUnrankedCandidates(entry.candidates, returned);
       entry.num_candidates = returned;
       entry.algo = entry.candidates[0].algo;
       entry.workspace_size = entry.candidates[0].workspaceSize;
