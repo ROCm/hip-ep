@@ -15,6 +15,16 @@ set_target_properties(test-gemv-bf16-f32-transposed-b PROPERTIES
     FOLDER "runtime-tests"
 )
 
+add_test(NAME GemmBf16F32TransposedBGpuTest
+    COMMAND test-gemm-bf16-f32-transposed-b)
+set_tests_properties(GemmBf16F32TransposedBGpuTest PROPERTIES
+    LABELS "gpu"
+    SKIP_RETURN_CODE 77
+)
+set_target_properties(test-gemm-bf16-f32-transposed-b PROPERTIES
+    FOLDER "runtime-tests"
+)
+
 add_test(NAME MatmulTypedGpuTest COMMAND test-matmul-typed)
 set_tests_properties(MatmulTypedGpuTest PROPERTIES
     LABELS "gpu"
