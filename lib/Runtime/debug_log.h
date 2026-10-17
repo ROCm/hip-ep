@@ -48,6 +48,36 @@ inline int hipdnn_ep_matmul_dp4a_max_m() {
   return m;
 }
 
+// Grouped single-row dp4a GEMV for hip.matmul_nbits_group (one activation
+// quant, one GEMV launch per group). HIPDNN_EP_MATMUL_GROUP=0 runs each member
+// as its own wrap_matmul_nbits, which is the A/B control for the grouping.
+inline bool hipdnn_ep_matmul_group_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_GROUP");
+  return enabled;
+}
+
+// Shared expert of a hip.qmoe as an extra slot of the dp4a fused decode.
+// HIPDNN_EP_QMOE_SHARED_FUSED=0 runs it as separate gate/up, swiglu, down and
+// combine launches after the routed experts, which is the A/B control.
+inline bool hipdnn_ep_qmoe_shared_fused_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_QMOE_SHARED_FUSED");
+  return enabled;
+}
+
+// Whether producers of a pre-quantized activation (hip.skip_rms_norm with
+// quant outputs, hip.dynamic_quant_i8) write it for `rows` rows, and so
+// whether its dp4a consumers may read it instead of quantizing. Producer and
+// consumers must agree, so both ask this. HIPDNN_EP_MATMUL_PREQUANT=0 leaves
+// the quantization to every consumer, which is the A/B control.
+inline bool hipdnn_ep_matmul_prequant_active(int64_t rows) {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MATMUL_PREQUANT");
+  return enabled && hipdnn_ep_matmul_dp4a_enabled() && rows >= 1 &&
+         rows <= hipdnn_ep_matmul_dp4a_max_m();
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

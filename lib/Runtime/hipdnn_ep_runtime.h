@@ -1359,6 +1359,13 @@ int wrap_pow(RuntimeState *state, void *input, void *output,
 int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
                 int64_t num_elements, int64_t data_type);
 
+// hip.sigmoid_mul (fp16): output = x * sigmoid(gate), x / gate / output of
+// num_elements in rows of row_size. q_out / q_scale_out (may be nullptr) as
+// for wrap_skip_simplified_layer_norm.
+int wrap_sigmoid_mul(RuntimeState *state, void *x, void *gate, void *output,
+                     void *q_out, void *q_scale_out, int64_t num_elements,
+                     int64_t row_size, int64_t quant_block_size);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
@@ -1429,12 +1436,15 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 // without position_ids ships cos/sin already position-expanded to
 // [batch, seq_len, rotary_dim/2], and the kernel indexes them by the flat
 // token position b*seq+s instead of looking up position_ids.
+// cache_element_size_bytes is that of cos/sin; fp16 input with fp32 caches
+// is rotated in fp32.
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
                           int64_t seq_len, int64_t num_heads, int64_t head_dim,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes, int64_t is_bnsh);
+                          int64_t element_size_bytes,
+                          int64_t cache_element_size_bytes, int64_t is_bnsh);
 
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`
@@ -1480,18 +1490,43 @@ int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+// With quant_block_size > 0, also writes `output` quantized to int8 for the
+// integer dot-product GEMV (q_out [rows x hidden], q_scale_out
+// [rows x hidden/quant_block_size], f32) when that path runs for these rows;
+// otherwise both are left unwritten.
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, void *q_out, void *q_scale_out,
+    int64_t input_num_elements, int64_t gamma_num_elements,
+    int64_t element_size_bytes, float epsilon, int64_t quant_block_size);
+
+// hip.gated_rms_norm (fp16): RMS-normalizes every group_size slice of each
+// row_size row of `input`, scales it by `weight`, and multiplies it by the
+// SiLU of `gate` in fp32. `gate` must have as many elements as `input`.
+// q_out / q_scale_out (may be nullptr) as for
+// wrap_skip_simplified_layer_norm.
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *gate,
+                        void *weight, void *output, void *q_out,
+                        void *q_scale_out, int64_t input_num_elements,
+                        int64_t gate_num_elements, int64_t row_size,
+                        int64_t group_size, float epsilon,
+                        int64_t quant_block_size);
+
+// DynamicQuantI8 wrapper: quantizes the fp16 activation A [rows x K] to int8
+// for the integer dot-product GEMV (q [rows x K], scale [rows x K/block_size],
+// f32), when that path runs for `rows`; otherwise q and scale are left
+// unwritten and consumers read A.
+int wrap_dynamic_quant_i8(RuntimeState *state, const void *A, void *q,
+                          void *scale, int64_t rows, int64_t K,
+                          int64_t block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
 // scales: [N x k_blocks], output: [batch_count x M x N]
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+// a_q/a_scale: A already quantized by its producer (nullable), read instead
+// of quantizing A when the integer dot-product path runs.
 int wrap_matmul_nbits(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (zp-cache home)
@@ -1501,6 +1536,8 @@ int wrap_matmul_nbits(
     const void *zero_points, // per-block zero points (nullable)
     const void *g_idx,       // GPTQ group indices (nullable, deprecated)
     const void *bias,        // output bias [N] (nullable)
+    const void *a_q,         // int8 A (nullable)
+    const void *a_scale,     // f32 per-block scales of a_q (nullable)
     void *output,            // result tensor
     int64_t M,               // rows per batch
     int64_t N,               // output columns
@@ -1511,6 +1548,24 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+
+// MatMulNBitsGroup wrapper: `count` (1..4) symmetric int4 projections of one
+// fp16 activation A [batch_count x M x K], member i computing
+// Y_i = A @ dequant(B_i)^T with B_i [N_i x k_blocks x blob_size] and fp16
+// scales S_i [N_i x k_blocks]. Slots i >= count are null with N_i = 0.
+// Decode (M within the dp4a band) quantizes A once and runs one grouped GEMV;
+// otherwise each member runs as wrap_matmul_nbits would. a_q/a_scale as for
+// wrap_matmul_nbits.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_q,
+                            const void *a_scale, int64_t count, const void *B0,
+                            const void *S0, void *Y0, int64_t N0,
+                            const void *B1, const void *S1, void *Y1,
+                            int64_t N1, const void *B2, const void *S2,
+                            void *Y2, int64_t N2, const void *B3,
+                            const void *S3, void *Y3, int64_t N3, int64_t M,
+                            int64_t K, int64_t batch_count, int64_t bits,
+                            int64_t block_size, int64_t elem_size);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
@@ -1636,13 +1691,24 @@ int wrap_qmoe(
     const void *fc1_zero_points, // (nullable) fc1 dequant zero points
     const void *fc2_zero_points, // (nullable) fc2 dequant zero points
     const void *fc3_zero_points, // (nullable) fc3 dequant zero points
-    void *output,                // [num_tokens, hidden_size]
+    // Sigmoid-gated shared expert (all null or all set): plain int4
+    // MatMulNBits gate/up [shared_inter, hidden/2] and down
+    // [hidden, shared_inter/2] with fp16 scales, and the pre-sigmoid gate
+    // logit [num_tokens]. Adds sigmoid(logit) * down(silu(gate) * up).
+    const void *shared_gate_weights, const void *shared_gate_scales,
+    const void *shared_up_weights, const void *shared_up_scales,
+    const void *shared_down_weights, const void *shared_down_scales,
+    const void *shared_gate_logit,
+    const void *input_q,     // int8 input (nullable), as a_q of matmul_nbits
+    const void *input_scale, // f32 per-block scales of input_q (nullable)
+    void *output,            // [num_tokens, hidden_size]
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size);
+    int64_t normalize_routing_weights, int64_t elem_size,
+    int64_t shared_inter_size); // 0 without a shared expert
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //
@@ -1753,20 +1819,33 @@ int wrap_causal_conv_with_state(
 //   beta_per_head     = 1  -> beta  is [B, T, H_kv]
 //                     = 0  -> beta  is [B, T, 1]          (broadcast over
 //                     heads)
+//
+// Input preparation (fp16 only), applied before the recurrence:
+//   key == value == nullptr -> query is packed [B, T, (Hq + Nk) * dk + Hkv*dv]
+//   qk_norm_weight          -> q, k = half(x * rsqrt(mean(x^2) + eps) * w)
+//                              per head ([dk] fp16 w)
+//   q_scale != 1            -> q = half(q * q_scale)
+//   decay_bias/decay_scale  -> decay = half(scale[h] * softplus(a + bias[h]))
+//                              (per-head decay only)
+//   beta_sigmoid            -> beta = half(sigmoid(beta))
 int wrap_linear_attention(
     RuntimeState *state,
-    const void *query,      // [B, T, Hq * dk]
-    const void *key,        // [B, T, Nk * dk]
-    const void *value,      // [B, T, H_kv * d_v]
-    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
-    const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
-    const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
-    void *output,           // [B, T, max(H_q, H_kv) * d_v]
-    void *present_state,    // [B, H_kv, d_k, d_v]
+    const void *query,       // [B, T, Hq * dk], or packed QKV
+    const void *key,         // [B, T, Nk * dk] (nullable: packed QKV)
+    const void *value,       // [B, T, H_kv * d_v] (nullable: packed QKV)
+    const void *past_state,  // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,       // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,        // [B, T, H_kv] or [B, T, 1] (nullable)
+    const void *decay_bias,  // f32 [H_kv] (nullable)
+    const void *decay_scale, // f32 [H_kv] (nullable)
+    const void *qk_norm_weight, // [d_k] (nullable)
+    void *output,            // [B, T, max(H_q, H_kv) * d_v]
+    void *present_state,     // [B, H_kv, d_k, d_v]
     int64_t Hq, int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
-    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+    int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type,
+    float qk_norm_epsilon, float q_scale, int64_t beta_sigmoid);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

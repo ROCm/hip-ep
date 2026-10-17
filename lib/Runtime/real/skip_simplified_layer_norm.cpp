@@ -26,12 +26,11 @@
 
 #include <cstdio>
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, void *q_out, void *q_scale_out,
+    int64_t input_num_elements, int64_t gamma_num_elements,
+    int64_t element_size_bytes, float epsilon, int64_t quant_block_size) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -80,7 +79,23 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                     (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
                     bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
 
-  return hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
-                           gamma, bias, output, input_skip_bias_sum, num_rows,
-                           hidden_dim, epsilon, hip_dtype);
+  void *stream = hipdnn_ep_state_get_stream(state);
+  // The quantized output is written exactly when its dp4a consumers read it.
+  const bool quant = q_out && q_scale_out && quant_block_size > 0 &&
+                     element_size_bytes == 2 &&
+                     hipdnn_ep_matmul_prequant_active(num_rows);
+  if (quant) {
+    const int rc = hip_skip_rms_norm_quant_i8(
+        stream, input, skip, gamma, bias, output, input_skip_bias_sum, q_out,
+        q_scale_out, num_rows, hidden_dim, epsilon, quant_block_size);
+    if (rc != hipErrorNotSupported)
+      return rc;
+  }
+  const int rc = hip_skip_rms_norm(stream, input, skip, gamma, bias, output,
+                                   input_skip_bias_sum, num_rows, hidden_dim,
+                                   epsilon, hip_dtype);
+  if (rc != 0 || !quant)
+    return rc;
+  return hip_matmul_nbits_quant_act_i8(stream, output, q_out, q_scale_out,
+                                       num_rows, hidden_dim, quant_block_size);
 }

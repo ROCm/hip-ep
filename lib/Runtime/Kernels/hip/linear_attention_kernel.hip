@@ -475,6 +475,175 @@ __global__ void linear_attention_decode_kernel_par(
 }
 
 //===----------------------------------------------------------------------===//
+// Column-tiled fp16 variant: one block per (batch, kv_head, LA_TILE_J-column
+// tile) instead of one per (batch, kv_head). The per-head kernels above launch
+// only B*Hkv blocks (32 for Qwen3.5), too few to cover the GPU, and walk each
+// state column serially, so they are latency-bound at well under DRAM
+// bandwidth. Every column of the delta rule is independent (sk[j], the update
+// and the readout only reduce over the dk rows), so tiling dv is exact.
+//
+// Thread t owns row i = t / LA_TPR and LA_VEC contiguous columns, loaded with a
+// single 16-byte access and kept in registers between the sk reduction and the
+// update, so S is read once and written once. Row reductions use 32-lane
+// shuffles (explicit width keeps the lane math identical on wave64) followed by
+// one LDS pass across the dk/16 segments. Accumulation stays fp32 and the
+// readout uses the pre-rounding fp32 S_new, as in the kernels above.
+//===----------------------------------------------------------------------===//
+static constexpr int LA_TILE_J = 16;
+static constexpr int LA_VEC = 8;
+static constexpr int LA_TPR = LA_TILE_J / LA_VEC;
+static constexpr int LA_SEG = 32;
+static constexpr int LA_ROWS_PER_SEG = LA_SEG / LA_TPR;
+static constexpr int LA_MAX_SEGS = 1024 / LA_SEG;
+
+template <int NQ>
+__device__ __forceinline__ void la_tiled_reduce_rows(
+    float (&v)[NQ][LA_VEC], float (*red)[NQ * LA_TILE_J], int tid) {
+  const int lane = tid % LA_SEG;
+  const int seg = tid / LA_SEG;
+#pragma unroll
+  for (int m = LA_TPR; m < LA_SEG; m <<= 1)
+#pragma unroll
+    for (int h = 0; h < NQ; h++)
+#pragma unroll
+      for (int c = 0; c < LA_VEC; c++)
+        v[h][c] += __shfl_xor(v[h][c], m, LA_SEG);
+  if (lane < LA_TPR) {
+#pragma unroll
+    for (int h = 0; h < NQ; h++)
+#pragma unroll
+      for (int c = 0; c < LA_VEC; c++)
+        red[seg][h * LA_TILE_J + lane * LA_VEC + c] = v[h][c];
+  }
+}
+
+template <int NQ>
+__global__ void __launch_bounds__(1024) linear_attention_decode_tiled_kernel(
+    const __half* __restrict__ query,
+    const __half* __restrict__ key,
+    const __half* __restrict__ value,
+    const __half* __restrict__ decay,
+    const __half* __restrict__ beta_in,
+    __half* __restrict__ state,
+    __half* __restrict__ output,
+    int seq_len,
+    int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
+{
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int j0 = blockIdx.y * LA_TILE_J;
+    const int tid = threadIdx.x;
+    const int i  = tid / LA_TPR;
+    const int c0 = (tid % LA_TPR) * LA_VEC;
+    const int nsegs = blockDim.x / LA_SEG;
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * NQ);
+    const int h_out_base    = inverse_gqa ? g : (g * NQ);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_batch_stride   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = decay_per_key_dim
+        ? (int64_t)seq_len * Hkv * dk : (int64_t)seq_len * Hkv;
+    const int64_t beta_batch_stride = beta_per_head
+        ? (int64_t)seq_len * Hkv : (int64_t)seq_len;
+    const int64_t state_batch_stride = (int64_t)Hkv * dk * dv;
+
+    __shared__ float red[LA_MAX_SEGS][NQ * LA_TILE_J];
+    __shared__ float sk_s[LA_TILE_J];
+
+    __half* S_row = state + b * state_batch_stride + (int64_t)g * dk * dv +
+                    (int64_t)i * dv + j0 + c0;
+    const uint4 raw = *reinterpret_cast<const uint4*>(S_row);
+    const __half* hs = reinterpret_cast<const __half*>(&raw);
+
+    const float k_i = __half2float(key[b * k_batch_stride + (int64_t)h_k * dk + i]);
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    float decay_i = 1.0f;
+    if (has_decay) {
+        decay_i = decay_per_key_dim
+            ? expf(__half2float(decay[b * decay_batch_stride + (int64_t)g * dk + i]))
+            : expf(__half2float(decay[b * decay_batch_stride + g]));
+    }
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+    float beta_val = 0.0f;
+    if (beta_in && needs_sk)
+        beta_val = __half2float(beta_in[beta_per_head
+            ? b * beta_batch_stride + g : b * beta_batch_stride]);
+    float q_i[NQ];
+#pragma unroll
+    for (int h = 0; h < NQ; h++) {
+        const int h_q = h_q_load_base + (inverse_gqa ? 0 : h);
+        q_i[h] = __half2float(query[b * q_batch_stride + (int64_t)h_q * dk + i]);
+    }
+
+    float s_old[LA_VEC];
+#pragma unroll
+    for (int c = 0; c < LA_VEC; c++) s_old[c] = __half2float(hs[c]);
+
+    float sk[LA_VEC] = {};
+    if (needs_sk) {
+        float part[1][LA_VEC];
+#pragma unroll
+        for (int c = 0; c < LA_VEC; c++) part[0][c] = decay_i * s_old[c] * k_i;
+        la_tiled_reduce_rows<1>(part, reinterpret_cast<float (*)[LA_TILE_J]>(red), tid);
+        __syncthreads();
+        if (tid < LA_TILE_J) {
+            float s = 0.0f;
+            for (int w = 0; w < nsegs; w++)
+                s += reinterpret_cast<float (*)[LA_TILE_J]>(red)[w][tid];
+            sk_s[tid] = s;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int c = 0; c < LA_VEC; c++) sk[c] = sk_s[c0 + c];
+    }
+
+    const __half* v_ptr = value + b * v_batch_stride + (int64_t)g * dv + j0 + c0;
+    float out[NQ][LA_VEC];
+    uint4 wraw;
+    __half* ws = reinterpret_cast<__half*>(&wraw);
+#pragma unroll
+    for (int c = 0; c < LA_VEC; c++) {
+        const float v_j = __half2float(v_ptr[c]);
+        float s_new;
+        switch (update_rule) {
+        case LA_RULE_LINEAR:      s_new = s_old[c] + k_i * v_j; break;
+        case LA_RULE_GATED:       s_new = decay_i * s_old[c] + k_i * v_j; break;
+        case LA_RULE_DELTA:       s_new = s_old[c] + beta_val * k_i * (v_j - sk[c]); break;
+        case LA_RULE_GATED_DELTA: s_new = decay_i * s_old[c] + beta_val * k_i * (v_j - sk[c]); break;
+        default:                  s_new = s_old[c];
+        }
+        ws[c] = __float2half(s_new);
+#pragma unroll
+        for (int h = 0; h < NQ; h++) out[h][c] = q_i[h] * s_new;
+    }
+    *reinterpret_cast<uint4*>(S_row) = wraw;
+
+    la_tiled_reduce_rows<NQ>(out, red, tid);
+    __syncthreads();
+    if (tid < NQ * LA_TILE_J) {
+        const int h = tid / LA_TILE_J;
+        const int col = tid % LA_TILE_J;
+        float s = 0.0f;
+        for (int w = 0; w < nsegs; w++) s += red[w][tid];
+        const int h_out = h_out_base + (inverse_gqa ? 0 : h);
+        output[b * out_batch_stride + (int64_t)h_out * dv + j0 + col] =
+            __float2half(scale * s);
+    }
+}
+
+//===----------------------------------------------------------------------===//
 // Host-side launcher
 //===----------------------------------------------------------------------===//
 
@@ -571,6 +740,40 @@ extern "C" int hip_linear_attention_decode(
                 "increase the kernel-side bound to support this GQA ratio\n",
                 num_q_heads, MAX_Q_HEADS);
         return -1;
+    }
+
+    // Column-tiled fp16 path (default on; HIPDNN_EP_LA_TILED=0 disables).
+    static const bool la_tiled = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_TILED");
+        return !(e && e[0] == '0');
+    }();
+    const int tiled_block = dk_i * LA_TPR;
+    if (la_tiled && type == 1 && dv_i % LA_TILE_J == 0 &&
+        dk_i % LA_ROWS_PER_SEG == 0 && tiled_block <= 1024 &&
+        (num_q_heads == 1 || num_q_heads == 2 || num_q_heads == 4)) {
+        const dim3 tgrid(static_cast<unsigned>(grid),
+                         static_cast<unsigned>(dv_i / LA_TILE_J));
+#define LA_LAUNCH_TILED(NQ)                                                    \
+        hipLaunchKernelGGL(linear_attention_decode_tiled_kernel<NQ>, tgrid,    \
+            dim3(tiled_block), 0, hip_stream,                                  \
+            static_cast<const __half*>(query), static_cast<const __half*>(key),\
+            static_cast<const __half*>(value),                                 \
+            static_cast<const __half*>(decay),                                 \
+            static_cast<const __half*>(beta), static_cast<__half*>(state),     \
+            static_cast<__half*>(output), seq_len_i, static_cast<int>(Hq),     \
+            static_cast<int>(Hkv), static_cast<int>(Nk), dk_i, dv_i, scale,    \
+            static_cast<int>(update_rule), decay_per_key_dim_i,                \
+            beta_per_head_i)
+        (void)hipGetLastError();
+        if (num_q_heads == 1) LA_LAUNCH_TILED(1);
+        else if (num_q_heads == 2) LA_LAUNCH_TILED(2);
+        else LA_LAUNCH_TILED(4);
+#undef LA_LAUNCH_TILED
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess)
+            fprintf(stderr, "[custom_kernels] linear_attention_decode_tiled "
+                            "failed: %s\n", hipGetErrorString(err));
+        return static_cast<int>(err);
     }
 
     // smem layout: k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv] |
@@ -683,6 +886,186 @@ extern "C" int hip_linear_attention_decode(
                 hipGetErrorString(err));
     }
     return static_cast<int>(err);
+}
+
+//===----------------------------------------------------------------------===//
+// Input preparation (fp16)
+//===----------------------------------------------------------------------===//
+//
+// Work items are (token, slot): slots [0, Hq) are q heads, [Hq, Hq+Nk) k
+// heads and [Hq+Nk, Hq+Nk+Hkv) v heads, the latter also producing that head's
+// decay and beta. A block runs LA_PREP_THREADS / R items with R threads each.
+// Each step reproduces the kernel of the unfused graph bit for bit: the head
+// norm is hip_rms_norm's VEC2 body (its 256-slot tree reduction only adds
+// zeros above the next power of two of d/2, so an R-slot tree with R >= d/2,
+// or R = 256, sums in the same order), the q scale an fp16 multiply, decay
+// the f32 add / softplus / multiply chain rounded once, and beta the fp16
+// sigmoid.
+static constexpr int LA_PREP_THREADS = 256;
+
+__device__ __forceinline__ float la_softplus_f32(float x) {
+  return x > 0.f ? x + logf(expf(-x) + 1.f) : logf(expf(x) + 1.f);
+}
+
+template <int R>
+__global__ void __launch_bounds__(LA_PREP_THREADS) la_prepare_kernel(
+    const __half *__restrict__ q_src, const __half *__restrict__ k_src,
+    const __half *__restrict__ v_src, int64_t q_stride, int64_t k_stride,
+    int64_t v_stride, const __half *__restrict__ decay,
+    const __half *__restrict__ beta, const float *__restrict__ decay_bias,
+    const float *__restrict__ decay_scale, __half *__restrict__ q_out,
+    __half *__restrict__ k_out, __half *__restrict__ v_out,
+    __half *__restrict__ decay_out, __half *__restrict__ beta_out,
+    const __half *__restrict__ norm_weight, int64_t items, int Hq, int Nk,
+    int Hkv, int dk, int dv, float eps, float q_scale, int beta_width) {
+  constexpr int ROWS = LA_PREP_THREADS / R;
+  const int tid = threadIdx.x;
+  const int lane = tid % R;
+  const int64_t item = (int64_t)blockIdx.x * ROWS + tid / R;
+  const bool active = item < items;
+  const int slots = Hq + Nk + Hkv;
+  const int64_t token = active ? item / slots : 0;
+  const int slot = active ? (int)(item % slots) : slots;
+
+  const bool is_q = slot < Hq;
+  const bool is_k = !is_q && slot < Hq + Nk;
+  const int h = is_q ? slot : is_k ? slot - Hq : slot - Hq - Nk;
+  __half *dst = is_q ? q_out : is_k ? k_out : nullptr;
+  const int dk2 = dk / 2;
+  const __half2 *x2 = nullptr;
+  if (dst)
+    x2 = reinterpret_cast<const __half2 *>(
+        (is_q ? q_src + token * q_stride : k_src + token * k_stride) +
+        (int64_t)h * dk);
+
+  // The reduction runs block-wide, so every row takes part in it.
+  const __half2 *g2 = reinterpret_cast<const __half2 *>(norm_weight);
+  float inv_rms = 1.f;
+  if (g2) {
+    __shared__ float s_reduce[LA_PREP_THREADS];
+    float local_sumsq = 0.f;
+    if (x2)
+      for (int i = lane; i < dk2; i += R) {
+        float2 v = __half22float2(x2[i]);
+        local_sumsq += v.x * v.x + v.y * v.y;
+      }
+    s_reduce[tid] = local_sumsq;
+    __syncthreads();
+    for (int stride = R / 2; stride > 0; stride >>= 1) {
+      if (lane < stride)
+        s_reduce[tid] += s_reduce[tid + stride];
+      __syncthreads();
+    }
+    inv_rms = rsqrtf(s_reduce[tid - lane] / static_cast<float>(dk) + eps);
+  }
+
+  if (x2) {
+    __half2 *y2 = reinterpret_cast<__half2 *>(
+        dst + token * (int64_t)(is_q ? Hq : Nk) * dk + (int64_t)h * dk);
+    const bool scale_q = is_q && q_scale != 1.f;
+    for (int i = lane; i < dk2; i += R) {
+      __half2 y = x2[i];
+      if (g2) {
+        float2 v = __half22float2(y);
+        float2 g = __half22float2(g2[i]);
+        float2 r;
+        r.x = v.x * inv_rms * g.x;
+        r.y = v.y * inv_rms * g.y;
+        y = __float22half2_rn(r);
+      }
+      if (scale_q) {
+        float2 v = __half22float2(y);
+        y = __halves2half2(__float2half(v.x * q_scale),
+                           __float2half(v.y * q_scale));
+      }
+      y2[i] = y;
+    }
+    return;
+  }
+  if (is_q || is_k || slot >= slots)
+    return;
+
+  if (v_out) {
+    const __half2 *s2 = reinterpret_cast<const __half2 *>(
+        v_src + token * v_stride + (int64_t)h * dv);
+    __half2 *d2 = reinterpret_cast<__half2 *>(
+        v_out + token * (int64_t)Hkv * dv + (int64_t)h * dv);
+    for (int i = lane; i < dv / 2; i += R)
+      d2[i] = s2[i];
+  }
+  if (lane != 0)
+    return;
+  if (decay_out) {
+    const int64_t idx = token * Hkv + h;
+    const float a = __half2float(decay[idx]) + decay_bias[h];
+    decay_out[idx] = __float2half(decay_scale[h] * la_softplus_f32(a));
+  }
+  if (beta_out && (beta_width != 1 || h == 0)) {
+    const int64_t idx = token * beta_width + (beta_width == 1 ? 0 : h);
+    const float x = __half2float(beta[idx]);
+    beta_out[idx] = __float2half(1.0f / (1.0f + expf(-x)));
+  }
+}
+
+extern "C" int hip_linear_attention_prepare(
+    void *stream, const void *q_src, const void *k_src, const void *v_src,
+    int64_t q_stride, int64_t k_stride, int64_t v_stride, const void *decay,
+    const void *beta, const void *decay_bias, const void *decay_scale,
+    void *q_out, void *k_out, void *v_out, void *decay_out, void *beta_out,
+    int64_t tokens, int64_t Hq, int64_t Nk, int64_t Hkv, int64_t dk,
+    int64_t dv, const void *qk_norm_weight, float qk_norm_epsilon,
+    float q_scale, int64_t beta_width) {
+  if (tokens <= 0)
+    return 0;
+  auto aligned = [](const void *p) {
+    return (reinterpret_cast<uintptr_t>(p) % 4) == 0;
+  };
+  if (dk % 2 != 0 || dv % 2 != 0 || q_stride % 2 != 0 || k_stride % 2 != 0 ||
+      v_stride % 2 != 0 || !aligned(q_src) || !aligned(k_src) ||
+      !aligned(v_src) || !aligned(qk_norm_weight) ||
+      (decay_out && (!decay || !decay_bias || !decay_scale)) ||
+      (beta_out && !beta)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_linear_attention_prepare: unsupported "
+            "layout (dk=%lld dv=%lld strides=%lld/%lld/%lld)\n",
+            (long long)dk, (long long)dv, (long long)q_stride,
+            (long long)k_stride, (long long)v_stride);
+    return -1;
+  }
+  (void)hipGetLastError();
+  const int64_t items = tokens * (Hq + Nk + Hkv);
+  const int64_t widest = (dk > dv ? dk : dv) / 2;
+  auto launch = [&](auto kernel, int rows) {
+    dim3 grid(static_cast<unsigned>((items + rows - 1) / rows));
+    hipLaunchKernelGGL(
+        kernel, grid, dim3(LA_PREP_THREADS), 0,
+        static_cast<hipStream_t>(stream), static_cast<const __half *>(q_src),
+        static_cast<const __half *>(k_src), static_cast<const __half *>(v_src),
+        q_stride, k_stride, v_stride, static_cast<const __half *>(decay),
+        static_cast<const __half *>(beta),
+        static_cast<const float *>(decay_bias),
+        static_cast<const float *>(decay_scale), static_cast<__half *>(q_out),
+        static_cast<__half *>(k_out), static_cast<__half *>(v_out),
+        static_cast<__half *>(decay_out), static_cast<__half *>(beta_out),
+        static_cast<const __half *>(qk_norm_weight), items, (int)Hq, (int)Nk,
+        (int)Hkv, (int)dk, (int)dv, qk_norm_epsilon, q_scale,
+        (int)beta_width);
+  };
+  if (widest <= 32)
+    launch(la_prepare_kernel<32>, LA_PREP_THREADS / 32);
+  else if (widest <= 64)
+    launch(la_prepare_kernel<64>, LA_PREP_THREADS / 64);
+  else if (widest <= 128)
+    launch(la_prepare_kernel<128>, LA_PREP_THREADS / 128);
+  else
+    launch(la_prepare_kernel<256>, 1);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr,
+            "[custom_kernels] hip_linear_attention_prepare launch failed: "
+            "%s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
 }
 
 //===----------------------------------------------------------------------===//

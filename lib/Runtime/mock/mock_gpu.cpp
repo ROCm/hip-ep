@@ -610,13 +610,16 @@ int wrap_multi_head_attention(
 int wrap_linear_attention(RuntimeState *state, const void *query,
                           const void *key, const void *value,
                           const void *past_state, const void *decay,
-                          const void *beta, void *output, void *present_state,
-                          int64_t Hq, int64_t Hkv, int64_t Nk,
-                          int64_t decay_per_key_dim, int64_t beta_per_head,
-                          float scale, int64_t chunk_size, int64_t update_rule,
-                          int64_t B, int64_t seq_len, int64_t dk, int64_t dv,
-                          int64_t type) {
-  if (!state || !query || !key || !value || !output || !present_state) {
+                          const void *beta, const void *decay_bias,
+                          const void *decay_scale, const void *qk_norm_weight,
+                          void *output, void *present_state, int64_t Hq,
+                          int64_t Hkv, int64_t Nk, int64_t decay_per_key_dim,
+                          int64_t beta_per_head, float scale,
+                          int64_t chunk_size, int64_t update_rule, int64_t B,
+                          int64_t seq_len, int64_t dk, int64_t dv, int64_t type,
+                          float qk_norm_epsilon, float q_scale,
+                          int64_t beta_sigmoid) {
+  if (!state || !query || !key != !value || !output || !present_state) {
     fprintf(stderr, "Invalid required argument in wrap_linear_attention\n");
     return -1;
   }
@@ -651,9 +654,15 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
              (double)scale, (long long)chunk_size, rule_name,
              (long long)update_rule);
   MOCK_PRINT("[MOCK]   type=%lld,\n", (long long)type);
-  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s)\n",
+  MOCK_PRINT("[MOCK]   past_state=%s, decay=%s, beta=%s,\n",
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   packed_qkv=%s, qk_norm=%s(eps=%g), q_scale=%f, "
+             "decay_softplus=%s, beta_sigmoid=%lld)\n",
+             key ? "no" : "yes", qk_norm_weight ? "yes" : "no",
+             (double)qk_norm_epsilon, (double)q_scale,
+             decay_bias && decay_scale ? "yes" : "no",
+             (long long)beta_sigmoid);
 
   return 0;
 }
@@ -1282,6 +1291,24 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   return 0;
 }
 
+int wrap_sigmoid_mul(RuntimeState *state, void *x, void *gate, void *output,
+                     void *q_out, void *q_scale_out, int64_t num_elements,
+                     int64_t row_size, int64_t quant_block_size) {
+  (void)x;
+  (void)gate;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_sigmoid_mul\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_sigmoid_mul(num_elements=%lld, row_size=%lld, "
+             "quant=%s, quant_block_size=%lld)\n",
+             (long long)num_elements, (long long)row_size,
+             q_out && q_scale_out ? "yes" : "no", (long long)quant_block_size);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
@@ -1305,7 +1332,8 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t interleaved, int64_t batch_size,
                           int64_t seq_len, int64_t num_heads, int64_t head_dim,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
-                          int64_t element_size_bytes, int64_t is_bnsh) {
+                          int64_t element_size_bytes,
+                          int64_t cache_element_size_bytes, int64_t is_bnsh) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_rotary_embedding\n");
     return -1;
@@ -1313,11 +1341,12 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
 
   MOCK_PRINT("[MOCK] wrap_rotary_embedding(interleaved=%lld, batch=%lld, "
              "seq_len=%lld, num_heads=%lld, head_dim=%lld, rotary_dim=%lld, "
-             "cos_cache_num_elements=%lld, element_size=%lld, is_bnsh=%lld)\n",
+             "cos_cache_num_elements=%lld, element_size=%lld, "
+             "cache_element_size=%lld, is_bnsh=%lld)\n",
              (long long)interleaved, (long long)batch_size, (long long)seq_len,
              (long long)num_heads, (long long)head_dim, (long long)rotary_dim,
              (long long)cos_cache_num_elements, (long long)element_size_bytes,
-             (long long)is_bnsh);
+             (long long)cache_element_size_bytes, (long long)is_bnsh);
 
   return 0;
 }
@@ -1341,12 +1370,13 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, void *q_out, void *q_scale_out,
+    int64_t input_num_elements, int64_t gamma_num_elements,
+    int64_t element_size_bytes, float epsilon, int64_t quant_block_size) {
+  (void)q_out;
+  (void)q_scale_out;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -1354,10 +1384,55 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm(input_num_elements=%lld, "
              "gamma_num_elements=%lld, element_size=%lld, epsilon=%f, "
-             "bias=%s, input_skip_bias_sum=%s)\n",
+             "bias=%s, input_skip_bias_sum=%s, quant_block_size=%lld)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
-             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no",
+             (long long)quant_block_size);
+
+  return 0;
+}
+
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *gate,
+                        void *weight, void *output, void *q_out,
+                        void *q_scale_out, int64_t input_num_elements,
+                        int64_t gate_num_elements, int64_t row_size,
+                        int64_t group_size, float epsilon,
+                        int64_t quant_block_size) {
+  (void)input;
+  (void)gate;
+  (void)weight;
+  (void)output;
+  (void)gate_num_elements;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gated_rms_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gated_rms_norm(input_num_elements=%lld, "
+             "row_size=%lld, group_size=%lld, epsilon=%f, quant=%s, "
+             "quant_block_size=%lld)\n",
+             (long long)input_num_elements, (long long)row_size,
+             (long long)group_size, (double)epsilon,
+             q_out && q_scale_out ? "yes" : "no", (long long)quant_block_size);
+
+  return 0;
+}
+
+int wrap_dynamic_quant_i8(RuntimeState *state, const void *A, void *q,
+                          void *scale, int64_t rows, int64_t K,
+                          int64_t block_size) {
+  (void)A;
+  (void)q;
+  (void)scale;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_dynamic_quant_i8\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_dynamic_quant_i8(rows=%lld, K=%lld, "
+             "block_size=%lld)\n",
+             (long long)rows, (long long)K, (long long)block_size);
 
   return 0;
 }
@@ -1365,12 +1440,15 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
-                      int64_t K, int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      const void *bias, const void *a_q, const void *a_scale,
+                      void *output, int64_t M, int64_t N, int64_t K,
+                      int64_t batch_count, int64_t bits, int64_t block_size,
+                      int64_t elem_size, int64_t zp_elem_size,
+                      int64_t scale_elem_size) {
   (void)op_state_slot;
   (void)scale_elem_size;
+  (void)a_q;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -1383,6 +1461,36 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
              (long long)bits, (long long)block_size, (long long)elem_size,
              zero_points ? "yes" : "null", g_idx ? "yes" : "null",
              bias ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_q,
+                            const void *a_scale, int64_t count, const void *B0,
+                            const void *S0, void *Y0, int64_t N0,
+                            const void *B1, const void *S1, void *Y1,
+                            int64_t N1, const void *B2, const void *S2,
+                            void *Y2, int64_t N2, const void *B3,
+                            const void *S3, void *Y3, int64_t N3, int64_t M,
+                            int64_t K, int64_t batch_count, int64_t bits,
+                            int64_t block_size, int64_t elem_size) {
+  (void)op_state_slot;
+  (void)A, (void)a_q, (void)a_scale;
+  (void)B0, (void)S0, (void)Y0, (void)B1, (void)S1, (void)Y1;
+  (void)B2, (void)S2, (void)Y2, (void)B3, (void)S3, (void)Y3;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_nbits_group\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_matmul_nbits_group(count=%lld, N=[%lld,%lld,%lld,"
+             "%lld], M=%lld, K=%lld, batch=%lld, bits=%lld, block_size=%lld, "
+             "elem_size=%lld)\n",
+             (long long)count, (long long)N0, (long long)N1, (long long)N2,
+             (long long)N3, (long long)M, (long long)K,
+             (long long)batch_count, (long long)bits, (long long)block_size,
+             (long long)elem_size);
 
   return 0;
 }
@@ -1493,12 +1601,20 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *fc2_bias, const void *fc3_weights,
               const void *fc3_scales, const void *fc3_bias,
               const void *fc1_zero_points, const void *fc2_zero_points,
-              const void *fc3_zero_points, void *output, int64_t num_tokens,
-              int64_t hidden_size, int64_t inter_size, int64_t num_experts,
-              int64_t k, int64_t expert_weight_bits, int64_t block_size,
+              const void *fc3_zero_points, const void *shared_gate_weights,
+              const void *shared_gate_scales, const void *shared_up_weights,
+              const void *shared_up_scales, const void *shared_down_weights,
+              const void *shared_down_scales, const void *shared_gate_logit,
+              const void *input_q, const void *input_scale, void *output,
+              int64_t num_tokens, int64_t hidden_size,
+              int64_t inter_size, int64_t num_experts, int64_t k,
+              int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              int64_t shared_inter_size) {
+  (void)input_q;
+  (void)input_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -1525,6 +1641,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   shared_expert=%s, shared_inter_size=%lld)\n",
+             shared_gate_weights ? "yes" : "null",
+             (long long)shared_inter_size);
 
   return 0;
 }

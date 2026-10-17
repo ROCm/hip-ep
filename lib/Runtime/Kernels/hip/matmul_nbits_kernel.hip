@@ -75,6 +75,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1353,11 +1354,12 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
 #define DP4A_WAVES_MIN(TM) 1
 #define DP4A_WAVES_MAX(TM) ((TM) > 1 ? 4 : 16)
 
-template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
-__global__
-__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
-                                   DP4A_WAVES_MAX(TILE_M))))
-void matmul_nbits_gemv_dp4a_kernel(
+// One block's tile: columns [n_base, n_base + TILE_N), rows [m0, m0 + TILE_M).
+// Shared by the single-matrix kernel and the grouped kernel below, which only
+// differ in how a block finds its weight and column range.
+template <int BLOCK_SIZE, int TILE_N, int TILE_M>
+__device__ __forceinline__
+void dp4a_gemv_tile(
     const int8_t*  __restrict__ a_qb,
     const float*   __restrict__ a_scale,
     const uint8_t* __restrict__ B,
@@ -1365,10 +1367,9 @@ void matmul_nbits_gemv_dp4a_kernel(
     const uint8_t* __restrict__ zp,
     const __half*  __restrict__ bias,
     __half*        __restrict__ output,
-    int64_t M, int64_t N, int64_t K, int64_t block_size)
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    int64_t n_base, int64_t m0)
 {
-    const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
-    const int64_t m0     = static_cast<int64_t>(blockIdx.y) * TILE_M;
     const int     tid    = threadIdx.x;
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift =
@@ -1546,6 +1547,63 @@ void matmul_nbits_gemv_dp4a_kernel(
             }
         }
     }
+}
+
+template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
+__global__
+__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(TILE_M),
+                                   DP4A_WAVES_MAX(TILE_M))))
+void matmul_nbits_gemv_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t M, int64_t N, int64_t K, int64_t block_size)
+{
+    dp4a_gemv_tile<BLOCK_SIZE, TILE_N, TILE_M>(
+        a_qb, a_scale, B, scales, zp, bias, output, M, N, K, block_size,
+        static_cast<int64_t>(blockIdx.x) * TILE_N,
+        static_cast<int64_t>(blockIdx.y) * TILE_M);
+}
+
+/* Grouped single-row dp4a GEMV. Members are laid out back to back along
+ * blockIdx.x; tile_end[i] is the exclusive end of member i's block range. */
+constexpr int kDp4aGroupMaxMembers = 4;
+
+struct Dp4aGroupArgs {
+    const uint8_t* B[kDp4aGroupMaxMembers];
+    const __half*  scales[kDp4aGroupMaxMembers];
+    __half*        out[kDp4aGroupMaxMembers];
+    int64_t        N[kDp4aGroupMaxMembers];
+    int            tile_end[kDp4aGroupMaxMembers];
+};
+
+template <int BLOCK_SIZE, int TILE_N>
+__global__
+__attribute__((amdgpu_waves_per_eu(DP4A_WAVES_MIN(1), DP4A_WAVES_MAX(1))))
+void matmul_nbits_gemv_dp4a_group_kernel(
+    const int8_t* __restrict__ a_qb,
+    const float*  __restrict__ a_scale,
+    Dp4aGroupArgs g, int64_t K, int64_t block_size)
+{
+    const int bx = static_cast<int>(blockIdx.x);
+    // Constant-index selects keep the kernarg struct out of scratch memory.
+    const int s = (bx >= g.tile_end[0]) + (bx >= g.tile_end[1]) +
+                  (bx >= g.tile_end[2]);
+    const int tile0 = s == 0 ? 0
+                    : s == 1 ? g.tile_end[0]
+                    : s == 2 ? g.tile_end[1]
+                             : g.tile_end[2];
+#define DP4A_GROUP_PICK(f) \
+    (s == 0 ? g.f[0] : s == 1 ? g.f[1] : s == 2 ? g.f[2] : g.f[3])
+    dp4a_gemv_tile<BLOCK_SIZE, TILE_N, 1>(
+        a_qb, a_scale, DP4A_GROUP_PICK(B), DP4A_GROUP_PICK(scales), nullptr,
+        nullptr, DP4A_GROUP_PICK(out), 1, DP4A_GROUP_PICK(N), K, block_size,
+        static_cast<int64_t>(bx - tile0) * TILE_N, 0);
+#undef DP4A_GROUP_PICK
 }
 
 /* -----------------------------------------------------------------------
@@ -2557,6 +2615,193 @@ static void launchDp4aConfig(
 #undef DP4A_CASE
 }
 
+// Grouped analog of launchDp4aConfig: one launch over every member's tiles.
+static void launchDp4aGroupConfig(
+    int config_id, hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    int count, const uint8_t* const* B, const __half* const* sc,
+    __half* const* out, const int64_t* N, int64_t K, int64_t bs)
+{
+    auto& c = kGemvConfigs[config_id];
+    Dp4aGroupArgs g{};
+    int tiles = 0;
+    for (int i = 0; i < kDp4aGroupMaxMembers; i++) {
+        if (i < count) {
+            g.B[i] = B[i];
+            g.scales[i] = sc[i];
+            g.out[i] = out[i];
+            g.N[i] = N[i];
+            tiles += static_cast<int>((N[i] + c.tile_n - 1) / c.tile_n);
+            g.tile_end[i] = tiles;
+        } else {
+            g.tile_end[i] = INT_MAX;
+        }
+    }
+    dim3 grid(static_cast<unsigned>(tiles), 1u, 1u);
+    dim3 block(c.threads);
+
+#define DP4A_GROUP_CASE(ID, BS, TN) \
+    case ID: \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_group_kernel<BS, TN>), \
+            grid, block, 0, stream, a_qb, a_scale, g, K, bs); \
+        break
+
+    switch (config_id) {
+        DP4A_GROUP_CASE( 0,  32,  1);  DP4A_GROUP_CASE( 1,  32,  2);
+        DP4A_GROUP_CASE( 2,  32,  4);  DP4A_GROUP_CASE( 3,  32,  8);
+        DP4A_GROUP_CASE( 4,  64,  1);  DP4A_GROUP_CASE( 5,  64,  2);
+        DP4A_GROUP_CASE( 6,  64,  4);  DP4A_GROUP_CASE( 7,  64,  8);
+        DP4A_GROUP_CASE( 8,  64, 16);
+        DP4A_GROUP_CASE( 9, 128,  1);  DP4A_GROUP_CASE(10, 128,  2);
+        DP4A_GROUP_CASE(11, 128,  4);  DP4A_GROUP_CASE(12, 128,  8);
+        DP4A_GROUP_CASE(13, 128, 16);
+        DP4A_GROUP_CASE(14, 256,  1);  DP4A_GROUP_CASE(15, 256,  2);
+        DP4A_GROUP_CASE(16, 256,  4);  DP4A_GROUP_CASE(17, 256,  8);
+        DP4A_GROUP_CASE(18, 256, 16);
+        DP4A_GROUP_CASE(19, 512,  1);  DP4A_GROUP_CASE(20, 512,  2);
+        DP4A_GROUP_CASE(21, 512,  4);  DP4A_GROUP_CASE(22, 512,  8);
+        DP4A_GROUP_CASE(23, 512, 16);
+        DP4A_GROUP_CASE(24, 1024,  1); DP4A_GROUP_CASE(25, 1024,  2);
+        DP4A_GROUP_CASE(26, 1024,  4); DP4A_GROUP_CASE(27, 1024,  8);
+        DP4A_GROUP_CASE(28, 1024, 16);
+        default: break;
+    }
+#undef DP4A_GROUP_CASE
+}
+
+// ---------------------------------------------------------------------------
+// Cold, burst-timed probing for the M=1 dp4a GEMV autotune.
+//
+// Two things made the old min-of-5 single-launch probe rank this kernel wrong.
+//
+// The weight was warm: every B up to 32 MB sits in the Infinity Cache after the
+// first launch, and a decode step never sees it that way (see the cold-probing
+// note above tuneGemvConfig). The memset eviction used there is no cure for
+// this kernel: it leaves the cache full of dirty lines whose write-back competes
+// with the timed kernel's reads, inflating readings 1.2-2.3x by a config-
+// dependent amount. On Llama-3.1-8B it picked configs 10-67% slower in-model.
+// What a decode step actually sees is a cache full of *clean* lines of other
+// weights, which is what rotating over copies of B reproduces.
+//
+// And a single event-bracketed launch of a 10-40 us kernel is mostly event and
+// launch jitter; the min over a handful of them selects for that jitter (and
+// for the sub-physical readings the GQA tuner guards against). Bursts of ~0.5 ms
+// of back-to-back launches amortize it, and the median of several bursts
+// rejects outliers either way.
+//
+// Measured against in-model kernel durations of the five Llama-3.1-8B shapes
+// over 10 sweeps: warm probing picked 64x1 for gate/up (7% slower in-model),
+// this probe's picks are within 1% of the in-model best for every shape, and
+// its run-to-run spread is ~1% versus ~2-3%. The K/V projection's shipped row,
+// 32x2, ran 1.78x slower than 128x1 in-model (0.6 ms per token).
+// HIPDNN_EP_MATMUL_TUNE_COLD=0 drops the rotation (one copy, warm) as the A/B
+// control; the burst estimator stays.
+// ---------------------------------------------------------------------------
+
+// The rotation set's total footprint, well past gfx1151's 32 MB cache so that a
+// copy is evicted long before the cycle comes back to it.
+static constexpr size_t kGemvRotationBytes = 192u << 20;
+// A weight this large evicts itself between consecutive launches; no copies.
+static constexpr size_t kGemvRotationSelfColdBytes = 64u << 20;
+
+// Device copies of a GEMV's weight-side operands (B, scales, zero points),
+// laid out back to back in one allocation. With one copy (warm probing, a
+// weight that is already cold, or a failed allocation) the caller's own
+// buffers are used.
+class GemvWeightRotation {
+public:
+    GemvWeightRotation(hipStream_t stream,
+                       const uint8_t* B, size_t b_bytes,
+                       const __half* sc, size_t sc_bytes,
+                       const uint8_t* zp, size_t zp_bytes)
+        : B_(B), sc_(sc), zp_(zp),
+          sc_off_(align(b_bytes)), zp_off_(align(sc_off_ + sc_bytes)),
+          slot_(align(zp_off_ + zp_bytes)) {
+        if (!gemvTuneColdEnabled() || slot_ >= kGemvRotationSelfColdBytes)
+            return;
+        int want = (int)((kGemvRotationBytes + slot_ - 1) / slot_);
+        while (want > 1 && hipMalloc(&buf_, want * slot_) != hipSuccess) {
+            buf_ = nullptr;
+            want /= 2;
+        }
+        if (!buf_) return;
+        copies_ = want;
+        hipMemcpyAsync(buf_, B, b_bytes, hipMemcpyDeviceToDevice, stream);
+        hipMemcpyAsync(buf_ + sc_off_, sc, sc_bytes, hipMemcpyDeviceToDevice, stream);
+        if (zp) hipMemcpyAsync(buf_ + zp_off_, zp, zp_bytes,
+                               hipMemcpyDeviceToDevice, stream);
+        for (int have = 1; have < copies_; have *= 2) {
+            const int n = std::min(have, copies_ - have);
+            hipMemcpyAsync(buf_ + have * slot_, buf_, n * slot_,
+                           hipMemcpyDeviceToDevice, stream);
+        }
+        hipStreamSynchronize(stream);
+    }
+    ~GemvWeightRotation() { if (buf_) (void)hipFree(buf_); }
+    GemvWeightRotation(const GemvWeightRotation&) = delete;
+    GemvWeightRotation& operator=(const GemvWeightRotation&) = delete;
+
+    int copies() const { return copies_; }
+
+    void get(int i, const uint8_t*& B, const __half*& sc, const uint8_t*& zp) const {
+        if (!buf_) { B = B_; sc = sc_; zp = zp_; return; }
+        const uint8_t* p = buf_ + (size_t)(i % copies_) * slot_;
+        B  = p;
+        sc = reinterpret_cast<const __half*>(p + sc_off_);
+        zp = zp_ ? p + zp_off_ : nullptr;
+    }
+
+private:
+    static size_t align(size_t n) { return (n + 255) & ~size_t(255); }
+    const uint8_t* B_;
+    const __half* sc_;
+    const uint8_t* zp_;
+    size_t sc_off_, zp_off_, slot_;
+    uint8_t* buf_ = nullptr;
+    int copies_ = 1;
+};
+
+// Per-launch time of `launch(i)` (i = rotation index): a 3-launch probe sizes
+// the bursts to ~kBurstMs, then the median over kBursts per-launch averages.
+// Readings below half the probe are timer glitches, not durations.
+template <typename LaunchFn>
+static float timeConfigRotated(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
+                               int copies, LaunchFn&& launch) {
+    constexpr float kBurstMs = 0.5f;
+    constexpr int kBursts = 5;
+    constexpr int kProbe = 3;
+    constexpr int kMaxIters = 256;
+    int idx = 0;
+    for (int w = 0; w < std::min(copies, 4); w++) launch(idx++);
+
+    hipEventRecord(ev0, stream);
+    for (int i = 0; i < kProbe; i++) launch(idx++);
+    hipEventRecord(ev1, stream);
+    hipEventSynchronize(ev1);
+    float probe = 0.0f;
+    hipEventElapsedTime(&probe, ev0, ev1);
+    probe /= kProbe;
+    const int iters = probe > 0.0f
+        ? std::max(1, std::min(kMaxIters, (int)(kBurstMs / probe))) : 16;
+
+    float s[kBursts];
+    int n = 0;
+    for (int b = 0; b < kBursts; b++) {
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < iters; i++) launch(idx++);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        ms /= iters;
+        if (ms > probe * 0.5f) s[n++] = ms;
+    }
+    if (n == 0) return probe;
+    std::sort(s, s + n);
+    return s[n / 2];
+}
+
 static int tuneDp4aConfig(
     hipStream_t stream,
     const int8_t* a_qb, const float* a_scale,
@@ -2569,9 +2814,13 @@ static int tuneDp4aConfig(
     hipEventCreate(&ev1);
     float best_ms = 1e30f;
     int   best_id = 9;  // 128x1 default
-    constexpr int WARMUP = 3;
-    constexpr int ITERS  = 5;
-    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+    const auto t_start = std::chrono::steady_clock::now();
+
+    const int64_t k_blocks = (K + bs - 1) / bs;
+    const GemvWeightRotation rot(
+        stream, B, (size_t)N * k_blocks * (bs / 2),
+        sc, (size_t)N * k_blocks * sizeof(__half),
+        zp, zp ? (size_t)N * k_blocks : 0);
 
     settleClock(ev0, ev1, stream, [&]{
         launchDp4aConfig(best_id, stream, a_qb, a_scale, B, sc, zp, bi, out,
@@ -2579,14 +2828,16 @@ static int tuneDp4aConfig(
     });
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
-            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+        float cfg_best_ms = timeConfigRotated(ev0, ev1, stream, rot.copies(),
+                                              [&](int i) {
+            const uint8_t* Bi; const __half* sci; const uint8_t* zpi;
+            rot.get(i, Bi, sci, zpi);
+            launchDp4aConfig(cid, stream, a_qb, a_scale, Bi, sci, zpi, bi, out,
                              N, K, bs);
         });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
-            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
+            "[custom_kernels]   dp4a config[%2d] threads=%3d tile_n=%d : %.5f ms\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
             cfg_best_ms);
 
@@ -2597,16 +2848,40 @@ static int tuneDp4aConfig(
 
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] GEMV-dp4a autotune: N=%lld K=%lld bs=%lld zp=%s -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
+        "best config[%d] threads=%d tile_n=%d (%.5f ms/iter; %d weight copies, "
+        "tuned in %.0f ms)\n",
         (long long)N, (long long)K, (long long)bs, zp ? "yes" : "no",
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms);
+        kGemvConfigs[best_id].tile_n, best_ms, rot.copies(),
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_start).count());
 
     return best_id;
 }
 
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
+
+// HIPDNN_EP_MATMUL_DP4A_CFG=<id> pins the single-row dp4a config (an index into
+// kGemvConfigs) for every shape, bypassing LUT and autotune, so a candidate's
+// in-model duration can be measured; HIPDNN_EP_MATMUL_SMALLM_CFG is the M>1 analog.
+static int dp4aConfigOverride() {
+    static const int cfg = [] {
+#ifdef _WIN32
+        char buf[16];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_DP4A_CFG", buf, sizeof(buf));
+        if (n == 0 || n >= sizeof(buf)) return -1;
+        const int v = atoi(buf);
+#else
+        const char* s = getenv("HIPDNN_EP_MATMUL_DP4A_CFG");
+        if (!s) return -1;
+        const int v = atoi(s);
+#endif
+        return (v >= 0 && v < kNumGemvConfigs) ? v : -1;
+    }();
+    return cfg;
+}
 
 static int getOrTuneDp4aConfig(
     hipStream_t stream,
@@ -2615,6 +2890,9 @@ static int getOrTuneDp4aConfig(
     const __half* bi, __half* out,
     int64_t N, int64_t K, int64_t bs)
 {
+    const int forced = dp4aConfigOverride();
+    if (forced >= 0) return forced;
+
     std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
                       std::to_string(bs) + "_" + (zp ? "1" : "0");
 
@@ -2835,14 +3113,15 @@ extern "C" int hip_matmul_nbits_dp4a(
 
     const int64_t k_blocks = (K + block_size - 1) / block_size;
 
-    // Step 1: dynamic per-group int8 quantization of the activations.
+    // Step 1: dynamic per-group int8 quantization of the activations, unless
+    // the producer already wrote them (A == nullptr).
     // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks),
-                            static_cast<unsigned>(M)),
-                       dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    if (Ah)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), static_cast<unsigned>(M)),
+            dim3(128), 0, stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
 
     // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
     // launcher and its own tune cache, which has more history behind it.
@@ -2857,6 +3136,105 @@ extern "C" int hip_matmul_nbits_dp4a(
         launchDp4aMConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
                           M, N, K, block_size);
     }
+    return hipGetLastError();
+}
+
+// A group streams the same bytes as one matrix of the summed height, so it is
+// keyed in the LUT by total N. Without a LUT answer (online mode, empty
+// table) the largest member's config is used, which tunes on a real shape.
+static int getDp4aGroupConfig(
+    hipStream_t stream, const int8_t* a_qb, const float* a_scale,
+    int count, const uint8_t* const* B, const __half* const* sc,
+    __half* const* out, const int64_t* N, int64_t K, int64_t bs)
+{
+    const int forced = dp4aConfigOverride();
+    if (forced >= 0) return forced;
+
+    int64_t n_total = 0;
+    int largest = 0;
+    std::string key = "g";
+    for (int i = 0; i < count; i++) {
+        n_total += N[i];
+        if (N[i] > N[largest]) largest = i;
+        key += std::to_string(N[i]) + ",";
+    }
+    key += "_" + std::to_string(K) + "_" + std::to_string(bs);
+
+    {
+        std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+        auto it = dp4a_cache.find(key);
+        if (it != dp4a_cache.end())
+            return it->second;
+    }
+
+    int cfg = matmulNbitsLutGemvConfig(matmul_lut::Phase::DecodeDp4a, 1,
+                                       static_cast<int>(n_total),
+                                       static_cast<int>(K),
+                                       static_cast<int>(bs), false);
+    if (cfg < 0)
+        cfg = getOrTuneDp4aConfig(stream, a_qb, a_scale, B[largest],
+                                  sc[largest], nullptr, nullptr, out[largest],
+                                  N[largest], K, bs);
+
+    std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+    dp4a_cache[key] = cfg;
+    return cfg;
+}
+
+extern "C" int hip_matmul_nbits_dp4a_group(
+    void* stream_v, const void* A, int64_t count,
+    const void* const* B, const void* const* scales, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    if (K % 32 != 0) return hipErrorInvalidValue;
+    if (count < 1 || count > kDp4aGroupMaxMembers) return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+
+    const int n = static_cast<int>(count);
+    const uint8_t* Bp[kDp4aGroupMaxMembers];
+    const __half*  sc[kDp4aGroupMaxMembers];
+    __half*        outp[kDp4aGroupMaxMembers];
+    for (int i = 0; i < n; i++) {
+        Bp[i] = static_cast<const uint8_t*>(B[i]);
+        sc[i] = static_cast<const __half*>(scales[i]);
+        outp[i] = static_cast<__half*>(out[i]);
+    }
+    int8_t* a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*  a_sc = static_cast<float*>(a_scale_scratch);
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+
+    (void)hipGetLastError();
+    if (A)
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+            dim3(static_cast<unsigned>(k_blocks), 1u), dim3(128), 0, stream,
+            static_cast<const __half*>(A), a_qb, a_sc, K, block_size,
+            k_blocks);
+
+    const int cfg = getDp4aGroupConfig(stream, a_qb, a_sc, n, Bp, sc, outp, N,
+                                       K, block_size);
+    launchDp4aGroupConfig(cfg, stream, a_qb, a_sc, n, Bp, sc, outp, N, K,
+                          block_size);
+    return hipGetLastError();
+}
+
+extern "C" int hip_matmul_nbits_quant_act_i8(
+    void* stream_v, const void* A, void* a_qb, void* a_scale,
+    int64_t rows, int64_t K, int64_t block_size)
+{
+    if (K % 32 != 0 || rows < 1 || block_size < 32 ||
+        (block_size & (block_size - 1)) != 0)
+        return hipErrorInvalidValue;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                       dim3(static_cast<unsigned>(k_blocks),
+                            static_cast<unsigned>(rows)),
+                       dim3(128), 0, static_cast<hipStream_t>(stream_v),
+                       static_cast<const __half*>(A),
+                       static_cast<int8_t*>(a_qb), static_cast<float*>(a_scale),
+                       K, block_size, k_blocks);
     return hipGetLastError();
 }
 

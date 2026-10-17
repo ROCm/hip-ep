@@ -858,6 +858,19 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
                               void *output, int64_t num_elements,
                               int hip_dtype);
 
+/* Sigmoid-gated product (hip.sigmoid_mul), fp16 with fp32 math:
+ *   output = x * half(sigmoid(gate)), rounded to fp16
+ * which is what hip.sigmoid followed by hip.mul compute. x, gate and output
+ * hold num_elements, rows of row_size. When q_out and q_scale are non-null
+ * the kernel also writes output quantized as hip_matmul_nbits_quant_act_i8
+ * does (q_out int8 [rows, row_size], q_scale f32 [rows, row_size / 32]);
+ * that needs quant_block_size == 32, row_size % 32 == 0 and 4-byte aligned
+ * tensors, otherwise it returns hipErrorNotSupported and launches nothing. */
+HIP_KERNEL_API int hip_sigmoid_mul(void *stream, const void *x,
+                                   const void *gate, void *output, void *q_out,
+                                   void *q_scale, int64_t num_elements,
+                                   int64_t row_size, int64_t quant_block_size);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -923,7 +936,10 @@ HIP_KERNEL_API int hip_softplus(
  *   rotary_dim         - number of dimensions to rotate (<= head_dim)
  *   max_seq_len        - max sequence length in cos/sin cache (for bounds clamping)
  *   interleaved        - 0 = half-rotated, 1 = interleaved
- *   element_size_bytes - 2 for fp16, 4 for fp32
+ *   element_size_bytes - input/output: 2 for fp16, 4 for fp32
+ *   cache_element_size_bytes - cos/sin: 2 for fp16, 4 for fp32. The rotation
+ *                        runs in this type, so fp16 input with fp32 caches
+ *                        is rotated in fp32 and rounded once to fp16.
  *   is_bnsh            - layout flag, see input above (0 = BSNH/3D, 1 = BNSH)
  *
  * Returns: 0 on success, non-zero on error
@@ -943,6 +959,7 @@ HIP_KERNEL_API int hip_rope_forward(
     int64_t max_seq_len,
     int64_t interleaved,
     int64_t element_size_bytes,
+    int64_t cache_element_size_bytes,
     int64_t is_bnsh);
 
 /* =========================================================================
@@ -2153,6 +2170,19 @@ HIP_KERNEL_API int hip_rms_norm(
     float epsilon,
     int hip_dtype);
 
+/* hip.gated_rms_norm, fp16 only:
+ *   n = half(rms_norm(x over each group_size slice) * weight)
+ *   y = half(float(n) * silu(float(gate)))
+ * with input / gate / output [rows, row_size] and weight [group_size].
+ * Non-null q_out / q_scale also receive y quantized as by
+ * hip_skip_rms_norm_quant_i8 (quant_block_size 32, group_size % 32 == 0).
+ * Needs an even group_size dividing row_size and 4-byte aligned tensors;
+ * returns hipErrorNotSupported otherwise, launching nothing. */
+HIP_KERNEL_API int hip_gated_rms_norm(
+    void* stream, const void* input, const void* gate, const void* weight,
+    void* output, void* q_out, void* q_scale, int64_t rows, int64_t row_size,
+    int64_t group_size, float epsilon, int64_t quant_block_size);
+
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
@@ -2182,6 +2212,17 @@ HIP_KERNEL_API int hip_skip_rms_norm(
     int64_t norm_size,
     float epsilon,
     int hip_dtype);
+
+/* hip_skip_rms_norm for fp16 that also writes `output` quantized for the
+ * dp4a GEMV, exactly as hip_matmul_nbits_quant_act_i8 would quantize it:
+ * q_out int8 [outer, norm_size], q_scale f32 [outer, norm_size / 32].
+ * Only quant_block_size == 32 with norm_size % 32 == 0 and 4-byte aligned
+ * tensors; returns hipErrorNotSupported otherwise, launching nothing. */
+HIP_KERNEL_API int hip_skip_rms_norm_quant_i8(
+    void* stream, const void* input, const void* skip, const void* gamma,
+    const void* bias, void* output, void* input_skip_bias_sum, void* q_out,
+    void* q_scale, int64_t outer, int64_t norm_size, float epsilon,
+    int64_t quant_block_size);
 
 /* =========================================================================
  * Range (1-D sequence generation)
@@ -2442,6 +2483,8 @@ HIP_KERNEL_API int hip_matmul_nbits_wmma_smallm_grouped_supported(
  *   out        : fp16 [M, N]
  *   a_qb_scratch    : >= M*K bytes (int8), caller/session-owned
  *   a_scale_scratch : >= M*ceil(K/block_size) floats, caller/session-owned
+ * A == nullptr means the scratch already holds the quantized rows, as
+ * written by hip_matmul_nbits_quant_act_i8 or a fused producer.
  * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
  */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a(
@@ -2450,6 +2493,32 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     const void* bias, void* out,
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
+
+/* Grouped W4A8 dp4a GEMV for one decode row (M==1): `count` (1..4) symmetric
+ * int4 projections of the same fp16 activation. The row is quantized once and
+ * a single GEMV launch covers every member's columns, each member writing its
+ * own output.
+ *   A          : fp16 activations [1, K]
+ *   B[i]       : packed int4 weights [N[i], K/2]
+ *   scales[i]  : fp16 [N[i], ceil(K/block_size)]
+ *   out[i]     : fp16 [1, N[i]]
+ *   scratch    : as for hip_matmul_nbits_dp4a with M == 1, including
+ *                A == nullptr for an already quantized row
+ * Returns a hipError_t; hipErrorInvalidValue if K%32 or count is out of range.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
+    void* stream, const void* A, int64_t count,
+    const void* const* B, const void* const* scales, void* const* out,
+    const int64_t* N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
+/* The activation quantization of the dp4a GEMVs on its own: fp16 A
+ * [rows, K] to int8 a_qb [rows, K] in the deinterleaved dp4a layout and f32
+ * a_scale [rows, ceil(K/block_size)]. block_size must be a power of two
+ * >= 32 and K a multiple of 32; returns hipErrorInvalidValue otherwise. */
+HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
+    void* stream, const void* A, void* a_qb, void* a_scale,
+    int64_t rows, int64_t K, int64_t block_size);
 
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
@@ -2952,10 +3021,28 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
+// Sigmoid-gated shared expert of a QMoE layer: plain int4 MatMulNBits
+// weights (no zero points or bias) for separate gate/up [inter, hidden/2]
+// and down [hidden, inter/2] projections, plus the fp16 [num_tokens]
+// pre-sigmoid gate logit. Contributes sigmoid(logit) * down(silu(gate) * up).
+typedef struct HipQmoeSharedExpert {
+  const void* gate_weights;
+  const void* gate_scales;
+  const void* up_weights;
+  const void* up_scales;
+  const void* down_weights;
+  const void* down_scales;
+  const void* gate_logit;
+} HipQmoeSharedExpert;
+
 // W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
-// fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// fc2 slot activations ([slots, inter]). fp16 only; block_size a multiple of
+// 32. A non-null shared_expert (same inter_size as the routed experts) runs
+// as one extra slot, so act_out, slot_buf, a_qb_mid and a_scale_mid must
+// hold k+1 slots. input == nullptr means a_qb_in/a_scale_in already hold the
+// quantized input (same layout as hip_matmul_nbits_quant_act_i8).
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,
@@ -2973,7 +3060,15 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes,
+    const HipQmoeSharedExpert* shared_expert);
+
+// output[t, n] += sigmoid(gate_logit[t]) * shared_out[t, n], fp16 in/out with
+// fp32 math. Folds a separately computed shared-expert output into the
+// routed QMoE output.
+HIP_KERNEL_API int hip_qmoe_shared_combine(
+    void* stream, void* output, const void* shared_out,
+    const void* gate_logit, int64_t num_tokens, int64_t hidden_size);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
@@ -3280,6 +3375,27 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
     int64_t type);
+
+// fp16 input preparation for linear attention, one launch for `tokens`
+// (= B * T) tokens. Reads q/k/v at per-token element strides (packed QKV or
+// separate tensors) and writes contiguous [tokens, H * d] tensors:
+//   q_out/k_out: per-head RMS norm when qk_norm_weight ([dk]) is given,
+//                x * rsqrt(mean(x^2) + eps) * w rounded, then q *= q_scale
+//                (rounded);
+//   v_out:       plain copy;
+//   decay_out:   half(decay_scale[h] * softplus(decay + decay_bias[h])),
+//                per-head [tokens, Hkv] decay;
+//   beta_out:    half(sigmoid(beta)), beta_width = Hkv or 1.
+// Null outputs are skipped (the caller keeps using its input). Each step
+// matches the standalone kernel it replaces bit for bit.
+HIP_KERNEL_API int hip_linear_attention_prepare(
+    void* stream, const void* q_src, const void* k_src, const void* v_src,
+    int64_t q_stride, int64_t k_stride, int64_t v_stride, const void* decay,
+    const void* beta, const void* decay_bias, const void* decay_scale,
+    void* q_out, void* k_out, void* v_out, void* decay_out, void* beta_out,
+    int64_t tokens, int64_t Hq, int64_t Nk, int64_t Hkv, int64_t dk,
+    int64_t dv, const void* qk_norm_weight, float qk_norm_epsilon,
+    float q_scale, int64_t beta_width);
 
 // Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
 // processes the whole sequence). Returns >0 (=1) when it declines (caller must

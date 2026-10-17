@@ -131,6 +131,17 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // 1b**. Horizontal fusion of int4 projections that share an activation.
+  //       After hip-fusion-transform so subgraph fusions claim individual
+  //       projections first; before externalization like every hip-to-hip
+  //       rewrite.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createGroupMatMulNBitsPass());
+
+  // 1b***. One activation quantization per (activation, block size), written
+  //        by the producing norm where possible. After grouping, whose groups
+  //        are the main consumers.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistDynamicQuantPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing

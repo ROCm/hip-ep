@@ -74,14 +74,18 @@ static __device__ __forceinline__ int rope_resolve_pos(
              (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
 }
 
+// The rotation runs in the cache type C. An fp16 tensor with fp32 caches is
+// rotated in fp32 and rounded once, exactly as casting it to fp32, rotating
+// and casting back would.
+//
 // Half-rotated RoPE: dimensions [0..half) and [half..rotary_dim) form pairs.
 // Uses int32 index arithmetic for RDNA GPU performance (int64 div/mod is slow).
-template <typename T>
+template <typename T, typename C = T>
 __global__ void rope_half_rotated_kernel(
     const T* __restrict__ input,
     const int64_t* __restrict__ position_ids,
-    const T* __restrict__ cos_cache,
-    const T* __restrict__ sin_cache,
+    const C* __restrict__ cos_cache,
+    const C* __restrict__ sin_cache,
     T* __restrict__ output,
     int batch_size,
     int seq_len,
@@ -109,27 +113,27 @@ __global__ void rope_half_rotated_kernel(
   int pos = rope_resolve_pos(position_ids, b, s, seq_len, max_seq_len);
 
   if (d < half_rot) {
-    T cos_val = cos_cache[pos * half_rot + d];
-    T sin_val = sin_cache[pos * half_rot + d];
+    C cos_val = cos_cache[pos * half_rot + d];
+    C sin_val = sin_cache[pos * half_rot + d];
 
     int base = rope_base_offset(b, s, h, seq_len, num_heads, head_dim, is_bnsh);
     int idx_0 = base + d;
     int idx_1 = base + d + half_rot;
 
-    T x0 = input[idx_0];
-    T x1 = input[idx_1];
-    output[idx_0] = x0 * cos_val - x1 * sin_val;
-    output[idx_1] = x0 * sin_val + x1 * cos_val;
+    C x0 = static_cast<C>(input[idx_0]);
+    C x1 = static_cast<C>(input[idx_1]);
+    output[idx_0] = static_cast<T>(x0 * cos_val - x1 * sin_val);
+    output[idx_1] = static_cast<T>(x0 * sin_val + x1 * cos_val);
   }
 }
 
 // Interleaved RoPE: dimensions (2d, 2d+1) form pairs.
-template <typename T>
+template <typename T, typename C = T>
 __global__ void rope_interleaved_kernel(
     const T* __restrict__ input,
     const int64_t* __restrict__ position_ids,
-    const T* __restrict__ cos_cache,
-    const T* __restrict__ sin_cache,
+    const C* __restrict__ cos_cache,
+    const C* __restrict__ sin_cache,
     T* __restrict__ output,
     int batch_size,
     int seq_len,
@@ -163,17 +167,17 @@ __global__ void rope_interleaved_kernel(
 
   int pos = rope_resolve_pos(position_ids, b, s, seq_len, max_seq_len);
 
-  T cos_val = cos_cache[pos * half_rot + pair];
-  T sin_val = sin_cache[pos * half_rot + pair];
+  C cos_val = cos_cache[pos * half_rot + pair];
+  C sin_val = sin_cache[pos * half_rot + pair];
 
   int base = rope_base_offset(b, s, h, seq_len, num_heads, head_dim, is_bnsh);
   int idx_0 = base + 2 * pair;
   int idx_1 = base + 2 * pair + 1;
 
-  T x0 = input[idx_0];
-  T x1 = input[idx_1];
-  output[idx_0] = x0 * cos_val - x1 * sin_val;
-  output[idx_1] = x0 * sin_val + x1 * cos_val;
+  C x0 = static_cast<C>(input[idx_0]);
+  C x1 = static_cast<C>(input[idx_1]);
+  output[idx_0] = static_cast<T>(x0 * cos_val - x1 * sin_val);
+  output[idx_1] = static_cast<T>(x0 * sin_val + x1 * cos_val);
 }
 
 // Copy kernel for dimensions beyond rotary_dim (interleaved mode).
@@ -215,6 +219,46 @@ __global__ void rope_copy_remaining_kernel(
   output[src_idx] = input[src_idx];
 }
 
+template <typename T, typename C>
+static void rope_launch(hipStream_t stream, const void* input,
+                        const void* position_ids, const void* cos_cache,
+                        const void* sin_cache, void* output, int bs, int sl,
+                        int nh, int hd, int rd, int max_seq_len,
+                        int64_t interleaved, int bnsh) {
+  const int block_size = 256;
+  const int hr = rd / 2;
+  auto* in = static_cast<const T*>(input);
+  auto* pos = static_cast<const int64_t*>(position_ids);
+  auto* cos_c = static_cast<const C*>(cos_cache);
+  auto* sin_c = static_cast<const C*>(sin_cache);
+  auto* out = static_cast<T*>(output);
+
+  if (interleaved) {
+    int total_pairs = bs * sl * nh * hr;
+    int grid_size = (total_pairs + block_size - 1) / block_size;
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_interleaved_kernel<T, C>),
+        dim3(grid_size), dim3(block_size), 0, stream,
+        in, pos, cos_c, sin_c, out,
+        bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
+  } else {
+    int total = bs * sl * nh * hd;
+    int grid_size = (total + block_size - 1) / block_size;
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(rope_half_rotated_kernel<T, C>),
+        dim3(grid_size), dim3(block_size), 0, stream,
+        in, pos, cos_c, sin_c, out,
+        bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
+  }
+
+  if (interleaved && rd < hd) {
+    int remaining_per_head = hd - rd;
+    int total_remaining = bs * sl * nh * remaining_per_head;
+    int grid_size = (total_remaining + block_size - 1) / block_size;
+    hipLaunchKernelGGL(rope_copy_remaining_kernel<T>,
+        dim3(grid_size), dim3(block_size), 0, stream,
+        in, out, bs, sl, nh, hd, rd, bnsh);
+  }
+}
+
 extern "C" int hip_rope_forward(
     void* stream_ptr,
     const void* input,
@@ -230,6 +274,7 @@ extern "C" int hip_rope_forward(
     int64_t max_seq_len_i64,
     int64_t interleaved,
     int64_t element_size_bytes,
+    int64_t cache_element_size_bytes,
     int64_t is_bnsh) {
 
   // position_ids may be null: native ai.onnx RotaryEmbedding without
@@ -241,82 +286,32 @@ extern "C" int hip_rope_forward(
   }
 
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  const int block_size = 256;
-
   int bs = static_cast<int>(batch_size);
   int sl = static_cast<int>(seq_len);
   int nh = static_cast<int>(num_heads);
   int hd = static_cast<int>(head_dim);
   int rd = static_cast<int>(rotary_dim);
-  int hr = rd / 2;
   int max_seq_len = static_cast<int>(max_seq_len_i64);
   int bnsh = is_bnsh ? 1 : 0;
 
-  if (element_size_bytes == 2) {
-    auto* in = static_cast<const __half*>(input);
-    auto* pos = static_cast<const int64_t*>(position_ids);
-    auto* cos_c = static_cast<const __half*>(cos_cache);
-    auto* sin_c = static_cast<const __half*>(sin_cache);
-    auto* out = static_cast<__half*>(output);
-
-    if (interleaved) {
-      int total_pairs = bs * sl * nh * hr;
-      int grid_size = (total_pairs + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_interleaved_kernel<__half>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
-    } else {
-      int total = bs * sl * nh * hd;
-      int grid_size = (total + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_half_rotated_kernel<__half>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
-    }
-
-    if (interleaved && rd < hd) {
-      int remaining_per_head = hd - rd;
-      int total_remaining = bs * sl * nh * remaining_per_head;
-      int grid_size = (total_remaining + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_copy_remaining_kernel<__half>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, out, bs, sl, nh, hd, rd, bnsh);
-    }
-  } else if (element_size_bytes == 4) {
-    auto* in = static_cast<const float*>(input);
-    auto* pos = static_cast<const int64_t*>(position_ids);
-    auto* cos_c = static_cast<const float*>(cos_cache);
-    auto* sin_c = static_cast<const float*>(sin_cache);
-    auto* out = static_cast<float*>(output);
-
-    if (interleaved) {
-      int total_pairs = bs * sl * nh * hr;
-      int grid_size = (total_pairs + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_interleaved_kernel<float>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
-    } else {
-      int total = bs * sl * nh * hd;
-      int grid_size = (total + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_half_rotated_kernel<float>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, pos, cos_c, sin_c, out,
-          bs, sl, nh, hd, rd, hr, max_seq_len, bnsh);
-    }
-
-    if (interleaved && rd < hd) {
-      int remaining_per_head = hd - rd;
-      int total_remaining = bs * sl * nh * remaining_per_head;
-      int grid_size = (total_remaining + block_size - 1) / block_size;
-      hipLaunchKernelGGL(rope_copy_remaining_kernel<float>,
-          dim3(grid_size), dim3(block_size), 0, stream,
-          in, out, bs, sl, nh, hd, rd, bnsh);
-    }
+  if (element_size_bytes == 2 && cache_element_size_bytes == 2) {
+    rope_launch<__half, __half>(stream, input, position_ids, cos_cache,
+                                sin_cache, output, bs, sl, nh, hd, rd,
+                                max_seq_len, interleaved, bnsh);
+  } else if (element_size_bytes == 2 && cache_element_size_bytes == 4) {
+    rope_launch<__half, float>(stream, input, position_ids, cos_cache,
+                               sin_cache, output, bs, sl, nh, hd, rd,
+                               max_seq_len, interleaved, bnsh);
+  } else if (element_size_bytes == 4 && cache_element_size_bytes == 4) {
+    rope_launch<float, float>(stream, input, position_ids, cos_cache,
+                              sin_cache, output, bs, sl, nh, hd, rd,
+                              max_seq_len, interleaved, bnsh);
   } else {
-    fprintf(stderr, "hip_rope_forward: unsupported element_size %lld\n",
-            (long long)element_size_bytes);
+    fprintf(stderr,
+            "hip_rope_forward: unsupported element_size %lld with cache "
+            "element_size %lld\n",
+            (long long)element_size_bytes,
+            (long long)cache_element_size_bytes);
     return -1;
   }
 

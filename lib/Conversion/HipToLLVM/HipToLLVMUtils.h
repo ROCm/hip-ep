@@ -55,6 +55,7 @@ inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
+inline constexpr const char *kWrapGatedRmsNorm = "wrap_gated_rms_norm";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
@@ -85,6 +86,8 @@ inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
 inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
+inline constexpr const char *kWrapSigmoidMul =
+    "wrap_sigmoid_mul"; // hip.sigmoid_mul
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -102,6 +105,8 @@ inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+inline constexpr const char *kWrapMatMulNBitsGroup = "wrap_matmul_nbits_group";
+inline constexpr const char *kWrapDynamicQuantI8 = "wrap_dynamic_quant_i8";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =

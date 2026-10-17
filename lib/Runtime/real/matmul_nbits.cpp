@@ -568,15 +568,38 @@ cleanup:
   return result;
 }
 
+// Session scratch for the dp4a activation quant: a_qb at offset 0 (M*K bytes,
+// hipMalloc base is over-aligned); a_scale after a 64-byte-rounded gap so its
+// float reads stay naturally aligned.
+bool get_dp4a_scratch(RuntimeState *state, int64_t M, int64_t K,
+                      int64_t block_size, void **a_qb, void **a_scale) {
+  const size_t k_blocks =
+      static_cast<size_t>((K + block_size - 1) / block_size);
+  const size_t a_qb_bytes = static_cast<size_t>(M) * static_cast<size_t>(K);
+  const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
+  const size_t need =
+      scale_off + static_cast<size_t>(M) * k_blocks * sizeof(float);
+  if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) != 0)
+    return false;
+  char *base =
+      static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
+  if (!base)
+    return false;
+  *a_qb = base;
+  *a_scale = base + scale_off;
+  return true;
+}
+
 } // namespace
 
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
-                      int64_t K, int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      const void *bias, const void *a_q, const void *a_scale,
+                      void *output, int64_t M, int64_t N, int64_t K,
+                      int64_t batch_count, int64_t bits, int64_t block_size,
+                      int64_t elem_size, int64_t zp_elem_size,
+                      int64_t scale_elem_size) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -729,31 +752,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
       block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
       (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
-    const size_t k_blocks =
-        static_cast<size_t>((K + block_size - 1) / block_size);
-    // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
-    // after a 64-byte-rounded gap so its float reads stay naturally aligned.
-    const size_t a_qb_bytes = static_cast<size_t>(M) * static_cast<size_t>(K);
-    const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
-    const size_t need =
-        scale_off + static_cast<size_t>(M) * k_blocks * sizeof(float);
-    if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) == 0) {
-      char *base =
-          static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
-      if (base) {
-        void *a_qb = base;
-        void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
-        if (rc == 0) {
-          result = 0;
-          goto cleanup;
-        }
-        // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
-        RUNTIME_DEBUG_LOG(
-            "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
+    // A producer-written quantization replaces the quant launch.
+    const bool prequant =
+        a_q && a_scale && hipdnn_ep_matmul_prequant_active(M);
+    void *a_qb = const_cast<void *>(a_q);
+    void *a_sc = const_cast<void *>(a_scale);
+    if (prequant ||
+        get_dp4a_scratch(state, M, K, block_size, &a_qb, &a_sc)) {
+      int rc = hip_matmul_nbits_dp4a(stream, prequant ? nullptr : A, B, scales,
+                                     pre_zp_u8, bias, output, M, N, K,
+                                     block_size, a_qb, a_sc);
+      if (rc == 0) {
+        result = 0;
+        goto cleanup;
       }
+      // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
+      RUNTIME_DEBUG_LOG(
+          "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
     }
   }
 
@@ -845,4 +860,107 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
 cleanup:
   return result;
+}
+
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_q,
+                            const void *a_scale, int64_t count, const void *B0,
+                            const void *S0, void *Y0, int64_t N0,
+                            const void *B1, const void *S1, void *Y1,
+                            int64_t N1, const void *B2, const void *S2,
+                            void *Y2, int64_t N2, const void *B3,
+                            const void *S3, void *Y3, int64_t N3, int64_t M,
+                            int64_t K, int64_t batch_count, int64_t bits,
+                            int64_t block_size, int64_t elem_size) {
+  const void *B[] = {B0, B1, B2, B3};
+  const void *S[] = {S0, S1, S2, S3};
+  void *Y[] = {Y0, Y1, Y2, Y3};
+  const int64_t N[] = {N0, N1, N2, N3};
+  if (!state || !A || count < 1 || count > 4) {
+    fprintf(stderr, "wrap_matmul_nbits_group: invalid arguments\n");
+    return -1;
+  }
+  for (int64_t i = 0; i < count; i++) {
+    if (!B[i] || !S[i] || !Y[i] || N[i] <= 0) {
+      fprintf(stderr, "wrap_matmul_nbits_group: invalid member %lld\n",
+              (long long)i);
+      return -1;
+    }
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits_group(count=%lld, N=[%lld,%lld,"
+                    "%lld,%lld], M=%lld, K=%lld, batch=%lld)\n",
+                    (long long)count, (long long)N0, (long long)N1,
+                    (long long)N2, (long long)N3, (long long)M, (long long)K,
+                    (long long)batch_count);
+
+  // Same eligibility as the single-row dp4a path in wrap_matmul_nbits
+  // (members are symmetric fp16-scale int4 by construction of the group).
+  if (hipdnn_ep_matmul_group_enabled() && hipdnn_ep_matmul_dp4a_enabled() &&
+      M == 1 && batch_count == 1 && bits == 4 && block_size > 0 &&
+      (K % 32 == 0) && elem_size == 2) {
+    OP_PROFILE(
+        "matmul_nbits_group",
+        [&] {
+          char b[96];
+          snprintf(b, sizeof(b), "count=%lld,n=%lld+%lld+%lld+%lld,k=%lld",
+                   (long long)count, (long long)N0, (long long)N1,
+                   (long long)N2, (long long)N3, (long long)K);
+          return std::string(b);
+        },
+        state);
+    void *stream = hipdnn_ep_state_get_stream(state);
+    const bool prequant =
+        a_q && a_scale && hipdnn_ep_matmul_prequant_active(M);
+    void *a_qb = const_cast<void *>(a_q);
+    void *a_sc = const_cast<void *>(a_scale);
+    if (stream && (prequant || get_dp4a_scratch(state, M, K, block_size,
+                                                &a_qb, &a_sc))) {
+      int rc = hip_matmul_nbits_dp4a_group(stream, prequant ? nullptr : A,
+                                           count, B, S, Y, N, K, block_size,
+                                           a_qb, a_sc);
+      if (rc == 0)
+        return 0;
+      RUNTIME_DEBUG_LOG(
+          "[REAL] matmul_nbits_group dp4a rc=%d, running members\n", rc);
+    }
+  }
+
+  for (int64_t i = 0; i < count; i++) {
+    int rc = wrap_matmul_nbits(state, op_state_slot, A, B[i], S[i],
+                               /*zero_points=*/nullptr, /*g_idx=*/nullptr,
+                               /*bias=*/nullptr, a_q, a_scale, Y[i], M, N[i],
+                               K, batch_count, bits, block_size, elem_size,
+                               /*zp_elem_size=*/2, /*scale_elem_size=*/2);
+    if (rc != 0)
+      return rc;
+  }
+  return 0;
+}
+
+int wrap_dynamic_quant_i8(RuntimeState *state, const void *A, void *q,
+                          void *scale, int64_t rows, int64_t K,
+                          int64_t block_size) {
+  if (!state || !A || !q || !scale) {
+    fprintf(stderr, "wrap_dynamic_quant_i8: null argument\n");
+    return -1;
+  }
+  if (!hipdnn_ep_matmul_prequant_active(rows))
+    return 0;
+  OP_PROFILE(
+      "dynamic_quant_i8",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "rows=%lld,k=%lld", (long long)rows,
+                 (long long)K);
+        return std::string(b);
+      },
+      state);
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_dynamic_quant_i8: null stream\n");
+    return -1;
+  }
+  return hip_matmul_nbits_quant_act_i8(stream, A, q, scale, rows, K,
+                                       block_size);
 }

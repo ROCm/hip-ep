@@ -519,6 +519,61 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
   }
 };
 
+// hip.sigmoid_mul(%ctx) ins(%input, %gate) outs(%output, [%q, %scale])
+//   -> wrap_sigmoid_mul(state, input, gate, output, q_or_null,
+//        scale_or_null, num_elements, row_size, quant_block_size)
+// The verifier fixes the last axis.
+struct SigmoidMulOpLowering : public ConvertOpToLLVMPattern<SigmoidMulOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(SigmoidMulOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    auto i64 = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    auto outputs = adaptor.getOutputs();
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    Value quantPtr = nullPtr;
+    Value quantScalePtr = nullPtr;
+    if (op.hasQuantOutputs()) {
+      quantPtr = extractContiguousMemRefPtr(outputs[1], rewriter, loc);
+      quantScalePtr = extractContiguousMemRefPtr(outputs[2], rewriter, loc);
+    }
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    SmallVector<Type> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType, // state, input, gate, output
+        ptrType, ptrType,                   // q, scale
+        i64Type, i64Type, i64Type // num_elements, row_size, quant_block_size
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSigmoidMul, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc),
+        extractContiguousMemRefPtr(outputs[0], rewriter, loc),
+        quantPtr,
+        quantScalePtr,
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc),
+        i64(inputType.getDimSize(inputType.getRank() - 1)),
+        i64(op.getQuantBlockSize().value_or(0))};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -713,7 +768,8 @@ void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
                PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
-               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
+               SwigluOpLowering, SigmoidMulOpLowering, SiluOpLowering,
+               MiopenSoftmaxOpLowering>(
       converter);
 }
 

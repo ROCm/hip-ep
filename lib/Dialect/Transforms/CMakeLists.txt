@@ -25,7 +25,12 @@ add_library(HipDialectTransforms STATIC
   # Native C++ rewrites driven by hip-fusion-transform alongside the PDLL
   # ones. Each is a .hpp/.cpp pair so that HipFusionTransform.cpp, which
   # instantiates the driver, only ever sees their populate declarations.
+  fusion_pattern/gated_rms_norm_fusion.cpp
+  fusion_pattern/linear_attention_input_fusion.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
+  fusion_pattern/qmoe_shared_expert_fusion.cpp
+  fusion_pattern/rope_layout_fusion.cpp
+  fusion_pattern/sigmoid_mul_fusion.cpp
   fusion_pattern/swiglu_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
@@ -36,8 +41,10 @@ add_library(HipDialectTransforms STATIC
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
+  GroupMatMulNBits.cpp
   HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
+  HoistDynamicQuant.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
   LoopBodyToOutParams.cpp

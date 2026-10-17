@@ -1179,7 +1179,131 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+/// A pre-quantized activation operand pair (see hip.dynamic_quant_i8): both
+/// or neither, int8 values and f32 scales.
+static LogicalResult verifyActivationQuant(Operation *op, Value q, Value scale,
+                                           StringRef name) {
+  if (!q && !scale)
+    return success();
+  if (!q || !scale)
+    return op->emitOpError(name) << " needs both the values and the scales";
+  auto qType = dyn_cast<ShapedType>(q.getType());
+  auto sType = dyn_cast<ShapedType>(scale.getType());
+  if (!qType || !sType || !qType.getElementType().isInteger(8) ||
+      !sType.getElementType().isF32())
+    return op->emitOpError(name) << " must be i8 values with f32 scales";
+  return success();
+}
+
+LogicalResult SkipRmsNormOp::verify() {
+  if (!hasQuantOutputs())
+    return success();
+  const size_t outputs = getOutputs().size();
+  if (outputs < 3 || outputs > 4 || *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size needs the output, an optional "
+                       "residual sum and the quantized pair as outputs");
+  return verifyActivationQuant(*this, getOutputs()[outputs - 2],
+                               getOutputs()[outputs - 1], "quant outputs");
+}
+
+//===----------------------------------------------------------------------===//
+// GatedRmsNormOp: ins(input, gate, weight) outs(output, [q, scale])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedRmsNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void GatedRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedRmsNormOp::verify() {
+  const size_t outputs = getOutputs().size();
+  if (outputs != (hasQuantOutputs() ? 3u : 1u))
+    return emitOpError("expected the output")
+           << (hasQuantOutputs() ? " and the quantized pair" : "")
+           << " as outputs, got " << outputs;
+  if (hasQuantOutputs() && *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size must be positive");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  auto outputType = cast<ShapedType>(getOutputs()[0].getType());
+  if (!inputType.getElementType().isF16() ||
+      getGate().getType() != getInput().getType() ||
+      outputType.getShape() != inputType.getShape() ||
+      outputType.getElementType() != inputType.getElementType() ||
+      weightType.getElementType() != inputType.getElementType())
+    return emitOpError("input, gate, weight and output must be f16, and "
+                       "input, gate and output must share a shape");
+  if (inputType.getRank() < 1 || weightType.getRank() != 1 ||
+      weightType.isDynamicDim(0) || inputType.isDynamicDim(inputType.getRank() - 1))
+    return emitOpError("needs a static last axis and a static 1-D weight");
+  const int64_t group = weightType.getDimSize(0);
+  const int64_t width = inputType.getDimSize(inputType.getRank() - 1);
+  if (group <= 0 || group % 2 != 0 || width % group != 0)
+    return emitOpError("the last axis (")
+           << width << ") must be a multiple of the even weight size ("
+           << group << ")";
+
+  SmallVector<Value> dataOperands = {getInput(), getGate(), getWeight()};
+  llvm::append_range(dataOperands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/static_cast<unsigned>(outputs))))
+    return failure();
+  if (!hasQuantOutputs())
+    return success();
+  return verifyActivationQuant(*this, getOutputs()[1], getOutputs()[2],
+                               "quant outputs");
+}
+
+//===----------------------------------------------------------------------===//
+// SigmoidMulOp: ins(input, gate) outs(output, [q, scale])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SigmoidMulOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SigmoidMulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SigmoidMulOp::verify() {
+  const size_t outputs = getOutputs().size();
+  if (outputs != (hasQuantOutputs() ? 3u : 1u))
+    return emitOpError("expected the output")
+           << (hasQuantOutputs() ? " and the quantized pair" : "")
+           << " as outputs, got " << outputs;
+  if (hasQuantOutputs() && *getQuantBlockSize() <= 0)
+    return emitOpError("quant_block_size must be positive");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutputs()[0].getType());
+  if (!inputType.getElementType().isF16() ||
+      getGate().getType() != getInput().getType() ||
+      outputType.getShape() != inputType.getShape() ||
+      outputType.getElementType() != inputType.getElementType())
+    return emitOpError("input, gate and output must be f16 of one shape");
+  if (inputType.getRank() < 1 ||
+      inputType.isDynamicDim(inputType.getRank() - 1))
+    return emitOpError("needs a static last axis");
+
+  SmallVector<Value> dataOperands = {getInput(), getGate()};
+  llvm::append_range(dataOperands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/static_cast<unsigned>(outputs))))
+    return failure();
+  if (!hasQuantOutputs())
+    return success();
+  return verifyActivationQuant(*this, getOutputs()[1], getOutputs()[2],
+                               "quant outputs");
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -2139,6 +2263,74 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  return verifyActivationQuant(*this, getAQ(), getAScale(), "a_quant");
+}
+
+//===----------------------------------------------------------------------===//
+// DynamicQuantI8Op: ins(input) outs(q, scale)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicQuantI8Op::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void DynamicQuantI8Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicQuantI8Op::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected the quantized values and the scales as "
+                       "outputs, got ")
+           << getOutputs().size();
+  if (getBlockSize() <= 0)
+    return emitOpError("block_size must be positive");
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getOutputs()[0], getOutputs()[1]},
+          /*numInits=*/2)))
+    return failure();
+  return verifyActivationQuant(*this, getOutputs()[0], getOutputs()[1],
+                               "outputs");
+}
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp: ins(A) weights(B...) scales(S...) outs(Y...)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  const size_t members = getOutputs().size();
+  if (members < 1 || members > kMaxMembers)
+    return emitOpError("expected 1 to ")
+           << kMaxMembers << " members, got " << members;
+  if (getB().size() != members || getScales().size() != members ||
+      getNs().size() != members)
+    return emitOpError("weights, scales, outputs and Ns must have one entry "
+                       "per member");
+
+  if (failed(verifyActivationQuant(*this, getAQ(), getAScale(), "a_quant")))
+    return failure();
+
+  SmallVector<Value> dataOperands{getA()};
+  llvm::append_range(dataOperands, getB());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getOutputs());
+  return verifyDpsComputeOp(*this, dataOperands,
+                            static_cast<unsigned>(members));
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
@@ -2149,6 +2341,19 @@ void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QMoEOp::verify() {
+  Value shared[] = {getSharedGateWeights(), getSharedGateScales(),
+                    getSharedUpWeights(),   getSharedUpScales(),
+                    getSharedDownWeights(), getSharedDownScales(),
+                    getSharedGateLogit()};
+  unsigned present = llvm::count_if(shared, [](Value v) { return bool(v); });
+  if (present != 0 && present != std::size(shared))
+    return emitOpError("shared expert needs all seven operands or none, got ")
+           << present;
+  return verifyActivationQuant(*this, getInputQ(), getInputScale(),
+                               "input_quant");
 }
 
 //===----------------------------------------------------------------------===//
@@ -2227,20 +2432,56 @@ void GemmOp::getEffects(
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange LinearAttentionOp::getDpsInitsMutable() {
-  // Operand segments:
-  //   ctx(1), query(1), key(1), value(1),
-  //   past_state(0|1), decay(0|1), beta(0|1),
-  //   output(1), present_state(1)
-  unsigned numInputs = 4; // ctx, query, key, value
-  if (getPastState())
-    ++numInputs;
-  if (getDecay())
-    ++numInputs;
-  if (getBeta())
-    ++numInputs;
+  // DPS inits: output, present_state (always 2, adjacent)
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
+}
 
-  // DPS inits: output, present_state (always 2)
-  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+LogicalResult LinearAttentionOp::verify() {
+  if (!getKey() != !getValue())
+    return emitOpError("key and value must be both present or both absent");
+  if (!getDecayBias() != !getDecayScale())
+    return emitOpError("decay_bias and decay_scale go together");
+
+  auto elemType = getElementTypeOrSelf(getQuery().getType());
+  const bool prepares = isPackedQKV() || getQkNormWeight() || getDecayBias() ||
+                        getBetaSigmoid() || getQScale().convertToFloat() != 1.f;
+  if (prepares && !elemType.isF16())
+    return emitOpError("input preparation requires f16 inputs");
+
+  if (Value weight = getQkNormWeight()) {
+    auto t = dyn_cast<ShapedType>(weight.getType());
+    auto stateType = dyn_cast<ShapedType>(getPresentState().getType());
+    if (!t || !t.hasRank() || t.getRank() != 1 ||
+        t.getElementType() != elemType)
+      return emitOpError("qk_norm weight must be a 1-D tensor of the input "
+                         "element type");
+    if (stateType && stateType.hasRank() && stateType.getRank() == 4 &&
+        !t.isDynamicDim(0) && !stateType.isDynamicDim(2) &&
+        t.getDimSize(0) != stateType.getDimSize(2))
+      return emitOpError("qk_norm weight must have d_k elements");
+  }
+
+  if (getDecayBias()) {
+    if (!getDecay())
+      return emitOpError("decay_softplus requires decay");
+    const int64_t hkv = getKvNumHeads();
+    auto decayType = dyn_cast<ShapedType>(getDecay().getType());
+    if (!decayType || !decayType.hasRank() ||
+        decayType.getShape().back() != hkv)
+      return emitOpError("decay_softplus requires per-head decay [B, T, ")
+             << hkv << "]";
+    for (Value v : {getDecayBias(), getDecayScale()}) {
+      auto t = dyn_cast<ShapedType>(v.getType());
+      if (!t || !t.hasRank() || t.getRank() != 1 || t.getDimSize(0) != hkv ||
+          !t.getElementType().isF32())
+        return emitOpError("decay_bias / decay_scale must be f32 [")
+               << hkv << "]";
+    }
+  }
+  if (getBetaSigmoid() && !getBeta())
+    return emitOpError("beta_sigmoid requires beta");
+  return success();
 }
 
 void LinearAttentionOp::getEffects(
