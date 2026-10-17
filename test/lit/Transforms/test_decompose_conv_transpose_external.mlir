@@ -31,7 +31,8 @@
 // FILE-DAG: hip.constant {value = dense<4.000000e+00> : tensor<1x1x1x1xf32>}
 
 // The memory address is process-local and owned by whoever recorded it, which
-// this pass cannot establish -- resolving it would dereference a bare integer.
+// this pass cannot establish without allow-memory-sources -- resolving it
+// would dereference a bare integer.
 // MEMORY-LABEL: func.func @memory_source
 // MEMORY: hip.conv_transpose
 
