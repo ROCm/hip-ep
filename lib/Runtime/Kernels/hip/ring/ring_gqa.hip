@@ -667,8 +667,8 @@ hip_gqa_ring_attention(void *stream_ptr, const void *q, const void *k,
                        const void *v, void *o, int nq, int past, int capacity,
                        void *workspace, size_t workspace_bytes) {
 #if HIP_EP_RING_DEVICE_ENABLED
-  if (!q || !k || !v || !o || nq < 1 || nq > 4096 || past < 0 ||
-      past > 32768 - nq || capacity < past + nq ||
+  if (!q || !k || !v || !o || nq < 1 || nq > 65536 || past < 0 ||
+      past > 65664 - nq || capacity < past + nq ||
       !hip_gqa_ring_device_supported())
     return int(hipErrorInvalidValue);
   const size_t needed = hip_gqa_ring_workspace(nq, past + nq);

@@ -364,7 +364,7 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
             "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
     return -1;
   }
-  if (total > 32768)
+  if (total > 65664)
     return 1;
 
   struct Range {
@@ -3058,7 +3058,7 @@ int wrap_group_query_attention(
   }
   if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
       kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= 4096 && seq_len_new_kv == seq_len_q && key && value &&
+      seq_len_q <= 65536 && seq_len_new_kv == seq_len_q && key && value &&
       seqlens_k && !kv_bnsd && !reuse_past_kv && !kv_quantized && !do_rotary &&
       no_causal == 0 && scale == 0.0625f && local_window_size <= 0 &&
       !head_sink && smooth_softmax <= 0 && !attention_bias &&

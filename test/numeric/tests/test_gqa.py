@@ -932,3 +932,85 @@ def test_gqa_ring_shared_cache_transitions(model_runner, tmp_path):
         np.testing.assert_array_equal(outputs[1], expected_k)
         np.testing.assert_array_equal(outputs[2], expected_v)
         past = total
+
+
+@pytest.mark.parametrize(
+    "query_length,past_length",
+    [
+        (8192, 0),
+        (32768, 0),
+        (4096, 28800),
+        (1, 32895),
+        (65536, 0),
+        (4096, 61568),
+        (1, 65663),
+    ],
+)
+def test_gqa_ring_long_context(model_runner, tmp_path, query_length, past_length):
+    """Check long-query admission and the final cache boundary through ONNX.
+
+    Sample query rows but scan every causally valid key in an FP32 reference;
+    verify full output finiteness and every valid present-cache element.
+    """
+    import onnx
+
+    qlen, past = query_length, past_length
+    total = past + qlen
+    capacity = max(32915, total + 19)
+    model = _make_gqa_fixed_cache_model(1, "query_length", capacity, 6144, 1024, 24, 4)
+    rng = np.random.default_rng(985)
+    query = rng.standard_normal((1, qlen, 6144)).astype(np.float16)
+    key = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    value = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    old_k = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    old_v = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    path = tmp_path / "ring_long_context.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.array([total - 1], dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    old_k[:, :, past:total] = key.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    old_v[:, :, past:total] = value.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    assert np.isfinite(actual[0]).all()
+    np.testing.assert_array_equal(actual[1][:, :, :total], old_k[:, :, :total])
+    np.testing.assert_array_equal(actual[2][:, :, :total], old_v[:, :, :total])
+    indices = np.array(
+        sorted(
+            {
+                0,
+                qlen // 4,
+                qlen // 2,
+                3 * qlen // 4,
+                qlen - 1,
+                min(15, qlen - 1),
+                min(16, qlen - 1),
+            }
+        )
+    )
+    q = query.reshape(qlen, 24, 256)[indices].astype(np.float32)
+    expected = np.empty_like(q)
+    mask = np.arange(total)[None, :] > past + indices[:, None]
+    for group in range(4):
+        heads = slice(group * 6, (group + 1) * 6)
+        scores = (
+            q[:, heads].transpose(1, 0, 2)
+            @ old_k[0, group, :total].astype(np.float32).T
+        ) * np.float32(0.0625)
+        scores = np.where(mask[None, :, :], -np.inf, scores)
+        weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        weights /= weights.sum(axis=-1, keepdims=True)
+        expected[:, heads] = (
+            weights @ old_v[0, group, :total].astype(np.float32)
+        ).transpose(1, 0, 2)
+    np.testing.assert_allclose(
+        actual[0].reshape(qlen, 24, 256)[indices], expected, atol=0.005, rtol=0.005
+    )
