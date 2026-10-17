@@ -134,7 +134,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Implementation |
 |---|---|
-| If | Outlined then/else functions with runtime branch dispatch |
+| If | Outlined then/else functions with runtime branch dispatch. The condition is a single-element `i1`, `i8`, or `ui8` tensor, including a unit shape such as `tensor<1xui8>` |
 | Loop | Outlined loop body with runtime loop dispatch |
 
 ## Compiler-optimized operations
@@ -155,6 +155,7 @@ These operations are handled through standard MLIR transformations and generally
 | Identity | SSA value forwarding | No runtime operation |
 | Flatten | `tensor.collapse_shape` and, where needed, `tensor.expand_shape` | Metadata-only where representable |
 | DepthToSpace | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | Rank-4 NCHW. `blocksize >= 1`, `C` divisible by `blocksize^2`, and output `[N, C / blocksize^2, H * blocksize, W * blocksize]`. Modes `DCR` (default) and `CRD`. `blocksize == 1` is the input |
+| SpaceToDepth | `tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape` | Rank-4 NCHW. `blocksize >= 1`, `H` and `W` divisible by `blocksize`, and output `[N, C * blocksize^2, H / blocksize, W / blocksize]`. Inverse of DepthToSpace `DCR`. `blocksize == 1` is the input |
 
 ## Fusion and preprocessing
 
