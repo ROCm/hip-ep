@@ -32,6 +32,9 @@ config.hip_build_mode = "@LLVM_BUILD_MODE@"
 # platform (static linking needs no symbol export).
 config.hip_static_plugins = @HIPDNN_STATIC_PLUGINS_LIT_FEATURE@
 
+if "@HIP_EP_GQA_IMPL@" != "existing":
+    config.available_features.add("ring-gqa")
+
 lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.

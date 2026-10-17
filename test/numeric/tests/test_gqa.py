@@ -811,3 +811,249 @@ class TestGroupQueryAttention:
             [q, k, v, pk, pv, seqlens, total],
         )
         compare_outputs(actual, expected, atol=1e-3)
+
+
+def _ring_fp32_reference(query, key_cache, value_cache, past):
+    qlen = query.shape[1]
+    total = past + qlen
+    q = query.reshape(1, qlen, 24, 256).transpose(0, 2, 1, 3).astype(np.float32)
+    k = np.repeat(key_cache[:, :, :total].astype(np.float32), 6, axis=1)
+    v = np.repeat(value_cache[:, :, :total].astype(np.float32), 6, axis=1)
+    scores = (q @ k.transpose(0, 1, 3, 2)) * np.float32(0.0625)
+    mask = np.arange(total)[None, :] > past + np.arange(qlen)[:, None]
+    scores = np.where(mask, -np.inf, scores)
+    weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+    weights /= weights.sum(axis=-1, keepdims=True)
+    return (weights @ v).transpose(0, 2, 1, 3).reshape(1, qlen, 6144)
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize(
+    "query_length,past_length", [(1, 0), (1, 257), (17, 0), (33, 129)]
+)
+def test_gqa_ring_geometry(model_runner, tmp_path, dynamic, query_length, past_length):
+    """Verify the common ONNX contract for existing and both Ring builds.
+
+    The backend disables CPU fallback. Compare against FP32 attention computed
+    from the same FP16-rounded inputs; check the entire valid present cache too.
+    Unused capacity in separately allocated outputs has no defined contents.
+    """
+    import onnx
+
+    qlen, past = query_length, past_length
+    total, capacity = past + qlen, past + qlen + 19
+    model = _make_gqa_fixed_cache_model(
+        1, "query_length" if dynamic else qlen, capacity, 6144, 1024, 24, 4
+    )
+    rng = np.random.default_rng(984)
+    query = rng.standard_normal((1, qlen, 6144)).astype(np.float16)
+    key = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    value = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    old_k = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    old_v = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    seqlens = np.array([total - 1], dtype=np.int32)
+    length = np.array(capacity, dtype=np.int32)
+    path = tmp_path / "ring_geometry.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path), [query, key, value, old_k, old_v, seqlens, length]
+    )
+    expected_k, expected_v = old_k.copy(), old_v.copy()
+    expected_k[:, :, past:total] = key.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    expected_v[:, :, past:total] = value.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    expected = _ring_fp32_reference(query, expected_k, expected_v, past)
+    np.testing.assert_allclose(actual[0], expected, atol=0.005, rtol=0.005)
+    np.testing.assert_array_equal(actual[1][:, :, :total], expected_k[:, :, :total])
+    np.testing.assert_array_equal(actual[2][:, :, :total], expected_v[:, :, :total])
+
+
+def test_gqa_ring_shared_cache_transitions(model_runner, tmp_path):
+    """Bind actual GPU OrtValues as both past and present across prefill/decode."""
+    import onnx
+    import onnxruntime as ort
+
+    backend = model_runner.backend
+    if not hasattr(backend, "_ep_device"):
+        pytest.skip("requires the ORT EP backend and its GPU allocator")
+    capacity = 80
+    model = _make_gqa_fixed_cache_model(1, "query_length", capacity, 6144, 1024, 24, 4)
+    path = tmp_path / "ring_shared.onnx"
+    onnx.save(model, path)
+    options = ort.SessionOptions()
+    options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    options.add_provider_for_devices(
+        [backend._ep_device], dict(backend._provider_options)
+    )
+    session = ort.InferenceSession(str(path), sess_options=options)
+    expected_k = np.full((1, 4, capacity, 256), 7.0, dtype=np.float16)
+    expected_v = expected_k.copy()
+    caches = [
+        ort.OrtValue.ortvalue_from_shape_and_type(
+            list(expected_k.shape), np.float16, device_type="gpu", vendor_id=0x1002
+        )
+        for _ in range(2)
+    ]
+    for cache, values in zip(caches, [expected_k, expected_v]):
+        cache.update_inplace(values)
+    rng = np.random.default_rng(987)
+    past = 0
+    for qlen in (17, 1, 33, 1):
+        total = past + qlen
+        query = rng.standard_normal((1, qlen, 6144)).astype(np.float16)
+        key = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+        value = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+        inputs = {
+            "query": query,
+            "key": key,
+            "value": value,
+            "seqlens_k": np.array([total - 1], dtype=np.int32),
+            "total_seq": np.array(capacity, dtype=np.int32),
+        }
+        io = session.io_binding()
+        for name, array in inputs.items():
+            io.bind_cpu_input(name, array)
+        io.bind_output("output", "cpu")
+        for kind, cache in zip(["key", "value"], caches):
+            io.bind_ortvalue_input("past_" + kind, cache)
+            io.bind_ortvalue_output("present_" + kind, cache)
+        session.run_with_iobinding(io)
+        io.synchronize_outputs()
+        outputs = io.copy_outputs_to_cpu()
+        for actual, cache in zip(io.get_outputs()[1:], caches):
+            assert actual.data_ptr() == cache.data_ptr()
+        expected_k[:, :, past:total] = key.reshape(1, qlen, 4, 256).transpose(
+            0, 2, 1, 3
+        )
+        expected_v[:, :, past:total] = value.reshape(1, qlen, 4, 256).transpose(
+            0, 2, 1, 3
+        )
+        expected = _ring_fp32_reference(query, expected_k, expected_v, past)
+        np.testing.assert_allclose(outputs[0], expected, atol=0.005, rtol=0.005)
+        np.testing.assert_array_equal(outputs[1], expected_k)
+        np.testing.assert_array_equal(outputs[2], expected_v)
+        past = total
+
+
+@pytest.mark.parametrize(
+    "query_length,past_length",
+    [
+        (8192, 0),
+        (32768, 0),
+        (4096, 28800),
+        (1, 32895),
+        (65536, 0),
+        (4096, 61568),
+        (1, 65663),
+    ],
+)
+def test_gqa_ring_long_context(model_runner, tmp_path, query_length, past_length):
+    """Check long-query admission and the final cache boundary through ONNX.
+
+    Sample query rows but scan every causally valid key in an FP32 reference;
+    verify full output finiteness and every valid present-cache element.
+    """
+    import onnx
+
+    qlen, past = query_length, past_length
+    total = past + qlen
+    capacity = max(32915, total + 19)
+    model = _make_gqa_fixed_cache_model(1, "query_length", capacity, 6144, 1024, 24, 4)
+    rng = np.random.default_rng(985)
+    query = rng.standard_normal((1, qlen, 6144)).astype(np.float16)
+    key = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    value = rng.standard_normal((1, qlen, 1024)).astype(np.float16)
+    old_k = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    old_v = rng.standard_normal((1, 4, capacity, 256)).astype(np.float16)
+    path = tmp_path / "ring_long_context.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.array([total - 1], dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    old_k[:, :, past:total] = key.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    old_v[:, :, past:total] = value.reshape(1, qlen, 4, 256).transpose(0, 2, 1, 3)
+    assert np.isfinite(actual[0]).all()
+    np.testing.assert_array_equal(actual[1][:, :, :total], old_k[:, :, :total])
+    np.testing.assert_array_equal(actual[2][:, :, :total], old_v[:, :, :total])
+    indices = np.array(
+        sorted(
+            {
+                0,
+                qlen // 4,
+                qlen // 2,
+                3 * qlen // 4,
+                qlen - 1,
+                min(15, qlen - 1),
+                min(16, qlen - 1),
+            }
+        )
+    )
+    q = query.reshape(qlen, 24, 256)[indices].astype(np.float32)
+    expected = np.empty_like(q)
+    mask = np.arange(total)[None, :] > past + indices[:, None]
+    for group in range(4):
+        heads = slice(group * 6, (group + 1) * 6)
+        scores = (
+            q[:, heads].transpose(1, 0, 2)
+            @ old_k[0, group, :total].astype(np.float32).T
+        ) * np.float32(0.0625)
+        scores = np.where(mask[None, :, :], -np.inf, scores)
+        weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        weights /= weights.sum(axis=-1, keepdims=True)
+        expected[:, heads] = (
+            weights @ old_v[0, group, :total].astype(np.float32)
+        ).transpose(1, 0, 2)
+    np.testing.assert_allclose(
+        actual[0].reshape(qlen, 24, 256)[indices], expected, atol=0.005, rtol=0.005
+    )
+
+
+@pytest.mark.parametrize(
+    "total", [15, 16, 17, 31, 32, 33, 127, 128, 129, 1023, 1024, 1025]
+)
+def test_gqa_ring_decode_regimes(model_runner, tmp_path, total):
+    """Exercise partial tiles and both sides of partition dispatch boundaries."""
+    test_gqa_ring_geometry(model_runner, tmp_path, True, 1, total - 1)
+
+
+def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
+    """A tiny probability times a large FP16 value must survive decode.
+
+    exp(-18) rounds to zero in FP16, but its FP32 product with 60000 is
+    representable in the output. This catches FP16 probability narrowing.
+    """
+    import onnx
+
+    capacity = 19
+    model = _make_gqa_fixed_cache_model(1, 1, capacity, 6144, 1024, 24, 4)
+    query = np.zeros((1, 1, 6144), dtype=np.float16)
+    query.reshape(24, 256)[:, 0] = 16
+    key = np.zeros((1, 1, 1024), dtype=np.float16)
+    key.reshape(4, 256)[:, 0] = -18
+    value = np.full((1, 1, 1024), 60000, dtype=np.float16)
+    old_k = np.zeros((1, 4, capacity, 256), dtype=np.float16)
+    old_v = np.zeros_like(old_k)
+    path = tmp_path / "ring_decode_probability_precision.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.array([1], dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    expected = 60000 * np.exp(-18.0) / (1 + np.exp(-18.0))
+    np.testing.assert_allclose(actual[0], expected, atol=0.000002, rtol=0.001)
