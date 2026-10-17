@@ -29,6 +29,17 @@
 //
 //   Result for attention: 8 allocs -> 4 allocs (50% reduction).
 //
+// Host-accessed buffers take no part:
+//   An alloc the host reads or writes (memref.load / memref.store, directly or
+//   through a view) neither takes a slot nor donates one. Program order is not
+//   execution order across the host/device boundary: a hip op only enqueues
+//   work on the stream, while a host store happens at once. Two host-fed
+//   scalars sharing a slot let the second store overwrite the first before
+//   the kernel that reads the first has run - the GQA total-sequence-length
+//   staging buffer did exactly that, so a decode step after a prefill read
+//   the step length instead of the total length. They are tiny, so excluding
+//   them costs nothing.
+//
 // Compatibility rules:
 //   - Static shapes: any alloc whose byte-size fits inside an earlier slot
 //     (same element type and memory space).  A memref.reinterpret_cast is
@@ -48,6 +59,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -96,6 +108,19 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
     stride *= shape[i];
   }
   return strides;
+}
+
+/// True if the host reads or writes \p buffer, directly or through a view.
+static bool isHostAccessed(Value buffer) {
+  for (Operation *user : buffer.getUsers()) {
+    if (isa<memref::LoadOp, memref::StoreOp>(user))
+      return true;
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
+      if (view.getViewSource() == buffer &&
+          isHostAccessed(view->getResult(0)))
+        return true;
+  }
+  return false;
 }
 
 /// Returns true if \p slot can serve an allocation of \p neededType with
@@ -175,7 +200,7 @@ void OptimizeMemRefsPass::runOnOperation() {
       continue;
 
     Value result = allocOp.getResult();
-    if (result.use_empty())
+    if (result.use_empty() || isHostAccessed(result))
       continue;
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,
