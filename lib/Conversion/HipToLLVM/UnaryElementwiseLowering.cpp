@@ -86,6 +86,61 @@ struct UnaryElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
+// hip.isnan writes a 1-byte boolean. data_type is the INPUT float type;
+// the output element type is not a HIPDNN float enum value.
+struct IsNaNOpLowering : public ConvertOpToLLVMPattern<IsNaNOp> {
+  using ConvertOpToLLVMPattern<IsNaNOp>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(IsNaNOp op, IsNaNOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto inputType = dyn_cast<MemRefType>(op.getX().getType());
+    auto outputType = dyn_cast<MemRefType>(op.getY().getType());
+    if (!inputType || !outputType)
+      return rewriter.notifyMatchFailure(
+          op, "hip.isnan lowering expects ranked memref operands");
+
+    Type outputElem = outputType.getElementType();
+    if (!outputElem.isInteger(1) && !outputElem.isInteger(8))
+      return rewriter.notifyMatchFailure(
+          op, "hip.isnan output must be a 1-byte boolean");
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for hip.isnan");
+
+    Value numElements =
+        computeNumElements(outputType, adaptor.getY(), rewriter, loc);
+    Value dataTypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dataType));
+
+    // int wrap_isnan(RuntimeState* state, void* input, void* output,
+    //                int64_t num_elements, int64_t data_type)
+    SmallVector<Type, 5> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapIsNaN, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 5> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getY(), rewriter, loc), numElements,
+        dataTypeVal};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateUnaryElementwiseLoweringPatterns(
@@ -96,6 +151,7 @@ void populateUnaryElementwiseLoweringPatterns(
                                                      "neg");
   patterns.insert<UnaryElementwiseOpLowering<NotOp>>(converter, kWrapNot,
                                                      "not");
+  patterns.add<IsNaNOpLowering>(converter);
   patterns.insert<UnaryElementwiseOpLowering<CosOp>>(converter, kWrapCos,
                                                      "cos");
   patterns.insert<UnaryElementwiseOpLowering<ErfOp>>(converter, kWrapErf,

@@ -7,7 +7,8 @@
 // Verifies that the pass rewrites graph-output memref.alloc ops (values
 // returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
 // sizes and setting out_idx to the return position, while leaving intermediates,
-// passthrough outputs, private helpers, and context-less functions untouched.
+// private helpers, and context-less functions untouched. A passthrough output
+// is copied into a hip.alloc_output so the EP output allocator still runs.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
@@ -59,10 +60,16 @@ func.func @static_output(%ctx: !hip.context) -> memref<4x8xf16> {
   return %out : memref<4x8xf16>
 }
 
-// --- Passthrough output (return a memref block-arg): left unchanged. ---
+// --- Passthrough output (return a memref block-arg): allocate an EP-owned
+//     buffer and copy the input into it. The output allocator callback only
+//     runs for hip.alloc_output, so returning the input itself leaves the
+//     output unallocated. ---
 // CHECK-LABEL: func.func @passthrough
-// CHECK-NOT:     hip.alloc_output
-// CHECK:         return %{{.*}} : memref<?xf16>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[X:.*]]: memref<?xf16>)
+// CHECK:         %[[DIM:.*]] = memref.dim %[[X]], %c0
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[DIM]]) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         memref.copy %[[X]], %[[OUT]]
+// CHECK:         return %[[OUT]]
 func.func @passthrough(%ctx: !hip.context, %x: memref<?xf16>) -> memref<?xf16> {
   return %x : memref<?xf16>
 }

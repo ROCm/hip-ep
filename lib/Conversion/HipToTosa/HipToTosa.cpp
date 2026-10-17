@@ -6555,6 +6555,14 @@ struct GqaConverter final : public OpConversionPattern<GqaOp> {
               unpackToBnsh(vSlice, kvHeads, headDim, rewriter, loc, op, vCur)))
         return failure();
     } else {
+      // The past concat below appends seqQ new rows. A zero-length key/value
+      // over a past cache (attend over past only) does not fit that shape.
+      auto kInTy = dyn_cast<RankedTensorType>(adaptor.getKey().getType());
+      if (adaptor.getPastKey() && kInTy &&
+          (kInTy.getRank() == 3 || kInTy.getRank() == 4) &&
+          kInTy.getDimSize(kInTy.getRank() == 4 ? 2 : 1) != seqQ)
+        return rewriter.notifyMatchFailure(
+            op, "key length differs from query length with a past cache");
       if (qInTy.getRank() == 4)
         headDim = qInTy.getDimSize(3);
       else if (qInTy.getDimSize(2) % numHeads != 0)

@@ -47,14 +47,22 @@ set(_kernel_sources
     hip/bias_gelu_kernel.hip
     hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
+    hip/prelu_kernel.hip
+    hip/lrn_kernel.hip
+    hip/trilu_kernel.hip
     hip/swish_kernel.hip
+    hip/pow_kernel.hip
+    hip/swiglu_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
     hip/qmatmul_kernel.hip
     hip/qgemm_kernel.hip
     hip/qconv_kernel.hip
+    hip/qlinear_conv_kernel.hip
+    hip/qlinear_matmul_kernel.hip
     hip/elementwise_unary_kernel.hip
+    hip/isnan_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
     hip/tile_kernel.hip
     hip/expand_kernel.hip
@@ -63,6 +71,8 @@ set(_kernel_sources
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
     hip/instance_norm_kernel.hip
+    hip/batch_norm_kernel.hip
+    hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
@@ -70,6 +80,7 @@ set(_kernel_sources
     hip/gather_kernel.hip
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
+    hip/random_normal_like_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
@@ -268,3 +279,13 @@ set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_
 # in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so
 # the host-side declarations stay in lockstep with the kernel TUs that
 # implement them.
+
+# Standalone kernel unit-test executables for the packaging CI
+# (BUILD_HIP_KERNEL_UNIT_TESTS, default ON). Their drivers link the
+# custom_kernels_<arch> targets above instead of recompiling any .hip file.
+# Added from this directory rather than the top level because hip::host and
+# the hip_utils.cmake variables (HIP_INCLUDE_DIR, ...) are directory-scoped:
+# a sibling directory of this one cannot see them.
+if(BUILD_HIP_KERNEL_UNIT_TESTS)
+    add_subdirectory(unit_test)
+endif()
