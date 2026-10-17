@@ -38,6 +38,11 @@ env:
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
   OGA_PR_PATCHES: "2685 2691 2705"
+  # Space-separated patch files under .github/patches/onnxruntime-extensions/,
+  # applied with git apply to the onnxruntime-extensions commit that OGA pins
+  # in cmake/deps.txt. OGA then builds that tree instead of fetching the pin.
+  # Part of the OGA cache key. Remove a patch once OGA pins a commit with it.
+  ORTX_LOCAL_PATCHES: "1136-stl-regex-utf8-offset.patch"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -511,10 +516,24 @@ jobs:
       cache_key: ${{ steps.key.outputs.value }}
 
     steps:
+      - name: Checkout dependency patches
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: source-hip-ep
+          sparse-checkout: .github/patches
+          fetch-depth: 1
+          show-progress: false
+
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        working-directory: source-hip-ep
+        run: |
+          # Key on the patch list and the patch directory's tree, so editing,
+          # adding or dropping a patch rebuilds OGA.
+          PATCH_TREE=$(git rev-parse HEAD:.github/patches/onnxruntime-extensions 2>/dev/null || echo none)
+          LP_KEY=$(printf '%s %s' "$ORTX_LOCAL_PATCHES" "$PATCH_TREE" | sha1sum | cut -c1-12)
+          echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ortx${LP_KEY}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -617,6 +636,27 @@ jobs:
             }
           }
 
+      - name: Prepare patched onnxruntime-extensions
+        if: steps.cache-oga.outputs.cache-hit != 'true' && env.ORTX_LOCAL_PATCHES != ''
+        shell: bash
+        run: |
+          # Read the pin after the OGA PR patches, which may move it.
+          ORTX_SHA=$(grep '^onnxruntime_extensions;' "${{ github.workspace }}/source-oga/cmake/deps.txt" | cut -d';' -f3)
+          if [ -z "$ORTX_SHA" ]; then
+            echo "ERROR: onnxruntime_extensions pin not found in OGA cmake/deps.txt"
+            exit 1
+          fi
+          # Forward slashes: the path is handed to CMake as a -D value.
+          ORTX_DIR="$(cygpath -m "${{ runner.workspace }}")/source-ortx"
+          git init -q "$ORTX_DIR"
+          git -C "$ORTX_DIR" fetch -q --depth 1 https://github.com/microsoft/onnxruntime-extensions.git "$ORTX_SHA"
+          git -C "$ORTX_DIR" checkout -q FETCH_HEAD
+          for p in $ORTX_LOCAL_PATCHES; do
+            echo "Applying $p to onnxruntime-extensions $ORTX_SHA"
+            git -C "$ORTX_DIR" apply --verbose "${{ github.workspace }}/source-hip-ep/.github/patches/onnxruntime-extensions/$p"
+          done
+          echo "ORTX_SOURCE_DIR=$ORTX_DIR" >> "$GITHUB_ENV"
+
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
@@ -655,7 +695,8 @@ jobs:
             --cmake_extra_defines \
               ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ${ORTX_SOURCE_DIR:+FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME_EXTENSIONS=$ORTX_SOURCE_DIR}
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
