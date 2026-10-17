@@ -57,3 +57,64 @@ establish ONNX integration or a performance improvement.
 
 The kernel is adapted from the METIS Ring exports, contributed under the MIT
 license. WMMA score ownership and V swizzle also derive from hip-ep v8x (MIT).
+
+## Algorithms and enablement
+
+### Algorithms and regime selection
+
+- **Existing:** preserve the current GQA dispatch and make it the default. The reported baseline is the actual ONNX/EP path for this model, including its existing fallback choices.
+- **Ring-Q prefill:** each workgroup keeps one 16-query tile for six query heads resident, streams 16-token KV tiles through shared memory, and updates online softmax and output accumulators. QK/PV use WMMA with FP32 accumulation.
+- **Ring-KV prefill:** two parallel 16-query consumers (32 queries per workgroup) and six query heads share each staged 16-token KV tile. Each consumer maintains its own online softmax/output state. This increases KV reuse across query tiles.
+- **Shared decode, query length = 1:** stage each KV tile once for six query heads; four waves divide the 256-wide head dimension. Use WMMA QK with FP32 accumulation, FP32 softmax probabilities and FP32 weighted-V accumulation. Every wave reduces QK partials in the same order. Partition long histories and merge the FP32 summaries with stable softmax rescaling; round only the final output to FP16.
+- These are single-GPU tiled schedules. There is no distributed ring transport. Neither prefill schedule materializes a global attention-score matrix or requests explicit global scratch.
+
+```mermaid
+flowchart TD
+    A[ONNX GroupQueryAttention] --> B{Compile-time selection}
+    B -->|existing| E[Existing GQA dispatch]
+    B -->|ring_q_resident or ring_kv_outer| C{Eligible Ring call?}
+    C -->|no| E
+    C -->|yes| Q{Query length = 1?}
+    Q -->|yes| D[Shared partitioned decode]
+    Q -->|no: ring_q_resident| R[16-query resident prefill]
+    Q -->|no: ring_kv_outer| K[Two shared-KV query consumers]
+```
+
+The fallback in the figure applies to supported existing contracts. Ring builds explicitly reject softcap, BF16 and mismatched unquantized cache element types as described below.
+
+```mermaid
+flowchart LR
+    H[Valid KV history] --> P[Choose partitions]
+    P --> T[Stage 16-token KV tile]
+    T --> S[Six heads: QK and online softmax]
+    S --> V[FP32 weighted V]
+    V --> M[Merge partition summaries if needed]
+    M --> O[FP16 output]
+```
+
+| Valid KV tokens | Waves per scan workgroup | Partitions | Explicit global decode scratch |
+| --- | --- | --- | --- |
+| 1..32 | 4 | 1 | 0 |
+| 33..128 | 4 | 4 | 99,072 B (96.75 KiB) |
+| 129..1,024 | 4 | 8 | 198,144 B (193.5 KiB) |
+| 1,025..65,664 | 4 | 16 | 396,288 B (387 KiB) |
+
+Workspace sizing and launch dispatch use the same helper. Scratch is runtime-owned and reused; scan/merge run on the caller's stream without an added host allocation or synchronization.
+
+## How to enable
+
+Follow the repository Linux quick start for dependencies. From the hip-ep source directory, choose exactly one implementation and use a separate build/install directory for each comparison:
+
+```bash
+IMPL=ring_kv_outer  # existing | ring_q_resident | ring_kv_outer
+python3 build.py --config Release --hip_arch gfx1151 \
+  --build_dir "../build/hip-ep-${IMPL}" \
+  --install_dir "../install/hip-ep-${IMPL}" \
+  --cmake_extra_defines "HIP_EP_GQA_IMPL=${IMPL}"
+```
+
+The CMake equivalent is `-DHIP_EP_GQA_IMPL=ring_kv_outer`; invalid values fail configuration. Omitting the option retains `existing`. This is a build-time option, not an environment-variable selector.
+
+Point the application at the matching installation's EP library and MorphiZen configuration. Rebuild/reinstall the compiler, runtime and custom kernels together, and use a fresh model compilation cache after switching. Keep the original ONNX model and its GroupQueryAttention nodes unchanged. For validation, enable `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback (`session.disable_cpu_ep_fallback=1`) and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm Ring dispatch. Disable debug for performance measurements.
+
+See [Ring validation results](ring-attention-validation.md) for phase-specific performance, memory, accuracy and tested model scope.
