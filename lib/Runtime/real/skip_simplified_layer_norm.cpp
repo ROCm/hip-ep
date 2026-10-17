@@ -26,12 +26,11 @@
 
 #include <cstdio>
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -79,6 +78,21 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                     (long long)num_rows, (long long)hidden_dim,
                     (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon,
                     bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+
+  // Consumers read a_quant/a_scale unconditionally, so a request that cannot
+  // be honoured is an error rather than a silent skip.
+  if (a_quant || a_scale) {
+    if (!a_quant || !a_scale || element_size_bytes != 2) {
+      fprintf(stderr,
+              "wrap_skip_simplified_layer_norm: quantized output needs both "
+              "buffers and fp16 data\n");
+      return -1;
+    }
+    return hip_skip_rms_norm_quant(hipdnn_ep_state_get_stream(state), input,
+                                   skip, gamma, bias, output,
+                                   input_skip_bias_sum, num_rows, hidden_dim,
+                                   epsilon, a_quant, a_scale, quant_block_size);
+  }
 
   return hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
                            gamma, bias, output, input_skip_bias_sum, num_rows,

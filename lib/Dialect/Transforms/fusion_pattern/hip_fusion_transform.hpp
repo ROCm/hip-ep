@@ -30,6 +30,8 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "matmul_nbits_group.hpp"
+#include "matmul_nbits_shared_act.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -831,6 +833,11 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// declines -- which is the whole reason QConvFusion roots at `hip.conv`
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
+/// The grouping pattern only matches projections that already carry the
+/// `quantized(...)` operands the shared-activation pattern adds, so the two
+/// never compete for the same root.
+constexpr unsigned kMatMulNBitsSharedActivationBenefit = 1;
+constexpr unsigned kMatMulNBitsGroupBenefit = 1;
 
 /// The SwiGLU fusion is the only pattern in this set rooted at `hip.mul`, so
 /// this benefit is never ranked against another pattern. `HipQMul` also
@@ -853,6 +860,10 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateMatMulNBitsSharedActivationPatterns(
+      patterns, mlir::PatternBenefit(kMatMulNBitsSharedActivationBenefit));
+  populateMatMulNBitsGroupPatterns(
+      patterns, mlir::PatternBenefit(kMatMulNBitsGroupBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

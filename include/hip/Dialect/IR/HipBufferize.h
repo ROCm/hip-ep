@@ -163,6 +163,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ReduceL2Op::attachInterface<HipDstBufferizableModel<ReduceL2Op>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
+    QuantizeActOp::attachInterface<HipDstBufferizableModel<QuantizeActOp>>(
+        *ctx);
+    MatMulNBitsGroupOp::attachInterface<
+        HipDstBufferizableModel<MatMulNBitsGroupOp>>(*ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
     QMoEAmdOp::attachInterface<HipDstBufferizableModel<QMoEAmdOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
