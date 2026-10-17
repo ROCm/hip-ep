@@ -6,9 +6,9 @@ Licensed under the MIT License.
 
 ## Prefill performance and memory
 
-Median full-model prefill latency; lower is better. Peak memory is measured within the prefill phase.
+Median full-model prefill latency; lower is better. Peak DRM allocation is measured within the prefill phase; mapped-host cache memory is excluded (see accounting below).
 
-| Input tokens | Existing s | Ring-Q s | Ring-KV s | Existing peak GiB | Ring-Q peak GiB | Ring-KV peak GiB |
+| Input tokens | Existing s | Ring-Q s | Ring-KV s | Existing DRM peak GiB | Ring-Q DRM peak GiB | Ring-KV DRM peak GiB |
 | --- | --- | --- | --- | --- | --- | --- |
 | 4,096 | 9.467 | 9.697 | 9.488 | 17.9956 | 17.9910 | 17.9849 |
 | 32,768 | 87.723 | 105.253 | 87.023 | 34.0887 | 34.0780 | 34.0719 |
@@ -16,9 +16,9 @@ Median full-model prefill latency; lower is better. Peak memory is measured with
 
 ## Decode performance and memory
 
-Median full-model throughput for the 127 decode tokens after first-token selection; higher is better. Peak memory is measured within the decode phase.
+Median full-model throughput for the 127 decode tokens after first-token selection; higher is better. Peak DRM allocation is measured within the decode phase; mapped-host cache memory is excluded (see accounting below).
 
-| Input tokens | Existing tok/s | Ring-Q tok/s | Ring-KV tok/s | Existing peak GiB | Ring-Q peak GiB | Ring-KV peak GiB |
+| Input tokens | Existing tok/s | Ring-Q tok/s | Ring-KV tok/s | Existing DRM peak GiB | Ring-Q DRM peak GiB | Ring-KV DRM peak GiB |
 | --- | --- | --- | --- | --- | --- | --- |
 | 4,096 | 12.238 | 12.631 | 12.630 | 17.9955 | 17.9910 | 17.9849 |
 | 32,768 | 9.615 | 10.778 | 11.021 | 34.0881 | 34.0777 | 34.0713 |
@@ -34,27 +34,25 @@ Full request latency (prefill, first-token selection and 127 subsequent tokens),
 | 32,768 | 100.931 | 117.036 | 98.542 |
 | 65,536 | 237.811 | 293.920 | 234.954 |
 
-### Memory decomposition
+### Memory accounting
 
-For each phase, **total = model parameters + KV cache + other memory**. GiB uses 2^30 bytes; displayed values are rounded independently.
+**Correction:** the phase peaks above are per-process amdgpu DRM VRAM+GTT allocations, not total GPU-accessible memory. On this APU, the ORT HIP allocator uses `hipHostMalloc(Mapped|Coherent)` for KV and other ORT buffers. Those mapped-host allocations are not included in the DRM counters. This allocation strategy is present in the benchmarked commit as well as the current implementation.
 
-| Input tokens | Selection | Parameters GiB | KV GiB | Prefill other GiB | Prefill total GiB | Decode other GiB | Decode total GiB |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 4,096 | existing | 14.8338 | 0.2578 | 2.9040 | 17.9956 | 2.9039 | 17.9955 |
-| 4,096 | ring_q_resident | 14.8338 | 0.2578 | 2.8995 | 17.9910 | 2.8994 | 17.9910 |
-| 4,096 | ring_kv_outer | 14.8338 | 0.2578 | 2.8934 | 17.9849 | 2.8933 | 17.9849 |
-| 32,768 | existing | 14.8338 | 2.0078 | 17.2471 | 34.0887 | 17.2465 | 34.0881 |
-| 32,768 | ring_q_resident | 14.8338 | 2.0078 | 17.2364 | 34.0780 | 17.2361 | 34.0777 |
-| 32,768 | ring_kv_outer | 14.8338 | 2.0078 | 17.2304 | 34.0719 | 17.2298 | 34.0713 |
-| 65,536 | existing | 14.8338 | 4.0078 | 33.6267 | 52.4682 | 33.6254 | 52.4670 |
-| 65,536 | ring_q_resident | 14.8338 | 4.0078 | 33.6100 | 52.4516 | 33.6098 | 52.4514 |
-| 65,536 | ring_kv_outer | 14.8338 | 4.0078 | 33.6040 | 52.4456 | 33.6032 | 52.4448 |
+The earlier decomposition subtracted KV from the DRM peak and was incorrect; its “other” and “total” columns have been withdrawn. Timings and the observed DRM peaks are unchanged. Complete total memory is **model parameters + KV cache + other**, but requires counting both DRM and mapped-host allocations together. That combined peak and complete “other” subtotal were not measured in this archived campaign and cannot be recovered exactly from its counters.
 
-- **Parameters:** 15,927,620,288 bytes (14.833752 GiB), the two GPU constants blobs, including the model's stored weight/constant representation.
-- **KV:** allocated FP16 K and V capacity for 16 full-attention layers, `65,536 * (input_tokens + 128)` bytes. Past/present aliases count once. The capacity is the same during prefill and decode, and is identical across implementations.
-- **Other:** the residual after subtracting parameters and KV from the sampled phase peak. It includes the 48 linear-attention layers' state, activations, allocator pools/reservations, scratch and other allocations. It is not isolated attention-kernel working memory.
-- **Peak:** maximum observed per-process amdgpu DRM VRAM+GTT allocation during that phase across the three measured requests; target sampling interval 20 ms. This can miss brief peaks and is not an allocator's exact high-water mark. Decode can retain buffers allocated during prefill. Host RSS is separate and must not be added on this UMA system.
-- **Ring kernel scratch:** zero explicit global prefill scratch; at most 387 KiB decode scratch. These figures exclude common Q/K/V/output storage, shared memory and registers. The full-model data do **not** establish a substantial memory reduction over existing GQA.
+Known allocations, identical across the three implementations:
+
+| Input tokens | Model parameters GiB | Mapped-host FP16 KV GiB |
+| --- | --- | --- |
+| 4,096 | 14.8338 | 0.2578 |
+| 32,768 | 14.8338 | 2.0078 |
+| 65,536 | 14.8338 | 4.0078 |
+
+- **Parameters:** 15,927,620,288 bytes (14.833752 GiB), the two GPU constants blobs; already included in DRM allocation.
+- **KV:** 16 full-attention layers, `65,536 * (input_tokens + 128)` bytes. Past/present aliases count once. These mapped-host buffers are additional to DRM allocation and have equal capacity during prefill and decode.
+- **DRM peak:** maximum sampled allocation within the phase across three requests, target interval 20 ms. Retained prefill buffers can remain during decode; short-lived peaks may be missed. Do not add all host RSS: it includes ordinary CPU memory and potentially overlapping mappings.
+- **Other:** includes linear-attention states, activations, allocator pools, runtime buffers and kernel scratch across both allocation types. It is not isolated attention-kernel working memory; no complete historical subtotal is claimed.
+- **Ring kernel scratch:** zero explicit global prefill scratch; at most 387 KiB decode scratch, excluding common Q/K/V/output storage, shared memory and registers. These measurements do not establish a substantial full-model memory reduction over existing GQA.
 
 ### Measurement setup
 
