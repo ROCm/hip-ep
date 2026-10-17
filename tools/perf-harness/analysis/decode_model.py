@@ -55,6 +55,7 @@ import sys
 
 from perfcommon import (
     LAYER_MARKERS,
+    markers_per_layer,
     ModelSpec,
     add_model_args,
     decode_step_windows,
@@ -68,6 +69,7 @@ from perfcommon import (
 OP_COMPONENT = {
     "qmoe": "moe_experts",
     "matmul_nbits": "attn_proj",
+    "quantize_act": "norm_other",
     "gqa": "kv_cache",
     "layernorm": "norm_other",
     "skip_layernorm": "norm_other",
@@ -130,11 +132,13 @@ def from_trace(
         for e in r:
             name = e["name"]
             shape = (e.get("args") or {}).get("shape", "")
-            comp = (
-                classify_matmul(shape, spec)
-                if name == "matmul"
-                else OP_COMPONENT.get(name, "norm_other")
-            )
+            if name == "matmul":
+                comp = classify_matmul(shape, spec)
+            elif name == "matmul_nbits_group":
+                # epi=1 is the gate/up pair with its SiLU*mul; epi=0 is q/k/v.
+                comp = "dense_mlp" if "epi=1" in shape else "attn_proj"
+            else:
+                comp = OP_COMPONENT.get(name, "norm_other")
             dur = e.get("dur", 0.0)
             out[comp] += dur
             if detail is not None:
@@ -227,7 +231,7 @@ def from_dispatches(
                 "cannot tell how many decode steps this window holds"
             )
         sel = rows
-        steps = counts[marker] / spec.layers
+        steps = counts[marker] / (spec.layers * markers_per_layer(marker, spec))
         how = f"window held {steps:.2f} decode steps by {marker} count"
     dec = [r for r in sel if not wins or r.get("queue") == main_q]
     # Classify per (family, threads) group rather than per row, so the rule can
@@ -339,13 +343,15 @@ def dispatch_stats(rows: list[dict], steps: float) -> dict:
 
 
 def _shape_fields(shape: str) -> dict[str, int]:
+    """Integer fields of an op label. A '+'-joined value is summed: the
+    matmul_nbits_group label lists each segment's N ("n=4096+1024+1024")."""
     out: dict[str, int] = {}
     for part in shape.replace("x", ",").split(","):
         part = part.strip()
         if "=" in part:
             k, v = part.split("=", 1)
             try:
-                out[k] = int(v)
+                out[k] = sum(int(x) for x in v.split("+"))
             except ValueError:
                 pass
     return out
@@ -360,7 +366,7 @@ def shape_bytes(op: str, shape: str, calls: float, spec: ModelSpec) -> float:
     adding information -- they return 0 and print as '-'.
     """
     f = _shape_fields(shape)
-    if op == "matmul_nbits" and "n" in f and "k" in f:
+    if op in ("matmul_nbits", "matmul_nbits_group") and "n" in f and "k" in f:
         return calls * spec.int4w(f["n"] * f["k"])
     if op == "matmul" and "n" in f and "k" in f:
         return calls * spec.fp16(f["n"] * f["k"])
@@ -404,6 +410,29 @@ def positional_components(dec: list[dict], spec: ModelSpec) -> dict[int, str]:
         return [g - 1, g] if "matmul_nbits_quant_act" in prev else [g]
 
     out: dict[int, str] = {}
+    if ffn and not any("gelu" in r.get("family", "") for r in dec):
+        # Dense SwiGLU layer: norm, q/k/v, attention, o, norm, gate/up (or a
+        # SiLU projection group), activation, down. The norm after attention
+        # opens the FFN; the next norm, or the final rms_norm ahead of the
+        # lm_head, closes it. Walked in launch order: the parser places the
+        # one-block norm's waves inside the next kernel, so ts order puts it
+        # after the GEMV it feeds.
+        order = sorted(
+            range(len(dec)),
+            key=lambda i: float(dec[i].get("launch_ts_us") or dec[i]["t0"]),
+        )
+        seen_attn = in_ffn = False
+        for i in order:
+            fam = dec[i].get("family", "")
+            if fam == "skip_rms_norm":
+                in_ffn, seen_attn = seen_attn, False
+            elif fam == "rms_norm":
+                in_ffn = False
+            elif fam.startswith("gqa"):
+                seen_attn = True
+            elif in_ffn and ("matmul_nbits" in fam or "swiglu" in fam.lower()):
+                out[i] = ffn
+        return out
     for i, r in enumerate(dec):
         fam = r.get("family", "")
         if ffn and "gelu" in fam:

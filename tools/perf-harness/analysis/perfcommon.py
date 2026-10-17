@@ -93,6 +93,10 @@ class ModelSpec:
     # Asymmetric int4 exports carry a 4-bit zero point per block (two per byte)
     # beside each fp16 scale: +n/(2*group_size) bytes, ~3% at group 32.
     zero_points: bool = False
+    # skip_rms_norm dispatches per layer when it is the layer marker. A llama-
+    # style layer runs two (before attention and before the FFN); counting it
+    # as one doubles the step count and halves every per-step number.
+    skip_norms_per_layer: int = 1
 
     @property
     def full_kv(self) -> int:
@@ -224,17 +228,25 @@ INT4_FAMILIES = frozenset(
         "MatMulNBitsWMMA_ZP",
         "MatMulNBitsFp16GEMM",
         "matmul_nbits_gemv",
+        "matmul_nbits_gemv_dp4a",
+        "matmul_nbits_gemv_dp4a_group",
+        "matmul_nbits_quant_act_i8",
+        "matmul_nbits_silu_mul",
         "dequant_u4_to_fp16",
         "matmul_nbits_add_bias_rowmajor",
         "transpose2d_fp16",
     }
 )
 
+# The W4A8 decode GEMVs are their own families: the parser names a kernel by
+# its symbol, and matmul_nbits_gemv_dp4a(_group) is not matmul_nbits_gemv.
 GEMM_FAMILIES = (
     "MatMulNBitsWMMA_NoZP",
     "MatMulNBitsWMMA_ZP",
     "MatMulNBitsFp16GEMM",
     "matmul_nbits_gemv",
+    "matmul_nbits_gemv_dp4a",
+    "matmul_nbits_gemv_dp4a_group",
 )
 
 # Families that run exactly once per layer, tried in order. This is what turns a
@@ -251,6 +263,11 @@ GEMM_FAMILIES = (
 # elementwise_gelu_f16 in each. softmax is kept as a second fallback for models
 # whose norm is fused away.
 LAYER_MARKERS = ("topk_routing", "skip_rms_norm", "softmax_f32_to_out")
+
+
+def markers_per_layer(marker: str, spec: "ModelSpec") -> int:
+    """Dispatches of `marker` one layer runs (see ModelSpec.skip_norms_per_layer)."""
+    return spec.skip_norms_per_layer if marker == "skip_rms_norm" else 1
 
 # EP op name (the OP_PROFILE / HIPDNN_EP_PERF_OPS name) -> the rgp_parser kernel
 # families its wrapper launches: exact names from the kernels each op's own .hip
@@ -271,6 +288,19 @@ OP_KERNEL_FAMILIES: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "prefix": ("matmul_nbits", "MatMulNBits"),
     },
+    # Projection groups (several weights off one activation in one launch) and
+    # their M>1 SiLU*mul. Exact names, so they win over matmul_nbits' prefix.
+    # matmul_nbits_quant_act_i8 stays with matmul_nbits: both the single-weight
+    # dp4a path and the quantize_act op launch it, so its owner depends on the
+    # build -- give it to quantize_act with --map when a run pins that down.
+    "matmul_nbits_group": {
+        "exact": ("matmul_nbits_gemv_dp4a_group", "matmul_nbits_silu_mul"),
+        "prefix": (),
+    },
+    # One kernel each; with a norm-fused activation quantize the int8 write
+    # rides inside skip_rms_norm, so this op is where that cost shows up.
+    "skip_layernorm": {"exact": ("skip_rms_norm",), "prefix": ()},
+    "layernorm": {"exact": ("rms_norm",), "prefix": ()},
     "qmoe": {
         "exact": (
             "topk_routing",
@@ -329,8 +359,13 @@ def op_family_map(extra: list[str] | None = None) -> dict[str, dict[str, tuple]]
 
 
 def op_for_family(family: str, fmap: dict[str, dict[str, tuple]]) -> str | None:
+    # An exact name anywhere beats a prefix: matmul_nbits' "matmul_nbits"
+    # prefix would otherwise swallow every op whose kernels share the stem.
     for op, m in fmap.items():
-        if family in m["exact"] or any(family.startswith(p) for p in m["prefix"]):
+        if family in m["exact"]:
+            return op
+    for op, m in fmap.items():
+        if any(family.startswith(p) for p in m["prefix"]):
             return op
     return None
 
@@ -498,7 +533,9 @@ class Capture:
         self.layer_marker = next(
             (f for f in LAYER_MARKERS if counts.get(f)), LAYER_MARKERS[0]
         )
-        self.layers_in_window = counts.get(self.layer_marker, 0)
+        per = markers_per_layer(self.layer_marker, spec)
+        n = counts.get(self.layer_marker, 0)
+        self.layers_in_window = n if per == 1 else n / per
         # lm_head: the only MatMulNBits with a vocab-sized thread count.
         self.lm_head_idx = [
             i
@@ -675,6 +712,106 @@ PRESETS: dict[str, dict] = {
         zero_points=True,
         lm_head_fp16=True,
         router_fp16=True,
+    ),
+    # Dense llama-style int4 exports (separate q/k/v and gate/up/down, int4
+    # lm_head, full attention everywhere). Every shape is read off the
+    # MatMulNBits N/K attributes and the GroupQueryAttention heads in model.onnx.
+    # The FFN rides the expert term with topk=1, as gemma4-12b does.
+    "llama-3.1-8b": dict(
+        hidden=4096,
+        inter=14336,
+        vocab=128256,
+        layers=32,
+        qkv_n=4096 + 1024 + 1024,
+        o_proj_k=4096,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=128,
+        heads=32,
+        kv_heads=8,
+        head_dim=128,
+        sliding_window=0,
+        full_attn_layers=32,
+        zero_points=True,
+        skip_norms_per_layer=2,
+    ),
+    "mistral-7b-v0.3": dict(
+        hidden=4096,
+        inter=14336,
+        vocab=32768,
+        layers=32,
+        qkv_n=4096 + 1024 + 1024,
+        o_proj_k=4096,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=128,
+        heads=32,
+        kv_heads=8,
+        head_dim=128,
+        sliding_window=0,
+        full_attn_layers=32,
+        skip_norms_per_layer=2,
+    ),
+    "phi4-14b": dict(
+        hidden=5120,
+        inter=17920,
+        vocab=100352,
+        layers=40,
+        qkv_n=5120 + 1280 + 1280,
+        o_proj_k=5120,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=32,
+        heads=40,
+        kv_heads=10,
+        head_dim=128,
+        sliding_window=0,
+        full_attn_layers=40,
+        skip_norms_per_layer=2,
+    ),
+    "deepseek-r1-llama-70b": dict(
+        hidden=8192,
+        inter=28672,
+        vocab=128256,
+        layers=80,
+        qkv_n=8192 + 1024 + 1024,
+        o_proj_k=8192,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=128,
+        heads=64,
+        kv_heads=8,
+        head_dim=128,
+        sliding_window=0,
+        full_attn_layers=80,
+        skip_norms_per_layer=2,
+    ),
+    # Qwen3.8-27B text decoder: 64 layers, 48 linear-attention (gated delta)
+    # and 16 full GQA (24 q / 4 kv heads of 256). The linear-attention state has
+    # no term here, so its KV floor is wrong; the preset is for step counting
+    # and the int4 projection bytes. Shapes from text.onnx's MatMulNBits.
+    "qwen3.8-27b": dict(
+        hidden=5120,
+        inter=17408,
+        vocab=248320,
+        layers=64,
+        qkv_n=(48 * (10240 + 6144 + 48 + 48) + 16 * (12288 + 1024 + 1024)) // 64,
+        o_proj_k=(48 * 6144 + 16 * 6144) // 64,
+        router_n=0,
+        experts=0,
+        topk=1,
+        group_size=128,
+        heads=24,
+        kv_heads=4,
+        head_dim=256,
+        sliding_window=0,
+        full_attn_layers=16,
+        zero_points=True,
+        skip_norms_per_layer=2,
     ),
 }
 

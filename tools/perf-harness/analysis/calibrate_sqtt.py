@@ -62,6 +62,7 @@ import sys
 from perfcommon import (
     LAYER_MARKERS,
     add_model_args,
+    markers_per_layer,
     decode_op_stats,
     decode_step_windows,
     load_dispatches,
@@ -73,9 +74,10 @@ from perfcommon import (
 
 
 def sqtt_per_step(
-    path: str, layers: int, fmap: dict
+    path: str, spec, fmap: dict
 ) -> tuple[dict[str, dict], dict[str, float], dict]:
     """Per-op and unmapped-family SQTT us per decode step, decoder queue only."""
+    layers = spec.layers
     rows = load_dispatches(path)
     wins, main_q, rejected = decode_step_windows(rows, layers)
     info = {"decoder_queue": main_q, "rejected_windows": rejected}
@@ -93,8 +95,9 @@ def sqtt_per_step(
                 "how many decode steps the window holds"
             )
         sel = rows
-        steps = counts[marker] / layers
-        info["method"] = f"{counts[marker]} {marker} / {layers} layers"
+        per = markers_per_layer(marker, spec)
+        steps = counts[marker] / (layers * per)
+        info["method"] = f"{counts[marker]} {marker} / ({layers} layers x {per})"
     info["steps"] = steps
     per_op: dict[str, dict] = collections.defaultdict(
         lambda: {"us": 0.0, "n": 0, "fams": collections.Counter()}
@@ -242,7 +245,7 @@ def main(argv=None) -> int:
             )
         return 0
 
-    sqtt, unmapped, info = sqtt_per_step(args.capture, spec.layers, fmap)
+    sqtt, unmapped, info = sqtt_per_step(args.capture, spec, fmap)
     print(f"capture : {args.capture}")
     print(
         f"steps   : {info['steps']:g} ({info['method']}; decoder queue "
