@@ -2508,7 +2508,8 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a_prequant(
  *               unpacked uint8 zero points [N[s], K/block_size]
  *   out[s]    : fp16 [N[s]] (SiLU epilogue: out[0] only)
  *   block_size: a power of two >= 32 that divides K
- * The launch config is the widest segment's single-weight dp4a config.
+ * The launch config comes from a one-time sweep of the group kernel per group
+ * shape, cached for the process.
  * Returns a hipError_t; hipErrorInvalidValue for an unsupported group. */
 HIP_KERNEL_API int hip_matmul_nbits_dp4a_group(
     void* stream, const void* a_qb, const void* a_scale, int nseg,

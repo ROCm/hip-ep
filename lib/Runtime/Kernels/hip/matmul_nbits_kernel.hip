@@ -2907,13 +2907,11 @@ extern "C" int hip_matmul_nbits_dp4a_prequant(
  * No bias. Zero points are pre-unpacked uint8 [N[s], k_blocks] per segment;
  * HAS_ZP keeps zero-point indexing out of the symmetric inner loop.
  *
- * The launch config is the widest segment's single-weight config
- * (getOrTuneDp4aConfig: the offline LUT, else its one-time sweep). The widest
- * segment dominates the group's bytes, and a narrow segment's config can
- * leave it badly under-occupied. The SiLU form splits that config's columns
- * between gate and up (TN / 2 of each, at least 1), so for TN >= 2 a block
- * holds as many accumulators and reads as many weight bytes as the tuned
- * single-weight kernel.
+ * The launch config comes from a one-time cold sweep of this kernel per group
+ * shape (getOrTuneDp4aGroupConfig). The widest segment's single-weight config
+ * does not transfer: on DeepSeek-R1-70B gate/up it was 1024x8, which runs this
+ * kernel ~9% slower than its own best, 256x1. The SiLU form splits a config's
+ * columns between gate and up (TN / 2 of each, at least 1).
  * ----------------------------------------------------------------------- */
 
 struct Dp4aGroupArgs {
@@ -3126,6 +3124,141 @@ static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
 #undef DP4A_GROUP_CASE
 }
 
+// Streams the eviction scratch through the cache by reading it. gemvEvict's
+// memset leaves the cache full of dirty lines whose write-back lands inside
+// the next timed launch; on a 13-40 MB group that cost is large enough to
+// reorder the configs (q/k/v groups picked 1.35-1.7x their best).
+__global__ void groupEvictReadKernel(const uint4* __restrict__ p, size_t n,
+                                     unsigned* sink) {
+    unsigned acc = 0;
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)gridDim.x * blockDim.x) {
+        uint4 v = p[i];
+        acc ^= v.x ^ v.y ^ v.z ^ v.w;
+    }
+    if (acc == 0x9e3779b9u) sink[0] = acc;
+}
+
+// Median, not timeConfigPeak's min: an event pair on this platform now and
+// then reports a few us for a launch that takes 60, and a min over a handful
+// of samples keeps that reading and crowns whichever config drew it.
+template <typename LaunchFn>
+static float timeGroupConfigMedian(hipEvent_t ev0, hipEvent_t ev1,
+                                   hipStream_t stream, void* evict,
+                                   LaunchFn&& launch) {
+    constexpr int kWarmup = 3;
+    constexpr int kIters  = 9;
+    for (int w = 0; w < kWarmup; w++) launch();
+    float t[kIters];
+    for (int i = 0; i < kIters; i++) {
+        if (evict)
+            hipLaunchKernelGGL(groupEvictReadKernel, dim3(2560), dim3(256), 0,
+                               stream, static_cast<const uint4*>(evict),
+                               kGemvEvictBytes / 16,
+                               static_cast<unsigned*>(evict));
+        hipEventRecord(ev0, stream);
+        launch();
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+        t[i] = 0.0f;
+        hipEventElapsedTime(&t[i], ev0, ev1);
+    }
+    std::sort(t, t + kIters);
+    return t[kIters / 2];
+}
+
+// Sweeps the group kernel itself, probing cold like tuneGemvConfig: at decode
+// every group reads weights that have streamed out of the Infinity Cache since
+// their last use. Under the SiLU epilogue a TN=2 id launches the same kernel
+// as TN=1 (TN / 2, at least 1), so it is not measured twice.
+template <int EPI, bool HAS_ZP>
+static int tuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
+                               const float* a_sc, const Dp4aGroupArgs& g,
+                               int64_t K, int64_t bs)
+{
+    constexpr bool kSilu = (EPI == HIP_MATMUL_GROUP_EPI_SILU_MUL);
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+    float best_ms = 1e30f;
+    int   best_id = 9;  // 128x1 default
+
+    void* evict = gemvEvictAlloc();
+
+    settleClock(ev0, ev1, stream, [&]{
+        launchDp4aGroupConfig<EPI, HAS_ZP>(best_id, stream, a_qb, a_sc, g, K,
+                                           bs);
+    });
+
+    for (int cid = 0; cid < kNumGemvConfigs; cid++) {
+        if (kSilu && kGemvConfigs[cid].tile_n == 2)
+            continue;
+        const float cfg_best_ms =
+            timeGroupConfigMedian(ev0, ev1, stream, evict, [&]{
+                launchDp4aGroupConfig<EPI, HAS_ZP>(cid, stream, a_qb, a_sc, g,
+                                                   K, bs);
+            });
+
+        MATMUL_NBITS_AUTOTUNE_LOG(
+            "[custom_kernels]   dp4a group config[%2d] threads=%3d tile_n=%d : "
+            "%.4f ms\n",
+            cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
+            cfg_best_ms);
+
+        if (cfg_best_ms < best_ms) { best_ms = cfg_best_ms; best_id = cid; }
+    }
+    if (evict) (void)hipFree(evict);
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    MATMUL_NBITS_AUTOTUNE_LOG(
+        "[custom_kernels] GEMV-dp4a group autotune: nseg=%d silu=%d N0=%lld "
+        "K=%lld bs=%lld zp=%s -> best config[%d] threads=%d tile_n=%d "
+        "(%.4f ms/iter)\n",
+        g.nseg, kSilu ? 1 : 0, (long long)g.N[0], (long long)K, (long long)bs,
+        HAS_ZP ? "yes" : "no", best_id, kGemvConfigs[best_id].threads,
+        kGemvConfigs[best_id].tile_n, best_ms);
+
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> dp4a_group_cache;
+static std::mutex dp4a_group_tune_mutex;
+
+// No LUT step: the offline table has no group phase, and a single GEMV's entry
+// does not transfer to the group kernel.
+template <int EPI, bool HAS_ZP>
+static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
+                                    const float* a_sc, const Dp4aGroupArgs& g,
+                                    int64_t K, int64_t bs)
+{
+    std::string key = std::to_string(EPI) + "_" + std::to_string(g.nseg);
+    for (int s = 0; s < g.nseg; s++)
+        key += "_" + std::to_string(g.N[s]);
+    key += "_" + std::to_string(K) + "_" + std::to_string(bs) + "_" +
+           (HAS_ZP ? "1" : "0");
+
+    std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
+    auto it = dp4a_group_cache.find(key);
+    if (it != dp4a_group_cache.end())
+        return it->second;
+    const int best =
+        tuneDp4aGroupConfig<EPI, HAS_ZP>(stream, a_qb, a_sc, g, K, bs);
+    dp4a_group_cache[key] = best;
+    return best;
+}
+
+template <int EPI, bool HAS_ZP>
+static void runDp4aGroup(hipStream_t stream, const int8_t* a_qb,
+                         const float* a_sc, const Dp4aGroupArgs& g, int64_t K,
+                         int64_t bs)
+{
+    const int cfg =
+        getOrTuneDp4aGroupConfig<EPI, HAS_ZP>(stream, a_qb, a_sc, g, K, bs);
+    (void)hipGetLastError();
+    launchDp4aGroupConfig<EPI, HAS_ZP>(cfg, stream, a_qb, a_sc, g, K, bs);
+}
+
 extern "C" int hip_matmul_nbits_dp4a_group(
     void* stream_v, const void* a_qb_v, const void* a_scale_v, int nseg,
     const void* const* B, const void* const* scales,
@@ -3150,7 +3283,6 @@ extern "C" int hip_matmul_nbits_dp4a_group(
     const bool has_zp = zp_u8 && zp_u8[0];
     Dp4aGroupArgs g{};
     g.nseg = nseg;
-    int widest = 0;
     for (int s = 0; s < nseg; s++) {
         g.B[s]      = static_cast<const uint8_t*>(B[s]);
         g.scales[s] = static_cast<const __half*>(scales[s]);
@@ -3160,30 +3292,22 @@ extern "C" int hip_matmul_nbits_dp4a_group(
         if (!g.B[s] || !g.scales[s] || (has_zp && !g.zp[s]) || N[s] < 1 ||
             (!g.out[s] && (!silu || s == 0)))
             return hipErrorInvalidValue;
-        if (N[s] > N[widest])
-            widest = s;
     }
 
-    // A config miss sweeps the widest segment's single GEMV once, writing its
-    // output buffer, which the group launch below then overwrites. With the
-    // SiLU epilogue that is gate's buffer, the group's own output.
-    const int cfg = getOrTuneDp4aConfig(
-        stream, a_qb, a_sc, g.B[widest], g.scales[widest], g.zp[widest],
-        nullptr, g.out[widest], g.N[widest], K, block_size);
-
-    (void)hipGetLastError();
+    // A config miss sweeps the group kernel into the group's own output
+    // buffers, which the launch after it then overwrites.
     if (silu && has_zp)
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL, true>(
-            cfg, stream, a_qb, a_sc, g, K, block_size);
+        runDp4aGroup<HIP_MATMUL_GROUP_EPI_SILU_MUL, true>(
+            stream, a_qb, a_sc, g, K, block_size);
     else if (silu)
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_SILU_MUL, false>(
-            cfg, stream, a_qb, a_sc, g, K, block_size);
+        runDp4aGroup<HIP_MATMUL_GROUP_EPI_SILU_MUL, false>(
+            stream, a_qb, a_sc, g, K, block_size);
     else if (has_zp)
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_NONE, true>(
-            cfg, stream, a_qb, a_sc, g, K, block_size);
+        runDp4aGroup<HIP_MATMUL_GROUP_EPI_NONE, true>(
+            stream, a_qb, a_sc, g, K, block_size);
     else
-        launchDp4aGroupConfig<HIP_MATMUL_GROUP_EPI_NONE, false>(
-            cfg, stream, a_qb, a_sc, g, K, block_size);
+        runDp4aGroup<HIP_MATMUL_GROUP_EPI_NONE, false>(
+            stream, a_qb, a_sc, g, K, block_size);
     return hipGetLastError();
 }
 
