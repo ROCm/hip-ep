@@ -47,6 +47,18 @@
 extern "C" {
 #endif
 
+/* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
+ * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
+HIP_KERNEL_API int hip_gqa_ring_device_supported(void);
+HIP_KERNEL_API size_t hip_gqa_ring_workspace(int query_length,
+                                             int total_length);
+HIP_KERNEL_API int hip_gqa_ring_attention(void *stream, const void *query,
+                                          const void *key, const void *value,
+                                          void *output, int query_length,
+                                          int past_length, int capacity,
+                                          void *workspace,
+                                          size_t workspace_bytes);
+
 /* =========================================================================
  * Data Type Enum
  * =========================================================================

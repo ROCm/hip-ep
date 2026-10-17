@@ -337,6 +337,97 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
+
+#if HIP_EP_GQA_IMPL_ID != 0
+// Return 1 for a valid call outside Ring's context bound, 0 on success, and
+// -1 on failure. Validate every writable range before updating either cache.
+static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
+                            const void *query, const void *key,
+                            const void *value, const void *past_key,
+                            const void *past_value, const void *seqlens_k,
+                            void *output, void *present_key,
+                            void *present_value, int64_t sq, int64_t capacity,
+                            int64_t past_capacity) {
+  int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
+  if (last < -1) {
+    fprintf(stderr, "Ring GQA: failed or invalid sequence-length read\n");
+    return -1;
+  }
+  int64_t total = last == -1 ? sq : int64_t(last) + 1;
+  int64_t past = total - sq;
+  if (past < 0 || total > capacity || capacity > INT32_MAX ||
+      past_capacity < 0 || past_capacity > INT32_MAX ||
+      (past && (!past_key || !past_value || past > past_capacity)) ||
+      ((past_key == present_key) != (past_value == present_value)) ||
+      (past_key == present_key && past_capacity != capacity)) {
+    fprintf(stderr,
+            "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
+    return -1;
+  }
+  if (total > 32768)
+    return 1;
+
+  struct Range {
+    const void *ptr;
+    size_t bytes;
+  };
+  auto overlaps = [](Range a, Range b) {
+    if (!a.ptr || !b.ptr || !a.bytes || !b.bytes)
+      return false;
+    uintptr_t x = reinterpret_cast<uintptr_t>(a.ptr);
+    uintptr_t y = reinterpret_cast<uintptr_t>(b.ptr);
+    if (a.bytes > UINTPTR_MAX - x || b.bytes > UINTPTR_MAX - y)
+      return true;
+    return x < y + b.bytes && y < x + a.bytes;
+  };
+  const size_t qbytes = size_t(sq) * 24 * 256 * 2;
+  const size_t newbytes = size_t(sq) * 4 * 256 * 2;
+  const size_t cachebytes = size_t(capacity) * 4 * 256 * 2;
+  const size_t pastbytes = size_t(past_capacity) * 4 * 256 * 2;
+  Range q{query, qbytes}, k{key, newbytes}, v{value, newbytes},
+      o{output, qbytes};
+  Range pk{present_key, cachebytes}, pv{present_value, cachebytes};
+  Range oldk{past_key, pastbytes}, oldv{past_value, pastbytes};
+  bool invalid = overlaps(pk, pv) || overlaps(pk, oldv) || overlaps(pv, oldk) ||
+                 (past_key != present_key && overlaps(pk, oldk)) ||
+                 (past_value != present_value && overlaps(pv, oldv));
+  for (Range input : {q, k, v, o})
+    invalid |= overlaps(pk, input) || overlaps(pv, input);
+  for (Range input : {q, k, v, oldk, oldv})
+    invalid |= overlaps(o, input);
+  if (invalid) {
+    fprintf(stderr, "Ring GQA: overlapping input/output/cache buffers\n");
+    return -1;
+  }
+  const size_t bytes = hip_gqa_ring_workspace(int(sq), int(total));
+  if (bytes && hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
+    return -1;
+  void *workspace = bytes ? hipdnn_ep_state_get_workspace(state) : nullptr;
+  if (bytes && !workspace)
+    return -1;
+  for (Range input : {q, k, v, o, pk, pv, oldk, oldv}) {
+    if (overlaps({workspace, bytes}, input)) {
+      fprintf(stderr, "Ring GQA: workspace overlaps an input or output\n");
+      return -1;
+    }
+  }
+  // Pass the validated host length to the same cache-update helper used by
+  // existing GQA; append exactly once and avoid a second device length read.
+  if (update_kv_cache(stream, past_key, past_value, key, value, present_key,
+                      present_value, 1, int(past), int(sq), 4, 256,
+                      int(past_capacity), int(capacity), nullptr, 2, 0) != 0)
+    return -1;
+  RUNTIME_DEBUG_LOG("[REAL] Ring GQA impl=%d q=%lld past=%lld capacity=%lld\n",
+                    HIP_EP_GQA_IMPL_ID, (long long)sq, (long long)past,
+                    (long long)capacity);
+  return hip_gqa_ring_attention(stream, query, present_key, present_value,
+                                output, int(sq), int(past), int(capacity),
+                                workspace, bytes) == 0
+             ? 0
+             : -1;
+}
+#endif
+
 static int gqa_forward_fused(
     RuntimeState *state, hipStream_t stream,
     const void *query,    // BSHD [B, sq, H, d] or packed [B, sq, (H+2G)*d]
@@ -2957,6 +3048,30 @@ int wrap_group_query_attention(
   // head_dim 64, 96 or 128. Everything else uses the feature-complete
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
+
+#if HIP_EP_GQA_IMPL_ID != 0
+  // No existing route implements softcap; do not silently drop it in a Ring
+  // build. Other unsupported Ring features retain their existing GQA route.
+  if (softcap != 0.0f) {
+    fprintf(stderr, "Ring GQA builds do not support softcap\n");
+    return -1;
+  }
+  if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
+      kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
+      seq_len_q <= 4096 && seq_len_new_kv == seq_len_q && key && value &&
+      seqlens_k && !kv_bnsd && !reuse_past_kv && !kv_quantized && !do_rotary &&
+      no_causal == 0 && scale == 0.0625f && local_window_size <= 0 &&
+      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      hip_gqa_ring_device_supported()) {
+    int ring_rc =
+        gqa_forward_ring(state, stream, query, key, value, past_key, past_value,
+                         seqlens_k, output, present_key, present_value,
+                         seq_len_q, seq_len_kv, past_buf_seq);
+    if (ring_rc != 1)
+      return ring_rc;
+  }
+#endif
+
   const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
       !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);

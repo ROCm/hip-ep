@@ -103,3 +103,8 @@ target_link_libraries(HipToLLVM PUBLIC
   # implement this interface. See the guarded walk in HipToLLVM.cpp.
   MLIRConvertToLLVMInterface
 )
+
+# Guard dtype before the unchanged runtime ABI reduces it to byte width.
+if(HIP_EP_GQA_IMPL_ID)
+    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID})
+endif()
