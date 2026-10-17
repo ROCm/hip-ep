@@ -561,10 +561,11 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  // On the validated target, transposed-B decode projections can consume the
-  // physical [N,K] weight layout directly. F32 uses this path only for the
-  // measured small-N range; BF16-to-F32 uses it for any representable N and
-  // even K. Prefill and every unsupported shape retain tuned hipBLASLt.
+  // On the validated target, transposed-B projections can consume the
+  // physical [N,K] weight layout directly. F32 decode uses this path only for
+  // the measured small-N range; BF16-to-F32 decode uses the GEMV for N >=
+  // 1024 and even K, and BF16-to-F32 with more rows the custom WMMA GEMM for
+  // K % 8 == 0. Every other shape retains tuned hipBLASLt.
   if (input_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
       hipdnn_ep_real::useF32TransposedBDecodeGemv(
@@ -589,6 +590,16 @@ int wrap_hipblasLtMatmulTyped(RuntimeState *state, int op_state_slot,
     return hip_gemv_bf16_f32_transposed_b(
         stream, A, B, static_cast<float *>(output), static_cast<int>(N),
         static_cast<int>(K));
+  }
+
+  if (input_data_type == HIPDNN_EP_DATATYPE_BFLOAT16 &&
+      output_data_type == HIPDNN_EP_DATATYPE_FLOAT &&
+      hipdnn_ep_real::useBf16F32TransposedBGemm(
+          ms->use_gfx1151_decode_gemv, M, N, K, batch_count, transA, transB) &&
+      hipdnn_ep_real::hasBf16VectorAlignment(A, B)) {
+    return hip_gemm_bf16_f32_transposed_b(
+        stream, A, B, static_cast<float *>(output), static_cast<int>(M),
+        static_cast<int>(N), static_cast<int>(K));
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmulTyped: M=%lld, N=%lld, K=%lld, "

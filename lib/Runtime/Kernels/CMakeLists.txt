@@ -283,6 +283,14 @@ if(BUILD_HIP_UNIT_TESTS)
         OFFLOAD_ARCHS
             ${HIP_ARCHITECTURES}
     )
+    hip_add_executable(test-gemm-bf16-f32-transposed-b
+        ${CMAKE_SOURCE_DIR}/test/gpu/test_gemm_bf16_f32_transposed_b.hip
+        hip/gemm_wmma_kernel.hip
+        INCLUDE_DIRECTORIES
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        OFFLOAD_ARCHS
+            ${HIP_ARCHITECTURES}
+    )
     # The kernels directory is added before lib/Runtime resolves hipBLASLt.
     if(NOT TARGET roc::hipblaslt AND NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
         find_package(hipblaslt QUIET HINTS "${THEROCK_DIST}")

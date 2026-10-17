@@ -304,6 +304,9 @@ int main() {
       runCase<__hip_bfloat16, float>(
           "bf16 decode transposed B", 1, 1, 1025, 1026, true, true,
           HIPDNN_EP_DATATYPE_BFLOAT16, HIPDNN_EP_DATATYPE_FLOAT) &&
+      runCase<__hip_bfloat16, float>(
+          "bf16 prefill transposed B", 1, 40, 70, 136, true, true,
+          HIPDNN_EP_DATATYPE_BFLOAT16, HIPDNN_EP_DATATYPE_FLOAT) &&
       runCase<__hip_bfloat16, float>("bf16 M>1", 1, 3, 11, 17, false, true,
                                      HIPDNN_EP_DATATYPE_BFLOAT16,
                                      HIPDNN_EP_DATATYPE_FLOAT) &&

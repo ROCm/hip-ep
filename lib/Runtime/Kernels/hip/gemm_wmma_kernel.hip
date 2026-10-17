@@ -353,6 +353,159 @@ __global__ void gemv_bf16_f32_transposed_b_kernel(
     }
 }
 
+// BF16 x BF16 -> F32 GEMM for prefill-sized transposed-B projections:
+// C[M,N] = A[M,K] * transpose(B[N,K]), all row-major, F32 accumulation.
+//
+// A block of 256 threads (eight waves, WM x WN) computes a BM x BN tile of C;
+// each wave owns (BM/WM) x (BN/WN) outputs as 16x16 WMMA tiles. A and B are
+// staged through padded shared memory in BK-wide slices, double-buffered: the
+// next slice is loaded into registers while the WMMAs run on the current one.
+// Blocks walk M fastest, so the blocks sharing one slice of the weights run
+// together and read it from DRAM once.
+//
+// Only the gfx11 WMMA encoding (RDNA3/3.5) is implemented: a_frag at lane l
+// holds A_tile[l % 16][0..15] and b_frag holds B_tile[l % 16][0..15] (B rows
+// are N, so both are contiguous K runs); accumulator element e is row
+// 2 * e + l / 16, column l % 16.
+#if defined(__HIP_DEVICE_COMPILE__) &&                                        \
+    __has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32)
+#define HIPDNN_HAS_BF16_WMMA_GFX11 1
+#else
+#define HIPDNN_HAS_BF16_WMMA_GFX11 0
+#endif
+
+typedef short bf16x16 __attribute__((ext_vector_type(16)));
+
+template <int BM, int BN, int BK, int WM, int WN>
+__global__ void __launch_bounds__(256) gemm_bf16_f32_transposed_b_kernel(
+    const uint16_t *__restrict__ A, const uint16_t *__restrict__ B,
+    float *__restrict__ C, int M, int N, int K) {
+#if HIPDNN_HAS_BF16_WMMA_GFX11
+  static_assert(WM * WN == 8, "eight waves per block");
+  constexpr int TM = BM / WM / kWmmaTile;
+  constexpr int TN = BN / WN / kWmmaTile;
+  constexpr int kVector = 8; // BF16 values per 16-byte load
+  constexpr int kStride = BK + 8;
+  constexpr int AVectors = BM * BK / kVector / 256;
+  constexpr int BVectors = BN * BK / kVector / 256;
+  static_assert(AVectors * 256 * kVector == BM * BK &&
+                BVectors * 256 * kVector == BN * BK);
+  __shared__ __attribute__((aligned(16))) uint16_t As[2][BM * kStride];
+  __shared__ __attribute__((aligned(16))) uint16_t Bs[2][BN * kStride];
+
+  const int thread = threadIdx.x;
+  const int wave = thread / 32;
+  const int lane = thread % 32;
+  const int row16 = lane % kWmmaTile;
+  const int waveM = wave / WN;
+  const int waveN = wave % WN;
+  const int m0 = blockIdx.x * BM;
+  const int n0 = blockIdx.y * BN;
+
+  uint4 aStage[AVectors];
+  uint4 bStage[BVectors];
+  auto loadGlobal = [&](int k0) {
+#pragma unroll
+    for (int i = 0; i < AVectors; ++i) {
+      const int v = thread + i * 256;
+      const int r = v / (BK / kVector);
+      const int c = (v % (BK / kVector)) * kVector;
+      aStage[i] = m0 + r < M && k0 + c < K
+                      ? *reinterpret_cast<const uint4 *>(
+                            A + static_cast<size_t>(m0 + r) * K + k0 + c)
+                      : make_uint4(0, 0, 0, 0);
+    }
+#pragma unroll
+    for (int i = 0; i < BVectors; ++i) {
+      const int v = thread + i * 256;
+      const int r = v / (BK / kVector);
+      const int c = (v % (BK / kVector)) * kVector;
+      bStage[i] = n0 + r < N && k0 + c < K
+                      ? *reinterpret_cast<const uint4 *>(
+                            B + static_cast<size_t>(n0 + r) * K + k0 + c)
+                      : make_uint4(0, 0, 0, 0);
+    }
+  };
+  auto storeShared = [&](int buffer) {
+#pragma unroll
+    for (int i = 0; i < AVectors; ++i) {
+      const int v = thread + i * 256;
+      *reinterpret_cast<uint4 *>(
+          &As[buffer][(v / (BK / kVector)) * kStride +
+                      (v % (BK / kVector)) * kVector]) = aStage[i];
+    }
+#pragma unroll
+    for (int i = 0; i < BVectors; ++i) {
+      const int v = thread + i * 256;
+      *reinterpret_cast<uint4 *>(
+          &Bs[buffer][(v / (BK / kVector)) * kStride +
+                      (v % (BK / kVector)) * kVector]) = bStage[i];
+    }
+  };
+  auto fragment = [](const uint16_t *row) {
+    bf16x16 value;
+    const uint4 low = *reinterpret_cast<const uint4 *>(row);
+    const uint4 high = *reinterpret_cast<const uint4 *>(row + 8);
+    __builtin_memcpy(&value, &low, sizeof(low));
+    __builtin_memcpy(reinterpret_cast<char *>(&value) + sizeof(low), &high,
+                     sizeof(high));
+    return value;
+  };
+
+  float8 acc[TM][TN] = {};
+  loadGlobal(0);
+  storeShared(0);
+  __syncthreads();
+  int buffer = 0;
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    const bool more = k0 + BK < K;
+    if (more)
+      loadGlobal(k0 + BK);
+#pragma unroll
+    for (int kk = 0; kk < BK; kk += kWmmaTile) {
+      bf16x16 a[TM];
+      bf16x16 b[TN];
+#pragma unroll
+      for (int i = 0; i < TM; ++i)
+        a[i] = fragment(&As[buffer][((waveM * TM + i) * kWmmaTile + row16) *
+                                        kStride +
+                                    kk]);
+#pragma unroll
+      for (int j = 0; j < TN; ++j)
+        b[j] = fragment(&Bs[buffer][((waveN * TN + j) * kWmmaTile + row16) *
+                                        kStride +
+                                    kk]);
+#pragma unroll
+      for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j)
+          acc[i][j] =
+              __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a[i], b[j], acc[i][j]);
+    }
+    if (more) {
+      storeShared(buffer ^ 1);
+      __syncthreads();
+      buffer ^= 1;
+    }
+  }
+
+  const int pair = lane / kWmmaTile;
+#pragma unroll
+  for (int i = 0; i < TM; ++i)
+#pragma unroll
+    for (int j = 0; j < TN; ++j)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int r = m0 + (waveM * TM + i) * kWmmaTile + 2 * e + pair;
+        const int c = n0 + (waveN * TN + j) * kWmmaTile + row16;
+        if (r < M && c < N)
+          C[static_cast<size_t>(r) * N + c] = acc[i][j][e];
+      }
+#else
+  __builtin_trap();
+#endif
+}
+
 } // namespace
 
 extern "C" int hip_gemv_bf16_f32_transposed_b(void *stream, const void *A,
@@ -379,4 +532,32 @@ extern "C" int hip_gemv_bf16_f32_transposed_b(void *stream, const void *A,
                            weight, C, N, K / 2);
     }
     return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+extern "C" int hip_gemm_bf16_f32_transposed_b(void *stream, const void *A,
+                                              const void *B, float *C, int M,
+                                              int N, int K) {
+  constexpr uintptr_t kVectorAlignmentMask = alignof(uint4) - 1;
+  if (!stream || !A || !B || !C || M <= 0 || N <= 0 || K <= 0 || K % 8 != 0 ||
+      ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(B)) &
+       kVectorAlignmentMask) != 0 ||
+      hipdnn_device_is_wave64())
+    return -1;
+  const auto *input = static_cast<const uint16_t *>(A);
+  const auto *weight = static_cast<const uint16_t *>(B);
+  const auto hipStream = static_cast<hipStream_t>(stream);
+  // 128 x 64 tiles keep eight waves busy on 2x2 WMMA tiles each for prompt-
+  // sized M; short M takes 64 x 64 tiles so fewer rows are padding.
+  if (M >= 128) {
+    constexpr int BM = 128, BN = 64;
+    hipLaunchKernelGGL((gemm_bf16_f32_transposed_b_kernel<BM, BN, 64, 4, 2>),
+                       dim3((M + BM - 1) / BM, (N + BN - 1) / BN), dim3(256),
+                       0, hipStream, input, weight, C, M, N, K);
+  } else {
+    constexpr int BM = 64, BN = 64;
+    hipLaunchKernelGGL((gemm_bf16_f32_transposed_b_kernel<BM, BN, 64, 2, 4>),
+                       dim3((M + BM - 1) / BM, (N + BN - 1) / BN), dim3(256),
+                       0, hipStream, input, weight, C, M, N, K);
+  }
+  return hipGetLastError() == hipSuccess ? 0 : -1;
 }

@@ -3929,6 +3929,13 @@ HIP_KERNEL_API int hip_gemv_f32_transposed_b_multiwave_gfx1151(
 HIP_KERNEL_API int hip_gemv_bf16_f32_transposed_b(
     void* stream, const void* A, const void* B, float* C, int N, int K);
 
+/* BF16-input, F32-output GEMM for C[M,N] = A[M,K] * transpose(B[N,K]), the
+ * prefill counterpart of the GEMV above: WMMA tiles staged through shared
+ * memory, F32 accumulation. Requires K % 8 == 0, 16-byte aligned A and B,
+ * and the gfx11 WMMA encoding (RDNA3/3.5); returns -1 otherwise. */
+HIP_KERNEL_API int hip_gemm_bf16_f32_transposed_b(
+    void* stream, const void* A, const void* B, float* C, int M, int N, int K);
+
 #ifdef __cplusplus
 }
 #endif
