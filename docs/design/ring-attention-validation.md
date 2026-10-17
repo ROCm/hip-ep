@@ -68,9 +68,9 @@ For context, isolated attention-core decode improved from the original Ring impl
 
 - All three builds pass **29 strict ONNX numeric cases**, with CPU fallback disabled. Decode checks every output element. Long prefill checks reference rows over all valid keys, all output finiteness and the full valid caches.
 - **68 final direct-kernel checks** pass against an FP32 reference (`atol=rtol=0.005`), covering all 24 heads and all 256 dimensions, history boundaries, input scales 0.125/1/8, nondefault streams, poisoned unused cache capacity, output/scratch redzones, undersized scratch rejection, oldest/final-token dominance and NaN-head isolation.
-- Full-model Ring prefill and matching-prefix first-decode logits pass cosine similarity >=0.999 and relative L2 <=0.05 against existing at 4K/32K/64K. The worst first-decode cosine is 0.999828 and worst relative L2 is 0.020067. All 128 warmup tokens match existing for both Ring selections at all three lengths. Each configuration's three measured generations repeat identically.
+- Full-model Ring prefill and decode logits after two generated tokens with matching two-token prefixes pass cosine similarity >=0.999 and relative L2 <=0.05 against existing at 4K/32K/64K. The worst decode-logit cosine is 0.999828 and worst relative L2 is 0.020067. All 128 warmup tokens match existing for both Ring selections at all three lengths. Each configuration's three measured generations repeat identically.
 - Two natural prompts (arithmetic and a one-sentence sky explanation) produce identical answers with all three builds; matching-prefix logit checks also pass. This is bounded functionality evidence, not a broad quality benchmark.
-- An earlier FP16-probability decode candidate passed weaker checks but failed 64K full-model logits (cosine 0.941767); it is excluded. The final decoder keeps probabilities and weighted V accumulation in FP32, with a dedicated underflow regression test.
+- An earlier FP16-probability decode candidate diverged from baseline at the second generated token and is excluded. Its later logits were conditioned on a different prefix, so their cosine is not a like-for-like numerical comparison. The final decoder keeps probabilities and weighted V accumulation in FP32, with a dedicated underflow regression test.
 
 ## Test plan and new tests
 
