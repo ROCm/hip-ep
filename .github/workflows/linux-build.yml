@@ -25,7 +25,7 @@ env:
   # inside rocmlirTriton (external/llvm-project); the repo + pinned commit are
   # read from cmake/deps.txt at build time and the commit keys the llvm-install
   # cache. Bumping the pin only invalidates that cache.
-  ONNXRUNTIME_VERSION: "1.30.0"
+  ONNXRUNTIME_VERSION: "1.31.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
@@ -35,7 +35,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705"
+  OGA_PR_PATCHES: "2685 2691 2705 2712"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -363,7 +363,9 @@ jobs:
           # tag's version of every line the PR did not touch, so unrelated main
           # commits stay out; a hunk needing code absent from the tag conflicts
           # and fails the step. Tests are excluded because OGA does not build
-          # them and their fixtures do conflict.
+          # them and their fixtures do conflict; OGA's own CI workflows are
+          # excluded because the build does not use them and some no longer
+          # exist at the pinned tag.
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff"
             echo "Fetching $url"
@@ -373,7 +375,7 @@ jobs:
               "$url" -o "/tmp/oga-pr-${pr}.diff"
             echo "Applying PR #${pr}"
             git apply --whitespace=nowarn --3way --exclude='test/*' \
-              "/tmp/oga-pr-${pr}.diff" \
+              --exclude='.github/*' "/tmp/oga-pr-${pr}.diff" \
               || { echo "PR #${pr} failed to apply"; exit 1; }
           done
 
