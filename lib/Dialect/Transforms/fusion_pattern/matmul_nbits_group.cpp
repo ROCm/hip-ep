@@ -145,13 +145,21 @@ collectGroup(mlir::hip::MatMulNBitsOp root) {
   return group;
 }
 
-/// The SiLU(gate) * up chain consuming a gate/up pair.
+/// The SiLU(gate) * up consumer of a gate/up pair: either the primitive
+/// sigmoid/mul chain or the hip.swiglu that SwigluFusion folds it into. The
+/// two rewrites share one greedy driver, so either form can reach this
+/// pattern. Exactly one of `swiglu` and the chain ops is set.
 struct SiluMulChain {
   mlir::hip::MatMulNBitsOp gate;
   mlir::hip::MatMulNBitsOp up;
   mlir::hip::SigmoidOp sigmoid;
   mlir::hip::MulOp gateMul; // gate * sigmoid(gate)
   mlir::hip::MulOp upMul;   // gateMul * up
+  mlir::hip::SwigluOp swiglu;
+
+  mlir::Operation *consumer() {
+    return swiglu ? swiglu.getOperation() : upMul.getOperation();
+  }
 };
 
 bool isMulOf(mlir::hip::MulOp mul, mlir::Value x, mlir::Value y) {
@@ -184,6 +192,14 @@ std::optional<SiluMulChain> matchSiluMul(mlir::hip::MatMulNBitsOp gate,
   mlir::Value u = up->getResult(0);
   if (g.getType() != u.getType() || valueUsers(u).size() != 1)
     return std::nullopt;
+  if (auto swiglu = soleUserOf<mlir::hip::SwigluOp>(g)) {
+    if (swiglu.getGate() != g || swiglu.getUp() != u ||
+        soleUserOf<mlir::hip::SwigluOp>(u) != swiglu ||
+        swiglu->getNumResults() != 1 ||
+        swiglu->getResult(0).getType() != g.getType())
+      return std::nullopt;
+    return SiluMulChain{gate, up, {}, {}, {}, swiglu};
+  }
   llvm::SmallVector<mlir::Operation *> gUsers = valueUsers(g);
   if (gUsers.size() != 2)
     return std::nullopt;
@@ -208,7 +224,7 @@ std::optional<SiluMulChain> matchSiluMul(mlir::hip::MatMulNBitsOp gate,
   if (s.getType() != g.getType() || m.getType() != g.getType() ||
       upMul->getResult(0).getType() != g.getType())
     return std::nullopt;
-  return SiluMulChain{gate, up, sigmoid, gateMul, upMul};
+  return SiluMulChain{gate, up, sigmoid, gateMul, upMul, {}};
 }
 
 struct MatMulNBitsGroup final
@@ -271,15 +287,21 @@ struct MatMulNBitsGroup final
       return mlir::success();
     }
     mlir::Value fused = groupOp->getResult(0);
-    for (mlir::Value v :
-         {silu->gate->getResult(0), silu->up->getResult(0),
-          silu->sigmoid->getResult(0), silu->gateMul->getResult(0)})
+    llvm::SmallVector<mlir::Value> shaped{silu->gate->getResult(0),
+                                          silu->up->getResult(0)};
+    if (!silu->swiglu) {
+      shaped.push_back(silu->sigmoid->getResult(0));
+      shaped.push_back(silu->gateMul->getResult(0));
+    }
+    for (mlir::Value v : shaped)
       for (mlir::OpOperand &use : llvm::make_early_inc_range(v.getUses()))
         if (auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(use.getOwner()))
           rewriter.modifyOpInPlace(dim, [&] { use.set(fused); });
-    rewriter.replaceOp(silu->upMul, fused);
-    rewriter.eraseOp(silu->gateMul);
-    rewriter.eraseOp(silu->sigmoid);
+    rewriter.replaceOp(silu->consumer(), fused);
+    if (!silu->swiglu) {
+      rewriter.eraseOp(silu->gateMul);
+      rewriter.eraseOp(silu->sigmoid);
+    }
     rewriter.eraseOp(silu->up);
     rewriter.eraseOp(silu->gate);
     return mlir::success();

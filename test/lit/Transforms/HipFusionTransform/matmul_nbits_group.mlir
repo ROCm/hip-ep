@@ -234,15 +234,52 @@ func.func @gate_up_silu_dynamic(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
 
 // -----
 
+// A gate/up pair already consumed by hip.swiglu, as SwigluFusion leaves it
+// when it rewrites the chain first, takes the same silu_mul epilogue.
+// CHECK-LABEL: func.func @gate_up_swiglu
+// CHECK:         %[[EG:.*]] = tensor.empty() : tensor<1x1x128xf16>
+// CHECK:         %[[EU:.*]] = tensor.empty() : tensor<1x1x128xf16>
+// CHECK:         %[[Y:.*]]:2 = hip.matmul_nbits_group(%arg0) ins(%arg1 : tensor<1x1x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg4 :
+// CHECK-SAME:      outs(%[[EG]] : tensor<1x1x128xf16>)
+// CHECK-SAME:      up_tmp(%[[EU]] : tensor<1x1x128xf16>)
+// CHECK-SAME:      epilogue = 1
+// CHECK-NOT:     hip.swiglu
+// CHECK:         return %[[Y]]#0
+func.func @gate_up_swiglu(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                          %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
+                          %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)
+    -> tensor<1x1x128xf16> {
+  %eg = tensor.empty() : tensor<1x1x128xf16>
+  %g = hip.matmul_nbits(%ctx) ins(%x, %bg, %sg :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eg : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %eu = tensor.empty() : tensor<1x1x128xf16>
+  %u = hip.matmul_nbits(%ctx) ins(%x, %bu, %su :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eu : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %ey = tensor.empty() : tensor<1x1x128xf16>
+  %y = hip.swiglu(%ctx) ins(%g, %u : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%ey : tensor<1x1x128xf16>) : tensor<1x1x128xf16>
+  return %y : tensor<1x1x128xf16>
+}
+
+// -----
+
 // The gate projection has a second consumer, so it has to reach memory: the
-// pair is still grouped, without the epilogue, and the SiLU chain stays.
+// pair is still grouped, without the epilogue, and the SiLU chain is left to
+// SwigluFusion.
 // CHECK-LABEL: func.func @gate_escapes
-// CHECK:         hip.matmul_nbits_group
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group
 // CHECK-NOT:       up_tmp
 // CHECK-NOT:       epilogue = 1
-// CHECK:         hip.sigmoid
-// CHECK:         hip.mul
-// CHECK:         hip.mul
+// CHECK:         %[[Y:.*]] = hip.swiglu(%arg0) ins(%[[G]]#0, %[[G]]#1 :
+// CHECK-NOT:     hip.sigmoid
+// CHECK:         return %[[Y]], %[[G]]#0
 func.func @gate_escapes(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
                         %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
                         %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)

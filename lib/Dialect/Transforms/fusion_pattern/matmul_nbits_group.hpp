@@ -11,7 +11,8 @@
 // hip.matmul_nbits_group, which the runtime runs as a single launch for one
 // activation row and as the ordinary per-projection kernels otherwise.
 //
-// A gate/up pair whose only consumer is Mul(Mul(gate, Sigmoid(gate)), up)
+// A gate/up pair whose only consumer is Mul(Mul(gate, Sigmoid(gate)), up),
+// or the hip.swiglu(gate, up) that SwigluFusion makes of that chain,
 // becomes one group with the silu_mul epilogue, so neither projection is
 // written to memory on the single-launch path. The up projection's init stays
 // on the op as `up_tmp`, which the multi-row path writes; memory planning
