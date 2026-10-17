@@ -203,3 +203,27 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+
+// Host-fed scalars never share a slot. The host stores %y as soon as it gets
+// there, while the first hip.cast has only been enqueued; with %b in %a's
+// slot the cast would read %y. Neither is reused, nor reuses another buffer.
+//
+// CHECK-LABEL: func.func @host_fed_scalars_not_reused
+// CHECK:         %[[A:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %{{.*}}, %[[A]][]
+// CHECK:         hip.cast{{.*}}ins(%[[A]] :
+// CHECK:         %[[B:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %{{.*}}, %[[B]][]
+// CHECK:         hip.cast{{.*}}ins(%[[B]] :
+func.func @host_fed_scalars_not_reused(%ctx: !hip.context, %x: i64, %y: i64)
+    -> (memref<i32>, memref<i32>) {
+  %a = memref.alloc() : memref<i64>
+  memref.store %x, %a[] : memref<i64>
+  %o1 = memref.alloc() : memref<i32>
+  hip.cast(%ctx) ins(%a : memref<i64>) outs(%o1 : memref<i32>) {to = 6 : i64}
+  %b = memref.alloc() : memref<i64>
+  memref.store %y, %b[] : memref<i64>
+  %o2 = memref.alloc() : memref<i32>
+  hip.cast(%ctx) ins(%b : memref<i64>) outs(%o2 : memref<i32>) {to = 6 : i64}
+  return %o1, %o2 : memref<i32>, memref<i32>
+}
