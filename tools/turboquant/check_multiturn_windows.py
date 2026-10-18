@@ -16,7 +16,9 @@ root = Path(os.environ["TQ_WORK_ROOT"])
 base = Path(os.environ["TQ_INTEGRATION_INSTALL"])
 dense = os.environ.get("TQ_MULTITURN_DENSE_CONTROL") == "1"
 results = Path(os.environ["TQ_APPEND_RESULTS"])
-out = results / ("qwen-ring" if dense else "qwen")
+dense_variant = os.environ.get("TQ_MULTITURN_DENSE_VARIANT", "ring")
+assert dense_variant in ("ring", "baseline"), dense_variant
+out = results / (f"qwen-{dense_variant}" if dense else "qwen")
 carrier_width, row_bytes = (256, 512) if dense else (66, 132)
 control = json.loads((results / "qwen/receipt.json").read_text()) if dense else None
 out.mkdir(parents=True, exist_ok=True)
@@ -76,6 +78,8 @@ def sync():
 report = dict(
     status="loading",
     scope="Same-generator multi-turn execution and matching-prefix logits; diagnostic timings, not a task-quality benchmark",
+    variant=dense_variant if dense else "turboquant",
+    harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     kv_format="FP16" if dense else "TurboQuant 4-bit",
     comparisons=[],
     genai_module=og.__file__,

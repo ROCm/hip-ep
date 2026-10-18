@@ -91,6 +91,9 @@ and eight decode tokens in one generator. It checks old cache bytes in all
 16 full-attention layers and finite logits. Run it again with
 `TQ_MULTITURN_DENSE_CONTROL=1` for a dense Ring comparison on exactly the same
 token history, including a dense append versus fresh full-history check.
+For the production baseline, also set `TQ_MULTITURN_DENSE_VARIANT=baseline`
+and point `TQ_INTEGRATION_INSTALL` to the frozen `install/existing` build.
+It writes `qwen-baseline/` results separately and reuses the same TQ token history.
 The single-run latencies are diagnostic, not replacements for the historical
 benchmark table. Read [append validation](../../docs/design/turboquant-append-validation.md)
 for results and limitations.

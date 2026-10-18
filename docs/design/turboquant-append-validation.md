@@ -48,6 +48,18 @@ All matching-prefix screens passed the existing cosine >= 0.999 / relative L2 <=
 
 These are single-run diagnostics, including initial-call effects, rather than warmed median benchmarks. Follow-up TQ prefill took about 292 ms and 634 ms; no append speedup over dense Ring is claimed.
 
+## Baseline append comparison
+
+| Past tokens | New prompt | Baseline prefill s | Ring-KV prefill s | TurboQuant prefill s |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 4,096 | 9.5737 | 9.6373 | 10.0920 |
+| 4,104 | 33 | 0.2763 | 0.2831 | 0.2918 |
+| 4,145 | 129 | 0.5976 | 0.6107 | 0.6341 |
+
+Baseline uses the frozen production `existing` GQA installation from the original comparison, with its loaded-library hashes verified against that report. It uses the same isolated GenAI patch, 4,608-token capacity, seeded prompt tokens and TQ-selected decode tokens as the Ring control. The timer includes `append_tokens`, logits readback and GPU synchronization; model loading and cache inspection are outside it. These are separate single-run diagnostics, not warmed medians or an alternating paired experiment. TurboQuant append was 5.6% and 6.1% slower than baseline for the 33- and 129-token prompts, respectively (3.1% and 3.8% slower than Ring-KV).
+
+Baseline preserved all old FP16 cache rows and resumed decode after both appends. Matching-prefix logits versus TurboQuant passed the existing numerical screen; append cosine was 0.999943 / 0.999944 and relative L2 1.094% / 1.077%. Baseline final append also passed its own fresh full-history control (cosine 0.99999559, relative L2 0.003159). This does not resolve the earlier TurboQuant accuracy blockers.
+
 ## Memory and remaining limits
 
 Persistent full-attention KV payload remains **3.8788x smaller** (512/132 bytes per vector). At the tested capacity of 4,608 tokens across 16 full-attention layers, that is **74.25 MiB** of TQ KV versus **288 MiB** of FP16 KV. Weights, recurrent state, padding and other allocations are separate. These are payload calculations from verified cache shapes, not a new WDDM process-memory measurement.
