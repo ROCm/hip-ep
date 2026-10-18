@@ -329,6 +329,8 @@ void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populateMatMulBnb4ConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,

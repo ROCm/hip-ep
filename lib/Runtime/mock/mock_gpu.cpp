@@ -1387,6 +1387,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
+                      void *output, int64_t n, int64_t k, int64_t block_size,
+                      int64_t quant_type) {
+  (void)packed;
+  (void)absmax;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_dequant_bnb4\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_dequant_bnb4(N=%lld, K=%lld, block_size=%lld, "
+             "quant_type=%lld)\n",
+             (long long)n, (long long)k, (long long)block_size,
+             (long long)quant_type);
+  return 0;
+}
+
 int wrap_gather_block_quantized(
     RuntimeState *state, const void *data, const void *indices,
     const void *scales, const void *zero_points, void *output,

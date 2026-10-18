@@ -8,7 +8,10 @@
 // 1. bhwc,hkc->bhwk  (batch h, contract c)
 // 2. bhwc,wkc->bhwk  (batch w, contract c)
 // 3. ij,jk->ik       (plain matmul, no transpose)
-// 4. A single-operand reduction stays onnx.Einsum
+// 4. bc,d->bcd       (outer product: no contracted index)
+// 5. A reordered outer product inserts the unit axes in output order
+// 6. Rank 5 stays onnx.Einsum because hip.mul's ABI stops at rank 4
+// 7. A single-operand reduction stays onnx.Einsum
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -53,6 +56,44 @@ module {
   // CHECK: hip.matmul
   // CHECK-NOT: tensor.collapse_shape
   // CHECK-NOT: tensor.expand_shape
+
+  func.func @einsum_outer(%A: tensor<1x3xf16>, %B: tensor<10xf16>) -> tensor<1x3x10xf16> {
+    %Y = "onnx.Einsum"(%A, %B) {equation = "bc,d->bcd"} : (tensor<1x3xf16>, tensor<10xf16>) -> tensor<1x3x10xf16>
+    return %Y : tensor<1x3x10xf16>
+  }
+
+  // CHECK-LABEL: func.func @einsum_outer
+  // CHECK: tensor.expand_shape
+  // CHECK: tensor<1x3x1xf16>
+  // CHECK: tensor.expand_shape
+  // CHECK: tensor<1x1x10xf16>
+  // CHECK: hip.mul
+  // CHECK-NOT: onnx.Einsum
+  // CHECK-NOT: hip.matmul
+
+  func.func @einsum_outer_reordered(%A: tensor<10xf16>, %B: tensor<1x3xf16>) -> tensor<3x10x1xf16> {
+    %Y = "onnx.Einsum"(%A, %B) {equation = "d,bc->cdb"} : (tensor<10xf16>, tensor<1x3xf16>) -> tensor<3x10x1xf16>
+    return %Y : tensor<3x10x1xf16>
+  }
+
+  // CHECK-LABEL: func.func @einsum_outer_reordered
+  // CHECK: tensor.expand_shape
+  // CHECK: tensor<1x10x1xf16>
+  // CHECK: hip.transpose
+  // CHECK: tensor.expand_shape
+  // CHECK: tensor<3x1x1xf16>
+  // CHECK: hip.mul
+  // CHECK-NOT: onnx.Einsum
+  // CHECK-NOT: hip.matmul
+
+  func.func @einsum_outer_rank5(%A: tensor<2x2x2x2x2xf16>, %B: tensor<2xf16>) -> tensor<2x2x2x2x2x2xf16> {
+    %Y = "onnx.Einsum"(%A, %B) {equation = "abcde,f->abcdef"} : (tensor<2x2x2x2x2xf16>, tensor<2xf16>) -> tensor<2x2x2x2x2x2xf16>
+    return %Y : tensor<2x2x2x2x2x2xf16>
+  }
+
+  // CHECK-LABEL: func.func @einsum_outer_rank5
+  // CHECK: onnx.Einsum
+  // CHECK-NOT: hip.mul
 
   func.func @einsum_reduce(%A: tensor<2x3xf32>) -> tensor<2xf32> {
     %Y = "onnx.Einsum"(%A) {equation = "ij->i"} : (tensor<2x3xf32>) -> tensor<2xf32>
