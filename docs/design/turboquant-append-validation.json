@@ -1,0 +1,516 @@
+{
+  "status": "append_validation_passed",
+  "all_turboquant_accuracy_gates_passed": false,
+  "base_commit": "583492f544b78c2a61fd1184f57e53c3d95fd791",
+  "source_sha256": {
+    "lib/Runtime/Kernels/hip/ring/ring_gqa.hip": "3aeee2c7d86aecc9043df50fb6203d0e72569d93c3e7e82a2a7a1803acfc703c",
+    "lib/Runtime/Kernels/hip/turboquant_kernel.hip": "a0bc756d0fa32b0820929abb47f5c038dab3860dd045cc87e77807683a3dacda",
+    "lib/Runtime/Kernels/include/hip_custom_kernels.h": "e79a843586eaf81050020193cc37ab1da78ddf61fa7ea1c19e6d85243db54c67",
+    "lib/Runtime/real/gqa.cpp": "6a4d62428334bf22955df157803da081c42768240d05f2c415b8c2cd9afc2594"
+  },
+  "genai_release": "v0.17.0",
+  "genai_patch_sha256": "60700e991f16e38dfad8f36c0a64056cce7cae2bbba7f98e97b05c2dd2d7e8ba",
+  "genai_core_sha256": "98f56770b577c22299d960e5429ac0dadaeb66f97fd980a20355c976ffb7bd36",
+  "genai_build": {
+    "ort": "1.30.0",
+    "python_binding": "Existing cp313 v0.17.0 C-API binding, isolated package with rebuilt core DLL",
+    "options": [
+      "USE_CUDA=OFF",
+      "USE_DML=OFF",
+      "ENABLE_PYTHON=OFF",
+      "ENABLE_TESTS=OFF",
+      "ENABLE_TELEMETRY=OFF"
+    ],
+    "upstream_cpp_tests_executed": false
+  },
+  "hip_build": {
+    "compiler_tests_passed": 608,
+    "unsupported": 9,
+    "runtime_tests_passed": 3
+  },
+  "ring_q_compile": {
+    "status": "passed",
+    "returncode": 0,
+    "seconds": 4.016984462738037
+  },
+  "kernel": {
+    "status": "passed",
+    "gate": "append_attention_and_frozen_encoder_regression",
+    "strict_cpu_encoder_parity_passed": false,
+    "encoder_baseline": "${TQ_WORK_ROOT}\\install\\turboquant\\bin\\custom_kernels_gfx1151.dll",
+    "cases": [
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 1,
+        "count": 2,
+        "max_abs": 0.0009765625,
+        "relative_l2": 0.000110663975647185,
+        "attention_ms": 0.18926666719683757,
+        "scratch_bytes": 123264,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 15,
+        "count": 17,
+        "max_abs": 0.00390625,
+        "relative_l2": 0.0004458111070562154,
+        "attention_ms": 0.3005333322410782,
+        "scratch_bytes": 1047744,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 32,
+        "count": 33,
+        "max_abs": 0.00390625,
+        "relative_l2": 0.0005515071097761393,
+        "attention_ms": 0.3187333350069821,
+        "scratch_bytes": 2033856,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 129,
+        "count": 129,
+        "max_abs": 0.00390625,
+        "relative_l2": 0.0006687360582873225,
+        "attention_ms": 1.1903000025389094,
+        "scratch_bytes": 7888896,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 1,
+        "past": 4096,
+        "count": 257,
+        "max_abs": 0.00390625,
+        "relative_l2": 0.0008938476094044745,
+        "attention_ms": 4.484166667680256,
+        "scratch_bytes": 7888896,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 131072,
+        "count": 2,
+        "max_abs": 0.0003662109375,
+        "relative_l2": 0.0012034728424623609,
+        "attention_ms": 21.810466666162636,
+        "scratch_bytes": 123264,
+        "old_cache_unchanged": true
+      },
+      {
+        "frozen_encoder_byte_exact": true,
+        "cpu_encoder_code_mismatches": 0,
+        "past": 262142,
+        "count": 2,
+        "max_abs": 0.0006103515625,
+        "relative_l2": 0.001590200699865818,
+        "attention_ms": 40.98010000113087,
+        "scratch_bytes": 123264,
+        "old_cache_unchanged": true
+      }
+    ]
+  },
+  "genai_integration": {
+    "status": "passed",
+    "records": [
+      {
+        "codec": "tq4_mse_qr_v1",
+        "prompt_length": 1,
+        "processed_tokens": [
+          3,
+          10,
+          10,
+          10,
+          10,
+          7,
+          8,
+          9,
+          10,
+          14,
+          6,
+          10,
+          11,
+          12,
+          13,
+          14,
+          13,
+          13
+        ],
+        "cache_shape": [
+          1,
+          4,
+          64,
+          66
+        ],
+        "prefill_dense_reference": "passed",
+        "decode_reference_max_abs": [
+          0.00048828125,
+          0.0009765625,
+          0.00048828125,
+          0.0009765625,
+          0.000244140625,
+          0.00048828125,
+          0.0009765625,
+          0.00048828125
+        ],
+        "append_reference_max_abs": [
+          0.00048828125,
+          0.00048828125
+        ],
+        "append_turns": 2,
+        "checked_logit_dimensions": 16,
+        "status": "passed"
+      },
+      {
+        "codec": "tq4_mse_qr_v1",
+        "prompt_length": 4,
+        "processed_tokens": [
+          3,
+          4,
+          5,
+          6,
+          4,
+          0,
+          1,
+          11,
+          7,
+          8,
+          9,
+          5,
+          14,
+          1,
+          10,
+          11,
+          12,
+          13,
+          14,
+          1,
+          13
+        ],
+        "cache_shape": [
+          1,
+          4,
+          64,
+          66
+        ],
+        "prefill_dense_reference": "passed",
+        "decode_reference_max_abs": [
+          0.00048828125,
+          0.00048828125,
+          0.00048828125,
+          0.000244140625,
+          0.0003662109375,
+          0.0001220703125,
+          0.000244140625,
+          0.00048828125
+        ],
+        "append_reference_max_abs": [
+          0.0009765625,
+          0.000244140625
+        ],
+        "append_turns": 2,
+        "checked_logit_dimensions": 16,
+        "status": "passed"
+      },
+      {
+        "codec": "invalid",
+        "rejected": true,
+        "message": "Non-zero status code returned while running AMDGPUExecutionProvider_17441358744733329221_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_17441358744733329221_0_0' Status Message: inference_compute (allocator) failed with code: -1"
+      }
+    ]
+  },
+  "regression": {
+    "status": "passed",
+    "cases": [
+      {
+        "kind": "dense_ring",
+        "count": 2,
+        "past": 0,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 17,
+        "past": 0,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 33,
+        "past": 0,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 129,
+        "past": 0,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 2,
+        "past": 15,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 33,
+        "past": 129,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 129,
+        "past": 4096,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 1,
+        "past": 0,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 1,
+        "past": 128,
+        "byte_exact": true
+      },
+      {
+        "kind": "dense_ring",
+        "count": 1,
+        "past": 4095,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 1,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 33,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 129,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 1025,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 4096,
+        "byte_exact": true
+      },
+      {
+        "kind": "tq_decode",
+        "length": 131072,
+        "byte_exact": true
+      }
+    ]
+  },
+  "qwen_turboquant": {
+    "status": "passed",
+    "scope": "Same-generator multi-turn execution and matching-prefix logits; diagnostic timings, not a task-quality benchmark",
+    "kv_format": "TurboQuant 4-bit",
+    "comparisons": [],
+    "genai_module": "${TQ_WORK_ROOT}\\install\\genai_append\\onnxruntime_genai\\__init__.py",
+    "initial_tokens": 4096,
+    "append_lengths": [
+      33,
+      129
+    ],
+    "capacity": 4608,
+    "turns": [
+      {
+        "turn": 0,
+        "past": 0,
+        "prompt_tokens": 4096,
+        "prefill_seconds": 10.092001800003345,
+        "decode_seconds": 0.7481100999866612,
+        "generated_tokens": [
+          278,
+          4384,
+          362,
+          640,
+          82,
+          289,
+          640,
+          82
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      },
+      {
+        "turn": 1,
+        "past": 4104,
+        "prompt_tokens": 33,
+        "prefill_seconds": 0.29182529999525286,
+        "decode_seconds": 0.6316362999932608,
+        "generated_tokens": [
+          2022,
+          287,
+          8,
+          201,
+          1358,
+          201,
+          1358,
+          201
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      },
+      {
+        "turn": 2,
+        "past": 4145,
+        "prompt_tokens": 129,
+        "prefill_seconds": 0.6341035000077682,
+        "decode_seconds": 0.6203131000074791,
+        "generated_tokens": [
+          470,
+          201,
+          1358,
+          201,
+          1358,
+          201,
+          1358,
+          201
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      }
+    ],
+    "libraries": {
+      "${TQ_WORK_ROOT}\\install\\turboquant_append\\bin\\custom_kernels_gfx1151.dll": "8a7e9254c46ea7618a4abe04eb94714f8b2204ff86ca69fb352a6827c95b32c3",
+      "${TQ_WORK_ROOT}\\install\\turboquant_append\\bin\\hipgpu.dll": "31764ee2cdb7a43a239c8168d69e83a87fab6cef19f6b57dbdbba20c5eb16062"
+    }
+  },
+  "qwen_dense_control": {
+    "status": "passed",
+    "scope": "Same-generator multi-turn execution and matching-prefix logits; diagnostic timings, not a task-quality benchmark",
+    "kv_format": "FP16",
+    "comparisons": [
+      {
+        "turn": 0,
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      {
+        "turn": 1,
+        "cosine": 0.9999427417726051,
+        "relative_l2": 0.010917967275506363,
+        "passed": true
+      },
+      {
+        "turn": 2,
+        "cosine": 0.9999424401292405,
+        "relative_l2": 0.011272389918870425,
+        "passed": true
+      }
+    ],
+    "genai_module": "${TQ_WORK_ROOT}\\install\\genai_append\\onnxruntime_genai\\__init__.py",
+    "initial_tokens": 4096,
+    "append_lengths": [
+      33,
+      129
+    ],
+    "capacity": 4608,
+    "turns": [
+      {
+        "turn": 0,
+        "past": 0,
+        "prompt_tokens": 4096,
+        "prefill_seconds": 9.637270899998839,
+        "decode_seconds": 0.7282492999947863,
+        "generated_tokens": [
+          278,
+          4384,
+          362,
+          640,
+          82,
+          289,
+          640,
+          82
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      },
+      {
+        "turn": 1,
+        "past": 4104,
+        "prompt_tokens": 33,
+        "prefill_seconds": 0.28314070000487845,
+        "decode_seconds": 0.6275027000083355,
+        "generated_tokens": [
+          2022,
+          287,
+          8,
+          201,
+          1358,
+          201,
+          1358,
+          201
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      },
+      {
+        "turn": 2,
+        "past": 4145,
+        "prompt_tokens": 129,
+        "prefill_seconds": 0.6106606999965152,
+        "decode_seconds": 0.6417197999980999,
+        "generated_tokens": [
+          470,
+          201,
+          1358,
+          201,
+          1358,
+          201,
+          1358,
+          201
+        ],
+        "old_packed_rows_unchanged": true,
+        "finite_logits": true
+      }
+    ],
+    "libraries": {
+      "${TQ_WORK_ROOT}\\install\\turboquant_append\\bin\\hipgpu.dll": "31764ee2cdb7a43a239c8168d69e83a87fab6cef19f6b57dbdbba20c5eb16062",
+      "${TQ_WORK_ROOT}\\install\\turboquant_append\\bin\\custom_kernels_gfx1151.dll": "8a7e9254c46ea7618a4abe04eb94714f8b2204ff86ca69fb352a6827c95b32c3"
+    },
+    "dense_append_vs_fresh": {
+      "cosine": 0.999993752003635,
+      "relative_l2": 0.0035649212269884822,
+      "passed": true
+    },
+    "quality_gates_passed": true
+  },
+  "timing_scope": "Single-run full-model diagnostics; direct attention timing is three synchronized repetitions. No replacement for historical medians.",
+  "workspace_limit_bytes": 7888896,
+  "kv_payload_ratio": 3.878787878787879,
+  "qwen_capacity_4608_payload": {
+    "fp16_bytes": 301989888,
+    "tq4_bytes": 77856768
+  },
+  "known_limitations": [
+    "Stock GenAI 0.17 blocks AMDGPU continuation; companion patch required.",
+    "One CPU encoder centroid-boundary code-byte mismatch in the new cases; frozen encoder matches byte for byte.",
+    "Existing strict encoder and broader model-quality failures in the original PR remain unresolved.",
+    "GPU append validation uses Ring-KV; Ring-Q append was compile-checked.",
+    "No rewind, beam, batch expansion, prefix-cache sharing or broad task-quality qualification."
+  ]
+}

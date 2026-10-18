@@ -241,6 +241,37 @@ __global__ void merge(const float *partial, int parts, const float *pi,
   output[h * D + i] = __float2half(result);
 }
 
+// Bounded query chunks; history is reconstructed only in Ring's LDS tiles.
+constexpr int APPEND_CHUNK = 128;
+__global__ void rotate_append_query(const half *q, half *qr, const float *pi) {
+  const int row = blockIdx.x, i = threadIdx.x;
+  __shared__ float x[D];
+  x[i] = __half2float(q[row * D + i]);
+  __syncthreads();
+  float sum = 0;
+  for (int j = 0; j < D; ++j)
+    sum = fmaf(x[j], pi[i * D + j], sum);
+  // A rotation can exceed the FP16 range even for finite FP16 inputs.
+  // Power-of-two scaling protects staging; Ring restores QK scaling in FP32.
+  qr[row * D + i] = __float2half(sum * 0.0625f);
+}
+
+__global__ void join_append(const float *prefix, const float *suffix,
+                            const float *plse, const float *slse,
+                            const float *pi, half *output) {
+  const int row = blockIdx.x, i = threadIdx.x;
+  __shared__ float rotated[D];
+  rotated[i] = prefix[row * D + i] * 16.f;
+  __syncthreads();
+  float original = 0;
+  for (int j = 0; j < D; ++j)
+    original = fmaf(rotated[j], pi[j * D + i], original);
+  float m = fmaxf(plse[row], slse[row]);
+  float a = expf(plse[row] - m), b = expf(slse[row] - m);
+  output[row * D + i] = __float2half(
+      (a * original + b * suffix[row * D + i]) / (a + b));
+}
+
 int partitions(int length) {
   // Offline gfx1151 policy. Bound both the merge scratch and short-context
   // launch overhead; no event timing or host autotuning in steady decode.
@@ -298,4 +329,48 @@ extern "C" HIP_KERNEL_API int hip_tq4_decode(
   hipLaunchKernelGGL(merge, dim3(H), dim3(D), 0, s, partial, parts, pi,
                     static_cast<half *>(output));
   return hipGetLastError() == hipSuccess ? 0 : -1;
+}
+
+extern "C" HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count) {
+  if (count < 1 || count > 131072)
+    return 0;
+  const size_t rows = size_t(count < APPEND_CHUNK ? count : APPEND_CHUNK) * H;
+  return rows * (D * sizeof(half) + (2 * D + 2) * sizeof(float));
+}
+
+// Does not modify the cache. The caller encodes new K/V after attention.
+extern "C" HIP_KERNEL_API int hip_tq4_prefill(
+    void *stream, const void *query, const void *key, const void *value,
+    const void *pk, const void *pv, void *output, int count, int past,
+    int capacity, const float *pi, const float *cbk, const float *cbv,
+    void *workspace, size_t bytes) {
+  const size_t required = hip_tq4_prefill_workspace(count);
+  if (!required || !query || !key || !value || !pk || !pv || !output ||
+      !pi || !cbk || !cbv || !workspace || bytes < required || past < 1 ||
+      capacity < 1 || capacity > 262144 || past > capacity - count ||
+      !hip_gqa_ring_device_supported())
+    return -1;
+  auto s = static_cast<hipStream_t>(stream);
+  int chunk = count < APPEND_CHUNK ? count : APPEND_CHUNK;
+  half *qr = static_cast<half *>(workspace);
+  float *prefix = reinterpret_cast<float *>(qr + chunk * H * D);
+  float *suffix = prefix + chunk * H * D;
+  float *plse = suffix + chunk * H * D, *slse = plse + chunk * H;
+  (void)hipGetLastError();
+  for (int start = 0; start < count; start += chunk) {
+    int n = count - start < chunk ? count - start : chunk;
+    const half *q = static_cast<const half *>(query) + int64_t(start) * H * D;
+    half *out = static_cast<half *>(output) + int64_t(start) * H * D;
+    hipLaunchKernelGGL(rotate_append_query, dim3(n * H), dim3(D), 0, s, q, qr, pi);
+    if (hipGetLastError() != hipSuccess ||
+        hip_gqa_ring_tq4_prefill(stream, qr, q, pk, pv, key, value, prefix,
+                                suffix, plse, slse, n, start, past, capacity,
+                                cbk, cbv) != 0)
+      return -1;
+    hipLaunchKernelGGL(join_append, dim3(n * H), dim3(D), 0, s, prefix, suffix,
+                      plse, slse, pi, out);
+    if (hipGetLastError() != hipSuccess)
+      return -1;
+  }
+  return 0;
 }

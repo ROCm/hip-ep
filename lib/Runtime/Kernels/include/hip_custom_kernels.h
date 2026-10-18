@@ -60,6 +60,21 @@ HIP_KERNEL_API int hip_tq4_decode(
     const float *rotation, const float *key_centroids,
     const float *value_centroids, void *workspace, size_t workspace_bytes);
 
+// Append prefill: packed past plus causal FP16 BSHD new K/V; no cache writes.
+HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count);
+HIP_KERNEL_API int hip_tq4_prefill(
+    void *stream, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, void *output, int count,
+    int past, int capacity, const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+// Internal Ring statistics helper for a bounded query chunk.
+HIP_KERNEL_API int hip_gqa_ring_tq4_prefill(
+    void *stream, const void *rotated_query, const void *query,
+    const void *past_key, const void *past_value, const void *key,
+    const void *value, float *prefix, float *suffix, float *prefix_lse,
+    float *suffix_lse, int count, int start, int past, int capacity,
+    const float *key_centroids, const float *value_centroids);
+
 /* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
  * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
 HIP_KERNEL_API int hip_gqa_ring_device_supported(void);

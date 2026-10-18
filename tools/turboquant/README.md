@@ -58,10 +58,42 @@ the assertion. Run `check_hip_extended.py` with `TQ_RING_LIBRARY` set to a
 Ring-enabled custom-kernel library for append/long-history checks and direct
 kernel timing. These timings are not full-model token throughput.
 
-`check_genai_windows.py` checks GenAI shared-cache allocation and invalid-codec
+`check_append.py` checks multi-token append prefill against an FP64 mixed-cache
+oracle, including 128-query chunk boundaries, bounded scratch, unchanged old
+cache bytes and long histories through the 256K capacity boundary. Set
+`TQ_APPEND_RESULTS` to isolate its receipts from prior measurements. The test
+compares appended rows byte for byte with the frozen PR encoder selected by
+`TQ_ENCODER_BASELINE_LIBRARY` (default: `install/turboquant`). CPU encoder
+code-byte differences remain visible in the receipt; `check_hip.py` retains
+the separate strict CPU encoder assertion unchanged.
+
+`check_genai_windows.py` checks repeated append/decode turns, shared-cache
+allocation, old-row preservation and invalid-codec
 error propagation with a small generated ONNX graph. It expects the Windows
-SDK and work layout described above. `benchmark/check_long_windows.py` checks
+SDK and work layout described above. `TQ_INTEGRATION_INSTALL` and
+`TQ_INTEGRATION_RESULTS` select an isolated installation and result directory. `benchmark/check_long_windows.py` checks
 the decoder against an FP64 oracle at 128K, 128K+128 and 256K, including guards.
+
+## Multi-turn GenAI checks
+
+Stock GenAI 0.17 rejects continuous decoding on AMDGPU. Apply
+[`patches/onnxruntime-genai-0.17-amdgpu-append.patch`](patches/onnxruntime-genai-0.17-amdgpu-append.patch)
+to the matching GenAI release, build it against the matching ORT SDK, and use
+the resulting Python package (an isolated `PYTHONPATH` works). The patch
+enables AMDGPU append and flushes a pending selected token before the next
+prompt; it does not change rewind handling.
+
+Run `check_genai_windows.py` first. Then run `check_multiturn_windows.py` with
+`TQ_WORK_ROOT`, `TQ_INTEGRATION_INSTALL`, and `TQ_APPEND_RESULTS` set, using the
+verified model files and download receipt described below. It runs 4K prefill,
+eight decode tokens, a 33-token append, eight decode tokens, a 129-token append,
+and eight decode tokens in one generator. It checks old cache bytes in all
+16 full-attention layers and finite logits. Run it again with
+`TQ_MULTITURN_DENSE_CONTROL=1` for a dense Ring comparison on exactly the same
+token history, including a dense append versus fresh full-history check.
+The single-run latencies are diagnostic, not replacements for the historical
+benchmark table. Read [append validation](../../docs/design/turboquant-append-validation.md)
+for results and limitations.
 
 ## Reproduce Windows full-model measurements
 

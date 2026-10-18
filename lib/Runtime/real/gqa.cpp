@@ -3427,9 +3427,8 @@ extern "C" int wrap_group_query_attention_v2(
   int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
   int64_t total = last == -1 ? seq_len_q : int64_t(last) + 1;
   int64_t past = total - seq_len_q;
-  if (last < -1 || past < 0 || total > seq_len_kv || (past && seq_len_q != 1))
-    return tq4_error(
-        state, "invalid length, overflow, or unsupported continuation prefill");
+  if (last < -1 || past < 0 || total > seq_len_kv)
+    return tq4_error(state, "invalid length or cache capacity overflow");
 
   struct Range {
     const void *pointer;
@@ -3463,8 +3462,9 @@ extern "C" int wrap_group_query_attention_v2(
     return tq4_error(state, "invalid or unreadable codec constants file");
   size_t ring_bytes =
       past == 0 ? hip_gqa_ring_workspace(int(seq_len_q), int(total)) : 0;
-  size_t bytes = past == 0 ? 2 * newbytes + ring_bytes
-                           : hip_tq4_decode_workspace(int(total));
+  size_t bytes = past == 0       ? 2 * newbytes + ring_bytes
+                 : seq_len_q > 1 ? hip_tq4_prefill_workspace(int(seq_len_q))
+                                 : hip_tq4_decode_workspace(int(total));
   if (!bytes || hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
     return tq4_error(state, "cannot reserve workspace");
   void *workspace = hipdnn_ep_state_get_workspace(state);
@@ -3485,13 +3485,19 @@ extern "C" int wrap_group_query_attention_v2(
                                ring_workspace, ring_bytes) != 0)
       return tq4_error(state, "dense Ring prefill failed");
   }
+  if (past && seq_len_q > 1 &&
+      hip_tq4_prefill(stream, query, key, value, present_key, present_value,
+                      output, int(seq_len_q), int(past), int(seq_len_kv), pi,
+                      cbk, cbv, workspace, bytes) != 0)
+    return tq4_error(state, "compressed-history append prefill failed");
   if (hip_tq4_encode_append(stream, key, value, present_key, present_value,
                             int(seq_len_q), int(past), int(seq_len_kv), pi, cbk,
                             cbv) != 0)
     return tq4_error(state, "encode/append failed");
-  if (past && hip_tq4_decode(stream, query, present_key, present_value, output,
-                             int(total), int(seq_len_kv), scale, pi, cbk, cbv,
-                             workspace, bytes) != 0)
+  if (past && seq_len_q == 1 &&
+      hip_tq4_decode(stream, query, present_key, present_value, output,
+                     int(total), int(seq_len_kv), scale, pi, cbk, cbv,
+                     workspace, bytes) != 0)
     return tq4_error(state, "compressed decode failed");
   RUNTIME_DEBUG_LOG(
       "[REAL] TurboQuant KV q=%lld past=%lld capacity=%lld width=66 shared=1\n",

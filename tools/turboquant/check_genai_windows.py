@@ -11,12 +11,14 @@ import sys
 import subprocess
 
 ROOT = Path(os.environ["TQ_WORK_ROOT"])
-BASE = ROOT / "install/turboquant"
+BASE = Path(os.environ.get("TQ_INTEGRATION_INSTALL", ROOT / "install/turboquant"))
+WORK = Path(os.environ.get("TQ_INTEGRATION_RESULTS", ROOT / "results/integration"))
+WORK.mkdir(parents=True, exist_ok=True)
 SDK = Path(sys.base_prefix) / "Lib/site-packages/_rocm_sdk_devel"
 CORE = Path(sys.base_prefix) / "Lib/site-packages/_rocm_sdk_core"
 paths = [BASE / "bin", SDK / "bin", CORE / "bin"]
 if os.environ.get("TQ_INTEGRATION_CHILD") != "1":
-    work = ROOT / "results/integration"
+    work = WORK
     work.mkdir(parents=True, exist_ok=True)
     assert (BASE / "bin/hipgpu.dll").is_file(), "Build and install hip-ep first"
     env = dict(
@@ -63,7 +65,7 @@ for codec, prompt_length in (
     ("tq4_mse_qr_v1", 4),
     ("invalid", 4),
 ):
-    path = ROOT / "models" / f"integration-{codec}-{prompt_length}"
+    path = WORK / f"model-{codec}-{prompt_length}"
     path.mkdir(parents=True, exist_ok=True)
     inputs = [
         h.make_tensor_value_info(
@@ -158,7 +160,7 @@ for codec, prompt_length in (
     cfg = {
         "model": {
             "type": "llama",
-            "context_length": 16,
+            "context_length": 64,
             "vocab_size": 16,
             "bos_token_id": 1,
             "eos_token_id": 2,
@@ -188,7 +190,7 @@ for codec, prompt_length in (
             },
         },
         "search": {
-            "max_length": 16,
+            "max_length": 64,
             "past_present_share_buffer": True,
             "num_beams": 1,
             "do_sample": False,
@@ -197,7 +199,7 @@ for codec, prompt_length in (
     (path / "genai_config.json").write_text(json.dumps(cfg, indent=2) + "\n")
     m = og.Model(str(path))
     p = og.GeneratorParams(m)
-    p.set_search_options(max_length=16, min_length=16, do_sample=False)
+    p.set_search_options(max_length=64, min_length=64, do_sample=False)
     g = og.Generator(m, p)
     try:
         g.append_tokens(np.arange(3, 3 + prompt_length, dtype=np.int32)[None])
@@ -234,7 +236,7 @@ for codec, prompt_length in (
         packed = [
             g.get_output("present.3." + kind)
             .view(np.uint8)
-            .reshape(4, 16, 132)[:, : len(processed)]
+            .reshape(4, 64, 132)[:, : len(processed)]
             .copy()
             for kind in ("key", "value")
         ]
@@ -252,14 +254,98 @@ for codec, prompt_length in (
         )
         np.testing.assert_allclose(logits, expected, rtol=0.005, atol=0.005)
         decode_errors.append(float(np.max(np.abs(logits - expected))))
+    # Exercise repeated append -> decode transitions in one GenAI Generator.
+    # Import the oracle without loading the direct HIP test library.
+    from reference import reconstruct
+
+    append_errors = []
+    for new_ids in ([7, 8, 9], [10, 11, 12, 13, 14]):
+        np.asarray(g.get_logits())  # Finish any pending generated token first.
+        previous = g.get_sequence(0).copy()
+        before = [
+            g.get_output("present.3." + kind)
+            .view(np.uint8)
+            .reshape(4, 64, 132)[:, : len(previous)]
+            .copy()
+            for kind in ("key", "value")
+        ]
+        append_ids = new_ids
+        if new_ids[0] == 10:
+            # Normal chat can stop immediately after token selection, leaving
+            # its KV pending. GenAI must include that token in the next append.
+            g.generate_next_token()
+            new_ids = [int(g.get_sequence(0)[-1])] + new_ids
+        g.append_tokens(np.array(append_ids, np.int32)[None])
+        actual_logits = np.asarray(g.get_logits()).reshape(-1, 16)[-1].copy()
+        np.testing.assert_array_equal(
+            g.get_sequence(0), np.concatenate((previous, new_ids))
+        )
+        for kind, old in zip(("key", "value"), before):
+            cache = g.get_output("present.3." + kind).view(np.uint8).reshape(4, 64, 132)
+            np.testing.assert_array_equal(cache[:, : len(previous)], old)
+        # GenAI flushes a pending generated token through single-token decode
+        # before append. Its KV therefore belongs to the compressed history.
+        history = before
+        if new_ids is not append_ids:
+            history = [
+                g.get_output("present.3." + kind)
+                .view(np.uint8)
+                .reshape(4, 64, 132)[:, : len(previous) + 1]
+                .copy()
+                for kind in ("key", "value")
+            ]
+        # Last query sees all old compressed rows and all new unquantized rows.
+        kk = reconstruct(history[0], const["rotation"], const["cb_k"])[0].astype(
+            np.float64
+        )
+        vv = reconstruct(history[1], const["rotation"], const["cb_v"])[0].astype(
+            np.float64
+        )
+        kk = np.concatenate(
+            (kk, ktab[append_ids].reshape(-1, 4, 256)[:, 0].astype(np.float64))
+        )
+        vv = np.concatenate(
+            (vv, vtab[append_ids].reshape(-1, 4, 256)[:, 0].astype(np.float64))
+        )
+        q = qtab[new_ids[-1]].reshape(24, 256)[0].astype(np.float64)
+        scores = kk @ q * 0.0625
+        weights = np.exp(scores - scores.max())
+        expected = (weights @ vv / weights.sum()).astype(np.float16)[:16]
+        np.testing.assert_allclose(actual_logits, expected, rtol=0.005, atol=0.005)
+        append_errors.append(float(np.max(np.abs(actual_logits - expected))))
+        for _ in range(2):
+            g.generate_next_token()
+            logits = np.asarray(g.get_logits()).reshape(-1, 16)[-1].copy()
+            processed = g.get_sequence(0).copy()
+            packed = [
+                g.get_output("present.3." + kind)
+                .view(np.uint8)
+                .reshape(4, 64, 132)[:, : len(processed)]
+                .copy()
+                for kind in ("key", "value")
+            ]
+            expected = (
+                attention(
+                    qtab[processed[-1]].reshape(24, 256),
+                    *packed,
+                    const["rotation"],
+                    const["cb_k"],
+                    const["cb_v"],
+                    0.0625,
+                )
+                .astype(np.float16)
+                .reshape(-1)[:16]
+            )
+            np.testing.assert_allclose(logits, expected, rtol=0.005, atol=0.005)
+            decode_errors.append(float(np.max(np.abs(logits - expected))))
     processed = g.get_sequence(0)
     for kind, table, cb in [
         ("key", ktab, const["cb_k"]),
         ("value", vtab, const["cb_v"]),
     ]:
         cache = g.get_output("present.3." + kind)
-        assert cache.shape == (1, 4, 16, 66), cache.shape
-        actual = cache.view(np.uint8).reshape(4, 16, 132)[:, : len(processed)]
+        assert cache.shape == (1, 4, 64, 66), cache.shape
+        actual = cache.view(np.uint8).reshape(4, 64, 132)[:, : len(processed)]
         vectors = table[processed].reshape(-1, 4, 256).transpose(1, 0, 2).copy()
         expected = encode(vectors, const["rotation"], cb)
         np.testing.assert_array_equal(actual[..., 4:], expected[..., 4:])
@@ -271,15 +357,17 @@ for codec, prompt_length in (
             "codec": codec,
             "prompt_length": prompt_length,
             "processed_tokens": processed.tolist(),
-            "cache_shape": [1, 4, 16, 66],
+            "cache_shape": [1, 4, 64, 66],
             "prefill_dense_reference": "passed",
             "decode_reference_max_abs": decode_errors,
+            "append_reference_max_abs": append_errors,
+            "append_turns": 2,
             "checked_logit_dimensions": 16,
             "status": "passed",
         }
     )
     print("PASS", records[-1], flush=True)
     del g, p, m
-(ROOT / "results/integration/receipt.json").write_text(
+(WORK / "receipt.json").write_text(
     json.dumps({"status": "passed", "records": records}, indent=2) + "\n"
 )
