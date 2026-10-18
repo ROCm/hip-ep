@@ -364,7 +364,7 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
             "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
     return -1;
   }
-  if (total > 65664)
+  if (total > 262144)
     return 1;
 
   struct Range {
@@ -1152,6 +1152,12 @@ struct GqaGemmCache {
 // distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
+  float *tq4_constants = nullptr;
+  int tq4_load_status = 0;
+  ~GqaState() {
+    if (tq4_constants)
+      (void)hipFree(tq4_constants);
+  }
 };
 
 // Resolve this GQA instance's descriptor cache from its op-state slot. Returns
@@ -2925,6 +2931,8 @@ static int gqa_forward_fused_from_fp32(
 // Public wrapper called by generated IR. ABI MUST stay identical to the
 // HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 43 params).
 //===----------------------------------------------------------------------===//
+static int tq4_error(RuntimeState *state, const char *message);
+
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -2946,6 +2954,15 @@ int wrap_group_query_attention(
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv) {
+  const char *cache_bits = state ? hipdnn_ep_runtime_get_provider_option(
+                                       state, "kvCacheQuantizationBits")
+                                 : nullptr;
+  const char *cache_codec =
+      state ? hipdnn_ep_runtime_get_provider_option(state, "kv_cache_codec")
+            : nullptr;
+  if ((cache_bits && strcmp(cache_bits, "0") != 0) ||
+      (cache_codec && *cache_codec))
+    return tq4_error(state, "quantized cache requires the physical-width ABI");
   OP_PROFILE(
       "gqa",
       [&] {
@@ -3058,7 +3075,7 @@ int wrap_group_query_attention(
   }
   if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
       kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= 65536 && seq_len_new_kv == seq_len_q && key && value &&
+      seq_len_q <= 131072 && seq_len_new_kv == seq_len_q && key && value &&
       seqlens_k && !kv_bnsd && !reuse_past_kv && !kv_quantized && !do_rotary &&
       no_causal == 0 && scale == 0.0625f && local_window_size <= 0 &&
       !head_sink && smooth_softmax <= 0 && !attention_bias &&
@@ -3234,4 +3251,251 @@ int wrap_group_query_attention(
             "(rc=%d)\n",
             rc);
   return rc;
+}
+
+// TurboQuant v1 uses a versioned cache-width ABI. Existing dense callers retain
+// wrap_group_query_attention; physical widths are never inferred from Q.
+static int tq4_error(RuntimeState *state, const char *message) {
+  fprintf(stderr, "TurboQuant KV: %s\n", message);
+  if (state && state->device_error_flag)
+    (void)hipMemsetAsync(state->device_error_flag, 0xff, sizeof(int),
+                         state->stream);
+  return -1;
+}
+
+static bool tq4_load_constants(RuntimeState *state, GqaState *gs) {
+  if (gs->tq4_load_status)
+    return gs->tq4_load_status > 0;
+  gs->tq4_load_status = -1;
+  const char *path =
+      hipdnn_ep_runtime_get_provider_option(state, "kv_cache_codec_file");
+  if (!path || !*path)
+    return false;
+  FILE *file = fopen(path, "rb");
+  if (!file)
+    return false;
+  struct Header {
+    uint32_t magic, version, dimension, centroids, rotations, row_bytes, flags,
+        bytes;
+    uint64_t checksum;
+  } header{};
+  static_assert(sizeof(Header) == 40, "codec header ABI");
+  constexpr size_t floats = 256 * 256 + 32;
+  bool valid = fread(&header, sizeof(header), 1, file) == 1 &&
+               header.magic == 0x34515448 && header.version == 1 &&
+               header.dimension == 256 && header.centroids == 16 &&
+               header.rotations == 1 && header.row_bytes == 132 &&
+               header.flags == 0 && header.bytes == floats * sizeof(float);
+  std::vector<float> data(floats);
+  if (valid)
+    valid = fread(data.data(), sizeof(float), floats, file) == floats &&
+            fgetc(file) == EOF;
+  fclose(file);
+  if (!valid)
+    return false;
+  uint64_t checksum = 14695981039346656037ULL;
+  const auto *bytes = reinterpret_cast<const uint8_t *>(data.data());
+  for (size_t i = 0; i < floats * sizeof(float); ++i)
+    checksum = (checksum ^ bytes[i]) * 1099511628211ULL;
+  if (checksum != header.checksum)
+    return false;
+  for (float f : data)
+    if (!std::isfinite(f))
+      return false;
+  for (int table = 0; table < 2; ++table)
+    for (int i = 1; i < 16; ++i)
+      if (data[65536 + table * 16 + i] <= data[65536 + table * 16 + i - 1])
+        return false;
+  // Check orthogonality once, before this op writes any cache rows.
+  for (int i = 0; i < 256; ++i)
+    for (int j = 0; j <= i; ++j) {
+      double dot = 0;
+      for (int k = 0; k < 256; ++k)
+        dot += double(data[i * 256 + k]) * data[j * 256 + k];
+      if (fabs(dot - (i == j ? 1.0 : 0.0)) > 2e-5)
+        return false;
+    }
+  if (hipMalloc(reinterpret_cast<void **>(&gs->tq4_constants), header.bytes) !=
+      hipSuccess)
+    return false;
+  // Initialization-only copy; no host transfer or allocation in steady decode.
+  if (hipMemcpy(gs->tq4_constants, data.data(), header.bytes,
+                hipMemcpyHostToDevice) != hipSuccess)
+    return false;
+  gs->tq4_load_status = 1;
+  return true;
+}
+
+extern "C" int wrap_group_query_attention_v2(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int64_t past_key_width, int64_t past_value_width,
+    int64_t present_key_width, int64_t present_value_width) {
+  const char *bits = state ? hipdnn_ep_runtime_get_provider_option(
+                                 state, "kvCacheQuantizationBits")
+                           : nullptr;
+  const char *codec =
+      state ? hipdnn_ep_runtime_get_provider_option(state, "kv_cache_codec")
+            : nullptr;
+  if (!bits || strcmp(bits, "0") == 0) {
+    if (codec && *codec)
+      return tq4_error(state, "codec requires kvCacheQuantizationBits=4");
+    for (int64_t width : {past_key_width, past_value_width, present_key_width,
+                          present_value_width})
+      if (width && width != head_dim)
+        return tq4_error(
+            state, "dense cache physical width differs from head dimension");
+    return wrap_group_query_attention(
+        state, op_state_slot, query, key, value, past_key, past_value,
+        seqlens_k, total_seq_len, cos_cache, sin_cache, position_ids,
+        attention_bias, head_sink, k_scale, v_scale, output, present_key,
+        present_value, output_qk, num_heads, kv_num_heads, scale, do_rotary,
+        rotary_interleaved, softcap, local_window_size, smooth_softmax,
+        qk_output, k_quant_type, v_quant_type, kv_cache_bit_width, no_causal,
+        batch_size, seq_len_q, seq_len_kv, past_buf_seq, head_dim,
+        element_size_bytes, attn_bias_batch, attn_bias_num_heads, kv_bnsd,
+        seq_len_new_kv);
+  }
+#if HIP_EP_GQA_IMPL_ID == 0
+  return tq4_error(state, "v1 requires a Ring-enabled build");
+#else
+  if (strcmp(bits, "4") != 0 || !codec || strcmp(codec, "tq4_mse_qr_v1") != 0)
+    return tq4_error(state, "unsupported bit width or missing codec identity");
+  if (!state)
+    return tq4_error(state, "missing runtime state");
+  if (!hip_gqa_ring_device_supported())
+    return tq4_error(state, "Ring requires an enabled gfx1151 device");
+  if (batch_size != 1 || num_heads != 24 || kv_num_heads != 4 ||
+      head_dim != 256 || element_size_bytes != 2 || seq_len_q < 1 ||
+      seq_len_q > 131072 || seq_len_new_kv != seq_len_q || kv_bnsd != 0 ||
+      no_causal || do_rotary || rotary_interleaved || position_ids ||
+      cos_cache || sin_cache || attention_bias || head_sink || k_scale ||
+      v_scale || k_quant_type || v_quant_type || softcap != 0 ||
+      local_window_size != -1 || smooth_softmax > 0 || qk_output || output_qk) {
+    fprintf(
+        stderr,
+        "TurboQuant GQA contract: B=%lld H=%lld G=%lld D=%lld bytes=%lld "
+        "q=%lld new_kv=%lld bnsd=%lld no_causal=%d rotary=%lld "
+        "interleaved=%lld optional_mask=%u k_quant=%lld v_quant=%lld "
+        "softcap=%g window=%lld smooth=%lld qk=%lld\n",
+        (long long)batch_size, (long long)num_heads, (long long)kv_num_heads,
+        (long long)head_dim, (long long)element_size_bytes,
+        (long long)seq_len_q, (long long)seq_len_new_kv, (long long)kv_bnsd,
+        no_causal, (long long)do_rotary, (long long)rotary_interleaved,
+        unsigned(bool(position_ids)) | (unsigned(bool(cos_cache)) << 1) |
+            (unsigned(bool(sin_cache)) << 2) |
+            (unsigned(bool(attention_bias)) << 3) |
+            (unsigned(bool(head_sink)) << 4) | (unsigned(bool(k_scale)) << 5) |
+            (unsigned(bool(v_scale)) << 6) | (unsigned(bool(output_qk)) << 7),
+        (long long)k_quant_type, (long long)v_quant_type, double(softcap),
+        (long long)local_window_size, (long long)smooth_softmax,
+        (long long)qk_output);
+    return tq4_error(state,
+                     "unsupported FP16 GQA geometry or attention features");
+  }
+  if (scale == 0)
+    scale = 0.0625f;
+  if (scale != 0.0625f)
+    return tq4_error(state, "v1 Ring prefill requires attention scale 1/16");
+  if (!query || !key || !value || !output || !present_key || !present_value ||
+      past_key != present_key || past_value != present_value ||
+      past_buf_seq != seq_len_kv || seq_len_kv < 1 || seq_len_kv > 262144 ||
+      past_key_width != 66 || past_value_width != 66 ||
+      present_key_width != 66 || present_value_width != 66)
+    return tq4_error(
+        state,
+        "v1 requires shared packed cache buffers with physical width 66");
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  int32_t last = read_seqlens_k_for_dispatch(stream, seqlens_k, 1, state);
+  int64_t total = last == -1 ? seq_len_q : int64_t(last) + 1;
+  int64_t past = total - seq_len_q;
+  if (last < -1 || past < 0 || total > seq_len_kv || (past && seq_len_q != 1))
+    return tq4_error(
+        state, "invalid length, overflow, or unsupported continuation prefill");
+
+  struct Range {
+    const void *pointer;
+    size_t bytes;
+  };
+  auto overlaps = [](Range a, Range b) {
+    if (!a.pointer || !b.pointer || !a.bytes || !b.bytes)
+      return false;
+    uintptr_t x = reinterpret_cast<uintptr_t>(a.pointer);
+    uintptr_t y = reinterpret_cast<uintptr_t>(b.pointer);
+    return a.bytes > UINTPTR_MAX - x || b.bytes > UINTPTR_MAX - y ||
+           (x < y + b.bytes && y < x + a.bytes);
+  };
+  size_t qbytes = size_t(seq_len_q) * 24 * 256 * 2;
+  size_t newbytes = size_t(seq_len_q) * 4 * 256 * 2;
+  size_t cachebytes = size_t(seq_len_kv) * 4 * 132;
+  Range q{query, qbytes}, k{key, newbytes}, v{value, newbytes},
+      o{output, qbytes};
+  Range pk{present_key, cachebytes}, pv{present_value, cachebytes};
+  if (overlaps(pk, pv))
+    return tq4_error(state, "K and V caches overlap");
+  for (Range r : {q, k, v, o})
+    if (overlaps(pk, r) || overlaps(pv, r))
+      return tq4_error(state, "packed cache overlaps an activation");
+  for (Range r : {q, k, v})
+    if (overlaps(o, r))
+      return tq4_error(state, "output overlaps an input");
+
+  GqaState *gs = GqaState::get_op_state(state, op_state_slot);
+  if (!gs || !tq4_load_constants(state, gs))
+    return tq4_error(state, "invalid or unreadable codec constants file");
+  size_t ring_bytes =
+      past == 0 ? hip_gqa_ring_workspace(int(seq_len_q), int(total)) : 0;
+  size_t bytes = past == 0 ? 2 * newbytes + ring_bytes
+                           : hip_tq4_decode_workspace(int(total));
+  if (!bytes || hipdnn_ep_state_ensure_workspace(state, bytes) != 0)
+    return tq4_error(state, "cannot reserve workspace");
+  void *workspace = hipdnn_ep_state_get_workspace(state);
+  for (Range r : {q, k, v, o, pk, pv})
+    if (!workspace || overlaps({workspace, bytes}, r))
+      return tq4_error(state, "invalid workspace range");
+  float *pi = gs->tq4_constants;
+  float *cbk = pi + 65536, *cbv = cbk + 16;
+  if (past == 0) {
+    auto *dense_k = static_cast<uint8_t *>(workspace);
+    auto *dense_v = dense_k + newbytes;
+    void *ring_workspace = ring_bytes ? dense_v + newbytes : nullptr;
+    if (update_kv_cache(stream, nullptr, nullptr, key, value, dense_k, dense_v,
+                        1, 0, int(seq_len_q), 4, 256, 0, int(seq_len_q),
+                        nullptr, 2, 0) != 0 ||
+        hip_gqa_ring_attention(stream, query, dense_k, dense_v, output,
+                               int(seq_len_q), 0, int(seq_len_q),
+                               ring_workspace, ring_bytes) != 0)
+      return tq4_error(state, "dense Ring prefill failed");
+  }
+  if (hip_tq4_encode_append(stream, key, value, present_key, present_value,
+                            int(seq_len_q), int(past), int(seq_len_kv), pi, cbk,
+                            cbv) != 0)
+    return tq4_error(state, "encode/append failed");
+  if (past && hip_tq4_decode(stream, query, present_key, present_value, output,
+                             int(total), int(seq_len_kv), scale, pi, cbk, cbv,
+                             workspace, bytes) != 0)
+    return tq4_error(state, "compressed decode failed");
+  RUNTIME_DEBUG_LOG(
+      "[REAL] TurboQuant KV q=%lld past=%lld capacity=%lld width=66 shared=1\n",
+      (long long)seq_len_q, (long long)past, (long long)seq_len_kv);
+  return 0;
+#endif
 }

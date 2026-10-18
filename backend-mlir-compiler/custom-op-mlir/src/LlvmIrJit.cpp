@@ -425,6 +425,21 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   auto &jd = jit.getMainJITDylib();
   const char global_prefix = jit.getDataLayout().getGlobalPrefix();
 
+#ifdef _WIN32
+  // Experimental local memory profiling. The sidecar intercepts four HIP
+  // allocation APIs; absent this explicit environment variable, no change.
+  if (const char *counter = std::getenv("HIP_EP_PROFILE_ALLOCATOR_DLL")) {
+    auto gen =
+        llvm::orc::DynamicLibrarySearchGenerator::Load(counter, global_prefix);
+    if (!gen) {
+      LOG(ERROR) << "Allocation profiler load failed: "
+                 << llvm::toString(gen.takeError());
+      return false;
+    }
+    jd.addGenerator(std::move(*gen));
+  }
+#endif
+
   std::string last_load_error;
   auto loadFirst = [&](llvm::ArrayRef<const char *> names) {
     for (const char *lib : names) {

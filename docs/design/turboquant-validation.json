@@ -1,0 +1,4215 @@
+{
+  "platform": "Windows Radeon 8060S gfx1151",
+  "model": "amd/Qwen3.8-27B_gpuep_1.0_gpu_128",
+  "model_revision": "9b37cf56a001720ba7ce98ff80ea651b02e5931b",
+  "ring_dependency": "https://github.com/ROCm/hip-ep/pull/1252",
+  "ring_parent": "63a00f5e35e54aff1d423525a9c8992fd8dea927",
+  "upstream_baseline": "a4f9826b809c9483fe2353eea876c4c2257a5ad4",
+  "rows": [
+    {
+      "context": 128,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "51fb112165242eb3d7637cc7bd830c078ee9feba70acaded9a5b8b0c1f5c25fd",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.015625,
+      "kv_payload_gib": 0.015625,
+      "prefill_seconds": 0.34470990000409074,
+      "ttft_seconds": 0.34508610000193585,
+      "decode_tps": 12.247081730165661,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.33586409999406897,
+          "ttft_seconds": 0.336642700000084,
+          "decode_seconds": 10.504058499995153,
+          "decode_tokens_per_second": 12.09056480407631
+        },
+        {
+          "prefill_seconds": 0.35338830000546295,
+          "ttft_seconds": 0.3537704000045778,
+          "decode_seconds": 10.36981730000116,
+          "decode_tokens_per_second": 12.247081730165661
+        },
+        {
+          "prefill_seconds": 0.34470990000409074,
+          "ttft_seconds": 0.34508610000193585,
+          "decode_seconds": 10.254371400005766,
+          "decode_tokens_per_second": 12.38496198800919
+        }
+      ],
+      "prompt_sha256": "2e5ac26bc36c8c7cf21363ec5ac94d97681b0a2fffc77fe8d6e8dc8906da493b",
+      "ep_prefill_peak_gib": 15.554503546096385,
+      "ep_decode_peak_gib": 15.554503546096385,
+      "decode_ms_per_token": 81.65210472441858,
+      "prefill_peak_gib": 16.239601135253906,
+      "prefill_other_gib": 1.390223853290081,
+      "decode_peak_gib": 16.239601135253906,
+      "decode_other_gib": 1.390223853290081,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 128,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "fbda5ca432a90ed483be3ebabd1d03e5f878aafb363c01050146cf1c28a90c8d",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d",
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.015625,
+      "kv_payload_gib": 0.015625,
+      "prefill_seconds": 0.3375417999923229,
+      "ttft_seconds": 0.33827300000120886,
+      "decode_tps": 12.48421729522727,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.3375417999923229,
+          "ttft_seconds": 0.33827300000120886,
+          "decode_seconds": 10.172844399989117,
+          "decode_tokens_per_second": 12.48421729522727
+        },
+        {
+          "prefill_seconds": 0.33567760000005364,
+          "ttft_seconds": 0.33642300000065006,
+          "decode_seconds": 10.063222400000086,
+          "decode_tokens_per_second": 12.620211990942277
+        },
+        {
+          "prefill_seconds": 0.34935059999406803,
+          "ttft_seconds": 0.3501001999975415,
+          "decode_seconds": 10.25052489999507,
+          "decode_tokens_per_second": 12.389609433567745
+        }
+      ],
+      "prompt_sha256": "2e5ac26bc36c8c7cf21363ec5ac94d97681b0a2fffc77fe8d6e8dc8906da493b",
+      "ep_prefill_peak_gib": 15.55468808207661,
+      "ep_decode_peak_gib": 15.55468808207661,
+      "decode_ms_per_token": 80.10113700778832,
+      "prefill_peak_gib": 16.239601135253906,
+      "prefill_other_gib": 1.390223853290081,
+      "decode_peak_gib": 16.239601135253906,
+      "decode_other_gib": 1.390223853290081,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968165387654,
+        "relative_l2": 0.002543181909104781,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999614338485788,
+        "relative_l2": 0.00897095782751352,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 128,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "cc5bd9b7f5bcab2d4cdf100fd8a3ef25be07bfcff266054f00618f57e32a70e6",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.015625,
+      "kv_payload_gib": 0.015625,
+      "prefill_seconds": 0.33210240000335034,
+      "ttft_seconds": 0.33259689999977127,
+      "decode_tps": 12.826488285960151,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.34574410000641365,
+          "ttft_seconds": 0.34647220000624657,
+          "decode_seconds": 9.998082199992496,
+          "decode_tokens_per_second": 12.702436073199651
+        },
+        {
+          "prefill_seconds": 0.33210240000335034,
+          "ttft_seconds": 0.33259689999977127,
+          "decode_seconds": 9.886171999998624,
+          "decode_tokens_per_second": 12.846226021559982
+        },
+        {
+          "prefill_seconds": 0.32359830000496004,
+          "ttft_seconds": 0.3239342000015313,
+          "decode_seconds": 9.901385100005427,
+          "decode_tokens_per_second": 12.826488285960151
+        }
+      ],
+      "prompt_sha256": "2e5ac26bc36c8c7cf21363ec5ac94d97681b0a2fffc77fe8d6e8dc8906da493b",
+      "ep_prefill_peak_gib": 15.55468808207661,
+      "ep_decode_peak_gib": 15.55468808207661,
+      "decode_ms_per_token": 77.96366220476715,
+      "prefill_peak_gib": 16.239601135253906,
+      "prefill_other_gib": 1.390223853290081,
+      "decode_peak_gib": 16.239601135253906,
+      "decode_other_gib": 1.390223853290081,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968165387654,
+        "relative_l2": 0.002543181909104781,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999614338485788,
+        "relative_l2": 0.00897095782751352,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 128,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "32a6d2e18da6b43652ebf869e74e8897be0058780c13b9321c151903131f75a1",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0048828125,
+      "kv_payload_gib": 0.0040283203125,
+      "prefill_seconds": 0.33665579999797046,
+      "ttft_seconds": 0.3370372000063071,
+      "decode_tps": 12.707723754486857,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.3322440000047209,
+          "ttft_seconds": 0.3327378999965731,
+          "decode_seconds": 10.069630700003472,
+          "decode_tokens_per_second": 12.612180504291603
+        },
+        {
+          "prefill_seconds": 0.34446520000346936,
+          "ttft_seconds": 0.3449347999994643,
+          "decode_seconds": 9.993922000008752,
+          "decode_tokens_per_second": 12.707723754486857
+        },
+        {
+          "prefill_seconds": 0.33665579999797046,
+          "ttft_seconds": 0.3370372000063071,
+          "decode_seconds": 9.89744499999506,
+          "decode_tokens_per_second": 12.831594416545219
+        }
+      ],
+      "prompt_sha256": "2e5ac26bc36c8c7cf21363ec5ac94d97681b0a2fffc77fe8d6e8dc8906da493b",
+      "ep_prefill_peak_gib": 15.548157797195017,
+      "ep_decode_peak_gib": 15.548157797195017,
+      "decode_ms_per_token": 78.69229921266734,
+      "prefill_peak_gib": 16.239601135253906,
+      "prefill_other_gib": 1.400966040790081,
+      "decode_peak_gib": 16.239601135253906,
+      "decode_other_gib": 1.400966040790081,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968165387654,
+        "relative_l2": 0.002543181909104781,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999101450663895,
+        "relative_l2": 0.013644499381272553,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9999040118707432,
+        "relative_l2": 0.014545005266730015,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "5d974ec79fe311d4a01be32a930a72dbf70765709d225443540ad272326ac69e",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            977
+          ],
+          "cosine": 0.9999040118707431,
+          "relative_l2": 0.014545005266730015,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "ddf356ca32067bbf2f6b11c6fc3346b08cb1c3e7daa036ec4c9d404b6a6ffbe9",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 256,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "6f933c9eb37b985d1dc495dea2dcb14b8488401ab2f38e6c9cbdd271b031e91c",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0234375,
+      "kv_payload_gib": 0.0234375,
+      "prefill_seconds": 0.6270330999977887,
+      "ttft_seconds": 0.6275414999981876,
+      "decode_tps": 12.490414344627096,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.6312516999896616,
+          "ttft_seconds": 0.6319116999948164,
+          "decode_seconds": 10.209690600007889,
+          "decode_tokens_per_second": 12.43916245609851
+        },
+        {
+          "prefill_seconds": 0.6270330999977887,
+          "ttft_seconds": 0.6275414999981876,
+          "decode_seconds": 10.167797199988854,
+          "decode_tokens_per_second": 12.490414344627096
+        },
+        {
+          "prefill_seconds": 0.6220604999980424,
+          "ttft_seconds": 0.6225088000064716,
+          "decode_seconds": 10.12105449999217,
+          "decode_tokens_per_second": 12.548099607614825
+        }
+      ],
+      "prompt_sha256": "bb2e00def36528190efee8b0672565d4a5ed7c74a77ca834b7cb5083a488ceb5",
+      "ep_prefill_peak_gib": 15.652949639596045,
+      "ep_decode_peak_gib": 15.652949639596045,
+      "decode_ms_per_token": 80.06139527550279,
+      "prefill_peak_gib": 16.39958953857422,
+      "prefill_other_gib": 1.5423997566103935,
+      "decode_peak_gib": 16.39958953857422,
+      "decode_other_gib": 1.5423997566103935,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 256,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "b4c22a49b5ce2870071e144b010fa803ba0c4e42ce0444dc4bf2ef069d67cc23",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0234375,
+      "kv_payload_gib": 0.0234375,
+      "prefill_seconds": 0.6303482999937842,
+      "ttft_seconds": 0.631025700000464,
+      "decode_tps": 12.533660403320573,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.6303482999937842,
+          "ttft_seconds": 0.631025700000464,
+          "decode_seconds": 10.261894700000994,
+          "decode_tokens_per_second": 12.375882204286086
+        },
+        {
+          "prefill_seconds": 0.6415065999899525,
+          "ttft_seconds": 0.6419055000005756,
+          "decode_seconds": 10.132714299994404,
+          "decode_tokens_per_second": 12.533660403320573
+        },
+        {
+          "prefill_seconds": 0.6247595000022557,
+          "ttft_seconds": 0.6251716000115266,
+          "decode_seconds": 10.091811799997231,
+          "decode_tokens_per_second": 12.584459809291612
+        }
+      ],
+      "prompt_sha256": "bb2e00def36528190efee8b0672565d4a5ed7c74a77ca834b7cb5083a488ceb5",
+      "ep_prefill_peak_gib": 15.653082475997508,
+      "ep_decode_peak_gib": 15.653082475997508,
+      "decode_ms_per_token": 79.78515196845987,
+      "prefill_peak_gib": 16.390827178955078,
+      "prefill_other_gib": 1.533637396991253,
+      "decode_peak_gib": 16.390827178955078,
+      "decode_other_gib": 1.533637396991253,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972919997757,
+        "relative_l2": 0.0026004758188402045,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 127,
+      "first_divergent_token_1based": 10,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999211621724944,
+        "relative_l2": 0.012556746662054792,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 256,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "791d8449f8800c6381df182bbc4ce0268a084ca4c048cd57c5f4cc108e87c99f",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0234375,
+      "kv_payload_gib": 0.0234375,
+      "prefill_seconds": 0.6182263999944553,
+      "ttft_seconds": 0.6188802999968175,
+      "decode_tps": 12.693046875844717,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.6182263999944553,
+          "ttft_seconds": 0.6188802999968175,
+          "decode_seconds": 10.122957300001872,
+          "decode_tokens_per_second": 12.54574095654602
+        },
+        {
+          "prefill_seconds": 0.6051658000069438,
+          "ttft_seconds": 0.6055569000018295,
+          "decode_seconds": 10.005477900005644,
+          "decode_tokens_per_second": 12.693046875844717
+        },
+        {
+          "prefill_seconds": 0.6220700999983819,
+          "ttft_seconds": 0.6224690999952145,
+          "decode_seconds": 9.953441900011967,
+          "decode_tokens_per_second": 12.759405367086867
+        }
+      ],
+      "prompt_sha256": "bb2e00def36528190efee8b0672565d4a5ed7c74a77ca834b7cb5083a488ceb5",
+      "ep_prefill_peak_gib": 15.653082475997508,
+      "ep_decode_peak_gib": 15.653082475997508,
+      "decode_ms_per_token": 78.78329055122555,
+      "prefill_peak_gib": 16.390827178955078,
+      "prefill_other_gib": 1.533637396991253,
+      "decode_peak_gib": 16.390827178955078,
+      "decode_other_gib": 1.533637396991253,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972919997757,
+        "relative_l2": 0.0026004758188402045,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 127,
+      "first_divergent_token_1based": 10,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999211621724944,
+        "relative_l2": 0.012556746662054792,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 256,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "298edef3d82613f00380536ff86abe64ce5a6553fb44010a918c110b9bc3a615",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0068359375,
+      "kv_payload_gib": 0.00604248046875,
+      "prefill_seconds": 0.6374209999921732,
+      "ttft_seconds": 0.6378869000036502,
+      "decode_tps": 12.616283139278815,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 0.6339257000072394,
+          "ttft_seconds": 0.6343373999989126,
+          "decode_seconds": 10.066356199997244,
+          "decode_tokens_per_second": 12.616283139278815
+        },
+        {
+          "prefill_seconds": 0.6374209999921732,
+          "ttft_seconds": 0.6378869000036502,
+          "decode_seconds": 10.071662899994408,
+          "decode_tokens_per_second": 12.60963569383071
+        },
+        {
+          "prefill_seconds": 0.6402861999958986,
+          "ttft_seconds": 0.6408413000026485,
+          "decode_seconds": 10.023294899991015,
+          "decode_tokens_per_second": 12.670484233693838
+        }
+      ],
+      "prompt_sha256": "bb2e00def36528190efee8b0672565d4a5ed7c74a77ca834b7cb5083a488ceb5",
+      "ep_prefill_peak_gib": 15.641181097365916,
+      "ep_decode_peak_gib": 15.641181097365916,
+      "decode_ms_per_token": 79.2626472440728,
+      "prefill_peak_gib": 16.328083038330078,
+      "prefill_other_gib": 1.487494818866253,
+      "decode_peak_gib": 16.328083038330078,
+      "decode_other_gib": 1.487494818866253,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972919997757,
+        "relative_l2": 0.0026004758188402045,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 3,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9996439529062936,
+        "relative_l2": 0.029706077909773237,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 3,
+      "first_divergent_token_vs_ring_kv_1based": 3,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9996394675557333,
+        "relative_l2": 0.029871618057974888,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "bfab4725d9e8f2cb476c60f95ee5c26430d3055bc86747898dfca37e8ced019e",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            220
+          ],
+          "cosine": 0.9996394675557336,
+          "relative_l2": 0.029871618057974895,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "1cefc7bfd5431f372101dfd3d04371cc2aac62cc9ddbd81a25bc9933ccbb7480",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 512,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "a5cdeac4cacab6020afca4b5157bdec220c03b76f6b9fe751e4a61b010827ace",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0390625,
+      "kv_payload_gib": 0.0390625,
+      "prefill_seconds": 1.246695699999691,
+      "ttft_seconds": 1.247111800010316,
+      "decode_tps": 12.52747783895358,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 1.246695699999691,
+          "ttft_seconds": 1.247111800010316,
+          "decode_seconds": 10.13771499998984,
+          "decode_tokens_per_second": 12.52747783895358
+        },
+        {
+          "prefill_seconds": 1.2225682999996934,
+          "ttft_seconds": 1.2229698000010103,
+          "decode_seconds": 10.041703299997607,
+          "decode_tokens_per_second": 12.647256765695344
+        },
+        {
+          "prefill_seconds": 1.2786001000058604,
+          "ttft_seconds": 1.279010099999141,
+          "decode_seconds": 10.14910310000414,
+          "decode_tokens_per_second": 12.51342101352268
+        }
+      ],
+      "prompt_sha256": "1fe0bee57c51bd1f7b94afec68befda2d6563a2ada8e1b653dd6df86bcf3abe4",
+      "ep_prefill_peak_gib": 15.849793025292456,
+      "ep_decode_peak_gib": 15.849793025292456,
+      "decode_ms_per_token": 79.8245275589751,
+      "prefill_peak_gib": 16.586410522460938,
+      "prefill_other_gib": 1.7135957404971123,
+      "decode_peak_gib": 16.586410522460938,
+      "decode_other_gib": 1.7135957404971123,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 512,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "16170bb1e9f68195b44c4ba1d4fcfe86f04f439204d081add6782e2f9059bf86",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d",
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0390625,
+      "kv_payload_gib": 0.0390625,
+      "prefill_seconds": 1.2364520999981323,
+      "ttft_seconds": 1.236868299994967,
+      "decode_tps": 12.556201111262215,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 1.2140188999910606,
+          "ttft_seconds": 1.214704799989704,
+          "decode_seconds": 10.121016300006886,
+          "decode_tokens_per_second": 12.548146968196622
+        },
+        {
+          "prefill_seconds": 1.2506263999966905,
+          "ttft_seconds": 1.2510276999964844,
+          "decode_seconds": 10.048230300002615,
+          "decode_tokens_per_second": 12.639041523557331
+        },
+        {
+          "prefill_seconds": 1.2364520999981323,
+          "ttft_seconds": 1.236868299994967,
+          "decode_seconds": 10.11452420000569,
+          "decode_tokens_per_second": 12.556201111262215
+        }
+      ],
+      "prompt_sha256": "1fe0bee57c51bd1f7b94afec68befda2d6563a2ada8e1b653dd6df86bcf3abe4",
+      "ep_prefill_peak_gib": 15.849874363280833,
+      "ep_decode_peak_gib": 15.849874363280833,
+      "decode_ms_per_token": 79.64192283469046,
+      "prefill_peak_gib": 16.577648162841797,
+      "prefill_other_gib": 1.7048333808779716,
+      "decode_peak_gib": 16.577648162841797,
+      "decode_other_gib": 1.7048333808779716,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999970499276999,
+        "relative_l2": 0.0028384868135449544,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999231507377392,
+        "relative_l2": 0.012405140562391751,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 512,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "61b315164f8ed55dac4872689a708105feeb5c0760aedb84f5c27ede183de955",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0390625,
+      "kv_payload_gib": 0.0390625,
+      "prefill_seconds": 1.2492910000000848,
+      "ttft_seconds": 1.249914500003797,
+      "decode_tps": 12.663283316558099,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 1.2745008999918355,
+          "ttft_seconds": 1.2750831999874208,
+          "decode_seconds": 10.03206300000602,
+          "decode_tokens_per_second": 12.659410133282037
+        },
+        {
+          "prefill_seconds": 1.239641100008157,
+          "ttft_seconds": 1.2403795999998692,
+          "decode_seconds": 10.028994599997532,
+          "decode_tokens_per_second": 12.663283316558099
+        },
+        {
+          "prefill_seconds": 1.2492910000000848,
+          "ttft_seconds": 1.249914500003797,
+          "decode_seconds": 10.010847500001546,
+          "decode_tokens_per_second": 12.686238602673788
+        }
+      ],
+      "prompt_sha256": "1fe0bee57c51bd1f7b94afec68befda2d6563a2ada8e1b653dd6df86bcf3abe4",
+      "ep_prefill_peak_gib": 15.849874363280833,
+      "ep_decode_peak_gib": 15.849874363280833,
+      "decode_ms_per_token": 78.9684614173034,
+      "prefill_peak_gib": 16.514904022216797,
+      "prefill_other_gib": 1.6420892402529716,
+      "decode_peak_gib": 16.514904022216797,
+      "decode_other_gib": 1.6420892402529716,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999970499276999,
+        "relative_l2": 0.0028384868135449544,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999231507377392,
+        "relative_l2": 0.012405140562391751,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 512,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "4a06f610b89f6ab5cb59bed97edd3031a7358d5f10f8d28994dcdc0eb8af6fe8",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.01171875,
+      "kv_payload_gib": 0.01007080078125,
+      "prefill_seconds": 1.2451314999925671,
+      "ttft_seconds": 1.2455182999983663,
+      "decode_tps": 12.693861375587495,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 1.2557751999993343,
+          "ttft_seconds": 1.2565107999980683,
+          "decode_seconds": 10.035089800003334,
+          "decode_tokens_per_second": 12.655591781546171
+        },
+        {
+          "prefill_seconds": 1.244060900004115,
+          "ttft_seconds": 1.2444637000007788,
+          "decode_seconds": 10.004835899992031,
+          "decode_tokens_per_second": 12.693861375587495
+        },
+        {
+          "prefill_seconds": 1.2451314999925671,
+          "ttft_seconds": 1.2455182999983663,
+          "decode_seconds": 9.91371039999649,
+          "decode_tokens_per_second": 12.810541651493569
+        }
+      ],
+      "prompt_sha256": "1fe0bee57c51bd1f7b94afec68befda2d6563a2ada8e1b653dd6df86bcf3abe4",
+      "ep_prefill_peak_gib": 15.828207359649241,
+      "ep_decode_peak_gib": 15.828207359649241,
+      "decode_ms_per_token": 78.77823543300812,
+      "prefill_peak_gib": 16.514904022216797,
+      "prefill_other_gib": 1.6694329902529716,
+      "decode_peak_gib": 16.514904022216797,
+      "decode_other_gib": 1.6694329902529716,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999970499276999,
+        "relative_l2": 0.0028384868135449544,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 1,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9996710990773641,
+        "relative_l2": 0.026651092762838658,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 1,
+      "first_divergent_token_vs_ring_kv_1based": 2,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9996337923989427,
+        "relative_l2": 0.02787772450412134,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "9e51bce0a52c6fb9e2d5994e491ba8fb89f0a3190a9b82c1d38537a9bce47bfd",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            220
+          ],
+          "cosine": 0.9996337923989423,
+          "relative_l2": 0.027877724504121338,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "5b9581dd904bbc4a2c2bc01edb154ff517bbe77e1b7da824e7dfaad4506e2a83",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 1024,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "526cfa6ad8f9317ba18706ed8f8e661a72c3256371de10da02b58eae9c914ce3",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0703125,
+      "kv_payload_gib": 0.0703125,
+      "prefill_seconds": 2.408955099992454,
+      "ttft_seconds": 2.4093653000018094,
+      "decode_tps": 12.46425347792383,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 2.408955099992454,
+          "ttft_seconds": 2.4093653000018094,
+          "decode_seconds": 10.1298276999878,
+          "decode_tokens_per_second": 12.537232000515957
+        },
+        {
+          "prefill_seconds": 2.403275800010306,
+          "ttft_seconds": 2.4036783000046853,
+          "decode_seconds": 10.18913810000231,
+          "decode_tokens_per_second": 12.46425347792383
+        },
+        {
+          "prefill_seconds": 2.4217072000028566,
+          "ttft_seconds": 2.4223308000073303,
+          "decode_seconds": 10.199647399989772,
+          "decode_tokens_per_second": 12.451410820351237
+        }
+      ],
+      "prompt_sha256": "e9aed7d1cfab6fccd3bc3aac4e60cda3c1844f5813271a89632d8404e2ce5755",
+      "ep_prefill_peak_gib": 16.174546309746802,
+      "ep_decode_peak_gib": 16.174546309746802,
+      "decode_ms_per_token": 80.22943385828592,
+      "prefill_peak_gib": 16.943695068359375,
+      "prefill_other_gib": 2.0396302863955498,
+      "decode_peak_gib": 16.943695068359375,
+      "decode_other_gib": 2.0396302863955498,
+      "prefill_vs_baseline": {
+        "cosine": 1.0000000000000002,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 1024,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "ddd95e7165f008bbf3ecce661e4f8fe677104d2f31f1a192a9652bdec5b5e7f3",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d",
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0703125,
+      "kv_payload_gib": 0.0703125,
+      "prefill_seconds": 2.4158892999985255,
+      "ttft_seconds": 2.416289599990705,
+      "decode_tps": 12.609247463235063,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 2.4237764999998035,
+          "ttft_seconds": 2.4241860000038287,
+          "decode_seconds": 10.071972999998252,
+          "decode_tokens_per_second": 12.609247463235063
+        },
+        {
+          "prefill_seconds": 2.3961798999953317,
+          "ttft_seconds": 2.396585700000287,
+          "decode_seconds": 10.137332199999946,
+          "decode_tokens_per_second": 12.52795089422054
+        },
+        {
+          "prefill_seconds": 2.4158892999985255,
+          "ttft_seconds": 2.416289599990705,
+          "decode_seconds": 10.04367350001121,
+          "decode_tokens_per_second": 12.644775838228737
+        }
+      ],
+      "prompt_sha256": "e9aed7d1cfab6fccd3bc3aac4e60cda3c1844f5813271a89632d8404e2ce5755",
+      "ep_prefill_peak_gib": 16.17470918688923,
+      "ep_decode_peak_gib": 16.17470918688923,
+      "decode_ms_per_token": 79.30687401573427,
+      "prefill_peak_gib": 16.872188568115234,
+      "prefill_other_gib": 1.9681237861514091,
+      "decode_peak_gib": 16.872188568115234,
+      "decode_other_gib": 1.9681237861514091,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999966414768577,
+        "relative_l2": 0.0025977368171705264,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 4,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999131873961562,
+        "relative_l2": 0.01373076672989177,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 1024,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "04d5b1dcae25d197b608d162b12d5bbbc05fc00fafcb189a6748a0b53b3cd9a5",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0703125,
+      "kv_payload_gib": 0.0703125,
+      "prefill_seconds": 2.4053053999959957,
+      "ttft_seconds": 2.405710100007127,
+      "decode_tps": 12.62016145121431,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 2.379809399993974,
+          "ttft_seconds": 2.380567499989411,
+          "decode_seconds": 10.06326270000136,
+          "decode_tokens_per_second": 12.62016145121431
+        },
+        {
+          "prefill_seconds": 2.40590689999226,
+          "ttft_seconds": 2.406310999998823,
+          "decode_seconds": 10.128910999992513,
+          "decode_tokens_per_second": 12.538366661538824
+        },
+        {
+          "prefill_seconds": 2.4053053999959957,
+          "ttft_seconds": 2.405710100007127,
+          "decode_seconds": 10.032946599996649,
+          "decode_tokens_per_second": 12.658295221071187
+        }
+      ],
+      "prompt_sha256": "e9aed7d1cfab6fccd3bc3aac4e60cda3c1844f5813271a89632d8404e2ce5755",
+      "ep_prefill_peak_gib": 16.17470918688923,
+      "ep_decode_peak_gib": 16.17470918688923,
+      "decode_ms_per_token": 79.23828897638866,
+      "prefill_peak_gib": 16.872188568115234,
+      "prefill_other_gib": 1.9681237861514091,
+      "decode_peak_gib": 16.872188568115234,
+      "decode_other_gib": 1.9681237861514091,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999966414768577,
+        "relative_l2": 0.0025977368171705264,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 4,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999131873961562,
+        "relative_l2": 0.01373076672989177,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 1024,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "3707b31c2459b9982d18472dd9293956770635e2ee9701981258f1d6a2db26d5",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.01953125,
+      "kv_payload_gib": 0.01812744140625,
+      "prefill_seconds": 2.4206342000106815,
+      "ttft_seconds": 2.4210375000111526,
+      "decode_tps": 12.548278389543546,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 2.405243300003349,
+          "ttft_seconds": 2.405663800003822,
+          "decode_seconds": 10.157105599995703,
+          "decode_tokens_per_second": 12.503562038387564
+        },
+        {
+          "prefill_seconds": 2.4206342000106815,
+          "ttft_seconds": 2.4210375000111526,
+          "decode_seconds": 10.111833499991917,
+          "decode_tokens_per_second": 12.559542243263946
+        },
+        {
+          "prefill_seconds": 2.449323099994217,
+          "ttft_seconds": 2.449965299994801,
+          "decode_seconds": 10.120910300000105,
+          "decode_tokens_per_second": 12.548278389543546
+        }
+      ],
+      "prompt_sha256": "e9aed7d1cfab6fccd3bc3aac4e60cda3c1844f5813271a89632d8404e2ce5755",
+      "ep_prefill_peak_gib": 16.131373272277415,
+      "ep_decode_peak_gib": 16.131373272277415,
+      "decode_ms_per_token": 79.692207086615,
+      "prefill_peak_gib": 16.876110076904297,
+      "prefill_other_gib": 2.0228265449404716,
+      "decode_peak_gib": 16.876110076904297,
+      "decode_other_gib": 2.0228265449404716,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999966414768577,
+        "relative_l2": 0.0025977368171705264,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9996844514853975,
+        "relative_l2": 0.025126186394196184,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 3,
+      "first_divergent_token_vs_ring_kv_1based": 4,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9996820174623415,
+        "relative_l2": 0.025585047760097752,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 0.9999999999999999,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "5b87c919c64e7d61833739e9ac3fbf78c295ff2b985ec800227f28319716ce3a",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            317
+          ],
+          "cosine": 0.9996820174623418,
+          "relative_l2": 0.025585047760097752,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "a46a4bface581ec11c9883f289870de22c8605fb460ce4fd77ae055ce9433036",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 2048,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "051a2670dc9f2fc998256b667fff42658036d212f4e74f30e9956200574e05be",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.1328125,
+      "kv_payload_gib": 0.1328125,
+      "prefill_seconds": 4.660591100007878,
+      "ttft_seconds": 4.660994300007587,
+      "decode_tps": 12.367863981070464,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 4.660591100007878,
+          "ttft_seconds": 4.660994300007587,
+          "decode_seconds": 10.256424699997297,
+          "decode_tokens_per_second": 12.382482562372195
+        },
+        {
+          "prefill_seconds": 4.660370500001591,
+          "ttft_seconds": 4.660783200000878,
+          "decode_seconds": 10.315748499997426,
+          "decode_tokens_per_second": 12.311273389423143
+        },
+        {
+          "prefill_seconds": 4.698084399991785,
+          "ttft_seconds": 4.698600899995654,
+          "decode_seconds": 10.26854760000424,
+          "decode_tokens_per_second": 12.367863981070464
+        }
+      ],
+      "prompt_sha256": "1de3a292b9cf4b8743df0223b9b4d9c0d97b75f22d0d748f80f964cd43c1cf56",
+      "ep_prefill_peak_gib": 16.821123191155493,
+      "ep_decode_peak_gib": 16.821123191155493,
+      "decode_ms_per_token": 80.85470551184441,
+      "prefill_peak_gib": 17.53762435913086,
+      "prefill_other_gib": 2.571059577167034,
+      "decode_peak_gib": 17.53762435913086,
+      "decode_other_gib": 2.571059577167034,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 2048,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "c8bc457cba41fc95624b8cc6afe6a73511dc075085ab70c7f13fac39d4b03e63",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.1328125,
+      "kv_payload_gib": 0.1328125,
+      "prefill_seconds": 4.661888500006171,
+      "ttft_seconds": 4.6622831000131555,
+      "decode_tps": 12.56738232104321,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 4.674682299999404,
+          "ttft_seconds": 4.675163699997938,
+          "decode_seconds": 10.105525299994042,
+          "decode_tokens_per_second": 12.56738232104321
+        },
+        {
+          "prefill_seconds": 4.661888500006171,
+          "ttft_seconds": 4.6622831000131555,
+          "decode_seconds": 10.102071699991939,
+          "decode_tokens_per_second": 12.57167873794653
+        },
+        {
+          "prefill_seconds": 4.658021999988705,
+          "ttft_seconds": 4.658587999991141,
+          "decode_seconds": 10.20105180000246,
+          "decode_tokens_per_second": 12.449696608732971
+        }
+      ],
+      "prompt_sha256": "1de3a292b9cf4b8743df0223b9b4d9c0d97b75f22d0d748f80f964cd43c1cf56",
+      "ep_prefill_peak_gib": 16.82108007464558,
+      "ep_decode_peak_gib": 16.82108007464558,
+      "decode_ms_per_token": 79.57106535428379,
+      "prefill_peak_gib": 17.46611785888672,
+      "prefill_other_gib": 2.4995530769228935,
+      "decode_peak_gib": 17.46611785888672,
+      "decode_other_gib": 2.4995530769228935,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999956739198552,
+        "relative_l2": 0.0029910048776897766,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 4,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999630658439115,
+        "relative_l2": 0.010052130284412493,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 2048,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "deb22e7a655dc608bb6c58e92602214b9f95741571ae7307e6a6023147428e58",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.1328125,
+      "kv_payload_gib": 0.1328125,
+      "prefill_seconds": 4.690592900005868,
+      "ttft_seconds": 4.691084200007026,
+      "decode_tps": 12.41765432973973,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 4.690592900005868,
+          "ttft_seconds": 4.691084200007026,
+          "decode_seconds": 10.262297499997658,
+          "decode_tokens_per_second": 12.375396445097113
+        },
+        {
+          "prefill_seconds": 4.684458100004122,
+          "ttft_seconds": 4.684913000004599,
+          "decode_seconds": 10.092225999993389,
+          "decode_tokens_per_second": 12.58394332430558
+        },
+        {
+          "prefill_seconds": 4.7128496000077575,
+          "ttft_seconds": 4.713449600007152,
+          "decode_seconds": 10.227374399997643,
+          "decode_tokens_per_second": 12.41765432973973
+        }
+      ],
+      "prompt_sha256": "1de3a292b9cf4b8743df0223b9b4d9c0d97b75f22d0d748f80f964cd43c1cf56",
+      "ep_prefill_peak_gib": 16.82108007464558,
+      "ep_decode_peak_gib": 16.82108007464558,
+      "decode_ms_per_token": 80.53050708659562,
+      "prefill_peak_gib": 17.46611785888672,
+      "prefill_other_gib": 2.4995530769228935,
+      "decode_peak_gib": 17.46611785888672,
+      "decode_other_gib": 2.4995530769228935,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999956739198552,
+        "relative_l2": 0.0029910048776897766,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 4,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999630658439115,
+        "relative_l2": 0.010052130284412493,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 2048,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "62a0b8b90661c4570c0e0d2c10a9f33a72808a00d2c5b06d56e5299547c4ef84",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.03515625,
+      "kv_payload_gib": 0.03424072265625,
+      "prefill_seconds": 4.725443000002997,
+      "ttft_seconds": 4.7260066000017105,
+      "decode_tps": 12.518194752512978,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 4.736239399993792,
+          "ttft_seconds": 4.736645900004078,
+          "decode_seconds": 10.145232800001395,
+          "decode_tokens_per_second": 12.518194752512978
+        },
+        {
+          "prefill_seconds": 4.7237115999887465,
+          "ttft_seconds": 4.724108399997931,
+          "decode_seconds": 10.139692600001581,
+          "decode_tokens_per_second": 12.52503453605489
+        },
+        {
+          "prefill_seconds": 4.725443000002997,
+          "ttft_seconds": 4.7260066000017105,
+          "decode_seconds": 10.150519100003294,
+          "decode_tokens_per_second": 12.511675388104909
+        }
+      ],
+      "prompt_sha256": "1de3a292b9cf4b8743df0223b9b4d9c0d97b75f22d0d748f80f964cd43c1cf56",
+      "ep_prefill_peak_gib": 16.734775410033762,
+      "ep_decode_peak_gib": 16.734775410033762,
+      "decode_ms_per_token": 79.88372283465665,
+      "prefill_peak_gib": 17.46611785888672,
+      "prefill_other_gib": 2.5972093269228935,
+      "decode_peak_gib": 17.46611785888672,
+      "decode_other_gib": 2.5972093269228935,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999956739198552,
+        "relative_l2": 0.0029910048776897766,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 3,
+      "first_divergent_token_1based": 4,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9998754563923562,
+        "relative_l2": 0.021434241122034594,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0000000000000002,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998869864461488,
+        "relative_l2": 0.01766115916456413,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "bfe3acb9586f91b53b2b9f705e32884a3e4de961fec26c5e5c681547d26bcde8",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            472
+          ],
+          "cosine": 0.9998869864461492,
+          "relative_l2": 0.01766115916456413,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "f314acb747599fff63a0f20d81ef45cb79ae34c6b42d375f332cfeb047d32278",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 4096,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "34ae6ccc983dab1d7b5572fcbfb42c6239c188b74c13062522d59fa1683732f8",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.2578125,
+      "kv_payload_gib": 0.2578125,
+      "prefill_seconds": 9.40262619999703,
+      "ttft_seconds": 9.40326510000159,
+      "decode_tps": 12.147001326696573,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 9.38267089999863,
+          "ttft_seconds": 9.383380600003875,
+          "decode_seconds": 10.757898099996964,
+          "decode_tokens_per_second": 11.805280066747967
+        },
+        {
+          "prefill_seconds": 9.610989900000277,
+          "ttft_seconds": 9.611391300000832,
+          "decode_seconds": 10.45525529999577,
+          "decode_tokens_per_second": 12.147001326696573
+        },
+        {
+          "prefill_seconds": 9.40262619999703,
+          "ttft_seconds": 9.40326510000159,
+          "decode_seconds": 10.364684799991664,
+          "decode_tokens_per_second": 12.2531463764438
+        }
+      ],
+      "prompt_sha256": "62307503a591584422a0fc0c5c9cc5a5e6473cb0c1882731ed23c0971d7e5147",
+      "ep_prefill_peak_gib": 18.114276953972876,
+      "ep_decode_peak_gib": 18.114276953972876,
+      "decode_ms_per_token": 82.32484488185646,
+      "prefill_peak_gib": 18.835281372070312,
+      "prefill_other_gib": 3.7437165901064873,
+      "decode_peak_gib": 18.835281372070312,
+      "decode_other_gib": 3.7437165901064873,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 4096,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "2e877c2ff213f5f45f8972fe22e2441ac208577d2c45c572194685a9deae94d3",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.2578125,
+      "kv_payload_gib": 0.2578125,
+      "prefill_seconds": 9.374021700001322,
+      "ttft_seconds": 9.37442920000467,
+      "decode_tps": 12.345221301906665,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 9.374021700001322,
+          "ttft_seconds": 9.37442920000467,
+          "decode_seconds": 10.334456799988402,
+          "decode_tokens_per_second": 12.288986490334212
+        },
+        {
+          "prefill_seconds": 9.347800800009281,
+          "ttft_seconds": 9.34820240001136,
+          "decode_seconds": 10.287381399990409,
+          "decode_tokens_per_second": 12.345221301906665
+        },
+        {
+          "prefill_seconds": 9.402702899998985,
+          "ttft_seconds": 9.403325599996606,
+          "decode_seconds": 10.206857900004252,
+          "decode_tokens_per_second": 12.442614685558334
+        }
+      ],
+      "prompt_sha256": "62307503a591584422a0fc0c5c9cc5a5e6473cb0c1882731ed23c0971d7e5147",
+      "ep_prefill_peak_gib": 18.113821850158274,
+      "ep_decode_peak_gib": 18.113821850158274,
+      "decode_ms_per_token": 81.00300314953077,
+      "prefill_peak_gib": 18.826519012451172,
+      "prefill_other_gib": 3.7349542304873466,
+      "decode_peak_gib": 18.826519012451172,
+      "decode_other_gib": 3.7349542304873466,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972496093169,
+        "relative_l2": 0.002742342076703624,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999548588639434,
+        "relative_l2": 0.009919711071125463,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 4096,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "57c1fc1f63d83f3c7804ee81262682cedad29f803d867ffe1bcf1b80361489d4",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.2578125,
+      "kv_payload_gib": 0.2578125,
+      "prefill_seconds": 9.438135399992461,
+      "ttft_seconds": 9.438475299990387,
+      "decode_tps": 12.405629909289823,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 9.434276400003,
+          "ttft_seconds": 9.434842400005437,
+          "decode_seconds": 10.275967499997932,
+          "decode_tokens_per_second": 12.358933599198863
+        },
+        {
+          "prefill_seconds": 9.637827899990953,
+          "ttft_seconds": 9.63844509999035,
+          "decode_seconds": 10.237287500000093,
+          "decode_tokens_per_second": 12.405629909289823
+        },
+        {
+          "prefill_seconds": 9.438135399992461,
+          "ttft_seconds": 9.438475299990387,
+          "decode_seconds": 10.074900000006892,
+          "decode_tokens_per_second": 12.605584174524127
+        }
+      ],
+      "prompt_sha256": "62307503a591584422a0fc0c5c9cc5a5e6473cb0c1882731ed23c0971d7e5147",
+      "ep_prefill_peak_gib": 18.113821850158274,
+      "ep_decode_peak_gib": 18.113821850158274,
+      "decode_ms_per_token": 80.60856299212672,
+      "prefill_peak_gib": 18.763774871826172,
+      "prefill_other_gib": 3.6722100898623466,
+      "decode_peak_gib": 18.763774871826172,
+      "decode_other_gib": 3.6722100898623466,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972496093169,
+        "relative_l2": 0.002742342076703624,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999548588639434,
+        "relative_l2": 0.009919711071125463,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 4096,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "710c29a0c7531e842fd0b725225ce62d05b35b12980e4818ca8099aa828e9157",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.0703125,
+      "kv_payload_gib": 0.06646728515625,
+      "prefill_seconds": 9.426986000005854,
+      "ttft_seconds": 9.427406200004043,
+      "decode_tps": 12.409364857150631,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 9.506502899996121,
+          "ttft_seconds": 9.506906399998115,
+          "decode_seconds": 10.207577299996046,
+          "decode_tokens_per_second": 12.441737766712693
+        },
+        {
+          "prefill_seconds": 9.411111999987043,
+          "ttft_seconds": 9.41152019999572,
+          "decode_seconds": 10.234206299996004,
+          "decode_tokens_per_second": 12.409364857150631
+        },
+        {
+          "prefill_seconds": 9.426986000005854,
+          "ttft_seconds": 9.427406200004043,
+          "decode_seconds": 10.35376769999857,
+          "decode_tokens_per_second": 12.266066197333897
+        }
+      ],
+      "prompt_sha256": "62307503a591584422a0fc0c5c9cc5a5e6473cb0c1882731ed23c0971d7e5147",
+      "ep_prefill_peak_gib": 17.945485935546458,
+      "ep_decode_peak_gib": 17.945485935546458,
+      "decode_ms_per_token": 80.58430157477169,
+      "prefill_peak_gib": 18.708873748779297,
+      "prefill_other_gib": 3.8048089668154716,
+      "decode_peak_gib": 18.708873748779297,
+      "decode_other_gib": 3.8048089668154716,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999972496093169,
+        "relative_l2": 0.002742342076703624,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.999880284279932,
+        "relative_l2": 0.01674680070168111,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998697826195604,
+        "relative_l2": 0.018644485951155167,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "e4e4b8c9adefdcc9247bc09d3f207690af9f59686ae2f91073a9af807246eb96",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            278
+          ],
+          "cosine": 0.9998697826195605,
+          "relative_l2": 0.018644485951155167,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "4f63ef720fa92e77681feddc76d3f4d4ec32f9e986b98151f3bd5c0e9327d956",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 8192,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "d9fe6ecd76fdc1b58e69a67ff5dc93de901da7500e751458705ee4759ca0d4a7",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.5078125,
+      "kv_payload_gib": 0.5078125,
+      "prefill_seconds": 19.240591199995833,
+      "ttft_seconds": 19.24126460000116,
+      "decode_tps": 11.849934077039972,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 19.240591199995833,
+          "ttft_seconds": 19.24126460000116,
+          "decode_seconds": 10.689339999997173,
+          "decode_tokens_per_second": 11.880995459030547
+        },
+        {
+          "prefill_seconds": 19.22978449999937,
+          "ttft_seconds": 19.2301848000061,
+          "decode_seconds": 10.726409499999136,
+          "decode_tokens_per_second": 11.839935814496942
+        },
+        {
+          "prefill_seconds": 19.309139099990716,
+          "ttft_seconds": 19.309567399992375,
+          "decode_seconds": 10.717359200003557,
+          "decode_tokens_per_second": 11.849934077039972
+        }
+      ],
+      "prompt_sha256": "acdbb01dac8ebfc8827f5b9e93f7c87c85f81c9b6d3c6939fa6e38cea34afd1c",
+      "ep_prefill_peak_gib": 20.70058447960764,
+      "ep_decode_peak_gib": 20.70058447960764,
+      "decode_ms_per_token": 84.38865511813825,
+      "prefill_peak_gib": 21.430599212646484,
+      "prefill_other_gib": 6.089034430682659,
+      "decode_peak_gib": 21.430599212646484,
+      "decode_other_gib": 6.089034430682659,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 8192,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "87c679ff3a851a8f5bc42ea8630d2dad8828932c7f8f5e000a1f706c301e551a",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.5078125,
+      "kv_payload_gib": 0.5078125,
+      "prefill_seconds": 19.186742899997625,
+      "ttft_seconds": 19.187275799995405,
+      "decode_tps": 12.128607591048818,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 19.186742899997625,
+          "ttft_seconds": 19.187275799995405,
+          "decode_seconds": 10.36553460000141,
+          "decode_tokens_per_second": 12.25214182392317
+        },
+        {
+          "prefill_seconds": 19.18418290000409,
+          "ttft_seconds": 19.18458339999779,
+          "decode_seconds": 10.518094400002155,
+          "decode_tokens_per_second": 12.074430516612779
+        },
+        {
+          "prefill_seconds": 19.3661482000025,
+          "ttft_seconds": 19.366548299993156,
+          "decode_seconds": 10.471111300008488,
+          "decode_tokens_per_second": 12.128607591048818
+        }
+      ],
+      "prompt_sha256": "acdbb01dac8ebfc8827f5b9e93f7c87c85f81c9b6d3c6939fa6e38cea34afd1c",
+      "ep_prefill_peak_gib": 20.699305401183665,
+      "ep_decode_peak_gib": 20.699305401183665,
+      "decode_ms_per_token": 82.44969527565739,
+      "prefill_peak_gib": 21.359092712402344,
+      "prefill_other_gib": 6.0175279304385185,
+      "decode_peak_gib": 21.359092712402344,
+      "decode_other_gib": 6.0175279304385185,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968527057339,
+        "relative_l2": 0.0026581998938792037,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999575767869745,
+        "relative_l2": 0.009251432600995414,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 8192,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "d8523272e02e8483656f752a9359bb68b5c0059b5ec9c2be353d8b23fd9650c1",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.5078125,
+      "kv_payload_gib": 0.5078125,
+      "prefill_seconds": 19.153637399998843,
+      "ttft_seconds": 19.15437999999267,
+      "decode_tps": 12.062186097040094,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 19.153637399998843,
+          "ttft_seconds": 19.15437999999267,
+          "decode_seconds": 10.52877140000055,
+          "decode_tokens_per_second": 12.062186097040094
+        },
+        {
+          "prefill_seconds": 19.15727500000503,
+          "ttft_seconds": 19.157696599999326,
+          "decode_seconds": 10.462358000004315,
+          "decode_tokens_per_second": 12.138754953706194
+        },
+        {
+          "prefill_seconds": 19.14782759999798,
+          "ttft_seconds": 19.14823140000226,
+          "decode_seconds": 10.550741099999868,
+          "decode_tokens_per_second": 12.037069130622642
+        }
+      ],
+      "prompt_sha256": "acdbb01dac8ebfc8827f5b9e93f7c87c85f81c9b6d3c6939fa6e38cea34afd1c",
+      "ep_prefill_peak_gib": 20.699305401183665,
+      "ep_decode_peak_gib": 20.699305401183665,
+      "decode_ms_per_token": 82.90371181102796,
+      "prefill_peak_gib": 21.359092712402344,
+      "prefill_other_gib": 6.0175279304385185,
+      "decode_peak_gib": 21.359092712402344,
+      "decode_other_gib": 6.0175279304385185,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968527057339,
+        "relative_l2": 0.0026581998938792037,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999575767869745,
+        "relative_l2": 0.009251432600995414,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 8192,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "0a41c25f517c3179283ef29bd4c712f5d5141f430d18921235e79a54de5ae885",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.1328125,
+      "kv_payload_gib": 0.13092041015625,
+      "prefill_seconds": 19.295191299999715,
+      "ttft_seconds": 19.295738200002233,
+      "decode_tps": 12.193017736563856,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 19.295191299999715,
+          "ttft_seconds": 19.295738200002233,
+          "decode_seconds": 10.375031599993235,
+          "decode_tokens_per_second": 12.240926572221987
+        },
+        {
+          "prefill_seconds": 19.287911100007477,
+          "ttft_seconds": 19.288303699999233,
+          "decode_seconds": 10.415797199995723,
+          "decode_tokens_per_second": 12.193017736563856
+        },
+        {
+          "prefill_seconds": 19.32168300000194,
+          "ttft_seconds": 19.322208700003102,
+          "decode_seconds": 10.423575199994957,
+          "decode_tokens_per_second": 12.183919390734712
+        }
+      ],
+      "prompt_sha256": "acdbb01dac8ebfc8827f5b9e93f7c87c85f81c9b6d3c6939fa6e38cea34afd1c",
+      "ep_prefill_peak_gib": 20.35909448657185,
+      "ep_decode_peak_gib": 20.35909448657185,
+      "decode_ms_per_token": 82.01415118106868,
+      "prefill_peak_gib": 21.076740264892578,
+      "prefill_other_gib": 6.110175482928753,
+      "decode_peak_gib": 21.076740264892578,
+      "decode_other_gib": 6.110175482928753,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999968527057339,
+        "relative_l2": 0.0026581998938792037,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9998933479066128,
+        "relative_l2": 0.014613994587041957,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.999893260492333,
+        "relative_l2": 0.014613500034737943,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "0a21b23866c1cad1fb66b56687a030f06162e7eef557ec5ec548ce98038dd0e6",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            286
+          ],
+          "cosine": 0.9998932604923331,
+          "relative_l2": 0.014613500034737943,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "3d839799758e379385a07fa26c0a94b1c9add3e8fb339b3b90c8be9d75859ab6",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 16384,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "92d85ebc0e97bb00d67f3b1e26d1a24e98bec121d3ecd699abfa8d49f7aad722",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 1.0078125,
+      "kv_payload_gib": 1.0078125,
+      "prefill_seconds": 40.09430060000159,
+      "ttft_seconds": 40.09470250000595,
+      "decode_tps": 11.162117790190042,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 40.09430060000159,
+          "ttft_seconds": 40.09470250000595,
+          "decode_seconds": 11.353144799999427,
+          "decode_tokens_per_second": 11.186327862215446
+        },
+        {
+          "prefill_seconds": 40.16898499999661,
+          "ttft_seconds": 40.16941390000284,
+          "decode_seconds": 11.389857099988149,
+          "decode_tokens_per_second": 11.150271586825452
+        },
+        {
+          "prefill_seconds": 40.014156800010824,
+          "ttft_seconds": 40.014838200004306,
+          "decode_seconds": 11.37776920000033,
+          "decode_tokens_per_second": 11.162117790190042
+        }
+      ],
+      "prompt_sha256": "30ba6b10158b29d1132f92bc632ea6c34e2ad5fd07c5b984ec5f214e8d210ffb",
+      "ep_prefill_peak_gib": 25.873199530877173,
+      "ep_decode_peak_gib": 25.873199530877173,
+      "decode_ms_per_token": 89.58873385827032,
+      "prefill_peak_gib": 26.631088256835938,
+      "prefill_other_gib": 10.789523474872112,
+      "decode_peak_gib": 26.631088256835938,
+      "decode_other_gib": 10.789523474872112,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 16384,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "0ad94b0a1ae8b19e5e9e1b7ba4634113e4d71fb41b4dcfd7eb4e954d23febcc2",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 1.0078125,
+      "kv_payload_gib": 1.0078125,
+      "prefill_seconds": 39.90710480000416,
+      "ttft_seconds": 39.90751530000125,
+      "decode_tps": 11.586139484912307,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 39.8981660999998,
+          "ttft_seconds": 39.898572000005515,
+          "decode_seconds": 10.96137330000056,
+          "decode_tokens_per_second": 11.586139484912307
+        },
+        {
+          "prefill_seconds": 40.04546059999848,
+          "ttft_seconds": 40.04588269999658,
+          "decode_seconds": 10.933718000000226,
+          "decode_tokens_per_second": 11.61544499318506
+        },
+        {
+          "prefill_seconds": 39.90710480000416,
+          "ttft_seconds": 39.90751530000125,
+          "decode_seconds": 11.07637429999886,
+          "decode_tokens_per_second": 11.465845822853158
+        }
+      ],
+      "prompt_sha256": "30ba6b10158b29d1132f92bc632ea6c34e2ad5fd07c5b984ec5f214e8d210ffb",
+      "ep_prefill_peak_gib": 25.870272503234446,
+      "ep_decode_peak_gib": 25.870272503234446,
+      "decode_ms_per_token": 86.31002598425637,
+      "prefill_peak_gib": 26.559581756591797,
+      "prefill_other_gib": 10.718016974627972,
+      "decode_peak_gib": 26.559581756591797,
+      "decode_other_gib": 10.718016974627972,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999957911714283,
+        "relative_l2": 0.004263456248699052,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 19,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999472514837672,
+        "relative_l2": 0.01035752334848287,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 16384,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "0535ca9e7f5a9c58bfd4d5063972f879d15f3ea3313dcf322a62da9e448a39be",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 1.0078125,
+      "kv_payload_gib": 1.0078125,
+      "prefill_seconds": 39.63667369999166,
+      "ttft_seconds": 39.63708179999958,
+      "decode_tps": 11.553544126990566,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 39.63667369999166,
+          "ttft_seconds": 39.63708179999958,
+          "decode_seconds": 10.99229799999739,
+          "decode_tokens_per_second": 11.553544126990566
+        },
+        {
+          "prefill_seconds": 39.747675999999046,
+          "ttft_seconds": 39.74846170000092,
+          "decode_seconds": 11.059787399994093,
+          "decode_tokens_per_second": 11.483041708384723
+        },
+        {
+          "prefill_seconds": 39.60863270000846,
+          "ttft_seconds": 39.60903649999818,
+          "decode_seconds": 10.938036599996849,
+          "decode_tokens_per_second": 11.610858936057737
+        }
+      ],
+      "prompt_sha256": "30ba6b10158b29d1132f92bc632ea6c34e2ad5fd07c5b984ec5f214e8d210ffb",
+      "ep_prefill_peak_gib": 25.870272503234446,
+      "ep_decode_peak_gib": 25.870272503234446,
+      "decode_ms_per_token": 86.55352755903458,
+      "prefill_peak_gib": 26.559581756591797,
+      "prefill_other_gib": 10.718016974627972,
+      "decode_peak_gib": 26.559581756591797,
+      "decode_other_gib": 10.718016974627972,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999957911714283,
+        "relative_l2": 0.004263456248699052,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 19,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999472514837672,
+        "relative_l2": 0.01035752334848287,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 16384,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "8f424d52ec677d074cf5ac1bf963a5dea4b8cc1f7d670a9a85538ee1ddcae361",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.265625,
+      "kv_payload_gib": 0.25982666015625,
+      "prefill_seconds": 39.83770879999793,
+      "ttft_seconds": 39.83810790001007,
+      "decode_tps": 11.874409920134697,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 39.90436069999123,
+          "ttft_seconds": 39.90476769999077,
+          "decode_seconds": 10.695268299998133,
+          "decode_tokens_per_second": 11.874409920134697
+        },
+        {
+          "prefill_seconds": 39.78895400000329,
+          "ttft_seconds": 39.78969850001158,
+          "decode_seconds": 10.738427099990076,
+          "decode_tokens_per_second": 11.82668549289843
+        },
+        {
+          "prefill_seconds": 39.83770879999793,
+          "ttft_seconds": 39.83810790001007,
+          "decode_seconds": 10.669006799987983,
+          "decode_tokens_per_second": 11.90363849052407
+        }
+      ],
+      "prompt_sha256": "30ba6b10158b29d1132f92bc632ea6c34e2ad5fd07c5b984ec5f214e8d210ffb",
+      "ep_prefill_peak_gib": 25.19412408862263,
+      "ep_decode_peak_gib": 25.19412408862263,
+      "decode_ms_per_token": 84.21471102360735,
+      "prefill_peak_gib": 25.939979553222656,
+      "prefill_other_gib": 10.840602271258831,
+      "decode_peak_gib": 25.939979553222656,
+      "decode_other_gib": 10.840602271258831,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999957911714283,
+        "relative_l2": 0.004263456248699052,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9998619578634452,
+        "relative_l2": 0.0171353110603604,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 19,
+      "first_divergent_token_vs_ring_kv_1based": 2,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998627726415016,
+        "relative_l2": 0.01681843947808452,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "e1c8a5640e6abc9c8d41dc062e3fd67a747c928404f6f01d96f5593d29eb0a65",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            286
+          ],
+          "cosine": 0.9998627726415016,
+          "relative_l2": 0.01681843947808452,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "e81d37af0a307fbf33639113d24433d89f8bed3b3e4e51804df97b450fca70f7",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 32768,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "eac224ef6f62d7e7680199f1041a36b51cb47b6e8cd3f04b1e557b0828a23b12",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 2.0078125,
+      "kv_payload_gib": 2.0078125,
+      "prefill_seconds": 86.60414019999735,
+      "ttft_seconds": 86.6046575000073,
+      "decode_tps": 10.093146710469576,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 86.62898069999937,
+          "ttft_seconds": 86.62937640000018,
+          "decode_seconds": 12.602664399993955,
+          "decode_tokens_per_second": 10.077234144238652
+        },
+        {
+          "prefill_seconds": 86.60414019999735,
+          "ttft_seconds": 86.6046575000073,
+          "decode_seconds": 12.58047909999732,
+          "decode_tokens_per_second": 10.095005046352094
+        },
+        {
+          "prefill_seconds": 86.56087100000877,
+          "ttft_seconds": 86.56127930000366,
+          "decode_seconds": 12.582795399997849,
+          "decode_tokens_per_second": 10.093146710469576
+        }
+      ],
+      "prompt_sha256": "269985d7f4c46dc899f1664a752bd895b8246db7922aa3f68829186251d9745d",
+      "ep_prefill_peak_gib": 36.218429633416235,
+      "ep_decode_peak_gib": 36.218429633416235,
+      "decode_ms_per_token": 99.07712913384134,
+      "prefill_peak_gib": 37.02361297607422,
+      "prefill_other_gib": 20.182048194110394,
+      "decode_peak_gib": 37.02361297607422,
+      "decode_other_gib": 20.182048194110394,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 32768,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "54e12a8eb40ca46622a750d306a6d392fb0ef9823ad80f16e0044b5bc000b031",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 2.0078125,
+      "kv_payload_gib": 2.0078125,
+      "prefill_seconds": 85.96601479999663,
+      "ttft_seconds": 85.96634939999785,
+      "decode_tps": 10.734992567022895,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 86.09338740000385,
+          "ttft_seconds": 86.09372829999484,
+          "decode_seconds": 11.830469300010009,
+          "decode_tokens_per_second": 10.734992567022895
+        },
+        {
+          "prefill_seconds": 85.89930619999359,
+          "ttft_seconds": 85.89978619999602,
+          "decode_seconds": 11.835649700005888,
+          "decode_tokens_per_second": 10.730293918713802
+        },
+        {
+          "prefill_seconds": 85.96601479999663,
+          "ttft_seconds": 85.96634939999785,
+          "decode_seconds": 11.750018100006855,
+          "decode_tokens_per_second": 10.808493988611465
+        }
+      ],
+      "prompt_sha256": "269985d7f4c46dc899f1664a752bd895b8246db7922aa3f68829186251d9745d",
+      "ep_prefill_peak_gib": 36.21220670733601,
+      "ep_decode_peak_gib": 36.21220670733601,
+      "decode_ms_per_token": 93.15330157488197,
+      "prefill_peak_gib": 36.94095993041992,
+      "prefill_other_gib": 20.099395148456097,
+      "decode_peak_gib": 36.94095993041992,
+      "decode_other_gib": 20.099395148456097,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999979411423807,
+        "relative_l2": 0.0021712079835906257,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999494148428838,
+        "relative_l2": 0.010768274946653736,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 32768,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "cd0ece410639b7805142b53123be1b7c34e19de5ecb1f6bbbba677d11f0ba3e9",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 2.0078125,
+      "kv_payload_gib": 2.0078125,
+      "prefill_seconds": 85.12646109999332,
+      "ttft_seconds": 85.12720859999536,
+      "decode_tps": 10.760812854520003,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 85.12646109999332,
+          "ttft_seconds": 85.12720859999536,
+          "decode_seconds": 11.803193100000499,
+          "decode_tokens_per_second": 10.759800244223289
+        },
+        {
+          "prefill_seconds": 85.10386519999884,
+          "ttft_seconds": 85.1045737999957,
+          "decode_seconds": 11.78889799999888,
+          "decode_tokens_per_second": 10.772847470561885
+        },
+        {
+          "prefill_seconds": 85.19583640000201,
+          "ttft_seconds": 85.19645299999684,
+          "decode_seconds": 11.802082399997744,
+          "decode_tokens_per_second": 10.760812854520003
+        }
+      ],
+      "prompt_sha256": "269985d7f4c46dc899f1664a752bd895b8246db7922aa3f68829186251d9745d",
+      "ep_prefill_peak_gib": 36.21220670733601,
+      "ep_decode_peak_gib": 36.21220670733601,
+      "decode_ms_per_token": 92.92978267714759,
+      "prefill_peak_gib": 36.94095993041992,
+      "prefill_other_gib": 20.099395148456097,
+      "decode_peak_gib": 36.94095993041992,
+      "decode_other_gib": 20.099395148456097,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999979411423807,
+        "relative_l2": 0.0021712079835906257,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999494148428838,
+        "relative_l2": 0.010768274946653736,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 32768,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "4a36e98b55ff55ae911ba62ee4980119e24f57aecca2bcb25ff40eece13106ba",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 0.51763916015625,
+      "kv_payload_gib": 0.51763916015625,
+      "prefill_seconds": 85.68232969999372,
+      "ttft_seconds": 85.68274049999309,
+      "decode_tps": 11.353672845215868,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 85.59381750000466,
+          "ttft_seconds": 85.59421520000615,
+          "decode_seconds": 11.185807600006228,
+          "decode_tokens_per_second": 11.353672845215868
+        },
+        {
+          "prefill_seconds": 85.68232969999372,
+          "ttft_seconds": 85.68274049999309,
+          "decode_seconds": 11.151300900004571,
+          "decode_tokens_per_second": 11.388805767042655
+        },
+        {
+          "prefill_seconds": 85.85697870000149,
+          "ttft_seconds": 85.85771780001232,
+          "decode_seconds": 11.29722259999835,
+          "decode_tokens_per_second": 11.241701123957544
+        }
+      ],
+      "prompt_sha256": "269985d7f4c46dc899f1664a752bd895b8246db7922aa3f68829186251d9745d",
+      "ep_prefill_peak_gib": 34.85057245288044,
+      "ep_decode_peak_gib": 34.85057245288044,
+      "decode_ms_per_token": 88.07722519689943,
+      "prefill_peak_gib": 35.633262634277344,
+      "prefill_other_gib": 20.28187119215727,
+      "decode_peak_gib": 35.633262634277344,
+      "decode_other_gib": 20.28187119215727,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999979411423807,
+        "relative_l2": 0.0021712079835906257,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9998588078067271,
+        "relative_l2": 0.016952062914566596,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998724498093146,
+        "relative_l2": 0.016056412830352643,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "9af691e5436dc06927e9f0ad2aed20f0e57f1217df0274cb0430b633cf41d9cd",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            317
+          ],
+          "cosine": 0.9998724498093144,
+          "relative_l2": 0.016056412830352643,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "e961f091637e7944807a3050796bcfece9651e9f45621fa7096b8043915c8aa0",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 65536,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "9138ddd970aa83f189f77c0bd170a6ebb4b1dc6bd3dd7684425d6ea5d224d577",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 4.0078125,
+      "kv_payload_gib": 4.0078125,
+      "prefill_seconds": 198.32526720000897,
+      "ttft_seconds": 198.32566719999886,
+      "decode_tps": 8.322051547429089,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 198.32526720000897,
+          "ttft_seconds": 198.32566719999886,
+          "decode_seconds": 15.260660100000678,
+          "decode_tokens_per_second": 8.322051547429089
+        },
+        {
+          "prefill_seconds": 198.28603630000725,
+          "ttft_seconds": 198.28645630000392,
+          "decode_seconds": 15.085276600002544,
+          "decode_tokens_per_second": 8.418804863013158
+        },
+        {
+          "prefill_seconds": 199.1557302000001,
+          "ttft_seconds": 199.1564325000072,
+          "decode_seconds": 15.34673789999215,
+          "decode_tokens_per_second": 8.275374273516782
+        }
+      ],
+      "prompt_sha256": "d783c98fc2fa0fa04d284ab71ec5d1e21d5e75ed59f43f61d5c884cd994b64f7",
+      "ep_prefill_peak_gib": 56.90888983849436,
+      "ep_decode_peak_gib": 56.90888983849436,
+      "decode_ms_per_token": 120.16267795276124,
+      "prefill_peak_gib": 57.79739761352539,
+      "prefill_other_gib": 38.955832831561565,
+      "decode_peak_gib": 57.79739761352539,
+      "decode_other_gib": 38.955832831561565,
+      "prefill_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 65536,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "ceec87a5adeeeeab375e58675766c9ed6c5857e03d4d061e2e3a41bb1aa6afed",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 4.0078125,
+      "kv_payload_gib": 4.0078125,
+      "prefill_seconds": 196.4590898000024,
+      "ttft_seconds": 196.4594281000027,
+      "decode_tps": 9.363836919322628,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 196.25539500000014,
+          "ttft_seconds": 196.2557960999984,
+          "decode_seconds": 13.594079200003762,
+          "decode_tokens_per_second": 9.342302492982743
+        },
+        {
+          "prefill_seconds": 196.4590898000024,
+          "ttft_seconds": 196.4594281000027,
+          "decode_seconds": 13.55341189999308,
+          "decode_tokens_per_second": 9.37033426985753
+        },
+        {
+          "prefill_seconds": 196.90268970000034,
+          "ttft_seconds": 196.9031277000031,
+          "decode_seconds": 13.562816300007398,
+          "decode_tokens_per_second": 9.363836919322628
+        }
+      ],
+      "prompt_sha256": "d783c98fc2fa0fa04d284ab71ec5d1e21d5e75ed59f43f61d5c884cd994b64f7",
+      "ep_prefill_peak_gib": 56.89607511553913,
+      "ep_decode_peak_gib": 56.89607511553913,
+      "decode_ms_per_token": 106.79382913391652,
+      "prefill_peak_gib": 57.703712463378906,
+      "prefill_other_gib": 38.86214768141508,
+      "decode_peak_gib": 57.703712463378906,
+      "decode_other_gib": 38.86214768141508,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999948551280903,
+        "relative_l2": 0.0034766470133568432,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999378812166595,
+        "relative_l2": 0.011149533867562258,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 65536,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "30adc0ec389254854344105a9e86acba9a834793fc1fcb29a36e91283d6eb5ca",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 4.0078125,
+      "kv_payload_gib": 4.0078125,
+      "prefill_seconds": 195.116789599997,
+      "ttft_seconds": 195.11751689999073,
+      "decode_tps": 9.315992813274377,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 195.116789599997,
+          "ttft_seconds": 195.11751689999073,
+          "decode_seconds": 13.653000699996483,
+          "decode_tokens_per_second": 9.30198443482338
+        },
+        {
+          "prefill_seconds": 194.8273266000033,
+          "ttft_seconds": 194.8277320000052,
+          "decode_seconds": 13.60290869999153,
+          "decode_tokens_per_second": 9.336238506112966
+        },
+        {
+          "prefill_seconds": 195.2050076000014,
+          "ttft_seconds": 195.2053664999985,
+          "decode_seconds": 13.63247080000292,
+          "decode_tokens_per_second": 9.315992813274377
+        }
+      ],
+      "prompt_sha256": "d783c98fc2fa0fa04d284ab71ec5d1e21d5e75ed59f43f61d5c884cd994b64f7",
+      "ep_prefill_peak_gib": 56.89607511553913,
+      "ep_decode_peak_gib": 56.89607511553913,
+      "decode_ms_per_token": 107.34228976380251,
+      "prefill_peak_gib": 57.703712463378906,
+      "prefill_other_gib": 38.86214768141508,
+      "decode_peak_gib": 57.703712463378906,
+      "decode_other_gib": 38.86214768141508,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999948551280903,
+        "relative_l2": 0.0034766470133568432,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999378812166595,
+        "relative_l2": 0.011149533867562258,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 65536,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "345b612740038e81f70cbef28d4d7e45d0eef85925565dc1841fe931c0510e1f",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 1.03326416015625,
+      "kv_payload_gib": 1.03326416015625,
+      "prefill_seconds": 191.48719080000592,
+      "ttft_seconds": 191.4875880000036,
+      "decode_tps": 10.257803064351661,
+      "measured_requests": 3,
+      "timing_samples": [
+        {
+          "prefill_seconds": 191.74916959999246,
+          "ttft_seconds": 191.74962010000309,
+          "decode_seconds": 12.307129399996484,
+          "decode_tokens_per_second": 10.319221962518432
+        },
+        {
+          "prefill_seconds": 191.48719080000592,
+          "ttft_seconds": 191.4875880000036,
+          "decode_seconds": 12.38081869999587,
+          "decode_tokens_per_second": 10.257803064351661
+        },
+        {
+          "prefill_seconds": 191.4083083000005,
+          "ttft_seconds": 191.4087361000129,
+          "decode_seconds": 12.456856899996637,
+          "decode_tokens_per_second": 10.195188161793387
+        }
+      ],
+      "prompt_sha256": "d783c98fc2fa0fa04d284ab71ec5d1e21d5e75ed59f43f61d5c884cd994b64f7",
+      "ep_prefill_peak_gib": 54.17506586108357,
+      "ep_decode_peak_gib": 54.17506586108357,
+      "decode_ms_per_token": 97.48676141729032,
+      "prefill_peak_gib": 55.03132247924805,
+      "prefill_other_gib": 39.16430603712797,
+      "decode_peak_gib": 55.03132247924805,
+      "decode_other_gib": 39.16430603712797,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999948551280903,
+        "relative_l2": 0.0034766470133568432,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9998419026533744,
+        "relative_l2": 0.01778119119474133,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998285669247469,
+        "relative_l2": 0.018516649377199216,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 0.9999999999999999,
+          "relative_l2": 0.0,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "b47a3cae6c8fcc571a212b6cd5d7e9014928773c258af8b2862d14432e5709b2",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            317
+          ],
+          "cosine": 0.9998285669247469,
+          "relative_l2": 0.018516649377199216,
+          "reference_platform": "Windows current dense control",
+          "reference_sha256": "308fd372217df67311f7184df9ea8648a1486173467c7951fe38e2372e84b205",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 131072,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "0c15c3147cad63b9a770802888ad99636c9b8664f56d36addc4c6c43f71942bd",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4",
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 8.0078125,
+      "kv_payload_gib": 8.0078125,
+      "prefill_seconds": 583.7551089999906,
+      "ttft_seconds": 583.7553474999877,
+      "decode_tps": 6.064962095535861,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "prefill_seconds": 583.7551089999906,
+          "ttft_seconds": 583.7553474999877,
+          "decode_seconds": 20.939949500010698,
+          "decode_tokens_per_second": 6.064962095535861
+        }
+      ],
+      "prompt_sha256": "e84c6e0b6e5a44344a5e9ed36e6dc4fb7ee27fb2a849fdf27d102e2bfc059f2a",
+      "ep_prefill_peak_gib": 98.28944403771311,
+      "ep_decode_peak_gib": 98.28944403771311,
+      "decode_ms_per_token": 164.88149212606848,
+      "prefill_peak_gib": 99.40751647949219,
+      "prefill_other_gib": 76.56595169752836,
+      "decode_peak_gib": 99.40751647949219,
+      "decode_other_gib": 76.56595169752836,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999999999999999,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 128,
+      "first_divergent_token_1based": null,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 131072,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "40c1678eaab26d9db8cc42947a8a628367a27ea11e772c4f98293a0f9b543895",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 8.0078125,
+      "kv_payload_gib": 8.0078125,
+      "prefill_seconds": 552.2652516999951,
+      "ttft_seconds": 552.2655937999953,
+      "decode_tps": 7.267035243823506,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "prefill_seconds": 552.2652516999951,
+          "ttft_seconds": 552.2655937999953,
+          "decode_seconds": 17.47617780001019,
+          "decode_tokens_per_second": 7.267035243823506
+        }
+      ],
+      "prompt_sha256": "e84c6e0b6e5a44344a5e9ed36e6dc4fb7ee27fb2a849fdf27d102e2bfc059f2a",
+      "ep_prefill_peak_gib": 98.26344572100788,
+      "ep_decode_peak_gib": 98.26344572100788,
+      "decode_ms_per_token": 137.60769921267865,
+      "prefill_peak_gib": 99.29193878173828,
+      "prefill_other_gib": 76.45037399977446,
+      "decode_peak_gib": 99.29193878173828,
+      "decode_other_gib": 76.45037399977446,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999976496139357,
+        "relative_l2": 0.002284573275809863,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 64,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999613746809561,
+        "relative_l2": 0.008840878494356396,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 131072,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "5ae0767dedfe31d408acc8f01942e16fd81cf6e2dc55abca24323e62e5fd6f7f",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "1957e642833aa3d28d7196b52471b524cf6da022df677140b78977ddf4e10440",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 8.0078125,
+      "kv_payload_gib": 8.0078125,
+      "prefill_seconds": 550.3667380999977,
+      "ttft_seconds": 550.3669402999949,
+      "decode_tps": 7.054943500012063,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "prefill_seconds": 550.3667380999977,
+          "ttft_seconds": 550.3669402999949,
+          "decode_seconds": 18.001561600001878,
+          "decode_tokens_per_second": 7.054943500012063
+        }
+      ],
+      "prompt_sha256": "e84c6e0b6e5a44344a5e9ed36e6dc4fb7ee27fb2a849fdf27d102e2bfc059f2a",
+      "ep_prefill_peak_gib": 98.26344572100788,
+      "ep_decode_peak_gib": 98.26344572100788,
+      "decode_ms_per_token": 141.74457952757385,
+      "prefill_peak_gib": 99.29193878173828,
+      "prefill_other_gib": 76.45037399977446,
+      "decode_peak_gib": 99.29193878173828,
+      "decode_other_gib": 76.45037399977446,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999976496139357,
+        "relative_l2": 0.002284573275809863,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 64,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9999613746809561,
+        "relative_l2": 0.008840878494356396,
+        "passed": true
+      },
+      "previous_quality_checks": []
+    },
+    {
+      "context": 131072,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "full_request",
+      "status": "passed",
+      "receipt_sha256": "8d667e96c264bd7dd66510933907f09f800d08a743062d3c5c15d639435cc1ca",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "b124088f4c26a2cb348d7a6cdb926380b80ad08abb45afbf911b647db5624a28",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 2.06451416015625,
+      "kv_payload_gib": 2.06451416015625,
+      "prefill_seconds": 540.3400448000029,
+      "ttft_seconds": 540.3403943000012,
+      "decode_tps": 8.289196570668931,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "prefill_seconds": 540.3400448000029,
+          "ttft_seconds": 540.3403943000012,
+          "decode_seconds": 15.32114709999587,
+          "decode_tokens_per_second": 8.289196570668931
+        }
+      ],
+      "prompt_sha256": "e84c6e0b6e5a44344a5e9ed36e6dc4fb7ee27fb2a849fdf27d102e2bfc059f2a",
+      "ep_prefill_peak_gib": 92.82368646655232,
+      "ep_decode_peak_gib": 92.82368646655232,
+      "decode_ms_per_token": 120.63895354327457,
+      "prefill_peak_gib": 93.89017105102539,
+      "prefill_other_gib": 76.99190460890532,
+      "decode_peak_gib": 93.89017105102539,
+      "decode_other_gib": 76.99190460890532,
+      "prefill_vs_baseline": {
+        "cosine": 0.9999976496139357,
+        "relative_l2": 0.002284573275809863,
+        "passed": true
+      },
+      "matching_tokens_vs_baseline": 64,
+      "first_divergent_token_1based": 2,
+      "first_decode_vs_baseline": {
+        "cosine": 0.99990166088793,
+        "relative_l2": 0.014641121017482066,
+        "passed": true
+      },
+      "prefill_vs_ring_kv": {
+        "cosine": 1.0000000000000002,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "matching_tokens_vs_ring_kv": 128,
+      "first_divergent_token_vs_ring_kv_1based": null,
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.9998985515498866,
+        "relative_l2": 0.015166143973092464,
+        "passed": true
+      },
+      "previous_quality_checks": [
+        {
+          "phase": "prefill-logits",
+          "prefix": [],
+          "cosine": 1.0000000000000002,
+          "relative_l2": 0.0,
+          "reference_platform": "Archived lx01 Ring-KV diagnostic, current dense control did not complete",
+          "reference_sha256": "d095b1c6e1ee428660833a3821c4634f0be89b69dc8adb1a582415f5631feebb",
+          "passed": true
+        },
+        {
+          "phase": "first-decode-logits",
+          "prefix": [
+            317
+          ],
+          "cosine": 0.9998985515498866,
+          "relative_l2": 0.015166143973092462,
+          "reference_platform": "Archived lx01 Ring-KV diagnostic, current dense control did not complete",
+          "reference_sha256": "6ab84853bbf17b34255c6245b33d83fd8f7bf71fe8a8e61c249c9a6f66568c60",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "context": 262144,
+      "variant": "existing",
+      "name": "Baseline",
+      "protocol": "synthetic",
+      "status": "passed",
+      "receipt_sha256": "bb27106c65a4fa548d7d095ea700826bdfb88d0c97951799db99a84b7f4608fb",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "e5a49b07cf9dca380a702b263be760fac504e30615913cc67be8e7afaddcf902",
+        "custom_kernels_gfx1151.dll": "7a4960ad764c2781d3aacbfdfe577cefddef8b63b03a05f363abafa0aa8da5d4"
+      },
+      "harness_sha256": "c8f1f583045b1ca110595e65430d05af589d4b83d7167107c9bc8f6063dcbe27",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 16.0,
+      "kv_payload_gib": 16.0,
+      "prefill_seconds": null,
+      "ttft_seconds": null,
+      "decode_tps": 4.374875029815131,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "decode_seconds": 29.25797859999875,
+          "generated_steps": 128
+        }
+      ],
+      "source_history_sha256": "f6b388c5a5d40cc7c24c670ebbb0e1bc906eaa039f2de8b98dafc23209ccc2d4",
+      "ep_decode_peak_gib": 31.224352010525763,
+      "decode_ms_per_token": 228.57795781249024,
+      "prefill_peak_gib": null,
+      "prefill_other_gib": null,
+      "decode_peak_gib": 31.917190551757812,
+      "decode_other_gib": 1.0834382697939873,
+      "first_decode_vs_baseline": {
+        "cosine": 1.0,
+        "relative_l2": 0.0,
+        "passed": true
+      },
+      "previous_quality_checks": null
+    },
+    {
+      "context": 262144,
+      "variant": "ring_q",
+      "name": "Ring-Q",
+      "protocol": "synthetic",
+      "status": "passed",
+      "receipt_sha256": "a6dabbf98dfa1d74201def7ea1861afa507bae8d539fab2646e1de1ec2038c66",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "0df5b03b545a4e4de933f0b46c5ddcde7bcdc02f1a7a3502afc7e6597be04497",
+        "custom_kernels_gfx1151.dll": "fa6a14a2470b2bc741da7314c1905da1d82acb4e54a4f1f8730567a336d5ba1d"
+      },
+      "harness_sha256": "c8f1f583045b1ca110595e65430d05af589d4b83d7167107c9bc8f6063dcbe27",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 16.0,
+      "kv_payload_gib": 16.0,
+      "prefill_seconds": null,
+      "ttft_seconds": null,
+      "decode_tps": 5.055499111257955,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "decode_seconds": 25.318964000005508,
+          "generated_steps": 128
+        }
+      ],
+      "source_history_sha256": "f6b388c5a5d40cc7c24c670ebbb0e1bc906eaa039f2de8b98dafc23209ccc2d4",
+      "ep_decode_peak_gib": 31.172013864852488,
+      "decode_ms_per_token": 197.80440625004303,
+      "prefill_peak_gib": null,
+      "prefill_other_gib": null,
+      "decode_peak_gib": 31.82177734375,
+      "decode_other_gib": 0.9880250617861748,
+      "first_decode_vs_baseline": {
+        "cosine": 0.8922280125151258,
+        "relative_l2": 0.46559266030176777,
+        "passed": false
+      },
+      "previous_quality_checks": null
+    },
+    {
+      "context": 262144,
+      "variant": "ring",
+      "name": "Ring-KV",
+      "protocol": "synthetic",
+      "status": "passed",
+      "receipt_sha256": "46ab8839fef5c7a6863673e3b8e4eba33db3a7fe7ea85955a9aa5937cd1f07b5",
+      "error": null,
+      "library_sha256": {
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c",
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae"
+      },
+      "harness_sha256": "a67247769b0a326a2b6266b3a4a9f015b40ab79b49cfc38d0ced9bc2b07b54b2",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 16.0,
+      "kv_payload_gib": 16.0,
+      "prefill_seconds": null,
+      "ttft_seconds": null,
+      "decode_tps": 5.0845120582841945,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "decode_seconds": 25.174490400007926,
+          "generated_steps": 128
+        }
+      ],
+      "source_history_sha256": "f6b388c5a5d40cc7c24c670ebbb0e1bc906eaa039f2de8b98dafc23209ccc2d4",
+      "ep_decode_peak_gib": 31.172013864852488,
+      "decode_ms_per_token": 196.67570625006192,
+      "prefill_peak_gib": null,
+      "prefill_other_gib": null,
+      "decode_peak_gib": 31.82177734375,
+      "decode_other_gib": 0.9880250617861748,
+      "first_decode_vs_baseline": {
+        "cosine": 0.8922280125151258,
+        "relative_l2": 0.46559266030176777,
+        "passed": false
+      },
+      "previous_quality_checks": null
+    },
+    {
+      "context": 262144,
+      "variant": "tq4",
+      "name": "TurboQuant",
+      "protocol": "synthetic",
+      "status": "passed",
+      "receipt_sha256": "38ef38ae744ffbe85602a973a83fb18d0772cf38abdb7dbff610d782a03ad3a9",
+      "error": null,
+      "library_sha256": {
+        "hipgpu.dll": "053ea08295457ac19e71117aa8265ee7cd672ea1b2b5a158a6d66bce2a4518ae",
+        "custom_kernels_gfx1151.dll": "e029b6a45872618000decd5cd5ec73faf3415f4a777b5263c9e888485534947c"
+      },
+      "harness_sha256": "a67247769b0a326a2b6266b3a4a9f015b40ab79b49cfc38d0ced9bc2b07b54b2",
+      "weights_gib": 14.833752281963825,
+      "kv_gib": 4.125,
+      "kv_payload_gib": 4.125,
+      "prefill_seconds": null,
+      "ttft_seconds": null,
+      "decode_tps": 6.459719264840667,
+      "measured_requests": 1,
+      "timing_samples": [
+        {
+          "decode_seconds": 19.815102599997772,
+          "generated_steps": 128
+        }
+      ],
+      "source_history_sha256": "f6b388c5a5d40cc7c24c670ebbb0e1bc906eaa039f2de8b98dafc23209ccc2d4",
+      "ep_decode_peak_gib": 19.37141449842602,
+      "decode_ms_per_token": 154.8054890624826,
+      "prefill_peak_gib": null,
+      "prefill_other_gib": null,
+      "decode_peak_gib": 20.033008575439453,
+      "decode_other_gib": 1.074256293475628,
+      "first_decode_vs_baseline": {
+        "cosine": 0.9027329516709036,
+        "relative_l2": 0.44064202010532677,
+        "passed": false
+      },
+      "first_decode_vs_ring_kv": {
+        "cosine": 0.8908781896871608,
+        "relative_l2": 0.4654823875072989,
+        "passed": false
+      },
+      "previous_quality_checks": {
+        "cosine": 0.8908781896871608,
+        "relative_l2": 0.4654823875072989,
+        "passed": false,
+        "input_token": 317
+      }
+    }
+  ],
+  "model_files": [
+    {
+      "file": ".gitattributes",
+      "bytes": 1730,
+      "sha256": "f53736fecc0397177c0df9d0e655a4f2ecd51b4df280dc9b6995663c341ffe3a"
+    },
+    {
+      "file": "README.md",
+      "bytes": 2278,
+      "sha256": "7d9e93bd2522e1d76cc2556c63a3b75a4d5f5c4856699c1da16f7c3d0859804f"
+    },
+    {
+      "file": "chat_template.jinja",
+      "bytes": 9127,
+      "sha256": "27dd380a2dd2cd6d7c9645609395c886aa8fcce4ac08c6d1c943c209ba5701bc"
+    },
+    {
+      "file": "config.json",
+      "bytes": 3834,
+      "sha256": "bbfc9a2934e1cae485e88789748ae5d8ecfe2e0cb88b4e5ffdfab99f806b6aba"
+    },
+    {
+      "file": "embedding.onnx",
+      "bytes": 3018,
+      "sha256": "58f07f986c7a49693e85258df282134f29b5d158702ff334f228ecfc738dadb2"
+    },
+    {
+      "file": "embedding.onnx.data",
+      "bytes": 2542796800,
+      "sha256": "41a8b66f4d3d229db720eb18f0e4567d721e784c3ef8f891274cfe1a362473bd"
+    },
+    {
+      "file": "genai_config.json",
+      "bytes": 2797,
+      "sha256": "5c3698196aa4ab74a8e997ef2750217cdc6afdefadd26741023c9b48f8ba54e1"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 227,
+      "sha256": "b3efcd7b58f605fc7f42fcb69d26dbcfa31e6858b90ce8078f2597524d463a63"
+    },
+    {
+      "file": "processor_config.json",
+      "bytes": 1606,
+      "sha256": "1a234febb152d8efb9ee1489d562f72ed5af6b451213111cc2f0ed695f425169"
+    },
+    {
+      "file": "text.onnx",
+      "bytes": 1413840,
+      "sha256": "44b712df872250c1c1614c3aa717788a103f3a814e0cfd24b22196d3b99509cd"
+    },
+    {
+      "file": "text.onnx.data",
+      "bytes": 13394313216,
+      "sha256": "9944f22d543669858768ab365cd8b09af68117396cf7e030c10635468db8a0e3"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 11071263,
+      "sha256": "6f57b7081304082fec953d5087f68107c261685f3d73f816233acffb088f8268"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 1155,
+      "sha256": "3248af4991a821494d21aa4edaec4a858d16f0839c24c852a570833f23f6f714"
+    },
+    {
+      "file": "vision.onnx",
+      "bytes": 3619391,
+      "sha256": "dedbc181f83848c273dd00715304bf8aea15ee7e14bafdf52c15f719933e070f"
+    },
+    {
+      "file": "vision.onnx.data",
+      "bytes": 921713632,
+      "sha256": "dfd5772e05b93608ad19924a795da6ee4539bf4532124d299bedf0020074ca50"
+    }
+  ],
+  "codec": {
+    "codec": "tq4_mse_qr_v1",
+    "seed": 42,
+    "head_dim": 256,
+    "row_bytes": 132,
+    "transform": "z=(x/n)@Pi.T; xhat=n*centroid[index]@Pi",
+    "normalization": "FP32 true L2 norm; zero norm produces an all-zero packed row",
+    "tie_break": "lowest centroid index at exact equal distance",
+    "torch": "2.13.0+rocm10.0.0",
+    "sha256": "a2a312f645ba0a7970bda404fb4f1e1f15a01c2dd18c257b6a4c83397e806a3c",
+    "constants_sha256": "9f2461f09da0a75ac9c6a96dfb3f06a7384e21d63c1061ae9d8b2a69077e3ade",
+    "standalone_source": {
+      "commit": "a6218a9b99ecabd3028da670fb0f85bb1114e552",
+      "files": {
+        "src/turboquant.py": "6e9e09d0af5de04a0b1357f3c5d9b7ea2f6fbadb5bb553550a59577a6cb0306e",
+        "src/qwen3_5_attention_turboquant.py": "690caf7f924f667bbe5161ec38199d90ac2a71a977f5561fb8a6c1791beb7198",
+        "src/turboquant_hip.py": "401ad4422ee4c9ca0e9b6fe983bf1d004167c0a0393ac44ba57f719da61f5861",
+        "hip_kernels/src/tq_phase3.hip": "493670025ae82e528972681ecbfab1b5f3ba44bdae2f047b3d04d79e506d04ef",
+        "hip_kernels/src/tq_phase6.hip": "7d730bde0b6731897c45d5f10747d6c306d2a4cf9606eef61f3368b873d2b46c",
+        "tests/hip/test_hip_parity.py": "0faf47b251cc10512a80248504fb9f87509c33486a09df2f8446a27def27c8a1",
+        "tests/test_sp_kernel.py": "deee62a745bbcc00af893cb7ad3cc4e1c556c766e9cb7ce261d6566cc8c61443"
+      }
+    }
+  },
+  "measured_source_provenance": {
+    "base": "1fd456844be94ee3539481dbab0794105798c972",
+    "uncommitted_experimental_changes": true,
+    "source_sha256": {
+      "backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp": "2859375a87b1c65be267d2e0622ec0994b26c1d280d210c511f7f0b09de42f1a",
+      "backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp": "66b915b5f9a83778659e7365cdaec4ee6f87aa2888c3455bfe40b67047f30257",
+      "lib/Conversion/HipToLLVM/GqaLowering.cpp": "c262b94678a467e6f2ce6f60386c8ac104205797af427ad560fc02db3315dd52",
+      "lib/Runtime/Kernels/CMakeLists.txt": "683d05efedcf943dc7d2de654c1ed82717beeb972c61cb9e1222dc8259bff29f",
+      "lib/Runtime/Kernels/hip/ring/ring_gqa.hip": "8f85ab23c7a3ca8a2f23ecb89ad0f4afd41754edcf619a5c2ac6b30c84eb1c91",
+      "lib/Runtime/Kernels/include/hip_custom_kernels.h": "0c2bfc9e1e339e7e19757c68f398088e0e29fe6cfe9bd9ee2ef24ab28851929a",
+      "lib/Runtime/hipdnn_ep_runtime.h": "244aa876448dbc738626d1c5234db64ea0eee819183129e1216d002b2a9bfd32",
+      "lib/Runtime/mock/mock_gpu.cpp": "52a34154c5f4722efab10c584d5c981eac33d7a6840bb14226d4aa51f1eea841",
+      "lib/Runtime/real/gqa.cpp": "3e5972ce8e8dae958a9429496613c3b409b8ea2ae6295eb7e5a8b56759a2e1b9",
+      "morphizen/ort-bridge/src/morphizen-ep.cpp": "ba0d4eb9f714177d06f3dd7da7ecd5c87bfa1d5f9c35edb7c73125144603a1dc",
+      "lib/Runtime/Kernels/hip/turboquant_kernel.hip": "57a004ccb3698682e62dc28b8d7552dfcf458fa9f632ea517a657dffae8b084c",
+      "test/lit/e2e/test_gqa_output_allocator_packed_dim.mlir": "857fafbd813cca59c8981d4ff1bfbfde10bc1131ef5ccbfcdd3f2c9aaaec2d6f",
+      "tools/turboquant/check_genai_windows.py": "5f9acd3544bb9bd5df5d2b930ad1f40b25d48e03f75f715bc3329d8965743125",
+      "tools/turboquant/check_hip.py": "2afd98e3ef7b6b9f2b89e6f3f25a6ac81cde730070121a5c942db13c0a1d2cba",
+      "tools/turboquant/check_hip_extended.py": "f776049dc737b7d0fa26165e378c8befb7800c9b642b863ce6963aef20e8858a",
+      "tools/turboquant/hip_test_utils.py": "33aaf904b6da4d0dfd01670c9a57f7c7833c395dba8c84bdc604234f52aa77d0",
+      "tools/turboquant/reference.py": "ff07e1dee68f6559ff70c40f0317a7bdf17a1a76229bc52abeaeb862b756e531",
+      "tools/turboquant/test_reference.py": "0a1c52c48bdbba2f7f89a98609027d3ef942eedf1a28df236d91602a1b98ae59",
+      "tools/turboquant/write_codec.py": "65e1fa3a25a86170a3bce446886b3d091ad1923be99e3d98dfc1e2f11220de06"
+    },
+    "allocation_counter_sha256": "69aeed09a70357512dff02fcbe197b2dd9c0fa43c9ed868467ef6ce0f07ac8fe"
+  },
+  "measurement_note": "For this recorded campaign, the Ring parent advanced from 1fd4568 to 63a00f5 by documentation-only commits before baseline/Ring-Q builds. Subsequent PR preparation restored Unicode comments/log text and applied formatting; GPU arithmetic was not changed. Binary hashes identify the measured installs.",
+  "package_validation": {
+    "status": "complete",
+    "checks": [
+      {
+        "name": "package-reference",
+        "returncode": 0,
+        "elapsed_seconds": 1.5894787311553955,
+        "status": "passed"
+      },
+      {
+        "name": "package-strict-encoder",
+        "returncode": 1,
+        "elapsed_seconds": 5.981928586959839,
+        "status": "known_failed_gate"
+      },
+      {
+        "name": "package-extended",
+        "returncode": 0,
+        "elapsed_seconds": 12.284722805023193,
+        "status": "passed"
+      },
+      {
+        "name": "package-long",
+        "returncode": 0,
+        "elapsed_seconds": 26.663405656814575,
+        "status": "passed"
+      },
+      {
+        "name": "package-genai",
+        "returncode": 0,
+        "elapsed_seconds": 8.034804821014404,
+        "status": "passed"
+      },
+      {
+        "name": "package-profiler-build",
+        "returncode": 0,
+        "elapsed_seconds": 1.149440050125122,
+        "status": "passed"
+      }
+    ],
+    "all_correctness_gates_passed": false,
+    "draft_validation_complete": true
+  },
+  "format_audit": {
+    "checks": [
+      {
+        "file": "backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Conversion/HipToLLVM/GqaLowering.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/Kernels/hip/ring/ring_gqa.hip",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/Kernels/hip/turboquant_kernel.hip",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/Kernels/include/hip_custom_kernels.h",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/hipdnn_ep_runtime.h",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/mock/mock_gpu.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "lib/Runtime/real/gqa.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      },
+      {
+        "file": "morphizen/ort-bridge/src/morphizen-ep.cpp",
+        "noncomment_tokens_unchanged_by_formatting": true
+      }
+    ],
+    "passed": true
+  },
+  "direct_checks": {
+    "kernel-long.json": {
+      "status": "passed",
+      "cases": [
+        {
+          "length": 131072,
+          "max_abs": 0.000244140625,
+          "relative_l2": 0.000695460825227201,
+          "pairs": [
+            {
+              "tq_ms": 2.5902399996994063,
+              "ring_ms": 3.0669600004330277
+            },
+            {
+              "tq_ms": 2.557120000710711,
+              "ring_ms": 2.9637600004207343
+            },
+            {
+              "tq_ms": 2.5907000002916902,
+              "ring_ms": 2.9639000014867634
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; serial run, diagnostic only"
+        },
+        {
+          "length": 131200,
+          "max_abs": 0.000244140625,
+          "relative_l2": 0.0008101657731458545,
+          "pairs": [
+            {
+              "tq_ms": 2.5282599992351606,
+              "ring_ms": 2.963079998153262
+            },
+            {
+              "tq_ms": 2.4971599981654435,
+              "ring_ms": 2.9981200001202524
+            },
+            {
+              "tq_ms": 2.4671400024089962,
+              "ring_ms": 2.9915599996456876
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; serial run, diagnostic only"
+        },
+        {
+          "length": 262144,
+          "max_abs": 0.0001220703125,
+          "relative_l2": 0.0007238518446683884,
+          "pairs": [
+            {
+              "tq_ms": 5.155740000191145,
+              "ring_ms": 6.0205799993127584
+            },
+            {
+              "tq_ms": 4.944659999455325,
+              "ring_ms": 6.092340001487173
+            },
+            {
+              "tq_ms": 4.937299998709932,
+              "ring_ms": 5.954479999491014
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; serial run, diagnostic only"
+        }
+      ]
+    },
+    "kernel-extended.json": {
+      "status": "passed",
+      "cases": [
+        {
+          "length": 33,
+          "max_abs": 0.00390625,
+          "relative_l2": 0.0004929298884235322,
+          "pairs": [
+            {
+              "tq_ms": 0.04400999993473912,
+              "ring_ms": 0.028789999972408015
+            },
+            {
+              "tq_ms": 0.028450000293863315,
+              "ring_ms": 0.0158833334959733
+            },
+            {
+              "tq_ms": 0.027763333249216277,
+              "ring_ms": 0.013433333272890499
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 129,
+          "max_abs": 0.001953125,
+          "relative_l2": 0.0004822160117328167,
+          "pairs": [
+            {
+              "tq_ms": 0.041986666716790445,
+              "ring_ms": 0.02070333333297943
+            },
+            {
+              "tq_ms": 0.03423999975590656,
+              "ring_ms": 0.02014333294937387
+            },
+            {
+              "tq_ms": 0.03443000023253262,
+              "ring_ms": 0.020379999962945778
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 4096,
+          "max_abs": 0.00048828125,
+          "relative_l2": 0.0006619104533456266,
+          "pairs": [
+            {
+              "tq_ms": 0.17023999971570447,
+              "ring_ms": 0.13387999982417872
+            },
+            {
+              "tq_ms": 0.1558033337156909,
+              "ring_ms": 0.13472999999066815
+            },
+            {
+              "tq_ms": 0.1594999999118348,
+              "ring_ms": 0.13034000003244728
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 8192,
+          "max_abs": 0.00048828125,
+          "relative_l2": 0.0006339264800772071,
+          "pairs": [
+            {
+              "tq_ms": 0.27627666665163514,
+              "ring_ms": 0.18302333337487653
+            },
+            {
+              "tq_ms": 0.2649800003079387,
+              "ring_ms": 0.18324666695358852
+            },
+            {
+              "tq_ms": 0.2524766668405694,
+              "ring_ms": 0.1865699998840379
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 16384,
+          "max_abs": 0.00048828125,
+          "relative_l2": 0.0007125856936909258,
+          "pairs": [
+            {
+              "tq_ms": 0.3843066665770796,
+              "ring_ms": 0.39426000003004447
+            },
+            {
+              "tq_ms": 0.32774333327931043,
+              "ring_ms": 0.39646999988084036
+            },
+            {
+              "tq_ms": 0.3277900003013201,
+              "ring_ms": 0.3888933332442927
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 32768,
+          "max_abs": 0.0009765625,
+          "relative_l2": 0.0006904672482050955,
+          "pairs": [
+            {
+              "tq_ms": 0.7068533333949745,
+              "ring_ms": 0.758779999644806
+            },
+            {
+              "tq_ms": 0.6594000001011106,
+              "ring_ms": 0.7595766665569196
+            },
+            {
+              "tq_ms": 0.6626433333925282,
+              "ring_ms": 0.7879433328829085
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 65536,
+          "max_abs": 0.00048828125,
+          "relative_l2": 0.0007167088333517313,
+          "pairs": [
+            {
+              "tq_ms": 1.2410366670034516,
+              "ring_ms": 1.5046199997110914
+            },
+            {
+              "tq_ms": 1.2720699999287415,
+              "ring_ms": 1.5236833331679616
+            },
+            {
+              "tq_ms": 1.2359300002572127,
+              "ring_ms": 1.505393333597264
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        },
+        {
+          "length": 65664,
+          "max_abs": 0.000244140625,
+          "relative_l2": 0.0007437925669364631,
+          "pairs": [
+            {
+              "tq_ms": 1.2406300001506072,
+              "ring_ms": 1.4905666665678534
+            },
+            {
+              "tq_ms": 1.2581999995745718,
+              "ring_ms": 1.4902666667088245
+            },
+            {
+              "tq_ms": 1.2428366666426882,
+              "ring_ms": 1.4847833333381761
+            }
+          ],
+          "timing_scope": "attention including rotations, excludes append; concurrent CPU build, diagnostic only"
+        }
+      ]
+    },
+    "windows-ring-direct.json": {
+      "status": "passed",
+      "cases": [
+        {
+          "n": 1,
+          "scale": 1.0,
+          "max_abs": 0.0,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 15,
+          "scale": 1.0,
+          "max_abs": 0.0007386207580566406,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 16,
+          "scale": 1.0,
+          "max_abs": 0.0004875659942626953,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 17,
+          "scale": 1.0,
+          "max_abs": 0.0004868507385253906,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 31,
+          "scale": 1.0,
+          "max_abs": 0.0004862546920776367,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 32,
+          "scale": 1.0,
+          "max_abs": 0.0003802776336669922,
+          "workspace": 0,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "scale": 0.125,
+          "max_abs": 0.00022709369659423828,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "scale": 1.0,
+          "max_abs": 0.0002440810203552246,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "scale": 8.0,
+          "max_abs": 0.0009682178497314453,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 63,
+          "scale": 1.0,
+          "max_abs": 0.0002442002296447754,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 64,
+          "scale": 1.0,
+          "max_abs": 0.0002402663230895996,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 65,
+          "scale": 1.0,
+          "max_abs": 0.00024068355560302734,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 127,
+          "scale": 1.0,
+          "max_abs": 0.0002022385597229004,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 128,
+          "scale": 1.0,
+          "max_abs": 0.0002415776252746582,
+          "workspace": 99072,
+          "pass": true
+        },
+        {
+          "n": 129,
+          "scale": 0.125,
+          "max_abs": 0.00011071562767028809,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 129,
+          "scale": 1.0,
+          "max_abs": 0.0002086162567138672,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 129,
+          "scale": 8.0,
+          "max_abs": 0.0009684562683105469,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 255,
+          "scale": 1.0,
+          "max_abs": 0.0001207888126373291,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 256,
+          "scale": 1.0,
+          "max_abs": 0.00012058019638061523,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 257,
+          "scale": 1.0,
+          "max_abs": 0.00012072920799255371,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 511,
+          "scale": 1.0,
+          "max_abs": 0.00010803341865539551,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 512,
+          "scale": 1.0,
+          "max_abs": 6.097555160522461e-05,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 513,
+          "scale": 1.0,
+          "max_abs": 0.00011113286018371582,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 1023,
+          "scale": 1.0,
+          "max_abs": 5.97536563873291e-05,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 1024,
+          "scale": 1.0,
+          "max_abs": 6.063282489776611e-05,
+          "workspace": 198144,
+          "pass": true
+        },
+        {
+          "n": 1025,
+          "scale": 0.125,
+          "max_abs": 3.053992986679077e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 1025,
+          "scale": 1.0,
+          "max_abs": 6.0498714447021484e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 1025,
+          "scale": 8.0,
+          "max_abs": 0.0009768009185791016,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 2047,
+          "scale": 1.0,
+          "max_abs": 5.7250261306762695e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 2048,
+          "scale": 1.0,
+          "max_abs": 5.328655242919922e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 2049,
+          "scale": 1.0,
+          "max_abs": 5.418062210083008e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 4096,
+          "scale": 1.0,
+          "max_abs": 3.0413269996643066e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 8191,
+          "scale": 1.0,
+          "max_abs": 2.483278512954712e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 8192,
+          "scale": 1.0,
+          "max_abs": 1.640617847442627e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 8193,
+          "scale": 1.0,
+          "max_abs": 2.909451723098755e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9215,
+          "scale": 1.0,
+          "max_abs": 1.524016261100769e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9216,
+          "scale": 0.125,
+          "max_abs": 1.2796372175216675e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9216,
+          "scale": 1.0,
+          "max_abs": 1.535937190055847e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9216,
+          "scale": 8.0,
+          "max_abs": 0.00096893310546875,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "scale": 0.125,
+          "max_abs": 1.3459473848342896e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "scale": 1.0,
+          "max_abs": 1.5255063772201538e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "scale": 8.0,
+          "max_abs": 0.0009741783142089844,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 10240,
+          "scale": 1.0,
+          "max_abs": 1.5255063772201538e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 16384,
+          "scale": 1.0,
+          "max_abs": 1.524016261100769e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 32768,
+          "scale": 0.125,
+          "max_abs": 7.5232237577438354e-06,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 32768,
+          "scale": 1.0,
+          "max_abs": 1.2021511793136597e-05,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 32768,
+          "scale": 8.0,
+          "max_abs": 0.0009746551513671875,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 65536,
+          "scale": 1.0,
+          "max_abs": 7.675960659980774e-06,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 65664,
+          "scale": 0.125,
+          "max_abs": 3.85381281375885e-06,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 65664,
+          "scale": 1.0,
+          "max_abs": 7.525086402893066e-06,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 65664,
+          "scale": 8.0,
+          "max_abs": 0.0009648799896240234,
+          "workspace": 396288,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "dominant_token": 32,
+          "pass": true
+        },
+        {
+          "n": 129,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 129,
+          "dominant_token": 128,
+          "pass": true
+        },
+        {
+          "n": 1025,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 1025,
+          "dominant_token": 1024,
+          "pass": true
+        },
+        {
+          "n": 9216,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 9216,
+          "dominant_token": 9215,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "dominant_token": 9216,
+          "pass": true
+        },
+        {
+          "n": 32768,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 32768,
+          "dominant_token": 32767,
+          "pass": true
+        },
+        {
+          "n": 65664,
+          "dominant_token": 0,
+          "pass": true
+        },
+        {
+          "n": 65664,
+          "dominant_token": 65663,
+          "pass": true
+        },
+        {
+          "n": 1,
+          "nan_head_isolation": true,
+          "pass": true
+        },
+        {
+          "n": 33,
+          "nan_head_isolation": true,
+          "pass": true
+        },
+        {
+          "n": 9217,
+          "nan_head_isolation": true,
+          "pass": true
+        }
+      ],
+      "timing": []
+    },
+    "windows-encoder-diagnostic.json": {
+      "strict_encoder_gate": "failed; unchanged",
+      "differing_indices": [
+        {
+          "kind": "key",
+          "head": 1,
+          "token": 2908,
+          "dimension": 237,
+          "gpu_index": 9,
+          "cpu_index": 8,
+          "rotated_fp64": 0.01614821265713463,
+          "distance_to_midpoint": 2.5026391965721206e-09,
+          "centroid_spacing": 0.016237515956163406,
+          "fp64_nearest": 8
+        },
+        {
+          "kind": "key",
+          "head": 2,
+          "token": 1162,
+          "dimension": 239,
+          "gpu_index": 9,
+          "cpu_index": 10,
+          "rotated_fp64": 0.03266827361554504,
+          "distance_to_midpoint": 1.5822112647834174e-09,
+          "centroid_spacing": 0.016802597790956497,
+          "fp64_nearest": 10
+        }
+      ],
+      "decoder_oracle": "passed",
+      "decoder_max_abs": 6.103515625e-05
+    }
+  },
+  "genai_integration": {
+    "status": "passed",
+    "records": [
+      {
+        "codec": "tq4_mse_qr_v1",
+        "prompt_length": 1,
+        "processed_tokens": [
+          3,
+          10,
+          10,
+          10,
+          10
+        ],
+        "cache_shape": [
+          1,
+          4,
+          16,
+          66
+        ],
+        "prefill_dense_reference": "passed",
+        "decode_reference_max_abs": [
+          0.00048828125,
+          0.0009765625,
+          0.00048828125,
+          0.0009765625
+        ],
+        "checked_logit_dimensions": 16,
+        "status": "passed"
+      },
+      {
+        "codec": "tq4_mse_qr_v1",
+        "prompt_length": 4,
+        "processed_tokens": [
+          3,
+          4,
+          5,
+          6,
+          4,
+          0,
+          1,
+          11
+        ],
+        "cache_shape": [
+          1,
+          4,
+          16,
+          66
+        ],
+        "prefill_dense_reference": "passed",
+        "decode_reference_max_abs": [
+          0.00048828125,
+          0.00048828125,
+          0.00048828125,
+          0.000244140625
+        ],
+        "checked_logit_dimensions": 16,
+        "status": "passed"
+      },
+      {
+        "codec": "invalid",
+        "rejected": true,
+        "message": "Non-zero status code returned while running AMDGPUExecutionProvider_7636775739360288988_0 node. Name:'AMDGPUExecutionProvider_AMDGPUExecutionProvider_7636775739360288988_0_0' Status Message: inference_compute (allocator) failed with code: -1"
+      }
+    ]
+  }
+}

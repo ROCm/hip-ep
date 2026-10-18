@@ -710,7 +710,7 @@ extern "C" HIP_KERNEL_API int hip_gqa_ring_device_supported() {
 }
 
 extern "C" HIP_KERNEL_API size_t hip_gqa_ring_workspace(int nq, int total) {
-  if (nq != 1 || total < 1 || total > 65664)
+  if (nq != 1 || total < 1 || total > 262144)
     return 0;
   const int parts = ring_decode_partitions(total);
   return parts == 1 ? 0 : size_t(24) * parts * 258 * sizeof(float);
@@ -721,8 +721,8 @@ hip_gqa_ring_attention(void *stream_ptr, const void *q, const void *k,
                        const void *v, void *o, int nq, int past, int capacity,
                        void *workspace, size_t workspace_bytes) {
 #if HIP_EP_RING_DEVICE_ENABLED
-  if (!q || !k || !v || !o || nq < 1 || nq > 65536 || past < 0 ||
-      past > 65664 - nq || capacity < past + nq ||
+  if (!q || !k || !v || !o || nq < 1 || nq > 131072 || past < 0 ||
+      past > 262144 - nq || capacity < past + nq ||
       !hip_gqa_ring_device_supported())
     return int(hipErrorInvalidValue);
   const size_t needed = hip_gqa_ring_workspace(nq, past + nq);

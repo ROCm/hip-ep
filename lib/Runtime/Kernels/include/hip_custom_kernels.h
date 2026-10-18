@@ -47,6 +47,19 @@
 extern "C" {
 #endif
 
+// tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
+// Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
+HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);
+HIP_KERNEL_API int hip_tq4_encode_append(
+    void *stream, const void *key, const void *value, void *present_key,
+    void *present_value, int count, int past, int capacity, const float *rotation,
+    const float *key_centroids, const float *value_centroids);
+HIP_KERNEL_API int hip_tq4_decode(
+    void *stream, const void *query, const void *key, const void *value,
+    void *output, int valid_length, int capacity, float scale,
+    const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+
 /* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
  * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
 HIP_KERNEL_API int hip_gqa_ring_device_supported(void);
@@ -720,7 +733,7 @@ HIP_KERNEL_API int hip_elementwise_sqrt(
  * Element-wise GELU activation via HIP with support for exact and approximate modes.
  *
  * Approximate mode (approximate=1, tanh):
- *   Formula: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+ *   Formula: GELU(x) â‰ˆ 0.5 * x * (1 + tanh(sqrt(2/Ï€) * (x + 0.044715 * xÂ³)))
  *   Standard approximation used in PyTorch, TensorFlow, and ONNX.
  *
  * Exact mode (approximate=0, erf, default):
