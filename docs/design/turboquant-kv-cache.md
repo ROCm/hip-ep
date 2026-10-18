@@ -144,3 +144,7 @@ The reference tests cover packing, reconstruction, rotation and partitioned atte
 The optional Windows `HIP_EP_PROFILE_ALLOCATOR_DLL` hook loads a diagnostic allocation shim into ORC symbol lookup. The benchmark shim intercepts four HIP allocation/free APIs and records live EP device/mapped-host allocation sizes and event peaks. Leave the variable unset outside profiling. The independent Windows WDDM sampler measures process GPU commitment and includes mapped-host KV once; it is not physical residency. A controlled allocation/free/reuse check distinguishes retained HIP memory from live-user allocation totals.
 
 The complete compiler/runtime/kernel integration is submitted together because the packed width, allocator contract, codec identity and decoder must agree. The feature remains explicit opt-in and draft while correctness gates are unresolved. No claim is made for other models, architectures, broad task accuracy or production readiness.
+
+## Codec generation
+
+Codec BIN/NPZ files are generated build/test assets, not source-controlled fixtures. Enable `HIP_EP_GENERATE_TQ_CODEC` or run `tools/turboquant/generate_codec.py` during setup; see the [generation instructions](../../tools/turboquant/README.md#generate-codec-assets-during-build-or-test-setup). Preserve the generated manifest and codec hash with cached data and measurements.

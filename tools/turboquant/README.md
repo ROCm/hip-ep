@@ -19,19 +19,52 @@ Install NumPy, SciPy and pytest, then run from the repository root:
 python -m pytest tools/turboquant/test_reference.py -q
 ```
 
-The checked-in `fixtures/constants.npz` freezes the Windows validation rotation
-and K/V centroids. It contains mathematical codec constants, not model weights.
-The standalone reference source revision was
-`a6218a9b99ecabd3028da670fb0f85bb1114e552`. Regenerating a QR rotation on another
-platform can change signs/rounding; do not silently replace these constants
-when comparing recorded results. Serialize the exact constants with:
+## Generate codec assets during build or test setup
+
+Only generator source is checked in. `generate_codec.py` creates `codec.bin`,
+`constants.npz` and `manifest.json` on CPU using the standalone shared QR seed-42
+rotation and 16-centroid Gaussian Lloyd-Max recipe (source revision
+`a6218a9b99ecabd3028da670fb0f85bb1114e552`). Install NumPy, SciPy and PyTorch
+in the selected Python environment; no GPU or model weights are required.
+
+For an existing HIP-EP CMake build, configure with
+`-DHIP_EP_GENERATE_TQ_CODEC=ON -DPython3_EXECUTABLE=/path/to/python`, then run:
 
 ```console
-python tools/turboquant/write_codec.py tools/turboquant/fixtures/constants.npz codec.bin
+cmake --build <build-dir> --target turboquant-codec
+cmake --install <build-dir> --component turboquant-codec
 ```
 
-The resulting codec SHA-256 must be
+When enabled, the normal build also generates the assets. They default to
+`<build-dir>/turboquant`; `HIP_EP_TQ_CODEC_DIR` can select another output directory.
+Installation puts the runtime `codec.bin` and its manifest under
+`<install-prefix>/share/hip-ep/turboquant`. Set `kv_cache_codec_file` to that
+installed file. `constants.npz` stays in the build tree for tests. The option
+defaults to OFF, so normal HIP-EP builds gain no Torch/SciPy/NumPy dependency.
+
+For the GPU checks' external work layout, generate directly into its codec
+directory (or set `HIP_EP_TQ_CODEC_DIR` to that same absolute path):
+
+```console
+python tools/turboquant/generate_codec.py --output-dir <work>/reference/codec
+python -m pytest tools/turboquant/test_reference.py tools/turboquant/test_generate_codec.py -q
+```
+
+The manifest records the seed, package versions, generator hash and output hashes.
+The generator refuses to replace different existing constants; use a new output
+directory for a new codec. The current Windows environment reproduces the
+historically measured runtime codec SHA-256 exactly:
 `a2a312f645ba0a7970bda404fb4f1e1f15a01c2dd18c257b6a4c83397e806a3c`.
+Pass `--expected-sha256 <hash>` to enforce an archived codec before writing files.
+QR results can differ across platforms/library versions: preserve and compare
+codec hashes when reproducing measurements, and never mix an existing packed
+cache with another codec. Historical benchmark receipts retain their original
+hashes; a new codec needs its own numerical validation.
+
+`write_codec.py <constants.npz> <codec.bin>` remains available to serialize
+already-exported constants without regenerating them. The older standalone
+`fixtures.npz` is a local diagnostic artifact; the current tests generate their
+input tensors and do not need it.
 
 ## GPU checks
 
@@ -40,7 +73,7 @@ The scripts use an external work directory with this layout:
 ```text
 work/
   hip-ep/                       this repository
-  reference/codec/constants.npz copy of the frozen fixture
+  reference/codec/constants.npz generated reference arrays
   reference/codec/codec.bin     serialized codec
   build/                       profiling DLL and build outputs
   results/                     test receipts

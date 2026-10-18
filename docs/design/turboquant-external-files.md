@@ -40,7 +40,8 @@ tests. Rewind behavior is unchanged.
   context capacity; TurboQuant additionally sets `kvCacheQuantizationBits=4`,
   `kv_cache_codec=tq4_mse_qr_v1` and `kv_cache_codec_file`.
 - `reference/codec/codec.bin` is the required frozen codec payload.
-  `constants.npz`, `fixtures.npz` and `manifest.json` support validation/provenance.
+  The build/setup generator creates `codec.bin`, `constants.npz` and `manifest.json`;
+  no BIN/NPZ assets are tracked. Older `fixtures.npz` is a local diagnostic artifact.
 - Separate HIP-EP and GenAI build/install trees, a Python venv, downloaded
   dependencies, model hard links, build/profiling helpers and generated test
   receipts/logs are local setup artifacts. They are not extra upstream patches.
@@ -146,3 +147,7 @@ Files in `WORK/scripts/`:
 - `scripts/windows_profile_run.py`
 - `scripts/windows_qwen_4k.py`
 - `scripts/windows_synthetic.py`
+
+## Generated codec build outputs
+
+See [generation instructions](../../tools/turboquant/README.md#generate-codec-assets-during-build-or-test-setup). The opt-in `HIP_EP_GENERATE_TQ_CODEC` CMake option generates the codec assets and installs the runtime codec plus manifest. The table above records local artifact locations, not additional checked-in binaries.
