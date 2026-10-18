@@ -108,6 +108,7 @@ Tool availability depends on the build configuration; see the platform quick-sta
 - [Custom kernel design](docs/design/custom_kernel_design.md)
 - [Per-operation profiling](docs/design/per-op-profiling.md)
 - [Remote development workflow](docs/remote-dev-workflow.md)
+- [Experimental TurboQuant KV: setup and validation](tools/turboquant/README.md)
 
 ## Developer entry points
 
