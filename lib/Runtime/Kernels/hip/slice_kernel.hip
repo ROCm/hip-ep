@@ -151,30 +151,34 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
                            "num_out=%lld\n",
                            hip_dtype, rank, (long long)num_output_elements);
 
+  // A slice moves elements without looking at them: launch on an unsigned
+  // type of the element's size, so every dtype of 1, 2, 4 or 8 bytes works
+  // (u8 / bool masks included).
+  auto launch = [&](auto zero) {
+    using T = decltype(zero);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<T>), dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const T *>(input), static_cast<T *>(output),
+                       p, num_output_elements);
+  };
   switch (hip_dtype) {
+  case HIP_DTYPE_UINT8:
+  case HIP_DTYPE_INT8:
+    launch(uint8_t{});
+    break;
   case HIP_DTYPE_FLOAT16:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<__half>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const __half *>(input),
-                       static_cast<__half *>(output), p, num_output_elements);
+  case HIP_DTYPE_BFLOAT16:
+  case HIP_DTYPE_INT16:
+  case HIP_DTYPE_UINT16:
+    launch(uint16_t{});
     break;
   case HIP_DTYPE_FLOAT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<float>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const float *>(input),
-                       static_cast<float *>(output), p, num_output_elements);
-    break;
   case HIP_DTYPE_INT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<int32_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int32_t *>(input),
-                       static_cast<int32_t *>(output), p, num_output_elements);
+    launch(uint32_t{});
     break;
   case HIP_DTYPE_INT64:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<int64_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int64_t *>(input),
-                       static_cast<int64_t *>(output), p, num_output_elements);
+  case HIP_DTYPE_FLOAT64:
+    launch(uint64_t{});
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_slice: unsupported dtype=%d\n",

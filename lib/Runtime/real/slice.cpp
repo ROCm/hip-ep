@@ -57,6 +57,18 @@ static int slice_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
     return HIP_DTYPE_INT64;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return HIP_DTYPE_FLOAT64;
+  case HIPDNN_EP_DATATYPE_INT8:
+    return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return HIP_DTYPE_UINT8;
+  case HIPDNN_EP_DATATYPE_INT16:
+    return HIP_DTYPE_INT16;
+  case HIPDNN_EP_DATATYPE_UINT16:
+    return HIP_DTYPE_UINT16;
   default:
     return -1;
   }
@@ -152,7 +164,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_slice: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
+            "(supported: 1, 2, 4 and 8 byte types)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
