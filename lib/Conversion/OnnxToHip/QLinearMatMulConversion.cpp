@@ -21,20 +21,23 @@ namespace {
 //   %y = hip.qlinear_matmul(%ctx) ins(%a, %as, %az, %b, %bs, %bz, %ys, %yz :
 //            ...) outs(%init : tensor<1x3xui8>)
 //
-// Both operands are rank 2 with static shape, and every scale and zero
-// point is one f32 or matching 8-bit element. A dynamic parameter shape is
-// not lowered: wrap_qlinear_matmul rejects a count other than 1, and the
-// LLVM call ignores that status, so the output would stay uninitialized.
-// Rank other than 2, and per-row or per-column quantization, stay
-// onnx.QLinearMatMul. hip.qmatmul is a different op and is not produced here.
+// Both operands are rank 2 with static shape. A's and Y's scale and zero
+// point are one element. B's scale and zero point are one element, or one
+// value per output column. A dynamic parameter shape is not lowered: the
+// runtime rejects a count other than 1 or N, and the LLVM call ignores that
+// status, so the output would stay uninitialized. Rank other than 2, and
+// per-row quantization of A, stay onnx.QLinearMatMul. hip.qmatmul is a
+// different op and is not produced here.
 static bool isEightBit(Type type) {
   auto integer = dyn_cast<IntegerType>(type);
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult checkPerTensor(PatternRewriter &rewriter, Operation *op,
-                                    Value scale, Value zp, Type storage,
-                                    StringRef name) {
+// `axisExtent` 1 accepts only a per-tensor parameter. For B, `axisExtent` is
+// N and each of the scale and zero point may independently have length 1 or N.
+static LogicalResult checkQuantParam(PatternRewriter &rewriter, Operation *op,
+                                     Value scale, Value zp, Type storage,
+                                     StringRef name, int64_t axisExtent) {
   auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
   auto zpType = dyn_cast<RankedTensorType>(zp.getType());
   auto reject = [&](const char *suffix) {
@@ -46,10 +49,14 @@ static LogicalResult checkPerTensor(PatternRewriter &rewriter, Operation *op,
     return reject(" scale must be f32");
   if (zpType.getElementType() != storage)
     return reject(" zero point type must match the quantized tensor");
-  if (scaleType.hasStaticShape() && zpType.hasStaticShape() &&
-      scaleType.getNumElements() == 1 && zpType.getNumElements() == 1)
+  if (!scaleType.hasStaticShape() || !zpType.hasStaticShape())
+    return reject(" quantization must have static shape");
+  auto fits = [&](int64_t count) { return count == 1 || count == axisExtent; };
+  if (fits(scaleType.getNumElements()) && fits(zpType.getNumElements()))
     return success();
-  return reject(" quantization must be per-tensor");
+  if (axisExtent == 1)
+    return reject(" quantization must be per-tensor");
+  return reject(" quantization must be per-tensor or one value per column");
 }
 
 struct QLinearMatMulToHip : public RewritePattern {
@@ -104,12 +111,14 @@ struct QLinearMatMulToHip : public RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "result shape must be [M, N] from a [M, K] and b [K, N]");
 
-    if (failed(checkPerTensor(rewriter, op, aScale, aZp, aType.getElementType(),
-                              "a")) ||
-        failed(checkPerTensor(rewriter, op, bScale, bZp, bType.getElementType(),
-                              "b")) ||
-        failed(checkPerTensor(rewriter, op, yScale, yZp,
-                              resultType.getElementType(), "y")))
+    if (failed(checkQuantParam(rewriter, op, aScale, aZp,
+                               aType.getElementType(), "a",
+                               /*axisExtent=*/1)) ||
+        failed(checkQuantParam(rewriter, op, bScale, bZp,
+                               bType.getElementType(), "b", n)) ||
+        failed(checkQuantParam(rewriter, op, yScale, yZp,
+                               resultType.getElementType(), "y",
+                               /*axisExtent=*/1)))
       return failure();
 
     Location loc = op->getLoc();

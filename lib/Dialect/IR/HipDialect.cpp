@@ -804,9 +804,11 @@ void QLinearMatMulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
-                                          Value zp, Type storage,
-                                          StringRef name) {
+// `axisExtent` is 1 for a per-tensor parameter. For B it is N, so the scale
+// and zero point may each be one element or one value per output column.
+static LogicalResult verifyQuantParam(QLinearMatMulOp op, Value scale, Value zp,
+                                      Type storage, StringRef name,
+                                      int64_t axisExtent) {
   auto scaleType = dyn_cast<ShapedType>(scale.getType());
   auto zpType = dyn_cast<ShapedType>(zp.getType());
   if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
@@ -819,10 +821,20 @@ static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
     return op.emitOpError()
            << name
            << " zero point element type must match the quantized tensor";
+  auto fits = [&](int64_t count) { return count == 1 || count == axisExtent; };
+  if (axisExtent == 1) {
+    if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+        scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+      return op.emitOpError()
+             << name << " scale and zero point must be a single element";
+    return success();
+  }
   if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
-      scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+      !fits(scaleType.getNumElements()) || !fits(zpType.getNumElements()))
     return op.emitOpError()
-           << name << " scale and zero point must be a single element";
+           << name
+           << " scale and zero point must be one element or one value per "
+              "column";
   return success();
 }
 
@@ -853,12 +865,12 @@ LogicalResult QLinearMatMulOp::verify() {
       !isEightBitInt(yType.getElementType()))
     return emitOpError("a, b, and output must be 8-bit integers");
 
-  if (failed(verifyPerTensorParam(*this, getAScale(), getAZeroPoint(),
-                                  aType.getElementType(), "a")) ||
-      failed(verifyPerTensorParam(*this, getBScale(), getBZeroPoint(),
-                                  bType.getElementType(), "b")) ||
-      failed(verifyPerTensorParam(*this, getYScale(), getYZeroPoint(),
-                                  yType.getElementType(), "y")))
+  if (failed(verifyQuantParam(*this, getAScale(), getAZeroPoint(),
+                              aType.getElementType(), "a", /*axisExtent=*/1)) ||
+      failed(verifyQuantParam(*this, getBScale(), getBZeroPoint(),
+                              bType.getElementType(), "b", n)) ||
+      failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
+                              yType.getElementType(), "y", /*axisExtent=*/1)))
     return failure();
   return success();
 }
