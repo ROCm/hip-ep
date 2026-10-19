@@ -175,9 +175,16 @@ Adding a model geometry: add its `(H, G, d)` to `GEOMETRIES` in
 **Read this before changing `../../gqa_kernel.hip`.** The table is a claim about
 kernels — and about the compiler that built them. Two rules:
 
-- **Sweep with the compiler the model runs under** (currently HIP 7.14 / clang 23).
-  A different clang can reorder the winning configs (this cost 20-30x on prefill v7
-  once), so a table swept on the wrong toolchain is confidently wrong.
+- **Sweep with the compiler and flags the model runs under**: the HIP SDK pinned
+  in `cmake/deps.txt`, `-O2`, and the product's offload arch -- `gfx11-generic`
+  for the gfx1150 / gfx1151 / gfx1152 tables (they all run the generic code
+  object), `gfx1170` for gfx1170. The sweep Makefile defaults to gfx1151 / `-O3`,
+  so pass `OFFLOAD=--offload-arch=gfx11-generic` and
+  `CXXFLAGS="-O2 -std=c++17 -x hip -w -D_CRT_SECURE_NO_WARNINGS"`. A different
+  clang can reorder the winning configs (this cost 20-30x on prefill v7 once), and
+  a gfx1151-target build gives every kernel a 1536-entry VGPR file the product
+  does not have, so a table swept on either is confidently wrong. Re-measure
+  after a compiler bump.
 - **Stamp kernel changes.** Bump the kernel's entry in
   `gqa_autotune_sweep.cpp :: kKernelVersions` in the same commit as the kernel change
   (this marks old readings stale), and re-measure. Bump `kKernelAbi` (`gqa-v4`) in

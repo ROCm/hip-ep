@@ -509,7 +509,7 @@ struct KernelVersion {
 };
 constexpr KernelVersion kKernelVersions[] = {
     {"flash_decode", "decode-2"},
-    {"prefill_v6x", "v6x-1"},
+    {"prefill_v6x", "v6x-2"},
     {"prefill_v8x", "v8x-1"},
 };
 

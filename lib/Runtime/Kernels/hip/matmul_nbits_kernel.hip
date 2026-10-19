@@ -286,7 +286,7 @@ __global__ void matmul_nbits_kernel_i8(
 // Shared by the int8 GEMV below and the int4 GEMV in section 1b, which have the
 // same accumulator tile and the same reason to want it in registers.
 #define GEMV_WAVES_MIN(TM) ((TM) > 1 ? 1 : 9)
-#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 4 : 9)
+#define GEMV_WAVES_MAX(TM) ((TM) > 1 ? 16 : 9)
 
 template <int BLOCK_SIZE, int TILE_N, int TILE_M = 1>
 __global__
@@ -672,10 +672,22 @@ void matmul_nbits_gemv_kernel_i8(
 // GEMV_WAVES_MIN/MAX are defined next to the int8 GEMV in section 1a-gemv;
 // both kernels hold the same partial[TILE_M][TILE_N] accumulator and want the
 // same register budget for it.
+//
+// Except TILE_N = 16 at TILE_M = 1. Its ~166 registers are what "9 waves"
+// means on gfx1151's 1536-entry file only; on the 1024-entry file of the
+// gfx11-generic product binary 9 waves is 112, and the tile spilled 184 B
+// (row-major) / 208 B (col-major) per lane under ROCm 7.14 and 192 / 204 B
+// under 7.16. Asking for the registers gives 6 waves there and still 9 on
+// gfx1151.
+#define GEMV4_WAVES_MIN(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MIN(TM))
+#define GEMV4_WAVES_MAX(TN, TM)                                                \
+  ((TM) == 1 && (TN) > 8 ? HIPDNN_WAVES_FOR_VGPRS(168) : GEMV_WAVES_MAX(TM))
+
 template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false, int TILE_M = 1>
-__global__
-__attribute__((amdgpu_waves_per_eu(GEMV_WAVES_MIN(TILE_M),
-                                   GEMV_WAVES_MAX(TILE_M))))
+__global__ __launch_bounds__(BLOCK_SIZE)
+__attribute__((amdgpu_waves_per_eu(GEMV4_WAVES_MIN(TILE_N, TILE_M),
+                                   GEMV4_WAVES_MAX(TILE_N, TILE_M))))
 void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -788,9 +800,21 @@ void matmul_nbits_gemv_kernel(
             return static_cast<float>(zp[nidx * k_blocks + grp]);
     };
 
-    // Helper: read A element for row `tm` of this block at K-offset
-    auto read_a = [&](int tm, int64_t k_off) __attribute__((always_inline)) -> float {
-        return static_cast<float>(a_base[tm * a_mstep + k_off * a_stride]);
+    // Helper: read A element for row `tm` of this block at K position
+    // k_lane + k_const: k_lane is the thread's position, k_const the
+    // compile-time offset inside the unrolled group. The row pointer is built
+    // from k_lane alone and shared by the whole group; only k_const * a_stride
+    // is added per element, which is a constant (row-major) or a uniform value
+    // (col-major, stride M). Written as one index (k_lane + k_const) * a_stride
+    // the compiler has to prove the 32-bit sum cannot wrap to split it back:
+    // ROCm 7.14 did, 7.16 does not, and emits a sign extension, two
+    // v_mul_lo_u32, a v_mad_u64_u32 and a 64-bit shift per element. At
+    // TILE_M > 1 the extra live values also pushed the tile into scratch
+    // (100-584 bytes per lane, 2-4x slower).
+    auto read_a = [&](int tm, int k_lane, int k_const) __attribute__((always_inline)) -> float {
+        const __half* row = a_base + tm * a_mstep +
+                            static_cast<int64_t>(k_lane) * a_stride;
+        return static_cast<float>(row[static_cast<int64_t>(k_const) * a_stride]);
     };
 
     // ---- Phase 1: 32-nibble (128-bit) vectorized main loop ----
@@ -835,7 +859,7 @@ void matmul_nbits_gemv_kernel(
             float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 32; i++) {
-                a_vals[i] = read_a(0, k32 + i);
+                a_vals[i] = read_a(0, k32, i);
                 a_sum += a_vals[i];
             }
             const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -912,7 +936,7 @@ void matmul_nbits_gemv_kernel(
                     float a8[8];
 #pragma unroll
                     for (int i = 0; i < 8; i++) {
-                        a8[i] = read_a(tm_r, k32 + q * 8 + i);
+                        a8[i] = read_a(tm_r, k32, q * 8 + i);
                         a_sum += a8[i];
                     }
 #pragma unroll
@@ -967,7 +991,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 16; i++) {
-                    a_vals[i] = read_a(0, k16 + i);
+                    a_vals[i] = read_a(0, k16, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1010,7 +1034,7 @@ void matmul_nbits_gemv_kernel(
                         float a8[8];
 #pragma unroll
                         for (int i = 0; i < 8; i++) {
-                            a8[i] = read_a(tm_r, k16 + q * 8 + i);
+                            a8[i] = read_a(tm_r, k16, q * 8 + i);
                             a_sum += a8[i];
                         }
 #pragma unroll
@@ -1066,7 +1090,7 @@ void matmul_nbits_gemv_kernel(
                 float a_sum = 0.0f;
 #pragma unroll
                 for (int i = 0; i < 8; i++) {
-                    a_vals[i] = read_a(tm_r, k8 + i);
+                    a_vals[i] = read_a(tm_r, k8, i);
                     a_sum += a_vals[i];
                 }
                 const float a_sum_x_default_zp = a_sum * 8.0f;
@@ -1109,7 +1133,7 @@ void matmul_nbits_gemv_kernel(
 #pragma unroll
                 for (int tm = 0; tm < TILE_M; tm++) {
                     const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
-                    partial[tm][tn] += read_a(tm_r, k) * (qval - zv) * sv;
+                    partial[tm][tn] += read_a(tm_r, k, 0) * (qval - zv) * sv;
                 }
             }
         }
@@ -1572,6 +1596,12 @@ static void launchGemvConfig(
     bool col_major = false)
 {
     auto& c = kGemvConfigs[config_id];
+    // M == 1 without zero points: col-major and row-major A are the same single
+    // row, and the row-major instantiation computes the identical result with a
+    // compile-time A stride. The col-major one indexes A with the runtime stride
+    // M (see read_a), which ROCm 7.16 compiles to a 64-bit multiply per element:
+    // +30% instructions in the decode loop, 1.2x slower on average, up to 1.9x.
+    if (col_major && M == 1 && zp == nullptr && batch == 1) col_major = false;
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
               static_cast<unsigned>(col_major ? 1 : batch));
@@ -3472,8 +3502,12 @@ __global__ void matmul_nbits_kernel_u3(
  * on RDNA3, per that kernel's notes).
  * ======================================================================= */
 
+// __launch_bounds__: without it the compiler assumes a 1024-thread block and
+// caps every instantiation at 128 VGPRs, whatever BLOCK_SIZE the launch uses.
+// TILE_N = 16 needs a little more: 56 B/lane of scratch under ROCm 7.14, 68
+// under 7.16 (u2: 0 -> 12).
 template <int BLOCK_SIZE, int TILE_N>
-__global__ void matmul_nbits_gemv_kernel_u3(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u3(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -3530,7 +3564,6 @@ __global__ void matmul_nbits_gemv_kernel_u3(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 4.0f;  // 2^(bits-1)
 
         uint3 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3539,6 +3572,21 @@ __global__ void matmul_nbits_gemv_kernel_u3(
             b_pk[tn] = *reinterpret_cast<const uint3*>(
                             &b_base_arr[tn][idx * 12]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // The zero points load next to B and the scales, all under one
+        // uniform branch, so their latency hides behind the dot products.
+        // Tested per column after each dot product, every column got its own
+        // branch holding one load and a full wait, and ROCm 7.16 turns each
+        // of those branches into more scalar code than 7.14 did.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 4.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3559,13 +3607,7 @@ __global__ void matmul_nbits_gemv_kernel_u3(
                 }
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
@@ -3885,8 +3927,9 @@ __global__ void matmul_nbits_kernel_u2(
  * loop, which had to special-case lanes 10 and 21).
  * ======================================================================= */
 
+// See matmul_nbits_gemv_kernel_u3 for the __launch_bounds__.
 template <int BLOCK_SIZE, int TILE_N, typename ZPT = uint8_t>
-__global__ void matmul_nbits_gemv_kernel_u2(
+__global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
     const __half* __restrict__ scales,
@@ -3943,7 +3986,6 @@ __global__ void matmul_nbits_gemv_kernel_u2(
         }
 
         const int grp = k32 >> bs_shift;
-        const float a_sum_x_default_zp = a_sum * 2.0f;  // 2^(bits-1)
 
         uint2 b_pk[TILE_N];
         float sv[TILE_N];
@@ -3952,6 +3994,17 @@ __global__ void matmul_nbits_gemv_kernel_u2(
             b_pk[tn] = *reinterpret_cast<const uint2*>(
                             &b_base_arr[tn][idx * 8]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
+        }
+        // See matmul_nbits_gemv_kernel_u3 for why the zero points load here.
+        float zv[TILE_N];
+        if (has_zp) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+        } else {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                zv[tn] = 2.0f;  // 2^(bits-1)
         }
 
 #pragma unroll
@@ -3967,13 +4020,7 @@ __global__ void matmul_nbits_gemv_kernel_u2(
                 uint32_t qv = (lo >> bitOff) & 0x3u;
                 dot = __fmaf_rn(a_vals[i], static_cast<float>(qv), dot);
             }
-
-            if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
-                partial[tn] += (dot - a_sum * zv) * sv[tn];
-            } else {
-                partial[tn] += (dot - a_sum_x_default_zp) * sv[tn];
-            }
+            partial[tn] += (dot - a_sum * zv[tn]) * sv[tn];
         }
     }
 
@@ -5258,7 +5305,7 @@ static void launchWmmaConfig(
     if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
     else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
 
-#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, BC_V) do { \
+#define WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, BC_V) do { \
     constexpr int WM_ = BM_V / (2 * 16); \
     constexpr int WN_ = BN_V / (4 * 16); \
     constexpr int THR_ = WM_ * WN_ * 32; \
@@ -5267,22 +5314,22 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, 8, BC_V, BK_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 4, WAVES_V, BC_V, BK_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n, \
             b_row_bytes); \
     } \
 } while(0)
 
-#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V) \
-    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, true); \
-    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, false)
+#define WMMA_TILE_CASE_WT24(BM_V, BN_V, BK_V, WAVES_V) \
+    if (need_bc) WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, true); \
+    else         WMMA_LAUNCH_WT24(BM_V, BN_V, BK_V, WAVES_V, false)
 
 #define WMMA_LAUNCH_WT44(BM_V, BN_V, BK_V, BC_V) do { \
     constexpr int WM_ = BM_V / (4 * 16); \
@@ -5317,10 +5364,20 @@ static void launchWmmaConfig(
     const int c_bk = wmmaBk(c);
     if      (c.wt_m == 4 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
                                               WMMA_TILE_CASE_WT44(128, 128, 32);
+    // The 256-thread 128x128 WT2x4 tile asks for 6 waves: its 40 KB of LDS
+    // allows no more than 6 per SIMD anyway, and 6 is a 160-VGPR budget on a
+    // 1024-VGPR target. With the nominal 8 the compiler fell back to the LDS
+    // limit and took 161 VGPRs under ROCm 7.16 (160 under 7.14), which on the
+    // 1024-VGPR hardware (gfx1150 / gfx1152) is one SIMD wave and one
+    // workgroup per WGP less: 1.07-1.25x slower on their LUT points. It fits
+    // 160 with no scratch (156-160 VGPRs, both compilers) since the epilogue
+    // builds one C row pointer per tile; before that, 7.16 spilled 36 B/lane
+    // here. The 512-thread 128x256 tile stays at 8 (see its comment in
+    // matmul_nbits_wmma_core.h).
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 128 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 128, 32);
+                                              WMMA_TILE_CASE_WT24(128, 128, 32, 6);
     else if (c.wt_m == 2 && c.wt_n == 4 && c.bm == 128 && c.bn == 256 && c_bk == 32)
-                                              WMMA_TILE_CASE_WT24(128, 256, 32);
+                                              WMMA_TILE_CASE_WT24(128, 256, 32, 8);
     else if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                               WMMA_TILE_CASE_WT4(256, 128);
     else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
@@ -6280,16 +6337,18 @@ void GemmFp16I8Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -6807,16 +6866,18 @@ void GemmFp16U3Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }
@@ -7486,16 +7547,18 @@ void GemmFp16U2Impl(
 #pragma unroll
         for (int wn = 0; wn < WT_N; wn++) {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // Row pointer once per tile: see the epilogue of GemmFp16U4Impl.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
-                        C[(mbase + r) * ldc + nbase + lane] =
-                            (_Float16)acc[wm][wn][e];
+                        *cp = (_Float16)acc[wm][wn][e];
                 } else {
-                    C[(mbase + r) * ldc + nbase + lane] =
-                        (_Float16)acc[wm][wn][e];
+                    *cp = (_Float16)acc[wm][wn][e];
                 }
             }
         }

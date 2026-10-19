@@ -59,7 +59,7 @@ Runtime:
 **Level-1 Pass:**
 - **Input:**
   - MLIR bytecode (from MorphiZen `graph.save_string()`)
-  - Provider options: `optimization_level` (0-3) and `artifact_format` — `"LLVM_IR"` (default) emits OS-portable LLVM bitcode JIT-loaded in-process by `LlvmIrJit`; `"NATIVE"` emits a per-OS `.dll`/`.so` loaded via `morphizen::Plugin`. Unknown values are coerced to `"LLVM_IR"` (see `pass_main.cpp::load_config`).
+  - Provider options: `optimization_level` (0-3) and `artifact_format` — `"LLVM_IR"` (default) emits OS-portable LLVM bitcode JIT-loaded in-process by `LlvmIrJit`; `"NATIVE"` emits a per-OS `.dll`/`.so` loaded via `morphizen::Plugin` and requires `-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON` (default `OFF`; otherwise session setup throws). Unknown values are coerced to `"LLVM_IR"` (see `pass_main.cpp::load_config`).
 - **Output:**
   - Per-model LLVM bitcode bytes written to EPContext
   - Metadata JSON (output tensor descriptors) attached to MetaDefProto
@@ -159,7 +159,7 @@ struct span_t {
 
 | Option | Values | Default | Purpose |
 |--------|--------|---------|---------|
-| `artifact_format` | `"LLVM_IR"` \| `"NATIVE"` (unknown coerced to `LLVM_IR`) | "LLVM_IR" | Per-model artifact format: `LLVM_IR` = OS-portable LLVM bitcode JIT-loaded by `LlvmIrJit`; `NATIVE` = per-OS `.dll`/`.so` loaded via `morphizen::Plugin` (opt-in, benchmarking/dev). |
+| `artifact_format` | `"LLVM_IR"` \| `"NATIVE"` (unknown coerced to `LLVM_IR`) | "LLVM_IR" | Per-model artifact format: `LLVM_IR` = OS-portable LLVM bitcode JIT-loaded by `LlvmIrJit`; `NATIVE` = per-OS `.dll`/`.so` loaded via `morphizen::Plugin` (opt-in, benchmarking/dev). `NATIVE` throws unless the build was configured with `-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON`. |
 | `optimization_level` | "0", "1", "2", "3" | "2" | LLVM optimization level (target-independent PerModule pipeline) |
 
 **Environment Variables:**
