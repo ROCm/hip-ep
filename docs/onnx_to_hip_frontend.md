@@ -109,9 +109,11 @@ per-row or per-column quantization, stay `onnx.QLinearMatMul`.
 
 `QLinearConv` is the native ONNX op: 8-bit activations and weights, grouped 2D
 windows, and an optional int32 bias. Input and output quantization is
-per-tensor. Weight quantization is per-tensor or per output channel. `auto_pad`
-must be `NOTSET`. `hip.qconv` is a different op, the W4A16 1x1 QDQ fusion, and
-does not accept `QLinearConv`.
+per-tensor. Weight quantization is per-tensor or per output channel. `NOTSET`
+keeps the `pads` attribute. `VALID` uses no padding. `SAME_UPPER` and
+`SAME_LOWER` split the pad budget, with the extra pad at the end or the
+beginning, and the kernel receives those explicit pads. `hip.qconv` is a
+different op, the W4A16 1x1 QDQ fusion, and does not accept `QLinearConv`.
 
 QuantizeLinear and DequantizeLinear storage is int8/uint8/int16/uint16 plus
 int4/uint4. DequantizeLinear additionally accepts int32, which is where a QDQ
