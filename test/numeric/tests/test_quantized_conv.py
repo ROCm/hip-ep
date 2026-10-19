@@ -77,10 +77,15 @@ class TestDynamicQuantizeLinear:
         )
         model = make_model_from_nodes([node], [x_info], outputs, opset=13)
         actual, expected = model_runner.run_sample(model, [x])
+        # A scalar graph output comes back as a length-1 vector from the CPU
+        # reference and as a rank-0 tensor from the EP. The value is the same.
+        actual = [
+            np.asarray(a).reshape(np.asarray(e).shape) for a, e in zip(actual, expected)
+        ]
         compare_outputs(actual, expected, atol=0, rtol=0)
-        assert float(expected[1]) == 1.0
-        assert int(expected[2]) == 0
-        assert np.all(expected[0] == 0)
+        assert float(np.asarray(actual[1]).reshape(-1)[0]) == 1.0
+        assert int(np.asarray(actual[2]).reshape(-1)[0]) == 0
+        assert np.all(np.asarray(actual[0]) == 0)
 
 
 class TestConvInteger:
@@ -118,4 +123,4 @@ class TestConvInteger:
         model = _conv_integer(x, w, np.uint8(0), np.uint8(0))
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0, rtol=0)
-        assert int(expected[0].reshape(-1)[0]) == 16841475
+        assert int(np.asarray(actual[0]).reshape(-1)[0]) == 16841475

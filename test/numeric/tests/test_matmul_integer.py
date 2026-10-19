@@ -82,7 +82,7 @@ class TestMatMulInteger:
         model = _matmul_integer(a, b)
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
-        assert int(expected[0].reshape(-1)[0]) == 16841475
+        assert int(np.asarray(actual[0]).reshape(-1)[0]) == 16841475
 
     def test_wide_k_batched(self, model_runner):
         # K=259 takes the i32 kernel. Each batch has its own B, and each
@@ -99,7 +99,7 @@ class TestMatMulInteger:
         model = _matmul_integer(a, b)
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
-        assert int(expected[0][1, 2, 3]) == 3 * 2 * 4 * k
+        assert int(np.asarray(actual[0])[1, 2, 3]) == 3 * 2 * 4 * k
 
     def test_wide_k_shared_b(self, model_runner):
         # Same i32 kernel, with one rank-2 B reused by every batch of A.
@@ -113,5 +113,6 @@ class TestMatMulInteger:
         model = _matmul_integer(a, b)
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
-        assert int(expected[0][0, 2, 3]) == 3 * 4 * k
-        assert int(expected[0][1, 2, 3]) == int(expected[0][0, 2, 3])
+        got = np.asarray(actual[0])
+        assert int(got[0, 2, 3]) == 3 * 4 * k
+        assert int(got[1, 2, 3]) == int(got[0, 2, 3])
