@@ -7,6 +7,7 @@
 #include "hip/Compiler/RocMlirArtifactTarget.h"
 
 // Morphizen headers
+#include "hip/native_artifacts.h"
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -49,25 +51,16 @@ static CompilationConfig load_config(PassContext *ctx) {
   bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
   config.skipConstantData = !epctxExport;
 
+  // Single compile option selecting the per-model artifact format.
+  //   "LLVM_IR" (default) -> OS-portable LLVM IR (.bc), JIT-loaded by the EP.
+  //   "NATIVE"            -> per-OS native .dll/.so loaded via LoadLibrary/
+  //                          dlopen. Requires HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  //                          (default OFF); otherwise this throws.
+  // Unknown values are logged and coerced to LLVM_IR.
+  std::string artifact_format_str = "LLVM_IR";
   try {
-    // Single compile option selecting the per-model artifact format.
-    //   "LLVM_IR" (default) -> OS-portable LLVM IR (.bc), JIT-loaded by the EP.
-    //   "NATIVE"            -> per-OS native .dll/.so loaded via LoadLibrary/
-    //                          dlopen. Opt-in for benchmarking/dev; not the
-    //                          production deployment format (signed-DLL
-    //                          policy).
-    // Unknown values are logged and coerced to LLVM_IR.
-    std::string artifact_format_str =
+    artifact_format_str =
         ctx->get_provider_option("artifact_format", "LLVM_IR");
-    if (artifact_format_str == "NATIVE") {
-      config.artifactFormat = ArtifactFormat::NATIVE;
-    } else {
-      config.artifactFormat = ArtifactFormat::LLVM_IR;
-      if (artifact_format_str != "LLVM_IR") {
-        MY_LOG(1) << "artifact_format=" << artifact_format_str
-                  << " is not recognized; falling back to LLVM_IR.";
-      }
-    }
 
     std::string opt_level_str =
         ctx->get_provider_option("optimization_level", "2");
@@ -76,6 +69,20 @@ static CompilationConfig load_config(PassContext *ctx) {
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
+    artifact_format_str = "LLVM_IR";
+  }
+
+  // Thrown outside the parse try/catch so a disabled native build cannot
+  // swallow the failure and silently compile LLVM IR instead.
+  if (artifact_format_str == "NATIVE") {
+#if !HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+    throw std::runtime_error(hipdnn::kNativeArtifactsDisabledMessage);
+#else
+    config.artifactFormat = ArtifactFormat::NATIVE;
+#endif
+  } else if (artifact_format_str != "LLVM_IR") {
+    MY_LOG(1) << "artifact_format=" << artifact_format_str
+              << " is not recognized; falling back to LLVM_IR.";
   }
 
   MY_LOG(1) << "Artifact format: "
