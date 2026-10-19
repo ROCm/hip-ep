@@ -32,6 +32,11 @@ config.hip_build_mode = "@LLVM_BUILD_MODE@"
 # platform (static linking needs no symbol export).
 config.hip_static_plugins = @HIPDNN_STATIC_PLUGINS_LIT_FEATURE@
 
+# Whether the torch_hip plugin (plugins/torch_hip) is statically linked into the
+# host (`torch_hip` in HIPDNN_EP_COMPILER_PLUGINS). lit.cfg.py turns this into
+# the `torch_hip_plugin` feature that gates the Plugin/torch_hip_*.mlir tests.
+config.torch_hip_plugin = @HIPDNN_TORCH_HIP_PLUGIN_LIT_FEATURE@
+
 lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.
