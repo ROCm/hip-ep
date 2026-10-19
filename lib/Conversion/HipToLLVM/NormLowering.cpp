@@ -43,7 +43,9 @@ inline Value getNullableMemRefPtr(Value memref,
 // the reduced axes, such as a grouped scale [G,D] against an [N,G,D] input:
 // that reduces over G*D rather than D.
 struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  RmsNormOpLowering(const LLVMTypeConverter &converter, bool useRyzenAICorelib)
+      : ConvertOpToLLVMPattern(converter),
+        useRyzenAICorelib(useRyzenAICorelib) {}
 
   LogicalResult
   matchAndRewrite(RmsNormOp op, OpAdaptor adaptor,
@@ -110,11 +112,6 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
         i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapRmsNorm, paramTypes, rewriter.getI32Type());
-    if (failed(funcOp))
-      return failure();
-
     SmallVector<Value> args = {statePtr,         inputPtr,
                                scalePtr,         outputPtr,
                                inputNumElements, scaleNumElements,
@@ -122,15 +119,25 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
                                axisVal,          epsilonVal,
                                stashTypeVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(emitCallWithCorelibFallback(
+            rewriter, loc, module, kWrapRmsNorm,
+            useRyzenAICorelib ? kWrapCorelibRmsNorm : "",
+            getHipdnnDataType(elementType), paramTypes, args)))
+      return failure();
     rewriter.eraseOp(op);
     return success();
   }
+
+private:
+  bool useRyzenAICorelib;
 };
 
 // hip.skip_rms_norm lowering with dynamic shape support
 struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  SkipRmsNormOpLowering(const LLVMTypeConverter &converter,
+                        bool useRyzenAICorelib)
+      : ConvertOpToLLVMPattern(converter),
+        useRyzenAICorelib(useRyzenAICorelib) {}
 
   LogicalResult
   matchAndRewrite(SkipRmsNormOp op, OpAdaptor adaptor,
@@ -194,12 +201,6 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         f32Type  // epsilon
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapSkipSimplifiedLayerNorm,
-                               paramTypes, rewriter.getI32Type());
-    if (failed(funcOp))
-      return failure();
-
     SmallVector<Value> args = {statePtr,         inputPtr,
                                skipPtr,          gammaPtr,
                                biasPtr,          outputPtr,
@@ -207,10 +208,17 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
                                gammaNumElements, elementSizeBytesVal,
                                epsilonVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(emitCallWithCorelibFallback(
+            rewriter, loc, module, kWrapSkipSimplifiedLayerNorm,
+            useRyzenAICorelib ? kWrapCorelibSkipRmsNorm : "",
+            getHipdnnDataType(elementType), paramTypes, args)))
+      return failure();
     rewriter.eraseOp(op);
     return success();
   }
+
+private:
+  bool useRyzenAICorelib;
 };
 
 // hip.layer_norm(%ctx) ins(%input, %scale, [%bias])
@@ -565,11 +573,12 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
-                                  RewritePatternSet &patterns) {
-  patterns
-      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering>(
-          converter);
+                                  RewritePatternSet &patterns,
+                                  bool useRyzenAICorelib) {
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering>(converter,
+                                                         useRyzenAICorelib);
+  patterns.add<LayerNormOpLowering, InstanceNormOpLowering,
+               BatchNormOpLowering, GroupNormOpLowering>(converter);
 }
 
 } // namespace hip

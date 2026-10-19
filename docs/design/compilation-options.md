@@ -32,6 +32,7 @@ Callers may pass `NULL` for `options_json` to accept all defaults when using the
 | `opt_level` | `int` | `2` | LLVM optimization level (0–3) |
 | `verbose` | `bool` | `false` | Enable verbose diagnostic output |
 | `constants_file` | `string` | `"constants.bin"` | Filename (relative to the `FileSystem` root) where constant weight data is written during compilation and read back at `inference_init` time. See [constant-handling-design.md](constant-handling-design.md). |
+| `use_ryzenai_corelib` | `bool` | `false` | Try the RyzenAI CoreLib (NPU) backend before the GPU for MatMulNBits, RmsNorm and SkipRmsNorm (see below). |
 | `output_mode` | `OutputMode` enum | `LLVM_IR` | Per-model artifact format. `LLVM_IR` (default) emits OS-portable LLVM IR (serialized as `.bc`), JIT-loaded in-process by `LlvmIrJit`. `NATIVE` emits a per-OS native `.dll`/`.so` (runtime merged at producer time, linked via `DLLLinker`) loaded via `morphizen::Plugin` (`LoadLibrary`/`dlopen`). `NATIVE` requires the CMake option `HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS` (default `OFF`). See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md). |
 
 The default `LLVM_IR` format produces a single OS-portable `.bc` consumed by
@@ -47,6 +48,14 @@ session creation.
 
 The EP provider option `artifact_format` (`"LLVM_IR"` | `"NATIVE"`) maps to
 this field; the `hip-compiler` CLI exposes it as `--mode {LLVM_IR,NATIVE}`.
+
+`use_ryzenai_corelib` (`bool`, default `false`) makes MatMulNBits, RmsNorm and
+SkipRmsNorm try the RyzenAI CoreLib NPU backend before the GPU. The EP sets it
+from the provider option `use_ryzenai_corelib` (`"1"`/`"true"`), or from the
+`HIPEP_USE_RYZENAI_CORELIB` environment variable when the provider option is
+unset. In `hip-mlir-opt` it is the `use-ryzenai-corelib` option of
+`--hip-to-llvm-pipeline` and `--convert-hip-to-llvm`. See
+[ryzenai-corelib-backend.md](ryzenai-corelib-backend.md).
 
 ---
 

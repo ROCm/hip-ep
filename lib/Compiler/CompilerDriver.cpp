@@ -508,6 +508,7 @@ bool CompilerDriver::runMLIRPasses(
 
     mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
     hipToLlvmOpts.constantsFile = options.constants_file;
+    hipToLlvmOpts.useRyzenAICorelib = options.use_ryzenai_corelib;
     mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
   }
 
@@ -718,6 +719,13 @@ void CompilerDriver::discoverInTreeLibraries(
   COMPILER_DEBUG_LOG("  Current-stream accessor lib: "
                      << HIPDNN_EP_TLS_LIB_NAME << " from "
                      << HIPDNN_EP_TLS_LIB_DIR << "\n");
+#endif
+
+  // wrap_corelib_* (use_ryzenai_corelib) are native like the stream
+  // accessors; the lib is the stub when corelib was absent at build time.
+#if defined(HIPDNN_EP_CORELIB_LIB_DIR) && defined(HIPDNN_EP_CORELIB_LIB_NAME)
+  library_paths.push_back(HIPDNN_EP_CORELIB_LIB_DIR);
+  libraries.push_back(HIPDNN_EP_CORELIB_LIB_NAME);
 #endif
 
   // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL

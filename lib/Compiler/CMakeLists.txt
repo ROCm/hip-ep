@@ -227,6 +227,15 @@ if(TARGET hipdnn-ep-tls)
     )
 endif()
 
+# Native RyzenAI CoreLib wrappers (real or stub), referenced by models compiled
+# with use_ryzenai_corelib.
+if(TARGET hipdnn-ep-corelib)
+    target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_EP_CORELIB_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:hipdnn-ep-corelib>\""
+        "HIPDNN_EP_CORELIB_LIB_NAME=\"$<TARGET_LINKER_FILE_BASE_NAME:hipdnn-ep-corelib>\""
+    )
+endif()
+
 # OnnxToHipDNN provides the OutlineOnnxToHipDNN / CompileHipDNNGraphs passes,
 # which CompilerDriver uses when a hipDNN handle is set. Gated on the runtime
 # target so a hipDNN-less build (no TheRock SDK) still configures.

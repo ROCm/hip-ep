@@ -238,6 +238,24 @@ inline llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT & /*jit*/) {
 extern "C" void *hipdnn_ep_get_current_stream(void);
 extern "C" void hipdnn_ep_set_current_stream(void *stream);
 
+// RyzenAI CoreLib (NPU) wrappers, likewise native (lib/Runtime
+// hipdnn-ep-corelib, a stub when corelib is absent). Signatures match
+// hipdnn_ep_runtime.h.
+struct RuntimeState;
+extern "C" int wrap_corelib_matmul_nbits(RuntimeState *, int, const void *,
+                                         const void *, const void *,
+                                         const void *, const void *,
+                                         const void *, void *, int64_t, int64_t,
+                                         int64_t, int64_t, int64_t, int64_t,
+                                         int64_t, int64_t, int64_t, int64_t);
+extern "C" int wrap_corelib_rms_norm(RuntimeState *, void *, void *, void *,
+                                     int64_t, int64_t, int64_t, int64_t,
+                                     int64_t, float, int64_t, int64_t);
+extern "C" int wrap_corelib_skip_rms_norm(RuntimeState *, void *, void *,
+                                          void *, void *, void *, void *,
+                                          int64_t, int64_t, int64_t, float,
+                                          int64_t);
+
 llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
   auto add = [&](llvm::StringRef name, void *addr) {
@@ -249,6 +267,12 @@ llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&hipdnn_ep_get_current_stream));
   add("hipdnn_ep_set_current_stream",
       reinterpret_cast<void *>(&hipdnn_ep_set_current_stream));
+  add("wrap_corelib_matmul_nbits",
+      reinterpret_cast<void *>(&wrap_corelib_matmul_nbits));
+  add("wrap_corelib_rms_norm",
+      reinterpret_cast<void *>(&wrap_corelib_rms_norm));
+  add("wrap_corelib_skip_rms_norm",
+      reinterpret_cast<void *>(&wrap_corelib_skip_rms_norm));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }

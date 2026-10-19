@@ -101,6 +101,11 @@ target_link_libraries(${LIB_NAME} PRIVATE
 if(TARGET hipdnn-ep-tls)
   target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-tls)
 endif()
+# Native RyzenAI CoreLib wrappers, registered as absolute JIT symbols the same
+# way (real or stub; see lib/Runtime/CMakeLists.txt STEP 6b).
+if(TARGET hipdnn-ep-corelib)
+  target_link_libraries(${LIB_NAME} PRIVATE hipdnn-ep-corelib)
+endif()
 # Shared embedded runtime.bc (single source of truth, lib/Runtime). LlvmIrJit's
 # extern runtime_bc_data reference pulls the embed object in.
 if(TARGET runtime-bc-embed)

@@ -223,6 +223,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gqa_fp32_adapter_scratch = nullptr;
   state->gqa_fp32_adapter_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
+  state->corelib_ctx = nullptr;
+  state->corelib_ctx_destroy = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->gqa_autotune_policy = nullptr;
   state->provider_options = nullptr;
@@ -877,6 +879,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
     state->zp_unpack_cache = nullptr;
   }
+
+  if (state->corelib_ctx && state->corelib_ctx_destroy)
+    state->corelib_ctx_destroy(state->corelib_ctx);
+  state->corelib_ctx = nullptr;
 
   // Free op profiling state
   if (state->op_profile) {

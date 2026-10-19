@@ -156,7 +156,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-resolve-extern-constants` | module | Resolve extern constants → `memref.view` into the constants-blob argument. |
 | `assign-op-state-slots` | module | Assign one op-state slot per stateful op instance (op-state-slots design). No-op without stateful ops. |
 | `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
-| `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. |
+| `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. `use-ryzenai-corelib` tries the RyzenAI CoreLib NPU wrapper before the GPU one for MatMulNBits/RmsNorm/SkipRmsNorm ([design](design/ryzenai-corelib-backend.md)). |
 
 ### rocMLIR offload passes
 

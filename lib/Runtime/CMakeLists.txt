@@ -580,6 +580,48 @@ target_compile_definitions(hipdnn-ep-tls PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
 
 # ============================================================================
+# STEP 6b: RyzenAI CoreLib (NPU) wrappers (NOT bitcode)
+# ============================================================================
+# wrap_corelib_* call into ryzenai_corelib, which the JIT cannot link, so they
+# are compiled natively like hipdnn-ep-tls and reach the JIT as absolute
+# symbols (LlvmIrJit). corelib itself is loaded at runtime, so only its header
+# is needed here (RYZENAICORELIB_ROOT). Without it, or in mock builds, a stub
+# reports every call as not handled and the generated code uses the GPU.
+# See docs/design/ryzenai-corelib-backend.md.
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+if(NOT BUILD_MOCK_RUNTIME)
+    find_package(RyzenAICorelib QUIET)
+endif()
+if(RyzenAICorelib_FOUND)
+    message(STATUS "RyzenAI CoreLib ${RyzenAICorelib_VERSION}: "
+                   "${RyzenAICorelib_INCLUDE_DIR}")
+    add_library(hipdnn-ep-corelib STATIC real/ryzenaicorelib.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/real
+        ${RyzenAICorelib_INCLUDE_DIR})
+    if(DEFINED THEROCK_DIST)
+        target_include_directories(hipdnn-ep-corelib PRIVATE
+            ${THEROCK_DIST}/include)
+    endif()
+    target_link_libraries(hipdnn-ep-corelib PRIVATE hip::host)
+    if(NOT WIN32)
+        target_link_libraries(hipdnn-ep-corelib PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+else()
+    message(STATUS "RyzenAI CoreLib not found (set RYZENAICORELIB_ROOT); "
+                   "wrap_corelib_* always defer to the GPU")
+    add_library(hipdnn-ep-corelib STATIC mock/ryzenaicorelib_stub.cpp)
+    target_include_directories(hipdnn-ep-corelib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/mock)
+endif()
+set_target_properties(hipdnn-ep-corelib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# corelib.h's C++ section uses designated initializers.
+target_compile_features(hipdnn-ep-corelib PRIVATE cxx_std_20)
+install(TARGETS hipdnn-ep-corelib ARCHIVE DESTINATION lib)
+
+# ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)
 # ============================================================================
 # Both consumers need runtime.bc embedded as bytes:

@@ -2097,6 +2097,43 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 // HIP stream synchronization wrapper
 int wrap_hipStreamSynchronize(void *stream);
 
+//===----------------------------------------------------------------------===//
+// RyzenAI CoreLib (NPU) wrappers -- native, in hipdnn-ep-corelib
+//===----------------------------------------------------------------------===//
+//
+// Emitted with --use-ryzenai-corelib. Each takes its GPU wrapper's exact
+// arguments followed by the activation data type (HIPDNN_EP_DATATYPE_*), and
+// returns HIPDNN_EP_CORELIB_NOT_HANDLED when corelib cannot run the call (no
+// NPU, corelib not loadable, unsupported dtype or shape); the generated code
+// then calls the GPU wrapper. These are compiled natively, not into
+// runtime.bc, and reach the JIT as absolute symbols (LlvmIrJit).
+// See docs/design/ryzenai-corelib-backend.md.
+#define HIPDNN_EP_CORELIB_NOT_HANDLED 1
+
+int wrap_corelib_matmul_nbits(RuntimeState *state, int op_state_slot,
+                              const void *A, const void *B, const void *scales,
+                              const void *zero_points, const void *g_idx,
+                              const void *bias, void *output, int64_t M,
+                              int64_t N, int64_t K, int64_t batch_count,
+                              int64_t bits, int64_t block_size,
+                              int64_t elem_size, int64_t zp_elem_size,
+                              int64_t scale_elem_size, int64_t data_type);
+
+int wrap_corelib_rms_norm(RuntimeState *state, void *input, void *scale,
+                          void *output, int64_t input_num_elements,
+                          int64_t scale_num_elements,
+                          int64_t norm_num_elements,
+                          int64_t element_size_bytes, int64_t axis,
+                          float epsilon, int64_t stash_type, int64_t data_type);
+
+int wrap_corelib_skip_rms_norm(RuntimeState *state, void *input, void *skip,
+                               void *gamma, void *bias, void *output,
+                               void *input_skip_bias_sum,
+                               int64_t input_num_elements,
+                               int64_t gamma_num_elements,
+                               int64_t element_size_bytes, float epsilon,
+                               int64_t data_type);
+
 #ifdef __cplusplus
 }
 #endif
