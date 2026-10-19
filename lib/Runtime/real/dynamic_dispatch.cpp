@@ -120,13 +120,19 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-#if 0
-  // HACK to always create cached operator handle
-  DDGemmState *gemm_state = nullptr;
-#else
   // Get or create cached operator handle
-  DDGemmState *gemm_state = DDGemmState::get_op_state(state, op_state_slot);
-#endif
+  DDGemmState *gemm_state = nullptr;
+  const char *skip_get_op_state_env = std::getenv("HIPEP_DD_DEBUG_NO_GET_OP_STATE");
+  if (skip_get_op_state_env && skip_get_op_state_env[0] == '1') {
+      fprintf(stderr, "[DD] will not attempt to obtain gemm_state: op_state_slot=%d (HIPEP_DD_DEBUG_NO_GET_OP_STATE=1)\n",  op_state_slot);
+  } else {
+    if (op_state_slot >= 0) {
+      fprintf(stderr, "[DD] Obtaining gemm_state: op_state_slot=%d\n",  op_state_slot);
+      gemm_state = DDGemmState::get_op_state(state, op_state_slot);
+    } else {
+      fprintf(stderr, "[DD] Can not obtain gemm_state: op_state_slot=%d\n",  op_state_slot);
+    }
+  }
 
   if (!gemm_state) {
     // First call: create operator instance via C API
