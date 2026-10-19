@@ -30,7 +30,13 @@ namespace {
 ///      tensor [Skv,…,Skv] equal to the K's static sequence length.  Cross-
 ///      attention is bidirectional (Q can see all of K).
 ///
-///   3. Everything else (8-input pre-surgery decoder self-attn, plain 3-input
+///   3. 8-input MHA with past_key/past_value but no past_sequence_length,
+///      present unshared (= concat(past, this step)) - Whisper decoder
+///      self-attn as onnxruntime-genai exports it. Lower to `hip.gqa` with
+///      seqlens_k and the total length taken from the past's and the step's
+///      shapes, causal when `unidirectional`.
+///
+///   4. Everything else (8-input pre-surgery decoder self-attn, plain 3-input
 ///      MHA, models with bias / mask / attention_bias, etc.) — keep the
 ///      existing `hip.multi_head_attention` lowering.  This preserves Llama
 ///      and gpt-oss behaviour and gives the unmodified Whisper self-attn form
@@ -41,6 +47,26 @@ namespace {
 /// driver runs with `ExistingOps` strictness, so newly-emitted onnx.* ops
 /// would NOT be picked up by their lowering patterns in this pass.  See the
 /// same comment in `AttentionConversion.cpp`.
+/// Present key and value are both produced, present_key as the
+/// concatenation of past_key [B, N, P, d] and this step's key [B, S, hidden]
+/// (dynamic, or P + S when all three are static). A present as long as the
+/// past is a shared buffer, which this form cannot express.
+bool presentConcatenatesPast(mlir::Operation *op, mlir::Value pastKey,
+                             mlir::Value key) {
+  if (op->getNumResults() < 3)
+    return false;
+  auto present = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto past = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+  auto step = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
+  if (!present || !past || !step || present.getRank() != 4 ||
+      past.getRank() != 4 || step.getRank() != 3)
+    return false;
+  if (present.isDynamicDim(2))
+    return true;
+  return !past.isDynamicDim(2) && !step.isDynamicDim(1) &&
+         present.getDimSize(2) == past.getDimSize(2) + step.getDimSize(1);
+}
+
 struct MultiHeadAttentionToHip : public mlir::RewritePattern {
   MultiHeadAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
@@ -206,6 +232,52 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
         presentKType, presentValueType);
   }
 
+  // Branch 3 (decoder self-attn as onnxruntime-genai exports Whisper, past
+  // and present unshared): K/V of this step [B, S, hidden], past [B, N, P,
+  // head], present = concat(past, this step) [B, N, P + S, head], no
+  // past_sequence_length. Lower to hip.gqa with seqlens_k = P + S - 1 and
+  // total P + S taken from the shapes, causal when unidirectional.
+  if (noExtraInputs && key && value && pastKey && pastValue &&
+      !pastSequenceLength && presentConcatenatesPast(op, pastKey, key)) {
+    auto pastType = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+    auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
+    auto keyType = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
+    if (!pastType || pastType.getRank() != 4 || !queryType ||
+        queryType.getRank() != 3 || !keyType || keyType.getRank() != 3)
+      return rewriter.notifyMatchFailure(
+          op, "unshared self-attn expects BSH query/key and BNSH past");
+
+    auto i32Ty = rewriter.getIntegerType(32);
+    mlir::Value pastLen = mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2);
+    mlir::Value stepLen = mlir::tensor::DimOp::create(rewriter, loc, key, 1);
+    mlir::Value total = mlir::arith::AddIOp::create(rewriter, loc, pastLen, stepLen);
+    mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+    mlir::Value last = mlir::arith::SubIOp::create(rewriter, loc, total, one);
+    mlir::Value lastI32 = mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, last);
+    mlir::Value totalI32 = mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, total);
+    mlir::Value batchSize = mlir::tensor::DimOp::create(rewriter, loc, query, 0);
+    mlir::Value seqlensK = mlir::tensor::SplatOp::create(
+        rewriter, loc, lastI32,
+        mlir::RankedTensorType::get({mlir::ShapedType::kDynamic}, i32Ty),
+        mlir::ValueRange{batchSize});
+    mlir::Value totalSeqLen = mlir::tensor::FromElementsOp::create(
+        rewriter, loc, mlir::RankedTensorType::get({}, i32Ty),
+        mlir::ValueRange{totalI32});
+    auto outputType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto presentKType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    auto presentVType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+    return buildHipGqaCall(
+        op, rewriter, context, query, key, value, pastKey, pastValue, seqlensK,
+        totalSeqLen, numHeadsAttr.getValue().getSExtValue(),
+        scaleAttr.getValue().convertToFloat(),
+        /*noCausal=*/unidirectionalAttr.getValue().getSExtValue() == 0,
+        outputType, presentKType, presentVType, /*attentionBias=*/nullptr,
+        /*presentLength=*/total);
+  }
+
   // Branch 1 (decoder cross-attn): 8-input form, K/V supplied, past slots
   // EMPTY (no KV cache — K/V come directly from encoder output), no
   // bias/mask/attention_bias/cache_indirection.  The past_sequence_length
@@ -225,10 +297,14 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
     //   * 3-D [B, Skv, hidden]            (separate K activation)
     //   * 4-D [B, num_heads, Skv, head]   (pre-split K cache — Whisper cross)
     // Detect by rank.
+    // The batch may be dynamic (onnxruntime-genai's export leaves it so);
+    // heads, Skv and head size must be static.
     auto keyType = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
-    if (!keyType || !keyType.hasStaticShape())
+    if (!keyType || keyType.getRank() < 1 ||
+        llvm::any_of(keyType.getShape().drop_front(),
+                     mlir::ShapedType::isDynamic))
       return rewriter.notifyMatchFailure(
-          op, "cross-attn dispatch requires static-shape key");
+          op, "cross-attn dispatch requires a key static but for its batch");
     int64_t batch = keyType.getDimSize(0);
     int64_t skv;
     // We currently only support rank-4 BNSH cross-attention keys (the Whisper
@@ -242,13 +318,46 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
           op, "cross-attn rank-3 key not yet supported; expected rank-4 BNSH");
 
     auto i32Ty = rewriter.getIntegerType(32);
-    auto seqlensKType = mlir::RankedTensorType::get({batch}, i32Ty);
-    llvm::SmallVector<llvm::APInt, 1> seqlensVals(
-        static_cast<size_t>(batch), llvm::APInt(32, skv, /*isSigned=*/true));
-    auto seqlensKAttr = mlir::DenseElementsAttr::get(
-        seqlensKType, llvm::ArrayRef<llvm::APInt>(seqlensVals));
-    mlir::Value seqlensK =
-        mlir::arith::ConstantOp::create(rewriter, loc, seqlensKAttr);
+    mlir::Value seqlensK;
+    if (mlir::ShapedType::isDynamic(batch)) {
+      // [Skv] x the key's batch, splatted at run time. The GQA runtime
+      // caches seqlens_k by address within a forward pass, so a buffer that
+      // dies and comes back at the same address with another value (a
+      // self-attention layer's) would read stale. When the key is a function
+      // argument the splat goes at the function's entry, one for every
+      // cross-attention layer of this Skv, alive until the last of them.
+      auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(key);
+      mlir::Block *entry = blockArg ? blockArg.getOwner() : nullptr;
+      const bool hoist = entry && entry->isEntryBlock();
+      mlir::OpBuilder::InsertionGuard guard(rewriter);
+      if (hoist) {
+        for (mlir::Operation &existing : *entry) {
+          auto attr = existing.getAttrOfType<mlir::IntegerAttr>("hip.cross_seqlens");
+          if (attr && attr.getInt() == skv && mlir::isa<mlir::tensor::SplatOp>(existing))
+            seqlensK = existing.getResult(0);
+        }
+        rewriter.setInsertionPointToStart(entry);
+      }
+      if (!seqlensK) {
+        mlir::Value skvValue = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getIntegerAttr(i32Ty, skv));
+        mlir::Value batchSize = mlir::tensor::DimOp::create(rewriter, loc, key, 0);
+        auto splat = mlir::tensor::SplatOp::create(
+            rewriter, loc, skvValue,
+            mlir::RankedTensorType::get({mlir::ShapedType::kDynamic}, i32Ty),
+            mlir::ValueRange{batchSize});
+        if (hoist)
+          splat->setAttr("hip.cross_seqlens", rewriter.getI64IntegerAttr(skv));
+        seqlensK = splat;
+      }
+    } else {
+      auto seqlensKType = mlir::RankedTensorType::get({batch}, i32Ty);
+      llvm::SmallVector<llvm::APInt, 1> seqlensVals(
+          static_cast<size_t>(batch), llvm::APInt(32, skv, /*isSigned=*/true));
+      auto seqlensKAttr = mlir::DenseElementsAttr::get(
+          seqlensKType, llvm::ArrayRef<llvm::APInt>(seqlensVals));
+      seqlensK = mlir::arith::ConstantOp::create(rewriter, loc, seqlensKAttr);
+    }
 
     auto totalSeqLenType = mlir::RankedTensorType::get({}, i32Ty);
     auto totalSeqLenAttr = mlir::DenseElementsAttr::get(
