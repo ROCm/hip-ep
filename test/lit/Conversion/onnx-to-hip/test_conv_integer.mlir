@@ -84,4 +84,23 @@ module {
 
   // CHECK-LABEL: func.func @conv_integer_rank2_rejected
   // CHECK: onnx.ConvInteger
+
+  // Cin = 259 is the first reduction whose uint8 dot product is not an exact f32.
+  func.func @conv_integer_wide_k(
+      %x: tensor<1x259x1x1xui8>, %w: tensor<1x259x1x1xui8>) -> tensor<1x1x1x1xi32> {
+    %y = "onnx.ConvInteger"(%x, %w) {
+      kernel_shape = [1, 1],
+      strides = [1, 1],
+      pads = [0, 0, 0, 0],
+      dilations = [1, 1],
+      group = 1 : i64
+    } : (tensor<1x259x1x1xui8>, tensor<1x259x1x1xui8>) -> tensor<1x1x1x1xi32>
+    return %y : tensor<1x1x1x1xi32>
+  }
+
+  // CHECK-LABEL: func.func @conv_integer_wide_k
+  // CHECK: hip.conv
+  // CHECK-SAME: tensor<1x259x1x1xi32>
+  // CHECK-SAME: tensor<1x1x1x1xi32>
+  // CHECK-NOT: onnx.ConvInteger
 }

@@ -23,6 +23,7 @@ module {
   // CHECK: hip.reduce_min
   // CHECK: hip.reduce_max
   // CHECK: hip.quantize_linear
+  // CHECK-SAME: axis = 0
   // CHECK-NOT: onnx.DynamicQuantizeLinear
 
   // A degenerate `tensor<1xf32>` scale is reshaped from the rank-0 math.
@@ -52,4 +53,17 @@ module {
 
   // CHECK-LABEL: func.func @dql_f16_rejected
   // CHECK: onnx.DynamicQuantizeLinear
+
+  // Rank 1 makes axis 1 out of range. Axis 0 stays legal.
+  func.func @dql_rank1(%x: tensor<4xf32>)
+      -> (tensor<4xui8>, tensor<f32>, tensor<ui8>) {
+    %y, %scale, %zp = "onnx.DynamicQuantizeLinear"(%x)
+        : (tensor<4xf32>) -> (tensor<4xui8>, tensor<f32>, tensor<ui8>)
+    return %y, %scale, %zp : tensor<4xui8>, tensor<f32>, tensor<ui8>
+  }
+
+  // CHECK-LABEL: func.func @dql_rank1
+  // CHECK: hip.quantize_linear
+  // CHECK-SAME: axis = 0
+  // CHECK-NOT: onnx.DynamicQuantizeLinear
 }

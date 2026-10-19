@@ -20,15 +20,15 @@ module {
   }
 
   // CHECK-LABEL: func.func @matmul_integer_inception
+  // K = 1536 exceeds the f32 mantissa, so the matmul stays in i32.
   // CHECK: hip.cast
   // CHECK: hip.sub
   // The length-N zero point is reshaped to [1, N] so it broadcasts on the
   // columns, which the 4D elementwise ABI would also do for a bare vector.
-  // CHECK: tensor<1x1001xf32>
+  // CHECK: tensor<1x1001xi32>
   // CHECK: hip.matmul
-  // CHECK-SAME: tensor<1x1536xf32>
-  // CHECK-SAME: tensor<1536x1001xf32>
-  // CHECK: hip.cast
+  // CHECK-SAME: tensor<1x1536xi32>
+  // CHECK-SAME: tensor<1536x1001xi32>
   // CHECK-SAME: tensor<1x1001xi32>
   // CHECK-NOT: onnx.MatMulInteger
 
@@ -75,8 +75,29 @@ module {
   }
 
   // CHECK-LABEL: func.func @matmul_integer_batch
+  // A's batch of 1 is expanded to B's batch of 4 before the matmul.
+  // CHECK: hip.expand
+  // CHECK-SAME: tensor<4x2x3xf32>
   // CHECK: hip.matmul
+  // CHECK-SAME: tensor<4x2x3xf32>
+  // CHECK-SAME: tensor<4x3x5xf32>
   // CHECK-SAME: tensor<4x2x5xf32>
+  // CHECK-NOT: onnx.MatMulInteger
+
+  // K = 259 is the first length whose uint8 dot product is not an exact f32.
+  func.func @matmul_integer_wide_k(
+      %a: tensor<1x259xui8>, %b: tensor<259x1xui8>) -> tensor<1x1xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b) : (
+        tensor<1x259xui8>, tensor<259x1xui8>
+      ) -> tensor<1x1xi32>
+    return %y : tensor<1x1xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_wide_k
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<1x259xi32>
+  // CHECK-SAME: tensor<259x1xi32>
+  // CHECK-SAME: tensor<1x1xi32>
   // CHECK-NOT: onnx.MatMulInteger
 
   // Rank 1 is numpy's vector promotion. hip.matmul requires rank >= 2.

@@ -204,9 +204,11 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     Type accType;
     if (elementType.isF16() || elementType.isBF16() || elementType.isF32())
       accType = rewriter.getF32Type();
+    else if (elementType.isInteger(32))
+      accType = rewriter.getI32Type();
     else
       return rewriter.notifyMatchFailure(
-          op, "only f16, bf16, and f32 convolution are supported");
+          op, "only f16, bf16, f32, and i32 convolution are supported");
 
     ArrayRef<int64_t> inputShape = inputType.getShape();
     ArrayRef<int64_t> weightShape = weightType.getShape();
@@ -338,11 +340,26 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
 
     Value convResult;
     if (spatialRank == 2) {
-      auto conv = tosa::Conv2DOp::create(
-          rewriter, op.getLoc(), channelLastType, input, weight, bias,
-          rewriter.getDenseI64ArrayAttr(tosaPads),
-          rewriter.getDenseI64ArrayAttr(strides),
-          rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+      // The quant-info builder only materializes zero points for float and
+      // quantized element types. An i32 convolution has to pass them itself.
+      tosa::Conv2DOp conv;
+      if (elementType.isInteger(32)) {
+        auto zpType = RankedTensorType::get({1}, elementType);
+        Value zp = tosa::ConstOp::create(
+            rewriter, op.getLoc(), zpType,
+            DenseElementsAttr::get(zpType, rewriter.getZeroAttr(elementType)));
+        conv = tosa::Conv2DOp::create(
+            rewriter, op.getLoc(), channelLastType, input, weight, bias, zp, zp,
+            rewriter.getDenseI64ArrayAttr(tosaPads),
+            rewriter.getDenseI64ArrayAttr(strides),
+            rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+      } else {
+        conv = tosa::Conv2DOp::create(
+            rewriter, op.getLoc(), channelLastType, input, weight, bias,
+            rewriter.getDenseI64ArrayAttr(tosaPads),
+            rewriter.getDenseI64ArrayAttr(strides),
+            rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+      }
       conv->setAttr("group", rewriter.getI64IntegerAttr(group));
       convResult = conv.getResult();
     } else {
@@ -451,11 +468,24 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     Value b = reshapeTo(bVal, {batch, k, n}, rewriter);
 
     auto matmulType = resultType.clone({batch, m, n});
-    // The quant-info builder appends the (zero) zero-point operands that
-    // tosa.matmul requires for float inputs.
-    Value matmul =
-        tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b)
-            .getResult();
+    Value matmul;
+    if (aType.getElementType().isInteger(32)) {
+      // The quant-info builder returns empty zero points for a non-quantized
+      // integer, which leaves tosa.matmul with missing operands.
+      auto zpType = RankedTensorType::get({1}, aType.getElementType());
+      Value zp = tosa::ConstOp::create(
+          rewriter, op.getLoc(), zpType,
+          DenseElementsAttr::get(zpType,
+                                 rewriter.getZeroAttr(aType.getElementType())));
+      matmul = tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b,
+                                      zp, zp)
+                   .getResult();
+    } else {
+      // The quant-info builder appends the (zero) zero-point operands that
+      // tosa.matmul requires for float inputs.
+      matmul = tosa::MatMulOp::create(rewriter, op.getLoc(), matmulType, a, b)
+                   .getResult();
+    }
 
     rewriter.replaceOp(op, reshapeTo(matmul, resultType.getShape(), rewriter));
     return success();

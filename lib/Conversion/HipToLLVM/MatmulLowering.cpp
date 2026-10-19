@@ -75,6 +75,24 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       }
     }
 
+    // hipBLASLt reads a 4-byte element as f32. An i32 matmul has to take the
+    // integer kernel instead, or the bits are interpreted as floats.
+    if (AType.getElementType().isInteger(32)) {
+      if (transA || transB)
+        return op.emitError("hip.matmul of i32 does not support transpose");
+      SmallVector<Type, 8> i32Params = {ptrType, ptrType, ptrType, ptrType,
+                                        i64Type, i64Type, i64Type, i64Type};
+      FailureOr<LLVM::LLVMFuncOp> i32Fn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapMatmulI32, i32Params, i32Type);
+      if (failed(i32Fn))
+        return failure();
+      SmallVector<Value, 8> i32Args = {statePtr, APtr, BPtr, outputPtr,
+                                       M,        N,    K,    batchCount};
+      LLVM::CallOp::create(rewriter, loc, *i32Fn, i32Args);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     // Compute element size in bytes
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
     Value elemSize = createI64Const(elemBits / 8);

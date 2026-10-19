@@ -239,9 +239,12 @@ mlir::LogicalResult DynamicQuantizeLinearToHip::matchAndRewrite(
                                     zpType.getElementType(), /*onnxTo=*/2);
 
   mlir::Value yInit = createEmptyTensor(rewriter, loc, yType, input);
+  // Per-tensor quantization. Axis 0 is in range for every non-scalar input,
+  // including rank 1. HipToTosa checks the axis before it notices that the
+  // scale and zero point are scalars, so axis 1 rejects a vector.
   auto quantized = mlir::hip::QuantizeLinearOp::create(
       rewriter, loc, mlir::TypeRange{yType}, context, input, scale, zpUi8,
-      yInit, rewriter.getI64IntegerAttr(/*axis=*/1),
+      yInit, rewriter.getI64IntegerAttr(/*axis=*/0),
       rewriter.getI64IntegerAttr(/*block_size=*/0),
       rewriter.getI64IntegerAttr(/*precision=*/0),
       rewriter.getI64IntegerAttr(/*saturate=*/1));

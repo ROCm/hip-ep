@@ -89,6 +89,7 @@ set(_kernel_sources
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
+    hip/matmul_i32_kernel.hip
     hip/conv_transpose_kernel.hip
     hip/resize_kernel.hip
     hip/grid_sample_kernel.hip

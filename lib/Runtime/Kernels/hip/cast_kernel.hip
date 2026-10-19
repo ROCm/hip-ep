@@ -323,6 +323,14 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int8_t*>(input),
                        static_cast<float*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_INT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT8->INT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int8_t, int32_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<int32_t*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,

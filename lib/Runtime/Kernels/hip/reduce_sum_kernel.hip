@@ -997,6 +997,22 @@ static int hip_block_reduce_launch(void *stream, const void *data,
                        inner_size, num_output_elements);
     break;
   }
+  case HIP_DTYPE_FLOAT32: {
+    size_t shared_mem = block_size * sizeof(float);
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_%s: dtype=FLOAT32, "
+                             "input=%lld, output=%lld, reduce_size=%lld, "
+                             "block=%d\n",
+                             op_name, (long long)num_input_elements,
+                             (long long)num_output_elements,
+                             (long long)reduce_size, block_size);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(reduce_int_kernel<float, OP>),
+                       dim3(static_cast<unsigned>(num_output_elements)),
+                       dim3(block_size), shared_mem, hip_stream,
+                       static_cast<const float *>(data),
+                       static_cast<float *>(output), reduce_size, inner_size,
+                       num_output_elements);
+    break;
+  }
   case HIP_DTYPE_FLOAT16: {
     size_t shared_mem = block_size * sizeof(float);
     CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_%s: dtype=FLOAT16, "

@@ -5,8 +5,8 @@
 
 """MatMulInteger.
 
-Values stay inside the f32 mantissa, so the f32 hip.matmul accumulator matches
-the int32 dot product exactly. A long K is not bit-identical.
+A reduction of at most 258 accumulates in f32, which is exact for an 8-bit
+dot product. A longer K accumulates in i32.
 """
 
 from __future__ import annotations
@@ -68,3 +68,18 @@ class TestMatMulInteger:
         model = _matmul_integer(a, b, np.uint8(0), np.uint8(0))
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_broadcast_batch(self, model_runner):
+        a = np.arange(6, dtype=np.uint8).reshape(1, 2, 3)
+        b = np.arange(60, dtype=np.uint8).reshape(4, 3, 5)
+        model = _matmul_integer(a, b, np.uint8(0), np.uint8(0))
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_wide_k(self, model_runner):
+        a = np.full((1, 259), 255, dtype=np.uint8)
+        b = np.full((259, 1), 255, dtype=np.uint8)
+        model = _matmul_integer(a, b)
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        assert int(expected[0].reshape(-1)[0]) == 16841475

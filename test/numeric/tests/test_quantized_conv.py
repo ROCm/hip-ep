@@ -5,8 +5,8 @@
 
 """DynamicQuantizeLinear and ConvInteger.
 
-Values stay inside the f32 mantissa, so the f32 hip.conv accumulator matches
-the int32 dot product exactly. Wider channel counts are not bit-identical.
+A reduction of at most 258 accumulates in f32, which is exact for an 8-bit
+dot product. A longer reduction accumulates in i32.
 """
 
 from __future__ import annotations
@@ -93,3 +93,11 @@ class TestConvInteger:
         model = _conv_integer(x, w, np.int8(0), np.int8(0))
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_wide_channels(self, model_runner):
+        x = np.full((1, 259, 1, 1), 255, dtype=np.uint8)
+        w = np.full((1, 259, 1, 1), 255, dtype=np.uint8)
+        model = _conv_integer(x, w, np.uint8(0), np.uint8(0))
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        assert int(expected[0].reshape(-1)[0]) == 16841475

@@ -1654,6 +1654,98 @@ static int launch(hipStream_t stream, const void *x, const void *w,
 
 } // namespace
 
+// Rank-2 NCHW convolution accumulated in int64. The float conv kernel converts
+// every dtype through to_float, which is not an int32 dot product. Stores the
+// low 32 bits, matching an ONNX int32 accumulator that is allowed to wrap.
+__global__ void conv_i32_nchw_kernel(
+    const int32_t *__restrict__ input, const int32_t *__restrict__ weight,
+    const int32_t *__restrict__ bias, int32_t *__restrict__ output, int64_t N,
+    int64_t Cin, int64_t Cout, int64_t H, int64_t W, int64_t OH, int64_t OW,
+    int64_t KH, int64_t KW, int64_t SH, int64_t SW, int64_t PH, int64_t PW,
+    int64_t DH, int64_t DW, int64_t group) {
+  const int64_t total = N * Cout * OH * OW;
+  const int64_t stride =
+      static_cast<int64_t>(gridDim.x) * static_cast<int64_t>(blockDim.x);
+  const int64_t coutPerGroup = Cout / group;
+  const int64_t cinPerGroup = Cin / group;
+  for (int64_t idx =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < total; idx += stride) {
+    int64_t ow = idx % OW;
+    int64_t tmp = idx / OW;
+    int64_t oh = tmp % OH;
+    tmp /= OH;
+    int64_t oc = tmp % Cout;
+    int64_t n = tmp / Cout;
+    int64_t g = oc / coutPerGroup;
+    int64_t icBase = g * cinPerGroup;
+    int64_t acc = 0;
+    for (int64_t ic = 0; ic < cinPerGroup; ++ic) {
+      for (int64_t kh = 0; kh < KH; ++kh) {
+        int64_t ih = oh * SH - PH + kh * DH;
+        if (ih < 0 || ih >= H)
+          continue;
+        for (int64_t kw = 0; kw < KW; ++kw) {
+          int64_t iw = ow * SW - PW + kw * DW;
+          if (iw < 0 || iw >= W)
+            continue;
+          int64_t inOff = ((n * Cin + (icBase + ic)) * H + ih) * W + iw;
+          int64_t wOff = ((oc * cinPerGroup + ic) * KH + kh) * KW + kw;
+          acc += static_cast<int64_t>(input[inOff]) *
+                 static_cast<int64_t>(weight[wOff]);
+        }
+      }
+    }
+    if (bias)
+      acc += bias[oc];
+    output[((n * Cout + oc) * OH + oh) * OW + ow] = static_cast<int32_t>(acc);
+  }
+}
+
+static int launch_conv_i32(void *stream, const void *input, const void *weights,
+                           const void *bias, void *output, int spatial_rank,
+                           int64_t N, int64_t Cin, int64_t Cout, int64_t in_d0,
+                           int64_t in_d1, int64_t in_d2, int64_t out_d0,
+                           int64_t out_d1, int64_t out_d2, int64_t k0,
+                           int64_t k1, int64_t k2, int64_t s0, int64_t s1,
+                           int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+                           int64_t dil0, int64_t dil1, int64_t dil2,
+                           int64_t group) {
+  if (spatial_rank != 2 || in_d2 != 1 || out_d2 != 1 || k2 != 1 || s2 != 1 ||
+      dil2 != 1 || p2 != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_conv: i32 supports spatial rank 2 only\n");
+    return -1;
+  }
+  if (N < 0 || Cin < 0 || Cout < 0 || in_d0 < 0 || in_d1 < 0 || out_d0 < 0 ||
+      out_d1 < 0 || k0 < 1 || k1 < 1 || s0 < 1 || s1 < 1 || dil0 < 1 ||
+      dil1 < 1) {
+    fprintf(stderr, "[custom_kernels] hip_conv: invalid i32 geometry\n");
+    return -1;
+  }
+  if (N == 0 || Cout == 0 || out_d0 == 0 || out_d1 == 0)
+    return 0;
+
+  constexpr int kBlock = 256;
+  const int64_t total = N * Cout * out_d0 * out_d1;
+  int64_t grid = (total + kBlock - 1) / kBlock;
+  if (grid > 65535)
+    grid = 65535;
+  hipStream_t hipStream = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
+  hipLaunchKernelGGL(
+      conv_i32_nchw_kernel, dim3(static_cast<unsigned>(grid)), dim3(kBlock), 0,
+      hipStream, static_cast<const int32_t *>(input),
+      static_cast<const int32_t *>(weights), static_cast<const int32_t *>(bias),
+      static_cast<int32_t *>(output), N, Cin, Cout, in_d0, in_d1, out_d0,
+      out_d1, k0, k1, s0, s1, p0, p1, dil0, dil1, group);
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_conv i32 launch failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
 extern "C" int hip_conv(void *stream, const void *input, const void *weights,
                         const void *bias, void *output, int hip_dtype,
                         int spatial_rank, int64_t N, int64_t Cin, int64_t Cout,
@@ -1679,6 +1771,11 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
             (long long)group, (long long)Cin, (long long)Cout);
     return -1;
   }
+  if (hip_dtype == HIP_DTYPE_INT32)
+    return launch_conv_i32(stream, input, weights, bias, output, spatial_rank,
+                           N, Cin, Cout, in_d0, in_d1, in_d2, out_d0, out_d1,
+                           out_d2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
+                           dil1, dil2, group);
 
   ConvParams pr{};
   pr.N = N;

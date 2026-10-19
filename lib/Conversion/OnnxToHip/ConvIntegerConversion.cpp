@@ -9,17 +9,13 @@
 // w_zero_point is a scalar or a length-M vector, one value per output
 // channel (default 0).
 //
-// Both the HIP kernel path and the rocMLIR path already lower hip.conv of
-// f32 (tosa.conv2d for rank 4). This decomposition casts the 8-bit tensors
-// to f32, subtracts the zero points, convolves, and casts the accumulator
-// back to i32. No new kernel is required, and the following Cast / Mul /
-// Add in a quantized graph stay on the existing elementwise ops.
-//
-// The f32 accumulator matches an int32 dot product only while the sum fits
-// in the 24-bit mantissa. A 3x3 of uint8 values does; a wide channel count
-// (for example 512 * 3 * 3 * 255 * 255) does not, and those results differ
-// from a wrapping int32 accumulator. ONNX itself allows the int32
-// accumulator to overflow, so the two are not bit-identical past 2^24.
+// hip.conv of f32 lowers through the convolution kernel and through
+// tosa.conv2d. That accumulator is an exact int32 dot product only while
+// every partial sum fits in the 24-bit mantissa. An 8-bit value minus an
+// 8-bit zero point is at most 255 in magnitude, so each product is at most
+// 65025 and the reduction length (C/group)*kH*kW must be at most 258. A
+// longer reduction casts to i32 and accumulates there. ONNX allows the int32
+// accumulator to wrap.
 //
 // A 1-D weight zero point is reshaped to [M, 1, 1, 1] before the subtract.
 // hip.sub right-aligns unequal ranks into the 4D broadcast ABI, so a bare
@@ -62,6 +58,14 @@ static mlir::LogicalResult readI64Array(mlir::ArrayAttr attr,
 }
 
 static bool isEightBit(mlir::Type type) { return type.isInteger(8); }
+
+/// True when `255 * 255 * reductionLength` is an exact f32 integer.
+static bool eightBitDotIsExactInF32(int64_t reductionLength) {
+  constexpr int64_t kMaxAbsProduct = 255 * 255;
+  constexpr int64_t kMantissaLimit = int64_t{1} << 24;
+  return reductionLength >= 0 &&
+         reductionLength <= kMantissaLimit / kMaxAbsProduct;
+}
 
 static mlir::Value realOperand(mlir::Operation *op, unsigned index) {
   if (index >= op->getNumOperands())
@@ -336,34 +340,36 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value context = *ctxOrFailure;
   mlir::Location loc = op->getLoc();
 
-  // ONNX FLOAT is datatype 1. The cast kernel is selected from the buffer
-  // types (ui8->f32 and i8->f32), not from this attribute.
-  mlir::Value inputF =
-      castTo(rewriter, loc, context, op->getOperand(0), rewriter.getF32Type(),
-             /*onnxTo=*/1);
-  mlir::Value weightF =
-      castTo(rewriter, loc, context, op->getOperand(1), rewriter.getF32Type(),
-             /*onnxTo=*/1);
+  // ONNX FLOAT is datatype 1 and INT32 is 6. The cast kernel is selected
+  // from the buffer types, not from this attribute.
+  const int64_t reduction = (inC / group) * kernelShape[0] * kernelShape[1];
+  const bool exactF32 = eightBitDotIsExactInF32(reduction);
+  mlir::Type accType = rewriter.getI32Type();
+  if (exactF32)
+    accType = rewriter.getF32Type();
+  const int64_t onnxAcc = exactF32 ? 1 : 6;
+
+  mlir::Value inputAcc =
+      castTo(rewriter, loc, context, op->getOperand(0), accType, onnxAcc);
+  mlir::Value weightAcc =
+      castTo(rewriter, loc, context, op->getOperand(1), accType, onnxAcc);
   if (xZp) {
-    mlir::Value xZpF =
-        castTo(rewriter, loc, context, xZp, rewriter.getF32Type(),
-               /*onnxTo=*/1);
-    xZpF = alignZeroPoint(rewriter, loc, xZpF, inputType, /*perChannel=*/false);
-    inputF = subtractZeroPoint(rewriter, loc, context, inputF, xZpF);
+    mlir::Value xZpAcc = castTo(rewriter, loc, context, xZp, accType, onnxAcc);
+    xZpAcc =
+        alignZeroPoint(rewriter, loc, xZpAcc, inputType, /*perChannel=*/false);
+    inputAcc = subtractZeroPoint(rewriter, loc, context, inputAcc, xZpAcc);
   }
   if (wZp) {
-    mlir::Value wZpF =
-        castTo(rewriter, loc, context, wZp, rewriter.getF32Type(),
-               /*onnxTo=*/1);
-    wZpF = alignZeroPoint(rewriter, loc, wZpF, weightType, /*perChannel=*/true);
-    weightF = subtractZeroPoint(rewriter, loc, context, weightF, wZpF);
+    mlir::Value wZpAcc = castTo(rewriter, loc, context, wZp, accType, onnxAcc);
+    wZpAcc =
+        alignZeroPoint(rewriter, loc, wZpAcc, weightType, /*perChannel=*/true);
+    weightAcc = subtractZeroPoint(rewriter, loc, context, weightAcc, wZpAcc);
   }
 
-  auto convType =
-      mlir::RankedTensorType::get(resultType.getShape(), rewriter.getF32Type());
-  mlir::Value convInit = createEmptyTensor(rewriter, loc, convType, inputF);
+  auto convType = mlir::RankedTensorType::get(resultType.getShape(), accType);
+  mlir::Value convInit = createEmptyTensor(rewriter, loc, convType, inputAcc);
 
-  llvm::SmallVector<mlir::Value> operands = {context, inputF, weightF,
+  llvm::SmallVector<mlir::Value> operands = {context, inputAcc, weightAcc,
                                              convInit};
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("kernel_shape",
@@ -377,9 +383,11 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(
       rewriter.getNamedAttr("group", rewriter.getI64IntegerAttr(group)));
   auto conv = mlir::hip::ConvOp::create(rewriter, loc, operands, attrs);
+  if (!exactF32) {
+    rewriter.replaceOp(op, conv.getResult(0));
+    return mlir::success();
+  }
 
-  // ONNX INT32 is datatype 6. Truncation of an already-integral f32 value
-  // is exact inside the mantissa range documented above.
   mlir::Value outInit = createEmptyTensor(rewriter, loc, resultType, convInit);
   auto casted = mlir::hip::CastOp::create(
       rewriter, loc, context, conv.getResult(0), outInit,

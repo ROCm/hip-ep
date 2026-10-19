@@ -10,17 +10,16 @@
 // scalar or a length-N vector (one value per column of B). Either zero point
 // may be omitted, which means 0.
 //
-// hip.matmul of f32 already lowers through hipBLASLt and through tosa.matmul
-// on the rocMLIR path. This decomposition casts the 8-bit tensors to f32,
-// subtracts the zero points, multiplies, and casts the accumulator back to
-// i32. No new kernel is required, and the Cast / Mul / Add that follow a
-// quantized gemm stay on the existing elementwise ops.
+// hip.matmul of f32 lowers through hipBLASLt and through tosa.matmul. That
+// accumulator is an exact int32 dot product only while every partial sum fits
+// in the 24-bit mantissa. An 8-bit value minus an 8-bit zero point is at most
+// 255 in magnitude, so each product is at most 65025 and K must be at most
+// 258. A longer K, including the Inception-v4 logits gemm, casts to i32 and
+// accumulates there instead. ONNX allows the int32 accumulator to wrap.
 //
-// The f32 accumulator matches an int32 dot product only while the sum fits
-// in the 24-bit mantissa. A short K does; the Inception-v4 logits gemm
-// (K = 1536, uint8 values) does not, and those results differ from a
-// wrapping int32 accumulator. ONNX itself allows the int32 accumulator to
-// overflow, so the two are not bit-identical past 2^24.
+// Batch dimensions are broadcast to the result's batch shape before the
+// matmul. hip.matmul counts batches from A and does not broadcast a size-1
+// batch, and tosa.matmul rejects unequal batches.
 //
 // hip.sub left-pads unequal ranks into the 4D broadcast ABI, so a 1-D zero
 // point would land on the last axis. That is correct for B's columns (N)
@@ -56,6 +55,14 @@ namespace hip {
 namespace {
 
 static bool isEightBit(mlir::Type type) { return type.isInteger(8); }
+
+/// True when `255 * 255 * reductionLength` is an exact f32 integer.
+static bool eightBitDotIsExactInF32(int64_t reductionLength) {
+  constexpr int64_t kMaxAbsProduct = 255 * 255;
+  constexpr int64_t kMantissaLimit = int64_t{1} << 24;
+  return reductionLength >= 0 &&
+         reductionLength <= kMantissaLimit / kMaxAbsProduct;
+}
 
 static mlir::Value realOperand(mlir::Operation *op, unsigned index) {
   if (index >= op->getNumOperands())
@@ -136,6 +143,23 @@ static mlir::Value castTo(mlir::PatternRewriter &rewriter, mlir::Location loc,
   auto casted = mlir::hip::CastOp::create(rewriter, loc, context, input, init,
                                           rewriter.getI64IntegerAttr(onnxTo));
   return casted->getResult(0);
+}
+
+/// Broadcast \p value to \p dstType. Equal shapes are left alone. hip.expand
+/// materializes the copies hip.matmul and tosa.matmul will not.
+static mlir::Value expandTo(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value context, mlir::Value value,
+                            mlir::RankedTensorType dstType) {
+  if (value.getType() == dstType)
+    return value;
+  auto shapeType =
+      mlir::RankedTensorType::get({dstType.getRank()}, rewriter.getI64Type());
+  auto shapeAttr = mlir::DenseElementsAttr::get(shapeType, dstType.getShape());
+  mlir::Value shape =
+      mlir::arith::ConstantOp::create(rewriter, loc, shapeType, shapeAttr);
+  mlir::Value init = createEmptyTensor(rewriter, loc, dstType, value);
+  return mlir::hip::ExpandOp::create(rewriter, loc, context, value, shape, init)
+      ->getResult(0);
 }
 
 static mlir::Value subtractZeroPoint(mlir::PatternRewriter &rewriter,
@@ -236,40 +260,55 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value context = *ctxOrFailure;
   mlir::Location loc = op->getLoc();
 
-  // ONNX FLOAT is datatype 1. The cast kernel is selected from the buffer
-  // types (ui8->f32 and i8->f32), not from this attribute.
-  mlir::Value aF = castTo(rewriter, loc, context, op->getOperand(0),
-                          rewriter.getF32Type(), /*onnxTo=*/1);
-  mlir::Value bF = castTo(rewriter, loc, context, op->getOperand(1),
-                          rewriter.getF32Type(), /*onnxTo=*/1);
+  // ONNX FLOAT is datatype 1 and INT32 is 6. The cast kernel is selected
+  // from the buffer types, not from this attribute.
+  const bool exactF32 = eightBitDotIsExactInF32(ka);
+  mlir::Type accType = rewriter.getI32Type();
+  if (exactF32)
+    accType = rewriter.getF32Type();
+  const int64_t onnxAcc = exactF32 ? 1 : 6;
+
+  mlir::Value aAcc =
+      castTo(rewriter, loc, context, op->getOperand(0), accType, onnxAcc);
+  mlir::Value bAcc =
+      castTo(rewriter, loc, context, op->getOperand(1), accType, onnxAcc);
   if (aZp) {
-    mlir::Value aZpF =
-        castTo(rewriter, loc, context, aZp, rewriter.getF32Type(),
-               /*onnxTo=*/1);
-    aZpF = alignZeroPoint(rewriter, loc, aZpF, aType, aType.getRank() - 2);
-    aF = subtractZeroPoint(rewriter, loc, context, aF, aZpF);
+    mlir::Value aZpAcc = castTo(rewriter, loc, context, aZp, accType, onnxAcc);
+    aZpAcc = alignZeroPoint(rewriter, loc, aZpAcc, aType, aType.getRank() - 2);
+    aAcc = subtractZeroPoint(rewriter, loc, context, aAcc, aZpAcc);
   }
   if (bZp) {
-    mlir::Value bZpF =
-        castTo(rewriter, loc, context, bZp, rewriter.getF32Type(),
-               /*onnxTo=*/1);
-    bZpF = alignZeroPoint(rewriter, loc, bZpF, bType, bType.getRank() - 1);
-    bF = subtractZeroPoint(rewriter, loc, context, bF, bZpF);
+    mlir::Value bZpAcc = castTo(rewriter, loc, context, bZp, accType, onnxAcc);
+    bZpAcc = alignZeroPoint(rewriter, loc, bZpAcc, bType, bType.getRank() - 1);
+    bAcc = subtractZeroPoint(rewriter, loc, context, bAcc, bZpAcc);
   }
 
-  auto matmulType =
-      mlir::RankedTensorType::get(resultType.getShape(), rewriter.getF32Type());
-  mlir::Value matmulInit = createEmptyTensor(rewriter, loc, matmulType, aF);
+  llvm::SmallVector<int64_t> batchShape(expected.begin(), expected.end() - 2);
+  llvm::SmallVector<int64_t> aBroadcast = batchShape;
+  aBroadcast.push_back(m);
+  aBroadcast.push_back(ka);
+  llvm::SmallVector<int64_t> bBroadcast = batchShape;
+  bBroadcast.push_back(kb);
+  bBroadcast.push_back(n);
+  aAcc = expandTo(rewriter, loc, context, aAcc,
+                  mlir::RankedTensorType::get(aBroadcast, accType));
+  bAcc = expandTo(rewriter, loc, context, bAcc,
+                  mlir::RankedTensorType::get(bBroadcast, accType));
+
+  auto matmulType = mlir::RankedTensorType::get(resultType.getShape(), accType);
+  mlir::Value matmulInit = createEmptyTensor(rewriter, loc, matmulType, aAcc);
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(
       rewriter.getNamedAttr("transA", rewriter.getI64IntegerAttr(0)));
   attrs.push_back(
       rewriter.getNamedAttr("transB", rewriter.getI64IntegerAttr(0)));
-  llvm::SmallVector<mlir::Value> operands = {context, aF, bF, matmulInit};
+  llvm::SmallVector<mlir::Value> operands = {context, aAcc, bAcc, matmulInit};
   auto matmul = mlir::hip::MatmulOp::create(rewriter, loc, operands, attrs);
+  if (!exactF32) {
+    rewriter.replaceOp(op, matmul.getResult(0));
+    return mlir::success();
+  }
 
-  // ONNX INT32 is datatype 6. Truncation of an already-integral f32 value
-  // is exact inside the mantissa range documented above.
   mlir::Value outInit =
       createEmptyTensor(rewriter, loc, resultType, matmulInit);
   auto casted = mlir::hip::CastOp::create(

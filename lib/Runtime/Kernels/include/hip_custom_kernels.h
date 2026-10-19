@@ -1790,8 +1790,8 @@ HIP_KERNEL_API int hip_global_pool(
  *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
- * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
- * (FP16 accumulates in float, narrows on write).
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT16 (FP16 accumulates in float, narrows on write).
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
@@ -3551,6 +3551,19 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t activation,
     int64_t element_size_bytes);
 
+/* Exact int32 matmul. A is [batch, M, K], B is [batch, K, N], both contiguous.
+ * Accumulates in int64 and stores a wrapping int32. transA/transB are not
+ * supported; the caller expands batches first. Returns 0 on success. */
+HIP_KERNEL_API int hip_matmul_i32(
+    void* stream,
+    const void* a,
+    const void* b,
+    void* c,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================
@@ -3571,11 +3584,15 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
  * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
  * must be 1 and those in `p` must be 0 (the lowering does this).
  *
- * Accumulation is in float for every dtype, so a fp16 convolution with a
- * contraction extent in the thousands does not lose the reduction to rounding.
+ * Float dtypes accumulate in float, so a fp16 convolution with a contraction
+ * extent in the thousands does not lose the reduction to rounding.
+ * HIP_DTYPE_INT32 is a spatial-rank-2 convolution that accumulates in int64
+ * and stores a wrapping int32. Its trailing spatial slots must be the identity
+ * (extent / kernel / stride / dilation 1, pad 0).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
+ * share the dtype.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_conv(
