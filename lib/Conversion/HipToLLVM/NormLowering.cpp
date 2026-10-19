@@ -179,6 +179,53 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
+    // Per-tensor element sizes: an fp32 residual can carry fp16 skip, gamma
+    // and output (the Casts around the norm folded away), which takes the
+    // _mixed runtime entry. Bias shares skip's type.
+    auto elemBytes = [](Value v) -> unsigned {
+      return cast<MemRefType>(v.getType()).getElementTypeBitWidth() / 8;
+    };
+    const unsigned skipBytes = elemBytes(op.getSkip());
+    const unsigned gammaBytes = elemBytes(op.getGamma());
+    const unsigned outBytes = elemBytes(op.getOutputs()[0]);
+    const unsigned sumBytes = op.getOutputs().size() > 1
+                                  ? elemBytes(op.getOutputs()[1])
+                                  : elementSizeBytes;
+    if (skipBytes != elementSizeBytes || gammaBytes != elementSizeBytes ||
+        outBytes != elementSizeBytes || sumBytes != elementSizeBytes) {
+      auto i64Const = [&](unsigned v) -> Value {
+        return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                        rewriter.getI64IntegerAttr(v));
+      };
+      SmallVector<Type> mixedTypes = {ptrType, ptrType, ptrType, ptrType,
+                                      ptrType, ptrType, ptrType, i64Type,
+                                      i64Type, i64Type, i64Type, i64Type,
+                                      i64Type, i64Type, f32Type};
+      FailureOr<LLVM::LLVMFuncOp> mixedFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapSkipSimplifiedLayerNormMixed, mixedTypes,
+          rewriter.getI32Type());
+      if (failed(mixedFn))
+        return failure();
+      SmallVector<Value> mixedArgs = {statePtr,
+                                      inputPtr,
+                                      skipPtr,
+                                      gammaPtr,
+                                      biasPtr,
+                                      outputPtr,
+                                      skipOutputPtr,
+                                      inputNumElements,
+                                      gammaNumElements,
+                                      elementSizeBytesVal,
+                                      i64Const(skipBytes),
+                                      i64Const(gammaBytes),
+                                      i64Const(outBytes),
+                                      i64Const(sumBytes),
+                                      epsilonVal};
+      LLVM::CallOp::create(rewriter, loc, *mixedFn, mixedArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
