@@ -18,7 +18,7 @@ from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
 
-def _conv_integer(x, w, x_zp, w_zp, *, stride=1, pad=0):
+def _conv_integer(x, w, x_zp, w_zp, *, stride=1, pad=0, group=1):
     x_shape = list(x.shape)
     w_shape = list(w.shape)
     out_h = (x_shape[2] + pad + pad - w_shape[2]) // stride + 1
@@ -35,7 +35,7 @@ def _conv_integer(x, w, x_zp, w_zp, *, stride=1, pad=0):
         strides=[stride, stride],
         pads=[pad, pad, pad, pad],
         dilations=[1, 1],
-        group=1,
+        group=group,
         auto_pad="NOTSET",
     )
     inits = [
@@ -128,3 +128,65 @@ class TestConvInteger:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0, rtol=0)
         assert int(np.asarray(actual[0]).reshape(-1)[0]) == 16841475
+
+    def test_wide_grouped_padded(self, model_runner):
+        # (C/group)*kH*kW = 29*3*3 = 261, so this takes the i32 kernel.
+        # Stride, pad, and two groups make a wrong spatial or group index
+        # change the result. Values differ by batch, channel, and position.
+        n, cin, h, w = 2, 58, 5, 5
+        cout, cin_g, kh, kw = 4, 29, 3, 3
+        group, stride, pad = 2, 2, 1
+        x = np.empty((n, cin, h, w), dtype=np.uint8)
+        for c in range(cin):
+            for ih in range(h):
+                for iw in range(w):
+                    x[0, c, ih, iw] = (c + 3 * ih + 5 * iw) % 37
+                    x[1, c, ih, iw] = (c + 7 * ih + iw) % 41
+        weight = np.empty((cout, cin_g, kh, kw), dtype=np.uint8)
+        for oc in range(cout):
+            for ic in range(cin_g):
+                for khi in range(kh):
+                    for kwi in range(kw):
+                        weight[oc, ic, khi, kwi] = (
+                            oc + 2 * ic + 3 * khi + 5 * kwi
+                        ) % 23
+        model = _conv_integer(
+            x,
+            weight,
+            np.uint8(0),
+            np.uint8(0),
+            stride=stride,
+            pad=pad,
+            group=group,
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+        got = np.asarray(actual[0])
+        cout_per_group = cout // group
+
+        def cell(batch, oc, oh, ow):
+            acc = 0
+            ic_base = (oc // cout_per_group) * cin_g
+            for ic in range(cin_g):
+                for khi in range(kh):
+                    ih = oh * stride - pad + khi
+                    if ih < 0 or ih >= h:
+                        continue
+                    for kwi in range(kw):
+                        iw = ow * stride - pad + kwi
+                        if iw < 0 or iw >= w:
+                            continue
+                        acc += int(x[batch, ic_base + ic, ih, iw]) * int(
+                            weight[oc, ic, khi, kwi]
+                        )
+            return acc
+
+        # Padded corner, an interior point, the other group, and the other batch.
+        for batch, oc, oh, ow in (
+            (0, 0, 0, 0),
+            (0, 1, 1, 2),
+            (0, 3, 2, 1),
+            (1, 2, 0, 2),
+        ):
+            assert int(got[batch, oc, oh, ow]) == cell(batch, oc, oh, ow)
