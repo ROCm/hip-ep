@@ -1774,6 +1774,11 @@ static void settleClock(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
 // comparable to the signal at that scale, so a small-iters min alone is not
 // trustworthy there. A reading <= 0 is not a real duration (Windows HIP event
 // timer noise at sub-0.1ms scale can yield this); it must never win the min.
+// Nor can a positive reading far below the config's own median: the same timer
+// now and then reports an 80 us GEMM as 10 us (beyond any chip's peak), and the
+// min would give that config the point every time. A sample under half the
+// median of the config's samples is such a glitch and is left out; a real peak
+// (boost clock, warm cache) stays within 2x of the median.
 // `evict`, when not null, streams the eviction buffer before each timed
 // launch; that is recorded ahead of ev0, so it stays out of the reading.
 template <typename LaunchFn>
@@ -1782,10 +1787,32 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
                             void* evict, LaunchFn&& launch) {
     for (int w = 0; w < warmup; w++) launch();
 
+    constexpr int kMaxSamples = 32;
+    float samples[kMaxSamples];
+    int kept = 0;
+    const int cap = floor_iters < kMaxSamples ? floor_iters : kMaxSamples;
+
+    // Smallest sample that is not implausibly far below the median of the
+    // samples taken so far (1e30 while there is none).
+    auto robustPeak = [&]() {
+        if (kept == 0) return 1e30f;
+        float lo = 1e30f;
+        for (int i = 0; i < kept; i++) lo = samples[i] < lo ? samples[i] : lo;
+        if (kept < 3) return lo;
+        float sorted[kMaxSamples];
+        for (int i = 0; i < kept; i++) sorted[i] = samples[i];
+        std::sort(sorted, sorted + kept);
+        const float median = sorted[kept / 2];
+        float best = 1e30f;
+        for (int i = 0; i < kept; i++)
+            if (samples[i] >= 0.5f * median && samples[i] < best) best = samples[i];
+        return best;
+    };
+
     float best = 1e30f;
     int iter_count = 0;
     while (iter_count < iters ||
-           (best < floor_ms && iter_count < floor_iters)) {
+           (best < floor_ms && iter_count < cap)) {
         gemvEvict(evict, stream);
         hipEventRecord(ev0, stream);
         launch();
@@ -1793,7 +1820,10 @@ static float timeConfigPeak(hipEvent_t ev0, hipEvent_t ev1, hipStream_t stream,
         hipEventSynchronize(ev1);
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
-        if (ms > 0.0f && ms < best) best = ms;
+        if (ms > 0.0f && kept < kMaxSamples) {
+            samples[kept++] = ms;
+            best = robustPeak();
+        }
         iter_count++;
     }
     return best;
