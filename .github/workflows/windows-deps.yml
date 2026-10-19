@@ -518,7 +518,11 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-oga-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: |
+          # upload-artifact rejects '/', so keep OGA_REPO for checkout and use
+          # a filesystem-safe form only in the shared cache/artifact name.
+          OGA_REPO_KEY="${OGA_REPO//\//-}"
+          echo "value=windows-oga-${OGA_REPO_KEY}-${OGA_REF}-pr${OGA_PR_PATCHES}-ort${ONNXRUNTIME_VERSION}-ortpr${ONNXRUNTIME_PR_PATCHES}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
