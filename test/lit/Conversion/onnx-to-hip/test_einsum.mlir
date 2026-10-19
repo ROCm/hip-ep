@@ -86,6 +86,15 @@ module {
   // CHECK-NOT: onnx.Einsum
   // CHECK-NOT: hip.matmul
 
+  func.func @einsum_outer_f64(%A: tensor<1x3xf64>, %B: tensor<10xf64>) -> tensor<1x3x10xf64> {
+    %Y = "onnx.Einsum"(%A, %B) {equation = "bc,d->bcd"} : (tensor<1x3xf64>, tensor<10xf64>) -> tensor<1x3x10xf64>
+    return %Y : tensor<1x3x10xf64>
+  }
+
+  // CHECK-LABEL: func.func @einsum_outer_f64
+  // CHECK: onnx.Einsum
+  // CHECK-NOT: hip.mul
+
   func.func @einsum_outer_rank5(%A: tensor<2x2x2x2x2xf16>, %B: tensor<2xf16>) -> tensor<2x2x2x2x2x2xf16> {
     %Y = "onnx.Einsum"(%A, %B) {equation = "abcde,f->abcdef"} : (tensor<2x2x2x2x2xf16>, tensor<2xf16>) -> tensor<2x2x2x2x2x2xf16>
     return %Y : tensor<2x2x2x2x2x2xf16>

@@ -34,7 +34,9 @@ namespace {
 // each operand is permuted into output-letter order and unit axes are
 // inserted for the letters it does not carry, then hip.mul broadcasts.
 // `bc,d->bcd` is `[1,3] -> [1,3,1]`, `[10] -> [1,1,10]`, multiply to
-// `[1,3,10]`. hip.mul's shape ABI stops at rank 4.
+// `[1,3,10]`. hip.mul's shape ABI stops at rank 4, and its runtime multiply
+// is f16 or f32. f64 stays onnx.Einsum: wrap_elementwise rejects it and
+// leaves the output unwritten.
 //
 // Letters that appear in only one operand and not in the output, a repeated
 // letter, ellipsis, or an operand count other than two stay unconverted.
@@ -193,6 +195,9 @@ EinsumToMatmul::matchAndRewrite(mlir::Operation *op,
     if (outType.getRank() > 4)
       return rewriter.notifyMatchFailure(
           op, "outer-product einsum rank exceeds hip.mul");
+    if (!elem.isF16() && !elem.isF32())
+      return rewriter.notifyMatchFailure(
+          op, "outer-product einsum requires f16 or f32");
   } else if (mDims.empty() || nDims.empty()) {
     return rewriter.notifyMatchFailure(
         op, "einsum is not a batched matmul with M, N, and K");
