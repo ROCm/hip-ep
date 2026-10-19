@@ -42,9 +42,20 @@
 #include <cstdint>
 #include <cstdio>
 
-static constexpr int kSkipRmsNormBlockSize = 256;
+static constexpr int kSkipRmsNormMaxBlockSize = 1024;
 
 namespace {
+
+// A decode step normalizes one row, so that row's block is the whole grid and
+// its latency is the chain of dependent loop iterations in each pass. Wide
+// rows get more threads to keep that chain at a few iterations: 256 threads
+// walk a 5120-wide row in 10 iterations per pass, 1024 threads in 3.
+inline int skip_block_size(int64_t norm_size) {
+  int block = 256;
+  while (block < kSkipRmsNormMaxBlockSize && block * 8 < norm_size)
+    block *= 2;
+  return block;
+}
 
 __device__ inline float skip_load(const float *p) { return *p; }
 __device__ inline float skip_load(const __half *p) { return __half2float(*p); }
@@ -63,7 +74,8 @@ __device__ inline float skip_block_sum(float partial, float *s_reduce) {
   return s_reduce[0];
 }
 
-// One block per row. blockDim.x == kSkipRmsNormBlockSize.
+// One block per row. blockDim.x is a power of two up to
+// kSkipRmsNormMaxBlockSize (skip_block_size).
 // `bias` and `sum_out` may be null. VEC2 requires an even norm_size and
 // 4-byte aligned bases on every non-null pointer; the launcher checks both.
 //
@@ -94,7 +106,7 @@ hip_skip_rms_norm_kernel(const T *__restrict__ input,
   int8_t *q_row = QUANT ? q_out + row * norm_size : nullptr;
   float *qs_row = QUANT ? q_scale + row * (norm_size / 32) : nullptr;
 
-  __shared__ float s_reduce[kSkipRmsNormBlockSize];
+  __shared__ float s_reduce[kSkipRmsNormMaxBlockSize];
   __shared__ float s_inv_rms;
 
   float local_sumsq = 0.0f;
@@ -214,7 +226,7 @@ extern "C" int hip_skip_rms_norm(void *stream, const void *input,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   dim3 grid(static_cast<unsigned int>(outer));
-  dim3 block(kSkipRmsNormBlockSize);
+  dim3 block(skip_block_size(norm_size));
 
   // Clear any error left sticky by a prior kernel whose launcher didn't check
   // its own status, so the hipGetLastError() below attributes a failure to THIS
@@ -292,7 +304,7 @@ extern "C" int hip_skip_rms_norm_quant_i8(
   (void)hipGetLastError();
   hipLaunchKernelGGL(
       HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half, true, true>),
-      dim3(static_cast<unsigned int>(outer)), dim3(kSkipRmsNormBlockSize), 0,
+      dim3(static_cast<unsigned int>(outer)), dim3(skip_block_size(norm_size)), 0,
       static_cast<hipStream_t>(stream), static_cast<const __half *>(input),
       static_cast<const __half *>(skip), static_cast<const __half *>(gamma),
       static_cast<const __half *>(bias), static_cast<__half *>(output),
