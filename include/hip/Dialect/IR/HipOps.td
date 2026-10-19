@@ -998,6 +998,8 @@ def Hip_DequantBnb4Op : Hip_DpsOp<"dequant_bnb4", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",

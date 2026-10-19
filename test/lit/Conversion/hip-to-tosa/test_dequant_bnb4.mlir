@@ -37,7 +37,7 @@ func.func @dequant_bnb4_fp4(%ctx: !hip.context, %packed: tensor<16xui8>,
 func.func @dequant_bnb4_bad_quant(%ctx: !hip.context, %packed: tensor<16xui8>,
                                   %absmax: tensor<2xf32>, %init: tensor<4x8xf32>)
     -> tensor<4x8xf32> attributes {rock.kernel} {
-  // expected-error @+1 {{failed to legalize operation 'hip.dequant_bnb4'}}
+  // expected-error @+1 {{quant_type must be 0 (FP4) or 1 (NF4)}}
   %r = hip.dequant_bnb4(%ctx) ins(%packed, %absmax :
         tensor<16xui8>, tensor<2xf32>) outs(%init : tensor<4x8xf32>)
         {K = 8 : i64, N = 4 : i64, block_size = 16 : i64, quant_type = 2 : i64}
