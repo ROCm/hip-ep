@@ -16,6 +16,11 @@
 #   make run ONLY=P            # prefill shapes only
 #   make run ONLY=D            # decode shapes only
 #   make run ONLY=P23          # one shape
+#
+# OFFLOAD defaults to the release target, gfx11-generic, at the release -O2,
+# so the sweep times the code custom_kernels_gfx11-generic.dll runs (pass
+# OFFLOAD=--offload-arch=gfx1170 for the gfx117x DLL). The table is
+# still per chip: give update_lut.py --arch the GPU this sweep ran on.
 # ============================================================
 
 ifeq ($(OS),Windows_NT)
@@ -26,7 +31,7 @@ else
     DETECTED_OS := WSL
 endif
 
-OFFLOAD   := --offload-arch=gfx1151
+OFFLOAD   ?= --offload-arch=gfx11-generic
 BUILD_DIR ?= build
 
 ifeq ($(DETECTED_OS),Windows)
@@ -48,7 +53,7 @@ LOG      ?= $(BUILD_DIR)/sweep.log
 
 # -w: the kernel TU is warning-clean under its own build flags; this harness
 # compiles it as a header and would otherwise replay every warning.
-CXXFLAGS := -O3 -std=c++17 -x hip -w -D_CRT_SECURE_NO_WARNINGS
+CXXFLAGS := -O2 -std=c++17 -x hip -w -D_CRT_SECURE_NO_WARNINGS
 
 ONLY      ?=
 TARGET_MS ?= 40
