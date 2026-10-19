@@ -33,11 +33,15 @@ env:
   # in cmake/deps.cmake); the commit is the llvm-install cache key.
   ONNXRUNTIME_VERSION: "1.30.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.17.0"
-  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
-  # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705"
+  # Pin OGA to a commit (not a moving branch) so cache keys invalidate when
+  # the fork is updated. Branch: sliding_window_support_amdgpu (AMDGPU
+  # MorphiZen integration + sliding_window).
+  OGA_REPO: "cliu1003/onnxruntime-genai"
+  OGA_REF: "9aec303f68aa311185f9da8204fa6f5ad54d3228"
+  # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
+  # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
+  # fork branch already carries the needed integration.
+  OGA_PR_PATCHES: ""
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -514,7 +518,11 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: |
+          # upload-artifact rejects '/', so keep OGA_REPO for checkout and use
+          # a filesystem-safe form only in the shared cache/artifact name.
+          OGA_REPO_KEY="${OGA_REPO//\//-}"
+          echo "value=windows-oga-${OGA_REPO_KEY}-${OGA_REF}-pr${OGA_PR_PATCHES}-ort${ONNXRUNTIME_VERSION}-ortpr${ONNXRUNTIME_PR_PATCHES}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
@@ -569,12 +577,15 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # OGA is built from cliu1003/onnxruntime-genai at OGA_REF (commit pin of
+      # sliding_window_support_amdgpu). Optional OGA_PR_PATCHES apply extra
+      # upstream PRs on top of the fork checkout.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
           path: source-oga
           submodules: true
           # Full history: `git apply --3way` below resolves each hunk against the
@@ -655,7 +666,8 @@ jobs:
             --cmake_extra_defines \
               ENABLE_TESTS=OFF \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              ENABLE_TESTS=OFF
 
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
