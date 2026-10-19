@@ -2552,6 +2552,14 @@
 "_ZN12_GLOBAL__N_119strided_copy_kernelItEEvPT_PKS1_NS_17StridedCopyParamsE":[25,0,0,16,491,0,0],
 "_ZN12_GLOBAL__N_119strided_copy_kernelIyEEvPT_PKS1_NS_17StridedCopyParamsE":[25,0,0,16,491,0,0]
 },
+"swiglu_kernel":{
+"_Z12swigluKernelI14__hip_bfloat16EvPKT_S3_PS1_x":[10,0,0,16,92,0,0],
+"_Z12swigluKernelI6__halfEvPKT_S3_PS1_x":[10,0,0,16,69,0,0],
+"_Z12swigluKernelIdEvPKT_S2_PS0_x":[16,0,0,16,109,0,0],
+"_Z12swigluKernelIfEvPKT_S2_PS0_x":[10,0,0,16,64,0,0],
+"_Z15swigluVecKernelI6__halfLi8EEvPKT_S3_PS1_x":[58,0,0,16,249,0,0],
+"_Z15swigluVecKernelIfLi4EEvPKT_S2_PS0_x":[34,0,0,16,154,0,0]
+},
 "swish_kernel":{
 "_Z11swishKernelI14__hip_bfloat16EvPKT_PS1_xd":[9,0,0,16,94,0,0],
 "_Z11swishKernelI6__halfEvPKT_PS1_xd":[9,0,0,16,68,0,0],
