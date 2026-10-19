@@ -8,18 +8,17 @@ module {
     return %arg0 : tensor<1x1x2x2xf32>
   }
 
-  // The quantized Inception-v4 activation: NHWC-to-NCHW f32, then a
-  // per-tensor uint8 dynamic quantize.
-  func.func @dql_inception(%x: tensor<1x3x299x299xf32>)
-      -> (tensor<1x3x299x299xui8>, tensor<f32>, tensor<ui8>) {
+  // Rank-4 f32 input, per-tensor uint8 quantize. Axis 0 is in range.
+  func.func @dql_rank4(%x: tensor<1x3x8x8xf32>)
+      -> (tensor<1x3x8x8xui8>, tensor<f32>, tensor<ui8>) {
     %y, %scale, %zp = "onnx.DynamicQuantizeLinear"(%x)
-        : (tensor<1x3x299x299xf32>)
-          -> (tensor<1x3x299x299xui8>, tensor<f32>, tensor<ui8>)
+        : (tensor<1x3x8x8xf32>)
+          -> (tensor<1x3x8x8xui8>, tensor<f32>, tensor<ui8>)
     return %y, %scale, %zp
-        : tensor<1x3x299x299xui8>, tensor<f32>, tensor<ui8>
+        : tensor<1x3x8x8xui8>, tensor<f32>, tensor<ui8>
   }
 
-  // CHECK-LABEL: func.func @dql_inception
+  // CHECK-LABEL: func.func @dql_rank4
   // CHECK: hip.reduce_min
   // CHECK: hip.reduce_max
   // CHECK: hip.quantize_linear

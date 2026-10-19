@@ -64,6 +64,24 @@ class TestDynamicQuantizeLinear:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-6, rtol=0)
 
+    def test_all_zero_input(self, model_runner):
+        x = np.zeros((1, 1, 2, 2), dtype=np.float32)
+        x_info = helper.make_tensor_value_info("x", TensorProto.FLOAT, list(x.shape))
+        outputs = [
+            helper.make_tensor_value_info("y", TensorProto.UINT8, list(x.shape)),
+            helper.make_tensor_value_info("y_scale", TensorProto.FLOAT, []),
+            helper.make_tensor_value_info("y_zero_point", TensorProto.UINT8, []),
+        ]
+        node = helper.make_node(
+            "DynamicQuantizeLinear", ["x"], ["y", "y_scale", "y_zero_point"]
+        )
+        model = make_model_from_nodes([node], [x_info], outputs, opset=13)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        assert float(expected[1]) == 1.0
+        assert int(expected[2]) == 0
+        assert np.all(expected[0] == 0)
+
 
 class TestConvInteger:
     def test_scalar_zero_points(self, model_runner):

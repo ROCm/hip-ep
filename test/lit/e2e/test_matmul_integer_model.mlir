@@ -3,9 +3,8 @@
 
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
-// DynamicQuantizeLinear followed by MatMulInteger, the logits head of a
-// quantized classifier. Both ops decompose to HIP ops that bufferize;
-// hip.matmul then lowers to hipBLASLt.
+// DynamicQuantizeLinear followed by MatMulInteger. Both ops decompose to
+// HIP ops that bufferize; hip.matmul then lowers to hipBLASLt.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 3

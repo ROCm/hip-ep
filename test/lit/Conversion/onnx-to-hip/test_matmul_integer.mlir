@@ -8,28 +8,28 @@ module {
     return %arg0 : tensor<1x4xui8>
   }
 
-  // Inception-v4 logits gemm: ui8 1x1536 x 1536x1001, scalar activation
-  // zero point, per-column weight zero point, i32 result 1x1001.
-  func.func @matmul_integer_inception(
-      %a: tensor<1x1536xui8>, %b: tensor<1536x1001xui8>,
-      %azp: tensor<ui8>, %bzp: tensor<1001xui8>) -> tensor<1x1001xi32> {
+  // K = 300 exceeds the f32 mantissa. Scalar activation zero point,
+  // per-column weight zero point, i32 result.
+  func.func @matmul_integer_wide_per_column(
+      %a: tensor<1x300xui8>, %b: tensor<300x4xui8>,
+      %azp: tensor<ui8>, %bzp: tensor<4xui8>) -> tensor<1x4xi32> {
     %y = "onnx.MatMulInteger"(%a, %b, %azp, %bzp) : (
-        tensor<1x1536xui8>, tensor<1536x1001xui8>, tensor<ui8>, tensor<1001xui8>
-      ) -> tensor<1x1001xi32>
-    return %y : tensor<1x1001xi32>
+        tensor<1x300xui8>, tensor<300x4xui8>, tensor<ui8>, tensor<4xui8>
+      ) -> tensor<1x4xi32>
+    return %y : tensor<1x4xi32>
   }
 
-  // CHECK-LABEL: func.func @matmul_integer_inception
-  // K = 1536 exceeds the f32 mantissa, so the matmul stays in i32.
+  // CHECK-LABEL: func.func @matmul_integer_wide_per_column
+  // K = 300 exceeds the f32 mantissa, so the matmul stays in i32.
   // CHECK: hip.cast
   // CHECK: hip.sub
   // The length-N zero point is reshaped to [1, N] so it broadcasts on the
   // columns, which the 4D elementwise ABI would also do for a bare vector.
-  // CHECK: tensor<1x1001xi32>
+  // CHECK: tensor<1x4xi32>
   // CHECK: hip.matmul
-  // CHECK-SAME: tensor<1x1536xi32>
-  // CHECK-SAME: tensor<1536x1001xi32>
-  // CHECK-SAME: tensor<1x1001xi32>
+  // CHECK-SAME: tensor<1x300xi32>
+  // CHECK-SAME: tensor<300x4xi32>
+  // CHECK-SAME: tensor<1x4xi32>
   // CHECK-NOT: onnx.MatMulInteger
 
   // A length-M zero point has to move to the row axis. Left as rank 1 it
@@ -111,4 +111,19 @@ module {
 
   // CHECK-LABEL: func.func @matmul_integer_rank1_rejected
   // CHECK: onnx.MatMulInteger
+
+  // A rank-2 B is one matrix. It is not copied into A's batch.
+  func.func @matmul_integer_rank2_b(
+      %a: tensor<2x2x3xui8>, %b: tensor<3x5xui8>) -> tensor<2x2x5xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b) : (
+        tensor<2x2x3xui8>, tensor<3x5xui8>
+      ) -> tensor<2x2x5xi32>
+    return %y : tensor<2x2x5xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_rank2_b
+  // CHECK-NOT: hip.expand
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<2x2x3xf32>, tensor<3x5xf32>
+  // CHECK-NOT: onnx.MatMulInteger
 }

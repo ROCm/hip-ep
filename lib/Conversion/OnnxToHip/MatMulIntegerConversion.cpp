@@ -17,9 +17,12 @@
 // 258. A longer K casts to i32 and
 // accumulates there instead. ONNX allows the int32 accumulator to wrap.
 //
-// Batch dimensions are broadcast to the result's batch shape before the
-// matmul. hip.matmul counts batches from A and does not broadcast a size-1
-// batch, and tosa.matmul rejects unequal batches.
+// A size-1 batch on A is expanded to the result batch: hip.matmul counts
+// batches from A and does not broadcast that 1. A rank-2 B is one shared
+// matrix and is left that way. Copying it once per batch is a large extra
+// buffer, and both hip.matmul (batch stride 0) and tosa.matmul (A's batch
+// folded into M) already reuse it. B is expanded only when it has batch
+// dimensions of its own.
 //
 // hip.sub left-pads unequal ranks into the 4D broadcast ABI, so a 1-D zero
 // point would land on the last axis. That is correct for B's columns (N)
@@ -287,13 +290,17 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> aBroadcast = batchShape;
   aBroadcast.push_back(m);
   aBroadcast.push_back(ka);
-  llvm::SmallVector<int64_t> bBroadcast = batchShape;
-  bBroadcast.push_back(kb);
-  bBroadcast.push_back(n);
   aAcc = expandTo(rewriter, loc, context, aAcc,
                   mlir::RankedTensorType::get(aBroadcast, accType));
-  bAcc = expandTo(rewriter, loc, context, bAcc,
-                  mlir::RankedTensorType::get(bBroadcast, accType));
+  // Rank-2 B has no batch to broadcast. Leave the one [K, N] matrix in
+  // place; the matmul reuses it for every batch of A.
+  if (bType.getRank() > 2) {
+    llvm::SmallVector<int64_t> bBroadcast = batchShape;
+    bBroadcast.push_back(kb);
+    bBroadcast.push_back(n);
+    bAcc = expandTo(rewriter, loc, context, bAcc,
+                    mlir::RankedTensorType::get(bBroadcast, accType));
+  }
 
   auto matmulType = mlir::RankedTensorType::get(resultType.getShape(), accType);
   mlir::Value matmulInit = createEmptyTensor(rewriter, loc, matmulType, aAcc);

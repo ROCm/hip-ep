@@ -8,30 +8,30 @@ module {
     return %arg0 : tensor<1x1x2x2xf32>
   }
 
-  // First conv of quantized Inception-v4: ui8 1x3x299x299, 32x3x3x3,
-  // stride 2, scalar zero points, i32 result 1x32x149x149.
-  func.func @conv_integer_inception(
-      %x: tensor<1x3x299x299xui8>, %w: tensor<32x3x3x3xui8>,
-      %xzp: tensor<ui8>, %wzp: tensor<ui8>) -> tensor<1x32x149x149xi32> {
+  // Rank-4 NCHW, stride 2, scalar zero points. The reduction is 27, which
+  // still fits the f32 mantissa.
+  func.func @conv_integer_stride2(
+      %x: tensor<1x3x8x8xui8>, %w: tensor<4x3x3x3xui8>,
+      %xzp: tensor<ui8>, %wzp: tensor<ui8>) -> tensor<1x4x3x3xi32> {
     %y = "onnx.ConvInteger"(%x, %w, %xzp, %wzp) {
       kernel_shape = [3, 3],
       strides = [2, 2],
       dilations = [1, 1],
       group = 1 : i64,
       auto_pad = "NOTSET"
-    } : (tensor<1x3x299x299xui8>, tensor<32x3x3x3xui8>, tensor<ui8>, tensor<ui8>)
-        -> tensor<1x32x149x149xi32>
-    return %y : tensor<1x32x149x149xi32>
+    } : (tensor<1x3x8x8xui8>, tensor<4x3x3x3xui8>, tensor<ui8>, tensor<ui8>)
+        -> tensor<1x4x3x3xi32>
+    return %y : tensor<1x4x3x3xi32>
   }
 
-  // CHECK-LABEL: func.func @conv_integer_inception
+  // CHECK-LABEL: func.func @conv_integer_stride2
   // CHECK: hip.cast
   // CHECK: hip.sub
   // CHECK: hip.conv
-  // CHECK-SAME: tensor<1x3x299x299xf32>
-  // CHECK-SAME: tensor<32x3x3x3xf32>
+  // CHECK-SAME: tensor<1x3x8x8xf32>
+  // CHECK-SAME: tensor<4x3x3x3xf32>
   // CHECK: hip.cast
-  // CHECK-SAME: tensor<1x32x149x149xi32>
+  // CHECK-SAME: tensor<1x4x3x3xi32>
   // CHECK-NOT: onnx.ConvInteger
 
   // Per-output-channel weight zero point is reshaped to [M, 1, 1, 1] so it

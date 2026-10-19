@@ -83,3 +83,35 @@ class TestMatMulInteger:
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
         assert int(expected[0].reshape(-1)[0]) == 16841475
+
+    def test_wide_k_batched(self, model_runner):
+        # K=259 takes the i32 kernel. Each batch has its own B, and each
+        # row and column has a different factor, so a wrong batch stride or
+        # a swapped index changes the result.
+        batch, rows, k, cols = 2, 3, 259, 4
+        a = np.empty((batch, rows, k), dtype=np.uint8)
+        b = np.empty((batch, k, cols), dtype=np.uint8)
+        for bi in range(batch):
+            for row in range(rows):
+                a[bi, row, :] = row + 1
+            for col in range(cols):
+                b[bi, :, col] = (bi + 1) * (col + 1)
+        model = _matmul_integer(a, b)
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        assert int(expected[0][1, 2, 3]) == 3 * 2 * 4 * k
+
+    def test_wide_k_shared_b(self, model_runner):
+        # Same i32 kernel, with one rank-2 B reused by every batch of A.
+        batch, rows, k, cols = 2, 3, 259, 4
+        a = np.empty((batch, rows, k), dtype=np.uint8)
+        for row in range(rows):
+            a[:, row, :] = row + 1
+        b = np.empty((k, cols), dtype=np.uint8)
+        for col in range(cols):
+            b[:, col] = col + 1
+        model = _matmul_integer(a, b)
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        assert int(expected[0][0, 2, 3]) == 3 * 4 * k
+        assert int(expected[0][1, 2, 3]) == int(expected[0][0, 2, 3])
