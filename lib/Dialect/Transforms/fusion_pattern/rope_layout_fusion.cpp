@@ -119,6 +119,9 @@ struct RopeLayoutFusion : public mlir::OpRewritePattern<RopeOp> {
     const int64_t headDim = xType.getDimSize(3);
     if (rope.getNumHeads() != 0 && rope.getNumHeads() != heads)
       return rewriter.notifyMatchFailure(rope, "num_heads disagrees");
+    mlir::Operation *chain[] = {toF16, rope, toF32, toBnsh};
+    if (!allMemoryEffectFree(chain) || !mlir::isMemoryEffectFree(toBsnh))
+      return rewriter.notifyMatchFailure(rope, "chain has memory effects");
     for (mlir::Value v : {toBnsh->getResult(0), toF32->getResult(0),
                           rope->getResult(0), toF16->getResult(0)})
       if (!shapeQueriesAreConstant(v))
@@ -151,7 +154,6 @@ struct RopeLayoutFusion : public mlir::OpRewritePattern<RopeOp> {
     mlir::Value y = mlir::tensor::ExpandShapeOp::create(
         rewriter, loc, xType, fused->getResult(0), heads3d);
     rewriter.replaceOp(toBsnh, y);
-    mlir::Operation *chain[] = {toF16, rope, toF32, toBnsh};
     eraseChain(rewriter, chain);
     return mlir::success();
   }

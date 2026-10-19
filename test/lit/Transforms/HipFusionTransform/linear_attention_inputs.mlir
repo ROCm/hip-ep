@@ -149,6 +149,66 @@ func.func @la_not_packed(%ctx: !hip.context, %qkv: tensor<1x?x96xf16>,
 
 // -----
 
+// q|k|v are contiguous, but the state says dv = 4: v (32 wide) is not
+// Hkv * dv, so the packed op would split the source differently.
+
+// CHECK-LABEL: func.func @la_packed_width_mismatch
+// CHECK: %[[Q:.*]] = tensor.extract_slice
+// CHECK: %[[K:.*]] = tensor.extract_slice
+// CHECK: %[[V:.*]] = tensor.extract_slice
+// CHECK: hip.linear_attention(%{{.*}}) ins(%[[Q]], %[[K]], %[[V]] :
+func.func @la_packed_width_mismatch(%ctx: !hip.context, %qkv: tensor<1x?x64xf16>,
+    %past: tensor<1x4x8x4xf16>) -> tensor<1x?x16xf16> {
+  %c1 = arith.constant 1 : index
+  %t = tensor.dim %qkv, %c1 : tensor<1x?x64xf16>
+  %q = tensor.extract_slice %qkv[0, 0, 0] [1, %t, 16] [1, 1, 1] : tensor<1x?x64xf16> to tensor<1x?x16xf16>
+  %k = tensor.extract_slice %qkv[0, 0, 16] [1, %t, 16] [1, 1, 1] : tensor<1x?x64xf16> to tensor<1x?x16xf16>
+  %v = tensor.extract_slice %qkv[0, 0, 32] [1, %t, 32] [1, 1, 1] : tensor<1x?x64xf16> to tensor<1x?x32xf16>
+  %eo = tensor.empty(%t) : tensor<1x?x16xf16>
+  %es = tensor.empty() : tensor<1x4x8x4xf16>
+  %o:2 = hip.linear_attention(%ctx) ins(%q, %k, %v : tensor<1x?x16xf16>, tensor<1x?x16xf16>, tensor<1x?x32xf16>)
+      past_state(%past : tensor<1x4x8x4xf16>)
+      outs(%eo, %es : tensor<1x?x16xf16>, tensor<1x4x8x4xf16>)
+      {kv_num_heads = 4 : i64, q_num_heads = 2 : i64, update_rule = "linear"}
+      : tensor<1x?x16xf16>, tensor<1x4x8x4xf16>
+  return %o#0 : tensor<1x?x16xf16>
+}
+
+// -----
+
+// Odd head sizes (dk = dv = 7): the preparation kernel reads half2 pairs,
+// so neither the packed source nor the raw beta is folded in.
+
+// CHECK-LABEL: func.func @la_odd_heads
+// CHECK: %[[Q:.*]] = tensor.extract_slice
+// CHECK: %[[K:.*]] = tensor.extract_slice
+// CHECK: %[[V:.*]] = tensor.extract_slice
+// CHECK: %[[BETA:.*]] = hip.sigmoid
+// CHECK: hip.linear_attention(%{{.*}}) ins(%[[Q]], %[[K]], %[[V]] :
+// CHECK-SAME: beta(%[[BETA]] :
+// CHECK-NOT: beta_sigmoid
+// CHECK: return
+func.func @la_odd_heads(%ctx: !hip.context, %qkv: tensor<1x?x56xf16>,
+    %braw: tensor<1x?x4xf16>, %past: tensor<1x4x7x7xf16>) -> tensor<1x?x28xf16> {
+  %c1 = arith.constant 1 : index
+  %t = tensor.dim %qkv, %c1 : tensor<1x?x56xf16>
+  %q = tensor.extract_slice %qkv[0, 0, 0] [1, %t, 14] [1, 1, 1] : tensor<1x?x56xf16> to tensor<1x?x14xf16>
+  %k = tensor.extract_slice %qkv[0, 0, 14] [1, %t, 14] [1, 1, 1] : tensor<1x?x56xf16> to tensor<1x?x14xf16>
+  %v = tensor.extract_slice %qkv[0, 0, 28] [1, %t, 28] [1, 1, 1] : tensor<1x?x56xf16> to tensor<1x?x28xf16>
+  %eb = tensor.empty(%t) : tensor<1x?x4xf16>
+  %beta = hip.sigmoid(%ctx) ins(%braw : tensor<1x?x4xf16>) outs(%eb : tensor<1x?x4xf16>) : tensor<1x?x4xf16>
+  %eo = tensor.empty(%t) : tensor<1x?x28xf16>
+  %es = tensor.empty() : tensor<1x4x7x7xf16>
+  %o:2 = hip.linear_attention(%ctx) ins(%q, %k, %v : tensor<1x?x14xf16>, tensor<1x?x14xf16>, tensor<1x?x28xf16>)
+      past_state(%past : tensor<1x4x7x7xf16>) beta(%beta : tensor<1x?x4xf16>)
+      outs(%eo, %es : tensor<1x?x28xf16>, tensor<1x4x7x7xf16>)
+      {kv_num_heads = 4 : i64, q_num_heads = 2 : i64, update_rule = "delta"}
+      : tensor<1x?x28xf16>, tensor<1x4x7x7xf16>
+  return %o#0 : tensor<1x?x28xf16>
+}
+
+// -----
+
 // The sigmoid has another user: beta stays prepared outside.
 
 // CHECK-LABEL: func.func @la_beta_shared

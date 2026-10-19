@@ -72,7 +72,7 @@ bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
 // scales at the routed experts' block size.
 bool isPlainInt4Projection(MatMulNBitsOp mm, int64_t blockSize) {
   return mm && !mm.getZeroPoints() && !mm.getGIdx() && !mm.getBias() &&
-         mm.getBits() == 4 && mm.getBlockSize() == blockSize &&
+         !mm.getAQ() && mm.getBits() == 4 && mm.getBlockSize() == blockSize &&
          mm.getScaleElemSize() == 2 && mm->getNumResults() == 1;
 }
 
@@ -147,6 +147,15 @@ struct QMoESharedExpertFusion : public mlir::OpRewritePattern<AddOp> {
         gated->getResult(0).getType() != resultType ||
         down->getResult(0).getType() != resultType || x.getType() != resultType)
       return rewriter.notifyMatchFailure(add, "shared expert broadcasts");
+    // The runtime reads one fp16 gate logit per token of %x.
+    llvm::SmallVector<int64_t> logitShape(xType.getShape());
+    logitShape.back() = 1;
+    auto logitType =
+        mlir::RankedTensorType::get(logitShape, xType.getElementType());
+    if (logit->getResult(0).getType() != logitType ||
+        sigmoid->getResult(0).getType() != logitType)
+      return rewriter.notifyMatchFailure(add, "gate logit is not [..., 1] "
+                                              "f16");
 
     mlir::Value ctx = add.getCtx();
     for (mlir::Value c : {moe.getHandle(), gated.getCtx(), sigmoid.getCtx(),
@@ -169,6 +178,10 @@ struct QMoESharedExpertFusion : public mlir::OpRewritePattern<AddOp> {
     // is static. Uses other than shape queries are the erased ops and the add.
     mlir::Operation *erased[] = {gated,  sigmoid, down,
                                  swiglu, gate,    up,   moe};
+    if (!llvm::all_of(erased, [](mlir::Operation *op) {
+          return mlir::isMemoryEffectFree(op);
+        }))
+      return rewriter.notifyMatchFailure(add, "chain has memory effects");
     for (mlir::Operation *op : erased) {
       mlir::Value v = op->getResult(0);
       auto vType = mlir::cast<mlir::RankedTensorType>(v.getType());

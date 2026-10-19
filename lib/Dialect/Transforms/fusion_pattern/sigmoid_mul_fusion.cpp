@@ -40,25 +40,33 @@ struct SigmoidMulFusion : public mlir::OpRewritePattern<MulOp> {
 
   mlir::LogicalResult
   matchAndRewrite(MulOp mul, mlir::PatternRewriter &rewriter) const override {
-    SigmoidOp sigmoid;
-    mlir::Value x;
-    if (!matchEither(mul.getLhs(), mul.getRhs(), sigmoid, x))
-      return rewriter.notifyMatchFailure(mul, "no hip.sigmoid operand");
     mlir::Value ctx = mul.getCtx();
-    mlir::Value gate = sigmoid.getX();
-    mlir::Value prob = sigmoid->getResult(0);
-    if (sigmoid.getCtx() != ctx || !hasSingleValueUse(prob, mul))
-      return rewriter.notifyMatchFailure(mul, "sigmoid has other uses");
-    if (x == gate)
-      return rewriter.notifyMatchFailure(mul, "SiLU");
-
     auto type = rankedType(mul->getResult(0));
     if (!type || !type.getElementType().isF16() || type.getRank() < 1 ||
-        type.isDynamicDim(type.getRank() - 1) || x.getType() != type ||
-        gate.getType() != type)
-      return rewriter.notifyMatchFailure(mul, "not same-shaped f16");
-    if (!shapeQueriesRetargetable(prob, gate))
-      return rewriter.notifyMatchFailure(mul, "unexpected shape query");
+        type.isDynamicDim(type.getRank() - 1))
+      return rewriter.notifyMatchFailure(mul, "not f16");
+
+    // Either operand may be the sigmoid, if it is a gate of the other.
+    SigmoidOp sigmoid;
+    mlir::Value x;
+    for (auto [p, other] : {std::pair{mul.getLhs(), mul.getRhs()},
+                            std::pair{mul.getRhs(), mul.getLhs()}}) {
+      auto s = p.getDefiningOp<SigmoidOp>();
+      if (!s || s.getCtx() != ctx || !hasSingleValueUse(p, mul) ||
+          other == s.getX() || p.getType() != type ||
+          other.getType() != type || s.getX().getType() != type ||
+          !shapeQueriesRetargetable(p, s.getX()) ||
+          !mlir::isMemoryEffectFree(s))
+        continue;
+      sigmoid = s;
+      x = other;
+      break;
+    }
+    if (!sigmoid)
+      return rewriter.notifyMatchFailure(
+          mul, "no same-shaped f16 sigmoid gate (other than SiLU)");
+    mlir::Value gate = sigmoid.getX();
+    mlir::Value prob = sigmoid->getResult(0);
 
     retargetShapeQueries(rewriter, prob, gate);
     rewriter.setInsertionPoint(mul);

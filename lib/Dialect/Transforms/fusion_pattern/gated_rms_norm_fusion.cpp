@@ -46,9 +46,11 @@ using mlir::hip::SwigluOp;
 
 // `v` is cast<f32>(src) with `consumer` as its only value use; returns src.
 mlir::Value castFromF16(mlir::Value v, mlir::Operation *consumer,
+                        mlir::Value ctx,
                         llvm::SmallVectorImpl<mlir::Operation *> &chain) {
   auto cast = v.getDefiningOp<CastOp>();
-  if (!cast || cast.getTo() != kOnnxFloat || !isF16(cast.getInput()) ||
+  if (!cast || cast.getCtx() != ctx || cast.getTo() != kOnnxFloat ||
+      !isF16(cast.getInput()) ||
       (consumer && !hasSingleValueUse(v, consumer)))
     return nullptr;
   chain.push_back(cast);
@@ -99,7 +101,7 @@ struct GatedRmsNormFusion : public mlir::OpRewritePattern<CastOp> {
       if (swiglu.getCtx() != ctx)
         return rewriter.notifyMatchFailure(out, "ops must share a context");
       normF32 = swiglu.getUp();
-      z = castFromF16(swiglu.getGate(), swiglu, chain);
+      z = castFromF16(swiglu.getGate(), swiglu, ctx, chain);
     } else if (auto mul = mlir::dyn_cast<MulOp>(productOp)) {
       if (mul.getCtx() != ctx)
         return rewriter.notifyMatchFailure(out, "ops must share a context");
@@ -124,14 +126,14 @@ struct GatedRmsNormFusion : public mlir::OpRewritePattern<CastOp> {
           continue;
         chain.append({siluMul, sigmoid});
         normF32 = other;
-        z = castFromF16(gate, nullptr, chain);
+        z = castFromF16(gate, nullptr, ctx, chain);
         break;
       }
     }
     if (!z)
       return rewriter.notifyMatchFailure(out, "no SiLU of an f16 gate");
 
-    mlir::Value n = castFromF16(normF32, productOp, chain);
+    mlir::Value n = castFromF16(normF32, productOp, ctx, chain);
     if (!n)
       return rewriter.notifyMatchFailure(out, "no f16 norm operand");
     mlir::Operation *normCast = chain.back();
@@ -147,13 +149,18 @@ struct GatedRmsNormFusion : public mlir::OpRewritePattern<CastOp> {
         norm->headSize % 2 != 0 || mlir::ShapedType::isDynamic(width) ||
         width % norm->headSize != 0)
       return rewriter.notifyMatchFailure(out, "unsupported shapes");
-    // The norm's per-head views were checked by matchNorm.
+    // The norm's per-head views were checked by matchNorm. The gate math
+    // must be fp32 throughout: the op rounds only the final product.
     for (mlir::Operation *op : chain) {
       auto type = rankedType(op->getResult(0));
-      if (!type || type.getShape() != xType.getShape())
-        return rewriter.notifyMatchFailure(out, "chain broadcasts");
+      if (!type || type.getShape() != xType.getShape() ||
+          !type.getElementType().isF32())
+        return rewriter.notifyMatchFailure(out, "chain broadcasts or is "
+                                                "not fp32");
     }
     chain.append(norm->chain.begin(), norm->chain.end());
+    if (!allMemoryEffectFree(chain))
+      return rewriter.notifyMatchFailure(out, "chain has memory effects");
     for (mlir::Operation *op : chain)
       if (!shapeQueriesRetargetable(op->getResult(0), x))
         return rewriter.notifyMatchFailure(out, "unexpected shape query");

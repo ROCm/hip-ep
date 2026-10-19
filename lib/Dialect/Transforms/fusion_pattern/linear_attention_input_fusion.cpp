@@ -82,6 +82,22 @@ struct LaParts {
         betaSigmoid(op.getBetaSigmoidAttr()) {}
 };
 
+// Head sizes {dk, dv} of an op whose inputs the runtime can prepare: fp16
+// inputs and a [B, H, dk, dv] state with even, static head sizes (the
+// preparation kernel reads half2 pairs). Any folded input enables it.
+std::optional<std::pair<int64_t, int64_t>>
+preparableHeads(LinearAttentionOp op) {
+  auto stateType = rankedType(op.getPresentState());
+  if (!isF16(op.getQuery()) || !stateType || stateType.getRank() != 4 ||
+      stateType.isDynamicDim(2) || stateType.isDynamicDim(3))
+    return std::nullopt;
+  const int64_t dk = stateType.getDimSize(2);
+  const int64_t dv = stateType.getDimSize(3);
+  if (dk <= 0 || dv <= 0 || dk % 2 != 0 || dv % 2 != 0)
+    return std::nullopt;
+  return std::pair{dk, dv};
+}
+
 void replaceWith(mlir::PatternRewriter &rewriter, LinearAttentionOp op,
                  const LaParts &p) {
   rewriter.setInsertionPoint(op);
@@ -117,11 +133,10 @@ struct QkNormFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
     if (op.isPackedQKV() || op.getQkNormWeight() ||
         op.getQScale().convertToFloat() != 1.f)
       return rewriter.notifyMatchFailure(op, "already prepared");
-    auto stateType = rankedType(op.getPresentState());
-    if (!stateType || stateType.getRank() != 4 ||
-        stateType.isDynamicDim(2) || !isF16(op.getQuery()))
+    auto heads = preparableHeads(op);
+    if (!heads)
       return rewriter.notifyMatchFailure(op, "unsupported state / dtype");
-    const int64_t dk = stateType.getDimSize(2);
+    const int64_t dk = heads->first;
     mlir::Value ctx = op.getCtx();
 
     // Optional q scale: hip.mul(qn, splat) with a one-element f16 constant.
@@ -155,6 +170,8 @@ struct QkNormFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
     if (qMul)
       qChain.push_back(qMul);
     qChain.append(qNorm->chain.begin(), qNorm->chain.end());
+    if (!allMemoryEffectFree(qChain) || !allMemoryEffectFree(kNorm->chain))
+      return rewriter.notifyMatchFailure(op, "chain has memory effects");
     for (auto [chain, input] :
          {std::pair{llvm::ArrayRef(qChain), qNorm->input},
           std::pair{llvm::ArrayRef(kNorm->chain), kNorm->input}})
@@ -227,8 +244,11 @@ struct PackedQkvFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
   mlir::LogicalResult
   matchAndRewrite(LinearAttentionOp op,
                   mlir::PatternRewriter &rewriter) const override {
-    if (op.isPackedQKV() || !isF16(op.getQuery()))
-      return rewriter.notifyMatchFailure(op, "already packed / not f16");
+    auto heads = preparableHeads(op);
+    if (op.isPackedQKV() || !heads)
+      return rewriter.notifyMatchFailure(op, "already packed / unsupported "
+                                             "state / dtype");
+    const auto [dk, dv] = *heads;
     auto q = lastAxisSlice(op.getQuery());
     auto k = lastAxisSlice(op.getKey());
     auto v = lastAxisSlice(op.getValue());
@@ -249,6 +269,11 @@ struct PackedQkvFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
         k->second != qWidth || v->second != qWidth + kWidth ||
         lastDim(src) != qWidth + kWidth + vWidth)
       return rewriter.notifyMatchFailure(op, "slices are not q|k|v");
+    // The packed op splits its input by the state's head sizes.
+    if (qWidth != op.getQNumHeads() * dk || kWidth <= 0 || kWidth % dk != 0 ||
+        vWidth != op.getKvNumHeads() * dv)
+      return rewriter.notifyMatchFailure(op, "slice widths are not the "
+                                             "q/k/v heads");
 
     for (mlir::Value x : {op.getQuery(), op.getKey(), op.getValue()})
       if (!shapeQueriesRetargetable(x, src))
@@ -283,7 +308,7 @@ struct SoftplusDecayFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
   matchAndRewrite(LinearAttentionOp op,
                   mlir::PatternRewriter &rewriter) const override {
     mlir::Value decay = op.getDecay();
-    if (!decay || op.getDecayBias() || !isF16(op.getQuery()))
+    if (!decay || op.getDecayBias() || !preparableHeads(op))
       return rewriter.notifyMatchFailure(op, "no raw decay to fold");
     const int64_t heads = op.getKvNumHeads();
     auto decayType = rankedType(decay);
@@ -319,12 +344,17 @@ struct SoftplusDecayFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
         !isPerHeadVector(scale, heads))
       return rewriter.notifyMatchFailure(op, "decay operands mismatch");
     mlir::Operation *chain[] = {toF16, mul, softplus, add, toF32};
+    if (!allMemoryEffectFree(chain))
+      return rewriter.notifyMatchFailure(op, "chain has memory effects");
     for (mlir::Operation *c : chain) {
       if (c->getOperand(0) != ctx)
         return rewriter.notifyMatchFailure(op, "ops must share a context");
       auto cType = rankedType(c->getResult(0));
       if (!cType || cType.getShape() != decayType.getShape())
         return rewriter.notifyMatchFailure(op, "decay chain broadcasts");
+      // The op computes the softplus decay in fp32 and rounds it once.
+      if (c != toF16 && !cType.getElementType().isF32())
+        return rewriter.notifyMatchFailure(op, "decay chain is not fp32");
       if (!shapeQueriesRetargetable(c->getResult(0), raw))
         return rewriter.notifyMatchFailure(op, "unexpected shape query");
     }
@@ -348,12 +378,13 @@ struct SigmoidBetaFusion : public mlir::OpRewritePattern<LinearAttentionOp> {
   matchAndRewrite(LinearAttentionOp op,
                   mlir::PatternRewriter &rewriter) const override {
     mlir::Value beta = op.getBeta();
-    if (!beta || op.getBetaSigmoid() || !isF16(op.getQuery()) || !isF16(beta))
+    if (!beta || op.getBetaSigmoid() || !preparableHeads(op) || !isF16(beta))
       return rewriter.notifyMatchFailure(op, "no raw beta to fold");
     auto sigmoid = beta.getDefiningOp<SigmoidOp>();
     if (!sigmoid || sigmoid.getCtx() != op.getCtx() ||
         !hasSingleValueUse(beta, op) || sigmoid.getX().getType() != beta.getType() ||
-        !shapeQueriesRetargetable(beta, sigmoid.getX()))
+        !shapeQueriesRetargetable(beta, sigmoid.getX()) ||
+        !mlir::isMemoryEffectFree(sigmoid))
       return rewriter.notifyMatchFailure(op, "beta is not a sigmoid");
 
     mlir::Value raw = sigmoid.getX();

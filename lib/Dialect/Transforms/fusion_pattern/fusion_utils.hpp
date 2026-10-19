@@ -44,6 +44,14 @@ inline bool isF16(mlir::Value v) {
   return t && t.getElementType().isF16();
 }
 
+// Only ops without memory effects (tensor form) may be folded away: an op
+// writing a buffer must stay even when its result is unused.
+inline bool allMemoryEffectFree(llvm::ArrayRef<mlir::Operation *> ops) {
+  return llvm::all_of(ops, [](mlir::Operation *op) {
+    return mlir::isMemoryEffectFree(op);
+  });
+}
+
 // True when every use is either `consumer` or a tensor.dim.
 inline bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
   mlir::Operation *seen = nullptr;
@@ -125,8 +133,8 @@ inline void retargetShapeQueries(mlir::PatternRewriter &rewriter,
   }
 }
 
-// Erase `chain` (consumers before producers, each left with no uses) and
-// the destinations only they used.
+// Erase `chain` (consumers before producers, each left with no uses and
+// checked by allMemoryEffectFree) and the destinations only they used.
 inline void eraseChain(mlir::PatternRewriter &rewriter,
                        llvm::ArrayRef<mlir::Operation *> chain) {
   llvm::SmallVector<mlir::Operation *> inits;

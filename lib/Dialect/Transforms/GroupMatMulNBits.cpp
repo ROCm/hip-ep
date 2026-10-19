@@ -76,18 +76,26 @@ bool isGroupable(MatMulNBitsOp op) {
     return false;
   if (op.getN() * op.getK() / 2 > kMaxGroupedWeightBytes)
     return false;
-  if (op.getNumResults() != 1)
+  if (op.getNumResults() != 1 || !isMemoryEffectFree(op))
     return false;
+  // The result is [A's leading axes, N] in A's element type: createInit sizes
+  // its dynamic axes from A, and the group computes every member from A.
   auto aType = dyn_cast<RankedTensorType>(op.getA().getType());
-  return aType && aType.getElementType().isF16() &&
-         isa<RankedTensorType>(op.getResult(0).getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!aType || !resultType || !aType.getElementType().isF16() ||
+      resultType.getElementType() != aType.getElementType() ||
+      aType.getRank() < 1 || resultType.getRank() != aType.getRank() ||
+      aType.getShape().back() != op.getK() ||
+      resultType.getShape().back() != op.getN())
+    return false;
+  return aType.getShape().drop_back() == resultType.getShape().drop_back();
 }
 
-using GroupKey = std::tuple<Value, int64_t, int64_t, int64_t, int64_t>;
+using GroupKey = std::tuple<Value, Value, int64_t, int64_t, int64_t, int64_t>;
 
 GroupKey keyOf(MatMulNBitsOp op) {
-  return {op.getA(), op.getK(), op.getBits(), op.getBlockSize(),
-          op.getAccuracyLevel()};
+  return {op.getHandle(), op.getA(),         op.getK(),
+          op.getBits(),   op.getBlockSize(), op.getAccuracyLevel()};
 }
 
 // The group sits at the first member, so every later member's weight and
@@ -122,15 +130,19 @@ Value createInit(OpBuilder &b, Location loc, Value A,
                                  resultType.getElementType(), dynSizes);
 }
 
-// Drops a replaced member's tensor.empty init and the tensor.dim ops sizing it.
-void eraseDeadChain(Value v) {
-  Operation *def = v.getDefiningOp();
-  if (!def || !isOpTriviallyDead(def))
+// Drops a replaced member's tensor.empty init and the tensor.dim ops sizing
+// it. Nothing else is touched: other dead ops may still be grouping
+// candidates.
+void eraseDeadInit(Value init) {
+  auto empty = init.getDefiningOp<tensor::EmptyOp>();
+  if (!empty || !isOpTriviallyDead(empty))
     return;
-  SmallVector<Value> operands(def->getOperands());
-  def->erase();
-  for (Value operand : operands)
-    eraseDeadChain(operand);
+  SmallVector<Value> sizes(empty.getDynamicSizes());
+  empty->erase();
+  for (Value size : sizes)
+    if (auto dim = size.getDefiningOp<tensor::DimOp>())
+      if (isOpTriviallyDead(dim))
+        dim->erase();
 }
 
 void emitGroup(ArrayRef<MatMulNBitsOp> members) {
@@ -164,7 +176,7 @@ void emitGroup(ArrayRef<MatMulNBitsOp> members) {
     member.getResult(0).replaceAllUsesWith(result);
     member.erase();
     for (Value init : oldInits)
-      eraseDeadChain(init);
+      eraseDeadInit(init);
   }
   ++NumGroups;
   NumGrouped += members.size();

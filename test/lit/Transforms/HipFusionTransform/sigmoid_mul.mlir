@@ -75,3 +75,26 @@ func.func @sigmoid_shared(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
   %y = hip.mul(%ctx) ins(%x, %s : tensor<1x1x64xf16>, tensor<1x1x64xf16>) outs(%e : tensor<1x1x64xf16>) -> tensor<1x1x64xf16>
   return %y, %s : tensor<1x1x64xf16>, tensor<1x1x64xf16>
 }
+
+// -----
+
+// The lhs sigmoid has a second consumer, so it is the input: the rhs sigmoid
+// is the gate that folds.
+
+// CHECK-LABEL: func.func @gate_on_rhs
+// CHECK-SAME: (%[[CTX:[^:]*]]: !hip.context, %[[A:[^:]*]]: tensor<1x1x64xf16>, %[[B:[^:]*]]: tensor<1x1x64xf16>)
+// CHECK: %[[S:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[A]]
+// CHECK-NOT: hip.sigmoid(
+// CHECK: %[[Y:.*]] = hip.sigmoid_mul(%[[CTX]]) ins(%[[S]], %[[B]] :
+// CHECK-NOT: hip.mul(
+// CHECK: return %[[Y]], %[[S]]
+func.func @gate_on_rhs(%ctx: !hip.context, %a: tensor<1x1x64xf16>,
+    %b: tensor<1x1x64xf16>) -> (tensor<1x1x64xf16>, tensor<1x1x64xf16>) {
+  %ea = tensor.empty() : tensor<1x1x64xf16>
+  %sa = hip.sigmoid(%ctx) ins(%a : tensor<1x1x64xf16>) outs(%ea : tensor<1x1x64xf16>) : tensor<1x1x64xf16>
+  %eb = tensor.empty() : tensor<1x1x64xf16>
+  %sb = hip.sigmoid(%ctx) ins(%b : tensor<1x1x64xf16>) outs(%eb : tensor<1x1x64xf16>) : tensor<1x1x64xf16>
+  %e = tensor.empty() : tensor<1x1x64xf16>
+  %y = hip.mul(%ctx) ins(%sa, %sb : tensor<1x1x64xf16>, tensor<1x1x64xf16>) outs(%e : tensor<1x1x64xf16>) -> tensor<1x1x64xf16>
+  return %y, %sa : tensor<1x1x64xf16>, tensor<1x1x64xf16>
+}
