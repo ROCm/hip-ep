@@ -235,3 +235,23 @@ func.func @kernel_shape_mismatch(
        pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x4x3x3xf32>
   return %result : tensor<1x4x3x3xf32>
 }
+
+// -----
+
+// An i32 convolution passes explicit zero points and an i32 accumulator.
+
+// CHECK-LABEL: func.func @conv_i32
+// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: tosa.conv2d {{.*}}, %[[ZP]], %[[ZP]]
+// CHECK-SAME: acc_type = i32
+// CHECK-NOT: hip.conv
+func.func @conv_i32(%ctx: !hip.context, %input: tensor<1x4x3x3xi32>,
+                    %weight: tensor<2x4x1x1xi32>, %init: tensor<1x2x3x3xi32>)
+    -> tensor<1x2x3x3xi32> attributes {rock.kernel} {
+  %result = hip.conv(%ctx) ins(
+      %input, %weight : tensor<1x4x3x3xi32>, tensor<2x4x1x1xi32>)
+      outs(%init : tensor<1x2x3x3xi32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x3x3xi32>
+  return %result : tensor<1x2x3x3xi32>
+}

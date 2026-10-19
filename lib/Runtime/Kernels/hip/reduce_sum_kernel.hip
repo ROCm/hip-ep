@@ -1005,6 +1005,7 @@ static int hip_block_reduce_launch(void *stream, const void *data,
                              op_name, (long long)num_input_elements,
                              (long long)num_output_elements,
                              (long long)reduce_size, block_size);
+    (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(reduce_int_kernel<float, OP>),
                        dim3(static_cast<unsigned>(num_output_elements)),
                        dim3(block_size), shared_mem, hip_stream,

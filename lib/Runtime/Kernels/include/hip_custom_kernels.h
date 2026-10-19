@@ -3551,9 +3551,10 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t activation,
     int64_t element_size_bytes);
 
-/* Exact int32 matmul. A is [batch, M, K], B is [batch, K, N], both contiguous.
+/* Exact int32 matmul. A is [batch, M, K]. b_batch_stride is 0 when every
+ * batch reuses one [K, N] matrix and K*N when B is batch-contiguous.
  * Accumulates in int64 and stores a wrapping int32. transA/transB are not
- * supported; the caller expands batches first. Returns 0 on success. */
+ * supported. Returns 0 on success. */
 HIP_KERNEL_API int hip_matmul_i32(
     void* stream,
     const void* a,
@@ -3562,7 +3563,8 @@ HIP_KERNEL_API int hip_matmul_i32(
     int64_t m,
     int64_t n,
     int64_t k,
-    int64_t batch);
+    int64_t batch,
+    int64_t b_batch_stride);
 
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)

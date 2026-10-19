@@ -847,11 +847,12 @@ int wrap_hipblasLtMatmul(
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
 // Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
-// entry point reads them as floats. A and B are batch-contiguous and neither
-// is transposed. The kernel accumulates in int64 and wraps to int32.
+// entry point reads them as floats. Neither operand is transposed. The kernel
+// accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
+// matrix shared by every batch, and K*N when B holds one matrix per batch.
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
                     void *output, int64_t M, int64_t N, int64_t K,
-                    int64_t batch_count);
+                    int64_t batch_count, int64_t b_batch_stride);
 
 // RocMLIR dispatch wrapper (hip.rocmlir). Launches a pre-compiled GPU kernel
 // embedded (as an ELF/HSACO blob) in `kernel_binary` at compile time. The

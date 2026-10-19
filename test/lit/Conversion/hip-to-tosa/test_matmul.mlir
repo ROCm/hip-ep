@@ -181,3 +181,38 @@ func.func @batch_mismatch(%ctx: !hip.context, %a: tensor<8x4x16xf32>,
       {transA = 0 : i64, transB = 0 : i64} : tensor<8x4x32xf32>
   return %r : tensor<8x4x32xf32>
 }
+
+// -----
+
+// An i32 matmul passes explicit zero points. The quant-info builder leaves
+// those operands empty for a non-quantized integer.
+
+// CHECK-LABEL: func.func @matmul_i32
+// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: tosa.matmul {{.*}}, %[[ZP]], %[[ZP]]
+// CHECK-SAME: -> tensor<1x2x5xi32>
+// CHECK-NOT: hip.matmul
+func.func @matmul_i32(%ctx: !hip.context, %a: tensor<2x3xi32>,
+                      %b: tensor<3x5xi32>, %init: tensor<2x5xi32>)
+    -> tensor<2x5xi32> attributes {rock.kernel} {
+  %r = hip.matmul(%ctx) ins(%a, %b : tensor<2x3xi32>, tensor<3x5xi32>)
+      outs(%init : tensor<2x5xi32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<2x5xi32>
+  return %r : tensor<2x5xi32>
+}
+
+// -----
+
+// CHECK-LABEL: func.func @matmul_i32_batched
+// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: tosa.matmul {{.*}}, %[[ZP]], %[[ZP]]
+// CHECK-SAME: -> tensor<4x2x5xi32>
+// CHECK-NOT: hip.matmul
+func.func @matmul_i32_batched(%ctx: !hip.context, %a: tensor<4x2x3xi32>,
+                              %b: tensor<4x3x5xi32>, %init: tensor<4x2x5xi32>)
+    -> tensor<4x2x5xi32> attributes {rock.kernel} {
+  %r = hip.matmul(%ctx) ins(%a, %b : tensor<4x2x3xi32>, tensor<4x3x5xi32>)
+      outs(%init : tensor<4x2x5xi32>)
+      {transA = 0 : i64, transB = 0 : i64} : tensor<4x2x5xi32>
+  return %r : tensor<4x2x5xi32>
+}

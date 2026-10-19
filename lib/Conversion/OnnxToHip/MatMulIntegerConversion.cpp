@@ -14,7 +14,7 @@
 // accumulator is an exact int32 dot product only while every partial sum fits
 // in the 24-bit mantissa. An 8-bit value minus an 8-bit zero point is at most
 // 255 in magnitude, so each product is at most 65025 and K must be at most
-// 258. A longer K, including the Inception-v4 logits gemm, casts to i32 and
+// 258. A longer K casts to i32 and
 // accumulates there instead. ONNX allows the int32 accumulator to wrap.
 //
 // Batch dimensions are broadcast to the result's batch shape before the

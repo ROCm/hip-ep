@@ -568,13 +568,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
                     void *output, int64_t M, int64_t N, int64_t K,
-                    int64_t batch_count) {
+                    int64_t batch_count, int64_t b_batch_stride) {
   if (!state || !A || !B || !output) {
     fprintf(stderr, "wrap_matmul_i32: null argument\n");
     return -1;
   }
   void *stream = hipdnn_ep_state_get_stream(state);
-  int rc = hip_matmul_i32(stream, A, B, output, M, N, K, batch_count);
+  int rc = hip_matmul_i32(stream, A, B, output, M, N, K, batch_count,
+                          b_batch_stride);
   if (rc != 0)
     fprintf(stderr, "wrap_matmul_i32: hip_matmul_i32 failed (%d)\n", rc);
   return rc;
