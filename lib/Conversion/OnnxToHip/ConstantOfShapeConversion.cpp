@@ -350,8 +350,22 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
       }
     }
 
-    mlir::Value cst =
-        mlir::arith::ConstantOp::create(rewriter, op->getLoc(), splatAttr);
+    // A float fill may be read by a device kernel. Emit it as an onnx.Constant,
+    // which the second constant sweep turns into a hip.constant carrier in
+    // device memory. An `arith.constant` here instead bufferizes to a
+    // `memref.global` in host memory. Integer fills stay arith constants: they
+    // are shapes and indices, read on the host or folded away.
+    mlir::Value cst;
+    if (mlir::isa<mlir::FloatType>(elemType)) {
+      mlir::OperationState state(op->getLoc(), "onnx.Constant");
+      state.addTypes(outTensorType);
+      state.addAttribute("value", splatAttr);
+      if (auto outputs = op->getAttr("node.outputs"))
+        state.addAttribute("node.outputs", outputs);
+      cst = rewriter.create(state)->getResult(0);
+    } else {
+      cst = mlir::arith::ConstantOp::create(rewriter, op->getLoc(), splatAttr);
+    }
     rewriter.replaceOp(op, cst);
     return mlir::success();
   }
