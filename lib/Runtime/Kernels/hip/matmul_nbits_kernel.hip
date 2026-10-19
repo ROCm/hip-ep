@@ -5443,34 +5443,40 @@ static int tuneWmmaConfig(
 
     float best_ms = 1e30f;
     int   best_id = wmmaFallbackConfig(N, K, gs);
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
-    /* Single in-order pass, keeping each config's batch time. Deliberately the
-     * original, minimal measurement: the kernel tuner is on the runtime dispatch
-     * path, so it stays simple and fast. Any more careful measurement (clock
-     * settling, multi-pass, structural tie-breaks) belongs in the offline LUT
-     * sweep, not here -- see autotune/matmul_nbits. */
+    auto candidate = [&](int cid) {
+        return wmmaConfigSupported(kWmmaConfigs[cid], N, K, gs) &&
+               !(fused_only && !kWmmaConfigs[cid].fused);
+    };
+
+    /* The offline LUT sweep ranks configs by the timings logged here, so this
+     * is the measurement the tables are only as good as. Same standard as the
+     * GEMV and u3 / u2 WMMA tuners: settle the clock once, then give every
+     * config the peak (min) of ITERS isolated launches at that clock. A
+     * back-to-back average with one warmup launch timed the early configs
+     * boosted and the late ones throttled. */
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaConfigs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfig(settle_id, stream, M, N, K, A, lda, B,
+                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
+                             b_row_bytes);
+        });
+
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        auto& cfg = kWmmaConfigs[cid];
-        if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
-        if (fused_only && !cfg.fused) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
                              b_row_bytes);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf,
-                             b_row_bytes);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
@@ -5479,10 +5485,10 @@ static int tuneWmmaConfig(
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            ms / ITERS);
+            cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -5501,7 +5507,7 @@ static int tuneWmmaConfig(
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
         kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
         kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
-        best_ms / ITERS);
+        best_ms);
 
     return best_id;
 }
@@ -6396,34 +6402,40 @@ static int tuneWmmaConfigI8(
 
     float best_ms = 1e30f;
     int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 1;
+    constexpr int WARMUP = 2;
     constexpr int ITERS  = 5;
+    constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
+
+    // Skip large BN tiles when N is too small to benefit.
+    auto candidate = [&](int cid) { return kWmmaI8Configs[cid].bn <= N * 2; };
+
+    // Settle the clock once, then peak-of-ITERS per config at that clock; see
+    // tuneWmmaConfig for why the offline sweep needs this.
+    int settle_id = -1;
+    for (int cid = 0; cid < kNumWmmaI8Configs && settle_id < 0; cid++)
+        if (candidate(cid)) settle_id = cid;
+    if (settle_id >= 0)
+        settleClock(ev0, ev1, stream, [&]{
+            launchWmmaConfigI8(settle_id, stream, M, N, K, A, lda, B,
+                               scales, zeros, gs, ngk, C, ldc, has_zp);
+        });
 
     for (int cid = 0; cid < kNumWmmaI8Configs; cid++) {
         auto& cfg = kWmmaI8Configs[cid];
-        // Skip large BN tiles when N is too small to benefit.
-        if (cfg.bn > N * 2) continue;
+        if (!candidate(cid)) continue;
 
-        for (int w = 0; w < WARMUP; w++)
+        const float cfg_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
+                                            kFloorIters, 0.1f, nullptr, [&]{
             launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfigI8(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        });
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-i8 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
+            cid, cfg.bm, cfg.bn, cfg.swizzle_n, cfg_ms);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (cfg_ms < best_ms) {
+            best_ms = cfg_ms;
             best_id = cid;
         }
     }
@@ -6436,7 +6448,7 @@ static int tuneWmmaConfigI8(
         "best config[%d] bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaI8Configs[best_id].bm, kWmmaI8Configs[best_id].bn,
-        kWmmaI8Configs[best_id].swizzle_n, best_ms / ITERS);
+        kWmmaI8Configs[best_id].swizzle_n, best_ms);
 
     return best_id;
 }
