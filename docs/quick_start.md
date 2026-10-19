@@ -188,6 +188,12 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #   --clean                   remove build/ and install/
 ```
 
+Optional: to build in the RyzenAI CoreLib (AIE4 NPU) backend, set
+`RYZENAICORELIB_ROOT` to a CoreLib install tree (the folder holding
+`include/ryzenai/corelib.h`) before building. Without it a stub is built and
+everything runs on the GPU. See
+[ryzenai-corelib-backend.md](design/ryzenai-corelib-backend.md).
+
 `--cmake_prefix_path "$LOCAL_DIR"` lets the build reuse an ONNX Runtime you
 installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
