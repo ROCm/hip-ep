@@ -384,15 +384,33 @@ is the single source of truth for what "typical" means for that op.
 From `unit_test/`, the whole suite, run the way the CI runs it:
 
 ```
-make test  OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [MODE=lookup|autotune] [COVERAGE=1|2|3]
+make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
 make build ...   # build only
 make clean ...
 ```
 
-The Makefiles use repo-relative paths only: `HIP_SDK` and `OFFLOAD` come from
-the command line. `MODE=lookup` on an arch that has a table (every arch with a
-checked-in `lut/<arch>.fb`) also needs `FLATC` and `FLATBUFFERS_INC`; see
-"`MODE=lookup`" below.
+The Makefiles use repo-relative paths only: `HIP_SDK`, `OFFLOAD` and
+`LUT_ARCH` come from the command line. `MODE=lookup` on a chip that has a table
+(every chip with a checked-in `lut/<chip>.fb`) also needs `FLATC` and
+`FLATBUFFERS_INC`; see "`MODE=lookup`" below.
+
+The build follows the release: compile for the CI target, pick the table by
+the real chip.
+
+- `OFFLOAD` defaults to `--offload-arch=gfx11-generic`, the target of the
+  `custom_kernels_gfx11-generic.dll` every gfx115x part runs, and the kernels
+  build at `-O2` like that DLL, so a test measures the code that ships.
+  For gfx117x pass the target the release builds for that family
+  (`OFFLOAD=--offload-arch=gfx1170` today). A chip target such as
+  `OFFLOAD=--offload-arch=gfx1151` still works and uses that chip's table.
+- The LUTs are per chip (`lut/gfx1151.fb`, ...), so for a `gfx*-generic`
+  target `LUT_ARCH` defaults to the GPU of the machine that builds, read with
+  `$(HIP_SDK)/bin/amdgpu-arch.exe`. Pass `LUT_ARCH=gfxNNNN` when the exe will
+  run on another box (e.g. `LUT_ARCH=gfx1150` for a gfx11-generic exe built
+  on a gfx1151 and run on a gfx1150). The resolver still
+  checks the table's `gpu_arch` against the device at run time and ignores a
+  table for another chip, so a wrong `LUT_ARCH` costs the lookup, never
+  correctness. `mode_info` prints the table it picked.
 
 `make test` runs every leaf's `make build` (add `-j` to build them in
 parallel), which compiles the kernel sources into the leaf, and collects the
@@ -416,8 +434,8 @@ leaf alone; `make test` there runs the leaf directly and writes the leaf's own
 after what the kernel itself calls them:
 
 - **`lookup`** (default): resolve the config from
-  `hip/autotune/<op>/lut/<arch>.fb`. If this arch has no table, it warns and
-  falls back to `autotune` — a missing table is never a hard failure.
+  `hip/autotune/<op>/lut/<LUT_ARCH>.fb`. If that chip has no table, it warns
+  and falls back to `autotune` — a missing table is never a hard failure.
 - **`autotune`**: always the runtime sweep, never touches a table.
 
 `MODE` also selects the kernel's own source, via
@@ -430,7 +448,7 @@ the real resolver and table are *linked*, so without that wiring a run labelled
 `knowledge/hosts.md`) plus its `include/`, passed on the command line:
 
 ```
-make test MODE=lookup OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> \
+make test MODE=lookup HIP_SDK=<sdk> \
     FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<flatbuffers include dir>
 ```
 
