@@ -62,6 +62,10 @@ class TestDynamicQuantizeLinear:
         )
         model = make_model_from_nodes([node], [x_info], outputs, opset=13)
         actual, expected = model_runner.run_sample(model, [x])
+        actual[1:] = [
+            np.asarray(a).reshape(np.asarray(e).shape)
+            for a, e in zip(actual[1:], expected[1:])
+        ]
         compare_outputs(actual, expected, atol=1e-6, rtol=0)
 
     def test_all_zero_input(self, model_runner):

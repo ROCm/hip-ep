@@ -126,4 +126,22 @@ module {
   // CHECK: hip.matmul
   // CHECK-SAME: tensor<2x2x3xf32>, tensor<3x5xf32>
   // CHECK-NOT: onnx.MatMulInteger
+
+  // A rank-3 B with only size-one batch dimensions is a shared matrix too.
+  func.func @matmul_integer_singleton_batch_b(
+      %a: tensor<32x1x4xui8>, %b: tensor<1x4x4xui8>) -> tensor<32x1x4xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b) : (
+        tensor<32x1x4xui8>, tensor<1x4x4xui8>
+      ) -> tensor<32x1x4xi32>
+    return %y : tensor<32x1x4xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_singleton_batch_b
+  // CHECK-NOT: hip.expand
+  // CHECK: tensor.reshape
+  // CHECK-SAME: tensor<4x4xf32>
+  // CHECK-NOT: hip.expand
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<32x1x4xf32>, tensor<4x4xf32>
+  // CHECK-NOT: onnx.MatMulInteger
 }

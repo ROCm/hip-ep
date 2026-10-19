@@ -292,9 +292,14 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
   aBroadcast.push_back(ka);
   aAcc = expandTo(rewriter, loc, context, aAcc,
                   mlir::RankedTensorType::get(aBroadcast, accType));
-  // Rank-2 B has no batch to broadcast. Leave the one [K, N] matrix in
-  // place; the matmul reuses it for every batch of A.
-  if (bType.getRank() > 2) {
+  // A B whose batch dimensions are all 1 is also one shared matrix. Collapse
+  // those dimensions instead of materializing a copy for every result batch.
+  if (bType.getRank() > 2 &&
+      llvm::all_of(bType.getShape().drop_back(2),
+                   [](int64_t dim) { return dim == 1; })) {
+    auto sharedBType = mlir::RankedTensorType::get({kb, n}, accType);
+    bAcc = reshapeTo(rewriter, loc, bAcc, sharedBType);
+  } else if (bType.getRank() > 2) {
     llvm::SmallVector<int64_t> bBroadcast = batchShape;
     bBroadcast.push_back(kb);
     bBroadcast.push_back(n);
