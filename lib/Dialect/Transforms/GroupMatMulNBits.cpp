@@ -60,12 +60,21 @@ namespace hip {
 
 namespace {
 
+// Grouping only pays while the launches it removes are a visible share of a
+// member's time. A member streaming more than this is bandwidth-bound for
+// hundreds of microseconds, and the grouped kernel's tiles run a few percent
+// slower than the single-matrix kernel's at the same config: Llama-70B
+// gate/up (117 MB each) decode slower grouped, 27B-class gate/up (45 MB) faster.
+constexpr int64_t kMaxGroupedWeightBytes = int64_t{64} << 20;
+
 // The grouped decode kernel is the dp4a GEMV, so only ops it can run are
 // worth grouping; anything else would just be computed member by member.
 bool isGroupable(MatMulNBitsOp op) {
   if (op.getZeroPoints() || op.getGIdx() || op.getBias() || op.getAQ())
     return false;
   if (op.getBits() != 4 || op.getK() % 32 != 0 || op.getScaleElemSize() != 2)
+    return false;
+  if (op.getN() * op.getK() / 2 > kMaxGroupedWeightBytes)
     return false;
   if (op.getNumResults() != 1)
     return false;

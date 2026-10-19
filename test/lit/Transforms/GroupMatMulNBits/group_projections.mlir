@@ -77,6 +77,30 @@ module {
 
 // -----
 
+// Projections over 64 MiB of weights (here 32768x8192, 128 MiB) stay single
+// ops; the small ones next to them still group.
+// CHECK-LABEL: func.func @main_graph
+// CHECK-COUNT-2: hip.matmul_nbits(
+// CHECK: hip.matmul_nbits_group
+// CHECK-SAME: Ns = array<i64: 32, 32>
+// CHECK-NOT: hip.matmul_nbits
+module {
+  func.func @main_graph(%arg0: tensor<1x1x8192xf16> {onnx.name = "A"}) -> (tensor<1x1x32768xf16> {onnx.name = "Y0"}, tensor<1x1x32768xf16> {onnx.name = "Y1"}, tensor<1x1x32xf16> {onnx.name = "Y2"}, tensor<1x1x32xf16> {onnx.name = "Y3"}) {
+    %BL = "onnx.Constant"() {value = dense<1> : tensor<32768x64x64xui8>} : () -> tensor<32768x64x64xui8>
+    %SL = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32768x64xf16>} : () -> tensor<32768x64xf16>
+    %BS = "onnx.Constant"() {value = dense<2> : tensor<32x64x64xui8>} : () -> tensor<32x64x64xui8>
+    %SS = "onnx.Constant"() {value = dense<2.000000e+00> : tensor<32x64xf16>} : () -> tensor<32x64xf16>
+    %Y0 = "onnx.Custom"(%arg0, %BL, %SL) {function_name = "MatMulNBits", K = 8192 : si64, N = 32768 : si64, accuracy_level = 4 : si64, bits = 4 : si64, block_size = 128 : si64, domain_name = "com.microsoft"} : (tensor<1x1x8192xf16>, tensor<32768x64x64xui8>, tensor<32768x64xf16>) -> tensor<1x1x32768xf16>
+    %Y1 = "onnx.Custom"(%arg0, %BL, %SL) {function_name = "MatMulNBits", K = 8192 : si64, N = 32768 : si64, accuracy_level = 4 : si64, bits = 4 : si64, block_size = 128 : si64, domain_name = "com.microsoft"} : (tensor<1x1x8192xf16>, tensor<32768x64x64xui8>, tensor<32768x64xf16>) -> tensor<1x1x32768xf16>
+    %Y2 = "onnx.Custom"(%arg0, %BS, %SS) {function_name = "MatMulNBits", K = 8192 : si64, N = 32 : si64, accuracy_level = 4 : si64, bits = 4 : si64, block_size = 128 : si64, domain_name = "com.microsoft"} : (tensor<1x1x8192xf16>, tensor<32x64x64xui8>, tensor<32x64xf16>) -> tensor<1x1x32xf16>
+    %Y3 = "onnx.Custom"(%arg0, %BS, %SS) {function_name = "MatMulNBits", K = 8192 : si64, N = 32 : si64, accuracy_level = 4 : si64, bits = 4 : si64, block_size = 128 : si64, domain_name = "com.microsoft"} : (tensor<1x1x8192xf16>, tensor<32x64x64xui8>, tensor<32x64xf16>) -> tensor<1x1x32xf16>
+    "onnx.Return"(%Y0, %Y1, %Y2, %Y3) : (tensor<1x1x32768xf16>, tensor<1x1x32768xf16>, tensor<1x1x32xf16>, tensor<1x1x32xf16>) -> ()
+  }
+  "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
+}
+
+// -----
+
 // Five candidates: one group of four, the fifth stays a plain op.
 // CHECK-LABEL: func.func @main_graph
 // CHECK: hip.matmul_nbits_group
