@@ -100,3 +100,9 @@ config.substitutions.append(("%python", sys.executable))
 # covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
 if getattr(config, "hip_static_plugins", False):
     config.available_features.add("hip_static_plugins")
+
+# `torch_hip_plugin` feature: gates the Plugin/torch_hip_*.mlir tests, which need
+# the torch_hip plugin (plugins/torch_hip) statically linked into hip-mlir-opt
+# (`torch_hip` in HIPDNN_EP_COMPILER_PLUGINS).
+if getattr(config, "torch_hip_plugin", False):
+    config.available_features.add("torch_hip_plugin")
