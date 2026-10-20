@@ -217,8 +217,8 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   // descriptor remains over-sized even though the kernel copies fewer values.
   if ((opName == "onnx.Reshape" || opName == "onnx.Squeeze" ||
        opName == "onnx.Unsqueeze") &&
-      vType.hasStaticShape() &&
-      vType.getNumElements() == 1 && def->getNumOperands() >= 1)
+      vType.hasStaticShape() && vType.getNumElements() == 1 &&
+      def->getNumOperands() >= 1)
     return resolveHostIndex(b, loc, def->getOperand(0), 0, depth + 1);
 
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
@@ -248,8 +248,8 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
   // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;
-  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp,
-                         mlir::hip::MulOp, mlir::hip::DivOp>(def);
+  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
+                         mlir::hip::DivOp>(def);
   if (isHip)
     lhsPos = 1;
   else if (opName != "onnx.Sub" && opName != "onnx.Add" &&
