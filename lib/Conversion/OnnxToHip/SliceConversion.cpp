@@ -210,6 +210,17 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   llvm::StringRef opName = def->getName().getStringRef();
 
+  // Exporters commonly wrap a scalar shape-arithmetic result in a
+  // one-element Reshape before feeding it to Slice. The reshape does not alter
+  // the sole value, so peel it and continue resolving the producer. Without
+  // this, a dynamic end falls back to the input dimension and the Slice output
+  // descriptor remains over-sized even though the kernel copies fewer values.
+  if ((opName == "onnx.Reshape" || opName == "onnx.Squeeze" ||
+       opName == "onnx.Unsqueeze") &&
+      vType.hasStaticShape() && vType.getNumElements() == 1 &&
+      def->getNumOperands() >= 1)
+    return resolveHostIndex(b, loc, def->getOperand(0), 0, depth + 1);
+
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
   // `start` is normalized as ShapeToTensorDims normalizes it; `end` only bounds
   // how many elements exist, which the caller-side extent check above covers.
@@ -237,11 +248,12 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
   // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
   unsigned lhsPos = 0;
-  bool isHip =
-      mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp>(def);
+  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
+                         mlir::hip::DivOp>(def);
   if (isHip)
     lhsPos = 1;
-  else if (opName != "onnx.Sub" && opName != "onnx.Add" && opName != "onnx.Mul")
+  else if (opName != "onnx.Sub" && opName != "onnx.Add" &&
+           opName != "onnx.Mul" && opName != "onnx.Div")
     return {};
 
   mlir::Value lhs = def->getOperand(lhsPos);
@@ -258,10 +270,13 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
   bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
+  bool isDiv = isHip ? mlir::isa<mlir::hip::DivOp>(def) : opName == "onnx.Div";
   if (isSub)
     return mlir::arith::SubIOp::create(b, loc, l, r);
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
+  if (isDiv)
+    return mlir::arith::DivSIOp::create(b, loc, l, r);
   return mlir::arith::MulIOp::create(b, loc, l, r);
 }
 
