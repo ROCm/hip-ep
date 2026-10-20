@@ -232,6 +232,52 @@ func.func @expand_output(%ctx: !hip.context) -> memref<1x64x56x56xf32> {
   return %out : memref<1x64x56x56xf32>
 }
 
+// --- A single internal dynamic dimension expanded into two external dynamic
+//     dimensions cannot be reconstructed from the internal product. Allocate
+//     at the returned rank with the exact expand_shape dimensions, then
+//     collapse that output buffer back to the rank-2 compute view. This covers
+//     a dynamic rank-expanding output [B*S, H] -> [B, S, H]. ---
+// CHECK-LABEL: func.func @expand_output_two_dynamic
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[BS:.*]]: index, %[[B:.*]]: index, %[[S:.*]]: index)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[B]], %[[S]]) {out_idx = 0 : i64} : memref<?x?x64xf16>
+// CHECK:         %[[INTERNAL:.*]] = memref.collapse_shape %[[OUT]] {{\[\[}}0, 1], [2]]
+// CHECK:         %[[RETURNED:.*]] = memref.expand_shape %[[INTERNAL]] {{\[\[}}0, 1], [2]] output_shape [%[[B]], %[[S]], 64]
+// CHECK:         return %[[RETURNED]]
+func.func @expand_output_two_dynamic(
+    %ctx: !hip.context, %bs: index, %b: index, %s: index)
+    -> memref<?x?x64xf16> {
+  %x = memref.alloc(%bs) : memref<?x64xf16>
+  %out = memref.expand_shape %x [[0, 1], [2]]
+       output_shape [%b, %s, 64]
+       : memref<?x64xf16> into memref<?x?x64xf16>
+  return %out : memref<?x?x64xf16>
+}
+
+// --- A cast after expand_shape may erase a static extent from the returned
+//     type. The output allocation must use expand_shape's precise result type,
+//     whose dynamic dimensions match its output_shape operands. The existing
+//     cast remains responsible for adapting that buffer to the function ABI. ---
+// CHECK-LABEL: func.func @expand_output_two_dynamic_then_cast
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[BS:.*]]: index, %[[B:.*]]: index, %[[S:.*]]: index)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[B]], %[[S]]) {out_idx = 0 : i64} : memref<?x?x64xf16>
+// CHECK:         %[[INTERNAL:.*]] = memref.collapse_shape %[[OUT]] {{\[\[}}0, 1], [2]]
+// CHECK:         %[[EXPANDED:.*]] = memref.expand_shape %[[INTERNAL]] {{\[\[}}0, 1], [2]] output_shape [%[[B]], %[[S]], 64]
+// CHECK:         %[[CAST:.*]] = memref.cast %[[EXPANDED]] : memref<?x?x64xf16> to memref<?x?x?xf16>
+// CHECK:         return %[[CAST]]
+func.func @expand_output_two_dynamic_then_cast(
+    %ctx: !hip.context, %bs: index, %b: index, %s: index)
+    -> memref<?x?x?xf16> {
+  %x = memref.alloc(%bs) : memref<?x64xf16>
+  %expanded = memref.expand_shape %x [[0, 1], [2]]
+       output_shape [%b, %s, 64]
+       : memref<?x64xf16> into memref<?x?x64xf16>
+  %cast = memref.cast %expanded
+       : memref<?x?x64xf16> to memref<?x?x?xf16>
+  return %cast : memref<?x?x?xf16>
+}
+
 // --- A chain of view ops (collapse_shape -> cast) before the return: the alloc
 //     is still converted, exactly once. Shows that multi-op view chains are
 //     followed, not just a single view op. The rank-reducing collapse (rank 2 ->
