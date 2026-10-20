@@ -7,8 +7,11 @@
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
+#include <algorithm>
 #include <optional>
 
 namespace mlir {
@@ -149,6 +152,47 @@ resolveQuantizeAxis(RankedTensorType dataType, RankedTensorType scalesType,
     return axis;
   }
   return inferQuantizeAxis(dataType, scalesType, blockSize, bits);
+}
+
+inline bool hasFloat8Data(Operation *op) {
+  return op->getNumOperands() > 0 &&
+         isa<Float8E4M3FNType>(getElementTypeOrSelf(op->getOperand(0)));
+}
+
+inline FailureOr<int64_t>
+resolveFloat8QuantizeAxis(RankedTensorType dataType,
+                          RankedTensorType scalesType, int64_t blockSize,
+                          std::optional<int64_t> explicitAxis) {
+  const int64_t rank = dataType.getRank();
+  if (scalesType.getRank() != rank) {
+    return failure();
+  }
+  int64_t axis = explicitAxis.value_or(1);
+  if (axis < 0) {
+    axis += rank;
+  }
+  if (axis < 0 || axis >= rank) {
+    return failure();
+  }
+
+  auto dataShape = dataType.getShape();
+  auto scalesShape = scalesType.getShape();
+  for (int64_t i = 0; i < rank; ++i) {
+    if (i != axis && scalesShape[i] != 1 && scalesShape[i] != dataShape[i]) {
+      return failure();
+    }
+  }
+  const int64_t dataDim = dataShape[axis];
+  if (ShapedType::isDynamic(dataDim)) {
+    return failure();
+  }
+  const int64_t effectiveBlockSize =
+      blockSize == 0 ? std::max<int64_t>(dataDim, 1) : blockSize;
+  if (scalesShape[axis] !=
+      llvm::divideCeilSigned(dataDim, effectiveBlockSize)) {
+    return failure();
+  }
+  return axis;
 }
 
 } // namespace gbq
@@ -314,6 +358,9 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
                                 PatternRewriter &rewriter) const override {
     if (!gbq::isGatherBlockQuantizedOp(op))
       return failure();
+    if (gbq::hasFloat8Data(op)) {
+      return failure();
+    }
     bool changed = annotateGbqSemantics(op, rewriter);
     changed |= legalizeInt4ConstantIfNeeded(op, rewriter);
     changed |= legalizeInt4ZeroPointsConstantIfNeeded(op, rewriter);
@@ -359,6 +406,10 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
 //
 // quantize_axis is taken from the ONNX attribute when present; otherwise it is
 // inferred from (data, scales, block_size, bits) shape invariants.
+//
+// Float8 data follows the ORT contract instead: `bits` is ignored,
+// quantize_axis defaults to 1, block_size 0 is rewritten to the quantize-axis
+// extent, and a scales dim of 1 off the quantize axis broadcasts.
 
 struct GatherBlockQuantizedToHip : public mlir::RewritePattern {
   GatherBlockQuantizedToHip(mlir::MLIRContext *ctx)
@@ -407,13 +458,23 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       zeroPoints = v;
   }
 
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+  auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
+  const bool float8Data = gbq::hasFloat8Data(op);
+  if (float8Data && zeroPoints) {
+    return rewriter.notifyMatchFailure(
+        op, "float8 GBQ data must not have `zero_points`");
+  }
+
   // Attribute extraction. Spec defaults:
   //   bits           — required, 4 or 8
   //   block_size     — required, power of 2 >= 16
   //   gather_axis    — optional, default 0
   //   quantize_axis  — optional, default 0
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
-  if (!bitsIntAttr)
+  if (!bitsIntAttr && !float8Data)
     return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
   auto blockSizeIntAttr = op->getAttrOfType<mlir::IntegerAttr>("block_size");
   if (!blockSizeIntAttr)
@@ -421,29 +482,32 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "missing required `block_size` attribute");
   auto gatherAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("gather_axis");
 
-  const int64_t bits = bitsIntAttr.getSInt();
-  const int64_t blockSize = blockSizeIntAttr.getSInt();
+  const int64_t bits = float8Data ? 8 : bitsIntAttr.getSInt();
+  int64_t blockSize = blockSizeIntAttr.getSInt();
   if (bits != 4 && bits != 8)
     return rewriter.notifyMatchFailure(op, "GBQ `bits` must be 4 or 8");
-  if (blockSize <= 0)
+  if (blockSize < 0 || (blockSize == 0 && !float8Data))
     return rewriter.notifyMatchFailure(op, "invalid `block_size`");
-
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-  auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
 
   std::optional<int64_t> explicitQuantAxis;
   if (op->getAttr("quantize_axis"))
     explicitQuantAxis = gbq::getGbqIntAttr(op, "quantize_axis", 0);
-  auto quantAxisOr = gbq::resolveQuantizeAxis(dataType, scalesType, blockSize,
-                                              bits, explicitQuantAxis);
+  auto quantAxisOr =
+      float8Data ? gbq::resolveFloat8QuantizeAxis(dataType, scalesType,
+                                                  blockSize, explicitQuantAxis)
+                 : gbq::resolveQuantizeAxis(dataType, scalesType, blockSize,
+                                            bits, explicitQuantAxis);
   if (mlir::failed(quantAxisOr))
     return rewriter.notifyMatchFailure(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
+  if (blockSize == 0) {
+    blockSize = std::max<int64_t>(dataType.getDimSize(*quantAxisOr), 1);
+  }
 
-  bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
-      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
+  bool unsignedQuantStorage =
+      !float8Data && gbq::resolveUnsignedQuantStorage(
+                         bits, op->hasAttr("unsigned_quant_storage"),
+                         dataType.getElementType());
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);
