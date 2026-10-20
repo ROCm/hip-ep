@@ -79,9 +79,11 @@ The target must match in:
 - Runtime libraries: HIP, hipBLASLt and MIOpen DLLs on the target from the
   same TheRock distribution the build used.
 
-Deploy `hipgpu.dll`, `hip-compiler.dll` and `custom_kernels_<gfx>.dll` from
-the same build together: the compiler emits the `wrap_corelib_*` calls and the
-embedded runtime defines the matching `RuntimeState` layout.
+Deploy `hipgpu.dll` and `custom_kernels_<gfx>.dll` from the same build, in
+the same folder: the EP's compiler emits the `wrap_corelib_*` calls, its
+embedded runtime defines the matching `RuntimeState` layout, and it loads the
+kernel library only from its own folder, never from `PATH`. This holds under
+whatever name an application registers the EP DLL.
 
 ## Operator coverage
 
