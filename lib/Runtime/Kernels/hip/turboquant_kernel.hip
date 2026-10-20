@@ -332,10 +332,14 @@ extern "C" HIP_KERNEL_API int hip_tq4_decode(
 }
 
 extern "C" HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count) {
+#if HIP_EP_GQA_IMPL_ID != 0 && HIP_EP_RING_DEVICE_ENABLED
   if (count < 1 || count > 131072)
     return 0;
   const size_t rows = size_t(count < APPEND_CHUNK ? count : APPEND_CHUNK) * H;
   return rows * (D * sizeof(half) + (2 * D + 2) * sizeof(float));
+#else
+  return 0;
+#endif
 }
 
 // Does not modify the cache. The caller encodes new K/V after attention.
@@ -344,6 +348,9 @@ extern "C" HIP_KERNEL_API int hip_tq4_prefill(
     const void *pk, const void *pv, void *output, int count, int past,
     int capacity, const float *pi, const float *cbk, const float *cbv,
     void *workspace, size_t bytes) {
+  // The default GQA build omits ring_gqa.hip entirely. Do not reference Ring
+  // exports there, or in an architecture slice that cannot execute Ring.
+#if HIP_EP_GQA_IMPL_ID != 0 && HIP_EP_RING_DEVICE_ENABLED
   const size_t required = hip_tq4_prefill_workspace(count);
   if (!required || !query || !key || !value || !pk || !pv || !output ||
       !pi || !cbk || !cbv || !workspace || bytes < required || past < 1 ||
@@ -373,4 +380,7 @@ extern "C" HIP_KERNEL_API int hip_tq4_prefill(
       return -1;
   }
   return 0;
+#else
+  return int(hipErrorNotSupported);
+#endif
 }

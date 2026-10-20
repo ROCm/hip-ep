@@ -4,6 +4,12 @@ Licensed under the MIT License.
 -->
 # TurboQuant append-prefill validation
 
+These are historical measurements of the frozen installations identified
+below and in the accompanying JSON, before the synchronization with upstream
+`65d1f5a`. That upstream update includes a new HpG=6 baseline decoder and an
+ORT 1.31 default. The tables have not been rerun against those changes and
+must not be read as performance comparisons against current `main`.
+
 Multi-token append prefill is implemented and validated on Windows Radeon 8060S (`gfx1151`), using Qwen3.8-27B, ORT 1.30.0, the frozen Windows TurboQuant codec, and an isolated GenAI 0.17 companion build. The [machine-readable receipt](turboquant-append-validation.json) identifies tested source and library hashes. The original single-turn benchmark tables remain unchanged.
 
 **GenAI dependency:** stock GenAI 0.17 rejects repeated `append_tokens()` for AMDGPU before calling HIP-EP. The [companion patch](../../tools/turboquant/patches/onnxruntime-genai-0.17-amdgpu-append.patch) enables AMDGPU continuation and flushes a pending selected token before the next prompt. It applies cleanly to the release sources and was built separately; the stock Python environment was preserved. No ONNX cache-layout/allocation change or rewind change is required.

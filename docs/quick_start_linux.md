@@ -84,7 +84,7 @@ To build them yourself from source, follow the steps below.
 
 #### 1. Build ONNX Runtime from source
 ```bash
-git clone --branch v1.30.0 https://github.com/microsoft/onnxruntime.git
+git clone --branch v1.31.0 https://github.com/microsoft/onnxruntime.git
 cd onnxruntime
 python3 -m venv .venv
 source .venv/bin/activate
@@ -93,7 +93,7 @@ pip install numpy packaging requests wheel setuptools
   --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF
 ```
 
-The wheel lands at `build/Linux/Release/dist/onnxruntime-1.30.0-cp310-cp310-linux_x86_64.whl`
+The wheel lands at `build/Linux/Release/dist/onnxruntime-1.31.0-cp310-cp310-linux_x86_64.whl`
 (filename varies by Python version).
 
 #### 2. Build OGA (`onnxruntime-genai`) from source

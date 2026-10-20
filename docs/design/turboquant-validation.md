@@ -4,6 +4,12 @@ Licensed under the MIT License.
 -->
 # Qwen four-way attention comparison
 
+These are historical measurements of the frozen installations identified
+below and in the accompanying JSON, before the synchronization with upstream
+`65d1f5a`. That upstream update includes a new HpG=6 baseline decoder and an
+ORT 1.31 default. The tables have not been rerun against those changes and
+must not be read as performance comparisons against current `main`.
+
 [Machine-readable metrics and validation provenance](turboquant-validation.json).
 
 Windows 11 Enterprise 10.0.26200; Ryzen AI MAX+ PRO 395 / Radeon 8060S gfx1151; 128 GiB installed UMA, 63.776 GiB OS-managed after firmware reservation; driver 32.0.22050.4002. ROCm HIP compiler 7.15.26333, ORT 1.30.0, GenAI 0.17.0. Qwen3.8-27B has INT4 group-128 weights, FP16 activations, 16 full-attention layers and 48 linear/recurrent layers. Batch one; CPU decoder fallback disabled.

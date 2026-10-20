@@ -37,6 +37,7 @@ $Repo = "$WorkRoot/hip-ep"
 $Python = "$WorkRoot/venv/Scripts/python.exe"
 $HipBuild = "$WorkRoot/build/turboquant"
 $HipInstall = "$WorkRoot/install/turboquant"
+$OrtSdk = "$WorkRoot/deps/onnxruntime-sdk/onnxruntime-win-x64-1.30.0"
 $BasePython = & $Python -c 'import sys; print(sys.base_prefix)'
 $RocmDevel = "$BasePython/Lib/site-packages/_rocm_sdk_devel"
 $RocmCore = "$BasePython/Lib/site-packages/_rocm_sdk_core"
@@ -49,12 +50,18 @@ Use the compatible PyTorch already supplied with the ROCm environment; the codec
 generator only uses its CPU operations. Do not upgrade a working ROCm/ORT/GenAI
 stack merely to run this command. Stop on a failed command before continuing.
 
+Upstream now defaults to ORT 1.31. The recorded TurboQuant/GenAI 0.17 results
+used ORT 1.30.0; prepare that matching SDK and pass the explicit override below
+to reproduce this environment. The CI build against ORT 1.31 is separate from
+the recorded model qualification.
+
 ### 2. Build Ring-KV plus TurboQuant and generate the codec
 
 ```powershell
 & $Python build.py --hip_arch gfx1151 --config Release --cmake_generator Ninja `
   --build_dir $HipBuild --install_dir $HipInstall --therock_dist $RocmDevel `
   --cmake_extra_defines HIP_EP_GQA_IMPL=ring_kv_outer `
+  --cmake_extra_defines "FETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$OrtSdk" `
   --cmake_extra_defines HIP_EP_GENERATE_TQ_CODEC=ON `
   --cmake_extra_defines "Python3_EXECUTABLE=$Python" `
   --cmake_extra_defines "HIP_EP_TQ_CODEC_DIR=$WorkRoot/reference/codec"
@@ -67,6 +74,20 @@ installs `codec.bin`/`manifest.json` under
 `$HipInstall/share/hip-ep/turboquant`. Generation does **not** enable quantization
 by itself; step 4 supplies the runtime options. `ring_q_resident` is an alternative
 prefill schedule, but the append GPU measurements use `ring_kv_outer`.
+
+The default `HIP_EP_GQA_IMPL=existing` build does not include Ring and cannot
+enable TurboQuant. In that build, and in architecture slices where Ring is
+disabled, `hip_tq4_prefill_workspace` returns zero and `hip_tq4_prefill` returns
+`hipErrorNotSupported` without accessing GPU memory. These exports must remain
+linkable even when `ring_gqa.hip` is omitted. To check such a library (with the
+ROCm runtime on the loader path), run:
+
+```powershell
+& $Python "$Repo/tools/turboquant/check_unavailable_append.py" --library "$HipInstall/bin/custom_kernels_gfx11-generic.dll" --dll-dir "$RocmCore/bin"
+```
+
+Use a library built with Ring unavailable for this check, not the enabled
+`gfx1151` library produced above.
 
 For an already configured build, the exact CMake-only generation commands and
 hash checks are in [Generate codec assets](#generate-codec-assets-during-build-or-test-setup).
