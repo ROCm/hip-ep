@@ -259,8 +259,7 @@ void OptimizeMemRefsPass::runOnOperation() {
                  << ", waste=" << bestWaste << ") for " << neededType << "\n");
       replacements.emplace_back(interval.allocOp.getResult(), replacement);
       bestSlot->lastUseIndex = interval.lastUseIndex;
-      bestSlot->lastHasAsyncGpuAccess |=
-          interval.mayHaveOutstandingGpuAccess;
+      bestSlot->lastHasAsyncGpuAccess |= interval.mayHaveOutstandingGpuAccess;
       ++NumAllocsReused;
     } else {
       LLVM_DEBUG(llvm::dbgs() << "  New slot for " << neededType << "\n");
