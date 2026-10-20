@@ -104,7 +104,8 @@ extern "C" int wrap_gather_block_quantized(
   // (cheap) instead of producing silently-wrong output.
   bool is_signed_data =
       (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
-  if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
+  const bool is_float8_data = (data_dtype == HIPDNN_EP_DATATYPE_FLOAT8E4M3FN);
+  if (bits == 8 && !is_signed_data && !is_float8_data && gather_axis_n != 0) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: ONNX spec requires "
             "gather_axis == 0 for uint8 data, got %d\n",
@@ -211,5 +212,6 @@ extern "C" int wrap_gather_block_quantized(
       static_cast<int>(scales_rank), output_shape,
       static_cast<int>(output_rank), static_cast<int>(bits),
       static_cast<int>(block_size), gather_axis_n, quantize_axis_n, default_zp,
-      is_signed_data ? 1 : 0, indices_is_int64, hip_out_dtype);
+      is_signed_data ? 1 : 0, is_float8_data ? 1 : 0, indices_is_int64,
+      hip_out_dtype);
 }
