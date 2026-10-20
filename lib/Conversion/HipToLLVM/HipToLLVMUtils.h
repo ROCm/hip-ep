@@ -218,6 +218,9 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return HIPDNN_EP_DATATYPE_UINT16;
   if (elemType.isInteger(16))
     return HIPDNN_EP_DATATYPE_INT16;
+  if (isa<Float8E4M3FNType>(elemType)) {
+    return HIPDNN_EP_DATATYPE_FLOAT8E4M3FN;
+  }
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 

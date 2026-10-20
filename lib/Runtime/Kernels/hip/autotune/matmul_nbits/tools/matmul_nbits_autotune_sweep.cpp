@@ -54,7 +54,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
     const void* zp_u8, const void* bias, void* out,
-    int64_t N, int64_t K, int64_t block_size,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
 #define HIP_OK(c)                                                             \
@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
           std::fprintf(stderr, "#SHAPE path=dp4a M=1 N=%d K=%d gs=%d zp=%d\n",
                        s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_dp4a(nullptr, buf.a, buf.b, buf.sc, zp_u, nullptr,
-                                buf.out, s.n, s.k, s.gs, buf.qb, buf.qs);
+                                buf.out, 1, s.n, s.k, s.gs, buf.qb, buf.qs);
           HIP_OK(hipDeviceSynchronize());
         }
         continue;
