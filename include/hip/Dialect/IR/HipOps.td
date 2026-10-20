@@ -1537,6 +1537,54 @@ def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_GatedRmsNormOp : Hip_DpsOp<"gated_rms_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "com.microsoft GatedRMSNorm (RMS norm times an activated gate)";
+  let description = [{
+    Gated RMS normalization from the `com.microsoft` contrib operator:
+
+      y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+
+    `scale` is 1-D of length C. The input's last dimension is a multiple of
+    C and every C consecutive elements form one normalized group. `gate` has
+    the input's shape. `activation` is `silu` (act(z) = z * sigmoid(z)) or
+    `sigmoid`. Math is FP32 and the result is rounded to the element type
+    once.
+
+    Example:
+    ```mlir
+    hip.gated_rms_norm(%ctx)
+        ins(%input, %scale, %gate :
+            memref<1x1x6144xf16, 1>, memref<128xf16, 1>, memref<1x1x6144xf16, 1>)
+        outs(%output : memref<1x1x6144xf16, 1>)
+        {activation = "sigmoid", epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$output,
+    StrAttr:$activation,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $gate `:`
+        type($input) `,` type($scale) `,` type($gate)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

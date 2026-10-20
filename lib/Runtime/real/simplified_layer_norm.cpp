@@ -117,3 +117,57 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return hip_rms_norm(hipdnn_ep_state_get_stream(state), input, scale, output,
                       num_rows, norm_size, scale_rows, epsilon, hip_dtype);
 }
+
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
+                        void *gate, void *output, int64_t input_num_elements,
+                        int64_t norm_size, int64_t element_size_bytes,
+                        int64_t activation, float epsilon) {
+  OP_PROFILE(
+      "layernorm",
+      [&] {
+        char b[64];
+        snprintf(
+            b, sizeof(b), "gated %lldx%lld",
+            (long long)(norm_size > 0 ? input_num_elements / norm_size : 0),
+            (long long)norm_size);
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !input || !scale || !gate || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_gated_rms_norm\n");
+    return -1;
+  }
+  if (norm_size <= 0 || input_num_elements % norm_size != 0) {
+    fprintf(stderr,
+            "wrap_gated_rms_norm: input_num_elements=%lld is not a multiple "
+            "of norm_size=%lld\n",
+            (long long)input_num_elements, (long long)norm_size);
+    return -1;
+  }
+
+  int hip_dtype;
+  if (element_size_bytes == 2) {
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  } else if (element_size_bytes == 4) {
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  } else {
+    fprintf(stderr,
+            "wrap_gated_rms_norm: unsupported element_size %lld "
+            "(supported: 2=fp16, 4=fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  const int64_t num_rows = input_num_elements / norm_size;
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gated_rms_norm: num_rows=%lld, "
+                    "norm_size=%lld, activation=%lld, data_type=%s, "
+                    "epsilon=%e\n",
+                    (long long)num_rows, (long long)norm_size,
+                    (long long)activation,
+                    (element_size_bytes == 2) ? "f16" : "f32", (double)epsilon);
+
+  return hip_gated_rms_norm(hipdnn_ep_state_get_stream(state), input, scale,
+                            gate, output, num_rows, norm_size,
+                            static_cast<int>(activation), epsilon, hip_dtype);
+}

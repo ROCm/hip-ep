@@ -562,14 +562,77 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
   }
 };
 
+// hip.gated_rms_norm -> wrap_gated_rms_norm(state, input, scale, gate, output,
+//   input_num_elements, norm_size, element_size_bytes, activation, epsilon)
+// activation: 0 = sigmoid, 1 = silu.
+struct GatedRmsNormOpLowering : public ConvertOpToLLVMPattern<GatedRmsNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GatedRmsNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value gatePtr =
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto scaleType = cast<MemRefType>(op.getScale().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+    Value normSize =
+        computeNumElements(scaleType, adaptor.getScale(), rewriter, loc);
+
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+    Value elementSize =
+        i64Const(inputType.getElementType().getIntOrFloatBitWidth() / 8);
+    Value activation = i64Const(op.getActivation() == "silu" ? 1 : 0);
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // input, scale, gate
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // input_num_elements, norm_size, elem size
+        i64Type, f32Type           // activation, epsilon
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGatedRmsNorm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value> args = {
+        statePtr,         inputPtr, scalePtr,    gatePtr,    outputPtr,
+        inputNumElements, normSize, elementSize, activation, epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns
-      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering>(
-          converter);
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+               InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
+               GatedRmsNormOpLowering>(converter);
 }
 
 } // namespace hip

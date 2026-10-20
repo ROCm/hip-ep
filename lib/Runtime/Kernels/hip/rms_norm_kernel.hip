@@ -128,6 +128,49 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// One block per row; blockDim.x is a power of two <= kRmsNormBlockSize.
+template <typename T, bool SILU>
+__global__ void hip_gated_rms_norm_kernel(const T *__restrict__ input,
+                                          const T *__restrict__ scale,
+                                          const T *__restrict__ gate,
+                                          T *__restrict__ output, int64_t outer,
+                                          int64_t norm_size, float epsilon) {
+  int64_t row = blockIdx.x;
+  if (row >= outer) {
+    return;
+  }
+
+  const T *x_row = input + row * norm_size;
+  const T *z_row = gate + row * norm_size;
+  T *y_row = output + row * norm_size;
+
+  __shared__ float s_reduce[kRmsNormBlockSize];
+  __shared__ float s_inv_rms;
+
+  float local_sumsq = 0.0f;
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float v = rms_load(x_row + i);
+    local_sumsq += v * v;
+  }
+  float sumsq = rms_block_sum(local_sumsq, s_reduce);
+  if (threadIdx.x == 0) {
+    s_inv_rms = rsqrtf(sumsq / static_cast<float>(norm_size) + epsilon);
+  }
+  __syncthreads();
+  const float inv_rms = s_inv_rms;
+
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float v = rms_load(x_row + i);
+    float g = rms_load(scale + i);
+    float z = rms_load(z_row + i);
+    float act = 1.0f / (1.0f + expf(-z));
+    if constexpr (SILU) {
+      act *= z;
+    }
+    rms_store(y_row + i, v * inv_rms * g * act);
+  }
+}
+
 // Packed __half2 requires an even row and 4-byte aligned bases. Row starts stay
 // aligned across rows when norm_size is even, so checking the bases is enough.
 inline bool rms_can_vectorize(const void *input, const void *scale,
@@ -204,6 +247,77 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_gated_rms_norm(void *stream, const void *input,
+                                  const void *scale, const void *gate,
+                                  void *output, int64_t outer,
+                                  int64_t norm_size, int activation,
+                                  float epsilon, int hip_dtype) {
+  if (outer <= 0 || norm_size <= 0) {
+    return 0;
+  }
+
+  // Size the block to the row so narrow groups (e.g. 128 wide) do not leave
+  // most of a 256-thread block idle.
+  int block_size = 32;
+  while (block_size < norm_size && block_size < kRmsNormBlockSize) {
+    block_size *= 2;
+  }
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned int>(outer));
+  dim3 block(block_size);
+  const bool silu = activation == 1;
+
+  (void)hipGetLastError();
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_gated_rms_norm: dtype=%d, outer=%lld, "
+      "norm_size=%lld, activation=%d, block=%d\n",
+      hip_dtype, (long long)outer, (long long)norm_size, activation,
+      block_size);
+
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+    auto *x = static_cast<const __half *>(input);
+    auto *s = static_cast<const __half *>(scale);
+    auto *z = static_cast<const __half *>(gate);
+    auto *y = static_cast<__half *>(output);
+    if (silu) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<__half, true>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<__half, false>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    }
+  } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
+    auto *x = static_cast<const float *>(input);
+    auto *s = static_cast<const float *>(scale);
+    auto *z = static_cast<const float *>(gate);
+    auto *y = static_cast<float *>(output);
+    if (silu) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<float, true>), grid, block,
+          0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<float, false>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    }
+  } else {
+    fprintf(stderr,
+            "[custom_kernels] hip_gated_rms_norm: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_gated_rms_norm launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

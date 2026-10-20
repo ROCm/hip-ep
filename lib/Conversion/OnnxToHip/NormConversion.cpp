@@ -13,6 +13,7 @@
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
 //   - onnx.RMSNormalization (standard, opset 23+)       -> hip.rms_norm
 //   - onnx.Custom(BranchwiseRMSNorm, com.microsoft)     -> hip.rms_norm
+//   - onnx.Custom(GatedRMSNorm, com.microsoft)          -> hip.gated_rms_norm
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
@@ -317,6 +318,86 @@ BranchwiseRMSNormToHip::matchAndRewrite(mlir::Operation *op,
         rewriter, loc, resultType, normalized, reassociation);
   }
   rewriter.replaceOp(op, normalized);
+  return mlir::success();
+}
+
+/// onnx.Custom(com.microsoft.GatedRMSNorm) -> hip.gated_rms_norm
+struct GatedRMSNormToHip : public mlir::RewritePattern {
+  GatedRMSNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+GatedRMSNormToHip::matchAndRewrite(mlir::Operation *op,
+                                   mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GatedRMSNorm") {
+    return rewriter.notifyMatchFailure(op, "not a GatedRMSNorm operation");
+  }
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for GatedRMSNorm");
+  }
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm expects 3 inputs and 1 result");
+  }
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value gate = op->getOperand(2);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto gateType = mlir::dyn_cast<mlir::RankedTensorType>(gate.getType());
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !scaleType || !gateType || !resultType ||
+      gateType != inputType || resultType != inputType) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm requires X, gate and output of one ranked type");
+  }
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32()) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm supports only f16 and f32");
+  }
+  if (scaleType.getRank() != 1 || scaleType.getElementType() != elemType) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm scale must be 1-D of the input type");
+  }
+
+  llvm::StringRef activation = "silu";
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("activation")) {
+    activation = attr.getValue();
+  }
+  if (activation == "swish") {
+    activation = "silu";
+  }
+  if (activation != "silu" && activation != "sigmoid") {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm activation must be silu, swish or sigmoid");
+  }
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("epsilon")) {
+    epsValue = attr.getValue();
+  }
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure)) {
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  }
+  mlir::Location loc = op->getLoc();
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::GatedRmsNormOp::create(
+      rewriter, loc, *ctxOrFailure, input, scale, gate, init,
+      rewriter.getStringAttr(activation),
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
 
@@ -1065,9 +1146,9 @@ GroupNormToHip::matchAndRewrite(mlir::Operation *op,
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-               BranchwiseRMSNormToHip, SkipSimplifiedLayerNormToHip,
-               SkipLayerNormToHip, LayerNormToHip, InstanceNormToHip,
-               BatchNormToHip, GroupNormToHip>(ctx);
+               BranchwiseRMSNormToHip, GatedRMSNormToHip,
+               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
+               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
 }
 
 } // namespace hip
