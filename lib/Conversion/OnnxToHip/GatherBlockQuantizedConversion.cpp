@@ -159,9 +159,10 @@ inline bool hasFloat8Data(Operation *op) {
          isa<Float8E4M3FNType>(getElementTypeOrSelf(op->getOperand(0)));
 }
 
+// Rewrites a `blockSize` of 0 to the effective block size.
 inline FailureOr<int64_t>
 resolveFloat8QuantizeAxis(RankedTensorType dataType,
-                          RankedTensorType scalesType, int64_t blockSize,
+                          RankedTensorType scalesType, int64_t &blockSize,
                           std::optional<int64_t> explicitAxis) {
   const int64_t rank = dataType.getRank();
   if (scalesType.getRank() != rank) {
@@ -192,6 +193,7 @@ resolveFloat8QuantizeAxis(RankedTensorType dataType,
       llvm::divideCeilSigned(dataDim, effectiveBlockSize)) {
     return failure();
   }
+  blockSize = effectiveBlockSize;
   return axis;
 }
 
@@ -468,11 +470,6 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "float8 GBQ data must not have `zero_points`");
   }
 
-  // Attribute extraction. Spec defaults:
-  //   bits           — required, 4 or 8
-  //   block_size     — required, power of 2 >= 16
-  //   gather_axis    — optional, default 0
-  //   quantize_axis  — optional, default 0
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
   if (!bitsIntAttr && !float8Data)
     return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
@@ -500,9 +497,6 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   if (mlir::failed(quantAxisOr))
     return rewriter.notifyMatchFailure(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
-  if (blockSize == 0) {
-    blockSize = std::max<int64_t>(dataType.getDimSize(*quantAxisOr), 1);
-  }
 
   bool unsignedQuantStorage =
       !float8Data && gbq::resolveUnsignedQuantStorage(

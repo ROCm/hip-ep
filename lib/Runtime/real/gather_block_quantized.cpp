@@ -127,7 +127,7 @@ extern "C" int wrap_gather_block_quantized(
   // model dequantises to roughly +0.65/+0.73 in place of the correct
   // values, which cluster around 0).
   int default_zp;
-  if (is_signed_data) {
+  if (is_signed_data || is_float8_data) {
     default_zp = 0;
   } else {
     default_zp = 1 << (static_cast<int>(bits) - 1);

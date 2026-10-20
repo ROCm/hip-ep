@@ -40,6 +40,7 @@ def _make_gbq_float8_model(
     indices_dtype: int,
     block_size: int,
     quantize_axis: int | None = None,
+    gather_axis: int = 0,
 ):
     data = helper.make_tensor(
         "data",
@@ -51,9 +52,13 @@ def _make_gbq_float8_model(
     out_dtype = TensorProto.FLOAT16 if scales.dtype == np.float16 else TensorProto.FLOAT
     indices = helper.make_tensor_value_info("indices", indices_dtype, indices_shape)
     output = helper.make_tensor_value_info(
-        "output", out_dtype, indices_shape + list(codes.shape[1:])
+        "output",
+        out_dtype,
+        list(codes.shape[:gather_axis])
+        + indices_shape
+        + list(codes.shape[gather_axis + 1 :]),
     )
-    attrs = {"gather_axis": 0, "block_size": block_size}
+    attrs = {"gather_axis": gather_axis, "block_size": block_size}
     if quantize_axis is not None:
         attrs["quantize_axis"] = quantize_axis
     node = helper.make_node(
@@ -121,3 +126,18 @@ class TestGatherBlockQuantizedFloat8:
         indices = rng.integers(0, vocab, [8], dtype=np.int32)
         actual, expected = model_runner.run_sample(model, [indices])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_inner_gather_axis_leading_quantize_axis(self, model_runner):
+        rng = np.random.default_rng(2)
+        model = _make_gbq_float8_model(
+            _float8_codes(rng, [4, 64, 32]),
+            rng.uniform(0.01, 0.1, [1, 1, 32]).astype(np.float16),
+            [2, 3],
+            TensorProto.INT64,
+            block_size=0,
+            quantize_axis=0,
+            gather_axis=1,
+        )
+        indices = rng.integers(-64, 64, [2, 3], dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [indices])
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3)
