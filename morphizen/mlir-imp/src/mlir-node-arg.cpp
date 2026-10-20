@@ -78,6 +78,9 @@ int mlirElementTypeToOnnxType(mlir::Type elementType) {
     }
     return mlir_type_code;
   } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType)) {
+    if (mlir::isa<mlir::Float8E4M3FNType>(floatType)) {
+      return 17; // TensorProto_DataType_FLOAT8E4M3FN
+    }
     // Map MLIR float types to our element type constants
     unsigned width = floatType.getWidth();
     int mlir_type_code = -1;
@@ -334,6 +337,7 @@ void MLIRNodeArg::validateElementType(int element_type) const {
   case 12: // TensorProto_DataType_UINT32
   case 13: // TensorProto_DataType_UINT64
   case 16: // TensorProto_DataType_BFLOAT16
+  case 17: // TensorProto_DataType_FLOAT8E4M3FN
   case 21: // TensorProto_DataType_UINT4
   case 22: // TensorProto_DataType_INT4
     break; // Valid types
