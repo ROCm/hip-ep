@@ -25,6 +25,8 @@ Input context:
   router weights: raw logits from router projection (range [-5, 5], std ~ 1.2)
 """
 
+import os
+
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
@@ -32,13 +34,34 @@ from onnx import TensorProto, helper, numpy_helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-SEQ_LENS = [1, 128]
+# 1 is decode and 128 is prefill; the runtime picks its MoE strategy on token count
+# (hipdnn_ep_qmoe_fused_max_tokens): 2..8 run the fused decode kernels as one burst
+# over all token*k slots, 9 and up take the grouped path. Speculative verify widths
+# live in the first band.
+SEQ_LENS = [1, 2, 5, 8, 9, 128]
+FUSED_MAX_TOKENS = int(os.environ.get("HIPDNN_EP_QMOE_FUSED_MAX_TOKENS", "8"))
 HIDDEN = 2880
 INTERMEDIATE = 5760
 NUM_EXPERTS = 32
 TOP_K = 4
 BLOCK_SIZE = 32
 EXPERT_WEIGHT_BITS = 4
+
+
+def _compare_gpt_oss_shape(actual, expected, seq_len):
+    """The fused decode kernels quantize activations to int8 per 32-element
+    group by default (W4A8, HIPDNN_EP_MATMUL_DP4A), an error that scales with
+    the output (|output| reaches ~100 at these shapes). Fused token counts are
+    bounded at 2% of the largest |output| with a tighter cosine instead of the
+    grouped path's fixed atol.
+    """
+    if seq_len <= FUSED_MAX_TOKENS:
+        scale = float(np.abs(expected[0].astype(np.float32)).max())
+        compare_outputs(
+            actual, expected, atol=2e-2 * scale, rtol=1e-2, cos_threshold=0.9999
+        )
+    else:
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
 
 
 def _make_qmoe_model(
@@ -235,7 +258,7 @@ class TestQMoE:
         )
 
         actual, expected = model_runner.run_sample(model, [x, router])
-        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+        _compare_gpt_oss_shape(actual, expected, seq_len)
 
     @pytest.mark.parametrize("seq_len", [2, 37, 512])
     def test_qmoe_gpt_oss_shape_skewed_routing(self, model_runner, seq_len):
@@ -266,4 +289,4 @@ class TestQMoE:
         assert not (ranked[:, TOP_K - 1] == ranked[:, TOP_K]).any()
 
         actual, expected = model_runner.run_sample(model, [x, router])
-        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
+        _compare_gpt_oss_shape(actual, expected, seq_len)
