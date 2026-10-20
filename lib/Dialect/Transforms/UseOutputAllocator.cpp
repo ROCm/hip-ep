@@ -237,11 +237,10 @@ static Value createExternalRankAllocationForMultiDynExpand(
   ValueRange externalDynamicSizes = expand.getOutputShape();
   if (static_cast<int64_t>(externalDynamicSizes.size()) !=
       externalType.getNumDynamicDims()) {
-    allocOp.emitError()
-        << "rank-increasing graph output has "
-        << externalType.getNumDynamicDims()
-        << " dynamic dimensions but expand_shape carries "
-        << externalDynamicSizes.size() << " runtime sizes";
+    allocOp.emitError() << "rank-increasing graph output has "
+                        << externalType.getNumDynamicDims()
+                        << " dynamic dimensions but expand_shape carries "
+                        << externalDynamicSizes.size() << " runtime sizes";
     return {};
   }
   for (Value size : externalDynamicSizes) {
