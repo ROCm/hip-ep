@@ -60,6 +60,21 @@ inline bool hipdnn_ep_qmoe_burst_enabled() {
   return enabled;
 }
 
+// Longest sequence wrap_linear_attention runs through the one-launch burst
+// kernel (decode included) instead of copy + per-step decode or the chunked
+// prefill scan. Clamped to [0, 64]; 0 disables.
+inline int hipdnn_ep_la_burst_max_tokens() {
+  static const int n = [] {
+    const std::string v =
+        hipdnn_ep::env_string("HIPDNN_EP_LA_BURST_MAX_TOKENS");
+    if (v.empty())
+      return 16;
+    const int parsed = atoi(v.c_str());
+    return (parsed >= 0 && parsed <= 64) ? parsed : 16;
+  }();
+  return n;
+}
+
 // Widest M the dp4a path claims. 1 is decode; above that is the speculative
 // verify pass, where blocking rows over one pass of the weight is the whole
 // point (see the GEMV-M dp4a section in matmul_nbits_kernel.hip). The default
