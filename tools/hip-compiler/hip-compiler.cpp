@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-compiler");
   std::string inputFilename;
   std::string outputPath;
-  std::string mode = "LLVM_IR"; // LLVM_IR (default) | NATIVE
+  std::string mode = "LLVM_IR"; // LLVM_IR (default) | NATIVE | HIP_IR
 
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "-o" && i + 1 < argc) {
@@ -28,13 +28,13 @@ int main(int argc, char **argv) {
 
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs() << "Usage: " << argv[0]
-                 << " <input.mlir> -o <output.{bc,dll,so}> "
-                    "[--mode LLVM_IR|NATIVE]\n";
+                 << " <input.mlir> -o <output.{bc,dll,so,mlir}> "
+                    "[--mode LLVM_IR|NATIVE|HIP_IR]\n";
     return 1;
   }
 
-  if (mode != "LLVM_IR" && mode != "NATIVE") {
-    llvm::errs() << "error: --mode must be 'LLVM_IR' or 'NATIVE'\n";
+  if (mode != "LLVM_IR" && mode != "NATIVE" && mode != "HIP_IR") {
+    llvm::errs() << "error: --mode must be 'LLVM_IR', 'NATIVE' or 'HIP_IR'\n";
     return 1;
   }
 
@@ -50,6 +50,10 @@ int main(int argc, char **argv) {
                                            : mlir::hip::OutputMode::LLVM_IR;
   std::string errorMessage;
   hip::compiler::CompilerDriver driver;
+  // HIP_IR: the tensor-form HIP IR the source lowers to, for a frontend
+  // whose product it is; it compiles again as any input does.
+  if (mode == "HIP_IR")
+    driver.setHipIrOutput();
 
   if (!driver.compile((*bufOrErr)->getBuffer(), outputPath, options,
                       errorMessage)) {

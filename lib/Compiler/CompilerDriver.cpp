@@ -57,6 +57,38 @@
 namespace hip::compiler {
 
 namespace {
+
+/// The source pipeline a module of tensor-form HIP IR names: no ONNX head,
+/// the pipeline from buildOnnxToHipPipelineTail on.
+constexpr llvm::StringLiteral kHipSourcePipeline = "hip";
+constexpr llvm::StringLiteral kSourcePipelineAttrName =
+    "hip.compiler.source_pipeline";
+
+/// Writes the module, lowered to the HIP dialect (setHipIrOutput), naming
+/// "hip" as its source pipeline, so it compiles from here on its own.
+///
+///   Lowered (after buildOnnxToHipPipelineHead):
+///     module {
+///       func.func @main_graph(%ctx: !hip.context, ...) { hip.* ops }
+///   Written:
+///     module attributes {hip.compiler.source_pipeline = "hip"} { ... same }
+bool writeHipIr(mlir::ModuleOp module, const std::string &path,
+                std::string &error_message) {
+  module->setAttr(
+      kSourcePipelineAttrName,
+      mlir::StringAttr::get(module.getContext(), kHipSourcePipeline));
+  std::error_code ec;
+  llvm::raw_fd_ostream out(path, ec);
+  if (ec) {
+    error_message =
+        "cannot write the HIP IR to '" + path + "': " + ec.message();
+    return false;
+  }
+  module.print(out);
+  out << "\n";
+  return true;
+}
+
 bool fileExists(const std::string &path) {
   llvm::sys::fs::file_status status;
   std::error_code EC = llvm::sys::fs::status(path, status);
@@ -202,6 +234,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (!runMLIRPasses(module, options, error_message))
     return false;
   logPhase("runMLIRPasses");
+  if (hipIrOutput_)
+    return writeHipIr(module, output_path, error_message);
 
   llvm::LLVMContext llvmContext;
   auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);
@@ -322,6 +356,13 @@ bool CompilerDriver::runMLIRPasses(
   std::string customPipeline = hip_get_env("HIPDNN_EP_PIPELINE");
   const bool overridePipeline = !customPipeline.empty();
   std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFileSystem;
+
+  if (hipIrOutput_ && (overridePipeline || hipsrPipelineRequested() ||
+                       rocMlirPipelineRequested())) {
+    error_message = "HIP IR output is supported by the built-in pipeline "
+                    "only, not with HIPDNN_EP_PIPELINE, HIPSR or rocMLIR";
+    return false;
+  }
 
   if (overridePipeline) {
     std::string parseErr;
@@ -497,19 +538,34 @@ bool CompilerDriver::runMLIRPasses(
         mlir::hip::kDefaultExternalizeMinNumElements;
     onnxToHipOpts.skipConstantData = options.skip_constant_data;
 
-    if (hipdnnHandle_) {
-      compiledGraphs_ =
-          std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
-      mlir::hip::buildOnnxToHipPipeline(
-          pm, onnxToHipOpts, fileSystem_,
-          static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
-    } else {
-      mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+    mlir::Attribute sourcePipeline = module->getAttr(kSourcePipelineAttrName);
+    auto sourcePipelineId =
+        mlir::dyn_cast_if_present<mlir::StringAttr>(sourcePipeline);
+    if (sourcePipeline && (!sourcePipelineId ||
+                           sourcePipelineId.getValue() != kHipSourcePipeline)) {
+      error_message = "module attribute '" + kSourcePipelineAttrName.str() +
+                      "' names no source pipeline this compiler has (\"" +
+                      kHipSourcePipeline.str() + "\": tensor-form HIP IR)";
+      return false;
     }
-
-    mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
-    hipToLlvmOpts.constantsFile = options.constants_file;
-    mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+    // Tensor-form HIP IR (written by setHipIrOutput) has been through the
+    // head already.
+    if (!sourcePipeline) {
+      if (hipdnnHandle_) {
+        compiledGraphs_ =
+            std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+        mlir::hip::buildOnnxToHipPipelineHead(
+            pm, static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+      } else {
+        mlir::hip::buildOnnxToHipPipelineHead(pm);
+      }
+    }
+    if (!hipIrOutput_) {
+      mlir::hip::buildOnnxToHipPipelineTail(pm, onnxToHipOpts, fileSystem_);
+      mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
+      hipToLlvmOpts.constantsFile = options.constants_file;
+      mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+    }
   }
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
