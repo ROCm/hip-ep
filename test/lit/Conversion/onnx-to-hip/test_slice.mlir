@@ -357,4 +357,41 @@ module {
 
     return %r : tensor<2x6xf32>
   }
+
+  // Test 15: an exported graph computes a dynamic Slice end as
+  // Reshape(1 + (Shape(mask)[1] - 1) / 8). All operations are over one-element
+  // shape tensors, so the chain is host-resolvable despite the wrappers.
+  func.func @test_slice_native_reshape_wrapped_end(
+      %data: tensor<?xf32>, %mask: tensor<1x?xi64>) -> tensor<?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_reshape_wrapped_end
+    %starts = arith.constant dense<[0]> : tensor<1xi64>
+    %axes = arith.constant dense<[0]> : tensor<1xi64>
+    %shape = "onnx.Shape"(%mask) {start = 1 : si64, end = 2 : si64}
+        : (tensor<1x?xi64>) -> tensor<1xi64>
+    %squeeze_axes = arith.constant dense<[0]> : tensor<1xi64>
+    %length = "onnx.Squeeze"(%shape, %squeeze_axes)
+        : (tensor<1xi64>, tensor<1xi64>) -> tensor<i64>
+    %neg_one = arith.constant dense<-1> : tensor<i64>
+    %eight = arith.constant dense<8> : tensor<i64>
+    %one = arith.constant dense<1> : tensor<i64>
+    %minus_one = "onnx.Add"(%length, %neg_one)
+        : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %quotient = "onnx.Div"(%minus_one, %eight)
+        : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %end_scalar = "onnx.Add"(%one, %quotient)
+        : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %shape_spec = arith.constant dense<[1]> : tensor<1xi64>
+    %ends = "onnx.Reshape"(%end_scalar, %shape_spec) {allowzero = 0 : si64}
+        : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%data, %starts, %ends, %axes)
+        : (tensor<?xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?xf32>
+
+    // This divsi belongs to the host-side allocation extent. Without resolving
+    // the full chain, Slice falls back to data's input dimension instead.
+    // CHECK: arith.divsi
+    // CHECK: tensor.empty(%{{.*}}) : tensor<?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?xf32>
+  }
 }
