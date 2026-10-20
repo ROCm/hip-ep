@@ -48,6 +48,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -71,6 +72,8 @@ struct AllocInterval {
   memref::AllocOp allocOp;
   unsigned defIndex;     ///< Block index where the alloc occurs.
   unsigned lastUseIndex; ///< Block index of the last (transitive) use.
+  bool hasHostStore;     ///< A host memref.store writes this allocation.
+  bool mayHaveOutstandingGpuAccess; ///< A GPU access may outlive its IR op.
 };
 
 /// A reusable memory slot: tracks the buffer, its type, when it becomes
@@ -80,6 +83,7 @@ struct Slot {
   MemRefType type;
   unsigned lastUseIndex; ///< Updated when the slot is reused.
   SmallVector<Value, 4> dynamicSizes;
+  bool lastHasAsyncGpuAccess; ///< The latest occupant may still be GPU-active.
 };
 
 //===----------------------------------------------------------------------===//
@@ -180,7 +184,27 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,
                                                opIndex, blockSize);
-    intervals.push_back({allocOp, opIndex[&op], lastUse});
+
+    bool hasHostStore = false;
+    bool mayHaveOutstandingGpuAccess = false;
+
+    // Follow aliases so accesses through subviews and casts are attributed to
+    // the underlying allocation. At this pipeline stage, DPS operations are
+    // HIP/plugin runtime operations, and memref.copy is preferentially lowered
+    // to an asynchronous HIP copy. Treat both as potentially outstanding GPU
+    // accesses. This is intentionally conservative for a copy that may later
+    // use host lowering: a false positive only loses a reuse opportunity.
+    for (Value alias : aliasAnalysis.resolve(result)) {
+      for (Operation *user : alias.getUsers()) {
+        if (isa<memref::StoreOp>(user))
+          hasHostStore = true;
+
+        if (isa<DestinationStyleOpInterface, memref::CopyOp>(user))
+          mayHaveOutstandingGpuAccess = true;
+      }
+    }
+    intervals.push_back({allocOp, opIndex[&op], lastUse, hasHostStore,
+                         mayHaveOutstandingGpuAccess});
     LLVM_DEBUG(llvm::dbgs() << "  interval " << allocOp << " [" << opIndex[&op]
                             << ", " << lastUse << "]\n");
   }
@@ -200,6 +224,13 @@ void OptimizeMemRefsPass::runOnOperation() {
     int64_t bestWaste = INT64_MAX;
     for (auto &slot : slots) {
       if (slot.lastUseIndex >= interval.defIndex)
+        continue;
+      // IR liveness ends when a GPU operation is launched, not when the GPU
+      // finishes using the buffer. A host store is not ordered on that stream,
+      // so it must not reuse a slot whose previous occupant may still be
+      // accessed asynchronously. CPU->CPU, CPU->GPU, and GPU->GPU reuse remain
+      // eligible.
+      if (slot.lastHasAsyncGpuAccess && interval.hasHostStore)
         continue;
       if (!canReuse(slot, neededType, neededDynSizes))
         continue;
@@ -228,13 +259,15 @@ void OptimizeMemRefsPass::runOnOperation() {
                  << ", waste=" << bestWaste << ") for " << neededType << "\n");
       replacements.emplace_back(interval.allocOp.getResult(), replacement);
       bestSlot->lastUseIndex = interval.lastUseIndex;
+      bestSlot->lastHasAsyncGpuAccess |=
+          interval.mayHaveOutstandingGpuAccess;
       ++NumAllocsReused;
     } else {
       LLVM_DEBUG(llvm::dbgs() << "  New slot for " << neededType << "\n");
-      slots.push_back({interval.allocOp.getResult(), neededType,
-                       interval.lastUseIndex,
-                       SmallVector<Value, 4>(neededDynSizes.begin(),
-                                             neededDynSizes.end())});
+      slots.push_back(
+          {interval.allocOp.getResult(), neededType, interval.lastUseIndex,
+           SmallVector<Value, 4>(neededDynSizes.begin(), neededDynSizes.end()),
+           interval.mayHaveOutstandingGpuAccess});
       ++NumSlotsCreated;
     }
   }

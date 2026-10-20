@@ -93,6 +93,93 @@ func.func @no_reuse_overlapping_lifetimes(
   return %alloc1 : memref<2x64x64xf32>
 }
 
+// Host stores are not stream-ordered with asynchronous GPU kernels. Even
+// though %gpu_tmp is dead before %host_scalar is allocated, coalescing them
+// would let the earlier kernel overwrite the later host value. Keep both
+// allocations distinct; MaterializeHostScalars will subsequently move the
+// host-written scalar to its own mapped scratch slot.
+//
+// CHECK-LABEL: func.func @no_reuse_for_host_store
+// CHECK:         %[[GPU:.*]] = memref.alloc() : memref<i64>
+// CHECK:         hip.add{{.*}}outs(%[[GPU]] : memref<i64>)
+// CHECK:         %[[HOST:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %{{.*}}, %[[HOST]][]
+// CHECK:         hip.add{{.*}}ins(%[[HOST]]
+func.func @no_reuse_for_host_store(
+    %ctx: !hip.context, %a: memref<i64>, %b: memref<i64>,
+    %host_value: i64) -> memref<i64> {
+  %gpu_tmp = memref.alloc() : memref<i64>
+  hip.add(%ctx) ins(%a, %b : memref<i64>, memref<i64>)
+                outs(%gpu_tmp : memref<i64>)
+  %host_scalar = memref.alloc() : memref<i64>
+  memref.store %host_value, %host_scalar[] : memref<i64>
+  %out = memref.alloc() : memref<i64>
+  hip.add(%ctx) ins(%host_scalar, %a : memref<i64>, memref<i64>)
+                outs(%out : memref<i64>)
+  return %out : memref<i64>
+}
+
+// Two host-written allocations are ordered by the CPU, so the second one may
+// reuse the first one's slot.
+//
+// CHECK-LABEL: func.func @host_to_host_reuse
+// CHECK:         %[[SLOT:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %arg0, %[[SLOT]][]
+// CHECK-NOT:     memref.alloc
+// CHECK:         memref.store %arg1, %[[SLOT]][]
+// CHECK:         return %[[SLOT]]
+func.func @host_to_host_reuse(
+    %first: i64, %second: i64) -> memref<i64> {
+  %host0 = memref.alloc() : memref<i64>
+  memref.store %first, %host0[] : memref<i64>
+  %host1 = memref.alloc() : memref<i64>
+  memref.store %second, %host1[] : memref<i64>
+  return %host1 : memref<i64>
+}
+
+// A GPU allocation may reuse a CPU-written slot because its stream operation
+// is launched after the host store. Once it does, the slot becomes GPU-active
+// and a subsequent host-written allocation must receive a different slot.
+//
+// CHECK-LABEL: func.func @host_to_gpu_then_block_gpu_to_host
+// CHECK:         %[[REUSED:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %arg3, %[[REUSED]][]
+// CHECK-NOT:     memref.alloc
+// CHECK:         hip.add{{.*}}outs(%[[REUSED]] : memref<i64>)
+// CHECK:         %[[HOST:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %arg4, %[[HOST]][]
+// CHECK:         return %[[HOST]]
+func.func @host_to_gpu_then_block_gpu_to_host(
+    %ctx: !hip.context, %a: memref<i64>, %b: memref<i64>,
+    %first: i64, %second: i64) -> memref<i64> {
+  %host0 = memref.alloc() : memref<i64>
+  memref.store %first, %host0[] : memref<i64>
+  %gpu = memref.alloc() : memref<i64>
+  hip.add(%ctx) ins(%a, %b : memref<i64>, memref<i64>)
+                outs(%gpu : memref<i64>)
+  %host1 = memref.alloc() : memref<i64>
+  memref.store %second, %host1[] : memref<i64>
+  return %host1 : memref<i64>
+}
+
+// memref.copy is preferentially lowered to an asynchronous HIP copy in this
+// pipeline, so a following host store must not reuse its destination slot.
+//
+// CHECK-LABEL: func.func @copy_to_host_no_reuse
+// CHECK:         %[[COPY:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.copy %arg0, %[[COPY]]
+// CHECK:         %[[HOST:.*]] = memref.alloc() : memref<i64>
+// CHECK:         memref.store %arg1, %[[HOST]][]
+// CHECK:         return %[[HOST]]
+func.func @copy_to_host_no_reuse(
+    %source: memref<i64>, %host_value: i64) -> memref<i64> {
+  %copy = memref.alloc() : memref<i64>
+  memref.copy %source, %copy : memref<i64> to memref<i64>
+  %host = memref.alloc() : memref<i64>
+  memref.store %host_value, %host[] : memref<i64>
+  return %host : memref<i64>
+}
+
 // Three memref<?x64xf32> buffers all sized by the same SSA value %n.
 // alloc0 becomes dead after softmax reads it, so alloc2 reuses alloc0.
 //
