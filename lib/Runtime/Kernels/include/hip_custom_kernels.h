@@ -2544,9 +2544,12 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_padrow(
  *   bits == 4 + is_signed_data == 0  -> uint4  (raw nibble in [0,15])
  *   bits == 8 + is_signed_data == 0  -> uint8  (raw byte  in [0,255])
  *   bits == 8 + is_signed_data == 1  -> int8   (signed byte in [-128,127])
+ *   is_float8_data == 1              -> float8 e4m3fn, dequantized as
+ *                                       decode * scale (zp not applied)
  *
  * scales       - one per (data block) along quantize_axis: same shape as
  *                data except dim quantize_axis is data.shape[qa]/block_size.
+ *                A dim of 1 on any other axis broadcasts along that axis.
  *                Type: T2 in {fp32, fp16, bf16}, matches output.
  * zero_points  - same logical shape as scales; same packing as data
  *                (sub-byte for bits==4). May be null; default zp is then
@@ -2580,6 +2583,7 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int quantize_axis,           // normalized
     int default_zp,              // applied when zero_points == null
     int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
+    int is_float8_data,          // 1 if float8 e4m3fn
     int indices_is_int64,        // 1 = i64, 0 = i32
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
