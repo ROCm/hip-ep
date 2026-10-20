@@ -152,13 +152,27 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value gammaPtr =
         extractContiguousMemRefPtr(adaptor.getGamma(), rewriter, loc);
     Value biasPtr = getNullableMemRefPtr(adaptor.getBias(), rewriter, loc);
-    // DPS outputs: outputs[0]=output, outputs[1]=input_skip_bias_sum (optional)
+    // DPS outputs: outputs[0]=output, outputs[1]=input_skip_bias_sum
+    // (optional), then the quantized output and its scales when
+    // quant_block_size is set.
     auto outputs = adaptor.getOutputs();
+    const size_t numQuant = op.hasQuantOutputs() ? 2 : 0;
     Value outputPtr = extractContiguousMemRefPtr(outputs[0], rewriter, loc);
     Value skipOutputPtr =
-        outputs.size() > 1
+        outputs.size() - numQuant > 1
             ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
             : nullPtr;
+    Value quantPtr = nullPtr;
+    Value quantScalePtr = nullPtr;
+    if (numQuant) {
+      quantPtr = extractContiguousMemRefPtr(outputs[outputs.size() - 2],
+                                            rewriter, loc);
+      quantScalePtr = extractContiguousMemRefPtr(outputs[outputs.size() - 1],
+                                                 rewriter, loc);
+    }
+    Value quantBlockSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getQuantBlockSize().value_or(0)));
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -179,7 +193,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
-    // Runtime function signature (11 params)
+    // Runtime function signature (14 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
         ptrType, // input
@@ -188,10 +202,13 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         ptrType, // bias (may be nullptr)
         ptrType, // output
         ptrType, // input_skip_bias_sum (may be nullptr)
+        ptrType, // quantized output (may be nullptr)
+        ptrType, // quantization scales (may be nullptr)
         i64Type, // input_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
-        f32Type  // epsilon
+        f32Type, // epsilon
+        i64Type  // quant_block_size (0 without quantized outputs)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -203,10 +220,78 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     SmallVector<Value> args = {statePtr,         inputPtr,
                                skipPtr,          gammaPtr,
                                biasPtr,          outputPtr,
-                               skipOutputPtr,    inputNumElements,
+                               skipOutputPtr,    quantPtr,
+                               quantScalePtr,    inputNumElements,
                                gammaNumElements, elementSizeBytesVal,
-                               epsilonVal};
+                               epsilonVal,       quantBlockSize};
 
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.gated_rms_norm(%ctx) ins(%input, %gate, %weight)
+//                           outs(%output, [%q, %scale])
+//   -> wrap_gated_rms_norm(state, input, gate, weight, output,
+//        q_or_null, scale_or_null, input_num_elements, gate_num_elements,
+//        row_size, group_size, epsilon, quant_block_size)
+// The verifier fixes the last axis and the weight size; the element counts
+// are dynamic.
+struct GatedRmsNormOpLowering : public ConvertOpToLLVMPattern<GatedRmsNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GatedRmsNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+    auto i64 = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    auto outputs = adaptor.getOutputs();
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    Value quantPtr = nullPtr;
+    Value quantScalePtr = nullPtr;
+    if (op.hasQuantOutputs()) {
+      quantPtr = extractContiguousMemRefPtr(outputs[1], rewriter, loc);
+      quantScalePtr = extractContiguousMemRefPtr(outputs[2], rewriter, loc);
+    }
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto gateType = cast<MemRefType>(op.getGate().getType());
+    auto weightType = cast<MemRefType>(op.getWeight().getType());
+    SmallVector<Type> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType, // state, input, gate, weight
+        ptrType, ptrType, ptrType,          // output, q, scale
+        i64Type, i64Type,                   // input / gate num_elements
+        i64Type, i64Type,                   // row_size, group_size
+        f32Type, i64Type                    // epsilon, quant_block_size
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGatedRmsNorm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc),
+        extractContiguousMemRefPtr(outputs[0], rewriter, loc),
+        quantPtr,
+        quantScalePtr,
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc),
+        computeNumElements(gateType, adaptor.getGate(), rewriter, loc),
+        i64(inputType.getDimSize(inputType.getRank() - 1)),
+        i64(weightType.getDimSize(0)),
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr()),
+        i64(op.getQuantBlockSize().value_or(0))};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -567,9 +652,9 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns
-      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering>(
-          converter);
+      .add<RmsNormOpLowering, SkipRmsNormOpLowering, GatedRmsNormOpLowering,
+           LayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
+           GroupNormOpLowering>(converter);
 }
 
 } // namespace hip

@@ -901,6 +901,11 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
       g_idx: GPTQ group ordering indices (deprecated)
       bias: output bias vector [N]
 
+    Optional `a_quant(a_q, a_scale)`: `A` already quantized to int8 per
+    `block_size` group by its producer (see `hip.dynamic_quant_i8`). The
+    runtime reads it instead of quantizing `A` whenever it runs the integer
+    dot-product path.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -921,6 +926,8 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     Optional<Hip_TensorOrMemRef>:$zero_points,  // dequant zero points (optional)
     Optional<Hip_TensorOrMemRef>:$g_idx,        // GPTQ group indices (optional, deprecated)
     Optional<Hip_TensorOrMemRef>:$bias,         // output bias [N] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_q,          // int8 A [..., K] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,      // f32 [..., K/block_size]
     Hip_TensorOrMemRef:$output,                 // result [..., N]
     I64Attr:$K,
     I64Attr:$N,
@@ -937,9 +944,12 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
     (`g_idx` `(` $g_idx^ `:` type($g_idx) `)`)?
     (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`a_quant` `(` $a_q^ `,` $a_scale `:` type($a_q) `,` type($a_scale) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 
   // OpStateOpInterface: construct this MatMulNBits instance's per-session
   // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
@@ -954,6 +964,120 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+}
+
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
+                                       /*traits=*/[AttrSizedOperandSegments,
+                                                   OpStateOpInterface],
+                                       /*outsAccessor=*/"Outputs",
+                                       /*autoReify=*/0> {
+  let summary = "Several MatMulNBits projections of one activation";
+  let description = [{
+    Computes `outputs[i] = A @ dequant(B[i])^T` for every member `i`. Each
+    member is a complete `hip.matmul_nbits` with its own packed weight,
+    scales, output and `N` (`Ns[i]`); the members share the activation and
+    the `K`, `bits`, `block_size` and `accuracy_level` attributes. Zero
+    points, `g_idx` and bias are not supported, and scales are fp16.
+
+    The members write separate destinations, so no result is a slice of
+    another. On the decode path the runtime quantizes `A` once (or reads the
+    optional `a_quant(a_q, a_scale)` its producer wrote) and runs a single
+    GEMV launch over all members; every other path computes the members one
+    after another exactly as `hip.matmul_nbits` would.
+
+    Example:
+    ```mlir
+    hip.matmul_nbits_group(%ctx) ins(%A : memref<1x1x2048xf16, 1>)
+        weights(%B0, %B1 : memref<8192x64x16xui8, 1>, memref<32x64x16xui8, 1>)
+        scales(%S0, %S1 : memref<8192x64xf16, 1>, memref<32x64xf16, 1>)
+        outs(%Y0, %Y1 : memref<1x1x8192xf16, 1>, memref<1x1x32xf16, 1>)
+        {K = 2048, Ns = array<i64: 8192, 32>, bits = 4, block_size = 32,
+         accuracy_level = 4}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                     // activation [..., K]
+    Optional<Hip_TensorOrMemRef>:$a_q,         // int8 A [..., K] (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,     // f32 [..., K/block_size]
+    Variadic<Hip_TensorOrMemRef>:$B,           // packed uint8 [N_i, k_blocks, blob_size]
+    Variadic<Hip_TensorOrMemRef>:$scales,      // fp16 [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$outputs,     // results [..., N_i]
+    I64Attr:$K,
+    DenseI64ArrayAttr:$Ns,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    (`a_quant` `(` $a_q^ `,` $a_scale `:` type($a_q) `,` type($a_scale) `)`)?
+    `weights` `(` $B `:` type($B) `)`
+    `scales` `(` $scales `:` type($scales) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  // Members share one MatmulNbitsState: its caches are keyed by weight
+  // pointer and shape, so they never collide across members.
+  let extraClassDeclaration = [{
+    static constexpr unsigned kMaxMembers = 4;
+
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
+def Hip_DynamicQuantI8Op : Hip_DpsOp<"dynamic_quant_i8",
+                                     /*traits=*/[],
+                                     /*outsAccessor=*/"Outputs"> {
+  let summary = "Per-group int8 quantization of an fp16 activation";
+  let description = [{
+    Quantizes every `block_size` group of each row of `input` [..., K] to
+    int8 with a symmetric scale `max|x| / 127`, the activation format of the
+    integer dot-product int4 matmuls. `outputs[0]` (i8, same shape as
+    `input`) holds each row's values with every 8-element chunk stored as
+    its 4 even elements followed by its 4 odd ones, which is how the weight
+    nibbles split. `outputs[1]` (f32, [..., ceil(K / block_size)]) holds the
+    scales.
+
+    Consumers take the pair as `a_quant` / `input_quant` operands, so one
+    quantization serves every projection of the activation. The runtime
+    quantizes only when a consumer can use the result (decode-sized row
+    counts with the integer dot-product matmuls on) and leaves the buffers
+    untouched otherwise; consumers make the same decision.
+
+    Example:
+    ```mlir
+    %q, %s = hip.dynamic_quant_i8(%ctx) ins(%x : tensor<1x1x2048xf16>)
+        outs(%eq, %es : tensor<1x1x2048xi8>, tensor<1x1x64xf32>)
+        {block_size = 32 : i64} : tensor<1x1x2048xi8>, tensor<1x1x64xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,             // f16 [..., K]
+    Variadic<Hip_TensorOrMemRef>:$outputs, // i8 [..., K], f32 [..., K/bs]
+    I64Attr:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
@@ -985,6 +1109,19 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
       fc3_*: unfused SwiGLU second GEMM weights/scales/bias (optional)
       fc1/fc2/fc3_zero_points: per-block zero points (optional)
       router_weights: alternative aggregation weights (optional, ONNX v1.25+, takes precedence over router_probs)
+
+    Optional shared expert (all seven or none), set by the hip fusion
+    transform from the subgraph a Qwen-MoE style model adds to the routed
+    output:
+      s = down(silu(gate(input)) * up(input))      // symmetric int4 GEMMs
+      output = moe(input) + sigmoid(shared_gate_logit) * s
+    gate/up weights are [inter_s, hidden/bs, bs/2] with scales
+    [inter_s, hidden/bs]; down is [hidden, inter_s/bs, bs/2]; the logit is
+    one value per token with the input's leading shape.
+
+    Optional `input_quant(input_q, input_scale)`: the input already
+    quantized to int8 per `block_size` group (see `hip.dynamic_quant_i8`),
+    read by the integer dot-product decode instead of quantizing the input.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1019,6 +1156,15 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
+    Optional<Hip_TensorOrMemRef>:$shared_gate_weights,    // [inter_s, hidden/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_gate_scales,     // [inter_s, hidden/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_up_weights,      // [inter_s, hidden/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_up_scales,       // [inter_s, hidden/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_down_weights,    // [hidden, inter_s/bs, bs/2]
+    Optional<Hip_TensorOrMemRef>:$shared_down_scales,     // [hidden, inter_s/bs]
+    Optional<Hip_TensorOrMemRef>:$shared_gate_logit,      // [batch, seq, 1]
+    Optional<Hip_TensorOrMemRef>:$input_q,                // int8 [batch, seq, hidden]
+    Optional<Hip_TensorOrMemRef>:$input_scale,            // f32 [batch, seq, hidden/bs]
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -1050,8 +1196,25 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
+    (`shared_expert` `(`
+        $shared_gate_weights^ `,` $shared_gate_scales `,`
+        $shared_up_weights `,` $shared_up_scales `,`
+        $shared_down_weights `,` $shared_down_scales `,`
+        $shared_gate_logit `:`
+        type($shared_gate_weights) `,` type($shared_gate_scales) `,`
+        type($shared_up_weights) `,` type($shared_up_scales) `,`
+        type($shared_down_weights) `,` type($shared_down_scales) `,`
+        type($shared_gate_logit) `)`)?
+    (`input_quant` `(` $input_q^ `,` $input_scale `:`
+        type($input_q) `,` type($input_scale) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasSharedExpert() { return static_cast<bool>(getSharedGateWeights()); }
   }];
 }
 
@@ -1556,9 +1719,15 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
       3. gamma   (required, T) - 1D normalization weight (hidden_size)
       4. bias    (optional, T) - 1D bias (hidden_size)
 
-    DPS output buffers (1-2, passed as Variadic `outputs`):
+    DPS output buffers (1-4, passed as Variadic `outputs`):
       outputs[0] = output             (required, T) - normalized result
       outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
+      last two, when `quant_block_size` is set: `output` quantized to int8
+        per `quant_block_size` group (i8, same shape as `output`) and the
+        group scales (f32, last dim hidden / quant_block_size), laid out as
+        `hip.dynamic_quant_i8` writes them. The runtime fills them only when
+        a consumer can use them (decode-sized row counts with the integer
+        dot-product matmuls on).
 
     Uses destination-passing style: output buffers are provided as arguments.
 
@@ -1595,11 +1764,13 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     // MS spec input 4 (optional)
     Optional<Hip_TensorOrMemRef>:$bias,
 
-    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    // DPS output buffers: [output] or [output, input_skip_bias_sum], then
+    // [output_q, output_scale] when quant_block_size is set
     Variadic<Hip_TensorOrMemRef>:$outputs,
 
     // Attributes
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    OptionalAttr<I64Attr>:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1614,6 +1785,67 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   }];
 
   let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
+  }];
+}
+
+def Hip_GatedRmsNormOp : Hip_DpsOp<"gated_rms_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Outputs"> {
+  let summary = "Grouped RMS normalization gated by SiLU of a second input";
+  let description = [{
+    Normalizes every `weight`-sized group of the last axis of `input` and
+    multiplies it by the SiLU of the matching `gate` element:
+
+      n = half(x * rsqrt(mean(x^2 over the group) + epsilon) * weight)
+      y = half(float(n) * (g * sigmoid(g)))      with g = float(gate)
+
+    The rounding is that of hip.rms_norm followed by an fp32 SiLU gate,
+    so the op is an exact replacement for that chain (the output gate of a
+    gated-delta-net layer). Reductions and the gate run in fp32; the
+    tensors are fp16. `input`, `gate` and `outputs[0]` share one shape
+    [..., G * D] and `weight` is [D].
+
+    When `quant_block_size` is set, two more outputs carry `outputs[0]`
+    quantized to int8 per `quant_block_size` group and the group scales,
+    laid out as `hip.dynamic_quant_i8` writes them. The runtime fills them
+    only when a consumer can use them (decode-sized row counts with the
+    integer dot-product matmuls on).
+
+    Example:
+    ```mlir
+    %y = hip.gated_rms_norm(%ctx)
+        ins(%x, %z, %w : tensor<1x1x4096xf16>, tensor<1x1x4096xf16>,
+                         tensor<128xf16>)
+        outs(%e : tensor<1x1x4096xf16>) {epsilon = 1.0e-06 : f32}
+        : tensor<1x1x4096xf16>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,             // f16 [..., G * D]
+    Hip_TensorOrMemRef:$gate,              // f16 [..., G * D]
+    Hip_TensorOrMemRef:$weight,            // f16 [D]
+    // [output] or [output, output_q, output_scale] with quant_block_size
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    F32Attr:$epsilon,
+    OptionalAttr<I64Attr>:$quant_block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $gate `,` $weight `:`
+        type($input) `,` type($gate) `,` type($weight) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
+  }];
 }
 
 def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
@@ -1638,6 +1870,10 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
       the flattened token position `b*seq + s`. (HF exports precompute the
       per-token cos/sin via a Gather, leaving the RotaryEmbedding node with
       no position_ids operand.)
+
+    The rotation runs in the element type of the caches. An f16 input and
+    output with f32 caches are rotated in f32 and rounded once to f16, the
+    exact equivalent of casting to f32, rotating and casting back.
 
     Attributes:
     - interleaved: Rotary embedding interleaved format (0 or 1)
@@ -2648,6 +2884,55 @@ def Hip_SwigluOp : Hip_DpsOp<"swiglu"> {
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SigmoidMulOp : Hip_DpsOp<"sigmoid_mul", /*traits=*/[],
+                                 /*outsAccessor=*/"Outputs"> {
+  let summary = "Sigmoid-gated product";
+  let description = [{
+    Multiplies `input` by the sigmoid of `gate`, element-wise:
+
+      y = half(x * half(sigmoid(gate)))
+
+    The rounding is that of hip.sigmoid followed by hip.mul, so the op is an
+    exact replacement for that pair (the output gate of a gated attention
+    layer). The math runs in fp32; `input`, `gate` and `outputs[0]` are fp16
+    of one shape.
+
+    When `quant_block_size` is set, two more outputs carry `outputs[0]`
+    quantized to int8 per `quant_block_size` group and the group scales,
+    laid out as `hip.dynamic_quant_i8` writes them. The runtime fills them
+    only when a consumer can use them (decode-sized row counts with the
+    integer dot-product matmuls on).
+
+    Example:
+    ```mlir
+    %y = hip.sigmoid_mul(%ctx)
+        ins(%x, %g : tensor<1x1x4096xf16>, tensor<1x1x4096xf16>)
+        outs(%e : tensor<1x1x4096xf16>) : tensor<1x1x4096xf16>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$gate,
+    // [output] or [output, output_q, output_scale] with quant_block_size
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    OptionalAttr<I64Attr>:$quant_block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $gate `:` type($input) `,` type($gate) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    bool hasQuantOutputs() { return getQuantBlockSize().has_value(); }
   }];
 }
 
@@ -4199,6 +4484,23 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
       output        (required, T) - [B, T, max(H_q, H_kv) * d_v]
       present_state (required, S) - [B, H_kv, d_k, d_v]
 
+    Input preparation the op can do itself (all optional), so a model's
+    projection outputs feed it directly:
+      - Packed QKV: with key and value absent, `query` is
+        [B, T, H_q * d_k + n_k * d_k + H_kv * d_v] holding q, k and v side
+        by side (d_k and d_v from present_state, n_k from the remainder).
+      - `qk_norm(weight)` ([d_k], element type): q and k are RMS-normalized
+        per head before use, x * rsqrt(mean(x^2) + qk_norm_epsilon) * weight,
+        rounded to the element type (a splat 1/sqrt(d_k) weight is the L2
+        norm). `q_scale` then multiplies q, rounded again.
+      - `decay_softplus(decay_bias, decay_scale)` (f32 [H_kv] each, per-head
+        decay only): `decay` holds raw gate logits a and the op uses
+        g = decay_scale * softplus(a + decay_bias), rounded to the element
+        type.
+      - `beta_sigmoid`: `beta` holds logits and the op uses sigmoid(beta),
+        rounded to the element type.
+    The roundings reproduce the unfused fp16 graph.
+
     Example:
     ```mlir
     hip.linear_attention(%ctx)
@@ -4218,15 +4520,22 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   let arguments = (ins
     Hip_ContextType:$ctx,
 
-    // Required inputs (spec order 1-3)
+    // Spec inputs 1-3 (key/value absent: packed QKV in query)
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
 
     // Optional inputs (spec order 4-6)
     Optional<Hip_TensorOrMemRef>:$past_state,
     Optional<Hip_TensorOrMemRef>:$decay,
     Optional<Hip_TensorOrMemRef>:$beta,
+
+    // decay_softplus: f32 [H_kv] each, both or neither
+    Optional<Hip_TensorOrMemRef>:$decay_bias,
+    Optional<Hip_TensorOrMemRef>:$decay_scale,
+
+    // qk_norm: [d_k] weight of the q/k head RMS norms
+    Optional<Hip_TensorOrMemRef>:$qk_norm_weight,
 
     // DPS output buffers
     Hip_TensorOrMemRef:$output,
@@ -4239,21 +4548,35 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
     // Optional attributes (with defaults)
     DefaultValuedAttr<F32Attr, "0.0">:$scale,
     DefaultValuedAttr<I64Attr, "0">:$chunk_size,
-    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule
+    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule,
+
+    // Input preparation (see description)
+    DefaultValuedAttr<F32Attr, "0.0">:$qk_norm_epsilon,
+    DefaultValuedAttr<F32Attr, "1.0">:$q_scale,
+    UnitAttr:$beta_sigmoid
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `:`
-        type($query) `,` type($key) `,` type($value)
+        $query ( `,` $key^ )? ( `,` $value^ )? `:`
+        type($query) ( `,` type($key)^ )? ( `,` type($value)^ )?
     `)`
     (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     (`decay` `(` $decay^ `:` type($decay) `)`)?
     (`beta` `(` $beta^ `:` type($beta) `)`)?
+    (`decay_softplus` `(` $decay_bias^ `,` $decay_scale `:`
+        type($decay_bias) `,` type($decay_scale) `)`)?
+    (`qk_norm` `(` $qk_norm_weight^ `:` type($qk_norm_weight) `)`)?
     `outs` `(` $output `,` $present_state `:`
               type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let extraClassDeclaration = [{
+    bool isPackedQKV() { return !getKey() && !getValue(); }
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],

@@ -282,6 +282,36 @@ LogicalResult MatMulNBitsOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp
+//
+// Member `i` has the shape a lone `hip.matmul_nbits` with `N = Ns[i]` would:
+// leading dims from `$A`, final dim the static `Ns[i]`.
+//===----------------------------------------------------------------------===//
+
+LogicalResult MatMulNBitsGroupOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  ArrayRef<int64_t> aShape = getShapeOf(getA());
+  if (aShape.empty())
+    return failure();
+
+  Location loc = getLoc();
+  Value A = getA();
+  size_t aRank = aShape.size();
+  SmallVector<OpFoldResult> leading;
+  for (size_t i : llvm::seq<size_t>(0, aRank - 1))
+    leading.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[i], A, i));
+  reifiedReturnShapes.clear();
+  for (int64_t n : getNs()) {
+    SmallVector<OpFoldResult> dims(leading);
+    dims.push_back(b.getIndexAttr(n));
+    reifiedReturnShapes.push_back(std::move(dims));
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GemmOp
 //
 // 2D output `[M, N]`:

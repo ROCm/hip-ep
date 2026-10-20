@@ -45,13 +45,16 @@ struct LinearAttentionOpLowering
 
     Value queryPtr =
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value keyPtr = extractContiguousMemRefPtr(adaptor.getKey(), rewriter, loc);
-    Value valuePtr =
-        extractContiguousMemRefPtr(adaptor.getValue(), rewriter, loc);
+    // Null key and value select the packed QKV layout in query.
+    Value keyPtr = getMemRefPtrOrNull(adaptor.getKey());
+    Value valuePtr = getMemRefPtrOrNull(adaptor.getValue());
 
     Value pastStatePtr = getMemRefPtrOrNull(adaptor.getPastState());
     Value decayPtr = getMemRefPtrOrNull(adaptor.getDecay());
     Value betaPtr = getMemRefPtrOrNull(adaptor.getBeta());
+    Value decayBiasPtr = getMemRefPtrOrNull(adaptor.getDecayBias());
+    Value decayScalePtr = getMemRefPtrOrNull(adaptor.getDecayScale());
+    Value qkNormWeightPtr = getMemRefPtrOrNull(adaptor.getQkNormWeight());
 
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
@@ -97,24 +100,46 @@ struct LinearAttentionOpLowering
     // llvm.udiv so the computed head_dim_k is valid for any shape.
     Value queryHiddenVal =
         getMemRefDimSize(queryType, 2, adaptor.getQuery(), rewriter, loc);
-    Value qNumHeadsForDiv = createI64Const(op.getQNumHeads());
-    Value headDimKVal =
-        LLVM::UDivOp::create(rewriter, loc, queryHiddenVal, qNumHeadsForDiv);
-
-    // n_k_heads = key.dim[2] / head_dim_k.  The key tensor is [B, T, n_k*d_k]
-    // and n_k may differ from kv_num_heads (it only has to divide it).  Use
-    // getMemRefDimSize so dynamic key shapes fall back to a runtime extract.
-    auto keyType = cast<MemRefType>(op.getKey().getType());
-    Value keyHiddenVal =
-        getMemRefDimSize(keyType, 2, adaptor.getKey(), rewriter, loc);
-    Value nKHeadsVal =
-        LLVM::UDivOp::create(rewriter, loc, keyHiddenVal, headDimKVal);
 
     // Derive d_v from present_state shape: [B, H_kv, d_k, d_v].
     // present_state is always 4D per spec, so index 3 is safe.
     auto presentStateType = cast<MemRefType>(op.getPresentState().getType());
-    Value headDimVVal = getMemRefDimSize(
-        presentStateType, 3, adaptor.getPresentState(), rewriter, loc);
+    auto getHeadDimV = [&] {
+      return getMemRefDimSize(presentStateType, 3, adaptor.getPresentState(),
+                              rewriter, loc);
+    };
+
+    Value headDimKVal;
+    Value headDimVVal;
+    Value nKHeadsVal;
+    if (op.isPackedQKV()) {
+      // query = [B, T, H_q*d_k + n_k*d_k + H_kv*d_v]: d_k from present_state,
+      // n_k from what q and v leave over.
+      headDimVVal = getHeadDimV();
+      headDimKVal = getMemRefDimSize(presentStateType, 2,
+                                     adaptor.getPresentState(), rewriter, loc);
+      Value qWidth = LLVM::MulOp::create(rewriter, loc, qNumHeads, headDimKVal);
+      Value vWidth = LLVM::MulOp::create(rewriter, loc, kvNumHeads, headDimVVal);
+      Value kWidth = LLVM::SubOp::create(
+          rewriter, loc,
+          LLVM::SubOp::create(rewriter, loc, queryHiddenVal, qWidth), vWidth);
+      nKHeadsVal = LLVM::UDivOp::create(rewriter, loc, kWidth, headDimKVal);
+    } else {
+      Value qNumHeadsForDiv = createI64Const(op.getQNumHeads());
+      headDimKVal =
+          LLVM::UDivOp::create(rewriter, loc, queryHiddenVal, qNumHeadsForDiv);
+
+      // n_k_heads = key.dim[2] / head_dim_k.  The key tensor is
+      // [B, T, n_k*d_k] and n_k may differ from kv_num_heads (it only has to
+      // divide it).  Use getMemRefDimSize so dynamic key shapes fall back to
+      // a runtime extract.
+      auto keyType = cast<MemRefType>(op.getKey().getType());
+      Value keyHiddenVal =
+          getMemRefDimSize(keyType, 2, adaptor.getKey(), rewriter, loc);
+      nKHeadsVal =
+          LLVM::UDivOp::create(rewriter, loc, keyHiddenVal, headDimKVal);
+      headDimVVal = getHeadDimV();
+    }
 
     // Derive layout flags for the optional decay / beta tensors so the
     // runtime can pick the correct per-token stride:
@@ -163,21 +188,29 @@ struct LinearAttentionOpLowering
     }
     Value typeVal = createI64Const(elemTypeEnum);
 
+    Value qkNormEps = createF32Const(op.getQkNormEpsilon().convertToFloat());
+    Value qScale = createF32Const(op.getQScale().convertToFloat());
+    Value betaSigmoid = createI64Const(op.getBetaSigmoid() ? 1 : 0);
+
     // Function signature:
-    //   state + 6 inputs + 2 outputs (9 ptrs)
+    //   state + 9 inputs + 2 outputs (12 ptrs)
     //   + 3 head-count attrs (Hq, Hkv, Nk)
     //   + 2 optional-input layout flags (decay_per_key_dim, beta_per_head)
     //   + 3 scalar attrs (scale, chunk_size, update_rule)
     //   + 5 shape params (B, seq_len, dk, dv, type)
-    // = 22 parameters total.
-    SmallVector<Type, 22> paramTypes = {
+    //   + 3 input-preparation attrs (qk_norm_epsilon, q_scale, beta_sigmoid)
+    // = 28 parameters total.
+    SmallVector<Type, 28> paramTypes = {
         ptrType, // state
         ptrType, // query
-        ptrType, // key
-        ptrType, // value
+        ptrType, // key (null: packed QKV)
+        ptrType, // value (null: packed QKV)
         ptrType, // past_state (nullable)
         ptrType, // decay (nullable)
         ptrType, // beta (nullable)
+        ptrType, // decay_bias (nullable)
+        ptrType, // decay_scale (nullable)
+        ptrType, // qk_norm_weight (nullable)
         ptrType, // output
         ptrType, // present_state
         i64Type, // Hq
@@ -192,7 +225,10 @@ struct LinearAttentionOpLowering
         i64Type, // seq_len
         i64Type, // dk
         i64Type, // dv
-        i64Type  // type (HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)
+        i64Type, // type (HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)
+        f32Type, // qk_norm_epsilon
+        f32Type, // q_scale
+        i64Type  // beta_sigmoid (0/1)
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -200,13 +236,14 @@ struct LinearAttentionOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 22> args = {
-        statePtr,          queryPtr,       keyPtr,     valuePtr,
-        pastStatePtr,      decayPtr,       betaPtr,    outputPtr,
-        presentStatePtr,   qNumHeads,      kvNumHeads, nKHeadsVal,
-        decayPerKeyDimVal, betaPerHeadVal, scale,      chunkSize,
-        updateRule,        batchSizeVal,   seqLenVal,  headDimKVal,
-        headDimVVal,       typeVal};
+    SmallVector<Value, 28> args = {
+        statePtr,       queryPtr,        keyPtr,          valuePtr,
+        pastStatePtr,   decayPtr,        betaPtr,         decayBiasPtr,
+        decayScalePtr,  qkNormWeightPtr, outputPtr,       presentStatePtr,
+        qNumHeads,      kvNumHeads,      nKHeadsVal,      decayPerKeyDimVal,
+        betaPerHeadVal, scale,           chunkSize,       updateRule,
+        batchSizeVal,   seqLenVal,       headDimKVal,     headDimVVal,
+        typeVal,        qkNormEps,       qScale,          betaSigmoid};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

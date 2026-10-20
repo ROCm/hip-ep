@@ -140,6 +140,8 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
+| `hip-group-matmul-nbits` | func.func | Replace up to four int4 `hip.matmul_nbits` ops that read the same fp16 activation with one `hip.matmul_nbits_group` (one activation quantization + one GEMV launch at decode; each member keeps its own destination). |
+| `hip-hoist-dynamic-quant` | func.func | Share one int8 activation quantization among the int4 `hip.matmul_nbits` / `hip.matmul_nbits_group` / `hip.qmoe` consumers of an activation: the producing `hip.skip_rms_norm`, `hip.gated_rms_norm` or `hip.sigmoid_mul` writes it as extra outputs, otherwise one `hip.dynamic_quant_i8` serves two or more consumers. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
@@ -241,6 +243,10 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
+  func.func(hip-group-matmul-nbits)  (after hip-fusion-transform so subgraph
+                                      fusions claim single projections first)
+  func.func(hip-hoist-dynamic-quant) (after grouping; groups are its main
+                                      consumers)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)

@@ -201,6 +201,82 @@ def HipFusionTransformPass
   ];
 }
 
+def GroupMatMulNBitsPass
+    : Pass<"hip-group-matmul-nbits", "mlir::func::FuncOp"> {
+  let summary = "Group hip.matmul_nbits ops that project the same activation";
+  let description = [{
+    Replaces up to `MatMulNBitsGroupOp::kMaxMembers` `hip.matmul_nbits` ops
+    that read the same activation and agree on `K`, `bits`, `block_size` and
+    `accuracy_level` with one `hip.matmul_nbits_group`. Each member keeps its
+    own weight, scales and destination, so no result becomes a slice of a
+    shared buffer. Decode then quantizes the activation once and covers every
+    member with one GEMV launch instead of one quantization and one GEMV per
+    projection.
+
+    Only members the grouped decode kernel can run are grouped: int4 weights,
+    `K % 32 == 0`, an fp16 activation, fp16 scales, and no zero points,
+    `g_idx` or bias. The group is placed at the first member; later members'
+    constant operands are moved above it when they are defined below.
+
+    Before:
+        %q = hip.matmul_nbits(%ctx) ins(%x, %Bq, %Sq : ...) outs(%eq : ...)
+               {K = 2048, N = 8192, ...}
+        %k = hip.matmul_nbits(%ctx) ins(%x, %Bk, %Sk : ...) outs(%ek : ...)
+               {K = 2048, N = 512, ...}
+    After:
+        %q, %k = hip.matmul_nbits_group(%ctx) ins(%x : ...)
+                   weights(%Bq, %Bk : ...) scales(%Sq, %Sk : ...)
+                   outs(%eq2, %ek2 : ...) {K = 2048, Ns = array<i64: 8192, 512>}
+
+    Runs after `hip-fusion-transform`, so subgraph fusions that consume
+    individual projections (e.g. a shared expert folded into `hip.qmoe`)
+    claim them first.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def HoistDynamicQuantPass
+    : Pass<"hip-hoist-dynamic-quant", "mlir::func::FuncOp"> {
+  let summary = "Quantize an activation once for all of its int4 consumers";
+  let description = [{
+    Decode runs every int4 `hip.matmul_nbits`, `hip.matmul_nbits_group` and
+    `hip.qmoe` on the int8 dot-product path, which quantizes its fp16
+    activation in a launch of its own. This pass makes that quantization an
+    SSA value the consumers share through their `a_quant` / `input_quant`
+    operands, keyed on the activation and the quantization block size.
+
+    When the activation is result #0 of a `hip.skip_rms_norm`, a
+    `hip.gated_rms_norm` or a `hip.sigmoid_mul`, that op is
+    rebuilt with `quant_block_size` and writes the int8 activation and its
+    per-block scales as two more outputs, so no quantization launch remains.
+    Otherwise, when at least two consumers share the activation, one
+    `hip.dynamic_quant_i8` is inserted after its definition.
+
+    Before:
+        %y:2 = hip.skip_rms_norm(%ctx) ins(%x, %r, %g : ...) outs(...)
+        %p:2 = hip.matmul_nbits_group(%ctx) ins(%y#0 : ...) ...
+        %m   = hip.qmoe(%ctx) ins(%y#0, ...) ...
+    After:
+        %y:4 = hip.skip_rms_norm(%ctx) ins(%x, %r, %g : ...) outs(...)
+                 {quant_block_size = 32}
+        %p:2 = hip.matmul_nbits_group(%ctx) ins(%y#0 : ...)
+                 a_quant(%y#2, %y#3 : ...) ...
+        %m   = hip.qmoe(%ctx) ins(%y#0, ...) input_quant(%y#2, %y#3 : ...) ...
+
+    The runtime still decides per call whether the integer path runs; when it
+    does not, the producers skip the extra outputs and consumers read the
+    fp16 activation. Runs after `hip-group-matmul-nbits`, whose groups are
+    the main consumers.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::tosa::TosaDialect"

@@ -172,6 +172,74 @@ class TestRotaryEmbedding:
         compare_outputs(actual, expected, atol=1e-3)
 
 
+def _make_fp32_bnsh_round_trip_model(seq_len, num_heads, head_dim, rotary_dim):
+    """fp16 BSNH q / k rotated as fp32 BNSH, as Qwen3.5 attention exports it.
+
+    hip-fusion-transform folds the transposes and casts away and rotates the
+    fp16 BSNH tensor against the fp32 caches directly.
+    """
+    max_pos = 4096
+    half_rot = rotary_dim // 2
+    shape = [1, seq_len, num_heads, head_dim]
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT16, shape)
+    pos_ids = helper.make_tensor_value_info("pos_ids", TensorProto.INT64, [1, seq_len])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, shape)
+
+    angles = np.arange(max_pos)[:, None] / (
+        10000.0 ** (np.arange(half_rot)[None, :] / half_rot)
+    )
+    cos_init = numpy_helper.from_array(np.cos(angles).astype(np.float32), "cos_cache")
+    sin_init = numpy_helper.from_array(np.sin(angles).astype(np.float32), "sin_cache")
+
+    nodes = [
+        helper.make_node("Transpose", ["X"], ["x_bnsh"], perm=[0, 2, 1, 3]),
+        helper.make_node("Cast", ["x_bnsh"], ["x32"], to=TensorProto.FLOAT),
+        helper.make_node(
+            "RotaryEmbedding",
+            ["x32", "pos_ids", "cos_cache", "sin_cache"],
+            ["y32"],
+            domain="com.microsoft",
+            interleaved=0,
+            num_heads=num_heads,
+            rotary_embedding_dim=rotary_dim,
+        ),
+        helper.make_node("Cast", ["y32"], ["y_bnsh"], to=TensorProto.FLOAT16),
+        helper.make_node("Transpose", ["y_bnsh"], ["Y"], perm=[0, 2, 1, 3]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [X, pos_ids],
+        [Y],
+        initializers=[cos_init, sin_init],
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestRotaryEmbeddingFp32BnshRoundTrip:
+    @pytest.mark.parametrize(
+        "seq_len,num_heads,head_dim,rotary_dim,offset",
+        [
+            (1, 2, 256, 64, 128),
+            (1, 16, 256, 64, 2047),
+            (8, 4, 64, 64, 0),
+            (128, 16, 256, 64, 0),
+        ],
+    )
+    def test_round_trip(
+        self, model_runner, seq_len, num_heads, head_dim, rotary_dim, offset
+    ):
+        model = _make_fp32_bnsh_round_trip_model(
+            seq_len, num_heads, head_dim, rotary_dim
+        )
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-4, 4, [1, seq_len, num_heads, head_dim]).astype(np.float16)
+        pos_ids = np.arange(offset, offset + seq_len, dtype=np.int64).reshape(
+            1, seq_len
+        )
+        actual, expected = model_runner.run_sample(model, [x, pos_ids])
+        compare_outputs(actual, expected, atol=4e-3)
+
+
 def _make_native_rope_precomputed_model(
     batch,
     seq_len,

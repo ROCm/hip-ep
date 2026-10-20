@@ -61,12 +61,18 @@ The norm ops are backed by custom HIP kernels.
 |---|---|---|
 | `hip.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `rms_norm_kernel.hip` |
 | `hip.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `skip_rms_norm_kernel.hip` |
+| `hip.gated_rms_norm` | `(%ctx) ins(%x, %gate, %weight : ...) outs(%output : ...)` | `rms_norm_kernel.hip` |
 
 Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `wrap_rms_norm(state, input, weight, output, ...)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
 `residual = x + skip; output = RMSNorm(residual) * weight`.
+
+`gated_rms_norm` normalizes every `weight`-sized group of `x` and gates it
+with SiLU of `gate` in fp32: `output = (RMSNorm(x) * weight) * SiLU(gate)`.
+hip-fusion-transform forms it from the primitive chain a gated-delta-net
+layer exports.
 
 ### Rotary Positional Embeddings
 
@@ -111,6 +117,7 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.transpose` | `(%ctx) ins(%input : ...) outs(%output : ...) {perm = [...]}` | N-D transpose with arbitrary permutation | Full impl |
 | `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
+| `hip.sigmoid_mul` | `(%ctx) ins(%x, %gate : ...) outs(%output : ...)` | Sigmoid gate `x * sigmoid(gate)` (fp16), optionally also writing the int8 activation of an int4 consumer | Full impl |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 
 ---
