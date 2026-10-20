@@ -70,6 +70,22 @@ class TestTopK:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("largest", [1, 0])
+    @pytest.mark.parametrize(
+        "rows,cols,k",
+        [
+            (2, 32000, 1),  # argmax / argmin over a vocab row
+            (3, 1000, 16),  # one block per row
+            (2, 20000, 32),  # rows past 8192 take the chunked two-pass path
+        ],
+    )
+    def test_topk_last_axis_vocab(self, model_runner, rows, cols, k, largest):
+        model = _make_topk_model([rows, cols], k, axis=1, largest=largest, sorted_=1)
+        rng = np.random.default_rng(603)
+        x = _distinct_rows(rng, rows, cols)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
     def test_topk_full_k(self, model_runner):
         """k == axis length -> a full sort of each row."""
         x_shape = [4, 5]
