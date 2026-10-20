@@ -298,7 +298,7 @@ static bool shouldPadRow(int64_t K) {
 const void *get_or_dequant_b_fp16(MatmulNbitsState *mst, void *stream,
                                   const void *B, const void *scales_fp16,
                                   const void *zeros_fp16, int N, int K,
-                                  int group_size) {
+                                  int group_size, int b_row_bytes) {
   const size_t bytes =
       static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(__fp16);
 
@@ -313,8 +313,8 @@ const void *get_or_dequant_b_fp16(MatmulNbitsState *mst, void *stream,
             bytes);
     return nullptr;
   }
-  hip_matmul_nbits_dequant_b_fp16(stream, B, scales_fp16, zeros_fp16, dst, N, K,
-                                  group_size);
+  hip_matmul_nbits_dequant_b_fp16_ex(stream, B, scales_fp16, zeros_fp16, dst, N,
+                                     K, group_size, b_row_bytes);
 
   if (it != mst->b_fp16.end()) {
     hipFree(it->second.first);
@@ -576,7 +576,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
+                      int64_t zp_elem_size, int64_t scale_elem_size,
+                      int64_t b_row_bytes) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -608,6 +609,18 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   if (g_idx) {
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
+    return -1;
+  }
+
+  // The compiler pads a weight's rows only for bits=4 with whole quant groups
+  // (hip-pad-matmul-nbits-weights); anything else is a malformed module.
+  if (b_row_bytes != 0 && (bits != 4 || block_size <= 0 ||
+                           K % block_size != 0 || b_row_bytes < K / 2)) {
+    fprintf(stderr,
+            "wrap_matmul_nbits: unsupported b_row_bytes=%lld (bits=%lld "
+            "K=%lld block_size=%lld)\n",
+            (long long)b_row_bytes, (long long)bits, (long long)K,
+            (long long)block_size);
     return -1;
   }
 
@@ -743,9 +756,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+        int rc = hip_matmul_nbits_dp4a_ex(stream, A, B, scales, pre_zp_u8, bias,
+                                          output, M, N, K, block_size, a_qb,
+                                          a_scale, b_row_bytes);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -780,7 +793,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (mst) {
         const void *b_fp16 = get_or_dequant_b_fp16(
             mst, stream, B, scales, zeros_fp16, static_cast<int>(N),
-            static_cast<int>(K), static_cast<int>(block_size));
+            static_cast<int>(K), static_cast<int>(block_size),
+            static_cast<int>(b_row_bytes));
         if (b_fp16) {
           result = matmul_nbits_prefill_hipblaslt(mst, state, A, b_fp16, bias,
                                                   output, M, N, K);
@@ -811,10 +825,12 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // through unpadded.
   //
   // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
-  // them. wave64 (CDNA) has already taken the hipBLASLt path above.
-  if (!hipdnn_device_is_wave64() && bits == 4 && batch_count == 1 &&
-      (K % 32 == 0) && M >= 16 && elem_size == 2 && block_size > 0 &&
-      (K % block_size == 0) && !bias && shouldPadRow(K)) {
+  // them. wave64 (CDNA) has already taken the hipBLASLt path above. A weight
+  // the compiler already padded (b_row_bytes != 0) needs no repack and goes
+  // straight to the strided dispatch below.
+  if (b_row_bytes == 0 && !hipdnn_device_is_wave64() && bits == 4 &&
+      batch_count == 1 && (K % 32 == 0) && M >= 16 && elem_size == 2 &&
+      block_size > 0 && (K % block_size == 0) && !bias && shouldPadRow(K)) {
     const void *zeros_fp16 = nullptr;
     bool zeros_ok = true;
     if (zero_points) {
@@ -839,9 +855,10 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     }
   }
 
-  HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                             N, K, batch_count, bits, block_size, elem_size,
-                             zp_elem_size, pre_zp_u8, pre_zp_fp16));
+  HIP_CHECK(hip_matmul_nbits_ex(stream, A, B, scales, zero_points, bias, output,
+                                M, N, K, batch_count, bits, block_size,
+                                elem_size, zp_elem_size, pre_zp_u8, pre_zp_fp16,
+                                b_row_bytes));
 
 cleanup:
   return result;

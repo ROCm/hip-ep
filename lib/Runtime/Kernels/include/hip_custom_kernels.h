@@ -2351,6 +2351,30 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* hip_matmul_nbits with an explicit weight row pitch. b_row_bytes == 0 is the
+ * arrival layout (identical to hip_matmul_nbits). A nonzero value reads a
+ * bits=4 B whose rows were padded to b_row_bytes (>= K/2) at load, so the
+ * aliasing-prone strides need no per-call repack; it requires bits == 4 and
+ * block_size | K, and every int4 path (WMMA, GEMV, M-blocked GEMV, naive)
+ * honours it. Returns -1 for an unsupported combination. */
+HIP_KERNEL_API int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    int64_t b_row_bytes);
+
 /* Hands the session's matmul_autotune_mode option ("lookup" resolves the
  * offline LUT, "online" always sweeps; null when absent) to the autotune.
  * Precedence is HIPDNN_MATMUL_AUTOTUNE_MODE > provider_mode > lookup. The mode
@@ -2451,6 +2475,14 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* hip_matmul_nbits_dp4a against a B with row pitch b_row_bytes (0 = K/2). */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_ex(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -2489,6 +2521,13 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_scale_fp32_to_fp16(
 HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
     const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
+
+/* hip_matmul_nbits_dequant_b_fp16 against a B with row pitch b_row_bytes
+ * (0 = the arrival stride). */
+HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16_ex(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size,
+    int b_row_bytes);
 
 /* -------------------------------------------------------------------------
  * int4 row-stride padding and stride-aware WMMA dispatch.

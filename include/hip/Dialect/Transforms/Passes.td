@@ -759,6 +759,26 @@ def ResolveExternConstantsPass
   ];
 }
 
+def PadMatMulNBitsWeightsPass
+    : Pass<"hip-pad-matmul-nbits-weights", "mlir::ModuleOp"> {
+  let summary = "Store aliasing-prone int4 MatMulNBits weights row-padded";
+  let description = [{
+    For each `hip.constant` whose only users are tensor-mode bits=4
+    `hip.matmul_nbits` ops reading it as B, with block_size dividing K and a
+    row stride K/2 that aliases into a few cache sets, retypes the carrier to
+    `[N, K/2 + 128]` and sets each user's `b_row_bytes` to that pitch. External
+    carriers keep their dense source and gain `row_bytes = K/2`, which
+    `hip-externalize-constants` and the runtime loader expand at storage time;
+    inline carriers are rewritten to padded bytes.
+
+    The runtime used to repack such a weight into a padded scratch on every
+    prefill call. Storing it padded removes the repack without a second copy.
+    Must run after every pass that creates or rewrites MatMulNBits weights and
+    before `hip-externalize-constants`.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
 def ExternalizeConstantsPass
     : Pass<"hip-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Apply storage policy to hip.constant carriers";

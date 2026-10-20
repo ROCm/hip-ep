@@ -5598,6 +5598,8 @@ struct MatMulNBitsConverter final
       return rewriter.notifyMatchFailure(op, "g_idx is not supported");
     if (op.getBits() != 4)
       return rewriter.notifyMatchFailure(op, "only bits=4 is supported");
+    if (op.getBRowBytes() != 0)
+      return rewriter.notifyMatchFailure(op, "row-padded B is not supported");
 
     int64_t k = op.getK();
     int64_t n = op.getN();

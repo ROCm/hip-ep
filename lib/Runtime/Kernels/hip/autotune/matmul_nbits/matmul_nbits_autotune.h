@@ -73,6 +73,8 @@ struct WmmaAnswer {
   int wt_n = 0;
   int bk = 0;
   bool fused = true;
+  int weu = 0;
+  int variant = 0;
 };
 
 /* (BLOCK_SIZE, TILE_N) for the GEMV decode path, matched against

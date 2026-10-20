@@ -43,7 +43,7 @@ LUT_DIR = ROOT / "lut"
 DATA_DIR = ROOT / "scripts" / "data"
 SHAPES = ROOT / "shapes" / "oga_models_bits4.csv"
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
@@ -98,7 +98,8 @@ SHAPE_RE = re.compile(
     r"^#SHAPE path=(\w+) M=(\d+) N=(\d+) K=(\d+) gs=(\d+) zp=(\d+)")
 WMMA_WIN_RE = re.compile(
     r"WMMA autotune:.*-> best config\[(\d+)\] (fused|dq\+gemm) "
-    r"bm=(\d+) bn=(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+)")
+    r"bm=(\d+) bn=(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+)"
+    r"(?: weu=(\d+) var=(\d+))?")
 GEMV_WIN_RE = re.compile(
     r"GEMV(?:-dp4a)? autotune:.*-> best config\[(\d+)\] "
     r"threads=(\d+) tile_n=(\d+)")
@@ -111,8 +112,8 @@ GEMV_WIN_RE = re.compile(
 # best-of that only covered the fused half of the table.
 WMMA_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+wmma config\[\s*\d+\] (fused|dq\+gemm?)\s+"
-    r"bm=\s*(\d+) bn=\s*(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+) : "
-    r"([\d.]+) ms")
+    r"bm=\s*(\d+) bn=\s*(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=\s*(\d+)"
+    r"(?: weu=(\d+) var=(\d+))? : ([\d.]+) ms")
 GEMV_TIME_RE = re.compile(
     r"^\[custom_kernels\]\s+(?:dp4a )?config\[\s*\d+\] "
     r"threads=\s*(\d+) tile_n=(\d+) : ([\d.]+) ms")
@@ -122,21 +123,23 @@ def answer_key(ans: dict):
     """Hashable identity of an answer: the dedup key and the comparison key."""
     if ans["kind"] == "Wmma":
         return ("Wmma", ans["bm"], ans["bn"], ans["swizzle"], ans["wt_m"],
-                ans["wt_n"], ans["bk"], 1 if ans["fused"] else 0)
+                ans["wt_n"], ans["bk"], 1 if ans["fused"] else 0,
+                ans.get("weu", 0), ans.get("variant", 0))
     return ("Gemv", ans["threads"], ans["tile_n"])
 
 
 def config_entry(key) -> dict:
     """answer_key tuple -> a MatmulNbitsTuneConfig dict."""
     if key[0] == "Wmma":
-        _, bm, bn, sw, wm, wn, bk, fused = key
+        _, bm, bn, sw, wm, wn, bk, fused, weu, variant = key
         return {"kind": "Wmma", "bm16": bm // 16, "bn16": bn // 16,
                 "swizzle": sw, "wt_m": wm, "wt_n": wn, "bk": bk,
-                "fused": fused, "threads": 0, "tile_n": 0}
+                "fused": fused, "threads": 0, "tile_n": 0, "weu": weu,
+                "variant": variant}
     _, threads, tile_n = key
     return {"kind": "Gemv", "bm16": 0, "bn16": 0, "swizzle": 0, "wt_m": 0,
             "wt_n": 0, "bk": 0, "fused": 0, "threads": threads,
-            "tile_n": tile_n}
+            "tile_n": tile_n, "weu": 0, "variant": 0}
 
 
 def parse_log(path: Path):
@@ -167,14 +170,16 @@ def parse_log(path: Path):
                 if t:
                     times[("Wmma", int(t.group(2)), int(t.group(3)),
                            int(t.group(4)), int(t.group(5)), int(t.group(6)),
-                           int(t.group(7)), 1 if t.group(1) == "fused" else 0)
-                          ] = float(t.group(8))
+                           int(t.group(7)), 1 if t.group(1) == "fused" else 0,
+                           int(t.group(8) or 0), int(t.group(9) or 0))
+                          ] = float(t.group(10))
                     continue
                 w = WMMA_WIN_RE.search(line)
                 if w:
                     key = ("Wmma", int(w.group(3)), int(w.group(4)),
                            int(w.group(5)), int(w.group(6)), int(w.group(7)),
-                           int(w.group(8)), 1 if w.group(2) == "fused" else 0)
+                           int(w.group(8)), 1 if w.group(2) == "fused" else 0,
+                           int(w.group(9) or 0), int(w.group(10) or 0))
                     yield cur, key, times
                     cur, times = None, {}
                 continue
@@ -270,7 +275,7 @@ def _tiebreak_rank(ans_key):
     noise, which cannot see cross-dispatch overlap. GEMV/dp4a configs have no
     warp tile, so they rank (0, 0) and the tie reduces to fastest-wins."""
     if ans_key[0] == "Wmma":
-        _, bm, bn, _sw, wt_m, wt_n, _bk, _fused = ans_key
+        _, bm, bn, _sw, wt_m, wt_n, _bk, _fused, _weu, _var = ans_key
         return (wt_m * wt_n, bm * bn)
     return (0, 0)
 

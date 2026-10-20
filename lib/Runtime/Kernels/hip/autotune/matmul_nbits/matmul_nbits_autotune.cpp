@@ -29,7 +29,7 @@ namespace {
 
 namespace fbs = hipdnn_ep::matmul_nbits_autotune::fbs;
 
-constexpr uint32_t kSchemaVersion = 4;
+constexpr uint32_t kSchemaVersion = 5;
 // Bump when the config tables or the meaning of a stored geometry changes.
 // A table stamped with an older ABI is rejected outright rather than allowed to
 // pick configs that no longer mean what they meant when they were measured.
@@ -228,6 +228,8 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
       a.wmma.wt_n = c->wt_n();
       a.wmma.bk = c->bk();
       a.wmma.fused = c->fused() != 0;
+      a.wmma.weu = c->weu();
+      a.wmma.variant = c->variant();
     } else {
       a.gemv.threads = c->threads();
       a.gemv.tile_n = c->tile_n();

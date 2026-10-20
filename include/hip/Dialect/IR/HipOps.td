@@ -511,6 +511,11 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     the producer-owned storage is live. Textual pass invocation rejects them
     before any address is dereferenced.
 
+    `row_bytes` (external sources only) marks a row-padded layout: the source
+    holds `size / row_bytes` dense rows of `row_bytes` bytes, and the stored
+    constant places each at the pitch of the rank-2 8-bit result's inner
+    dimension, zero-filling the rest. Set by `hip-pad-matmul-nbits-weights`.
+
     This op deliberately has no fold method. Generic canonicalization may
     reason about its purity, but only `hip-externalize-constants` may choose
     between inline and external storage.
@@ -524,7 +529,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<I64Attr>:$size,
     OptionalAttr<StrAttr>:$symbol_name_hint,
     OptionalAttr<StrAttr>:$source_name,
-    OptionalAttr<I64Attr>:$serialization_order
+    OptionalAttr<I64Attr>:$serialization_order,
+    OptionalAttr<I64Attr>:$row_bytes
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -545,7 +551,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
       build($_builder, $_state, result, value, /*location=*/nullptr,
             /*offset=*/nullptr, /*memory_address=*/nullptr, /*size=*/nullptr,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
-            /*serialization_order=*/nullptr);
+            /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::StringAttr":$location,
@@ -553,7 +560,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
                    "::mlir::IntegerAttr":$size), [{
       build($_builder, $_state, result, /*value=*/nullptr, location, offset,
             /*memory_address=*/nullptr, size, /*symbol_name_hint=*/nullptr,
-            /*source_name=*/nullptr, /*serialization_order=*/nullptr);
+            /*source_name=*/nullptr, /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::IntegerAttr":$memory_address,
@@ -561,7 +569,8 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
       build($_builder, $_state, result, /*value=*/nullptr,
             /*location=*/nullptr, /*offset=*/nullptr, memory_address, size,
             /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
-            /*serialization_order=*/nullptr);
+            /*serialization_order=*/nullptr,
+            /*row_bytes=*/nullptr);
     }]>
   ];
 
@@ -928,7 +937,10 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
     I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
-    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size // scales element size in bytes: 2=fp16, 4=fp32
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
+    // Byte pitch of B's rows when hip-pad-matmul-nbits-weights stored the
+    // weight row-padded; 0 means the dense [N, k_blocks * blob_size] layout.
+    DefaultValuedAttr<I64Attr, "0">:$b_row_bytes
   );
 
   let assemblyFormat = [{

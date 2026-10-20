@@ -78,7 +78,14 @@ struct ConstantPlan {
   bool externalize = false;
   bool splat = false;
   int64_t numElements = 0;
+  /// Bytes the constant occupies in the blob (padded footprint when rowBytes).
   int64_t size = 0;
+  /// Row-padded carrier (`row_bytes`): the source holds dense rows of rowBytes
+  /// bytes, stored at rowPitch. sourceSize is the source's byte count; it
+  /// equals `size` for every other carrier.
+  int64_t rowBytes = 0;
+  int64_t rowPitch = 0;
+  int64_t sourceSize = 0;
   /// Dense index in the generated constant metadata arrays.
   int64_t index = -1;
   /// Offset in the logical full constants blob and `hip.external_data`.
@@ -354,12 +361,17 @@ private:
     // A packed INT4/UINT4 source is an i8 tensor whose buffer is only
     // ceil(numElements/2) bytes; its `size` attr already holds that packed
     // count, so honor it rather than the logical `checkedByteSize`.
-    if (plan.source != SourceKind::Inline)
+    plan.sourceSize = plan.size;
+    if (IntegerAttr rowBytes = op.getRowBytesAttr()) {
+      plan.rowBytes = rowBytes.getInt();
+      plan.rowPitch = plan.type.getDimSize(1);
+      plan.sourceSize = op.getSizeAttr().getInt();
+    } else if (plan.source != SourceKind::Inline)
       if (auto sizeAttr = op.getSizeAttr()) {
         int64_t declared = sizeAttr.getInt();
         int64_t packedBytes = (plan.numElements + 1) / 2;
         if (plan.type.getElementTypeBitWidth() == 8 && declared == packedBytes)
-          plan.size = declared;
+          plan.size = plan.sourceSize = declared;
       }
 
     if (plan.source == SourceKind::Inline) {
@@ -419,31 +431,53 @@ private:
       // require the source file to be present at compile time.
       if ((!skipData || !plan.externalize) &&
           failed(validateFileRange(plan.op, location, plan.sourceFileOffset,
-                                   plan.size)))
+                                   plan.sourceSize)))
         return failure();
     }
 
     if (!plan.externalize)
       return materializeExternalSource(plan);
+    // A full constants file holds the stored (padded) bytes; streaming keeps
+    // the dense source and the runtime loader pads at upload.
+    if (plan.rowBytes && !skipData)
+      return readSourceBytes(plan);
+    return success();
+  }
+
+  /// Fills ownedData with the bytes as stored: the source as-is, or for a
+  /// row-padded carrier each dense row placed at rowPitch with zero fill.
+  LogicalResult readSourceBytes(ConstantPlan &plan) {
+    std::vector<char> source(static_cast<size_t>(plan.sourceSize));
+    if (plan.source == SourceKind::Memory) {
+      if (plan.sourceSize > 0)
+        std::memcpy(source.data(),
+                    reinterpret_cast<const void *>(
+                        static_cast<uintptr_t>(plan.hostAddress)),
+                    source.size());
+    } else if (plan.sourceSize > 0) {
+      FilePtr file(std::fopen(plan.filePath.c_str(), "rb"), &std::fclose);
+      if (!file || fileSeek(file.get(), plan.sourceFileOffset, SEEK_SET) != 0 ||
+          std::fread(source.data(), 1, source.size(), file.get()) !=
+              source.size())
+        return plan.op.emitError("failed to read external data file: ")
+               << plan.filePath;
+    }
+    if (!plan.rowBytes) {
+      plan.ownedData = std::move(source);
+      return success();
+    }
+    plan.ownedData.assign(static_cast<size_t>(plan.size), 0);
+    const int64_t rows = plan.sourceSize / plan.rowBytes;
+    for (int64_t r = 0; r < rows; ++r)
+      std::memcpy(plan.ownedData.data() + r * plan.rowPitch,
+                  source.data() + r * plan.rowBytes,
+                  static_cast<size_t>(plan.rowBytes));
     return success();
   }
 
   LogicalResult materializeExternalSource(ConstantPlan &plan) {
-    plan.ownedData.resize(static_cast<size_t>(plan.size));
-    if (plan.source == SourceKind::Memory) {
-      if (plan.size > 0)
-        std::memcpy(plan.ownedData.data(),
-                    reinterpret_cast<const void *>(
-                        static_cast<uintptr_t>(plan.hostAddress)),
-                    static_cast<size_t>(plan.size));
-    } else if (plan.size > 0) {
-      FilePtr file(std::fopen(plan.filePath.c_str(), "rb"), &std::fclose);
-      if (!file || fileSeek(file.get(), plan.sourceFileOffset, SEEK_SET) != 0 ||
-          std::fread(plan.ownedData.data(), 1, static_cast<size_t>(plan.size),
-                     file.get()) != static_cast<size_t>(plan.size))
-        return plan.op.emitError("failed to read external data file: ")
-               << plan.filePath;
-    }
+    if (failed(readSourceBytes(plan)))
+      return failure();
 
     FailureOr<DenseElementsAttr> materialized = denseFromBytes(plan);
     if (failed(materialized))
@@ -485,10 +519,10 @@ private:
         return failure();
       plan.partialBlobOffset = *aligned;
       if (plan.partialBlobOffset >
-          std::numeric_limits<int64_t>::max() - plan.size)
+          std::numeric_limits<int64_t>::max() - plan.sourceSize)
         return plan.op.emitError(
             "hybrid constant layout range overflows int64");
-      currentOffset = plan.partialBlobOffset + plan.size;
+      currentOffset = plan.partialBlobOffset + plan.sourceSize;
     }
     partialBlobSize = currentOffset;
     return success();
@@ -503,6 +537,9 @@ private:
     SmallVector<Attribute> filePaths;
     SmallVector<int64_t> fileOffsets;
     SmallVector<int64_t> memOffsets;
+    SmallVector<int64_t> rowBytes;
+    SmallVector<int64_t> rowPitches;
+    bool anyRowPadded = false;
     sizes.reserve(externalizedCount);
     offsets.reserve(externalizedCount);
 
@@ -536,6 +573,9 @@ private:
       filePaths.push_back(filePath);
       fileOffsets.push_back(plan.sourceFileOffset);
       memOffsets.push_back(plan.partialBlobOffset);
+      rowBytes.push_back(plan.rowBytes);
+      rowPitches.push_back(plan.rowPitch);
+      anyRowPadded |= plan.rowBytes != 0;
     }
 
     module->setAttr("hip.constants_file", StringAttr::get(ctx, binFileName));
@@ -557,6 +597,14 @@ private:
                     DenseI64ArrayAttr::get(ctx, fileOffsets));
     module->setAttr("hipdnn.constant_mem_offsets",
                     DenseI64ArrayAttr::get(ctx, memOffsets));
+    // Only streaming metadata needs these: a full constants file already
+    // holds the padded bytes, and the bulk upload copies it verbatim.
+    if (anyRowPadded) {
+      module->setAttr("hipdnn.constant_row_bytes",
+                      DenseI64ArrayAttr::get(ctx, rowBytes));
+      module->setAttr("hipdnn.constant_row_pitches",
+                      DenseI64ArrayAttr::get(ctx, rowPitches));
+    }
   }
 
   LogicalResult rejectStaleState() {
@@ -570,6 +618,8 @@ private:
         "hipdnn.constant_file_paths",
         "hipdnn.constant_file_offsets",
         "hipdnn.constant_mem_offsets",
+        "hipdnn.constant_row_bytes",
+        "hipdnn.constant_row_pitches",
     };
     for (const char *attr : attrs)
       if (module->hasAttr(attr))
@@ -607,8 +657,12 @@ private:
     entry.size = plan.size;
     entry.data = plan.data();
     entry.splat_elem_size = plan.splatElementSize;
-    entry.file_path = plan.filePath;
-    entry.file_offset = plan.sourceFileOffset;
+    // A row-padded carrier is written from its padded ownedData, never
+    // re-read from the dense source file.
+    if (!plan.rowBytes) {
+      entry.file_path = plan.filePath;
+      entry.file_offset = plan.sourceFileOffset;
+    }
     return entry;
   }
 
@@ -668,6 +722,8 @@ private:
       partialEntries.push_back(makeEntry(plan, plan.partialBlobOffset));
       partialEntries.back().file_path.clear();
       partialEntries.back().splat_elem_size = 0;
+      // The partial file holds the dense source; the loader pads at upload.
+      partialEntries.back().size = plan.sourceSize;
     }
 
     if (!partialEntries.empty() &&

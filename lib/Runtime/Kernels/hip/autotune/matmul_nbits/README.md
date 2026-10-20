@@ -71,7 +71,10 @@ meaningful for the exact table it was measured against. A stale index silently
 launches the wrong kernel.
 
 So a row stores the tile geometry (`bm, bn, swizzle, wt_m, wt_n, bk, fused`, or
-`threads, tile_n`), and the runtime looks that geometry up in the live table
+`threads, tile_n`), plus `weu, variant` for the extended WMMA entries
+(`WMMA_EXT_CONFIGS`: an explicit waves-per-EU hint and the
+`GemmFp16U4ImplX` pipeline options; both 0 for the original entries), and the
+runtime looks that geometry up in the live table
 while probing. A geometry the table no longer contains, or that is illegal for
 this shape, makes the probe **fall through to the next tier** instead of
 returning something unlaunchable. Stale table, degraded answer, never a wrong

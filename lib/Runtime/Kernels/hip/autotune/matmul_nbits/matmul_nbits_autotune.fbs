@@ -123,6 +123,11 @@ struct MatmulNbitsTuneConfig {
   // Gemv payload. Zero on Wmma configs.
   threads: uint16;
   tile_n: ubyte;
+
+  // Wmma extended-entry selectors (WmmaConfig::weu / ::variant in
+  // matmul_nbits_kernel.hip). 0/0 names an original kWmmaConfigs entry.
+  weu: ubyte;
+  variant: ubyte;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +166,7 @@ struct MatmulNbitsFallback {
 }
 
 table MatmulNbitsAutotuneLut {
-  schema_version: uint32 = 4;
+  schema_version: uint32 = 5;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
   rocm_version: int32;      // advisory; mismatch warns but still loads
   // Bumped whenever the config tables or kernel semantics change in a way that

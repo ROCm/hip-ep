@@ -1514,7 +1514,8 @@ int wrap_matmul_nbits(
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
-    int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+    int64_t scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
+    int64_t b_row_bytes);    // B row pitch in bytes; 0 = arrival layout
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along

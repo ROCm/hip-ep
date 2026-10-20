@@ -131,6 +131,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // 1b**. Store aliasing-prone int4 MatMulNBits weights row-padded, so the
+  //       runtime needs no per-call repack. After fusion (which may rewrite
+  //       weights) and before externalization (which stores them).
+  //       HIPDNN_EP_PAD_MATMUL_NBITS_WEIGHTS=0 keeps the dense layout.
+  if (hip_get_env("HIPDNN_EP_PAD_MATMUL_NBITS_WEIGHTS") != "0")
+    pm.addPass(mlir::hip::createPadMatMulNBitsWeightsPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing
