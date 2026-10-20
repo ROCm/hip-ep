@@ -8,12 +8,12 @@
 
 // RUN: split-file %s %t
 // RUN: mkdir -p %t/full %t/stream
-// RUN: %python -c "open('%t/w.bin','wb').write(bytes((i * 7 + 1) % 251 for i in range(4096)))"
+// RUN: %python -c "import sys; open(sys.argv[1], 'wb').write(bytes((i * 7 + 1) % 251 for i in range(4096)))" %t/w.bin
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights %t/pad.mlir | FileCheck %s --check-prefix=PAD
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights %t/skip.mlir | FileCheck %s --check-prefix=SKIP
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
-// RUN: %python -c "s=open('%t/w.bin','rb').read(); d=open('%t/full/model.constants.bin','rb').read(); assert len(d) == 2 * 2176, len(d); assert d[0:2048] == s[0:2048] and d[2176:4224] == s[2048:4096]; assert d[2048:2176] == bytes(128) and d[4224:4352] == bytes(128)"
+// RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 2 * 2176, len(d); assert d[0:2048] == s[0:2048] and d[2176:4224] == s[2048:4096]; assert d[2048:2176] == bytes(128) and d[4224:4352] == bytes(128)" %t/w.bin %t/full/model.constants.bin
 
 //--- pad.mlir
 // K = 4096: K/2 = 2048 bytes is 16 cache lines, gcd(16, 64) = 16 >= 8.
