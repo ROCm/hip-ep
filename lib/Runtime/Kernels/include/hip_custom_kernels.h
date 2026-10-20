@@ -2705,6 +2705,9 @@ HIP_KERNEL_API int hip_dequantize_linear(
 
 /* Top-k routing: find top-k experts per token from router_probs.
  *   router_probs   - GPU [num_tokens, num_experts]
+ *   router_weights - GPU [num_tokens, num_experts] or NULL. When set, the
+ *                    selected experts' weights are gathered from it instead
+ *                    of the softmax of router_probs.
  *   expert_indices - GPU [num_tokens, k] int32 (output)
  *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
  *   normalize      - 1 to normalize selected weights (sum-to-one)
@@ -2712,6 +2715,7 @@ HIP_KERNEL_API int hip_dequantize_linear(
 HIP_KERNEL_API int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
+    const void* router_weights,
     void* expert_indices,
     void* expert_weights,
     int64_t num_tokens,
