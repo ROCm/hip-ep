@@ -39,6 +39,10 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
     Value gIdxPtr = extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
     Value biasPtr = extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value aQuantPtr =
+        extractOptionalMemRefPtr(adaptor.getAQuant(), rewriter, loc);
+    Value aScalePtr =
+        extractOptionalMemRefPtr(adaptor.getAScale(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -66,7 +70,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value zpElemSizeVal = createI64Const(op.getZpElemSize());
     Value scaleElemSizeVal = createI64Const(op.getScaleElemSize());
 
-    SmallVector<Type, 18> paramTypes = {
+    SmallVector<Type, 20> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -75,6 +79,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         ptrType, // zero_points (nullable)
         ptrType, // g_idx (nullable)
         ptrType, // bias (nullable)
+        ptrType, // a_quant (nullable)
+        ptrType, // a_scale (nullable)
         ptrType, // output
         i64Type, // M
         i64Type, // N
@@ -93,7 +99,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
       return failure();
     }
 
-    SmallVector<Value, 18> args = {statePtr,
+    SmallVector<Value, 20> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -101,6 +107,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                    zeroPointsPtr,
                                    gIdxPtr,
                                    biasPtr,
+                                   aQuantPtr,
+                                   aScalePtr,
                                    outputPtr,
                                    m,
                                    n,
@@ -118,11 +126,157 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// QuantizeAct Lowering
+//===----------------------------------------------------------------------===//
+
+struct QuantizeActOpLowering : public ConvertOpToLLVMPattern<QuantizeActOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(QuantizeActOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    int64_t ARank = AType.getRank();
+    Value rows = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                          rewriter.getI64IntegerAttr(1));
+    for (int64_t i = 0; i < ARank - 1; ++i)
+      rows = LLVM::MulOp::create(
+          rewriter, loc, rows,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+
+    SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapQuantizeAct, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 7> args = {
+        adaptor.getHandle(),
+        extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getAQuant(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getAScale(), rewriter, loc),
+        rows,
+        LLVM::ConstantOp::create(
+            rewriter, loc, i64Type,
+            rewriter.getI64IntegerAttr(AType.getShape().back())),
+        LLVM::ConstantOp::create(
+            rewriter, loc, i64Type,
+            rewriter.getI64IntegerAttr(op.getBlockSize()))};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroup Lowering
+//===----------------------------------------------------------------------===//
+
+/// Segments go in fixed slots of three (null / 0 when absent). With the
+/// silu_mul epilogue, up_tmp fills the second output slot: it is where the
+/// per-segment path writes the second projection.
+struct MatMulNBitsGroupOpLowering
+    : public ConvertOpToLLVMPattern<MatMulNBitsGroupOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  static constexpr int64_t kMaxSegments = 3;
+
+  LogicalResult
+  matchAndRewrite(MatMulNBitsGroupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    int64_t numSegments = static_cast<int64_t>(op.getWeights().size());
+    if (numSegments > kMaxSegments)
+      return rewriter.notifyMatchFailure(op, "more than 3 segments");
+
+    SmallVector<Value> outputs(adaptor.getOutputs());
+    if (Value upTmp = adaptor.getUpTmp())
+      outputs.push_back(upTmp);
+    auto slots = [&](ValueRange vals) {
+      SmallVector<Value, 3> ptrs;
+      for (int64_t i : llvm::seq<int64_t>(0, kMaxSegments))
+        ptrs.push_back(extractOptionalMemRefPtr(
+            i < static_cast<int64_t>(vals.size()) ? vals[i] : Value(), rewriter,
+            loc));
+      return ptrs;
+    };
+    SmallVector<Value, 3> weightPtrs = slots(adaptor.getWeights());
+    SmallVector<Value, 3> scalePtrs = slots(adaptor.getScales());
+    SmallVector<Value, 3> zpPtrs = slots(adaptor.getZeroPoints());
+    SmallVector<Value, 3> outPtrs = slots(outputs);
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    int64_t ARank = AType.getRank();
+    Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                              rewriter, loc)
+                           : createI64Const(1);
+    Value batch = createI64Const(1);
+    for (int64_t i : llvm::seq<int64_t>(0, ARank - 2))
+      batch = LLVM::MulOp::create(
+          rewriter, loc, batch,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+
+    ArrayAttr nAttr = op.getN();
+    SmallVector<Value, 3> ns;
+    for (int64_t i : llvm::seq<int64_t>(0, kMaxSegments))
+      ns.push_back(createI64Const(
+          i < numSegments ? cast<IntegerAttr>(nAttr[i]).getInt() : 0));
+
+    SmallVector<Type, 26> paramTypes = {ptrType, i32Type, ptrType,
+                                        ptrType, ptrType, i64Type};
+    paramTypes.append(4 * kMaxSegments, ptrType); // B, scales, zp, out
+    paramTypes.append(kMaxSegments, i64Type);     // N
+    paramTypes.append(5, i64Type); // M, K, batch, block_size, epilogue
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMatMulNBitsGroup, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 26> args = {
+        adaptor.getHandle(),
+        getOpStateSlotValue(op, rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getAQuant(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getAScale(), rewriter, loc),
+        createI64Const(numSegments)};
+    llvm::append_range(args, weightPtrs);
+    llvm::append_range(args, scalePtrs);
+    llvm::append_range(args, zpPtrs);
+    llvm::append_range(args, outPtrs);
+    llvm::append_range(args, ns);
+    args.append({m, createI64Const(op.getK()), batch,
+                 createI64Const(op.getBlockSize()),
+                 createI64Const(op.getEpilogue())});
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
-  patterns.add<MatMulNBitsOpLowering>(converter);
+  patterns.add<MatMulNBitsOpLowering, QuantizeActOpLowering,
+               MatMulNBitsGroupOpLowering>(converter);
 }
 
 } // namespace hip

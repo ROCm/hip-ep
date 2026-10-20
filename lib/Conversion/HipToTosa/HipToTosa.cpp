@@ -3184,6 +3184,8 @@ struct SkipRmsNormConverter final : public OpConversionPattern<SkipRmsNormOp> {
   LogicalResult
   matchAndRewrite(SkipRmsNormOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (!op.getQuantOutputs().empty())
+      return rewriter.notifyMatchFailure(op, "quant_outs are not lowered");
     if (op.getNumResults() < 1 || op.getNumResults() > 2)
       return rewriter.notifyMatchFailure(op, "expected 1-2 tensor results");
     auto yTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
