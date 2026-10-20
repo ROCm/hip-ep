@@ -74,6 +74,9 @@ existing `--convert-hip-to-llvm` pipeline.
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
 | `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, including the optional input bias |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
+| `BranchwiseRMSNorm` (`com.microsoft`) | `hip.rms_norm` | `rms_norm_kernel.hip`; per-branch gain via grouped scale |
+| `GatedRMSNorm` (`com.microsoft`) | `hip.gated_rms_norm` | `rms_norm_kernel.hip` |
+| `EngramGate` (`com.microsoft`) | `hip.engram_gate` | `rms_norm_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:

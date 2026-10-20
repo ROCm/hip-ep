@@ -29,6 +29,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Softplus | Custom HIP kernel (f32/f16) |
 | Gelu | Custom HIP kernel; `com.microsoft` Gelu is the erf form of `onnx.Gelu` |
 | Swish | Custom HIP kernel; `com.microsoft` QuickGelu is this formula with alpha default 1.702 |
+| ScaledSiLU (`com.microsoft`) | Decomposed to Mul + Swish (alpha 1). f16/f32 |
+| GatedAdd (`com.microsoft`) | Decomposed to Mul + Add. f16/f32, rank 1-4 |
 | SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64, each dynamic axis traces to the same runtime extent, and the intermediates have no other value uses |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
@@ -93,6 +95,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
 | SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
+| BranchwiseRMSNorm (`com.microsoft`) | Lowered to RMSNormalization over the branch axis. f16/f32; the scale input is required |
+| GatedRMSNorm (`com.microsoft`) | Custom HIP kernel; silu, swish or sigmoid gate. f16/f32 |
+| EngramGate (`com.microsoft`) | Custom HIP kernel, including the optional `gated_value_normed` output. f16/f32 |
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
