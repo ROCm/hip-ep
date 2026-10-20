@@ -1485,6 +1485,15 @@ int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
                         int64_t norm_size, int64_t element_size_bytes,
                         int64_t activation, float epsilon);
 
+// com.microsoft EngramGate. key / query / output / normed are
+// (B, S, hc, hidden), value is (B, S, hidden), scales are (hc, hidden).
+// conv_scale and normed are both null or both non-null.
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

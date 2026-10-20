@@ -626,13 +626,85 @@ struct GatedRmsNormOpLowering : public ConvertOpToLLVMPattern<GatedRmsNormOp> {
   }
 };
 
+// hip.engram_gate -> wrap_engram_gate(state, key, query, value, key_scale,
+//   query_scale, conv_scale_or_null, output, normed_or_null,
+//   key_num_elements, hc, hidden, element_size_bytes, epsilon)
+struct EngramGateOpLowering : public ConvertOpToLLVMPattern<EngramGateOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(EngramGateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto ptr = [&](Value memref) {
+      return extractContiguousMemRefPtr(memref, rewriter, loc);
+    };
+    auto outputs = adaptor.getOutputs();
+    Value normedPtr = outputs.size() > 1
+                          ? ptr(outputs[1])
+                          : LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    Value convScalePtr =
+        getNullableMemRefPtr(adaptor.getConvNormScale(), rewriter, loc);
+
+    auto keyType = cast<MemRefType>(op.getKey().getType());
+    Value keyNumElements =
+        computeNumElements(keyType, adaptor.getKey(), rewriter, loc);
+    Value hc = getMemRefDimSize(keyType, 2, adaptor.getKey(), rewriter, loc);
+    Value hidden =
+        getMemRefDimSize(keyType, 3, adaptor.getKey(), rewriter, loc);
+    Value elementSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(
+            keyType.getElementType().getIntOrFloatBitWidth() / 8));
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // key, query, value
+        ptrType, ptrType, ptrType, // key_scale, query_scale, conv_scale
+        ptrType, ptrType,          // output, normed
+        i64Type, i64Type, i64Type, // key_num_elements, hc, hidden
+        i64Type, f32Type           // element_size_bytes, epsilon
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapEngramGate, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value> args = {adaptor.getCtx(),
+                               ptr(adaptor.getKey()),
+                               ptr(adaptor.getQuery()),
+                               ptr(adaptor.getValue()),
+                               ptr(adaptor.getKeyNormScale()),
+                               ptr(adaptor.getQueryNormScale()),
+                               convScalePtr,
+                               ptr(outputs[0]),
+                               normedPtr,
+                               keyNumElements,
+                               hc,
+                               hidden,
+                               elementSize,
+                               epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
                InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
-               GatedRmsNormOpLowering>(converter);
+               GatedRmsNormOpLowering, EngramGateOpLowering>(converter);
 }
 
 } // namespace hip

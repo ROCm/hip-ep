@@ -14,6 +14,7 @@
 //   - onnx.RMSNormalization (standard, opset 23+)       -> hip.rms_norm
 //   - onnx.Custom(BranchwiseRMSNorm, com.microsoft)     -> hip.rms_norm
 //   - onnx.Custom(GatedRMSNorm, com.microsoft)          -> hip.gated_rms_norm
+//   - onnx.Custom(EngramGate, com.microsoft)            -> hip.engram_gate
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
@@ -398,6 +399,108 @@ GatedRMSNormToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getStringAttr(activation),
       rewriter.getF32FloatAttr(epsValue.convertToFloat()));
   rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(com.microsoft.EngramGate) -> hip.engram_gate
+struct EngramGateToHip : public mlir::RewritePattern {
+  EngramGateToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+EngramGateToHip::matchAndRewrite(mlir::Operation *op,
+                                 mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "EngramGate") {
+    return rewriter.notifyMatchFailure(op, "not an EngramGate operation");
+  }
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for EngramGate");
+  }
+  size_t numOperands = op->getNumOperands();
+  unsigned numResults = op->getNumResults();
+  if (numOperands < 5 || numOperands > 6 || numResults < 1 || numResults > 2) {
+    return rewriter.notifyMatchFailure(
+        op, "EngramGate expects 5-6 inputs and 1-2 results");
+  }
+
+  mlir::Value key = op->getOperand(0);
+  mlir::Value query = op->getOperand(1);
+  mlir::Value value = op->getOperand(2);
+  mlir::Value keyScale = op->getOperand(3);
+  mlir::Value queryScale = op->getOperand(4);
+  mlir::Value convScale = getOptionalOperand(op, 5);
+  mlir::Value normedResult = getOptionalResult(op, 1);
+  if (normedResult && !convScale) {
+    return rewriter.notifyMatchFailure(
+        op, "EngramGate gated_value_normed requires conv_norm_scale");
+  }
+
+  auto keyType = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
+  auto valueType = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
+  auto outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!keyType || !valueType || !outputType || keyType.getRank() != 4 ||
+      valueType.getRank() != 3 || query.getType() != keyType ||
+      outputType != keyType) {
+    return rewriter.notifyMatchFailure(
+        op, "EngramGate expects key/query/output (B,S,hc,H), value (B,S,H)");
+  }
+  mlir::Type elemType = keyType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32()) {
+    return rewriter.notifyMatchFailure(op,
+                                       "EngramGate supports only f16 and f32");
+  }
+  for (mlir::Value v : {value, keyScale, queryScale, convScale}) {
+    if (!v) {
+      continue;
+    }
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (!t || t.getElementType() != elemType) {
+      return rewriter.notifyMatchFailure(
+          op, "EngramGate inputs must share one element type");
+    }
+  }
+  if (normedResult && normedResult.getType() != keyType) {
+    return rewriter.notifyMatchFailure(
+        op, "EngramGate gated_value_normed must match the key type");
+  }
+
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("epsilon")) {
+    epsValue = attr.getValue();
+  }
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure)) {
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  }
+  mlir::Location loc = op->getLoc();
+
+  llvm::SmallVector<mlir::Value> inits = {
+      createEmptyTensor(rewriter, loc, keyType, key)};
+  llvm::SmallVector<mlir::Type> resultTypes = {keyType};
+  if (normedResult) {
+    inits.push_back(createEmptyTensor(rewriter, loc, keyType, key));
+    resultTypes.push_back(keyType);
+  }
+  auto hipOp = mlir::hip::EngramGateOp::create(
+      rewriter, loc, resultTypes, *ctxOrFailure, key, query, value, keyScale,
+      queryScale, convScale, inits,
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+
+  llvm::SmallVector<mlir::Value> replacements = {hipOp->getResult(0)};
+  if (numResults == 2) {
+    replacements.push_back(normedResult ? hipOp->getResult(1) : mlir::Value{});
+  }
+  rewriter.replaceOp(op, replacements);
   return mlir::success();
 }
 
@@ -1146,7 +1249,7 @@ GroupNormToHip::matchAndRewrite(mlir::Operation *op,
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-               BranchwiseRMSNormToHip, GatedRMSNormToHip,
+               BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
                InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
 }

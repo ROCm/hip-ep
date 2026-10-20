@@ -171,3 +171,56 @@ int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
                             gate, output, num_rows, norm_size,
                             static_cast<int>(activation), epsilon, hip_dtype);
 }
+
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon) {
+  OP_PROFILE(
+      "layernorm",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "engram_gate %lldx%lld",
+                 (long long)(hidden > 0 ? key_num_elements / hidden : 0),
+                 (long long)hidden);
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !key || !query || !value || !key_scale || !query_scale ||
+      !output || (normed && !conv_scale)) {
+    fprintf(stderr, "Invalid arguments to wrap_engram_gate\n");
+    return -1;
+  }
+  if (hc <= 0 || hidden <= 0 || key_num_elements % (hc * hidden) != 0) {
+    fprintf(stderr,
+            "wrap_engram_gate: key_num_elements=%lld hc=%lld hidden=%lld\n",
+            (long long)key_num_elements, (long long)hc, (long long)hidden);
+    return -1;
+  }
+
+  int hip_dtype;
+  if (element_size_bytes == 2) {
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  } else if (element_size_bytes == 4) {
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  } else {
+    fprintf(stderr,
+            "wrap_engram_gate: unsupported element_size %lld "
+            "(supported: 2=fp16, 4=fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  const int64_t rows = key_num_elements / hidden;
+  RUNTIME_DEBUG_LOG("[REAL] wrap_engram_gate: rows=%lld, hc=%lld, "
+                    "hidden=%lld, normed=%s, data_type=%s\n",
+                    (long long)rows, (long long)hc, (long long)hidden,
+                    normed ? "yes" : "no",
+                    (element_size_bytes == 2) ? "f16" : "f32");
+
+  return hip_engram_gate(hipdnn_ep_state_get_stream(state), key, query, value,
+                         key_scale, query_scale, conv_scale, output, normed,
+                         rows, hc, hidden, epsilon, hip_dtype);
+}

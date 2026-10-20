@@ -1425,6 +1425,45 @@ LogicalResult GatedRmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// EngramGateOp: ins(key, query, value, kscale, qscale, [cscale])
+//               outs(output, [normed])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EngramGateOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void EngramGateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult EngramGateOp::verify() {
+  size_t numOutputs = getOutputs().size();
+  if (numOutputs != 1 && numOutputs != 2) {
+    return emitOpError("expected 1 or 2 outputs, got ") << numOutputs;
+  }
+  if (numOutputs == 2 && !getConvNormScale()) {
+    return emitOpError("the second output requires conv_norm_scale");
+  }
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!keyType || !keyType.hasRank() || keyType.getRank() != 4) {
+    return emitOpError("expected key of rank 4 (B, S, hc, H)");
+  }
+  if (!queryType || !queryType.hasRank() ||
+      queryType.getShape() != keyType.getShape()) {
+    return emitOpError("query shape must match key");
+  }
+  if (!valueType || !valueType.hasRank() || valueType.getRank() != 3) {
+    return emitOpError("expected value of rank 3 (B, S, H)");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 

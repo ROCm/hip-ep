@@ -186,6 +186,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GroupNormOp::attachInterface<HipDstBufferizableModel<GroupNormOp>>(*ctx);
     GatedRmsNormOp::attachInterface<HipDstBufferizableModel<GatedRmsNormOp>>(
         *ctx);
+    EngramGateOp::attachInterface<HipDstBufferizableModel<EngramGateOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);

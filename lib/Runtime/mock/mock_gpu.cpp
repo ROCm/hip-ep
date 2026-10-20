@@ -1360,6 +1360,25 @@ int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
   return 0;
 }
 
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_engram_gate\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_engram_gate(key_num_elements=%lld, hc=%lld, "
+             "hidden=%lld, normed=%s, element_size=%lld, epsilon=%f)\n",
+             (long long)key_num_elements, (long long)hc, (long long)hidden,
+             normed ? "yes" : "no", (long long)element_size_bytes,
+             (double)epsilon);
+
+  return 0;
+}
+
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *skip, void *gamma, void *bias,
                                     void *output, void *input_skip_bias_sum,
