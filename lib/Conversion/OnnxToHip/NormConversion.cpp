@@ -12,6 +12,7 @@
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
 //   - onnx.RMSNormalization (standard, opset 23+)       -> hip.rms_norm
+//   - onnx.Custom(BranchwiseRMSNorm, com.microsoft)     -> hip.rms_norm
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
@@ -174,6 +175,148 @@ RMSNormalizationToHip::matchAndRewrite(mlir::Operation *op,
       rewriter.getI64IntegerAttr(stashType));
 
   rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(com.microsoft.BranchwiseRMSNorm) -> hip.rms_norm
+///
+/// Each of the C branches is RMS-normalized over its own H elements. With
+/// num_branches = C > 0 the input is (..., C*H) and is expanded to
+/// (..., C, H); with num_branches = 0 it already is (..., C, H). A (C*H) or
+/// (C, H) scale is a per-branch gain, which hip.rms_norm selects by row
+/// (row r uses gain r % C).
+struct BranchwiseRMSNormToHip : public mlir::RewritePattern {
+  BranchwiseRMSNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+BranchwiseRMSNormToHip::matchAndRewrite(mlir::Operation *op,
+                                        mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "BranchwiseRMSNorm") {
+    return rewriter.notifyMatchFailure(op, "not a BranchwiseRMSNorm operation");
+  }
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for BranchwiseRMSNorm");
+  }
+  if (op->getNumResults() != 1) {
+    return rewriter.notifyMatchFailure(op,
+                                       "BranchwiseRMSNorm expects 1 result");
+  }
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = getOptionalOperand(op, 1);
+  if (!scale || op->getNumOperands() > 2) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm without a scale input is unsupported");
+  }
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !scaleType || !resultType || inputType != resultType) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm requires matching ranked input and result");
+  }
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32()) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm supports only f16 and f32");
+  }
+  if (scaleType.getElementType() != elemType || !scaleType.hasStaticShape()) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm scale must be static and of the input type");
+  }
+
+  int64_t numBranches = 0;
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("num_branches")) {
+    numBranches = attr.getValue().getSExtValue();
+  }
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("epsilon")) {
+    epsValue = attr.getValue();
+  }
+
+  int64_t rank = inputType.getRank();
+  mlir::RankedTensorType normType = inputType;
+  llvm::SmallVector<mlir::ReassociationIndices> reassociation;
+  if (numBranches > 0) {
+    if (rank < 1 || inputType.isDynamicDim(rank - 1) ||
+        inputType.getDimSize(rank - 1) % numBranches != 0) {
+      return rewriter.notifyMatchFailure(
+          op, "BranchwiseRMSNorm last dim must be static and divisible by "
+              "num_branches");
+    }
+    llvm::SmallVector<int64_t> shape(inputType.getShape());
+    int64_t hidden = shape.back() / numBranches;
+    shape.back() = numBranches;
+    shape.push_back(hidden);
+    normType = mlir::RankedTensorType::get(shape, elemType);
+    for (int64_t i = 0; i < rank - 1; ++i) {
+      reassociation.push_back({i});
+    }
+    reassociation.push_back({rank - 1, rank});
+  } else if (numBranches < 0 || rank < 2) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm needs num_branches > 0 or a rank >= 2 input");
+  }
+
+  int64_t normRank = normType.getRank();
+  if (normType.isDynamicDim(normRank - 1) ||
+      normType.isDynamicDim(normRank - 2)) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm branch count and width must be static");
+  }
+  int64_t branches = normType.getDimSize(normRank - 2);
+  int64_t hidden = normType.getDimSize(normRank - 1);
+  int64_t scaleElems = scaleType.getNumElements();
+  if (scaleElems != hidden && scaleElems != branches * hidden) {
+    return rewriter.notifyMatchFailure(
+        op, "BranchwiseRMSNorm scale must have shape (H), (C*H) or (C, H)");
+  }
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure)) {
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  }
+  mlir::Value context = *ctxOrFailure;
+  mlir::Location loc = op->getLoc();
+
+  mlir::Value normInput = input;
+  if (!reassociation.empty()) {
+    llvm::SmallVector<mlir::OpFoldResult> outputShape;
+    for (int64_t i = 0; i < normRank; ++i) {
+      if (normType.isDynamicDim(i)) {
+        outputShape.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, input, i).getResult());
+      } else {
+        outputShape.push_back(rewriter.getIndexAttr(normType.getDimSize(i)));
+      }
+    }
+    normInput = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, normType, input, reassociation, outputShape);
+  }
+  mlir::Value init = createEmptyTensor(rewriter, loc, normType, normInput);
+  mlir::Value normalized =
+      mlir::hip::RmsNormOp::create(
+          rewriter, loc, context, normInput, scale, init,
+          rewriter.getI64IntegerAttr(-1),
+          rewriter.getF32FloatAttr(epsValue.convertToFloat()),
+          rewriter.getI64IntegerAttr(1))
+          ->getResult(0);
+  if (!reassociation.empty()) {
+    normalized = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, resultType, normalized, reassociation);
+  }
+  rewriter.replaceOp(op, normalized);
   return mlir::success();
 }
 
@@ -922,8 +1065,9 @@ GroupNormToHip::matchAndRewrite(mlir::Operation *op,
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
+               BranchwiseRMSNormToHip, SkipSimplifiedLayerNormToHip,
+               SkipLayerNormToHip, LayerNormToHip, InstanceNormToHip,
+               BatchNormToHip, GroupNormToHip>(ctx);
 }
 
 } // namespace hip
