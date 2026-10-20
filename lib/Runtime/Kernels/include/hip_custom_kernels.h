@@ -3284,6 +3284,36 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Short-burst linear attention: runs all seq_len time steps of the packed
+// [B, T, H*D] inputs in one launch with the state held in registers (fp32
+// between steps). Same parameters as hip_linear_attention_decode, but the
+// pointers are at time step 0 and the initial state is read from past_state
+// (null = zeros, may alias state), so no past->present copy is needed.
+// Returns 0 on success, 1 when the shape is not supported or
+// HIPDNN_EP_LA_COLS=0 (caller falls back), <0 on launch error.
+HIP_KERNEL_API int hip_linear_attention_burst(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    const void* past_state,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
 // Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
 // processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
