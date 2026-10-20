@@ -638,8 +638,7 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
       if (ShapedType::isDynamic(strides[dim])) {
         if (shape[dim] != 1)
           return failure();
-        strides[dim] =
-            dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
+        strides[dim] = dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
       }
       if (ShapedType::isDynamic(shape[dim]))
         return failure();
