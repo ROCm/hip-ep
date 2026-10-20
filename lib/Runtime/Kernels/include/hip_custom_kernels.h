@@ -2956,6 +2956,9 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
 // HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
 // int8 activations + per-group scales for the fc1 input ([hidden]) and the
 // fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+// num_tokens > 1 serves a short burst (speculative verify) in the same
+// launches: input/output are [num_tokens, hidden], expert_indices/weights
+// [num_tokens, k], and every scratch buffer is num_tokens times larger.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     void* stream,
     const void* input,
@@ -2973,7 +2976,7 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
-    int64_t element_size_bytes);
+    int64_t element_size_bytes, int64_t num_tokens);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
