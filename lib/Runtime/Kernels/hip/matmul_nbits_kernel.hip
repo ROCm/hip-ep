@@ -3073,13 +3073,14 @@ extern "C" int hip_matmul_nbits_dp4a_prequant(
  * No bias. Zero points are pre-unpacked uint8 [N[s], k_blocks] per segment;
  * HAS_ZP keeps zero-point indexing out of the symmetric inner loop.
  *
- * The launch config is the widest segment's single-weight config
+ * The launch config starts from the widest segment's single-weight config
  * (getOrTuneDp4aConfig: the offline LUT, else its one-time sweep). The widest
  * segment dominates the group's bytes, and a narrow segment's config can
- * leave it badly under-occupied. The SiLU form splits that config's columns
- * between gate and up (TN / 2 of each, at least 1), so for TN >= 2 a block
- * holds as many accumulators and reads as many weight bytes as the tuned
- * single-weight kernel.
+ * leave it badly under-occupied. A config wider than 256 threads becomes 256
+ * threads at a tile of at most 2 (dp4aGroupConfigFor). The SiLU form splits
+ * the config's columns between gate and up (TN / 2 of each, at least 1), so
+ * for TN >= 2 a block holds as many accumulators and reads as many weight
+ * bytes as the tuned single-weight kernel.
  * ----------------------------------------------------------------------- */
 
 struct Dp4aGroupArgs {
@@ -3292,6 +3293,22 @@ static void launchDp4aGroupConfig(int config_id, hipStream_t stream,
 #undef DP4A_GROUP_CASE
 }
 
+// The single-weight tuner gives some large weights 512- or 1024-thread
+// blocks. The group kernel runs those 2-6% slower than 256 threads at a tile
+// of 1 or 2 (gfx1151, gfx11-generic binary), and no measured group shape was
+// fastest above 256 threads, so a group never borrows one.
+static int dp4aGroupConfigFor(int single_cfg)
+{
+    if (single_cfg < 0 || single_cfg >= kNumGemvConfigs ||
+        kGemvConfigs[single_cfg].threads <= 256)
+        return single_cfg;
+    const int tile_n = kGemvConfigs[single_cfg].tile_n < 2 ? 1 : 2;
+    for (int cid = 0; cid < kNumGemvConfigs; cid++)
+        if (kGemvConfigs[cid].threads == 256 && kGemvConfigs[cid].tile_n == tile_n)
+            return cid;
+    return single_cfg;
+}
+
 extern "C" int hip_matmul_nbits_dp4a_group(
     void* stream_v, const void* a_qb_v, const void* a_scale_v, int nseg,
     const void* const* B, const void* const* scales,
@@ -3333,9 +3350,9 @@ extern "C" int hip_matmul_nbits_dp4a_group(
     // A config miss sweeps the widest segment's single GEMV once, writing its
     // output buffer, which the group launch below then overwrites. With the
     // SiLU epilogue that is gate's buffer, the group's own output.
-    const int cfg = getOrTuneDp4aConfig(
+    const int cfg = dp4aGroupConfigFor(getOrTuneDp4aConfig(
         stream, a_qb, a_sc, g.B[widest], g.scales[widest], g.zp[widest],
-        nullptr, g.out[widest], g.N[widest], K, block_size);
+        nullptr, g.out[widest], g.N[widest], K, block_size));
 
     (void)hipGetLastError();
     if (silu && has_zp)
