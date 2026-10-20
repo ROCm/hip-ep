@@ -66,6 +66,15 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    // Provider option first; the env var serves tools that cannot set one.
+    std::string use_corelib =
+        ctx->get_provider_option("use_ryzenai_corelib", "");
+    if (use_corelib.empty()) {
+      if (const char *env = std::getenv("HIPEP_USE_RYZENAI_CORELIB"))
+        use_corelib = env;
+    }
+    config.useRyzenAICorelib = use_corelib == "1" || use_corelib == "true";
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -91,7 +100,9 @@ static CompilationConfig load_config(PassContext *ctx) {
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> constants file)"
-                            : " (streaming default)");
+                            : " (streaming default)")
+            << "; useRyzenAICorelib="
+            << (config.useRyzenAICorelib ? "true" : "false");
 
   return config;
 }

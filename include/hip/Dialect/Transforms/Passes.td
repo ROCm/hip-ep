@@ -146,7 +146,17 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
     Lowers HIP dialect operations to LLVM dialect by converting each HIP op
     into calls to the HIP runtime C API (hipCreateHandle, hipblasltMatmul,
     etc.). MemRef operands are unpacked into bare pointers for the C calls.
+
+    With use-ryzenai-corelib, MatMulNBits, RmsNorm and SkipRmsNorm first call
+    a RyzenAI CoreLib (NPU) wrapper and fall back to the GPU wrapper when it
+    reports the shape unsupported.
   }];
+  let options = [
+    Option<"useRyzenAICorelib", "use-ryzenai-corelib", "bool",
+           /*default=*/"false",
+           "Try RyzenAI CoreLib (NPU) before the GPU for MatMulNBits, "
+           "RmsNorm and SkipRmsNorm">
+  ];
   let dependentDialects = [
     "mlir::LLVM::LLVMDialect",
     "mlir::memref::MemRefDialect"

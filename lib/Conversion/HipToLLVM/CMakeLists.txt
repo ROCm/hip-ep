@@ -73,6 +73,7 @@ add_library(HipToLLVM STATIC
   QLinearMatMulLowering.cpp
   QLpNormalizationLowering.cpp
   QSigmoidLowering.cpp
+  RyzenAICorelibLowering.cpp
 )
 
 add_dependencies(HipToLLVM

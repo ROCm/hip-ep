@@ -106,6 +106,7 @@ Tool availability depends on the build configuration; see the platform quick-sta
 - [Plugin authoring](docs/plugin_authoring.md)
 - [Plugin interface design](docs/design/plugin-interface.md)
 - [Custom kernel design](docs/design/custom_kernel_design.md)
+- [RyzenAI CoreLib (NPU) backend](docs/design/ryzenai-corelib-backend.md)
 - [Per-operation profiling](docs/design/per-op-profiling.md)
 - [Remote development workflow](docs/remote-dev-workflow.md)
 

@@ -23,6 +23,8 @@ namespace {
 
 struct ConvertHipToLLVMPass
     : public impl::ConvertHipToLLVMPassBase<ConvertHipToLLVMPass> {
+  using ConvertHipToLLVMPassBase::ConvertHipToLLVMPassBase;
+
   void runOnOperation() override;
 
 private:
@@ -242,7 +244,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateBiasGeluLoweringPatterns(typeConverter, patterns);
   populateFastGeluLoweringPatterns(typeConverter, patterns);
   populateTriluLoweringPatterns(typeConverter, patterns);
-  populateNormLoweringPatterns(typeConverter, patterns);
+  populateNormLoweringPatterns(typeConverter, patterns, useRyzenAICorelib);
   populateGatherLoweringPatterns(typeConverter, patterns);
   populateGatherElementsLoweringPatterns(typeConverter, patterns);
   populateTopKLoweringPatterns(typeConverter, patterns);
@@ -257,7 +259,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateRopeLoweringPatterns(typeConverter, patterns);
   populateGqaLoweringPatterns(typeConverter, patterns);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
-  populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
+  populateMatMulNBitsLoweringPatterns(typeConverter, patterns,
+                                      useRyzenAICorelib);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateQMoEAmdLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);

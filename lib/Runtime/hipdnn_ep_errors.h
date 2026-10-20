@@ -43,6 +43,8 @@ extern "C" {
 // Library errors (-200 to -299)
 #define HIPDNN_EP_ERR_MIOPEN_FAILED -200
 #define HIPDNN_EP_ERR_HIPBLAS_FAILED -201
+// A RyzenAI CoreLib op ran on the host CPU under HIPDNN_EP_STRICT=1.
+#define HIPDNN_EP_ERR_CORELIB_CPU_FALLBACK -202
 
 #ifdef __cplusplus
 }

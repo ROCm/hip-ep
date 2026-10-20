@@ -211,6 +211,13 @@ struct RuntimeState {
   // field is therefore qmoe-owned.
   void *zp_unpack_cache;
 
+  // RyzenAI CoreLib (NPU) session context, created by the native
+  // hipdnn-ep-corelib library on the first wrap_corelib_* call. The runtime
+  // cannot name its type, so the library also sets the destroy callback that
+  // hipdnn_ep_state_cleanup invokes.
+  void *corelib_ctx;
+  void (*corelib_ctx_destroy)(void *);
+
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;

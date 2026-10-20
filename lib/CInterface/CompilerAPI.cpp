@@ -34,6 +34,8 @@ static const char *COMPILER_VERSION = "1.0.0";
 //   constants_file     — externalized weights filename (default
 //                        "constants.bin")
 //   skip_constant_data — skip writing constant bytes (default false)
+//   use_ryzenai_corelib — try RyzenAI CoreLib (NPU) before the GPU for
+//                         MatMulNBits/RmsNorm/SkipRmsNorm (default false)
 //   output_mode        — LLVM_IR (default; OS-portable LLVM IR as .bc,
 //   JIT-loaded
 //                        by the EP) or Native (per-OS .dll/.so linked here and

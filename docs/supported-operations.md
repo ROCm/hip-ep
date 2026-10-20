@@ -90,9 +90,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
 | GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
-| RMSNormalization | Custom HIP kernel |
-| SimplifiedLayerNormalization | Custom HIP kernel |
-| SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
+| RMSNormalization | Custom HIP kernel; optionally RyzenAI CoreLib (NPU)¹ |
+| SimplifiedLayerNormalization | Custom HIP kernel; optionally RyzenAI CoreLib (NPU)¹ |
+| SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused; optionally RyzenAI CoreLib (NPU)¹ |
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
@@ -100,7 +100,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
 | Attention (`com.microsoft`) | Fused QKV split into GroupQueryAttention. Equal Q/K/V sizes may be inferred from a `[H, 3H]` weight. Bidirectional and causal, with static or dynamic batch and sequence. A rank-1 length or rank-2 padding mask becomes an additive attention bias. |
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
-| MatMulNBits (`com.microsoft`) | Custom HIP kernel |
+| MatMulNBits (`com.microsoft`) | Custom HIP kernel; optionally RyzenAI CoreLib (NPU)¹ |
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
@@ -129,6 +129,11 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GlobalAveragePool | Custom HIP kernel |
 | GlobalMaxPool | Custom HIP kernel |
 | GlobalLpPool | Custom HIP kernel |
+
+¹ Opt-in with `HIPEP_USE_RYZENAI_CORELIB=1` (or the `use_ryzenai_corelib`
+provider option) on an AIE4 NPU. Each call falls back to the GPU backend when
+CoreLib cannot run it. See
+[ryzenai-corelib-backend.md](design/ryzenai-corelib-backend.md).
 
 ## Control flow
 
