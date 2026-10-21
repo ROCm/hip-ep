@@ -412,7 +412,6 @@ struct UseOutputAllocatorPass
       }
 
       allocOp.getResult().replaceAllUsesWith(replacement);
-      allocOp.erase();
 
       // After RAUW the returned value's view chain is rooted at allocOutput.
       // Record the ONNX return shape when it is a rank-reduced collapse of the
@@ -420,6 +419,8 @@ struct UseOutputAllocatorPass
       // callback at the returned (ONNX) rank (see stampAbiReshapeAttrs).
       if (allocOutput && retVal)
         stampAbiReshapeAttrs(allocOutput, retVal, builder);
+
+      allocOp.erase();
     }
 
     // Phase 3 -- pass-through outputs. A returned input (or a view of one)
