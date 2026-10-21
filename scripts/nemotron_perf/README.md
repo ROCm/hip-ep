@@ -113,6 +113,25 @@ runs. Memory is sampled whole-device VRAM plus GTT, not exact model storage.
 The published Vulkan reference uses different GGUF quantization and prompt
 generation. It is not a controlled compiler A/B. The gap remains open.
 
+## Optional logits head
+
+The separate head checkpoint adds a GPU matvec for FP16 input and weights.
+It applies only to one row, 2,688 input columns, and 131,072 output columns.
+It uses FP32 accumulation with a four-way split. The split changes the order
+of additions, so this path is not bit-exact against main. It is off by default.
+
+To test it, use `--runtime-dir .nemotron-perf/runtime-checkpoint-head-v1`
+and add `--head-f16-matvec` to the qualified core command above.
+The direct test is `bash scripts/nemotron_perf/test_head_matvec.sh`.
+
+The rebuilt head's short, 2K, and 16K captures match the earlier qualified
+head logits byte for byte. They also match all 48 main top-1 choices.
+The worst relative L2 error was about 0.000070001. This is limited numerical
+evidence, not broad model accuracy certification. Keep this experiment
+separate from the exact core until its accuracy contract is accepted.
+See `.nemotron-perf/checkpoint-source-20261021/head-validation.md` for the
+local evidence paths and binary hashes.
+
 ## Retention
 
 Keep frozen runtimes, raw logs, manifests, numerical comparisons, and

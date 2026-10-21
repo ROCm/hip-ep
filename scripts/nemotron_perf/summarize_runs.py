@@ -44,6 +44,9 @@ def summary(root):
     return {
         "run": str(root),
         "sparse_experts": manifest["sparse_experts"],
+        "head_f16_matvec": enabled(
+            "head_f16_matvec", "HIPDNN_EP_EXPERIMENTAL_HEAD_F16_MATVEC"
+        ),
         "la_f16_state": enabled("la_f16_state", "HIPDNN_EP_EXPERIMENTAL_LA_F16_STATE"),
         "la_compact_heads": enabled(
             "la_compact_heads", "HIPDNN_EP_EXPERIMENTAL_LA_COMPACT_HEADS"

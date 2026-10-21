@@ -98,6 +98,7 @@ set(_kernel_sources
     hip/qmoe_amd_kernel.hip
     hip/routed_experts_kernel.hip
     hip/small_matvec_kernel.hip
+    hip/head_matvec_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip

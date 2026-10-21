@@ -183,6 +183,11 @@ def main():
         help="Enable the experimental sequential-FMA router with register prefetch",
     )
     p.add_argument(
+        "--head-f16-matvec",
+        action="store_true",
+        help="Enable the separate, non-bit-exact FP16 vocabulary matvec experiment",
+    )
+    p.add_argument(
         "--la-f16-state",
         action="store_true",
         help="Fuse FP16 recurrent-state boundary casts into FP32 attention",
@@ -299,6 +304,8 @@ def main():
         env["HIPDNN_MATMUL_AUTOTUNE_MODE"] = args.nbits_autotune_mode
     if args.router_sequential_f32:
         env["HIPDNN_EP_EXPERIMENTAL_SEQUENTIAL_ROUTER_F32"] = "1"
+    if args.head_f16_matvec:
+        env["HIPDNN_EP_EXPERIMENTAL_HEAD_F16_MATVEC"] = "1"
     if args.la_f16_state:
         env["HIPDNN_EP_EXPERIMENTAL_LA_F16_STATE"] = "1"
     if args.la_compact_heads:
@@ -386,6 +393,7 @@ def main():
         },
         "sparse_experts": args.sparse_experts,
         "router_sequential_f32": args.router_sequential_f32,
+        "head_f16_matvec": args.head_f16_matvec,
         "la_f16_state": args.la_f16_state,
         "la_compact_heads": args.la_compact_heads,
         "la_fixed_geometry": args.la_fixed_geometry,
