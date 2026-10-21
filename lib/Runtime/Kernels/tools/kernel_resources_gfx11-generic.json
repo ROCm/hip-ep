@@ -448,6 +448,10 @@
 "_ZN12_GLOBAL__N_130causal_conv_prefill_nlc_kernelIfLi8ELi1ELi1ELi256ELi64EEEvPKT_S3_S3_S3_PS1_S4_iii":[33,0,0,16,653,0,0],
 "_ZN12_GLOBAL__N_131causal_conv_prefill_dynk_kernelI6__halfLi256EEEvPKT_S4_S4_S4_PS2_S5_iiiiii":[9,0,0,16,286,3,12],
 "_ZN12_GLOBAL__N_131causal_conv_prefill_dynk_kernelIfLi256EEEvPKT_S3_S3_S3_PS1_S4_iiiiii":[9,0,0,16,277,3,12],
+"_ZN12_GLOBAL__N_132causal_conv_nlc_state_out_kernelI6__halfEEvPKT_S4_S4_S4_PS2_iiiii":[9,0,0,16,197,0,0],
+"_ZN12_GLOBAL__N_132causal_conv_nlc_state_out_kernelIfEEvPKT_S3_S3_S3_PS1_iiiii":[9,0,0,16,195,0,0],
+"_ZN12_GLOBAL__N_134causal_conv_nlc_state_carry_kernelI6__halfEEvPKT_S4_PS2_iii":[7,0,0,16,89,0,0],
+"_ZN12_GLOBAL__N_134causal_conv_nlc_state_carry_kernelIfEEvPKT_S3_PS1_iii":[6,0,0,16,89,0,0],
 "_ZN12_GLOBAL__N_135causal_conv_prefill_nlc_dynk_kernelI6__halfEEvPKT_S4_S4_S4_PS2_S5_iiiiiiii":[19,0,0,16,316,1,4],
 "_ZN12_GLOBAL__N_135causal_conv_prefill_nlc_dynk_kernelIfEEvPKT_S3_S3_S3_PS1_S4_iiiiiiii":[19,0,0,16,310,1,4]
 },

@@ -71,6 +71,36 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
           ? rewriter.getI64IntegerAttr(ndimAttrOnnx.getValue().getSExtValue())
           : rewriter.getI64IntegerAttr(1);
 
+  auto getIntAttr = [&](llvm::StringRef name, int64_t dflt) -> int64_t {
+    auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+    return attr ? attr.getValue().getSExtValue() : dflt;
+  };
+  int64_t channelsLast = getIntAttr("channels_last", 0);
+  int64_t dilation = getIntAttr("dilation", 1);
+  if (getIntAttr("state_window", 0) != 0) {
+    return rewriter.notifyMatchFailure(op, "state_window > 0 is unsupported");
+  }
+  if (dilation < 1) {
+    return rewriter.notifyMatchFailure(op, "dilation must be at least 1");
+  }
+  if (!channelsLast && dilation != 1) {
+    return rewriter.notifyMatchFailure(
+        op, "dilation > 1 is only supported with channels_last = 1");
+  }
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType) {
+    return rewriter.notifyMatchFailure(op, "input must be ranked");
+  }
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32()) {
+    return rewriter.notifyMatchFailure(op, "only f16 and f32 are supported");
+  }
+  if (channelsLast && (ndimAttr.getInt() != 1 || inputType.getRank() != 3)) {
+    return rewriter.notifyMatchFailure(
+        op, "channels_last = 1 is only supported for rank-3 (B, L, C) input");
+  }
+
   // Outputs: output (same shape as input), present_state
   size_t numResults = op->getNumResults();
   if (numResults != 2)
@@ -103,6 +133,14 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   mlir::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("activation", activationAttr));
   attrs.push_back(rewriter.getNamedAttr("ndim", ndimAttr));
+  if (channelsLast) {
+    attrs.push_back(
+        rewriter.getNamedAttr("channels_last", rewriter.getBoolAttr(true)));
+    attrs.push_back(rewriter.getNamedAttr("state_channels_last",
+                                          rewriter.getBoolAttr(true)));
+    attrs.push_back(rewriter.getNamedAttr(
+        "dilation", rewriter.getI64IntegerAttr(dilation)));
+  }
 
   // Build result types
   mlir::SmallVector<mlir::Type> resultTypes;

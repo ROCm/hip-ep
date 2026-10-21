@@ -13,6 +13,10 @@
 // 4. causal_conv_no_activation           — different shape, activation=none
 // 5. causal_conv_dynamic                 — dynamic batch + seq_len (LLM decode)
 // 6. causal_conv_dynamic_no_past_state   — dynamic input with no past_state
+// 7. causal_conv_channels_last_dilated   — channels_last=1, dilation=3
+// 8. causal_conv_state_window            — rejected
+// 9. causal_conv_dilated_channels_first  — rejected
+// 10. causal_conv_bf16                   — rejected
 //
 // All static cases assert:
 // - context argument prepended
@@ -193,4 +197,84 @@ module {
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
   // CHECK: hip.causal_conv_with_state(%[[CTX6]]) ins(%[[IN6]], %[[W6]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>)
   // CHECK-NOT: hip.alloc
+
+  func.func @causal_conv_channels_last_dilated(
+      %input: tensor<?x?x64xf16>,
+      %weight: tensor<64x1x4xf16>,
+      %past_state: tensor<?x9x64xf16>
+  ) -> (tensor<?x?x64xf16>, tensor<?x9x64xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %past_state) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      activation = "silu",
+      channels_last = 1 : si64,
+      dilation = 3 : si64,
+      ndim = 1 : si64,
+      state_window = 0 : si64
+    } : (tensor<?x?x64xf16>, tensor<64x1x4xf16>, none, tensor<?x9x64xf16>)
+      -> (tensor<?x?x64xf16>, tensor<?x9x64xf16>)
+    return %output, %present_state : tensor<?x?x64xf16>, tensor<?x9x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_channels_last_dilated
+  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}} : tensor<?x?x64xf16>, tensor<64x1x4xf16>, tensor<?x9x64xf16>) outs({{.*}} : tensor<?x?x64xf16>, tensor<?x9x64xf16>) {activation = "silu", channels_last = true, dilation = 3 : i64, state_channels_last = true}
+
+  func.func @causal_conv_state_window(
+      %input: tensor<1x64x8xf16>,
+      %weight: tensor<64x1x4xf16>,
+      %past_state: tensor<2x1x64x3xf16>
+  ) -> (tensor<1x64x8xf16>, tensor<2x1x64x3xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %past_state) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      ndim = 1 : si64,
+      state_window = 2 : si64
+    } : (tensor<1x64x8xf16>, tensor<64x1x4xf16>, none, tensor<2x1x64x3xf16>)
+      -> (tensor<1x64x8xf16>, tensor<2x1x64x3xf16>)
+    return %output, %present_state : tensor<1x64x8xf16>, tensor<2x1x64x3xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_state_window
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: onnx.Custom
+
+  func.func @causal_conv_dilated_channels_first(
+      %input: tensor<1x64x8xf16>,
+      %weight: tensor<64x1x4xf16>,
+      %past_state: tensor<1x64x6xf16>
+  ) -> (tensor<1x64x8xf16>, tensor<1x64x6xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %past_state) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      dilation = 2 : si64,
+      ndim = 1 : si64
+    } : (tensor<1x64x8xf16>, tensor<64x1x4xf16>, none, tensor<1x64x6xf16>)
+      -> (tensor<1x64x8xf16>, tensor<1x64x6xf16>)
+    return %output, %present_state : tensor<1x64x8xf16>, tensor<1x64x6xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_dilated_channels_first
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: onnx.Custom
+
+  func.func @causal_conv_bf16(
+      %input: tensor<1x64x8xbf16>,
+      %weight: tensor<64x1x4xbf16>
+  ) -> (tensor<1x64x8xbf16>, tensor<1x64x3xbf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %none) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      ndim = 1 : si64
+    } : (tensor<1x64x8xbf16>, tensor<64x1x4xbf16>, none, none)
+      -> (tensor<1x64x8xbf16>, tensor<1x64x3xbf16>)
+    return %output, %present_state : tensor<1x64x8xbf16>, tensor<1x64x3xbf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_bf16
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: onnx.Custom
 }

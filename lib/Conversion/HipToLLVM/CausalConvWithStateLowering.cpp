@@ -17,7 +17,8 @@ namespace {
 //                                 output, present_state,
 //                                 batch_size, channels, seq_len,
 //                                 kernel_size, ndim, activation,
-//                                 element_size_bytes, channels_last)
+//                                 element_size_bytes, channels_last,
+//                                 dilation, state_channels_last)
 struct CausalConvWithStateOpLowering
     : public ConvertOpToLLVMPattern<CausalConvWithStateOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -71,6 +72,14 @@ struct CausalConvWithStateOpLowering
       return op.emitError("input must be at least rank-3");
     if (channelsLast && rank != 3)
       return op.emitError("channels_last requires a rank-3 input (ndim=1)");
+    bool stateChannelsLast = op.getStateChannelsLast();
+    int64_t dilation = op.getDilation();
+    if (stateChannelsLast && !channelsLast) {
+      return op.emitError("state_channels_last requires channels_last");
+    }
+    if (dilation < 1 || (dilation != 1 && !stateChannelsLast)) {
+      return op.emitError("dilation > 1 requires state_channels_last");
+    }
 
     Value batchSize =
         getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
@@ -117,9 +126,11 @@ struct CausalConvWithStateOpLowering
     Value elemSizeVal = createI64Const(elemSizeBytes);
 
     Value channelsLastVal = createI64Const(channelsLast ? 1 : 0);
+    Value dilationVal = createI64Const(dilation);
+    Value stateChannelsLastVal = createI64Const(stateChannelsLast ? 1 : 0);
 
     // Build function signature
-    SmallVector<Type, 16> paramTypes = {
+    SmallVector<Type, 18> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // input
@@ -135,7 +146,9 @@ struct CausalConvWithStateOpLowering
         i64Type, // ndim
         i64Type, // activation
         i64Type, // element_size_bytes
-        i64Type  // channels_last
+        i64Type, // channels_last
+        i64Type, // dilation
+        i64Type  // state_channels_last
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -143,7 +156,7 @@ struct CausalConvWithStateOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 16> args = {
+    SmallVector<Value, 18> args = {
         statePtr,    getOpStateSlotValue(op, rewriter, loc),
         inputPtr,    weightPtr,
         biasPtr,     pastStatePtr,
@@ -151,7 +164,8 @@ struct CausalConvWithStateOpLowering
         batchSize,   channels,
         seqLen,      kernelSizeVal,
         ndimVal,     activationVal,
-        elemSizeVal, channelsLastVal};
+        elemSizeVal, channelsLastVal,
+        dilationVal, stateChannelsLastVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

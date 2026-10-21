@@ -1742,7 +1742,12 @@ int wrap_causal_conv_with_state(
     // 0=channels-first, 1=channels-last. Permutes input and output only: the
     // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
-    int64_t channels_last);
+    int64_t channels_last,
+    // Tap spacing; the state then holds (kernel_size - 1) * dilation
+    // positions. Values > 1 require state_channels_last.
+    int64_t dilation,
+    // 1 = carry state is (batch, state_len, channels). Requires channels_last.
+    int64_t state_channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

@@ -3759,15 +3759,22 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `channels_last` is set, in which case 1D input is (batch_size, seq_len,
     channels). Weight layout: (channels, 1, k_1, ...) for depthwise
     convolution. The carry state stores the last (k-1) positions along the
-    causal axis for incremental decode, and is (batch, channels, k-1) in both
-    layouts -- only input and output are permuted, so a layout change never
-    invalidates a carried state.
+    causal axis for incremental decode, and is (batch, channels, k-1) under
+    either `channels_last` setting -- only input and output are permuted, so
+    that layout change never invalidates a carried state.
 
     `channels_last` exists because the surrounding graph is channels-last: a
     channels-first convolution has to be bracketed by a Transpose pair, and at
     the Qwen3.6 footprint that pair costs more than the convolution it serves.
     The canonicalizer sets the attribute while absorbing both Transposes.
     Only ndim=1 is supported channels-last.
+
+    `state_channels_last` additionally moves the carry state to (batch,
+    state_len, channels), the ONNX `channels_last = 1` layout. It requires
+    `channels_last`. `dilation` spaces the kernel taps along the sequence axis:
+    tap j of output t reads position t - (k-1-j) * dilation, and the carry
+    state holds state_len = (k-1) * dilation positions. `dilation` > 1 requires
+    `state_channels_last`.
 
     Example (1D):
     ```mlir
@@ -3799,7 +3806,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
     DefaultValuedAttr<I64Attr, "1">:$ndim,               // 1, 2, or 3
-    DefaultValuedAttr<BoolAttr, "false">:$channels_last  // input/output (B, L, C)
+    DefaultValuedAttr<BoolAttr, "false">:$channels_last,  // input/output (B, L, C)
+    DefaultValuedAttr<I64Attr, "1">:$dilation,
+    DefaultValuedAttr<BoolAttr, "false">:$state_channels_last  // state (B, S, C)
   );
 
   let assemblyFormat = [{
