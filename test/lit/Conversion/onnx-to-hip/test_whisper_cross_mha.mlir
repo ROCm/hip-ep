@@ -96,8 +96,8 @@ module {
     // present = concat(past, this step) (447 + 1 = 448) → causal hip.gqa
     // (onnxruntime-genai's unshared self-attention), seqlens_k = P + S - 1.
     // CHECK: arith.addi
-    // CHECK: hip.gqa
-    // CHECK-SAME: past_key
+    // Positional operands: query, key, value, past_key, past_value, seqlens_k, total.
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}} :
     // CHECK-NOT: no_causal = true
     // CHECK-NOT: hip.multi_head_attention
 
