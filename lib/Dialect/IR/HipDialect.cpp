@@ -2254,6 +2254,12 @@ LogicalResult NGramHashMappingOp::verify() {
   if (!elem.isSignlessInteger(32) && !elem.isSignlessInteger(64)) {
     return emitOpError("input_ids must be i32 or i64, got ") << elem;
   }
+  const auto padId = static_cast<int64_t>(getPadId());
+  if (elem.isSignlessInteger(32) &&
+      (padId < std::numeric_limits<int32_t>::min() ||
+       padId > std::numeric_limits<int32_t>::max())) {
+    return emitOpError("pad_id ") << padId << " does not fit in i32";
+  }
   if (ids.getRank() != 2) {
     return emitOpError("input_ids must be rank 2, got rank ") << ids.getRank();
   }

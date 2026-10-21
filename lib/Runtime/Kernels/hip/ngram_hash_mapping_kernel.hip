@@ -111,7 +111,7 @@ template <typename T>
 __global__ void ngram_present_kernel(const T *ids, const T *past, const T *eos,
                                      T *present, int64_t seq, int64_t hist,
                                      T pad) {
-  extern __shared__ unsigned char smem[];
+  extern __shared__ __align__(sizeof(int64_t)) unsigned char smem[];
   T *row = reinterpret_cast<T *>(smem);
   const int64_t b = blockIdx.x;
   const T fill = eos ? *eos : pad;
