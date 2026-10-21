@@ -329,6 +329,8 @@ void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populateMatMulBnb4ConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,
@@ -369,6 +371,8 @@ void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
                                                 MLIRContext *ctx);
+void populateArgMaxConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
@@ -377,6 +381,8 @@ void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
+void populateNGramHashMappingConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateWhereConversionPatterns(RewritePatternSet &patterns,
@@ -496,6 +502,8 @@ void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
+void populateSpaceToDepthConversionPatterns(RewritePatternSet &patterns,
                                             MLIRContext *ctx);
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,

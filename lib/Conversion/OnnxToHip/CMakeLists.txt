@@ -25,6 +25,7 @@ add_library(OnnxToHip STATIC
   ReduceMeanConversion.cpp
   ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
+  MatMulBnb4Conversion.cpp
   QMoEConversion.cpp
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
@@ -43,6 +44,7 @@ add_library(OnnxToHip STATIC
   GatherElementsConversion.cpp
   TopKConversion.cpp
   RandomNormalLikeConversion.cpp
+  ArgMaxConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
@@ -56,6 +58,7 @@ add_library(OnnxToHip STATIC
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
+  NGramHashMappingConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
@@ -112,6 +115,7 @@ add_library(OnnxToHip STATIC
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   DepthToSpaceConversion.cpp
+  SpaceToDepthConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp

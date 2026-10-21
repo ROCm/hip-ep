@@ -385,8 +385,9 @@ HIP_KERNEL_API int hip_qlinear_conv(
  *                    / y_scale) + y_zp)
  *
  * a is [M, K], b is [K, N], y is [M, N]. Distinct from hip_qmatmul, which is
- * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. Scales and
- * zero points are per-tensor. Returns 0 on success.
+ * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. A's and Y's
+ * scales and zero points are per-tensor. b_scale_count and b_zp_count are 1,
+ * or N for one value per output column. Returns 0 on success.
  */
 HIP_KERNEL_API int hip_qlinear_matmul(
     void* stream,
@@ -404,7 +405,9 @@ HIP_KERNEL_API int hip_qlinear_matmul(
     int64_t n,
     int a_dtype,
     int b_dtype,
-    int y_dtype);
+    int y_dtype,
+    int64_t b_scale_count,
+    int64_t b_zp_count);
 
 /* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)
@@ -1459,6 +1462,14 @@ HIP_KERNEL_API int hip_random_normal_like(void* stream, void* output,
                                           float mean, float scale,
                                           uint64_t seed, int hip_dtype);
 
+// Index of the maximum along `axis`. `data_shape` is the input shape (dynamic
+// dims included). Indices are i64. `hip_dtype` is hip_dtype_t so i32 is not
+// compared as float. Output is one index per slice, contiguous.
+HIP_KERNEL_API int hip_arg_max(void* stream, const void* data, void* indices,
+                               int64_t axis, int64_t select_last_index,
+                               int64_t rank, const int64_t* data_shape,
+                               int hip_dtype);
+
 HIP_KERNEL_API int hip_scatter_elements(
     void* stream,
     const void* data,
@@ -1507,6 +1518,28 @@ HIP_KERNEL_API int hip_one_hot(
     int64_t depth_scalar,
     int element_size_bytes,
     int indices_element_size_bytes);
+
+/* com.microsoft NGramHashMapping. T = int32 / int64 (element_size_bytes 4 /
+ * 8) for every pointer except segment_ids. past_ids, head_offsets,
+ * eos_token_id, segment_ids and present_ids may be null. */
+HIP_KERNEL_API int hip_ngram_hash_mapping(
+    void* stream,
+    const void* input_ids,
+    const void* multipliers,
+    const void* vocab_sizes,
+    const void* past_ids,
+    const void* head_offsets,
+    const void* eos_token_id,
+    const int32_t* segment_ids,
+    void* hash_ids,
+    void* present_ids,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t max_ngram_size,
+    int64_t n_head_per_ngram,
+    int64_t pad_id,
+    int64_t reset_on_eos,
+    int element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
@@ -1661,7 +1694,8 @@ HIP_KERNEL_API int hip_pool(
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64 for every mode. HIP_DTYPE_INT8 and
+ * HIP_DTYPE_UINT8 are nearest only (index copy, no interpolation).
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(
@@ -2154,6 +2188,53 @@ HIP_KERNEL_API int hip_rms_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * Gated RMS Normalization (com.microsoft GatedRMSNorm)
+ * =========================================================================
+ *
+ *   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+ *
+ * input / gate / output are [outer, norm_size]; scale is [norm_size].
+ * `activation`: 0 = sigmoid(z), 1 = SiLU z * sigmoid(z). FP32 math, one
+ * rounding to the I/O type. `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_gated_rms_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* gate,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * Engram gate (com.microsoft EngramGate)
+ * =========================================================================
+ *
+ * key / query / output / normed: [rows, hidden] with rows = B * S * hc;
+ * value: [rows / hc, hidden]; scales: [hc, hidden]. Row r uses scale row
+ * r % hc and value row r / hc. conv_scale and normed may both be null.
+ * `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_engram_gate(
+    void* stream,
+    const void* key,
+    const void* query,
+    const void* value,
+    const void* key_scale,
+    const void* query_scale,
+    const void* conv_scale,
+    void* output,
+    void* normed,
+    int64_t rows,
+    int64_t hc,
+    int64_t hidden,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
  *
@@ -2350,6 +2431,18 @@ HIP_KERNEL_API int hip_matmul_nbits(
     // by the WMMA / col-major-GEMV (M>1) paths and may be null otherwise.
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
+
+// Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+HIP_KERNEL_API int hip_dequant_bnb4(
+    void* stream,
+    const void* packed,
+    const void* absmax,
+    void* output,
+    int64_t n,
+    int64_t k,
+    int64_t block_size,
+    int64_t quant_type);
 
 /* Hands the session's matmul_autotune_mode option ("lookup" resolves the
  * offline LUT, "online" always sweeps; null when absent) to the autotune.

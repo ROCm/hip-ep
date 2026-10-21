@@ -8,7 +8,8 @@ Licensed under the MIT License.
 This branch is for controlled accuracy and performance comparisons.
 The sparse-expert and optional logits-head paths are not ready for production.
 
-This local development branch starts at main revision `04f1c0365`.
+This branch started at main revision `04f1c0365` and now includes main
+through `c1fd28860`. The earlier measurements below used the original base.
 It is separate from the shape-inference PR stack.
 CPU fallback is prohibited. Do not run llama.cpp for these checks.
 

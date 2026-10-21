@@ -119,6 +119,25 @@ public:
     }
     operands = std::move(kernelOperands);
 
+    // A bitsandbytes dequant that feeds only this anchor belongs in the same
+    // rock kernel. HipToTosa turns it into a nibble lookup and a multiply, and
+    // the matmul into tosa.matmul. A dynamic activation never reaches this
+    // pattern, so that case stays a HIP dequant plus hipBLASLt.
+    SmallVector<Value> dequantResults;
+    for (Value operand : operands) {
+      auto dequant = operand.getDefiningOp<DequantBnb4Op>();
+      if (!dequant || !dequant->hasOneUse())
+        continue;
+      dequantResults.push_back(operand);
+    }
+    for (Value value : dequantResults) {
+      auto dequant = value.getDefiningOp<DequantBnb4Op>();
+      ops.insert(dequant);
+      operands.remove(value);
+      operands.insert(dequant.getPacked());
+      operands.insert(dequant.getAbsmax());
+    }
+
     // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
     // has to resolve inside that func. The DPS inputs above cover the data,
     // but they do not cover what the inits are built from: an init is only a

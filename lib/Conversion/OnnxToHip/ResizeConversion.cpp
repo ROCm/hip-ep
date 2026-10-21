@@ -31,6 +31,8 @@ namespace {
 //   * keep_aspect_ratio_policy = "stretch"           (default)
 //   * roi must be absent / NoValue                   (no tf_crop_and_resize)
 //   * rank in [3, 5], input and output ranks equal
+//   * matching float types, or matching int8/uint8 when mode is nearest.
+//     Nearest copies samples. Linear on integer codes is rejected.
 //
 // The runtime kernel is unchanged: a copied prefix of at most two axes and a
 // trailing window of at most three.  Channels-first `1x3x16x16 -> 1x3x32x32`
@@ -279,10 +281,14 @@ struct ResizeToHip : public mlir::RewritePattern {
     if (rank < 3 || rank > 5 || rank != outputType.getRank())
       return rewriter.notifyMatchFailure(
           op, "Resize requires rank in [3, 5] and matching in/out ranks");
-    if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
-        inputType.getElementType() != outputType.getElementType())
+    mlir::Type elemType = inputType.getElementType();
+    bool floatElem = mlir::isa<mlir::FloatType>(elemType);
+    // Signless i8, signed si8, and unsigned ui8. Nearest is an index copy.
+    bool int8Elem = elemType.isInteger(8);
+    if ((!floatElem && !int8Elem) || elemType != outputType.getElementType())
       return rewriter.notifyMatchFailure(
-          op, "Resize runtime supports only matching float types");
+          op, "Resize runtime supports matching float types, or matching "
+              "int8/uint8");
 
     // Channels-last rank 4 fits the existing kernel: the batch is the prefix,
     // and (H, W, C) is the trailing window.  See planHipResizeLaunch. A
@@ -309,6 +315,9 @@ struct ResizeToHip : public mlir::RewritePattern {
     else
       return rewriter.notifyMatchFailure(op, "Resize mode must be "
                                              "'nearest' or 'linear'");
+    if (int8Elem && modeId != 0)
+      return rewriter.notifyMatchFailure(
+          op, "Resize int8/uint8 supports nearest only");
 
     std::string ct = getStrAttr("coordinate_transformation_mode", "half_pixel");
     int64_t coordId;
