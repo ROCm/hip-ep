@@ -197,20 +197,22 @@ class TestQLinearGlobalAveragePool:
 
 class TestQLinearLeakyRelu:
     @pytest.mark.parametrize(
-        "dtype,zp_dtype,low,high",
+        "dtype,zp_dtype,x_zp,y_zp,samples",
         [
-            (TensorProto.INT8, np.int8, -20, 20),
-            (TensorProto.UINT8, np.uint8, 0, 40),
+            (TensorProto.INT8, np.int8, 10, 1, [-10, 10, 30]),
+            # x=0 is below zp 20. alpha 0.1 quantizes it to 16; ReLU would
+            # yield 20. y_zp 20 keeps that negative slope inside uint8.
+            (TensorProto.UINT8, np.uint8, 20, 20, [0, 20, 40]),
         ],
     )
-    def test_negative_slope(self, model_runner, dtype, zp_dtype, low, high):
-        X = helper.make_tensor_value_info("X", dtype, [8])
-        Y = helper.make_tensor_value_info("Y", dtype, [8])
+    def test_negative_slope(self, model_runner, dtype, zp_dtype, x_zp, y_zp, samples):
+        X = helper.make_tensor_value_info("X", dtype, [3])
+        Y = helper.make_tensor_value_info("Y", dtype, [3])
         inits = [
             _init("X_scale", 0.5, np.float32),
-            _init("X_zp", 0, zp_dtype),
+            _init("X_zp", x_zp, zp_dtype),
             _init("Y_scale", 0.25, np.float32),
-            _init("Y_zp", 1, zp_dtype),
+            _init("Y_zp", y_zp, zp_dtype),
         ]
         node = helper.make_node(
             "QLinearLeakyRelu",
@@ -220,7 +222,6 @@ class TestQLinearLeakyRelu:
             alpha=0.1,
         )
         model = _model([node], [X], [Y], inits)
-        rng = np.random.default_rng(11)
-        x = rng.integers(low, high, 8, dtype=zp_dtype)
+        x = np.array(samples, dtype=zp_dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1)

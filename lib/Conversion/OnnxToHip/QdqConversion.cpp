@@ -517,9 +517,14 @@ struct QLinearLeakyReluToQdq : public mlir::RewritePattern {
     auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
     if (!domainAttr || domainAttr.getValue() != "com.microsoft")
       return rewriter.notifyMatchFailure(op, "not com.microsoft");
-    if (op->getNumResults() != 1 || op->getNumOperands() != 5)
+    // Schema min_input is 4: the trailing Y_zero_point may be omitted.
+    // realOperand returns null for that missing operand, and emitQuantize
+    // leaves it off the QuantizeLinear.
+    if (op->getNumResults() != 1 || op->getNumOperands() < 4 ||
+        op->getNumOperands() > 5)
       return rewriter.notifyMatchFailure(
-          op, "expected X, x_scale, x_zero_point, y_scale, y_zero_point");
+          op, "expected X, x_scale, x_zero_point, y_scale, optional "
+              "y_zero_point");
 
     mlir::Value x = realOperand(op, 0);
     mlir::Value xScale = realOperand(op, 1);

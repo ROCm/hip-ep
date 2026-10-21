@@ -191,4 +191,21 @@ module {
     // CHECK: hip.quantize_linear
     return %y : tensor<1x8xi8>
   }
+
+  // Trailing Y_zero_point is optional. QuantizeLinear is emitted without it.
+  func.func @qlinear_leaky_relu_no_y_zp(%x: tensor<1x8xi8>) -> tensor<1x8xi8> {
+    // CHECK-LABEL: func.func @qlinear_leaky_relu_no_y_zp
+    %x_scale = "onnx.Constant"() {value = dense<0.5> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<0> : tensor<i8>} : () -> tensor<i8>
+    %y_scale = "onnx.Constant"() {value = dense<0.25> : tensor<f32>} : () -> tensor<f32>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale) {
+      alpha = 0.25 : f32, domain_name = "com.microsoft", function_name = "QLinearLeakyRelu"
+    } : (tensor<1x8xi8>, tensor<f32>, tensor<i8>, tensor<f32>) -> tensor<1x8xi8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.dequantize_linear
+    // CHECK: hip.leaky_relu
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x8xi8>
+  }
 }
