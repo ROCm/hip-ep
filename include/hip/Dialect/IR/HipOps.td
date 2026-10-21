@@ -5161,7 +5161,9 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     `(N, C, H, W)` uses that prefix and window `(H, W)`.  Channels-last
     `(N, H, W, C)` uses prefix `(N)`, an empty channel slot, and window
     `(H, W, C)`; the channel extent is unchanged, so that axis is copied.
-    Rank is 3, 4, or 5.
+    Rank is 3, 4, or 5. Element type is f16, bf16, f32, or f64. Nearest also
+    accepts matching i8 or ui8; linear does not, because interpolating integer
+    codes is not a dequantized resize.
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
