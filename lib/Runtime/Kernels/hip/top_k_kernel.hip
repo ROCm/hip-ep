@@ -138,6 +138,81 @@ __global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
   topk_row(data, values, indices, geom, row_id, largest, sorted);
 }
 
+// Small last-axis rows use one cooperative block, not one serial thread.
+// Equal values select the lower index. Keep the serial path's NaN behavior.
+__global__ void top_k_small_f32(const float *data, float *values,
+                              int64_t *indices, int width, int k, bool largest) {
+  constexpr int threads = 128;
+  const int row = blockIdx.x, tid = threadIdx.x;
+  const float *input = data + static_cast<int64_t>(row) * width;
+  float local[2];
+  bool used[2];
+#pragma unroll
+  for (int part = 0; part < 2; ++part) {
+    const int index = tid + part * threads;
+    used[part] = index >= width;
+    local[part] = used[part] ? 0.0f : input[index];
+  }
+  __shared__ float waveValue[4];
+  __shared__ int waveIndex[4], waveFirst[4], selected;
+  for (int pick = 0; pick < k; ++pick) {
+    int first = 256, best = 256;
+    float value = 0.0f;
+#pragma unroll
+    for (int part = 0; part < 2; ++part) {
+      const int index = tid + part * threads;
+      if (!used[part]) {
+        first = min(first, index);
+        if (!isnan(local[part]) && (best == 256 ||
+            (largest ? local[part] > value : local[part] < value))) {
+          best = index;
+          value = local[part];
+        }
+      }
+    }
+    for (int offset = warpSize / 2; offset; offset /= 2) {
+      const float otherValue = __shfl_down(value, offset);
+      const int otherIndex = __shfl_down(best, offset);
+      first = min(first, __shfl_down(first, offset));
+      if (otherIndex < 256 && (best == 256 ||
+          (largest ? otherValue > value : otherValue < value) ||
+          (otherValue == value && otherIndex < best))) {
+        best = otherIndex;
+        value = otherValue;
+      }
+    }
+    if (tid % warpSize == 0) {
+      waveValue[tid / warpSize] = value;
+      waveIndex[tid / warpSize] = best;
+      waveFirst[tid / warpSize] = first;
+    }
+    __syncthreads();
+    if (tid == 0) {
+      best = 256;
+      first = 256;
+      for (int wave = 0; wave < threads / warpSize; ++wave) {
+        first = min(first, waveFirst[wave]);
+        const int index = waveIndex[wave];
+        const float candidate = waveValue[wave];
+        if (index < 256 && (best == 256 ||
+            (largest ? candidate > value : candidate < value) ||
+            (candidate == value && index < best))) {
+          best = index;
+          value = candidate;
+        }
+      }
+      // The serial search starts at the first unused index. A NaN there wins.
+      selected = isnan(input[first]) ? first : best;
+      values[static_cast<int64_t>(row) * k + pick] = input[selected];
+      indices[static_cast<int64_t>(row) * k + pick] = selected;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int part = 0; part < 2; ++part)
+      used[part] = used[part] || tid + part * threads == selected;
+  }
+}
+
 template <typename T>
 static int launch_top_k(void *stream, const void *data, void *values,
                         void *indices, const TopKGeom &geom, int largest,
@@ -226,6 +301,17 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
       (long long)geom.axis, (long long)geom.k, (long long)rank,
       (long long)geom.num_rows, (long long)geom.axis_size,
       element_size_bytes);
+
+  if (element_size_bytes == 4 && geom.axis == rank - 1 &&
+      geom.axis_size >= 1 && geom.axis_size <= 256 && k_eff <= 16 &&
+      geom.num_rows > 0 && geom.num_rows <= 65535) {
+    hipLaunchKernelGGL(top_k_small_f32, dim3(geom.num_rows), dim3(128), 0,
+                      static_cast<hipStream_t>(stream),
+                      static_cast<const float *>(data), static_cast<float *>(values),
+                      static_cast<int64_t *>(indices), int(geom.axis_size), int(k_eff),
+                      largest != 0);
+    return hipGetLastError();
+  }
 
   switch (element_size_bytes) {
   case 2:

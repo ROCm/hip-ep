@@ -260,6 +260,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateQMoEAmdLoweringPatterns(typeConverter, patterns);
+  populateRoutedExpertsLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
   populateQdqLoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);

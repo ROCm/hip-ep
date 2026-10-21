@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
@@ -25,6 +26,62 @@ static constexpr int64_t kUpdateRuleLinear = 0;
 static constexpr int64_t kUpdateRuleGated = 1;
 static constexpr int64_t kUpdateRuleDelta = 2;
 static constexpr int64_t kUpdateRuleGatedDelta = 3;
+
+extern "C" int wrap_linear_attention_f16_state(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_state, const void *decay, const void *beta, void *output,
+    void *present_state, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
+    int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
+    int64_t dk, int64_t dv, int64_t type) {
+  OP_PROFILE(
+      "linear_attention_f16_state", [&] { return std::string(); }, state);
+  if (!state || !query || !key || !value || !past_state || !present_state ||
+      !output || type != HIPDNN_EP_DATATYPE_FLOAT || B <= 0 || Hq <= 0 ||
+      Hkv <= 0 || Nk <= 0 || dk <= 0 || dv <= 0 || seq_len <= 0 ||
+      update_rule < 0 || update_rule > 3 ||
+      ((update_rule == 1 || update_rule == 3) && !decay) ||
+      (update_rule >= 2 && !beta))
+    return -1;
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream)
+    return -1;
+  if (scale == 0.0f)
+    scale = 1.0f / sqrtf((float)dk);
+  if (seq_len == 1) {
+    int rc = hip_linear_attention_decode_f16_state(
+        stream, query, key, value, decay, beta, past_state, present_state,
+        output, B, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
+        beta_per_head);
+    if (rc <= 0)
+      return rc;
+  }
+
+  // Preserve FP32 state between prefill tokens. Convert only at invocation
+  // boundaries. Reuse the original GPU path when fused decode declines.
+  size_t count = 1;
+  for (int64_t dim : {B, Hkv, dk, dv}) {
+    if (static_cast<uint64_t>(dim) >
+        std::numeric_limits<size_t>::max() / sizeof(float) / count)
+      return -1;
+    count *= dim;
+  }
+  void *scratch =
+      hipdnn_ep_state_get_la_state_scratch(state, count * sizeof(float));
+  if (!scratch)
+    return -1;
+  if (hip_cast(stream, past_state, scratch, count, HIP_DTYPE_FLOAT16,
+               HIP_DTYPE_FLOAT32) != 0)
+    return -1;
+  int rc = wrap_linear_attention(
+      state, query, key, value, scratch, decay, beta, output, scratch, Hq, Hkv,
+      Nk, decay_per_key_dim, beta_per_head, scale, chunk_size, update_rule, B,
+      seq_len, dk, dv, type);
+  if (rc != 0)
+    return rc;
+  return hip_cast(stream, scratch, present_state, count, HIP_DTYPE_FLOAT32,
+                  HIP_DTYPE_FLOAT16);
+}
 
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,

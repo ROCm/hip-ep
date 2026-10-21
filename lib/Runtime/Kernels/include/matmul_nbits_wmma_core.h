@@ -90,7 +90,8 @@ template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
           bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
           int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
           bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
-          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false>
+          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
+          bool ZEROS_PACKED = false>
 __device__ __forceinline__
 void GemmFp16U4Impl(
     int M, int N, int K,
@@ -117,6 +118,8 @@ void GemmFp16U4Impl(
     const int32_t* __restrict__ a_row_ids = nullptr,
     const _Float16* __restrict__ output_bias = nullptr)
 {
+    static_assert(!ZEROS_PACKED || (USE_ZEROS && ZEROS_U8 && FUSED_DQ),
+                  "Packed zero points require fused byte-zero dequantization");
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
     constexpr int THR_L  = WM_L * WN_L * 32;
@@ -257,10 +260,12 @@ void GemmFp16U4Impl(
                 if constexpr (RUNTIME_OPTIONAL) {
                     if (zeros)
                         z_src_u8 = static_cast<const uint8_t*>(zeros) +
-                                   static_cast<size_t>(b_n_g) * num_groups_k;
+                                   static_cast<size_t>(b_n_g) *
+                                   (ZEROS_PACKED ? (num_groups_k + 1) / 2 : num_groups_k);
                 } else {
                     z_src_u8 = static_cast<const uint8_t*>(zeros) +
-                               static_cast<size_t>(b_n_g) * num_groups_k;
+                               static_cast<size_t>(b_n_g) *
+                               (ZEROS_PACKED ? (num_groups_k + 1) / 2 : num_groups_k);
                 }
             } else {
                 if constexpr (RUNTIME_OPTIONAL) {
@@ -354,11 +359,17 @@ void GemmFp16U4Impl(
             if constexpr (ZEROS_U8) {
                 if constexpr (RUNTIME_OPTIONAL) {
                     if (z_src_u8) {
-                        zp_u4 = z_src_u8[grp];
+                        if constexpr (ZEROS_PACKED)
+                            zp_u4 = (z_src_u8[grp / 2] >> ((grp & 1) * 4)) & 15;
+                        else
+                            zp_u4 = z_src_u8[grp];
                         zp = static_cast<_Float16>(zp_u4);
                     }
                 } else {
-                    zp_u4 = z_src_u8[grp];
+                    if constexpr (ZEROS_PACKED)
+                        zp_u4 = (z_src_u8[grp / 2] >> ((grp & 1) * 4)) & 15;
+                    else
+                        zp_u4 = z_src_u8[grp];
                     zp = static_cast<_Float16>(zp_u4);
                 }
             } else {

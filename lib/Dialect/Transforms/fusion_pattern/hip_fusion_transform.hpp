@@ -30,7 +30,12 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "hip/debug_log.h"
+#include "linear_attention_head_fusion.hpp"
+#include "linear_attention_state_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
+#include "routed_experts_fusion.hpp"
+#include "swiglu_f32_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -853,6 +858,15 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  // Sparse execution has an explicit finite-inactive-expert contract.
+  if (hip_get_env("HIPDNN_EP_EXPERIMENTAL_SPARSE_EXPERTS") == "1")
+    populateRoutedExpertsPattern(patterns);
+  if (hip_get_env("HIPDNN_EP_EXPERIMENTAL_LA_F16_STATE") == "1")
+    populateLinearAttentionStatePattern(patterns);
+  if (hip_get_env("HIPDNN_EP_EXPERIMENTAL_LA_COMPACT_HEADS") == "1")
+    populateLinearAttentionHeadPattern(patterns);
+  if (hip_get_env("HIPDNN_EP_EXPERIMENTAL_SWIGLU_F32") == "1")
+    populateSwigluF32Pattern(patterns);
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

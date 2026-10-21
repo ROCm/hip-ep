@@ -72,6 +72,20 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     int64_t axisAttr = op.getAxis();
     if (axisAttr < 0)
       axisAttr += rank;
+    if (axisAttr < 0 || axisAttr >= rank)
+      return rewriter.notifyMatchFailure(op, "axis is out of range");
+
+    // A static destination extent is K by the TopK contract. Conversion uses
+    // this same extent to allocate both destinations. Do not read it back.
+    auto valuesType = cast<MemRefType>(op.getValues().getType());
+    auto indicesType = cast<MemRefType>(op.getIndices().getType());
+    bool staticK =
+        valuesType.getRank() == rank && indicesType.getRank() == rank &&
+        !valuesType.isDynamicDim(axisAttr) &&
+        valuesType.getDimSize(axisAttr) > 0 &&
+        valuesType.getDimSize(axisAttr) == indicesType.getDimSize(axisAttr);
+    if (staticK)
+      kPtr = createI64Const(valuesType.getDimSize(axisAttr));
 
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
@@ -87,8 +101,11 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
         i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, elem
 
+    if (staticK)
+      paramTypes[2] = i64Type;
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapTopK, paramTypes, i32Type);
+        rewriter, module, staticK ? "wrap_top_k_static" : kWrapTopK, paramTypes,
+        i32Type);
     if (failed(funcOp))
       return failure();
 

@@ -1,0 +1,4 @@
+FROM ubuntu:26.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 libgomp1 libatomic1 libnuma1 zlib1g libzstd1 libxml2-16 libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*

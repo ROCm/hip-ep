@@ -23,6 +23,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Config/llvm-config.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
@@ -118,7 +119,11 @@ struct ConstantBufferizableModel
                                           SmallVector<Value> &) const {
     auto tensorType = cast<TensorType>(value.getType());
     std::optional<Attribute> memorySpace =
+#if LLVM_VERSION_MAJOR >= 24
+        options.defaultMemorySpaceFn(cast<TensorLikeType>(tensorType));
+#else
         options.defaultMemorySpaceFn(tensorType);
+#endif
     if (!memorySpace) {
       return op->emitError("could not infer memory space");
     }

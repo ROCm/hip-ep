@@ -409,6 +409,8 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 // serialised. See runtime_state_internal.h for design rationale.
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
+void *hipdnn_ep_state_get_la_state_scratch(RuntimeState *state,
+                                           size_t needed_size);
 
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
@@ -1186,6 +1188,11 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
+
+int wrap_top_k_static(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t element_size_bytes);
 
 // RandomNormalLike. `shape` is the output rank's sizes, including dynamic
 // dims filled in by the HIP-to-LLVM lowering. The input tensor is not

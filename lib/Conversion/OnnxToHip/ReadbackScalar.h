@@ -41,11 +41,13 @@
 namespace mlir {
 namespace hip {
 
-/// `dense` attribute (arith.constant or inline onnx.Constant `value`) backing
-/// `v`, or null when `v` is not such a constant.
+/// Return the inline tensor value, or null for an unknown or external value.
 inline mlir::DenseElementsAttr getConstantDense(mlir::Value v) {
   if (auto cst = v.getDefiningOp<mlir::arith::ConstantOp>())
     return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
+  // Conversion can replace onnx.Constant before its shape users are visited.
+  if (auto cst = v.getDefiningOp<mlir::hip::ConstantOp>())
+    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(cst.getValueAttr());
   if (mlir::Operation *def = v.getDefiningOp())
     if (def->getName().getStringRef() == "onnx.Constant")
       return def->getAttrOfType<mlir::DenseElementsAttr>("value");
@@ -67,7 +69,7 @@ inline mlir::Value materializeConstScalar(mlir::OpBuilder &b,
 }
 
 /// Read a 0-D scalar tensor to a host SSA value. `ctx` must be a valid
-/// !hip.context. Folds an arith.constant / onnx.Constant; otherwise emits a
+/// !hip.context. Folds an inline constant; otherwise emits a
 /// synchronized hip.readback_scalar. See the file header for the race
 /// rationale.
 inline mlir::Value readbackScalarToHost(mlir::OpBuilder &b, mlir::Location loc,

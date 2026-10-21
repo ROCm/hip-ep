@@ -34,6 +34,7 @@ add_library(HipToLLVM STATIC
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   QMoEAmdLowering.cpp
+  RoutedExpertsLowering.cpp
   GatherBlockQuantizedLowering.cpp
   QdqLowering.cpp
   GraphLowering.cpp

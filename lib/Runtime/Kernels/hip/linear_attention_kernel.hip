@@ -325,6 +325,164 @@ __global__ void linear_attention_decode_kernel(
 // the output dot-product is accumulated in fp32 as G partials then summed in
 // fp32 before the single fp16 round (matches the original fp32-internal readout).
 //===----------------------------------------------------------------------===//
+template <typename T, typename StateT, int FixedThreads = 0>
+__device__ __forceinline__ void linear_attention_decode_par_impl(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    const StateT* past_state,
+    StateT* state,
+    T* __restrict__ output,
+    int seq_len,
+    int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int update_rule,
+    int decay_per_key_dim, int beta_per_head)
+{
+    constexpr int MAX_Q_HEADS = 16;
+
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = FixedThreads ? FixedThreads : blockDim.x;
+
+    const int G  = nthreads / dv;          // dk-split factor (block == G*dv)
+    const int j  = tid % dv;               // output column owned by this thread
+    const int p  = tid / dv;               // dk-partition index in [0, G)
+    const int islice = dk / G;
+    const int i0 = p * islice;
+    const int i1 = (p == G - 1) ? dk : (i0 + islice);
+
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+    const bool inverse_gqa = (Hq < Hkv);
+    const int num_q_heads  = inverse_gqa ? 1 : (Hq / Hkv);
+    const int h_q_load_base = inverse_gqa ? (g * Hq / Hkv) : (g * num_q_heads);
+    const int h_out_base    = inverse_gqa ? g : (g * num_q_heads);
+    const int h_k = g * n_k / Hkv;
+
+    const int64_t q_batch_stride   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_batch_stride   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_batch_stride   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_batch_stride = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_batch_stride = decay_per_key_dim
+        ? (int64_t)seq_len * Hkv * dk : (int64_t)seq_len * Hkv;
+    const int64_t beta_batch_stride = beta_per_head
+        ? (int64_t)seq_len * Hkv : (int64_t)seq_len;
+    const int64_t state_batch_stride = (int64_t)Hkv * dk * dv;
+
+    extern __shared__ float smem[];
+    float* k_smem   = smem;
+    float* v_smem   = smem + dk;
+    float* aux_smem = smem + dk + dv;
+    float* sk_smem  = smem + 2 * dk + dv;
+    float* q_smem   = smem + 2 * dk + 2 * dv;
+    float* sk_part  = q_smem + num_q_heads * dk;   // [G*dv] partial sk
+    float* out_part = sk_part + G * dv;            // [G*dv*num_q_heads] partial out
+
+    const T* k_ptr = key   + b * k_batch_stride + (int64_t)h_k * dk;
+    const T* v_ptr = value + b * v_batch_stride + (int64_t)g   * dv;
+    const StateT* S_old = past_state + b * state_batch_stride + (int64_t)g * dk * dv;
+    StateT* S = state + b * state_batch_stride + (int64_t)g * dk * dv;
+
+    for (int t = tid; t < dk; t += nthreads) k_smem[t] = to_float(k_ptr[t]);
+    for (int t = tid; t < dv; t += nthreads) v_smem[t] = to_float(v_ptr[t]);
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+    if (has_decay) {
+        if (decay_per_key_dim) {
+            const T* d_ptr = decay + b * decay_batch_stride + (int64_t)g * dk;
+            for (int t = tid; t < dk; t += nthreads)
+                aux_smem[t] = expf(to_float(d_ptr[t]));
+        } else {
+            const float gv = expf(to_float(decay[b * decay_batch_stride + g]));
+            for (int t = tid; t < dk; t += nthreads) aux_smem[t] = gv;
+        }
+    }
+
+    float beta_val = 0.0f;
+    if (beta_in &&
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA)) {
+        const int64_t beta_idx = beta_per_head
+            ? b * beta_batch_stride + g : b * beta_batch_stride;
+        beta_val = to_float(beta_in[beta_idx]);
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++) {
+        const int h_q = h_q_load_base + (inverse_gqa ? 0 : hl);
+        const T* q_ptr_h = query + b * q_batch_stride + (int64_t)h_q * dk;
+        for (int t = tid; t < dk; t += nthreads)
+            q_smem[hl * dk + t] = to_float(q_ptr_h[t]);
+    }
+    __syncthreads();
+
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+    if (needs_sk) {
+        float part = 0.0f;
+        for (int i = i0; i < i1; i++)
+            part += (has_decay ? aux_smem[i] : 1.0f) *
+                    to_float(S_old[i * dv + j]) * k_smem[i];
+        sk_part[p * dv + j] = part;
+        __syncthreads();
+        if (p == 0) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++) s += sk_part[q * dv + j];
+            sk_smem[j] = s;
+        }
+        __syncthreads();
+    }
+
+    const float v_j  = v_smem[j];
+    const float sk_j = needs_sk ? sk_smem[j] : 0.0f;
+
+    float sums[MAX_Q_HEADS];
+#pragma unroll
+    for (int hl = 0; hl < MAX_Q_HEADS; hl++) sums[hl] = 0.0f;
+
+    for (int i = i0; i < i1; i++) {
+        const float s_old   = to_float(S_old[i * dv + j]);
+        const float k_i     = k_smem[i];
+        const float decay_i = has_decay ? aux_smem[i] : 1.0f;
+        float s_new;
+        switch (update_rule) {
+        case LA_RULE_LINEAR:      s_new = s_old + k_i * v_j; break;
+        case LA_RULE_GATED:       s_new = decay_i * s_old + k_i * v_j; break;
+        case LA_RULE_DELTA:       s_new = s_old + beta_val * k_i * (v_j - sk_j); break;
+        case LA_RULE_GATED_DELTA: s_new = decay_i * s_old + beta_val * k_i * (v_j - sk_j); break;
+        default:                  s_new = s_old;
+        }
+        // Keep the FP32 boundary before the FP16 state store. Without it,
+        // specialization can select a mixed FMA that rounds directly to FP16.
+        if constexpr (FixedThreads != 0) asm volatile("" : "+v"(s_new));
+        S[i * dv + j] = from_float<StateT>(s_new);
+#pragma unroll
+        for (int hl = 0; hl < MAX_Q_HEADS; hl++)
+            if (hl < num_q_heads) sums[hl] += q_smem[hl * dk + i] * s_new;
+    }
+
+    for (int hl = 0; hl < num_q_heads; hl++)
+        out_part[(p * dv + j) * num_q_heads + hl] = sums[hl];
+    __syncthreads();
+    if (p == 0) {
+        for (int hl = 0; hl < num_q_heads; hl++) {
+            float s = 0.0f;
+            for (int q = 0; q < G; q++)
+                s += out_part[(q * dv + j) * num_q_heads + hl];
+            const int h_out = h_out_base + (inverse_gqa ? 0 : hl);
+            T* out_ptr = output + b * out_batch_stride + (int64_t)h_out * dv + j;
+            *out_ptr = from_float<T>(scale * s);
+        }
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Host-side launcher
+//===----------------------------------------------------------------------===//
+
 template <typename T>
 __global__ void linear_attention_decode_kernel_par(
     const T* __restrict__ query,
@@ -474,9 +632,78 @@ __global__ void linear_attention_decode_kernel_par(
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Host-side launcher
-//===----------------------------------------------------------------------===//
+// Keep FP32 arithmetic and reduction order. Round only the stored state.
+__global__ void __launch_bounds__(256) linear_attention_decode_fixed_kernel(
+    const float* query, const float* key, const float* value,
+    const float* decay, const __half* past_state, __half* state,
+    float* output, float scale) {
+    // Specialize dimensions and flags, but keep the existing arithmetic.
+    linear_attention_decode_par_impl<float, __half, 256>(
+        query, key, value, decay, nullptr, past_state, state, output, 1,
+        8, 64, 8, 128, 64, scale, LA_RULE_GATED, 0, 0);
+}
+
+__global__ void linear_attention_decode_f16_state_kernel(
+    const float* query, const float* key, const float* value,
+    const float* decay, const float* beta, const __half* past_state,
+    __half* state, float* output, int Hq, int Hkv, int Nk, int dk, int dv,
+    float scale, int rule, int decay_per_key_dim, int beta_per_head) {
+    linear_attention_decode_par_impl<float, __half>(
+        query, key, value, decay, beta, past_state, state, output, 1,
+        Hq, Hkv, Nk, dk, dv, scale, rule, decay_per_key_dim, beta_per_head);
+}
+
+static int linear_attention_parallel_factor() {
+    static const int factor = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_PARALLEL");
+        int v = e ? atoi(e) : 4;
+        return (v == 2 || v == 4 || v == 8) ? v : 0;
+    }();
+    return factor;
+}
+
+extern "C" int hip_linear_attention_decode_f16_state(
+    void* stream, const void* query, const void* key, const void* value,
+    const void* decay, const void* beta, const void* past_state, void* state,
+    void* output, int64_t B, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t dk, int64_t dv, float scale, int64_t rule,
+    int64_t decay_per_key_dim, int64_t beta_per_head) {
+    const int G = linear_attention_parallel_factor();
+    // A positive return asks the wrapper to use the original FP32 path.
+    if (B <= 0 || Hq <= 0 || Hkv <= 0 || Nk <= 0 || dk <= 0 || dv <= 0 ||
+        G < 2 || dk % G || dv > 1024 / G || (G * dv) % 32 ||
+        Hkv % Nk || (Hq >= Hkv ? Hq % Hkv : Hkv % Hq) ||
+        !past_state || !state)
+        return 1;
+    const int q_heads = Hq >= Hkv ? Hq / Hkv : 1;
+    if (q_heads > 16) return 1;
+    const size_t smem_bytes =
+        (2 * dk + 2 * dv + q_heads * dk + G * dv * (1 + q_heads)) * sizeof(float);
+    static const bool fixed_geometry = [] {
+        const char* e = std::getenv("HIPDNN_EP_EXPERIMENTAL_LA_FIXED_GEOMETRY");
+        return e && atoi(e) != 0;
+    }();
+    if (fixed_geometry && G == 4 && Hq == 8 && Hkv == 64 && Nk == 8 &&
+        dk == 128 && dv == 64 && rule == LA_RULE_GATED &&
+        !decay_per_key_dim && decay) {
+        hipLaunchKernelGGL(linear_attention_decode_fixed_kernel,
+            dim3(B * Hkv), dim3(256), smem_bytes, static_cast<hipStream_t>(stream),
+            static_cast<const float*>(query), static_cast<const float*>(key),
+            static_cast<const float*>(value), static_cast<const float*>(decay),
+            static_cast<const __half*>(past_state), static_cast<__half*>(state),
+            static_cast<float*>(output), scale);
+        return hipGetLastError() == hipSuccess ? 0 : -1;
+    }
+    hipLaunchKernelGGL(linear_attention_decode_f16_state_kernel,
+        dim3(B * Hkv), dim3(G * dv), smem_bytes, static_cast<hipStream_t>(stream),
+        static_cast<const float*>(query), static_cast<const float*>(key),
+        static_cast<const float*>(value), static_cast<const float*>(decay),
+        static_cast<const float*>(beta), static_cast<const __half*>(past_state),
+        static_cast<__half*>(state), static_cast<float*>(output),
+        (int)Hq, (int)Hkv, (int)Nk, (int)dk, (int)dv, scale, (int)rule,
+        (int)decay_per_key_dim, (int)beta_per_head);
+    return hipGetLastError() == hipSuccess ? 0 : -1;
+}
 
 extern "C" int hip_linear_attention_decode(
     void* stream,
@@ -591,8 +818,8 @@ extern "C" int hip_linear_attention_decode(
     // the original automatically when the shape can't satisfy the split.
     static const int la_par_G = []{
         const char* e = std::getenv("HIPDNN_EP_LA_PARALLEL");
-        int v = e ? atoi(e) : 4;                          // default: 4-way split
-        return (v == 2 || v == 4 || v == 8) ? v : 0;      // 0/1/other -> original
+        int v = e ? atoi(e) : 4;
+        return (v == 2 || v == 4 || v == 8) ? v : 0;
     }();
     const bool use_par = (la_par_G >= 2) && (dv_i > 0) && (dk_i % la_par_G == 0) &&
                          ((la_par_G * dv_i) <= 1024) && ((la_par_G * dv_i) % 32 == 0);
