@@ -33,4 +33,15 @@ module {
     } : (tensor<2x64xf32>, tensor<64xf32>, tensor<2x64xf32>) -> tensor<2x64xf32>
     return %y : tensor<2x64xf32>
   }
+
+  // CHECK-LABEL: func.func @gated_rms_norm_indivisible_scale
+  // CHECK: onnx.Custom
+  // CHECK-NOT: hip.gated_rms_norm
+  func.func @gated_rms_norm_indivisible_scale(%x: tensor<2x6144xf16>, %s: tensor<100xf16>, %z: tensor<2x6144xf16>) -> tensor<2x6144xf16> {
+    %y = "onnx.Custom"(%x, %s, %z) {
+      function_name = "GatedRMSNorm",
+      domain_name = "com.microsoft"
+    } : (tensor<2x6144xf16>, tensor<100xf16>, tensor<2x6144xf16>) -> tensor<2x6144xf16>
+    return %y : tensor<2x6144xf16>
+  }
 }

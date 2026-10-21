@@ -376,6 +376,19 @@ GatedRMSNormToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "GatedRMSNorm scale must be 1-D of the input type");
   }
+  if (inputType.getRank() < 1) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm input must have rank >= 1");
+  }
+  int64_t last = inputType.getDimSize(inputType.getRank() - 1);
+  int64_t groupWidth = scaleType.getDimSize(0);
+  if (!mlir::ShapedType::isDynamic(groupWidth) &&
+      (groupWidth <= 0 ||
+       (!mlir::ShapedType::isDynamic(last) && last % groupWidth != 0))) {
+    return rewriter.notifyMatchFailure(
+        op, "GatedRMSNorm input last dimension must be a multiple of the "
+            "scale length");
+  }
 
   llvm::StringRef activation = "silu";
   if (auto attr = op->getAttrOfType<mlir::StringAttr>("activation")) {
