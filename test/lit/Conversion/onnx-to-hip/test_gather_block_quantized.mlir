@@ -207,4 +207,57 @@ module {
   // CHECK-SAME: tensor<128x256xi8>
   // CHECK-SAME: zero_points(%{{.*}} : tensor<128x8xi8>)
   // CHECK-NOT: onnx.Custom
+
+  // ===== Test 7: external FLOAT8E4M3FN data, block_size 0, per-tensor scale =====
+
+  func.func @test_gbq_float8_per_tensor(%indices: tensor<2x3x16xi64>)
+      -> tensor<2x3x16x160xf16> {
+    %data = "onnx.Constant"() {
+      location = "/tmp/gbq_float8_weights.bin",
+      offset = 0 : i64,
+      size = 163840 : i64
+    } : () -> tensor<1024x160xf8E4M3FN>
+    %scales = "onnx.Constant"() {
+      value = dense<5.000000e-01> : tensor<1x1xf16>
+    } : () -> tensor<1x1xf16>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      block_size = 0 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64,
+      onnx_node_name = "GatherBlockQuantized_6"
+    } : (tensor<1024x160xf8E4M3FN>, tensor<2x3x16xi64>, tensor<1x1xf16>)
+        -> tensor<2x3x16x160xf16>
+    return %out : tensor<2x3x16x160xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_float8_per_tensor
+  // CHECK: hip.constant {location = "/tmp/gbq_float8_weights.bin", offset = 0 : i64{{.*}}size = 163840 : i64}
+  // CHECK-SAME: tensor<1024x160xf8E4M3FN>
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}} : tensor<1024x160xf8E4M3FN>, tensor<2x3x16xi64>, tensor<1x1xf16>) outs({{.*}} : tensor<2x3x16x160xf16>)
+  // CHECK-SAME: {bits = 8 : i64, block_size = 160 : i64, gather_axis = 0 : i64, quantize_axis = 1 : i64}
+  // CHECK-NOT: onnx.Custom
+
+  // ===== Test 8: FLOAT8E4M3FN ignores `bits`, defaults quantize_axis to 1 =====
+  // `bits = 4` must not trigger int4 repacking; scales [1, 5] broadcast over rows.
+
+  func.func @test_gbq_float8_row_broadcast(%indices: tensor<4xi32>)
+      -> tensor<4x160xf32> {
+    %data = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<64x160xf8E4M3FN>} : () -> tensor<64x160xf8E4M3FN>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<1x5xf32>} : () -> tensor<1x5xf32>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 4 : si64,
+      block_size = 32 : si64,
+      onnx_node_name = "GatherBlockQuantized_7"
+    } : (tensor<64x160xf8E4M3FN>, tensor<4xi32>, tensor<1x5xf32>) -> tensor<4x160xf32>
+    return %out : tensor<4x160xf32>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_float8_row_broadcast
+  // CHECK: hip.gather_block_quantized({{.*}}) ins({{.*}} : tensor<64x160xf8E4M3FN>, tensor<4xi32>, tensor<1x5xf32>)
+  // CHECK-SAME: {bits = 8 : i64, block_size = 32 : i64, gather_axis = 0 : i64, quantize_axis = 1 : i64}
+  // CHECK-NOT: onnx.Custom
 }
