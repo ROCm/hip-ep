@@ -537,9 +537,12 @@ struct QLinearAveragePoolToQdq : public mlir::RewritePattern {
     auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
     if (!domainAttr || domainAttr.getValue() != "com.microsoft")
       return rewriter.notifyMatchFailure(op, "not com.microsoft");
-    if (op->getNumResults() != 1 || op->getNumOperands() != 5)
+    // Schema min_input is 4: the trailing y_zero_point may be omitted.
+    if (op->getNumResults() != 1 || op->getNumOperands() < 4 ||
+        op->getNumOperands() > 5)
       return rewriter.notifyMatchFailure(
-          op, "expected X, x_scale, x_zero_point, y_scale, y_zero_point");
+          op, "expected X, x_scale, x_zero_point, y_scale, optional "
+              "y_zero_point");
 
     mlir::Value x = realOperand(op, 0);
     mlir::Value xScale = realOperand(op, 1);
@@ -591,7 +594,21 @@ struct QLinearAveragePoolToQdq : public mlir::RewritePattern {
     llvm::SmallVector<mlir::NamedAttribute> poolAttrs;
     poolAttrs.push_back(rewriter.getNamedAttr(
         "kernel_shape", rewriter.getI64ArrayAttr(*kernelOr)));
-    for (llvm::StringRef name : {"strides", "pads", "dilations"}) {
+    // ONNX stride defaults to 1. A missing strides attribute must be written
+    // down: AveragePoolToReshapeMean treats absence as stride == kernel and
+    // would take the non-overlapping fast path.
+    llvm::SmallVector<int64_t> strides(rank - 2, 1);
+    if (op->hasAttr("strides")) {
+      auto stridesOr = readI64List(op->getAttr("strides"));
+      if (mlir::failed(stridesOr) ||
+          static_cast<int64_t>(stridesOr->size()) != rank - 2)
+        return rewriter.notifyMatchFailure(
+            op, "strides length must equal the spatial rank");
+      strides.assign(stridesOr->begin(), stridesOr->end());
+    }
+    poolAttrs.push_back(
+        rewriter.getNamedAttr("strides", rewriter.getI64ArrayAttr(strides)));
+    for (llvm::StringRef name : {"pads", "dilations"}) {
       if (!op->hasAttr(name))
         continue;
       auto valuesOr = readI64List(op->getAttr(name));
