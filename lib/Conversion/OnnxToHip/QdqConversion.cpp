@@ -9,7 +9,8 @@
 // y = (x - zero_point) * scale
 //
 // com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-// QLinearGlobalAveragePool / QLinearAveragePool are decomposed here into
+// QLinearGlobalAveragePool / QLinearAveragePool / QLinearLeakyRelu are
+// decomposed here into
 // native DequantizeLinear + compute + QuantizeLinear, before PDLL fusion.
 // Per-tensor Add and Mul then fuse to hip.qadd / hip.qmul.
 
@@ -682,13 +683,81 @@ struct QLinearAveragePoolToQdq : public mlir::RewritePattern {
   }
 };
 
+// com.microsoft QLinearLeakyRelu: dequantize, onnx.LeakyRelu, quantize.
+// The float LeakyRelu lowering already emits hip.leaky_relu.
+struct QLinearLeakyReluToQdq : public mlir::RewritePattern {
+  QLinearLeakyReluToQdq(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!funcNameAttr || funcNameAttr.getValue() != "QLinearLeakyRelu")
+      return rewriter.notifyMatchFailure(op, "not QLinearLeakyRelu");
+    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return rewriter.notifyMatchFailure(op, "not com.microsoft");
+    // Schema min_input is 4: the trailing Y_zero_point may be omitted.
+    // realOperand returns null for that missing operand, and emitQuantize
+    // leaves it off the QuantizeLinear.
+    if (op->getNumResults() != 1 || op->getNumOperands() < 4 ||
+        op->getNumOperands() > 5)
+      return rewriter.notifyMatchFailure(
+          op, "expected X, x_scale, x_zero_point, y_scale, optional "
+              "y_zero_point");
+
+    mlir::Value x = realOperand(op, 0);
+    mlir::Value xScale = realOperand(op, 1);
+    mlir::Value xZp = realOperand(op, 2);
+    mlir::Value yScale = realOperand(op, 3);
+    mlir::Value yZp = realOperand(op, 4);
+    if (!x || !xScale || !yScale)
+      return rewriter.notifyMatchFailure(op, "missing data or scale operand");
+
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !resultType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensors");
+    if (inputType.getRank() != resultType.getRank())
+      return rewriter.notifyMatchFailure(op, "input and result rank differ");
+    for (int64_t i = 0; i < inputType.getRank(); ++i) {
+      int64_t inDim = inputType.getDimSize(i);
+      int64_t outDim = resultType.getDimSize(i);
+      if (inDim != mlir::ShapedType::kDynamic &&
+          outDim != mlir::ShapedType::kDynamic && inDim != outDim)
+        return rewriter.notifyMatchFailure(op, "input and result shape differ");
+    }
+    if (!isInt8Element(inputType.getElementType()) ||
+        inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(op, "LeakyRelu is int8 or uint8");
+
+    // Contrib default matches onnx.LeakyRelu.
+    double alpha = 0.01;
+    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
+      alpha = attr.getValueAsDouble();
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value dequantized =
+        emitDequantize(rewriter, loc, x, xScale, xZp, f32TypeOf(inputType));
+    mlir::Value activated = emitOnnxOp(
+        rewriter, loc, "onnx.LeakyRelu", dequantized, f32TypeOf(resultType),
+        {rewriter.getNamedAttr("alpha", rewriter.getF32FloatAttr(alpha))});
+    mlir::Value quantized =
+        emitQuantize(rewriter, loc, activated, yScale, yZp, resultType);
+    rewriter.replaceOp(op, quantized);
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateCustomQdqCanonicalizationPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
   patterns.add<CustomQdqToNativeOnnx, QLinearAddToQdq, QLinearMulToQdq,
                QLinearConcatToQdq, QLinearGlobalAveragePoolToQdq,
-               QLinearAveragePoolToQdq>(ctx);
+               QLinearAveragePoolToQdq, QLinearLeakyReluToQdq>(ctx);
 }
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
