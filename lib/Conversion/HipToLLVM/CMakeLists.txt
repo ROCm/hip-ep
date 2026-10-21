@@ -21,6 +21,7 @@ add_library(HipToLLVM STATIC
   GatherElementsLowering.cpp
   TopKLowering.cpp
   RandomNormalLikeLowering.cpp
+  ArgMaxLowering.cpp
   ScatterElementsLowering.cpp
   CompressLowering.cpp
   OneHotLowering.cpp

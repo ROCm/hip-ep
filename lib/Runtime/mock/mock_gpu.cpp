@@ -856,6 +856,33 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
   return 0;
 }
 
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type) {
+  (void)data;
+  (void)indices;
+  if (!state || !data_shape) {
+    fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    if (state)
+      hipdnn_ep_state_set_error_flag(state, -1);
+    return -1;
+  }
+  int64_t resolved_axis = axis;
+  if (resolved_axis < 0)
+    resolved_axis += rank;
+  if (resolved_axis >= 0 && resolved_axis < rank &&
+      data_shape[resolved_axis] <= 0) {
+    fprintf(stderr, "[MOCK] wrap_arg_max: empty reduction axis\n");
+    hipdnn_ep_state_set_error_flag(state, -1);
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "
+             "select_last_index=%lld, rank=%lld, data_type=%lld)\n",
+             (long long)axis, (long long)keepdims, (long long)select_last_index,
+             (long long)rank, (long long)data_type);
+  return 0;
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,

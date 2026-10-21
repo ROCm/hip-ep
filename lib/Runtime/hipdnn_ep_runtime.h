@@ -419,11 +419,14 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Device-side runtime error flag (set by kernels or host wrappers, observed
+// after the graph by inference_compute). Intended for operators that detect
+// runtime-invalid inputs (e.g. Range delta==0, ArgMax of an empty axis) and
+// need to propagate an error code back through main_graph. Generated graphs
+// discard most wrap_* statuses, so a nonzero status must also be stored here.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -1199,6 +1202,14 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
                             const int64_t *shape, int64_t mean_bits,
                             int64_t scale_bits, int64_t seed_bits,
                             int64_t has_seed, int64_t data_type);
+
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
 
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
