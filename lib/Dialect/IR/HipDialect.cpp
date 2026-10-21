@@ -2270,6 +2270,61 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantBnb4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DequantBnb4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getAbsmax(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto shaped = [](Value value) { return cast<ShapedType>(value.getType()); };
+  ShapedType packedType = shaped(getPacked());
+  ShapedType absmaxType = shaped(getAbsmax());
+  ShapedType outputType = shaped(getOutput());
+  if (!packedType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed weights must be ui8");
+  if (!absmaxType.getElementType().isF32() ||
+      !outputType.getElementType().isF32())
+    return emitOpError("absmax and output must be f32");
+  if (!packedType.hasStaticShape() || !absmaxType.hasStaticShape() ||
+      !outputType.hasStaticShape())
+    return emitOpError("packed, absmax, and output must have static shapes");
+  if (outputType.getRank() != 2)
+    return emitOpError("output must be rank 2 [N, K]");
+
+  int64_t n = getN();
+  int64_t k = getK();
+  int64_t blockSize = getBlockSize();
+  int64_t quantType = getQuantType();
+  if (quantType != 0 && quantType != 1)
+    return emitOpError("quant_type must be 0 (FP4) or 1 (NF4)");
+  if (blockSize != 16 && blockSize != 32 && blockSize != 64 &&
+      blockSize != 128 && blockSize != 256)
+    return emitOpError("block_size must be 16, 32, 64, 128, or 256");
+  if (n <= 0 || k <= 0)
+    return emitOpError("N and K must be positive");
+  if (n > std::numeric_limits<int64_t>::max() / k)
+    return emitOpError("N * K overflows");
+  int64_t numel = n * k;
+  if (numel % 2 != 0 || numel % blockSize != 0)
+    return emitOpError("N * K must fill nibble pairs and whole blocks");
+  if (outputType.getDimSize(0) != n || outputType.getDimSize(1) != k)
+    return emitOpError("output shape must be [N, K]");
+  if (packedType.getNumElements() != numel / 2)
+    return emitOpError("packed length must be N * K / 2");
+  if (absmaxType.getNumElements() != numel / blockSize)
+    return emitOpError("absmax length must be N * K / block_size");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//

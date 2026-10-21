@@ -2401,6 +2401,18 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+// Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+HIP_KERNEL_API int hip_dequant_bnb4(
+    void* stream,
+    const void* packed,
+    const void* absmax,
+    void* output,
+    int64_t n,
+    int64_t k,
+    int64_t block_size,
+    int64_t quant_type);
+
 /* Hands the session's matmul_autotune_mode option ("lookup" resolves the
  * offline LUT, "online" always sweeps; null when absent) to the autotune.
  * Precedence is HIPDNN_MATMUL_AUTOTUNE_MODE > provider_mode > lookup. The mode

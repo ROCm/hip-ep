@@ -1535,6 +1535,12 @@ int wrap_matmul_nbits(
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
+// Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
+                      void *output, int64_t n, int64_t k, int64_t block_size,
+                      int64_t quant_type);
+
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
 // `gather_axis` using `indices`, then dequantize the gathered rows using

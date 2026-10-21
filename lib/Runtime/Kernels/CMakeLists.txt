@@ -92,6 +92,7 @@ set(_kernel_sources
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip

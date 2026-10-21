@@ -956,6 +956,52 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
+// Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
+// ONNX Runtime writes before a transposed GEMM. The first of each packed pair
+// lives in the high nibble. This is not MXFP block-scaled matmul.
+def Hip_DequantBnb4Op : Hip_DpsOp<"dequant_bnb4", /*traits=*/[],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/1,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
+  let summary = "Dequantize com.microsoft MatMulBnb4 weights to [N, K] f32";
+  let description = [{
+    Unpacks a bitsandbytes 4-bit weight blob and multiplies each value by its
+    block absmax. `quant_type` 0 is FP4 and 1 is NF4. The flat index `i` reads
+    the high nibble of byte `i/2` when `i` is even and the low nibble when
+    `i` is odd, then `output[i] = codebook[nibble] * absmax[i / block_size]`.
+    The result is row-major `[N, K]`.
+
+    Example:
+    ```mlir
+    hip.dequant_bnb4(%ctx) ins(%packed, %absmax :
+        memref<16xui8, 1>, memref<2xf32, 1>)
+        outs(%weight : memref<4x8xf32, 1>)
+        {K = 8, N = 4, block_size = 16, quant_type = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$packed,
+    Hip_TensorOrMemRef:$absmax,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K,
+    I64Attr:$N,
+    I64Attr:$block_size,
+    I64Attr:$quant_type
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $packed `,` $absmax `:`
+    type($packed) `,` type($absmax) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
                            /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",

@@ -5544,6 +5544,38 @@ Value unpackInt4LastDim(Value packed, ConversionPatternRewriter &rewriter,
   return reshapeTo(cat, flat, rewriter);
 }
 
+// Bitsandbytes stores the first of each pair in the high nibble.
+Value unpackBnb4HighNibbleFirst(Value packed,
+                                ConversionPatternRewriter &rewriter,
+                                Location loc) {
+  Type i32 = rewriter.getI32Type();
+  Value asI32 = emitTosaCast(rewriter, loc, packed, i32);
+  auto i32Ty = cast<RankedTensorType>(asI32.getType());
+  Value mask = createSplatInt(rewriter, loc, i32Ty, 0x0F);
+  Value shift = createSplatInt(rewriter, loc, i32Ty, 4);
+  Value lo = tosa::BitwiseAndOp::create(rewriter, loc, i32Ty, asI32, mask);
+  Value hi =
+      tosa::LogicalRightShiftOp::create(rewriter, loc, i32Ty, asI32, shift);
+  hi = tosa::BitwiseAndOp::create(rewriter, loc, i32Ty, hi, mask);
+
+  SmallVector<int64_t> unsqueeze(i32Ty.getShape().begin(),
+                                 i32Ty.getShape().end());
+  unsqueeze.push_back(1);
+  Value loU = reshapeTo(lo, unsqueeze, rewriter);
+  Value hiU = reshapeTo(hi, unsqueeze, rewriter);
+
+  SmallVector<int64_t> catShape = unsqueeze;
+  catShape.back() = 2;
+  auto catTy = RankedTensorType::get(catShape, i32);
+  int32_t axis = static_cast<int32_t>(catShape.size() - 1);
+  Value cat = tosa::ConcatOp::create(rewriter, loc, catTy, ValueRange{hiU, loU},
+                                     rewriter.getI32IntegerAttr(axis));
+
+  SmallVector<int64_t> flat(i32Ty.getShape().begin(), i32Ty.getShape().end());
+  flat.back() *= 2;
+  return reshapeTo(cat, flat, rewriter);
+}
+
 Value sliceLastDimTo(Value input, int64_t extent,
                      ConversionPatternRewriter &rewriter, Location loc) {
   auto ty = cast<RankedTensorType>(input.getType());
@@ -5707,6 +5739,102 @@ struct MatMulNBitsConverter final
     }
 
     rewriter.replaceOp(op, y);
+    return success();
+  }
+};
+
+// NF4/FP4 codebook times a tiled absmax. Not MXFP block-scaled matmul.
+struct DequantBnb4Converter : public OpConversionPattern<DequantBnb4Op> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(DequantBnb4Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto outTy = dyn_cast<RankedTensorType>(op.getOutput().getType());
+    auto packedTy = dyn_cast<RankedTensorType>(adaptor.getPacked().getType());
+    auto absTy = dyn_cast<RankedTensorType>(adaptor.getAbsmax().getType());
+    if (!outTy || !packedTy || !absTy || !outTy.hasStaticShape() ||
+        !packedTy.hasStaticShape() || !absTy.hasStaticShape())
+      return rewriter.notifyMatchFailure(op,
+                                         "dequant_bnb4 shapes must be static");
+    if (!outTy.getElementType().isF32() || !absTy.getElementType().isF32())
+      return rewriter.notifyMatchFailure(op, "dequant_bnb4 is f32");
+    if (!packedTy.getElementType().isUnsignedInteger(8))
+      return rewriter.notifyMatchFailure(op, "packed weights must be ui8");
+
+    int64_t n = op.getN();
+    int64_t k = op.getK();
+    int64_t block = op.getBlockSize();
+    int64_t quant = op.getQuantType();
+    if (n <= 0 || k <= 0 || (quant != 0 && quant != 1))
+      return rewriter.notifyMatchFailure(op, "bad dequant_bnb4 attributes");
+    if (block != 16 && block != 32 && block != 64 && block != 128 &&
+        block != 256)
+      return rewriter.notifyMatchFailure(op, "unsupported block_size");
+    if (outTy.getRank() != 2 || outTy.getDimSize(0) != n ||
+        outTy.getDimSize(1) != k)
+      return rewriter.notifyMatchFailure(op, "output must be [N, K]");
+    if (n > std::numeric_limits<int64_t>::max() / k)
+      return rewriter.notifyMatchFailure(op, "N * K overflows");
+    int64_t numel = n * k;
+    if (numel % 2 != 0 || numel % block != 0)
+      return rewriter.notifyMatchFailure(op, "numel must fill blocks");
+    if (packedTy.getNumElements() != numel / 2 ||
+        absTy.getNumElements() != numel / block)
+      return rewriter.notifyMatchFailure(op, "packed or absmax length");
+
+    Location loc = op.getLoc();
+    Value indices = unpackBnb4HighNibbleFirst(
+        reshapeTo(adaptor.getPacked(), {numel / 2}, rewriter), rewriter, loc);
+
+    // Same tables as dequant_bnb4_kernel.hip / ORT
+    // blockwise_quant_block_bnb4.h.
+    static const float kFp4[16] = {0.0f,         5.208333333e-03f,
+                                   0.66666667f,  1.0f,
+                                   0.33333333f,  0.5f,
+                                   0.16666667f,  0.25f,
+                                   -0.0f,        -5.208333333e-03f,
+                                   -0.66666667f, -1.0f,
+                                   -0.33333333f, -0.5f,
+                                   -0.16666667f, -0.25f};
+    static const float kNf4[16] = {-1.0f,
+                                   -0.6961928009986877f,
+                                   -0.5250730514526367f,
+                                   -0.39491748809814453f,
+                                   -0.28444138169288635f,
+                                   -0.18477343022823334f,
+                                   -0.09105003625154495f,
+                                   0.0f,
+                                   0.07958029955625534f,
+                                   0.16093020141124725f,
+                                   0.24611230194568634f,
+                                   0.33791524171829224f,
+                                   0.44070982933044434f,
+                                   0.5626170039176941f,
+                                   0.7229568362236023f,
+                                   1.0f};
+    const float *table = quant == 0 ? kFp4 : kNf4;
+    auto lutTy = RankedTensorType::get({16}, rewriter.getF32Type());
+    SmallVector<Attribute, 16> lutElems;
+    for (int i = 0; i < 16; ++i)
+      lutElems.push_back(rewriter.getF32FloatAttr(table[i]));
+    Value lut = tosa::ConstOp::create(rewriter, loc, lutTy,
+                                      DenseElementsAttr::get(lutTy, lutElems));
+    lut = reshapeTo(lut, {1, 16, 1}, rewriter);
+    indices = reshapeTo(indices, {1, numel}, rewriter);
+    auto gatheredTy =
+        RankedTensorType::get({1, numel, 1}, rewriter.getF32Type());
+    Value gathered =
+        tosa::GatherOp::create(rewriter, loc, gatheredTy, lut, indices);
+    Value codes = reshapeTo(gathered, {numel}, rewriter);
+
+    Value scales = reshapeTo(adaptor.getAbsmax(), {numel / block, 1}, rewriter);
+    scales = tileMultiples(scales, {1, block}, {numel / block, block}, rewriter,
+                           loc);
+    scales = reshapeTo(scales, {numel}, rewriter);
+    auto flatTy = RankedTensorType::get({numel}, rewriter.getF32Type());
+    Value dequant = emitTosaMul(rewriter, loc, codes, scales, flatTy);
+    rewriter.replaceOp(op, reshapeTo(dequant, {n, k}, rewriter));
     return success();
   }
 };
@@ -7890,10 +8018,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         LogOp, SinOp, CosOp, TanhOp, ErfOp, SigmoidOp, ReciprocalOp, SqrtOp,
         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp, SiluOp, SwishOp, WhereOp,
         LeakyReluOp, MiopenSoftmaxOp, ReduceSumOp, ReduceMeanOp, CastOp,
-        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, GatherOp,
-        GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp, RangeOp,
-        RopeOp, GqaOp, MultiHeadAttentionOp, IfOp, LoopOp, RoundOp, ModOp,
-        AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
+        QuantizeLinearOp, DequantizeLinearOp, MatMulNBitsOp, DequantBnb4Op,
+        GatherOp, GatherElementsOp, GatherNDOp, GridSampleOp, SizeOp, OneHotOp,
+        RangeOp, RopeOp, GqaOp, MultiHeadAttentionOp, IfOp, LoopOp, RoundOp,
+        ModOp, AtanOp, RmsNormOp, LayerNormOp, InstanceNormOp, SkipRmsNormOp>();
     // tosa.matmul (and other tosa ops) are not destination-passing, so
     // MatMulConverter drops each hip op's DPS `outs` operand. The
     // `tensor.empty` that fed it is then dead, but a full conversion still
@@ -8048,10 +8176,10 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
         ReduceConverter<ReduceProdOp, tosa::ReduceProductOp>,
         ReduceMeanConverter, ReduceL2Converter, CastConverter,
         DequantizeLinearConverter, QuantizeLinearConverter,
-        MatMulNBitsConverter, GatherConverter, GatherElementsConverter,
-        GatherNDConverter, ScatterElementsConverter, ScatterNDConverter,
-        GatherBlockQuantizedConverter, TopKConverter, QMoEConverter,
-        GridSampleConverter, SizeConverter, TensorConstConverter,
+        MatMulNBitsConverter, DequantBnb4Converter, GatherConverter,
+        GatherElementsConverter, GatherNDConverter, ScatterElementsConverter,
+        ScatterNDConverter, GatherBlockQuantizedConverter, TopKConverter,
+        QMoEConverter, GridSampleConverter, SizeConverter, TensorConstConverter,
         FromElementsConverter, SplatConverter, OneHotConverter, RangeConverter,
         RopeConverter, GqaConverter, MhaConverter, CumSumConverter, IfConverter,
         LoopConverter, RmsNormConverter, LayerNormConverter,

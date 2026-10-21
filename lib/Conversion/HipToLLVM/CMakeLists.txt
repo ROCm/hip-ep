@@ -32,6 +32,7 @@ add_library(HipToLLVM STATIC
   GqaLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
+  DequantBnb4Lowering.cpp
   QMoELowering.cpp
   QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
