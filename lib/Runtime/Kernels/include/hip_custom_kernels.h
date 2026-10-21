@@ -3530,6 +3530,34 @@ HIP_KERNEL_API int hip_causal_conv_nlc_state(
     int64_t activation,
     int64_t element_size_bytes);
 
+// com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
+// beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
+//   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
+//   decay, beta   [B, L, Hv]                 fp32, raw projections
+//   initial_state [B, Hv, dv, dk]            fp32, may alias final_state
+//   a_log, dt_bias [Hv]                      fp32
+//   output        [B, L, Hv, dv]             T
+//   final_state   [B, Hv, dv, dk]            fp32
+// dk must be 32, 64, 128 or 256 and Hv a multiple of Hqk.
+HIP_KERNEL_API int hip_gated_delta_net(
+    void* stream,
+    const void* qkv,
+    const float* decay,
+    const float* beta,
+    const float* initial_state,
+    const float* a_log,
+    const float* dt_bias,
+    void* output,
+    float* final_state,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v,
+    float scale,
+    int element_size_bytes);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================

@@ -179,6 +179,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
+    GatedDeltaNetOp::attachInterface<HipDstBufferizableModel<GatedDeltaNetOp>>(
+        *ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);

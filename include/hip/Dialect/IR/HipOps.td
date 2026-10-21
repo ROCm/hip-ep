@@ -4374,6 +4374,75 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
+def Hip_GatedDeltaNetOp : Hip_DpsOp<"gated_delta_net"> {
+  let summary = "Gated delta rule recurrence (com.microsoft GatedDeltaNet)";
+  let description = [{
+    com.microsoft GatedDeltaNet restricted to packed QKV,
+    update_rule = gated_delta, gate_activation = qwen,
+    beta_activation = sigmoid and qk_l2_norm = 1.
+
+    Shapes, with Hv, dv, dk taken from the state and
+    Hqk = (P - Hv*dv) / (2*dk):
+      qkv           [B, L, P]          T = f16 or f32, row = [q | k | v]
+                                       with Hqk*dk, Hqk*dk, Hv*dv elements
+      decay, beta   [B, L, Hv]         f32
+      initial_state [B, Hv, dv, dk]    f32, V-major
+      a_log, dt_bias [Hv]              f32
+      output        [B, L, Hv, dv]     T
+      final_state   [B, Hv, dv, dk]    f32
+
+    Hv must be a multiple of Hqk and dk one of 32, 64, 128, 256. For each
+    token and value head hv, with hq = hv * Hqk / Hv:
+      q, k  = heads hq of the q and k segments, each scaled by
+              rsqrt(sum(x^2) + 1e-12)
+      g     = -exp(a_log[hv]) * softplus(decay + dt_bias[hv])
+      b     = sigmoid(beta)
+      S     = exp(g) * S
+      delta = b * (v - S^T k)
+      S     = S + k (x) delta
+      o     = scale * S^T q
+    `scale` = 0 means 1 / sqrt(dk).
+
+    Example:
+    ```mlir
+    hip.gated_delta_net(%ctx)
+        ins(%qkv, %decay, %beta, %state, %a_log, %dt_bias :
+            memref<1x1x10240xf16, 1>, memref<1x1x48xf32, 1>,
+            memref<1x1x48xf32, 1>, memref<1x48x128x128xf32, 1>,
+            memref<48xf32, 1>, memref<48xf32, 1>)
+        outs(%out, %final : memref<1x1x48x128xf16, 1>,
+                            memref<1x48x128x128xf32, 1>)
+        {scale = 0.0 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$qkv,
+    Hip_TensorOrMemRef:$decay,
+    Hip_TensorOrMemRef:$beta,
+    Hip_TensorOrMemRef:$initial_state,
+    Hip_TensorOrMemRef:$a_log,
+    Hip_TensorOrMemRef:$dt_bias,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$final_state,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $qkv `,` $decay `,` $beta `,` $initial_state `,` $a_log `,` $dt_bias
+        `:` type($qkv) `,` type($decay) `,` type($beta) `,`
+        type($initial_state) `,` type($a_log) `,` type($dt_bias)
+    `)`
+    `outs` `(` $output `,` $final_state `:`
+              type($output) `,` type($final_state) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,

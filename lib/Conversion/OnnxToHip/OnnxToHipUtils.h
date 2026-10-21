@@ -383,6 +383,8 @@ void populateWhereConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+void populateGatedDeltaNetConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,

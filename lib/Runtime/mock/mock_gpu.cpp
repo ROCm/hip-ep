@@ -660,6 +660,28 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !initial_state || !a_log ||
+      !dt_bias || !output || !final_state) {
+    fprintf(stderr, "Invalid required argument in wrap_gated_delta_net\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_gated_delta_net(B=%lld, L=%lld, Hqk=%lld, Hv=%lld, "
+             "dk=%lld, dv=%lld, scale=%f, elem=%lld)\n",
+             (long long)batch, (long long)seq_len, (long long)num_heads_qk,
+             (long long)num_heads_v, (long long)head_size_qk,
+             (long long)head_size_v, (double)scale,
+             (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
                      int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,

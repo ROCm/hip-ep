@@ -59,6 +59,7 @@ add_library(OnnxToHip STATIC
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
+  GatedDeltaNetConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp

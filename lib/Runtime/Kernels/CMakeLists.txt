@@ -96,6 +96,7 @@ set(_kernel_sources
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
+    hip/gated_delta_net_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip

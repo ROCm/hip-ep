@@ -2381,6 +2381,120 @@ void LinearAttentionOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GatedDeltaNetOp: ins(qkv, decay, beta, initial_state, a_log, dt_bias)
+//                  outs(output, final_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedDeltaNetOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
+}
+
+void GatedDeltaNetOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedDeltaNetOp::verify() {
+  SmallVector<Value> data = {getQkv(),          getDecay(),     getBeta(),
+                             getInitialState(), getALog(),      getDtBias(),
+                             getOutput(),       getFinalState()};
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  Type f32 = Float32Type::get(getContext());
+
+  auto qkvType = cast<ShapedType>(getQkv().getType());
+  Type elem = qkvType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("qkv must be f16 or f32, got ") << elem;
+  }
+  if (qkvType.getRank() != 3) {
+    return emitOpError("qkv must be rank 3, got rank ") << qkvType.getRank();
+  }
+  if (qkvType.isDynamicDim(2)) {
+    return emitOpError("qkv dim 2 must be static");
+  }
+
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  if (stateType.getElementType() != f32) {
+    return emitOpError("initial_state must be f32, got ")
+           << stateType.getElementType();
+  }
+  if (stateType.getRank() != 4) {
+    return emitOpError("initial_state must be rank 4, got rank ")
+           << stateType.getRank();
+  }
+  for (int64_t i = 1; i < 4; ++i) {
+    if (stateType.isDynamicDim(i)) {
+      return emitOpError("initial_state dim ") << i << " must be static";
+    }
+  }
+
+  const int64_t batch = qkvType.getDimSize(0);
+  const int64_t seq = qkvType.getDimSize(1);
+  const int64_t packed = qkvType.getDimSize(2);
+  const int64_t numHeadsV = stateType.getDimSize(1);
+  const int64_t headSizeV = stateType.getDimSize(2);
+  const int64_t headSizeQk = stateType.getDimSize(3);
+  if (headSizeQk != 32 && headSizeQk != 64 && headSizeQk != 128 &&
+      headSizeQk != 256) {
+    return emitOpError("head size dk must be 32, 64, 128 or 256, got ")
+           << headSizeQk;
+  }
+  const int64_t qkWidth = packed - numHeadsV * headSizeV;
+  if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0) {
+    return emitOpError("qkv dim 2 (")
+           << packed << ") minus Hv*dv (" << numHeadsV * headSizeV
+           << ") must be a positive multiple of 2*dk (" << 2 * headSizeQk
+           << ")";
+  }
+  const int64_t numHeadsQk = qkWidth / (2 * headSizeQk);
+  if (numHeadsV % numHeadsQk != 0) {
+    return emitOpError("Hv (")
+           << numHeadsV << ") must be a multiple of Hqk (" << numHeadsQk << ")";
+  }
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  if (failed(check(getInitialState(), "initial_state", f32,
+                   {batch, numHeadsV, headSizeV, headSizeQk})) ||
+      failed(check(getDecay(), "decay", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getBeta(), "beta", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
+      failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
+      failed(check(getOutput(), "output", elem,
+                   {batch, seq, numHeadsV, headSizeV})) ||
+      failed(
+          check(getFinalState(), "final_state", f32,
+                {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MultiHeadAttentionOp:
 //   ins(query, [key, value, bias, key_padding_mask, attention_bias,
 //                past_key, past_value, past_sequence_length,

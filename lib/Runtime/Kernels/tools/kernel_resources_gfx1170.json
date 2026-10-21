@@ -623,6 +623,16 @@
 "_ZN12_GLOBAL__N_116fast_gelu_kernelIdEEvPKT_S3_PS1_xx":[28,0,0,16,434,0,0],
 "_ZN12_GLOBAL__N_116fast_gelu_kernelIfEEvPKT_S3_PS1_xx":[11,0,0,16,236,0,0]
 },
+"gated_delta_net_kernel":{
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi1EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[31,0,0,16,706,3,16],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi2EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[35,0,0,16,737,3,24],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi4EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[39,0,0,16,783,5,40],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelI6__halfLi8EEEvPKT_PKfS6_S6_S6_S6_PS2_Pfiiiif":[50,0,0,16,885,9,72],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelIfLi1EEEvPKT_PKfS5_S5_S5_S5_PS1_Pfiiiif":[31,0,0,16,704,3,16],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelIfLi2EEEvPKT_PKfS5_S5_S5_S5_PS1_Pfiiiif":[35,0,0,16,735,3,24],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelIfLi4EEEvPKT_PKfS5_S5_S5_S5_PS1_Pfiiiif":[39,0,0,16,782,5,40],
+"_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelIfLi8EEEvPKT_PKfS5_S5_S5_S5_PS1_Pfiiiif":[50,0,0,16,863,9,72]
+},
 "gather_block_quantized_kernel":{
 "_ZN12_GLOBAL__N_129gather_block_quantized_kernelI14__hip_bfloat16EEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,756,0,0],
 "_ZN12_GLOBAL__N_129gather_block_quantized_kernelI6__halfEEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,742,0,0],

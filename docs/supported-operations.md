@@ -117,6 +117,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QLinearGlobalAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + GlobalAveragePool + QuantizeLinear. `channels_last` is transposed around the pool |
 | QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
+| GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; no `cu_seqlens` or state capture |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
