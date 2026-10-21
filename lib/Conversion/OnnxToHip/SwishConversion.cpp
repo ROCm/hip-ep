@@ -169,11 +169,6 @@ struct MicrosoftScaledSiLUToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "ScaledSiLU supports only f16 and f32");
     }
-    if (inputType.getRank() > 4) {
-      return rewriter.notifyMatchFailure(
-          op, "ScaledSiLU rank > 4 unsupported by hip.mul");
-    }
-
     mlir::Value scaleInput;
     if (op->getNumOperands() == 2 &&
         !mlir::isa<mlir::NoneType>(op->getOperand(1).getType())) {
@@ -202,7 +197,12 @@ struct MicrosoftScaledSiLUToHip : public mlir::RewritePattern {
     bool losesInfo = false;
     alpha.convert(elemType.getFloatSemantics(),
                   llvm::APFloat::rmNearestTiesToEven, &losesInfo);
-    if (scaleInput || !alpha.isExactlyValue(1.0)) {
+    bool needsScale = scaleInput || !alpha.isExactlyValue(1.0);
+    if (needsScale && inputType.getRank() > 4) {
+      return rewriter.notifyMatchFailure(
+          op, "ScaledSiLU rank > 4 unsupported by hip.mul");
+    }
+    if (needsScale) {
       mlir::Value scale = scaleInput;
       if (!scale) {
         auto scalarType = mlir::RankedTensorType::get({}, elemType);

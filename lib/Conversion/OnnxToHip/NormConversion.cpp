@@ -280,7 +280,12 @@ BranchwiseRMSNormToHip::matchAndRewrite(mlir::Operation *op,
   int64_t branches = normType.getDimSize(normRank - 2);
   int64_t hidden = normType.getDimSize(normRank - 1);
   int64_t scaleElems = scaleType.getNumElements();
-  if (scaleElems != hidden && scaleElems != branches * hidden) {
+  bool scaleShapeOk =
+      (scaleType.getRank() == 1 &&
+       (scaleElems == hidden || scaleElems == branches * hidden)) ||
+      (scaleType.getRank() == 2 && scaleType.getDimSize(0) == branches &&
+       scaleType.getDimSize(1) == hidden);
+  if (!scaleShapeOk) {
     return rewriter.notifyMatchFailure(
         op, "BranchwiseRMSNorm scale must have shape (H), (C*H) or (C, H)");
   }
@@ -471,6 +476,29 @@ EngramGateToHip::matchAndRewrite(mlir::Operation *op,
   if (normedResult && normedResult.getType() != keyType) {
     return rewriter.notifyMatchFailure(
         op, "EngramGate gated_value_normed must match the key type");
+  }
+  auto compatible = [](int64_t a, int64_t b) {
+    return mlir::ShapedType::isDynamic(a) || mlir::ShapedType::isDynamic(b) ||
+           a == b;
+  };
+  llvm::ArrayRef<int64_t> keyShape = keyType.getShape();
+  llvm::ArrayRef<int64_t> valueShape = valueType.getShape();
+  if (!compatible(valueShape[0], keyShape[0]) ||
+      !compatible(valueShape[1], keyShape[1]) ||
+      !compatible(valueShape[2], keyShape[3])) {
+    return rewriter.notifyMatchFailure(
+        op, "EngramGate value must be (B, S, H) of key (B, S, hc, H)");
+  }
+  for (mlir::Value scale : {keyScale, queryScale, convScale}) {
+    if (!scale) {
+      continue;
+    }
+    auto t = mlir::cast<mlir::RankedTensorType>(scale.getType());
+    if (t.getRank() != 2 || !compatible(t.getDimSize(0), keyShape[2]) ||
+        !compatible(t.getDimSize(1), keyShape[3])) {
+      return rewriter.notifyMatchFailure(
+          op, "EngramGate norm scales must have shape (hc, H)");
+    }
   }
 
   llvm::APFloat epsValue(9.99999974E-6f);

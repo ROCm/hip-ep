@@ -18,7 +18,7 @@ _TENSOR_PROTO = {
 }
 
 
-def _make_model(hc, hidden, dtype, normed, zero_query_scale=False):
+def _make_model(hc, hidden, dtype, conv_scale, normed, zero_query_scale):
     tp = _TENSOR_PROTO[dtype]
     kq_shape = ["batch", "seq", hc, hidden]
     K = helper.make_tensor_value_info("key", tp, kq_shape)
@@ -36,9 +36,10 @@ def _make_model(hc, hidden, dtype, normed, zero_query_scale=False):
     inputs = ["key", "query", "value", "key_scale", "query_scale"]
     outputs = [helper.make_tensor_value_info("out", tp, kq_shape)]
     node_outputs = ["out"]
-    if normed:
+    if conv_scale:
         inits.append(scale("conv_scale"))
         inputs.append("conv_scale")
+    if normed:
         outputs.append(helper.make_tensor_value_info("normed", tp, kq_shape))
         node_outputs.append("normed")
     node = helper.make_node(
@@ -54,20 +55,22 @@ def _make_model(hc, hidden, dtype, normed, zero_query_scale=False):
 
 
 @pytest.mark.parametrize(
-    "batch, seq, hc, hidden, dtype, normed, zero_query_scale",
+    "batch, seq, hc, hidden, dtype, conv_scale, normed, zero_query_scale",
     [
         # Qwen3.8 layer-1 engram injection: 4 hyper-connection branches of 2560.
-        (1, 1, 4, 2560, np.float16, True, False),
-        (2, 9, 4, 2560, np.float16, True, False),
-        (1, 3, 2, 96, np.float32, False, False),
+        (1, 1, 4, 2560, np.float16, True, True, False),
+        (2, 9, 4, 2560, np.float16, True, True, False),
+        (1, 3, 2, 96, np.float32, False, False, False),
+        # conv_norm_scale is ignored without the second output.
+        (1, 3, 2, 96, np.float16, True, False, False),
         # A zero dot product gives a gate of exactly 0.5.
-        (1, 2, 2, 64, np.float32, True, True),
+        (1, 2, 2, 64, np.float32, True, True, True),
     ],
 )
 def test_engram_gate(
-    model_runner, batch, seq, hc, hidden, dtype, normed, zero_query_scale
+    model_runner, batch, seq, hc, hidden, dtype, conv_scale, normed, zero_query_scale
 ):
-    model = _make_model(hc, hidden, dtype, normed, zero_query_scale)
+    model = _make_model(hc, hidden, dtype, conv_scale, normed, zero_query_scale)
     rng = np.random.default_rng(89)
     key = rng.uniform(-2, 2, [batch, seq, hc, hidden]).astype(dtype)
     query = rng.uniform(-2, 2, [batch, seq, hc, hidden]).astype(dtype)

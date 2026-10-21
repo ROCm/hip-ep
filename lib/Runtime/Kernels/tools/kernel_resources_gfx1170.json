@@ -2571,7 +2571,13 @@
 "rms_norm_kernel":{
 "_ZN12_GLOBAL__N_119hip_rms_norm_kernelI6__halfLb0EEEvPKT_S4_PS2_xxxf":[10,0,0,16,348,4,16],
 "_ZN12_GLOBAL__N_119hip_rms_norm_kernelI6__halfLb1EEEvPKT_S4_PS2_xxxf":[11,0,0,16,355,4,16],
-"_ZN12_GLOBAL__N_119hip_rms_norm_kernelIfLb0EEEvPKT_S3_PS1_xxxf":[11,0,0,16,344,4,16]
+"_ZN12_GLOBAL__N_119hip_rms_norm_kernelIfLb0EEEvPKT_S3_PS1_xxxf":[11,0,0,16,344,4,16],
+"_ZN12_GLOBAL__N_122hip_engram_gate_kernelI6__halfEEvPKT_S4_S4_S4_S4_S4_PS2_S5_xxxf":[18,0,0,16,855,13,52],
+"_ZN12_GLOBAL__N_122hip_engram_gate_kernelIfEEvPKT_S3_S3_S3_S3_S3_PS1_S4_xxxf":[18,0,0,16,848,13,52],
+"_ZN12_GLOBAL__N_125hip_gated_rms_norm_kernelI6__halfLb0EEEvPKT_S4_S4_PS2_xxf":[14,0,0,16,212,4,16],
+"_ZN12_GLOBAL__N_125hip_gated_rms_norm_kernelI6__halfLb1EEEvPKT_S4_S4_PS2_xxf":[14,0,0,16,214,4,16],
+"_ZN12_GLOBAL__N_125hip_gated_rms_norm_kernelIfLb0EEEvPKT_S3_S3_PS1_xxf":[14,0,0,16,207,4,16],
+"_ZN12_GLOBAL__N_125hip_gated_rms_norm_kernelIfLb1EEEvPKT_S3_S3_PS1_xxf":[14,0,0,16,208,4,16]
 },
 "rope_kernel":{
 "_Z23rope_interleaved_kernelI6__halfEvPKT_PKxS3_S3_PS1_iiiiiiii":[13,0,0,16,348,0,0],

@@ -21,7 +21,7 @@ func.func @engram_gate_two_outputs(%ctx: !hip.context) {
   return
 }
 
-// Without the second output, conv_scale and normed are null.
+// Without conv_norm_scale and the second output, both pointers are null.
 // CHECK-LABEL: llvm.func @engram_gate_one_output
 // CHECK-COUNT-2: llvm.mlir.zero : !llvm.ptr
 // CHECK: llvm.call @wrap_engram_gate

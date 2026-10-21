@@ -1460,6 +1460,37 @@ LogicalResult EngramGateOp::verify() {
   if (!valueType || !valueType.hasRank() || valueType.getRank() != 3) {
     return emitOpError("expected value of rank 3 (B, S, H)");
   }
+
+  auto compatible = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  ArrayRef<int64_t> key = keyType.getShape();
+  ArrayRef<int64_t> value = valueType.getShape();
+  if (!compatible(value[0], key[0]) || !compatible(value[1], key[1]) ||
+      !compatible(value[2], key[3])) {
+    return emitOpError("value shape must be (B, S, H) of key (B, S, hc, H)");
+  }
+  SmallVector<Value> scales = {getKeyNormScale(), getQueryNormScale()};
+  if (getConvNormScale()) {
+    scales.push_back(getConvNormScale());
+  }
+  for (Value scale : scales) {
+    auto scaleType = dyn_cast<ShapedType>(scale.getType());
+    if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 2 ||
+        !compatible(scaleType.getDimSize(0), key[2]) ||
+        !compatible(scaleType.getDimSize(1), key[3])) {
+      return emitOpError("norm scales must have shape (hc, H)");
+    }
+  }
+  for (Value output : getOutputs()) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() || outputType.getRank() != 4 ||
+        !llvm::all_of(llvm::seq<int64_t>(0, 4), [&](int64_t i) {
+          return compatible(outputType.getDimSize(i), key[i]);
+        })) {
+      return emitOpError("outputs must have the key shape");
+    }
+  }
   return success();
 }
 

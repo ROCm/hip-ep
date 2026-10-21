@@ -1487,7 +1487,7 @@ int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
 
 // com.microsoft EngramGate. key / query / output / normed are
 // (B, S, hc, hidden), value is (B, S, hidden), scales are (hc, hidden).
-// conv_scale and normed are both null or both non-null.
+// conv_scale may be null; normed may be null and requires conv_scale.
 int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                      void *key_scale, void *query_scale, void *conv_scale,
                      void *output, void *normed, int64_t key_num_elements,
