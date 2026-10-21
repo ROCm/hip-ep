@@ -764,6 +764,34 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
   return 0;
 }
 
+int wrap_ngram_hash_mapping(RuntimeState *state, void *input_ids,
+                            void *multipliers, void *vocab_sizes,
+                            void *past_ids, void *head_offsets,
+                            void *eos_token_id, void *segment_ids,
+                            void *hash_ids, void *present_ids, int64_t batch,
+                            int64_t seq_len, int64_t max_ngram_size,
+                            int64_t n_head_per_ngram, int64_t pad_id,
+                            int64_t reset_on_eos, int64_t element_size_bytes) {
+  (void)input_ids;
+  (void)multipliers;
+  (void)vocab_sizes;
+  (void)hash_ids;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_ngram_hash_mapping\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_ngram_hash_mapping(B=%lld, S=%lld, N=%lld, "
+             "heads=%lld, pad=%lld, reset_on_eos=%lld, elem=%lld, past=%d, "
+             "offsets=%d, eos=%d, seg=%d, present=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)max_ngram_size,
+             (long long)n_head_per_ngram, (long long)pad_id,
+             (long long)reset_on_eos, (long long)element_size_bytes,
+             past_ids != nullptr, head_offsets != nullptr,
+             eos_token_id != nullptr, segment_ids != nullptr,
+             present_ids != nullptr);
+  return 0;
+}
+
 int wrap_compress(RuntimeState *state, void *input, void *condition,
                   void *output, int64_t flatten, int64_t axis,
                   int64_t input_rank, int64_t output_rank,

@@ -2206,6 +2206,121 @@ void CausalConvWithStateOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// NGramHashMappingOp: ins(input_ids, multipliers, vocab_sizes, [past_ids],
+//                         [head_offsets], [eos_token_id], [segment_ids])
+//                     outs(hash_ids, [present_ids])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NGramHashMappingOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void NGramHashMappingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult NGramHashMappingOp::verify() {
+  SmallVector<Value> data = {getInputIds(), getMultipliers(), getVocabSizes()};
+  for (Value v :
+       {getPastIds(), getHeadOffsets(), getEosTokenId(), getSegmentIds()}) {
+    if (v) {
+      data.push_back(v);
+    }
+  }
+  llvm::append_range(data, getOutputs());
+  if (getOutputs().empty() || getOutputs().size() > 2) {
+    return emitOpError("expects 1 or 2 outputs, got ") << getOutputs().size();
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getOutputs().size()))) {
+    return failure();
+  }
+
+  const int64_t ngram = getMaxNgramSize();
+  const int64_t headsPerNgram = getNHeadPerNgram();
+  if (ngram < 2) {
+    return emitOpError("max_ngram_size must be >= 2, got ") << ngram;
+  }
+  if (headsPerNgram < 1) {
+    return emitOpError("n_head_per_ngram must be >= 1, got ") << headsPerNgram;
+  }
+  const int64_t history = ngram - 1;
+  const int64_t numHeads = history * headsPerNgram;
+  constexpr int64_t kAny = ShapedType::kDynamic;
+
+  auto ids = cast<ShapedType>(getInputIds().getType());
+  Type elem = ids.getElementType();
+  if (!elem.isSignlessInteger(32) && !elem.isSignlessInteger(64)) {
+    return emitOpError("input_ids must be i32 or i64, got ") << elem;
+  }
+  if (ids.getRank() != 2) {
+    return emitOpError("input_ids must be rank 2, got rank ") << ids.getRank();
+  }
+  const int64_t batch = ids.getDimSize(0);
+  const int64_t seq = ids.getDimSize(1);
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  auto mult = cast<ShapedType>(getMultipliers().getType());
+  if (failed(check(getMultipliers(), "multipliers", elem, {kAny}))) {
+    return failure();
+  }
+  if (!mult.isDynamicDim(0) && mult.getDimSize(0) < ngram) {
+    return emitOpError("multipliers must have at least ")
+           << ngram << " elements, got " << mult.getDimSize(0);
+  }
+  if (failed(check(getVocabSizes(), "vocab_sizes", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getPastIds() &&
+      failed(check(getPastIds(), "past_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  if (getHeadOffsets() &&
+      failed(check(getHeadOffsets(), "head_offsets", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getEosTokenId() &&
+      failed(check(getEosTokenId(), "eos_token_id", elem, {}))) {
+    return failure();
+  }
+  if (getSegmentIds() &&
+      failed(check(getSegmentIds(), "segment_ids",
+                   IntegerType::get(getContext(), 32), {batch, seq}))) {
+    return failure();
+  }
+  if (failed(
+          check(getOutputs()[0], "hash_ids", elem, {batch, seq, numHeads}))) {
+    return failure();
+  }
+  if (getOutputs().size() == 2 &&
+      failed(check(getOutputs()[1], "present_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // GemmOp
 //===----------------------------------------------------------------------===//
 

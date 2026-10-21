@@ -3736,6 +3736,84 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
   }];
 }
 
+// ===== N-gram Hash Mapping ===================================================
+
+def Hip_NGramHashMappingOp : Hip_DpsOp<"ngram_hash_mapping",
+    [AttrSizedOperandSegments]> {
+  let summary = "N-gram token hashing (com.microsoft NGramHashMapping)";
+  let description = [{
+    Implements the com.microsoft NGramHashMapping operator (Engram). With
+    `N = max_ngram_size`, `L = N - 1` and `H = L * n_head_per_ngram`, each
+    position `t` of `input_ids` [B, S] produces `H` ids in `hash_ids`
+    [B, S, H]. Columns are grouped by n-gram order (n = 2 first), each group
+    holding `n_head_per_ngram` heads:
+
+      mix_n  = XOR_{k < n} (token[t - k] * multipliers[k])
+      out[h] = PositiveMod(mix_n, vocab_sizes[h]) + head_offsets[h]
+
+    Multiplication and offset addition wrap in the unsigned type of the same
+    width. A head with `vocab_sizes[h] <= 0` outputs 0.
+
+    Tokens before `t` come from `past_ids` [B, L] (right-aligned history)
+    followed by `input_ids`. Missing history reads as the fill value:
+    `eos_token_id` when present, else `pad_id`. The nearest boundary in
+    [t - L, t - 1] replaces that position and everything older with the fill
+    value; the current token is never replaced. A boundary is an EOS token
+    (only when `reset_on_eos` is non-zero and `eos_token_id` is present,
+    `past_ids` included) or a change of `segment_ids` between adjacent
+    positions of `input_ids`.
+
+    The optional second DPS output `present_ids` [B, L] receives the last `L`
+    raw tokens of the history followed by `input_ids`. It may alias
+    `past_ids`.
+
+    Element type T is i32 or i64 for every operand and output except
+    `segment_ids` (i32). `eos_token_id` is rank 0.
+
+    Example:
+    ```mlir
+    hip.ngram_hash_mapping(%ctx)
+        ins(%ids, %mult, %vocab : memref<1x16xi64, 1>, memref<3xi64, 1>,
+                                  memref<16xi64, 1>)
+        past_ids(%past : memref<1x2xi64, 1>)
+        head_offsets(%off : memref<16xi64, 1>)
+        eos_token_id(%eos : memref<i64, 1>)
+        outs(%hash, %present : memref<1x16x16xi64, 1>, memref<1x2xi64, 1>)
+        {max_ngram_size = 3 : i64, n_head_per_ngram = 8 : i64,
+         pad_id = 248044 : i64, reset_on_eos = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input_ids,
+    Hip_TensorOrMemRef:$multipliers,
+    Hip_TensorOrMemRef:$vocab_sizes,
+    Optional<Hip_TensorOrMemRef>:$past_ids,
+    Optional<Hip_TensorOrMemRef>:$head_offsets,
+    Optional<Hip_TensorOrMemRef>:$eos_token_id,
+    Optional<Hip_TensorOrMemRef>:$segment_ids,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$max_ngram_size,
+    I64Attr:$n_head_per_ngram,
+    I64Attr:$pad_id,
+    DefaultValuedAttr<I64Attr, "0">:$reset_on_eos
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input_ids `,` $multipliers `,` $vocab_sizes `:`
+        type($input_ids) `,` type($multipliers) `,` type($vocab_sizes) `)`
+    (`past_ids` `(` $past_ids^ `:` type($past_ids) `)`)?
+    (`head_offsets` `(` $head_offsets^ `:` type($head_offsets) `)`)?
+    (`eos_token_id` `(` $eos_token_id^ `:` type($eos_token_id) `)`)?
+    (`segment_ids` `(` $segment_ids^ `:` type($segment_ids) `)`)?
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // ===== Group Query Attention =================================================
 
 def Hip_GqaOp : Hip_DpsOp<"gqa",
