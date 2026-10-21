@@ -226,8 +226,12 @@ struct RuntimeState {
   // hipdnn_ep_runtime_get_provider_option.
   void *provider_options;
 
-  // Device-side error flag used by kernels to report runtime-invalid inputs.
-  // 0 = no error, non-zero = error code (currently -1).
+  // Runtime error flag written by kernels (0 = none, non-zero = error code,
+  // currently -1). One hipHostMallocMapped allocation: error_flag_host is the
+  // CPU address, device_error_flag is hipHostGetDevicePointer of the same
+  // bytes. inference_compute stream-syncs before the host load, so the read
+  // does not sync or memset again.
+  int *error_flag_host;
   int *device_error_flag;
 
   // hipDNN graph execution support.
