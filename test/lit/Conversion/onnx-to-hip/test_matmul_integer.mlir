@@ -164,4 +164,74 @@ module {
   // CHECK-SAME: tensor<?x2x4xi32>
   // CHECK-NOT: hip.expand
   // CHECK-NOT: onnx.MatMulInteger
+
+  // A static batch with a runtime sequence. M is dynamic, K and N are static,
+  // and the scalar zero points do not depend on M. K = 512 selects i32.
+  func.func @matmul_integer_dynamic_sequence(
+      %a: tensor<1x?x512xui8>, %b: tensor<512x512xi8>,
+      %azp: tensor<ui8>, %bzp: tensor<i8>) -> tensor<1x?x512xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b, %azp, %bzp) : (
+        tensor<1x?x512xui8>, tensor<512x512xi8>, tensor<ui8>, tensor<i8>
+      ) -> tensor<1x?x512xi32>
+    return %y : tensor<1x?x512xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_dynamic_sequence
+  // CHECK: tensor.empty(%{{.*}}) : tensor<1x?x512xi32>
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<1x?x512xi32>, tensor<512x512xi32>
+  // CHECK-SAME: tensor<1x?x512xi32>
+  // CHECK-NOT: hip.expand
+  // CHECK-NOT: onnx.MatMulInteger
+
+  // Both leading dimensions may be dynamic when B is one static matrix.
+  // K = 4 still fits the f32 mantissa.
+  func.func @matmul_integer_dynamic_prefix(
+      %a: tensor<?x?x4xui8>, %b: tensor<4x3xi8>) -> tensor<?x?x3xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b) : (
+        tensor<?x?x4xui8>, tensor<4x3xi8>
+      ) -> tensor<?x?x3xi32>
+    return %y : tensor<?x?x3xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_dynamic_prefix
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<?x?x4xf32>, tensor<4x3xf32>
+  // CHECK-SAME: tensor<?x?x3xf32>
+  // CHECK: hip.cast
+  // CHECK-SAME: tensor<?x?x3xi32>
+  // CHECK-NOT: onnx.MatMulInteger
+
+  // A's K was not inferred. B still supplies static K and N. The accumulator
+  // stays i32 because the runtime K has no compile-time bound, even though
+  // B's K = 4 would fit the f32 mantissa.
+  func.func @matmul_integer_dynamic_k(
+      %a: tensor<?x?x?xui8>, %b: tensor<4x3xi8>,
+      %azp: tensor<ui8>, %bzp: tensor<i8>) -> tensor<?x?x3xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b, %azp, %bzp) : (
+        tensor<?x?x?xui8>, tensor<4x3xi8>, tensor<ui8>, tensor<i8>
+      ) -> tensor<?x?x3xi32>
+    return %y : tensor<?x?x3xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_dynamic_k
+  // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x3xi32>
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<?x?x?xi32>, tensor<4x3xi32>
+  // CHECK-SAME: tensor<?x?x3xi32>
+  // CHECK-NOT: hip.expand
+  // CHECK-NOT: onnx.MatMulInteger
+
+  // A length-M zero point has no static length when M is dynamic.
+  func.func @matmul_integer_dynamic_m_per_row_rejected(
+      %a: tensor<1x?x4xui8>, %b: tensor<4x3xi8>,
+      %azp: tensor<2xui8>) -> tensor<1x?x3xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b, %azp) : (
+        tensor<1x?x4xui8>, tensor<4x3xi8>, tensor<2xui8>
+      ) -> tensor<1x?x3xi32>
+    return %y : tensor<1x?x3xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_dynamic_m_per_row_rejected
+  // CHECK: onnx.MatMulInteger
 }

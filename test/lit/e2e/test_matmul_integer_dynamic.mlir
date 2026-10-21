@@ -1,8 +1,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// A dynamic leading batch reaches the integer matmul runtime wrapper through
-// A's memref descriptor. The rank-2 B is one shared matrix.
+// Dynamic leading dimensions, including a runtime sequence in M, reach the
+// integer matmul runtime wrapper through A's memref descriptor. The rank-2 B
+// is one shared matrix.
 
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
