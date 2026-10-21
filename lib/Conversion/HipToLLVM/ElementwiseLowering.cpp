@@ -218,10 +218,81 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
   }
 };
 
+struct SwigluF32Lowering : ConvertOpToLLVMPattern<SwigluF32Op> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(SwigluF32Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type ptr = getPtrType(), i64 = rewriter.getI64Type();
+    SmallVector<Type> parameters(4, ptr);
+    parameters.append(12, i64);
+    auto function = LLVM::lookupOrCreateFn(
+        rewriter, op->getParentOfType<ModuleOp>(), "wrap_swiglu_f32",
+        parameters, rewriter.getI32Type());
+    if (failed(function))
+      return failure();
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getUp(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    // Keep the backing arrays alive for the entire loop. ValueRange views
+    // of temporary initializer lists expire before the first iteration.
+    SmallVector<Value, 3> originals{op.getGate(), op.getUp(), op.getOutput()};
+    SmallVector<Value, 3> convertedValues{adaptor.getGate(), adaptor.getUp(),
+                                          adaptor.getOutput()};
+    for (auto [original, converted] : llvm::zip(originals, convertedValues)) {
+      auto dims = extractShape4D(cast<MemRefType>(original.getType()),
+                                 converted, rewriter, loc, i64);
+      args.append(dims.begin(), dims.end());
+    }
+    LLVM::CallOp::create(rewriter, loc, *function, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct RoundedScaledAddLowering : ConvertOpToLLVMPattern<RoundedScaledAddOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(RoundedScaledAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type ptr = getPtrType(), i64 = rewriter.getI64Type();
+    SmallVector<Type> parameters(5, ptr);
+    parameters.append(17, i64);
+    auto function = LLVM::lookupOrCreateFn(
+        rewriter, op->getParentOfType<ModuleOp>(),
+        "wrap_rounded_scaled_add_f16", parameters, rewriter.getI32Type());
+    if (failed(function))
+      return failure();
+    SmallVector<Value> args = {adaptor.getCtx()};
+    SmallVector<Value> originals{op.getBase(), op.getX(), op.getY(),
+                                 op.getOutput()};
+    SmallVector<Value> converted{adaptor.getBase(), adaptor.getX(),
+                                 adaptor.getY(), adaptor.getOutput()};
+    for (Value value : converted)
+      args.push_back(extractContiguousMemRefPtr(value, rewriter, loc));
+    for (auto [original, value] : llvm::zip(originals, converted)) {
+      auto dims = extractShape4D(cast<MemRefType>(original.getType()), value,
+                                 rewriter, loc, i64);
+      args.append(dims.begin(), dims.end());
+    }
+    args.push_back(LLVM::ConstantOp::create(
+        rewriter, loc, i64, rewriter.getI64IntegerAttr(op.getProductOnLhs())));
+    LLVM::CallOp::create(rewriter, loc, *function, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
+  patterns.add<SwigluF32Lowering>(converter);
+  patterns.add<RoundedScaledAddLowering>(converter);
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>,
                ElementwiseOpLowering<MinOp, kTensorOpMin>,

@@ -492,6 +492,8 @@ void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateRoutedExpertsLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateGatherBlockQuantizedLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateQdqLoweringPatterns(const LLVMTypeConverter &converter,

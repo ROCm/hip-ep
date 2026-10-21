@@ -220,6 +220,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->matmul_dp4a_scratch_size = 0;
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
+  state->la_state_scratch = nullptr;
+  state->la_state_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
   state->gqa_fp32_adapter_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
@@ -785,6 +787,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // The stream sync above has drained any in-flight prefill still reading it.
   if (state->la_scratch) {
     HIP_CLEANUP(hipFree(state->la_scratch));
+  }
+  if (state->la_state_scratch) {
+    HIP_CLEANUP(hipFree(state->la_state_scratch));
   }
 
   if (state->gqa_fp32_adapter_scratch) {
@@ -1706,6 +1711,29 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
   }
   state->la_scratch_size = alloc_size;
   return 0;
+}
+
+void *hipdnn_ep_state_get_la_state_scratch(RuntimeState *state,
+                                           size_t needed_size) {
+  if (!state || !state->stream || !needed_size)
+    return nullptr;
+  if (state->la_state_scratch_size >= needed_size)
+    return state->la_state_scratch;
+  // Growth is rare. Do not release storage while the stream still uses it.
+  if (state->la_state_scratch &&
+      hipStreamSynchronize(state->stream) != hipSuccess)
+    return nullptr;
+  void *buffer = nullptr;
+  if (hipMalloc(&buffer, needed_size) != hipSuccess)
+    return nullptr;
+  if (state->la_state_scratch &&
+      hipFree(state->la_state_scratch) != hipSuccess) {
+    HIP_CLEANUP(hipFree(buffer));
+    return nullptr;
+  }
+  state->la_state_scratch = buffer;
+  state->la_state_scratch_size = needed_size;
+  return buffer;
 }
 
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {

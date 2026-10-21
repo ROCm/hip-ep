@@ -11,6 +11,20 @@
 #include <cstdio>
 #include <hip/hip_runtime.h>
 
+int wrap_top_k_static(RuntimeState *state, void *x, int64_t k, void *values,
+                      void *indices, int64_t axis, int64_t largest,
+                      int64_t sorted, int64_t rank, const int64_t *x_shape,
+                      int64_t num_elements, int64_t element_size_bytes) {
+  OP_PROFILE(
+      "top_k_static", [&] { return std::to_string(k); }, state);
+  (void)num_elements;
+  if (!state || !x || !values || !indices || !x_shape)
+    return -1;
+  return hip_top_k(hipdnn_ep_state_get_stream(state), x, values, indices, axis,
+                   largest, sorted, rank, x_shape, k,
+                   static_cast<int>(element_size_bytes));
+}
+
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,

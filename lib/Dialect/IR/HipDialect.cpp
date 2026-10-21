@@ -2026,6 +2026,100 @@ void SwigluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SwigluF32Op: FP16 storage with FP32 intermediate rounding.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SwigluF32Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SwigluF32Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SwigluF32Op::verify() {
+  for (Value value : {getGate(), getUp(), getOutput()}) {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() || type.getRank() > 4 ||
+        !type.getElementType().isF16())
+      return emitOpError(
+          "requires ranked FP16 operands with at most four axes");
+  }
+  auto gate = cast<ShapedType>(getGate().getType());
+  auto up = cast<ShapedType>(getUp().getType());
+  auto output = cast<ShapedType>(getOutput().getType());
+  if (output.getRank() != std::max(gate.getRank(), up.getRank()))
+    return emitOpError("requires the broadcast result rank");
+  for (int64_t axis = 0; axis < output.getRank(); ++axis) {
+    auto extent = [&](ShapedType type) {
+      int64_t inputAxis = axis - (output.getRank() - type.getRank());
+      return inputAxis < 0 ? int64_t(1) : type.getDimSize(inputAxis);
+    };
+    int64_t g = extent(gate), u = extent(up), o = output.getDimSize(axis);
+    if (ShapedType::isDynamic(g) || ShapedType::isDynamic(u))
+      continue;
+    if (g != u && g != 1 && u != 1)
+      return emitOpError("requires compatible broadcast extents");
+    if (!ShapedType::isDynamic(o) && o != (g == 1 ? u : g))
+      return emitOpError("requires the broadcast destination shape");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RoundedScaledAddOp keeps each rounding boundary in the source chain.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundedScaledAddOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoundedScaledAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoundedScaledAddOp::verify() {
+  for (Value value : {getBase(), getX(), getY(), getOutput()}) {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() || type.getRank() > 4 ||
+        (value == getOutput() ? !type.getElementType().isF16()
+                              : !type.getElementType().isF32()))
+      return emitOpError("requires FP32 inputs and an FP16 destination, with "
+                         "at most four axes");
+  }
+  auto base = cast<ShapedType>(getBase().getType());
+  auto x = cast<ShapedType>(getX().getType());
+  auto y = cast<ShapedType>(getY().getType());
+  auto output = cast<ShapedType>(getOutput().getType());
+  if (output.getRank() != std::max({base.getRank(), x.getRank(), y.getRank()}))
+    return emitOpError("requires the broadcast result rank");
+  for (int64_t axis = 0; axis < output.getRank(); ++axis) {
+    int64_t known = 1;
+    bool dynamic = false;
+    for (auto type : {base, x, y}) {
+      int64_t inputAxis = axis - (output.getRank() - type.getRank());
+      int64_t size = inputAxis < 0 ? 1 : type.getDimSize(inputAxis);
+      if (ShapedType::isDynamic(size)) {
+        dynamic = true;
+      } else if (size != 1) {
+        if (known != 1 && known != size)
+          return emitOpError("requires compatible broadcast extents");
+        known = size;
+      }
+    }
+    int64_t size = output.getDimSize(axis);
+    if (!ShapedType::isDynamic(size) && (!dynamic || known != 1) &&
+        size != known)
+      return emitOpError("requires the broadcast destination shape");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 
@@ -2343,6 +2437,66 @@ LogicalResult DequantBnb4Op::verify() {
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
+
+MutableOperandRange RoutedExpertsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoutedExpertsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoutedExpertsOp::verify() {
+  auto input = cast<ShapedType>(getInput().getType());
+  auto indices = cast<ShapedType>(getIndices().getType());
+  auto gates = cast<ShapedType>(getGates().getType());
+  auto output = cast<ShapedType>(getOutput().getType());
+  int64_t experts = getNumExperts(), k = getK(), block = getBlockSize();
+  if (!input.hasRank() || !output.hasRank() || !indices.hasRank() ||
+      !gates.hasRank())
+    return emitOpError("requires ranked input, output, indices, and gates");
+  if (input.getRank() != 3 || output.getShape() != input.getShape() ||
+      !input.getElementType().isF16() || !output.getElementType().isF16() ||
+      indices.getRank() != 3 || gates.getShape() != indices.getShape() ||
+      !indices.getElementType().isInteger(64) ||
+      !gates.getElementType().isF32() || experts < 1 || experts > 128 ||
+      k < 1 || k > experts || indices.getDimSize(2) != k ||
+      getParameters().size() != 6 * experts ||
+      (block != 32 && block != 64 && block != 128) ||
+      input.getDimSize(2) <= 0 || getIntermediateSize() <= 0)
+    return emitOpError("invalid sparse expert shape, type, or quantization");
+  for (int axis = 0; axis < 2; ++axis)
+    if (input.getDimSize(axis) != indices.getDimSize(axis))
+      return emitOpError("input and routing dimensions must match");
+  for (int64_t e = 0; e < experts; ++e) {
+    for (int stage = 0; stage < 2; ++stage) {
+      int64_t n = stage ? input.getDimSize(2) : getIntermediateSize();
+      int64_t reduction = stage ? getIntermediateSize() : input.getDimSize(2);
+      int64_t groups = (reduction + block - 1) / block;
+      auto w = cast<ShapedType>(getParameters()[e * 6 + stage * 3].getType());
+      auto s =
+          cast<ShapedType>(getParameters()[e * 6 + stage * 3 + 1].getType());
+      auto z =
+          cast<ShapedType>(getParameters()[e * 6 + stage * 3 + 2].getType());
+      if (!w.hasRank() || !s.hasRank() || !z.hasRank())
+        return emitOpError("requires ranked expert parameters");
+      auto isByte = [](Type type) {
+        auto integer = dyn_cast<IntegerType>(type);
+        return integer && integer.getWidth() == 8;
+      };
+      if (w.getShape() != ArrayRef<int64_t>({n, groups, block / 2}) ||
+          s.getShape() != ArrayRef<int64_t>({n, groups}) ||
+          z.getShape() != ArrayRef<int64_t>({n, (groups + 1) / 2}) ||
+          !isByte(w.getElementType()) || !isByte(z.getElementType()) ||
+          !s.getElementType().isF16())
+        return emitOpError(
+            "expert parameter layout does not match quantization");
+    }
+  }
+  return success();
+}
 
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 

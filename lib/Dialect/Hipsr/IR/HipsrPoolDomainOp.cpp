@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
@@ -20,8 +21,8 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange PoolDomainOp::getSuccessorInputs(RegionSuccessor successor) {
-  return successor.isParent() ? ValueRange(getResults())
-                              : ValueRange(getBody().getArguments());
+  return !successor.getSuccessor() ? ValueRange(getResults())
+                                   : ValueRange(getBody().getArguments());
 }
 
 void PoolDomainOp::getSuccessorRegions(
@@ -36,8 +37,9 @@ void PoolDomainOp::getSuccessorRegions(
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected branch point");
   }
-  // TODO: Current llvm couldn't construct RegionSuccessor from op
-  // When it does, use the following:
-  // regions.emplace_back(getOperation());
+#if LLVM_VERSION_MAJOR >= 24
+  regions.emplace_back(getOperation());
+#else
   regions.emplace_back(nullptr);
+#endif
 }

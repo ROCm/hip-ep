@@ -53,6 +53,8 @@ set(_kernel_sources
     hip/swish_kernel.hip
     hip/pow_kernel.hip
     hip/swiglu_kernel.hip
+    hip/swiglu_f32_kernel.hip
+    hip/rounded_scaled_add_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
@@ -98,6 +100,9 @@ set(_kernel_sources
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
+    hip/routed_experts_kernel.hip
+    hip/small_matvec_kernel.hip
+    hip/head_matvec_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip

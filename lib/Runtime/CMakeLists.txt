@@ -339,6 +339,9 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/dequant_bnb4.cpp runtime_dequant_bnb4.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
+    compile_to_bitcode(real/routed_experts.cpp runtime_routed_experts.bc)
+    compile_to_bitcode(real/swiglu_f32.cpp runtime_swiglu_f32.bc)
+    compile_to_bitcode(real/rounded_scaled_add.cpp runtime_rounded_scaled_add.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
     compile_to_bitcode(real/qdq.cpp runtime_qdq.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
@@ -443,6 +446,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_dequant_bnb4.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_routed_experts.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_swiglu_f32.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_rounded_scaled_add.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc

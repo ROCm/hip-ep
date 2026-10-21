@@ -3382,6 +3382,15 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// FP32 decode with FP16 state at invocation boundaries. Returns 1 when the
+// shape or selected reduction kernel is not supported, and -1 on a launch error.
+HIP_KERNEL_API int hip_linear_attention_decode_f16_state(
+    void* stream, const void* query, const void* key, const void* value,
+    const void* decay, const void* beta, const void* past_state, void* state,
+    void* output, int64_t B, int64_t Hq, int64_t Hkv, int64_t Nk,
+    int64_t dk, int64_t dv, float scale, int64_t rule,
+    int64_t decay_per_key_dim, int64_t beta_per_head);
+
 // Chunked-parallel gated/gated-delta prefill kernel (windowed launches,
 // processes the whole sequence). Returns >0 (=1) when it declines (caller must
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.

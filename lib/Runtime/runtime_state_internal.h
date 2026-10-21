@@ -178,6 +178,9 @@ struct RuntimeState {
   // released on teardown.
   void *la_scratch;
   size_t la_scratch_size;
+  // FP32 state for mixed-state prefill. This must not alias la_scratch.
+  void *la_state_scratch;
+  size_t la_state_scratch_size;
 
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in

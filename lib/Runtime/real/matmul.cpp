@@ -7,8 +7,10 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "cache_utils.h"
+#include "head_matvec.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
+#include "small_matvec.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,7 +31,7 @@
 // pointers are available), we benchmark each candidate and cache the winner.
 // Subsequent calls reuse the tuned algorithm with zero overhead.
 //
-// Auto-tune is enabled by default. Set HIPDNN_EP_AUTOTUNE=0 to disable.
+// Auto-tune is disabled by default. Set HIPDNN_EP_AUTOTUNE=1 to enable it.
 //===----------------------------------------------------------------------===//
 
 static constexpr int MAX_ALGO_CANDIDATES = 60;
@@ -482,6 +484,26 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
             (long long)elem_size);
     return -1;
+  }
+
+  static const bool sequentialRouter =
+      hipdnn_ep::env_enabled("HIPDNN_EP_EXPERIMENTAL_SEQUENTIAL_ROUTER_F32");
+  if (sequentialRouter && elem_size == 4 && M == 1 && batch_count == 1 &&
+      transA == 0 && transB == 0 && N == 128 && K == 2688)
+    return hip_sequential_router_f32(stream, A, B, output, static_cast<int>(N),
+                                     static_cast<int>(K));
+
+  // Keep the experimental head reduction separate from the exact core.
+  static const bool headMatvec =
+      hipdnn_ep::env_enabled("HIPDNN_EP_EXPERIMENTAL_HEAD_F16_MATVEC");
+  if (headMatvec && elem_size == 2 && M == 1 && batch_count == 1 &&
+      transA == 0 && transB == 0 && N == 131072 && K == 2688) {
+    if (hipdnn_ep_state_ensure_workspace(state, 4 * N * sizeof(float)) != 0)
+      return -1;
+    RUNTIME_DEBUG_LOG("[HEAD_MATVEC] FP16 K2688 N131072, four-way split\n");
+    return hip_head_matvec_f16(stream, A, B, output,
+                               hipdnn_ep_state_get_workspace(state),
+                               static_cast<int>(N), static_cast<int>(K));
   }
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";

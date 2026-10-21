@@ -195,8 +195,19 @@ struct LinearAttentionOpLowering
         i64Type  // type (HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)
     };
 
+    const bool mixedState = op->hasAttr("hip.fp16_state_boundary");
+    if (mixedState &&
+        (!queryType.getElementType().isF32() ||
+         !presentStateType.getElementType().isF16() || !op.getPastState() ||
+         !cast<MemRefType>(op.getPastState().getType())
+              .getElementType()
+              .isF16()))
+      return rewriter.notifyMatchFailure(op,
+                                         "invalid mixed-state attention types");
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapLinearAttention, paramTypes, i32Type);
+        rewriter, module,
+        mixedState ? "wrap_linear_attention_f16_state" : kWrapLinearAttention,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

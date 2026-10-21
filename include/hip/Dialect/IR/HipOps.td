@@ -956,6 +956,41 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
+def Hip_RoutedExpertsOp : Hip_DpsOp<"routed_experts", [], "Output", 0, 1, 1,
+    [{
+      if (!::mlir::isa<::mlir::RankedTensorType>(getInput().getType()))
+        return ::mlir::failure();
+      reified.assign({::mlir::hip::reifyElementwiseSameShape(
+          b, getLoc(), getInput())});
+      return ::mlir::success();
+    }]> {
+  let summary = "Sparse quantized squared-ReLU experts with supplied routing";
+  let description = [{
+    Runs the experts selected by unique per-token indices. Input and output
+    have shape [batch, sequence, hidden]. Indices and gates have shape
+    [batch, sequence, k]. Parameters contain six tensors per expert in ID
+    order: up weights, up scales, up zero points, down weights, down scales,
+    and down zero points. Weights and zero points use packed int4 storage.
+
+    Each projection, activation, weighted result, and partial sum rounds to
+    FP16. Expert results add in increasing ID order. Inactive expert results
+    must be finite. This is an experimental, opt-in sparse execution contract.
+  }];
+  let arguments = (ins Hip_ContextType:$handle,
+      Hip_TensorOrMemRef:$input, Hip_TensorOrMemRef:$indices,
+      Hip_TensorOrMemRef:$gates, Variadic<Hip_TensorOrMemRef>:$parameters,
+      Hip_TensorOrMemRef:$output, I64Attr:$num_experts,
+      I64Attr:$intermediate_size, I64Attr:$k, I64Attr:$block_size);
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $input `,` $indices `,` $gates `:`
+      type($input) `,` type($indices) `,` type($gates) `)`
+    `parameters` `(` $parameters `:` type($parameters) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
+    (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 // Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
 // ONNX Runtime writes before a transposed GEMM. The first of each packed pair
 // lives in the high nibble. This is not MXFP block-scaled matmul.
@@ -2845,6 +2880,48 @@ def Hip_SwigluOp : Hip_DpsOp<"swiglu"> {
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SwigluF32Op : Hip_DpsOp<"swiglu_f32"> {
+  let summary = "FP16 SwiGLU with FP32 intermediate rounding";
+  let description = [{
+    Converts the FP16 inputs to FP32, computes Swish(gate) * up in FP32,
+    then converts the FP32 product to FP16. Swish uses alpha = 1.
+    The inputs use right-aligned broadcasting, with at most four axes.
+    The destination has the broadcast shape. This operation keeps the
+    intermediate FP32 rounding. It does not preserve NaN payload bits.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx, Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$up, Hip_TensorOrMemRef:$output);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_RoundedScaledAddOp : Hip_DpsOp<"rounded_scaled_add"> {
+  let summary = "Add separately rounded FP16 base and FP32 product";
+  let description = [{
+    Computes the FP32 product x * y, then rounds that product to FP16.
+    Rounds base to FP16 separately. Adds the two FP16 values and stores FP16.
+    product_on_lhs keeps the original add operand order. Each input uses
+    right-aligned broadcasting with at most four axes. This operation keeps
+    the FP32 product boundary and both FP16 boundaries before addition.
+    It preserves NaN results, but does not promise NaN payload bits.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx, Hip_TensorOrMemRef:$base,
+    Hip_TensorOrMemRef:$x, Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$product_on_lhs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $base `,` $x `,` $y `:`
+      type($base) `,` type($x) `,` type($y) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

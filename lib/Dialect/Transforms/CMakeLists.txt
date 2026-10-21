@@ -27,6 +27,11 @@ add_library(HipDialectTransforms STATIC
   # instantiates the driver, only ever sees their populate declarations.
   fusion_pattern/patch_embed_conv_to_gemm.cpp
   fusion_pattern/swiglu_fusion.cpp
+  fusion_pattern/swiglu_f32_fusion.cpp
+  fusion_pattern/rounded_scaled_add_fusion.cpp
+  fusion_pattern/routed_experts_fusion.cpp
+  fusion_pattern/linear_attention_state_fusion.cpp
+  fusion_pattern/linear_attention_head_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp

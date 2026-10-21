@@ -190,3 +190,6 @@ site/.bundle/
 # The repository-wide models/ rule above is for downloaded model files. Keep
 # the documentation pages under site/docs/models/ tracked.
 !site/docs/models/
+
+# Local Nemotron benchmark runtimes, model links, and diagnostic evidence.
+/.nemotron-perf/
