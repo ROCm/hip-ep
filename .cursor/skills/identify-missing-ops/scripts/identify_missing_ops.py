@@ -214,6 +214,7 @@ _WRAP_SUFFIX_TO_OP: dict[str, str] = {
     "linear_attention": "LinearAttention",
     "qmoe": "QMoE",
     "causal_conv_with_state": "CausalConvWithState",
+    "ngram_hash_mapping": "NGramHashMapping",
     "layer_normalization": "LayerNormalization",
     "skip_simplified_layer_norm": "SkipSimplifiedLayerNormalization",
 }
@@ -907,7 +908,7 @@ def _variant_issue_for_op(
         if (
             input_types
             and len(input_types) >= 2
-            and "none" not in input_types[1].lower()
+            and _resize_roi_type_is_present(input_types[1])
         ):
             return "Resize with roi (tf_crop_and_resize) not supported"
 
@@ -1008,7 +1009,11 @@ def _onnx_resize_variant_issue(node, values_by_name: dict) -> str | None:
     if kar and kar != "stretch":
         return "Resize keep_aspect_ratio_policy must be 'stretch'"
     if len(node.input) >= 2 and node.input[1]:
-        return "Resize with roi (tf_crop_and_resize) not supported"
+        roi = values_by_name.get(node.input[1])
+        # Exporters pass a 0-element tensor for an omitted roi. The converter
+        # treats that as absent; only a real crop is tf_crop_and_resize.
+        if not _onnx_tensor_is_empty(roi):
+            return "Resize with roi (tf_crop_and_resize) not supported"
     return None
 
 
@@ -1145,6 +1150,40 @@ def _onnx_dims_dynamic(dims: Iterable) -> list[bool]:
         else:
             flags.append(True)
     return flags
+
+
+def _resize_roi_type_is_present(type_fragment: str) -> bool:
+    """True when an MLIR roi operand is a real crop, not none or empty."""
+    if "none" in type_fragment.lower():
+        return False
+    dims = _tensor_dims_from_type(type_fragment)
+    if dims and any(dim == "0" for dim in dims):
+        return False
+    return True
+
+
+def _onnx_tensor_is_empty(value) -> bool:
+    """True for a 0-element initializer or value_info. Scalars are not empty."""
+    if value is None:
+        return False
+    if hasattr(value, "dims") and hasattr(value, "data_type"):
+        if len(value.dims) == 0:
+            return False
+        count = 1
+        for dim in value.dims:
+            count *= int(dim)
+        return count == 0
+    if hasattr(value, "type"):
+        tensor_type = value.type.tensor_type
+        if not tensor_type.HasField("shape") or len(tensor_type.shape.dim) == 0:
+            return False
+        count = 1
+        for dim in tensor_type.shape.dim:
+            if not dim.HasField("dim_value"):
+                return False
+            count *= int(dim.dim_value)
+        return count == 0
+    return False
 
 
 def _onnx_value_rank(value) -> int:

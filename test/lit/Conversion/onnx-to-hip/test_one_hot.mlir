@@ -71,4 +71,44 @@ module {
   // CHECK: %[[D2:.*]] = hip.readback_scalar(%{{.*}}, %[[C]] : tensor<i64>) -> i64
   // CHECK: arith.index_cast %[[D2]] : i64 to index
   // CHECK-NOT: onnx.OneHot
+
+  // A dynamic indices dim that follows a static one (Gemma 4 vision pooler:
+  // indices tensor<1x?xi64>) must be sized from that same indices dim. Taking
+  // it from indices dim 0 sizes the output 1x1xdepth and the pooling matmul
+  // then reads a single patch.
+  func.func @onehot_dynamic_indices_after_static(
+      %arg0: tensor<1x?xi64>,
+      %arg1: tensor<i64>,
+      %arg2: tensor<2xf32>) -> tensor<1x?x?xf32> {
+    %result = "onnx.OneHot"(%arg0, %arg1, %arg2) {axis = -1 : si64}
+        : (tensor<1x?xi64>, tensor<i64>, tensor<2xf32>) -> tensor<1x?x?xf32>
+    return %result : tensor<1x?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @onehot_dynamic_indices_after_static
+  // CHECK: %[[I1:.*]] = arith.constant 1 : index
+  // CHECK: %[[N:.*]] = tensor.dim %{{.*}}, %[[I1]] : tensor<1x?xi64>
+  // CHECK: %[[DA:.*]] = hip.readback_scalar(%{{.*}}, %{{.*}} : tensor<i64>) -> i64
+  // CHECK: %[[DAI:.*]] = arith.index_cast %[[DA]] : i64 to index
+  // CHECK: tensor.empty(%[[N]], %[[DAI]]) : tensor<1x?x?xf32>
+  // CHECK-NOT: onnx.OneHot
+
+  // Same indices with the one-hot axis in the middle: output dim 2 maps to
+  // indices dim 1 because the depth axis is not an indices dim.
+  func.func @onehot_dynamic_indices_axis_middle(
+      %arg0: tensor<1x?xi64>,
+      %arg1: tensor<i64>,
+      %arg2: tensor<2xf32>) -> tensor<1x?x?xf32> {
+    %result = "onnx.OneHot"(%arg0, %arg1, %arg2) {axis = 1 : si64}
+        : (tensor<1x?xi64>, tensor<i64>, tensor<2xf32>) -> tensor<1x?x?xf32>
+    return %result : tensor<1x?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @onehot_dynamic_indices_axis_middle
+  // CHECK: %[[J1:.*]] = arith.constant 1 : index
+  // CHECK: %[[DM:.*]] = hip.readback_scalar(%{{.*}}, %{{.*}} : tensor<i64>) -> i64
+  // CHECK: %[[DMI:.*]] = arith.index_cast %[[DM]] : i64 to index
+  // CHECK: %[[M:.*]] = tensor.dim %{{.*}}, %[[J1]] : tensor<1x?xi64>
+  // CHECK: tensor.empty(%[[DMI]], %[[M]]) : tensor<1x?x?xf32>
+  // CHECK-NOT: onnx.OneHot
 }

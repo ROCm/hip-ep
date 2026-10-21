@@ -21,6 +21,7 @@ add_library(HipToLLVM STATIC
   GatherElementsLowering.cpp
   TopKLowering.cpp
   RandomNormalLikeLowering.cpp
+  ArgMaxLowering.cpp
   ScatterElementsLowering.cpp
   CompressLowering.cpp
   OneHotLowering.cpp
@@ -32,12 +33,14 @@ add_library(HipToLLVM STATIC
   GqaLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
+  DequantBnb4Lowering.cpp
   QMoELowering.cpp
   QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
   QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
+  NGramHashMappingLowering.cpp
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp

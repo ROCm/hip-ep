@@ -4,7 +4,7 @@
 #
 
 """Tests for data-rearrangement / shape ops: Tile, Expand, Pad, GatherND,
-Slice, ScatterND, and DepthToSpace.
+Slice, ScatterND, DepthToSpace, and SpaceToDepth.
 
 Tile, Expand, Pad, GatherND, Slice, and ScatterND are added by the
 qwen-vision-kernels PR. They share a common
@@ -739,6 +739,51 @@ class TestDepthToSpace:
     def test_depth_to_space(self, model_runner, dtype, shape, blocksize, mode):
         model = _make_depth_to_space_model(dtype, shape, blocksize, mode)
         rng = np.random.default_rng(900 + blocksize)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# SpaceToDepth
+# ---------------------------------------------------------------------------
+#
+# Inverse of DepthToSpace DCR: expand_shape + hip.transpose + collapse_shape.
+# blocksize 1 is forwarded as the input. ONNX SpaceToDepth has no mode.
+
+
+def _make_space_to_depth_model(dtype, shape, blocksize):
+    n, c, h, w = shape
+    out_shape = [
+        n,
+        c * blocksize * blocksize,
+        h // blocksize,
+        w // blocksize,
+    ]
+    tp = np_to_onnx_type(dtype)
+    x = helper.make_tensor_value_info("X", tp, list(shape))
+    y = helper.make_tensor_value_info("Y", tp, out_shape)
+    node = helper.make_node("SpaceToDepth", ["X"], ["Y"], blocksize=blocksize)
+    return make_model_from_nodes([node], [x], [y])
+
+
+class TestSpaceToDepth:
+    @pytest.mark.parametrize(
+        "dtype,shape,blocksize",
+        [
+            (np.float32, [1, 3, 4, 6], 2),
+            (np.float16, [1, 3, 8, 8], 4),
+            (np.int32, [2, 1, 4, 4], 2),
+            (np.float32, [1, 4, 2, 2], 1),
+            (np.int64, [1, 2, 2, 2], 1),
+        ],
+    )
+    def test_space_to_depth(self, model_runner, dtype, shape, blocksize):
+        model = _make_space_to_depth_model(dtype, shape, blocksize)
+        rng = np.random.default_rng(910 + blocksize)
         if np.issubdtype(dtype, np.integer):
             x = rng.integers(-50, 50, shape, dtype=dtype)
         else:

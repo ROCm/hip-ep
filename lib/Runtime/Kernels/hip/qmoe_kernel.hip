@@ -28,9 +28,13 @@ static constexpr int kRoutingBlock = 256;
 // ---------------------------------------------------------------------------
 // Top-k routing (fp16 only): for each token, find top-k experts by
 // probability. Uses insertion sort — k is small (typically 2-8).
+// With router_weights, router_probs only selects the experts and the mixing
+// weight of each selected expert is gathered from router_weights instead of
+// the softmax of router_probs.
 // ---------------------------------------------------------------------------
 __global__ void topk_routing_kernel(
     const __half* __restrict__ router_probs,
+    const __half* __restrict__ router_weights,
     int32_t* __restrict__ expert_indices,
     __half* __restrict__ expert_weights,
     int64_t num_tokens,
@@ -54,6 +58,7 @@ __global__ void topk_routing_kernel(
   extern __shared__ float s_exp[];        // [num_experts] exp(logit - max)
   __shared__ float s_red[kRoutingBlock];  // reduction scratch
   __shared__ int s_idx[kRoutingBlock];
+  __shared__ float s_w[kMaxK];            // selected weights, fp32
 
   // Pass 1: stash logits, block-reduce the max (numerically-stable softmax).
   float lmax = -1e30f;
@@ -118,21 +123,27 @@ __global__ void topk_routing_kernel(
     if (tid == 0) {
       const int win = s_idx[0];
       expert_indices[token * k + i] = win;
-      expert_weights[token * k + i] = static_cast<__half>(s_red[0] / exp_sum);
+      s_w[i] = router_weights
+                   ? static_cast<float>(
+                         router_weights[static_cast<int64_t>(token) * num_experts + win])
+                   : s_red[0] / exp_sum;
       s_exp[win] = -1e30f;
     }
     __syncthreads();
   }
 
-  // Optional renormalization of the top-k weights to sum to 1 (thread 0).
-  if (normalize && tid == 0) {
-    float sum = 0.0f;
-    for (int i = 0; i < ik; i++)
-      sum += static_cast<float>(expert_weights[token * k + i]);
-    if (sum > 0.0f)
+  // Optional renormalization of the top-k weights to sum to 1. A zero sum
+  // yields zero weights (only reachable with router_weights).
+  if (tid == 0) {
+    float scale = 1.0f;
+    if (normalize) {
+      float sum = 0.0f;
       for (int i = 0; i < ik; i++)
-        expert_weights[token * k + i] = static_cast<__half>(
-            static_cast<float>(expert_weights[token * k + i]) / sum);
+        sum += s_w[i];
+      scale = sum != 0.0f ? 1.0f / sum : 0.0f;
+    }
+    for (int i = 0; i < ik; i++)
+      expert_weights[token * k + i] = static_cast<__half>(s_w[i] * scale);
   }
 }
 
@@ -351,6 +362,7 @@ __global__ void bucket_tokens_kernel(
 extern "C" int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
+    const void* router_weights,
     void* expert_indices,
     void* expert_weights,
     int64_t num_tokens,
@@ -376,10 +388,12 @@ extern "C" int hip_qmoe_topk_routing(
   // Dynamic shared memory holds num_experts fp32 exp values (no expert cap;
   // e.g. 256 experts = 1 KB, well within the per-block shared limit).
   const size_t shmem = static_cast<size_t>(num_experts) * sizeof(float);
+  (void)hipGetLastError();
   hipLaunchKernelGGL(topk_routing_kernel,
                      dim3(static_cast<unsigned>(num_tokens)),
                      dim3(kRoutingBlock), shmem, s,
                      static_cast<const __half*>(router_probs),
+                     static_cast<const __half*>(router_weights),
                      static_cast<int32_t*>(expert_indices),
                      static_cast<__half*>(expert_weights), num_tokens,
                      num_experts, k, normalize);

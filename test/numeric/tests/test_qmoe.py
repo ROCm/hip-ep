@@ -77,6 +77,8 @@ def _make_qmoe_model(
     down_scale_range: tuple[float, float] = (0.001, 0.02),
     down_bias_range: tuple[float, float] = (-0.5, 0.5),
     seed: int = 42,
+    with_mix_weights: bool = False,
+    normalize_routing_weights: int = 1,
 ):
     """Build a QMoE ONNX model with random quantized expert weights.
 
@@ -86,6 +88,10 @@ def _make_qmoe_model(
 
     Scale and bias ranges are tuneable to match real model distributions.
     Scales are always positive (matching the real GPT-OSS-20B pattern).
+
+    with_mix_weights adds the optional QMoE router_weights input (input 14) as
+    a graph input named "mix_weights": the router logits then only select the
+    experts and the mixing weights are gathered from it.
     """
     down_in = intermediate // 2
     packed_gate_up = hidden // 2
@@ -154,21 +160,34 @@ def _make_qmoe_model(
         numpy_helper.from_array(down_bias, name="down_bias"),
     ]
 
+    node_inputs = [
+        "input",
+        "router_weights",
+        "gate_up_qweight",
+        "gate_up_scales",
+        "gate_up_bias",
+        "down_qweight",
+        "down_scales",
+        "down_bias",
+        "",
+        "",
+        "",
+    ]
+    graph_inputs = [x, router]
+    if with_mix_weights:
+        # fc1/fc2/fc3 zero points (inputs 11-13) stay absent.
+        node_inputs += ["", "", "", "mix_weights"]
+        graph_inputs.append(
+            helper.make_tensor_value_info(
+                "mix_weights",
+                TensorProto.FLOAT16,
+                [seq_len, num_experts],
+            )
+        )
+
     node = helper.make_node(
         "QMoE",
-        [
-            "input",
-            "router_weights",
-            "gate_up_qweight",
-            "gate_up_scales",
-            "gate_up_bias",
-            "down_qweight",
-            "down_scales",
-            "down_bias",
-            "",
-            "",
-            "",
-        ],
+        node_inputs,
         ["output"],
         domain="com.microsoft",
         activation_type="swiglu",
@@ -176,7 +195,7 @@ def _make_qmoe_model(
         activation_beta=1.0,
         expert_weight_bits=4,
         k=top_k,
-        normalize_routing_weights=1,
+        normalize_routing_weights=normalize_routing_weights,
         swiglu_fusion=1,
         use_sparse_mixer=0,
         block_size=block_size,
@@ -186,7 +205,7 @@ def _make_qmoe_model(
     ms_opset = helper.make_opsetid("com.microsoft", 1)
     return make_model_from_nodes(
         [node],
-        [x, router],
+        graph_inputs,
         [output],
         initializers=initializers,
         opset=21,
@@ -290,3 +309,53 @@ class TestQMoE:
 
         actual, expected = model_runner.run_sample(model, [x, router])
         _compare_gpt_oss_shape(actual, expected, seq_len)
+
+    @pytest.mark.parametrize("normalize", [0, 1])
+    @pytest.mark.parametrize(
+        "seq_len",
+        [
+            pytest.param(
+                1,
+                marks=pytest.mark.xfail(
+                    reason="fused decode exceeds atol=0.1 here, as "
+                    "test_qmoe_gpt_oss_shape[1] does without router_weights",
+                    strict=False,
+                ),
+            ),
+            37,
+            128,
+        ],
+    )
+    def test_qmoe_gpt_oss_shape_mix_weights(self, model_runner, seq_len, normalize):
+        """router_weights (QMoE input 14): the logits only pick the top-k
+        experts; the mixing weights are gathered from a separate tensor and
+        renormalised only when normalize_routing_weights=1. The mixing
+        weights are uncorrelated with the logits, so taking the softmax of
+        the logits instead would not match. Their top-k sums vary around 1 so
+        the unnormalised case keeps the output scale (and fp16 error) of the
+        normalised one. seq_len=1 covers the fused decode path, the others
+        the prefill paths.
+        """
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            HIDDEN,
+            INTERMEDIATE,
+            NUM_EXPERTS,
+            TOP_K,
+            BLOCK_SIZE,
+            with_mix_weights=True,
+            normalize_routing_weights=normalize,
+        )
+
+        rng = np.random.default_rng(123)
+        x = rng.uniform(-1, 1, [1, seq_len, HIDDEN]).astype(np.float16)
+        router = (rng.standard_normal([seq_len, NUM_EXPERTS]) * 1.2).astype(
+            np.float16,
+        )
+        ranked = -np.sort(-router.astype(np.float32), axis=1)
+        assert not (ranked[:, TOP_K - 1] == ranked[:, TOP_K]).any()
+        mix = rng.uniform(0.05, 0.45, [seq_len, NUM_EXPERTS]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router, mix])
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.99)
