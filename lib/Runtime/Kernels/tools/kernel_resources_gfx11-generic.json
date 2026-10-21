@@ -1451,6 +1451,12 @@
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi80ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[152,0,0,6,6857,328,768],
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi96ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[160,16,3,6,8041,392,896]
 },
+"ngram_hash_mapping_kernel":{
+"_ZN12_GLOBAL__N_117ngram_hash_kernelIiEEvPKT_S3_S3_S3_S3_S3_PKiPS1_xxxxS1_b":[25,0,0,16,522,0,0],
+"_ZN12_GLOBAL__N_117ngram_hash_kernelIxEEvPKT_S3_S3_S3_S3_S3_PKiPS1_xxxxS1_b":[32,0,0,16,654,0,0],
+"_ZN12_GLOBAL__N_120ngram_present_kernelIiEEvPKT_S3_S3_PS1_xxS1_":[9,0,0,16,123,1,4],
+"_ZN12_GLOBAL__N_120ngram_present_kernelIxEEvPKT_S3_S3_PS1_xxS1_":[9,0,0,16,122,1,8]
+},
 "nonzero_kernel":{
 "_Z22nonzero_ordered_kernelI6__halfEvPKT_PxPixix11NonZeroDims":[26,0,0,16,368,5,68],
 "_Z22nonzero_ordered_kernelIaEvPKT_PxPixix11NonZeroDims":[26,0,0,16,364,5,68],

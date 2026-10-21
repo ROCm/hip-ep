@@ -272,6 +272,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateLoopLoweringPatterns(typeConverter, patterns);
   populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
+  populateNGramHashMappingLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
   populateEqualLoweringPatterns(typeConverter, patterns);
   populateOrLoweringPatterns(typeConverter, patterns);

@@ -118,6 +118,7 @@ inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
+inline constexpr const char *kWrapNGramHashMapping = "wrap_ngram_hash_mapping";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
 inline constexpr const char *kWrapOr = "wrap_or";
@@ -498,6 +499,8 @@ void populateQdqLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCausalConvWithStateLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateNGramHashMappingLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);

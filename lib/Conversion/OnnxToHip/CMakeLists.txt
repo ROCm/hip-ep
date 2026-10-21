@@ -58,6 +58,7 @@ add_library(OnnxToHip STATIC
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
+  NGramHashMappingConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp

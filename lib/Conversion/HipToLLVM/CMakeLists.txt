@@ -40,6 +40,7 @@ add_library(HipToLLVM STATIC
   QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
+  NGramHashMappingLowering.cpp
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp

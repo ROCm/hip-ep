@@ -85,6 +85,7 @@ set(_kernel_sources
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
+    hip/ngram_hash_mapping_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip

@@ -1519,6 +1519,28 @@ HIP_KERNEL_API int hip_one_hot(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+/* com.microsoft NGramHashMapping. T = int32 / int64 (element_size_bytes 4 /
+ * 8) for every pointer except segment_ids. past_ids, head_offsets,
+ * eos_token_id, segment_ids and present_ids may be null. */
+HIP_KERNEL_API int hip_ngram_hash_mapping(
+    void* stream,
+    const void* input_ids,
+    const void* multipliers,
+    const void* vocab_sizes,
+    const void* past_ids,
+    const void* head_offsets,
+    const void* eos_token_id,
+    const int32_t* segment_ids,
+    void* hash_ids,
+    void* present_ids,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t max_ngram_size,
+    int64_t n_head_per_ngram,
+    int64_t pad_id,
+    int64_t reset_on_eos,
+    int element_size_bytes);
+
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
