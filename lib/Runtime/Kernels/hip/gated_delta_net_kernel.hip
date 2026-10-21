@@ -16,8 +16,7 @@
 namespace {
 
 constexpr int kLanes = 32;
-constexpr int kRowsPerBlock = 8;
-constexpr int kBlockSize = kLanes * kRowsPerBlock;
+constexpr int kBlockSize = 256;
 
 template <typename T> __device__ __forceinline__ float toF32(T x);
 template <> __device__ __forceinline__ float toF32(float x) { return x; }
@@ -31,9 +30,9 @@ template <> __device__ __forceinline__ __half fromF32(float x) {
   return __float2half(x);
 }
 
-__device__ __forceinline__ float laneSum(float x) {
-  for (int off = kLanes / 2; off > 0; off >>= 1) {
-    x += __shfl_xor(x, off, kLanes);
+template <int WIDTH> __device__ __forceinline__ float groupSum(float x) {
+  for (int off = WIDTH / 2; off > 0; off >>= 1) {
+    x += __shfl_xor(x, off, WIDTH);
   }
   return x;
 }
@@ -42,126 +41,155 @@ __device__ __forceinline__ float softplus(float x) {
   return x > 20.0f ? x : log1pf(expf(x));
 }
 
-// One wave per state row S[v, :] (dk floats held EPL per lane), kRowsPerBlock
-// rows of one (batch, value head) per block. The row recurrence only couples
-// to other rows through q, k and the per-head scalars, so rows are independent
-// and the state stays in registers across the whole sequence. Every row is
-// read before it is written by the same wave, which makes an initial_state
-// that aliases final_state safe.
-template <typename T, int EPL>
+// TPR consecutive threads own one state row S[v, :] of one (batch, value
+// head), E = DK / TPR contiguous floats each, held in registers for the whole
+// sequence; the kernel is sequential in t. Keeping a row in at most a few
+// lanes is what makes a token step cheap: the two row dot products reduce over
+// TPR lanes instead of a full wave. Each row is read before it is written by
+// the threads that own it, so an initial_state aliasing final_state is safe.
+template <typename T, int DK>
 __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     const T *__restrict__ qkv, const float *__restrict__ decay,
     const float *__restrict__ beta, const float *initialState,
     const float *__restrict__ aLog, const float *__restrict__ dtBias,
     T *__restrict__ output, float *finalState, int seqLen, int numHeadsQk,
     int numHeadsV, int headSizeV, float scale) {
-  constexpr int kDk = EPL * kLanes;
+  constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
+  constexpr int kE = DK / kTpr;
+  constexpr int kRowsPerBlock = kBlockSize / kTpr;
+  constexpr int kQkPerLane = DK / kLanes;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const int rowGroup = static_cast<int>(blockIdx.x) % rowGroups;
   const int hv = (static_cast<int>(blockIdx.x) / rowGroups) % numHeadsV;
   const int b = static_cast<int>(blockIdx.x) / (rowGroups * numHeadsV);
   const int hq = hv * numHeadsQk / numHeadsV;
-  const int lane = static_cast<int>(threadIdx.x) % kLanes;
-  const int wave = static_cast<int>(threadIdx.x) / kLanes;
-  const int v = rowGroup * kRowsPerBlock + wave;
-  const bool activeRow = v < headSizeV;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int lane = tid % kLanes;
+  const bool leadWave = tid < kLanes;
+  const int part = tid % kTpr;
+  const int v = rowGroup * kRowsPerBlock + tid / kTpr;
+  const bool active = v < headSizeV;
 
-  __shared__ float qs[kDk];
-  __shared__ float ks[kDk];
+  __shared__ float qs[DK];
+  __shared__ float ks[DK];
   __shared__ float gateScale;
   __shared__ float betaScalar;
 
-  const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * kDk +
+  const int64_t packed = static_cast<int64_t>(2) * numHeadsQk * DK +
                          static_cast<int64_t>(numHeadsV) * headSizeV;
-  const int64_t stateRow =
-      ((static_cast<int64_t>(b) * numHeadsV + hv) * headSizeV + v) * kDk;
+  const int64_t vOffset = static_cast<int64_t>(2) * numHeadsQk * DK +
+                          static_cast<int64_t>(hv) * headSizeV;
+  const int64_t rowState =
+      ((static_cast<int64_t>(b) * numHeadsV + hv) * headSizeV + v) * DK +
+      part * kE;
   const float headDecay = -expf(aLog[hv]);
   const float headBias = dtBias[hv];
 
-  float s[EPL];
+  float s[kE];
 #pragma unroll
-  for (int e = 0; e < EPL; ++e) {
-    s[e] = activeRow ? initialState[stateRow + lane + e * kLanes] : 0.0f;
+  for (int i = 0; i < kE; ++i) {
+    s[i] = active ? initialState[rowState + i] : 0.0f;
   }
 
-  for (int t = 0; t < seqLen; ++t) {
+  // The step is latency-bound, so token t+1's inputs are fetched while token
+  // t is being computed.
+  float qv[kQkPerLane];
+  float kv[kQkPerLane];
+  float rawDecay = 0.0f;
+  float rawBeta = 0.0f;
+  float vNext = 0.0f;
+  auto load = [&](int t) {
     const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
     const T *row = qkv + tok * packed;
-    if (wave == 0) {
-      const T *qh = row + static_cast<int64_t>(hq) * kDk;
-      const T *kh = row + static_cast<int64_t>(numHeadsQk + hq) * kDk;
-      float qv[EPL];
-      float kv[EPL];
+    if (leadWave) {
+      const T *qh = row + static_cast<int64_t>(hq) * DK;
+      const T *kh = row + static_cast<int64_t>(numHeadsQk + hq) * DK;
+#pragma unroll
+      for (int e = 0; e < kQkPerLane; ++e) {
+        qv[e] = toF32(qh[lane + e * kLanes]);
+        kv[e] = toF32(kh[lane + e * kLanes]);
+      }
+      if (lane == 0) {
+        rawDecay = decay[tok * numHeadsV + hv];
+        rawBeta = beta[tok * numHeadsV + hv];
+      }
+    }
+    vNext = active ? toF32(row[vOffset + v]) : 0.0f;
+  };
+  load(0);
+
+  for (int t = 0; t < seqLen; ++t) {
+    if (leadWave) {
       float qq = 0.0f;
       float kk = 0.0f;
 #pragma unroll
-      for (int e = 0; e < EPL; ++e) {
-        qv[e] = toF32(qh[lane + e * kLanes]);
-        kv[e] = toF32(kh[lane + e * kLanes]);
+      for (int e = 0; e < kQkPerLane; ++e) {
         qq += qv[e] * qv[e];
         kk += kv[e] * kv[e];
       }
-      const float qn = rsqrtf(laneSum(qq) + 1e-12f);
-      const float kn = rsqrtf(laneSum(kk) + 1e-12f);
+      const float qn = rsqrtf(groupSum<kLanes>(qq) + 1e-12f);
+      const float kn = rsqrtf(groupSum<kLanes>(kk) + 1e-12f);
 #pragma unroll
-      for (int e = 0; e < EPL; ++e) {
+      for (int e = 0; e < kQkPerLane; ++e) {
         qs[lane + e * kLanes] = qv[e] * qn;
         ks[lane + e * kLanes] = kv[e] * kn;
       }
       if (lane == 0) {
-        const int64_t gi = tok * numHeadsV + hv;
-        const float g = headDecay * softplus(decay[gi] + headBias);
-        gateScale = expf(g);
-        betaScalar = 1.0f / (1.0f + expf(-beta[gi]));
+        gateScale = expf(headDecay * softplus(rawDecay + headBias));
+        betaScalar = 1.0f / (1.0f + expf(-rawBeta));
       }
     }
+    const float vCur = vNext;
     __syncthreads();
+    if (t + 1 < seqLen) {
+      load(t + 1);
+    }
 
-    if (activeRow) {
-      const float a = gateScale;
-      float r = 0.0f;
+    const float a = gateScale;
+    const float* kRow = ks + part * kE;
+    const float* qRow = qs + part * kE;
+    float r = 0.0f;
 #pragma unroll
-      for (int e = 0; e < EPL; ++e) {
-        s[e] *= a;
-        r += s[e] * ks[lane + e * kLanes];
-      }
-      r = laneSum(r);
-      const float vv = toF32(
-          row[static_cast<int64_t>(2) * numHeadsQk * kDk +
-              static_cast<int64_t>(hv) * headSizeV + v]);
-      const float delta = betaScalar * (vv - r);
-      float o = 0.0f;
+    for (int i = 0; i < kE; ++i) {
+      s[i] *= a;
+      r += s[i] * kRow[i];
+    }
+    r = groupSum<kTpr>(r);
+    const float delta = betaScalar * (vCur - r);
+    float o = 0.0f;
 #pragma unroll
-      for (int e = 0; e < EPL; ++e) {
-        s[e] += ks[lane + e * kLanes] * delta;
-        o += s[e] * qs[lane + e * kLanes];
-      }
-      o = laneSum(o);
-      if (lane == 0) {
-        output[(tok * numHeadsV + hv) * headSizeV + v] = fromF32<T>(scale * o);
-      }
+    for (int i = 0; i < kE; ++i) {
+      s[i] += kRow[i] * delta;
+      o += s[i] * qRow[i];
+    }
+    o = groupSum<kTpr>(o);
+    if (active && part == 0) {
+      const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
+      output[(tok * numHeadsV + hv) * headSizeV + v] = fromF32<T>(scale * o);
     }
     __syncthreads();
   }
 
-  if (activeRow) {
+  if (active) {
 #pragma unroll
-    for (int e = 0; e < EPL; ++e) {
-      finalState[stateRow + lane + e * kLanes] = s[e];
+    for (int i = 0; i < kE; ++i) {
+      finalState[rowState + i] = s[i];
     }
   }
 }
 
-template <typename T, int EPL>
+template <typename T, int DK>
 hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
                            const float *decay, const float *beta,
                            const float *initialState, const float *aLog,
                            const float *dtBias, void *output, float *finalState,
                            int batch, int seqLen, int numHeadsQk,
                            int numHeadsV, int headSizeV, float scale) {
+  constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
+  constexpr int kRowsPerBlock = kBlockSize / kTpr;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const dim3 grid(static_cast<unsigned>(batch * numHeadsV * rowGroups));
-  hipLaunchKernelGGL((gatedDeltaNetRecurrentKernel<T, EPL>), grid,
+  hipLaunchKernelGGL((gatedDeltaNetRecurrentKernel<T, DK>), grid,
                      dim3(kBlockSize), 0, stream, static_cast<const T *>(qkv),
                      decay, beta, initialState, aLog, dtBias,
                      static_cast<T *>(output), finalState, seqLen, numHeadsQk,
@@ -179,21 +207,25 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
                             int headSizeV, float scale) {
   switch (headSizeQk) {
   case 32:
-    return launchRecurrent<T, 1>(stream, qkv, decay, beta, initialState, aLog,
-                                 dtBias, output, finalState, batch, seqLen,
-                                 numHeadsQk, numHeadsV, headSizeV, scale);
+    return launchRecurrent<T, 32>(stream, qkv, decay, beta, initialState,
+                                  aLog, dtBias, output, finalState, batch,
+                                  seqLen, numHeadsQk, numHeadsV, headSizeV,
+                                  scale);
   case 64:
-    return launchRecurrent<T, 2>(stream, qkv, decay, beta, initialState, aLog,
-                                 dtBias, output, finalState, batch, seqLen,
-                                 numHeadsQk, numHeadsV, headSizeV, scale);
+    return launchRecurrent<T, 64>(stream, qkv, decay, beta, initialState,
+                                  aLog, dtBias, output, finalState, batch,
+                                  seqLen, numHeadsQk, numHeadsV, headSizeV,
+                                  scale);
   case 128:
-    return launchRecurrent<T, 4>(stream, qkv, decay, beta, initialState, aLog,
-                                 dtBias, output, finalState, batch, seqLen,
-                                 numHeadsQk, numHeadsV, headSizeV, scale);
+    return launchRecurrent<T, 128>(stream, qkv, decay, beta, initialState,
+                                   aLog, dtBias, output, finalState, batch,
+                                   seqLen, numHeadsQk, numHeadsV, headSizeV,
+                                   scale);
   case 256:
-    return launchRecurrent<T, 8>(stream, qkv, decay, beta, initialState, aLog,
-                                 dtBias, output, finalState, batch, seqLen,
-                                 numHeadsQk, numHeadsV, headSizeV, scale);
+    return launchRecurrent<T, 256>(stream, qkv, decay, beta, initialState,
+                                   aLog, dtBias, output, finalState, batch,
+                                   seqLen, numHeadsQk, numHeadsV, headSizeV,
+                                   scale);
   default:
     return hipErrorInvalidValue;
   }
