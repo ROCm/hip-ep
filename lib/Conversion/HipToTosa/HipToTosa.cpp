@@ -163,13 +163,12 @@ static SmallVector<int64_t> getI64Values(ArrayAttr attrs) {
   return values;
 }
 
-// hip.conv uses ONNX's NCHW input/output and OIHW weight layouts, while
-// tosa.conv2d is defined on NHWC and OHWI. Keep the TOSA op semantically valid
-// by transposing to its canonical layouts and transpose the result back:
+// hip.conv uses ONNX's channel-first layouts, while TOSA convolution is
+// channel-last. Keep the TOSA op semantically valid by transposing to its
+// canonical layouts and transpose the result back:
 //
-//   input  [N,C,H,W] -> [N,H,W,C]
-//   weight [K,C,Y,X] -> [K,Y,X,C]
-//   output [N,H,W,K] -> [N,K,H,W]
+//   2D: NCHW/OIHW  <-> NHWC/OHWI
+//   3D: NCDHW/OIDHW <-> NDHWC/ODHWI
 //
 // rocMLIR folds these transposes into the Rock convolution's layout metadata,
 // so they describe the original storage rather than becoming data movement.
@@ -191,9 +190,11 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
         !resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(
           op, "expected static ranked input, weight, and result tensors");
-    if (inputType.getRank() != 4 || weightType.getRank() != 4 ||
-        resultType.getRank() != 4)
-      return rewriter.notifyMatchFailure(op, "expected 2D convolution");
+    int64_t spatialRank = inputType.getRank() - 2;
+    if ((spatialRank != 2 && spatialRank != 3) ||
+        weightType.getRank() != spatialRank + 2 ||
+        resultType.getRank() != spatialRank + 2)
+      return rewriter.notifyMatchFailure(op, "expected 2D or 3D convolution");
 
     Type elementType = resultType.getElementType();
     if (inputType.getElementType() != elementType ||
@@ -227,12 +228,14 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
       return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
 
     SmallVector<int64_t> kernelShape = getI64Values(op.getKernelShape());
-    if (kernelShape.size() != 2 || kernelShape[0] != weightShape[2] ||
-        kernelShape[1] != weightShape[3])
+    if (kernelShape.size() != static_cast<size_t>(spatialRank) ||
+        !llvm::all_of(llvm::seq<int64_t>(spatialRank), [&](int64_t dim) {
+          return kernelShape[dim] == weightShape[dim + 2];
+        }))
       return rewriter.notifyMatchFailure(
           op, "kernel_shape disagrees with the weight tensor");
 
-    // TOSA CONV2D bias is T<out_t>, not acc_t. The MLIR verifier requires a
+    // TOSA convolution bias is T<out_t>, not acc_t. The verifier requires a
     // float bias to match the result element type, even when acc_type is f32
     // for an f16/bf16 convolution. Length 1 is a legal TOSA broadcast (BC==1).
     Value bias = adaptor.getBias();
@@ -253,9 +256,11 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     SmallVector<int64_t> strides = getI64Values(op.getStrides());
     SmallVector<int64_t> dilations = getI64Values(op.getDilations());
     SmallVector<int64_t> pads = getI64Values(op.getPads());
-    if (strides.size() != 2 || dilations.size() != 2 || pads.size() != 4)
+    if (strides.size() != static_cast<size_t>(spatialRank) ||
+        dilations.size() != static_cast<size_t>(spatialRank) ||
+        pads.size() != static_cast<size_t>(2 * spatialRank))
       return rewriter.notifyMatchFailure(
-          op, "expected 2D stride, dilation, and padding attributes");
+          op, "stride, dilation, or padding rank does not match convolution");
 
     // ONNX floors the output size, so a strided window that overruns the
     // padded input just drops the trailing partial window. TOSA instead
@@ -267,13 +272,14 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
     // for whatever the pad cannot cover -- a stride-2 1x1 kernel has no
     // padding to give back. Either way only elements the ONNX convolution
     // never reads are removed, so the result is unchanged.
-    SmallVector<int64_t> padBefore(2), padAfter(2), crop(2, 0);
-    for (int64_t dim : llvm::seq<int64_t>(2)) {
+    SmallVector<int64_t> padBefore(spatialRank), padAfter(spatialRank),
+        crop(spatialRank, 0);
+    for (int64_t dim : llvm::seq<int64_t>(spatialRank)) {
       if (strides[dim] < 1 || dilations[dim] < 1)
         return rewriter.notifyMatchFailure(op, "expected positive stride and "
                                                "dilation");
       padBefore[dim] = pads[dim];
-      padAfter[dim] = pads[dim + 2];
+      padAfter[dim] = pads[dim + spatialRank];
       if (padBefore[dim] < 0 || padAfter[dim] < 0)
         return rewriter.notifyMatchFailure(op, "expected non-negative padding");
 
@@ -295,33 +301,66 @@ struct ConvConverter final : public OpConversionPattern<hip::ConvOp> {
             op, "result shape disagrees with the convolution window");
     }
 
-    Value input = transposeTo(
-        adaptor.getInput(),
-        {inputShape[0], inputShape[2], inputShape[3], inputShape[1]},
-        {0, 2, 3, 1}, rewriter, op.getLoc());
-    if (crop[0] != 0 || crop[1] != 0)
-      input = sliceTo(input,
-                      {inputShape[0], inputShape[2] - crop[0],
-                       inputShape[3] - crop[1], inputShape[1]},
-                      rewriter, op.getLoc());
-    Value weight = transposeTo(
-        adaptor.getWeights(),
-        {weightShape[0], weightShape[2], weightShape[3], weightShape[1]},
-        {0, 2, 3, 1}, rewriter, op.getLoc());
-    auto nhwkType = resultType.clone(
-        {resultShape[0], resultShape[2], resultShape[3], resultShape[1]});
+    SmallVector<int32_t> toChannelLast{0};
+    SmallVector<int64_t> inputChannelLast{inputShape[0]};
+    SmallVector<int64_t> weightChannelLast{weightShape[0]};
+    SmallVector<int64_t> resultChannelLast{resultShape[0]};
+    for (int64_t dim : llvm::seq<int64_t>(spatialRank)) {
+      toChannelLast.push_back(static_cast<int32_t>(dim + 2));
+      inputChannelLast.push_back(inputShape[dim + 2]);
+      weightChannelLast.push_back(weightShape[dim + 2]);
+      resultChannelLast.push_back(resultShape[dim + 2]);
+    }
+    toChannelLast.push_back(1);
+    inputChannelLast.push_back(inputShape[1]);
+    weightChannelLast.push_back(weightShape[1]);
+    resultChannelLast.push_back(resultShape[1]);
 
-    // TOSA orders padding [top, bottom, left, right].
-    auto tosaPads = rewriter.getDenseI64ArrayAttr(
-        {padBefore[0], padAfter[0], padBefore[1], padAfter[1]});
-    auto conv = tosa::Conv2DOp::create(
-        rewriter, op.getLoc(), nhwkType, input, weight, bias, tosaPads,
-        rewriter.getDenseI64ArrayAttr(strides),
-        rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
-    conv->setAttr("group", rewriter.getI64IntegerAttr(group));
+    Value input = transposeTo(adaptor.getInput(), inputChannelLast,
+                              toChannelLast, rewriter, op.getLoc());
+    if (llvm::any_of(crop, [](int64_t amount) { return amount != 0; })) {
+      SmallVector<int64_t> croppedShape(inputChannelLast);
+      for (int64_t dim : llvm::seq<int64_t>(spatialRank))
+        croppedShape[dim + 1] -= crop[dim];
+      input = sliceTo(input, croppedShape, rewriter, op.getLoc());
+    }
+    Value weight = transposeTo(adaptor.getWeights(), weightChannelLast,
+                               toChannelLast, rewriter, op.getLoc());
+    auto channelLastType = resultType.clone(resultChannelLast);
 
-    rewriter.replaceOp(op, transposeTo(conv.getResult(), resultShape,
-                                       {0, 3, 1, 2}, rewriter, op.getLoc()));
+    // TOSA interleaves the before/after padding for each spatial dimension.
+    SmallVector<int64_t> tosaPads;
+    tosaPads.reserve(2 * spatialRank);
+    for (int64_t dim : llvm::seq<int64_t>(spatialRank)) {
+      tosaPads.push_back(padBefore[dim]);
+      tosaPads.push_back(padAfter[dim]);
+    }
+
+    Value convResult;
+    if (spatialRank == 2) {
+      auto conv = tosa::Conv2DOp::create(
+          rewriter, op.getLoc(), channelLastType, input, weight, bias,
+          rewriter.getDenseI64ArrayAttr(tosaPads),
+          rewriter.getDenseI64ArrayAttr(strides),
+          rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+      conv->setAttr("group", rewriter.getI64IntegerAttr(group));
+      convResult = conv.getResult();
+    } else {
+      auto conv = tosa::Conv3DOp::create(
+          rewriter, op.getLoc(), channelLastType, input, weight, bias,
+          rewriter.getDenseI64ArrayAttr(tosaPads),
+          rewriter.getDenseI64ArrayAttr(strides),
+          rewriter.getDenseI64ArrayAttr(dilations), TypeAttr::get(accType));
+      conv->setAttr("group", rewriter.getI64IntegerAttr(group));
+      convResult = conv.getResult();
+    }
+
+    SmallVector<int32_t> fromChannelLast{0,
+                                         static_cast<int32_t>(spatialRank + 1)};
+    for (int64_t dim : llvm::seq<int64_t>(spatialRank))
+      fromChannelLast.push_back(static_cast<int32_t>(dim + 1));
+    rewriter.replaceOp(op, transposeTo(convResult, resultShape, fromChannelLast,
+                                       rewriter, op.getLoc()));
     return success();
   }
 };
