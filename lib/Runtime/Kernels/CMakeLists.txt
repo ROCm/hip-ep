@@ -81,6 +81,7 @@ set(_kernel_sources
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
     hip/random_normal_like_kernel.hip
+    hip/arg_max_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
@@ -92,6 +93,7 @@ set(_kernel_sources
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip

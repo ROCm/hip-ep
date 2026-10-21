@@ -956,6 +956,52 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
   }];
 }
 
+// Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
+// ONNX Runtime writes before a transposed GEMM. The first of each packed pair
+// lives in the high nibble. This is not MXFP block-scaled matmul.
+def Hip_DequantBnb4Op : Hip_DpsOp<"dequant_bnb4", /*traits=*/[],
+                                  /*outsAccessor=*/"Output",
+                                  /*autoReify=*/1,
+                                  /*autoInfer=*/1,
+                                  /*declareInfer=*/1> {
+  let summary = "Dequantize com.microsoft MatMulBnb4 weights to [N, K] f32";
+  let description = [{
+    Unpacks a bitsandbytes 4-bit weight blob and multiplies each value by its
+    block absmax. `quant_type` 0 is FP4 and 1 is NF4. The flat index `i` reads
+    the high nibble of byte `i/2` when `i` is even and the low nibble when
+    `i` is odd, then `output[i] = codebook[nibble] * absmax[i / block_size]`.
+    The result is row-major `[N, K]`.
+
+    Example:
+    ```mlir
+    hip.dequant_bnb4(%ctx) ins(%packed, %absmax :
+        memref<16xui8, 1>, memref<2xf32, 1>)
+        outs(%weight : memref<4x8xf32, 1>)
+        {K = 8, N = 4, block_size = 16, quant_type = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$packed,
+    Hip_TensorOrMemRef:$absmax,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K,
+    I64Attr:$N,
+    I64Attr:$block_size,
+    I64Attr:$quant_type
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $packed `,` $absmax `:`
+    type($packed) `,` type($absmax) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
                            /*traits=*/[AttrSizedOperandSegments],
                            /*outsAccessor=*/"Output",
@@ -1540,6 +1586,109 @@ def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
+}
+
+def Hip_GatedRmsNormOp : Hip_DpsOp<"gated_rms_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "com.microsoft GatedRMSNorm (RMS norm times an activated gate)";
+  let description = [{
+    Gated RMS normalization from the `com.microsoft` contrib operator:
+
+      y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+
+    `scale` is 1-D of length C. The input's last dimension is a multiple of
+    C and every C consecutive elements form one normalized group. `gate` has
+    the input's shape. `activation` is `silu` (act(z) = z * sigmoid(z)) or
+    `sigmoid`. Math is FP32 and the result is rounded to the element type
+    once.
+
+    Example:
+    ```mlir
+    hip.gated_rms_norm(%ctx)
+        ins(%input, %scale, %gate :
+            memref<1x1x6144xf16, 1>, memref<128xf16, 1>, memref<1x1x6144xf16, 1>)
+        outs(%output : memref<1x1x6144xf16, 1>)
+        {activation = "sigmoid", epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$output,
+    StrAttr:$activation,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $gate `:`
+        type($input) `,` type($scale) `,` type($gate)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_EngramGateOp : Hip_DpsOp<"engram_gate", [AttrSizedOperandSegments]> {
+  let summary = "com.microsoft EngramGate (similarity-gated engram value)";
+  let description = [{
+    Engram gate from the `com.microsoft` contrib operator. `key` and `query`
+    are (B, S, hc, H), `value` is (B, S, H) and the three scales are (hc, H).
+    For each (b, s, g) row, in FP32:
+
+      dot  = sum(key * key_norm_scale[g] * query * query_norm_scale[g])
+             * rsqrt(mean(key^2) + eps) * rsqrt(mean(query^2) + eps) / sqrt(H)
+      gate = sigmoid(dot == 0 ? 0 : sign(dot) * sqrt(max(|dot|, 1e-6)))
+      outputs[0] = round_T(gate * value[b, s])
+
+    The optional outputs[1] is the RMS norm of the rounded outputs[0] scaled
+    by `conv_norm_scale[g]`, which it requires.
+
+    Example:
+    ```mlir
+    hip.engram_gate(%ctx)
+        ins(%key, %query, %value, %kscale, %qscale, %cscale :
+            memref<1x1x4x2560xf16, 1>, memref<1x1x4x2560xf16, 1>,
+            memref<1x1x2560xf16, 1>, memref<4x2560xf16, 1>,
+            memref<4x2560xf16, 1>, memref<4x2560xf16, 1>)
+        outs(%out, %normed : memref<1x1x4x2560xf16, 1>,
+                             memref<1x1x4x2560xf16, 1>)
+        {epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$key_norm_scale,
+    Hip_TensorOrMemRef:$query_norm_scale,
+    Optional<Hip_TensorOrMemRef>:$conv_norm_scale,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $key `,` $query `,` $value `,` $key_norm_scale `,` $query_norm_scale
+        ( `,` $conv_norm_scale^ )?
+        `:` type($key) `,` type($query) `,` type($value) `,`
+        type($key_norm_scale) `,` type($query_norm_scale)
+        ( `,` type($conv_norm_scale)^ )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -2195,6 +2344,50 @@ def Hip_RandomNormalLikeOp : Hip_DpsOp<"random_normal_like",
   );
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ArgMaxOp : Hip_DpsOp<"arg_max",
+    /*traits=*/[],
+    /*outsAccessor=*/"Output",
+    /*autoReify=*/1,
+    /*autoInfer=*/1,
+    /*declareInfer=*/1> {
+  let summary = "Index of the maximum element along an axis";
+  let description = [{
+    Implements ONNX ArgMax: along `axis`, write the index of the maximum
+    element into `output`. `keepdims = 0` drops the reduced axis;
+    `keepdims = 1` leaves it as size 1. `select_last_index = 0` keeps the
+    first occurrence; `select_last_index = 1` keeps the last.
+
+    Output element type is integer (i64 for the ONNX importer). The input
+    element type is preserved on `data` and compared as that type, including
+    integers. NaN outranks every number: the first NaN wins unless
+    `select_last_index` is set, in which case the last NaN wins. Supported
+    inputs are f16, bf16, f32, f64, i8, ui8, i16, ui16, i32, and i64, at rank
+    1 through 8. ui32 and ui64 are rejected. A zero-length reduction axis is
+    rejected by the runtime.
+
+    Example:
+    ```mlir
+    hip.arg_max(%ctx)
+        ins(%data : tensor<?x?xi32>)
+        outs(%indices : tensor<?xi64>)
+        {axis = 1 : i64, keepdims = 0 : i64, select_last_index = 0 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$select_last_index
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `:` type($data) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -5012,7 +5205,9 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     `(N, C, H, W)` uses that prefix and window `(H, W)`.  Channels-last
     `(N, H, W, C)` uses prefix `(N)`, an empty channel slot, and window
     `(H, W, C)`; the channel extent is unchanged, so that axis is copied.
-    Rank is 3, 4, or 5.
+    Rank is 3, 4, or 5. Element type is f16, bf16, f32, or f64. Nearest also
+    accepts matching i8 or ui8; linear does not, because interpolating integer
+    codes is not a dequantized resize.
 
     Supported attribute set (anything outside is rejected at conversion):
       * mode in {"nearest", "linear"}              — encoded as i64
@@ -5687,9 +5882,10 @@ def Hip_QLinearMatMulOp : Hip_DpsOp<"qlinear_matmul",
       y = saturate(round(acc * a_scale * b_scale / y_scale) + y_zp)
 
     `a` is [M, K], `b` is [K, N], and `y` is [M, N]. All three shapes are
-    static. Scales and zero points are a single f32 scale and a matching
-    8-bit zero point. The integer product accumulates in int64, then one f32
-    scale is applied with rintf (round to nearest, ties to even).
+    static. A's and Y's scale and zero point are one element. B's scale and
+    zero point are one element, or one value per output column. The integer
+    product accumulates in int64, then the f32 scale is applied with rintf
+    (round to nearest, ties to even).
 
     This op is not hip.qmatmul. hip.qmatmul fuses a QDQ chain and does not
     accept onnx.QLinearMatMul.
