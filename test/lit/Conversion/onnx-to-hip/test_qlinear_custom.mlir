@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 // com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-// QLinearGlobalAveragePool arrive as onnx.Custom. They decompose into
+// QLinearGlobalAveragePool / QLinearLeakyRelu arrive as onnx.Custom. They
+// decompose into
 // DequantizeLinear + the float op + QuantizeLinear, and --hip-fusion-transform
 // then fuses per-tensor Add and Mul to hip.qadd / hip.qmul. Absent zero
 // points are onnx.NoValue and fuse as zp 0.
@@ -171,5 +172,40 @@ module {
     // CHECK: hip.transpose
     // CHECK: hip.quantize_linear
     return %y : tensor<1x1x1x8xui8>
+  }
+
+  func.func @qlinear_leaky_relu(%x: tensor<1x8xi8>) -> tensor<1x8xi8> {
+    // CHECK-LABEL: func.func @qlinear_leaky_relu
+    %x_scale = "onnx.Constant"() {value = dense<0.5> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<0> : tensor<i8>} : () -> tensor<i8>
+    %y_scale = "onnx.Constant"() {value = dense<0.25> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<1> : tensor<i8>} : () -> tensor<i8>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale, %y_zp) {
+      alpha = 0.25 : f32, domain_name = "com.microsoft", function_name = "QLinearLeakyRelu"
+    } : (tensor<1x8xi8>, tensor<f32>, tensor<i8>, tensor<f32>, tensor<i8>) -> tensor<1x8xi8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.dequantize_linear
+    // CHECK: hip.leaky_relu
+    // CHECK-SAME: alpha = 2.500000e-01
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x8xi8>
+  }
+
+  // Trailing Y_zero_point is optional. QuantizeLinear is emitted without it.
+  func.func @qlinear_leaky_relu_no_y_zp(%x: tensor<1x8xi8>) -> tensor<1x8xi8> {
+    // CHECK-LABEL: func.func @qlinear_leaky_relu_no_y_zp
+    %x_scale = "onnx.Constant"() {value = dense<0.5> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<0> : tensor<i8>} : () -> tensor<i8>
+    %y_scale = "onnx.Constant"() {value = dense<0.25> : tensor<f32>} : () -> tensor<f32>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale) {
+      alpha = 0.25 : f32, domain_name = "com.microsoft", function_name = "QLinearLeakyRelu"
+    } : (tensor<1x8xi8>, tensor<f32>, tensor<i8>, tensor<f32>) -> tensor<1x8xi8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.dequantize_linear
+    // CHECK: hip.leaky_relu
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x8xi8>
   }
 }
