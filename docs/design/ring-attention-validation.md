@@ -4,6 +4,12 @@ Licensed under the MIT License.
 -->
 # Ring attention validation
 
+**Updated baseline:** See [the Windows main-refresh comparison](ring-attention-main-refresh.md)
+for fresh old-main, new-main (including #1259), Ring-Q, and Ring-KV measurements,
+complete HIP allocation accounting, and accuracy checks. The lx01 tables below
+are historical results for the stated source revision; their speedups do not
+describe performance against the updated main.
+
 ## Prefill performance and memory
 
 Median full-model prefill latency; lower is better. Peak DRM allocation is measured within the prefill phase; mapped-host cache memory is excluded (see accounting below).
@@ -58,7 +64,7 @@ Known allocations, identical across the three implementations:
 
 lx01: Ryzen AI MAX+ PRO 395 / Radeon 8060S (`gfx1151`, 20 CUs, 96 GiB GPU-reserved UMA), Ubuntu 24.04.4, TheRock 7.13, ONNX Runtime 1.30 and ONNX Runtime GenAI 0.14, Release builds. Batch 1, unchunked prefill, greedy generation of 128 tokens, identical seeded prompt prefixes, serial GPU execution, debug disabled, HIP-synchronized host-wall timing. One warmup plus three measured requests per configuration in a fresh process, with fresh Generator/KV/recurrent state per request.
 
-The benchmarked kernel/test commit is `6cda37598fcd36e2da8a9992b1ee7ad15aeee52b`, based on upstream `1c9a454141c22bdddfc6071ab8c0c58cb01c36de`. These measurements predate the merge of upstream `a4f9826b809c9483fe2353eea876c4c2257a5ad4` (GQA and quantized-matmul compiler/resource fixes). Performance has not been remeasured after that merge; the tables remain results for the stated benchmark commit. All final Ring cases were rerun. Unchanged 32K/64K existing controls from the same campaign were reused after matching all loaded library hashes. Numerical gates ran before timing. Independent medians need not add exactly to median total latency.
+The benchmarked kernel/test commit is `6cda37598fcd36e2da8a9992b1ee7ad15aeee52b`, based on upstream `1c9a454141c22bdddfc6071ab8c0c58cb01c36de`. These measurements predate the merge of upstream `a4f9826b809c9483fe2353eea876c4c2257a5ad4` (GQA and quantized-matmul compiler/resource fixes). The tables remain results for that historical benchmark commit; the separate Windows main-refresh comparison linked above measures later revisions. All final Ring cases were rerun. Unchanged 32K/64K existing controls from the same campaign were reused after matching all loaded library hashes. Numerical gates ran before timing. Independent medians need not add exactly to median total latency.
 
 For context, isolated attention-core decode improved from the original Ring implementation from 3.173 to 0.664 ms at 32K (4.78x), and 6.156 to 1.365 ms at 64K (4.51x). Those are **not** speedups over production GQA or whole-model speedups.
 
