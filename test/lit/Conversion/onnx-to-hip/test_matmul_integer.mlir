@@ -144,4 +144,24 @@ module {
   // CHECK: hip.matmul
   // CHECK-SAME: tensor<32x1x4xf32>, tensor<4x4xf32>
   // CHECK-NOT: onnx.MatMulInteger
+
+  // A runtime-sized leading batch on A is preserved. B is a shared rank-2
+  // weight, so hip.matmul receives it once and takes its batch count from A.
+  // K = 300 selects the i32 accumulator path.
+  func.func @matmul_integer_dynamic_batch(
+      %a: tensor<?x2x300xui8>, %b: tensor<300x4xi8>,
+      %azp: tensor<ui8>, %bzp: tensor<i8>) -> tensor<?x2x4xi32> {
+    %y = "onnx.MatMulInteger"(%a, %b, %azp, %bzp) : (
+        tensor<?x2x300xui8>, tensor<300x4xi8>, tensor<ui8>, tensor<i8>
+      ) -> tensor<?x2x4xi32>
+    return %y : tensor<?x2x4xi32>
+  }
+
+  // CHECK-LABEL: func.func @matmul_integer_dynamic_batch
+  // CHECK: tensor.empty(%{{.*}}) : tensor<?x2x300xi32>
+  // CHECK: hip.matmul
+  // CHECK-SAME: tensor<?x2x300xi32>, tensor<300x4xi32>
+  // CHECK-SAME: tensor<?x2x4xi32>
+  // CHECK-NOT: hip.expand
+  // CHECK-NOT: onnx.MatMulInteger
 }

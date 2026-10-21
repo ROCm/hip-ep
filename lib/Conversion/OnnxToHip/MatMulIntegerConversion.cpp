@@ -59,6 +59,17 @@ namespace {
 
 static bool isEightBit(mlir::Type type) { return type.isInteger(8); }
 
+/// The runtime matmul wrapper obtains the leading batch extent from A's
+/// memref descriptor. The matrix dimensions and any remaining batch axes still
+/// have to be known here to validate ONNX broadcast semantics and select the
+/// accumulator type.
+static bool hasStaticNonLeadingBatchShape(mlir::RankedTensorType type) {
+  for (int64_t dim : llvm::seq<int64_t>(1, type.getRank()))
+    if (type.isDynamicDim(dim))
+      return false;
+  return true;
+}
+
 /// True when `255 * 255 * reductionLength` is an exact f32 integer.
 static bool eightBitDotIsExactInF32(int64_t reductionLength) {
   constexpr int64_t kMaxAbsProduct = 255 * 255;
@@ -213,10 +224,24 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
   if (!resultType.getElementType().isInteger(32) ||
       resultType.getElementType().isUnsignedInteger(32))
     return rewriter.notifyMatchFailure(op, "MatMulInteger result must be i32");
-  if (!aType.hasStaticShape() || !bType.hasStaticShape() ||
-      !resultType.hasStaticShape())
+
+  const bool hasDynamicBatch =
+      aType.isDynamicDim(0) || resultType.isDynamicDim(0);
+  if ((!hasDynamicBatch &&
+       (!aType.hasStaticShape() || !bType.hasStaticShape() ||
+        !resultType.hasStaticShape())) ||
+      (hasDynamicBatch &&
+       (!hasStaticNonLeadingBatchShape(aType) || !bType.hasStaticShape() ||
+        !hasStaticNonLeadingBatchShape(resultType))))
     return rewriter.notifyMatchFailure(
-        op, "MatMulInteger lowering requires static shapes");
+        op, "MatMulInteger lowering requires static matrix dimensions, "
+            "weights, and non-leading batch dimensions");
+  if (hasDynamicBatch &&
+      (aType.getRank() == 2 || bType.getRank() != 2 || !aType.isDynamicDim(0) ||
+       !resultType.isDynamicDim(0) || resultType.getRank() != aType.getRank()))
+    return rewriter.notifyMatchFailure(
+        op, "MatMulInteger dynamic batch requires dynamic leading A and "
+            "result dimensions with a rank-2 B");
 
   const int64_t m = aType.getDimSize(aType.getRank() - 2);
   const int64_t ka = aType.getDimSize(aType.getRank() - 1);
@@ -227,11 +252,15 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
         op, "MatMulInteger contraction dimensions do not match");
 
   llvm::SmallVector<int64_t> expected;
-  if (!mlir::OpTrait::util::getBroadcastedShape(aType.getShape().drop_back(2),
-                                                bType.getShape().drop_back(2),
-                                                expected))
+  if (hasDynamicBatch) {
+    expected.append(aType.getShape().drop_back(2).begin(),
+                    aType.getShape().drop_back(2).end());
+  } else if (!mlir::OpTrait::util::getBroadcastedShape(
+                 aType.getShape().drop_back(2), bType.getShape().drop_back(2),
+                 expected)) {
     return rewriter.notifyMatchFailure(
         op, "MatMulInteger batch dimensions do not broadcast");
+  }
   expected.push_back(m);
   expected.push_back(n);
   if (!resultType.getShape().equals(expected))

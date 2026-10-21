@@ -61,6 +61,17 @@ static mlir::LogicalResult readI64Array(mlir::ArrayAttr attr,
 
 static bool isEightBit(mlir::Type type) { return type.isInteger(8); }
 
+/// ConvInteger needs compile-time channel and spatial extents for validation
+/// and for selecting the accumulator path. The runtime convolution ABI,
+/// however, obtains N from the input memref descriptor, so batch may remain
+/// dynamic.
+static bool hasStaticNonBatchShape(mlir::RankedTensorType type) {
+  for (int64_t dim : llvm::seq<int64_t>(1, type.getRank()))
+    if (type.isDynamicDim(dim))
+      return false;
+  return true;
+}
+
 /// True when `255 * 255 * reductionLength` is an exact f32 integer.
 static bool eightBitDotIsExactInF32(int64_t reductionLength) {
   constexpr int64_t kMaxAbsProduct = 255 * 255;
@@ -199,10 +210,15 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   if (!resultType.getElementType().isInteger(32) ||
       resultType.getElementType().isUnsignedInteger(32))
     return rewriter.notifyMatchFailure(op, "ConvInteger result must be i32");
-  if (!inputType.hasStaticShape() || !weightType.hasStaticShape() ||
-      !resultType.hasStaticShape())
+  if (!hasStaticNonBatchShape(inputType) || !weightType.hasStaticShape() ||
+      !hasStaticNonBatchShape(resultType))
     return rewriter.notifyMatchFailure(
-        op, "ConvInteger lowering requires static shapes");
+        op, "ConvInteger lowering requires static weights, channels, and "
+            "spatial dimensions");
+  if (inputType.isDynamicDim(0) != resultType.isDynamicDim(0))
+    return rewriter.notifyMatchFailure(
+        op, "ConvInteger input and result batch dimensions must both be "
+            "static or both be dynamic");
 
   mlir::Value xZp = realOperand(op, 2);
   mlir::Value wZp = realOperand(op, 3);
@@ -312,7 +328,8 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   if (inC % group != 0 || wC != inC / group)
     return rewriter.notifyMatchFailure(
         op, "ConvInteger group does not divide the input channels");
-  if (resultType.getDimSize(0) != inputType.getDimSize(0) ||
+  if ((!inputType.isDynamicDim(0) &&
+       resultType.getDimSize(0) != inputType.getDimSize(0)) ||
       resultType.getDimSize(1) != outC)
     return rewriter.notifyMatchFailure(
         op, "ConvInteger result batch or channel count does not match");
@@ -382,10 +399,20 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
     auto expandedType =
         mlir::RankedTensorType::get(shape, type.getElementType());
     llvm::SmallVector<mlir::OpFoldResult> outputShape;
-    outputShape.push_back(rewriter.getIndexAttr(shape[0]));
-    outputShape.push_back(rewriter.getIndexAttr(shape[1]));
-    outputShape.push_back(rewriter.getIndexAttr(1));
-    outputShape.push_back(rewriter.getIndexAttr(shape[3]));
+    for (int64_t expandedDim : llvm::seq<int64_t>(4)) {
+      if (expandedDim == 2) {
+        outputShape.push_back(rewriter.getIndexAttr(1));
+        continue;
+      }
+      const int64_t sourceDim = expandedDim < 2 ? expandedDim : 2;
+      if (type.isDynamicDim(sourceDim))
+        outputShape.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, value, sourceDim)
+                .getResult());
+      else
+        outputShape.push_back(
+            rewriter.getIndexAttr(type.getDimSize(sourceDim)));
+    }
     return mlir::tensor::ExpandShapeOp::create(rewriter, loc, expandedType,
                                                value, reassoc1d, outputShape);
   };
