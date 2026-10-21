@@ -128,6 +128,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);
     TopKOp::attachInterface<HipDstBufferizableModel<TopKOp>>(*ctx);
+    ArgMaxOp::attachInterface<HipDstBufferizableModel<ArgMaxOp>>(*ctx);
     ScatterElementsOp::attachInterface<
         HipDstBufferizableModel<ScatterElementsOp>>(*ctx);
     CompressOp::attachInterface<HipDstBufferizableModel<CompressOp>>(*ctx);
@@ -163,6 +164,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ReduceL2Op::attachInterface<HipDstBufferizableModel<ReduceL2Op>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
+    DequantBnb4Op::attachInterface<HipDstBufferizableModel<DequantBnb4Op>>(
+        *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
     QMoEAmdOp::attachInterface<HipDstBufferizableModel<QMoEAmdOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
@@ -184,6 +187,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     BatchNormOp::attachInterface<HipDstBufferizableModel<BatchNormOp>>(*ctx);
     GroupNormOp::attachInterface<HipDstBufferizableModel<GroupNormOp>>(*ctx);
+    GatedRmsNormOp::attachInterface<HipDstBufferizableModel<GatedRmsNormOp>>(
+        *ctx);
+    EngramGateOp::attachInterface<HipDstBufferizableModel<EngramGateOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);

@@ -325,6 +325,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
     compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
     compile_to_bitcode(real/random_normal_like.cpp runtime_random_normal_like.bc)
+    compile_to_bitcode(real/arg_max.cpp runtime_arg_max.bc)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
@@ -334,6 +335,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
+    compile_to_bitcode(real/dequant_bnb4.cpp runtime_dequant_bnb4.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
@@ -426,6 +428,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_random_normal_like.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_arg_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
@@ -435,6 +438,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dequant_bnb4.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc

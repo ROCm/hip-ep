@@ -62,6 +62,8 @@ inline constexpr const char *kWrapInstanceNormalization =
 inline constexpr const char *kWrapBatchNormalization =
     "wrap_batch_normalization";
 inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
+inline constexpr const char *kWrapGatedRmsNorm = "wrap_gated_rms_norm";
+inline constexpr const char *kWrapEngramGate = "wrap_engram_gate";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
@@ -70,6 +72,7 @@ inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
+inline constexpr const char *kWrapArgMax = "wrap_arg_max";
 inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
@@ -102,6 +105,7 @@ inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+inline constexpr const char *kWrapDequantBnb4 = "wrap_dequant_bnb4";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
@@ -453,6 +457,8 @@ void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateRandomNormalLikeLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateArgMaxLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
@@ -478,6 +484,8 @@ void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);

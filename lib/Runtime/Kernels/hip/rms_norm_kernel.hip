@@ -128,6 +128,135 @@ __global__ void hip_rms_norm_kernel(const T *__restrict__ input,
   }
 }
 
+// One block per row; blockDim.x is a power of two <= kRmsNormBlockSize.
+template <typename T, bool SILU>
+__global__ void hip_gated_rms_norm_kernel(const T *__restrict__ input,
+                                          const T *__restrict__ scale,
+                                          const T *__restrict__ gate,
+                                          T *__restrict__ output, int64_t outer,
+                                          int64_t norm_size, float epsilon) {
+  int64_t row = blockIdx.x;
+  if (row >= outer) {
+    return;
+  }
+
+  const T *x_row = input + row * norm_size;
+  const T *z_row = gate + row * norm_size;
+  T *y_row = output + row * norm_size;
+
+  __shared__ float s_reduce[kRmsNormBlockSize];
+  __shared__ float s_inv_rms;
+
+  float local_sumsq = 0.0f;
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float v = rms_load(x_row + i);
+    local_sumsq += v * v;
+  }
+  float sumsq = rms_block_sum(local_sumsq, s_reduce);
+  if (threadIdx.x == 0) {
+    s_inv_rms = rsqrtf(sumsq / static_cast<float>(norm_size) + epsilon);
+  }
+  __syncthreads();
+  const float inv_rms = s_inv_rms;
+
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float v = rms_load(x_row + i);
+    float g = rms_load(scale + i);
+    float z = rms_load(z_row + i);
+    float act = 1.0f / (1.0f + expf(-z));
+    if constexpr (SILU) {
+      act *= z;
+    }
+    rms_store(y_row + i, v * inv_rms * g * act);
+  }
+}
+
+// rms_block_sum with a trailing barrier, so the next reduction may reuse
+// s_reduce while slower threads are still reading this total.
+__device__ inline float rms_block_sum_reuse(float partial, float *s_reduce) {
+  float total = rms_block_sum(partial, s_reduce);
+  __syncthreads();
+  return total;
+}
+
+// One block per (b, s, g) row; blockDim.x == kRmsNormBlockSize.
+template <typename T>
+__global__ void hip_engram_gate_kernel(
+    const T *__restrict__ key, const T *__restrict__ query,
+    const T *__restrict__ value, const T *__restrict__ key_scale,
+    const T *__restrict__ query_scale, const T *__restrict__ conv_scale,
+    T *__restrict__ output, T *__restrict__ normed, int64_t rows, int64_t hc,
+    int64_t hidden, float epsilon) {
+  int64_t row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  const int64_t g = row % hc;
+  const T *k_row = key + row * hidden;
+  const T *q_row = query + row * hidden;
+  const T *v_row = value + (row / hc) * hidden;
+  const T *ks_row = key_scale + g * hidden;
+  const T *qs_row = query_scale + g * hidden;
+  T *o_row = output + row * hidden;
+
+  __shared__ float s_reduce[kRmsNormBlockSize];
+  __shared__ float s_gate;
+
+  float k_sumsq = 0.0f;
+  float q_sumsq = 0.0f;
+  float dot_num = 0.0f;
+  for (int64_t c = threadIdx.x; c < hidden; c += blockDim.x) {
+    float k = rms_load(k_row + c);
+    float q = rms_load(q_row + c);
+    k_sumsq += k * k;
+    q_sumsq += q * q;
+    dot_num += k * rms_load(ks_row + c) * q * rms_load(qs_row + c);
+  }
+  k_sumsq = rms_block_sum_reuse(k_sumsq, s_reduce);
+  q_sumsq = rms_block_sum_reuse(q_sumsq, s_reduce);
+  dot_num = rms_block_sum_reuse(dot_num, s_reduce);
+
+  if (threadIdx.x == 0) {
+    const float h = static_cast<float>(hidden);
+    const float k_inv = 1.0f / sqrtf(k_sumsq / h + epsilon);
+    const float q_inv = 1.0f / sqrtf(q_sumsq / h + epsilon);
+    const float dot = dot_num * k_inv * q_inv / sqrtf(h);
+    float arg = 0.0f;
+    if (dot != 0.0f) {
+      const float magnitude = sqrtf(fmaxf(fabsf(dot), 1.0e-6f));
+      arg = dot < 0.0f ? -magnitude : magnitude;
+    }
+    if (arg > 0.0f) {
+      s_gate = 1.0f / (1.0f + expf(-arg));
+    } else {
+      const float e = expf(arg);
+      s_gate = e / (1.0f + e);
+    }
+  }
+  __syncthreads();
+  const float gate = s_gate;
+
+  // The second output normalizes the already-rounded first output.
+  float o_sumsq = 0.0f;
+  for (int64_t c = threadIdx.x; c < hidden; c += blockDim.x) {
+    rms_store(o_row + c, gate * rms_load(v_row + c));
+    float o = rms_load(o_row + c);
+    o_sumsq += o * o;
+  }
+  if (normed == nullptr) {
+    return;
+  }
+
+  o_sumsq = rms_block_sum(o_sumsq, s_reduce);
+  const float o_inv = 1.0f / sqrtf(o_sumsq / static_cast<float>(hidden) +
+                                   epsilon);
+  const T *cs_row = conv_scale + g * hidden;
+  T *n_row = normed + row * hidden;
+  for (int64_t c = threadIdx.x; c < hidden; c += blockDim.x) {
+    rms_store(n_row + c, rms_load(o_row + c) * o_inv * rms_load(cs_row + c));
+  }
+}
+
 // Packed __half2 requires an even row and 4-byte aligned bases. Row starts stay
 // aligned across rows when norm_size is even, so checking the bases is enough.
 inline bool rms_can_vectorize(const void *input, const void *scale,
@@ -204,6 +333,138 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_gated_rms_norm(void *stream, const void *input,
+                                  const void *scale, const void *gate,
+                                  void *output, int64_t outer,
+                                  int64_t norm_size, int activation,
+                                  float epsilon, int hip_dtype) {
+  if (outer <= 0 || norm_size <= 0) {
+    return 0;
+  }
+
+  // Size the block to the row so narrow groups (e.g. 128 wide) do not leave
+  // most of a 256-thread block idle.
+  int block_size = 32;
+  while (block_size < norm_size && block_size < kRmsNormBlockSize) {
+    block_size *= 2;
+  }
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned int>(outer));
+  dim3 block(block_size);
+  const bool silu = activation == 1;
+
+  (void)hipGetLastError();
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_gated_rms_norm: dtype=%d, outer=%lld, "
+      "norm_size=%lld, activation=%d, block=%d\n",
+      hip_dtype, (long long)outer, (long long)norm_size, activation,
+      block_size);
+
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+    auto *x = static_cast<const __half *>(input);
+    auto *s = static_cast<const __half *>(scale);
+    auto *z = static_cast<const __half *>(gate);
+    auto *y = static_cast<__half *>(output);
+    if (silu) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<__half, true>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<__half, false>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    }
+  } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
+    auto *x = static_cast<const float *>(input);
+    auto *s = static_cast<const float *>(scale);
+    auto *z = static_cast<const float *>(gate);
+    auto *y = static_cast<float *>(output);
+    if (silu) {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<float, true>), grid, block,
+          0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    } else {
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(hip_gated_rms_norm_kernel<float, false>), grid,
+          block, 0, hip_stream, x, s, z, y, outer, norm_size, epsilon);
+    }
+  } else {
+    fprintf(stderr,
+            "[custom_kernels] hip_gated_rms_norm: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_gated_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_engram_gate(void *stream, const void *key, const void *query,
+                               const void *value, const void *key_scale,
+                               const void *query_scale, const void *conv_scale,
+                               void *output, void *normed, int64_t rows,
+                               int64_t hc, int64_t hidden, float epsilon,
+                               int hip_dtype) {
+  if (rows <= 0 || hidden <= 0) {
+    return 0;
+  }
+  if (hc <= 0 || (normed != nullptr && conv_scale == nullptr)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_engram_gate: hc=%lld, normed without "
+            "conv_scale=%d\n",
+            (long long)hc, normed != nullptr && conv_scale == nullptr);
+    return -1;
+  }
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned int>(rows));
+  dim3 block(kRmsNormBlockSize);
+
+  (void)hipGetLastError();
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_engram_gate: dtype=%d, rows=%lld, hc=%lld, "
+      "hidden=%lld, normed=%s\n",
+      hip_dtype, (long long)rows, (long long)hc, (long long)hidden,
+      normed ? "yes" : "no");
+
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(hip_engram_gate_kernel<__half>), grid, block, 0,
+        hip_stream, static_cast<const __half *>(key),
+        static_cast<const __half *>(query), static_cast<const __half *>(value),
+        static_cast<const __half *>(key_scale),
+        static_cast<const __half *>(query_scale),
+        static_cast<const __half *>(conv_scale), static_cast<__half *>(output),
+        static_cast<__half *>(normed), rows, hc, hidden, epsilon);
+  } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(hip_engram_gate_kernel<float>), grid, block, 0,
+        hip_stream, static_cast<const float *>(key),
+        static_cast<const float *>(query), static_cast<const float *>(value),
+        static_cast<const float *>(key_scale),
+        static_cast<const float *>(query_scale),
+        static_cast<const float *>(conv_scale), static_cast<float *>(output),
+        static_cast<float *>(normed), rows, hc, hidden, epsilon);
+  } else {
+    fprintf(stderr, "[custom_kernels] hip_engram_gate: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_engram_gate launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);
