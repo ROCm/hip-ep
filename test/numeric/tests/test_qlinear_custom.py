@@ -4,7 +4,7 @@
 #
 
 """Numeric checks for com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-QLinearGlobalAveragePool.
+QLinearGlobalAveragePool / QLinearLeakyRelu.
 
 LIT only checks the lowered IR. These compare hip-ep against the ORT CPU
 reference, including rounding, broadcast, mixed int8/uint8 concat, and the
@@ -191,5 +191,36 @@ class TestQLinearGlobalAveragePool:
         model = _model([node], [X], [Y], inits)
         rng = np.random.default_rng(7)
         x = rng.integers(0, 32, in_shape, dtype=np.uint8)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1)
+
+
+class TestQLinearLeakyRelu:
+    @pytest.mark.parametrize(
+        "dtype,zp_dtype,low,high",
+        [
+            (TensorProto.INT8, np.int8, -20, 20),
+            (TensorProto.UINT8, np.uint8, 0, 40),
+        ],
+    )
+    def test_negative_slope(self, model_runner, dtype, zp_dtype, low, high):
+        X = helper.make_tensor_value_info("X", dtype, [8])
+        Y = helper.make_tensor_value_info("Y", dtype, [8])
+        inits = [
+            _init("X_scale", 0.5, np.float32),
+            _init("X_zp", 0, zp_dtype),
+            _init("Y_scale", 0.25, np.float32),
+            _init("Y_zp", 1, zp_dtype),
+        ]
+        node = helper.make_node(
+            "QLinearLeakyRelu",
+            ["X", "X_scale", "X_zp", "Y_scale", "Y_zp"],
+            ["Y"],
+            domain="com.microsoft",
+            alpha=0.1,
+        )
+        model = _model([node], [X], [Y], inits)
+        rng = np.random.default_rng(11)
+        x = rng.integers(low, high, 8, dtype=zp_dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1)
