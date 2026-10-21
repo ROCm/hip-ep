@@ -128,49 +128,53 @@ def _make_gqa_model(
 
 
 def _make_gqa_fixed_cache_model(
-    batch, seq_len, cache_size, hidden, kv_hidden, num_heads, kv_num_heads
+    batch,
+    seq_len,
+    cache_size,
+    hidden,
+    kv_hidden,
+    num_heads,
+    kv_num_heads,
+    elem_type=TensorProto.FLOAT16,
 ):
     """Build a GQA ONNX model with pre-allocated fixed-size KV cache.
 
     In this pattern (used by the Llama-3.1-8B-fixed model), past and present
     key/value tensors share the same buffer size.  The total_seq scalar
     equals cache_size and seqlens_k indicates how many past tokens are valid.
+    elem_type sets the element type of the activations and the cache.
     """
     head_dim = hidden // num_heads
 
-    query = helper.make_tensor_value_info(
-        "query", TensorProto.FLOAT16, [batch, seq_len, hidden]
-    )
-    key = helper.make_tensor_value_info(
-        "key", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]
-    )
+    query = helper.make_tensor_value_info("query", elem_type, [batch, seq_len, hidden])
+    key = helper.make_tensor_value_info("key", elem_type, [batch, seq_len, kv_hidden])
     value = helper.make_tensor_value_info(
-        "value", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]
+        "value", elem_type, [batch, seq_len, kv_hidden]
     )
     past_key = helper.make_tensor_value_info(
         "past_key",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     past_value = helper.make_tensor_value_info(
         "past_value",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     seqlens_k = helper.make_tensor_value_info("seqlens_k", TensorProto.INT32, [batch])
     total_seq = helper.make_tensor_value_info("total_seq", TensorProto.INT32, [])
 
     output = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [batch, seq_len, hidden]
+        "output", elem_type, [batch, seq_len, hidden]
     )
     present_key = helper.make_tensor_value_info(
         "present_key",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
     present_value = helper.make_tensor_value_info(
         "present_value",
-        TensorProto.FLOAT16,
+        elem_type,
         [batch, kv_num_heads, cache_size, head_dim],
     )
 
@@ -727,8 +731,15 @@ class TestGroupQueryAttention:
             (128, 128, 0),
         ],
     )
+    # float16 runs the fused prefill; float32 activations with an unquantized
+    # cache are not fused_supported and run the decomposed hipBLASLt pipeline.
+    @pytest.mark.parametrize(
+        "elem_type,np_dtype",
+        [(TensorProto.FLOAT16, np.float16), (TensorProto.FLOAT, np.float32)],
+        ids=["fp16_fused", "fp32_hipblaslt"],
+    )
     def test_gqa_padded_chunk_prefill_llama_shape(
-        self, model_runner, seq_len, real_count, past_valid
+        self, model_runner, seq_len, real_count, past_valid, elem_type, np_dtype
     ):
         """GQA chunk-opt padded prefill: seq_len_q > seqlens_k+1.
 
@@ -760,13 +771,13 @@ class TestGroupQueryAttention:
 
         rng = np.random.default_rng(42)
         # Real Q/K/V values for the [0, real_count) prefix.
-        q_real = rng.uniform(-1, 1, [1, real_count, LLAMA_HIDDEN]).astype(np.float16)
-        k_real = rng.uniform(-1, 1, [1, real_count, LLAMA_KV_HIDDEN]).astype(np.float16)
-        v_real = rng.uniform(-1, 1, [1, real_count, LLAMA_KV_HIDDEN]).astype(np.float16)
+        q_real = rng.uniform(-1, 1, [1, real_count, LLAMA_HIDDEN]).astype(np_dtype)
+        k_real = rng.uniform(-1, 1, [1, real_count, LLAMA_KV_HIDDEN]).astype(np_dtype)
+        v_real = rng.uniform(-1, 1, [1, real_count, LLAMA_KV_HIDDEN]).astype(np_dtype)
         # Padded tail uses zeros to mimic genai's padded embeddings.
-        pad_q = np.zeros([1, seq_len - real_count, LLAMA_HIDDEN], dtype=np.float16)
-        pad_k = np.zeros([1, seq_len - real_count, LLAMA_KV_HIDDEN], dtype=np.float16)
-        pad_v = np.zeros([1, seq_len - real_count, LLAMA_KV_HIDDEN], dtype=np.float16)
+        pad_q = np.zeros([1, seq_len - real_count, LLAMA_HIDDEN], dtype=np_dtype)
+        pad_k = np.zeros([1, seq_len - real_count, LLAMA_KV_HIDDEN], dtype=np_dtype)
+        pad_v = np.zeros([1, seq_len - real_count, LLAMA_KV_HIDDEN], dtype=np_dtype)
         q_full = np.concatenate([q_real, pad_q], axis=1)
         k_full = np.concatenate([k_real, pad_k], axis=1)
         v_full = np.concatenate([v_real, pad_v], axis=1)
@@ -775,12 +786,12 @@ class TestGroupQueryAttention:
             -1,
             1,
             [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM],
-        ).astype(np.float16)
+        ).astype(np_dtype)
         pv = rng.uniform(
             -1,
             1,
             [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM],
-        ).astype(np.float16)
+        ).astype(np_dtype)
         if past_valid == 0:
             pk[:] = 0
             pv[:] = 0
@@ -795,6 +806,7 @@ class TestGroupQueryAttention:
             LLAMA_KV_HIDDEN,
             LLAMA_NUM_HEADS,
             LLAMA_KV_NUM_HEADS,
+            elem_type,
         )
         sub = model_runner._next_subdir("wide_padded")
         wide_path = str(sub / "model.onnx")
@@ -821,6 +833,7 @@ class TestGroupQueryAttention:
             LLAMA_KV_HIDDEN,
             LLAMA_NUM_HEADS,
             LLAMA_KV_NUM_HEADS,
+            elem_type,
         )
         seqlens_narrow = np.array([total_kv_seq - 1], dtype=np.int32)
         total = np.array(LLAMA_CACHE_SIZE, dtype=np.int32)
