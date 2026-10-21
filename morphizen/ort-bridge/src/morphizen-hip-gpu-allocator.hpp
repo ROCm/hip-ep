@@ -121,11 +121,13 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
-  // All six expect pool_mutex_ held. The first three append buffers the
+  // All eight expect pool_mutex_ held. The first five append buffers the
   // caller must hand to the driver after releasing it.
   void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
   void TrimLarge(std::vector<void *> &out);
   void DrainLarge(std::vector<void *> &out);
+  void EvictIdleSets(size_t need, std::vector<void *> &out);
+  void DrainSets(std::vector<void *> &out);
   void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown);
   bool ReplacesLiveBuffer(size_t size) const;
   bool ReplacedByLiveBuffer(size_t requested) const;
@@ -155,8 +157,7 @@ private:
   // with growth headroom. Only such buffers, and the buffers they replaced,
   // are kept on Free, keyed by capacity, and a request takes the smallest one
   // that covers it. Tensors that keep their size, such as a shared
-  // past/present KV buffer, never qualify and are released on Free as without
-  // the pool.
+  // past/present KV buffer, never qualify for this growth pool.
   //
   // The first version of a growing tensor, such as the KV cache a new
   // generator prefills, has nothing to grow from. Allocated exactly, it could
@@ -173,6 +174,21 @@ private:
   // lifetime. TrimLarge additionally ages out capacities that stop being asked
   // for while others are still cycling, and a driver allocation failure
   // drains the pool and retries.
+  //
+  // Sets of same-sized buffers are the other exception: the shared
+  // past/present KV cache of a generator is one buffer per layer and per K/V,
+  // all freed together when the generator goes away, and the next generator
+  // asks for the same set again. A large buffer that is not kept for growth
+  // goes to a separate set pool when another buffer of its requested size is
+  // still checked out, or when the set pool already holds its capacity; a
+  // lone transient never qualifies. A request takes a set buffer under the
+  // same fit rule as the growth pool. A set bucket is idle from a free until
+  // its next hit, and a driver allocation first releases idle set buffers,
+  // least recently used first, until it has released as many bytes as it
+  // allocates, so a workload whose shapes change hands the memory over
+  // instead of adding to it. Unlike the growth pool, set buffers outlive the
+  // tensors that used them: they stay until an allocation evicts them, a
+  // driver allocation fails, or the allocator is destroyed.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
@@ -197,6 +213,15 @@ private:
     uint64_t last_used = 0;
   };
   std::map<size_t, LargeBucket> large_free_;
+  // Set pool, keyed by capacity like large_free_; empty buckets are erased.
+  struct SetBucket {
+    std::vector<void *> free;
+    // large_ops_ at the last hit or free here; orders idle buckets for
+    // eviction.
+    uint64_t last_used = 0;
+    bool idle = true;
+  };
+  std::map<size_t, SetBucket> set_free_;
   // Checked-out large buffers. `grown` marks a buffer handed to a request that
   // replaced a live buffer a little smaller than itself, whether allocated
   // with headroom or reused from the pool. Those are pooled on Free, as is a
