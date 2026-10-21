@@ -642,9 +642,9 @@
 "_ZN12_GLOBAL__N_116fast_gelu_kernelIfEEvPKT_S3_PS1_xx":[11,0,0,16,238,0,0]
 },
 "gather_block_quantized_kernel":{
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI14__hip_bfloat16EEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,688,0,0],
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI6__halfEEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,680,0,0],
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelIfEEvPKhPKvPKT_S2_PS5_xiiiiiiiiiiNS_9GbqDimsNDES9_S9_S9_":[39,0,0,16,672,0,0]
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI14__hip_bfloat16EEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,758,0,0],
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI6__halfEEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,744,0,0],
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelIfEEvPKhPKvPKT_S2_PS5_xiiiiiiiiiiiNS_9GbqDimsNDES9_S9_S9_":[39,0,0,16,732,0,0]
 },
 "gather_elements_kernel":{
 "_ZN12_GLOBAL__N_122gather_elements_kernelIjiEEvPKT_PKT0_PS1_xNS_18GatherElementsGeomE":[40,0,0,16,386,0,0],

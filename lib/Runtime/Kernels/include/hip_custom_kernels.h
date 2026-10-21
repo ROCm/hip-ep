@@ -1281,7 +1281,7 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
     void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
- * HPG=H/G in {1,2,3,4,5,8,16}):
+ * HPG=H/G in {1,2,3,4,5,6,8,16}):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the query heads of each KV group, then a second kernel
  * merges K_SPLITS partial (m, l, O) per query head. fp16 d == 96 runs a
@@ -2552,9 +2552,12 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_padrow(
  *   bits == 4 + is_signed_data == 0  -> uint4  (raw nibble in [0,15])
  *   bits == 8 + is_signed_data == 0  -> uint8  (raw byte  in [0,255])
  *   bits == 8 + is_signed_data == 1  -> int8   (signed byte in [-128,127])
+ *   is_float8_data == 1              -> float8 e4m3fn, dequantized as
+ *                                       decode * scale (zp not applied)
  *
  * scales       - one per (data block) along quantize_axis: same shape as
  *                data except dim quantize_axis is data.shape[qa]/block_size.
+ *                A dim of 1 on any other axis broadcasts along that axis.
  *                Type: T2 in {fp32, fp16, bf16}, matches output.
  * zero_points  - same logical shape as scales; same packing as data
  *                (sub-byte for bits==4). May be null; default zp is then
@@ -2588,6 +2591,7 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int quantize_axis,           // normalized
     int default_zp,              // applied when zero_points == null
     int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
+    int is_float8_data,          // 1 if float8 e4m3fn
     int indices_is_int64,        // 1 = i64, 0 = i32
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
@@ -2709,6 +2713,9 @@ HIP_KERNEL_API int hip_dequantize_linear(
 
 /* Top-k routing: find top-k experts per token from router_probs.
  *   router_probs   - GPU [num_tokens, num_experts]
+ *   router_weights - GPU [num_tokens, num_experts] or NULL. When set, the
+ *                    selected experts' weights are gathered from it instead
+ *                    of the softmax of router_probs.
  *   expert_indices - GPU [num_tokens, k] int32 (output)
  *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
  *   normalize      - 1 to normalize selected weights (sum-to-one)
@@ -2716,6 +2723,7 @@ HIP_KERNEL_API int hip_dequantize_linear(
 HIP_KERNEL_API int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
+    const void* router_weights,
     void* expert_indices,
     void* expert_weights,
     int64_t num_tokens,

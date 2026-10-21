@@ -22,9 +22,12 @@
 #include <optional>
 #endif
 
+#if HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 #include "hip/Target/LLVM/DLLLinker.h"
+#endif
 #include "hip/Target/LLVM/LLVMBackend.h"
 #include "hip/artifact_abi.h"
+#include "hip/native_artifacts.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -207,6 +210,10 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   logPhase("translateToLLVMIR");
 
   const bool native = (options.output_mode == mlir::hip::OutputMode::NATIVE);
+  if (native && !hipdnn::nativeArtifactsEnabled()) {
+    error_message = hipdnn::kNativeArtifactsDisabledMessage;
+    return false;
+  }
 
   // Native path merges runtime.bc at producer time so the .dll/.so is
   // self-contained (modulo dynamic imports). The bitcode path leaves
@@ -679,6 +686,15 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
                                const std::vector<std::string> &library_paths,
                                const std::vector<std::string> &export_symbols,
                                std::string &error_message) {
+#if !HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  (void)objPath;
+  (void)dllPath;
+  (void)libraries;
+  (void)library_paths;
+  (void)export_symbols;
+  error_message = hipdnn::kNativeArtifactsDisabledMessage;
+  return false;
+#else
   hipdnn::DLLLinker linker;
   if (!linker.linkDLL(objPath, dllPath, libraries, library_paths,
                       export_symbols)) {
@@ -686,6 +702,7 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
     return false;
   }
   return true;
+#endif
 }
 
 void CompilerDriver::discoverInTreeLibraries(

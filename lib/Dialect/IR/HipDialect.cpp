@@ -134,7 +134,7 @@ LogicalResult ConstantOp::verify() {
   unsigned elementBits = 0;
   if (auto floatType = dyn_cast<FloatType>(elementType)) {
     if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
-        !elementType.isF64())
+        !elementType.isF64() && !isa<Float8E4M3FNType>(elementType))
       return emitOpError("has unsupported floating-point element type ")
              << elementType;
     elementBits = floatType.getWidth();

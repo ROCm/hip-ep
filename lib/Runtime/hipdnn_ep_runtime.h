@@ -84,6 +84,8 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 2;
   case HIPDNN_EP_DATATYPE_UINT16:
     return 2;
+  case HIPDNN_EP_DATATYPE_FLOAT8E4M3FN:
+    return 1;
   default:
     return -1;
   }
@@ -111,6 +113,8 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i16";
   case HIPDNN_EP_DATATYPE_UINT16:
     return "ui16";
+  case HIPDNN_EP_DATATYPE_FLOAT8E4M3FN:
+    return "f8E4M3FN";
   default:
     return "unknown";
   }

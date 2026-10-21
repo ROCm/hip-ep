@@ -1194,6 +1194,12 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     `data.shape[quantize_axis] / block_size`. When `zero_points` is absent,
     the default is `0` for int4/uint4 and `2^(bits-1)` for uint8.
 
+    `f8E4M3FN` data holds one float8 value per byte and is dequantized as
+    `float(data) * scale` with no `zero_points`; `bits` is 8. Its `scales`
+    may have extent 1 on any axis other than `quantize_axis`, broadcasting
+    along that axis, and extent `ceil(data.shape[quantize_axis] / block_size)`
+    on `quantize_axis`.
+
     Output rank is `q + (r - 1)` where `q = rank(indices)`. Element type of
     `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
     `gather_axis` must be 0.
