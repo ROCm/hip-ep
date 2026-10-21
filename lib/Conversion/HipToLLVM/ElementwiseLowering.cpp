@@ -253,11 +253,46 @@ struct SwigluF32Lowering : ConvertOpToLLVMPattern<SwigluF32Op> {
   }
 };
 
+struct RoundedScaledAddLowering : ConvertOpToLLVMPattern<RoundedScaledAddOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(RoundedScaledAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type ptr = getPtrType(), i64 = rewriter.getI64Type();
+    SmallVector<Type> parameters(5, ptr);
+    parameters.append(17, i64);
+    auto function = LLVM::lookupOrCreateFn(
+        rewriter, op->getParentOfType<ModuleOp>(),
+        "wrap_rounded_scaled_add_f16", parameters, rewriter.getI32Type());
+    if (failed(function))
+      return failure();
+    SmallVector<Value> args = {adaptor.getCtx()};
+    SmallVector<Value> originals{op.getBase(), op.getX(), op.getY(),
+                                 op.getOutput()};
+    SmallVector<Value> converted{adaptor.getBase(), adaptor.getX(),
+                                 adaptor.getY(), adaptor.getOutput()};
+    for (Value value : converted)
+      args.push_back(extractContiguousMemRefPtr(value, rewriter, loc));
+    for (auto [original, value] : llvm::zip(originals, converted)) {
+      auto dims = extractShape4D(cast<MemRefType>(original.getType()), value,
+                                 rewriter, loc, i64);
+      args.append(dims.begin(), dims.end());
+    }
+    args.push_back(LLVM::ConstantOp::create(
+        rewriter, loc, i64, rewriter.getI64IntegerAttr(op.getProductOnLhs())));
+    LLVM::CallOp::create(rewriter, loc, *function, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
   patterns.add<SwigluF32Lowering>(converter);
+  patterns.add<RoundedScaledAddLowering>(converter);
   patterns.add<ElementwiseOpLowering<MulOp, kTensorOpMul>,
                ElementwiseOpLowering<AddOp, kTensorOpAdd>,
                ElementwiseOpLowering<MinOp, kTensorOpMin>,

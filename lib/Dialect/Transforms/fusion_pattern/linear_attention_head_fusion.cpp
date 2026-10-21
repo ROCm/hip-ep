@@ -1,5 +1,7 @@
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #include "linear_attention_head_fusion.hpp"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"

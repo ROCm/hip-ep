@@ -2711,6 +2711,29 @@ def Hip_SwigluF32Op : Hip_DpsOp<"swiglu_f32"> {
   }];
 }
 
+def Hip_RoundedScaledAddOp : Hip_DpsOp<"rounded_scaled_add"> {
+  let summary = "Add separately rounded FP16 base and FP32 product";
+  let description = [{
+    Computes the FP32 product x * y, then rounds that product to FP16.
+    Rounds base to FP16 separately. Adds the two FP16 values and stores FP16.
+    product_on_lhs keeps the original add operand order. Each input uses
+    right-aligned broadcasting with at most four axes. This operation keeps
+    the FP32 product boundary and both FP16 boundaries before addition.
+    It preserves NaN results, but does not promise NaN payload bits.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx, Hip_TensorOrMemRef:$base,
+    Hip_TensorOrMemRef:$x, Hip_TensorOrMemRef:$y,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<BoolAttr, "false">:$product_on_lhs);
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $base `,` $x `,` $y `:`
+      type($base) `,` type($x) `,` type($y) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal", /*traits=*/[],
                                  /*outsAccessor=*/"Y",
                                  /*autoReify=*/1,

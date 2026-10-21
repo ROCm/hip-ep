@@ -1923,6 +1923,57 @@ LogicalResult SwigluF32Op::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// RoundedScaledAddOp keeps each rounding boundary in the source chain.
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoundedScaledAddOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoundedScaledAddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoundedScaledAddOp::verify() {
+  for (Value value : {getBase(), getX(), getY(), getOutput()}) {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() || type.getRank() > 4 ||
+        (value == getOutput() ? !type.getElementType().isF16()
+                              : !type.getElementType().isF32()))
+      return emitOpError("requires FP32 inputs and an FP16 destination, with "
+                         "at most four axes");
+  }
+  auto base = cast<ShapedType>(getBase().getType());
+  auto x = cast<ShapedType>(getX().getType());
+  auto y = cast<ShapedType>(getY().getType());
+  auto output = cast<ShapedType>(getOutput().getType());
+  if (output.getRank() != std::max({base.getRank(), x.getRank(), y.getRank()}))
+    return emitOpError("requires the broadcast result rank");
+  for (int64_t axis = 0; axis < output.getRank(); ++axis) {
+    int64_t known = 1;
+    bool dynamic = false;
+    for (auto type : {base, x, y}) {
+      int64_t inputAxis = axis - (output.getRank() - type.getRank());
+      int64_t size = inputAxis < 0 ? 1 : type.getDimSize(inputAxis);
+      if (ShapedType::isDynamic(size)) {
+        dynamic = true;
+      } else if (size != 1) {
+        if (known != 1 && known != size)
+          return emitOpError("requires compatible broadcast extents");
+        known = size;
+      }
+    }
+    int64_t size = output.getDimSize(axis);
+    if (!ShapedType::isDynamic(size) && (!dynamic || known != 1) &&
+        size != known)
+      return emitOpError("requires the broadcast destination shape");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 

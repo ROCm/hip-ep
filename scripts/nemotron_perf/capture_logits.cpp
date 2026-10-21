@@ -1,6 +1,7 @@
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
-// Diagnostic only. All model inference uses the configured GPU provider.
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #include "ort_genai_c.h"
 #include <algorithm>
 #include <cmath>

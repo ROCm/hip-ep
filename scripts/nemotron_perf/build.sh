@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Licensed under the MIT License.
-# Build this worktree without changing shared source or install directories.
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 set -euo pipefail
 
 SOURCE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)

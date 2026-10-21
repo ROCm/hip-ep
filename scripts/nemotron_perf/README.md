@@ -1,4 +1,12 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Nemotron 3.5 Lightning performance checkpoint
+
+**DO NOT MERGE — EXPERIMENTAL ONLY.**
+This branch is for controlled accuracy and performance comparisons.
+The sparse-expert and optional logits-head paths are not ready for production.
 
 This local development branch starts at main revision `04f1c0365`.
 It is separate from the shape-inference PR stack.
@@ -14,6 +22,7 @@ The checkpoint includes:
 - FP16 recurrent-state boundaries with FP32 attention calculations.
 - Compact Q/K heads and fixed-geometry linear-attention decode.
 - SwiGLU fusion with the original FP32 rounding boundaries.
+- Scaled-add fusion with separate FP32 product and FP16 rounding boundaries.
 - A sequential FP32 router for the pinned matrix geometry.
 
 The sparse rewrite still has an experimental gate. Inactive expert results
@@ -93,9 +102,21 @@ The rebuilt core checkpoint matches all 6,291,456 main logits in the short, 2K, 
 captures. Each capture uses 16 steps, 131,072 logits per step, and the same
 forced token history. This evidence does not certify all prompts or models.
 
-The four compiler matcher suites, three lowering FileCheck tests, and five
-GPU kernel suites also pass. The local checkpoint record is
+The original four compiler matcher suites, three lowering FileCheck tests,
+and five GPU kernel suites passed for the core checkpoint. Its record is
 `.nemotron-perf/checkpoint-source-20261021/core-validation.md`.
+
+The later scaled-add fusion has a separate validation record:
+`.nemotron-perf/rounded-residual-validation-v2.md`.
+It matched 23 residual chains and removed 69 launches per decoder invocation.
+Its short, 2K, and 16K captures matched all 6,291,456 recorded main logits.
+These runs enabled the sparse-expert and other core experiment switches.
+They do not measure the default configuration of this branch.
+
+The normal LIT suite now runs the four non-MoE compiler matcher scripts.
+Their entry point is
+`test/lit/Transforms/HipFusionTransform/nemotron_matchers.mlir`.
+This makes those checks available on Linux and Windows without a GPU.
 
 Two clean 2K pairs, in opposite orders, measured 56.12-56.16 TPS for v20
 and 55.74 TPS for v18. The sampled device footprint was about 17.515 GiB.

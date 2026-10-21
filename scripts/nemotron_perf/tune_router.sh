@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Licensed under the MIT License.
-# Generate and verify a library-specific comparison control. Do not install it.
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 set -euo pipefail
 SOURCE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 WS=/scratch/fhanuman/RCOmEP

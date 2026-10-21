@@ -34,6 +34,7 @@
 #include "linear_attention_head_fusion.hpp"
 #include "linear_attention_state_fusion.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
+#include "rounded_scaled_add_fusion.hpp"
 #include "routed_experts_fusion.hpp"
 #include "swiglu_f32_fusion.hpp"
 #include "swiglu_fusion.hpp"
@@ -858,6 +859,7 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateRoundedScaledAddPattern(patterns);
   // Sparse execution has an explicit finite-inactive-expert contract.
   if (hip_get_env("HIPDNN_EP_EXPERIMENTAL_SPARSE_EXPERTS") == "1")
     populateRoutedExpertsPattern(patterns);

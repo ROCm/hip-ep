@@ -17,7 +17,8 @@ module {
         outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
         {axis = 1 : i64, largest = true, sorted = true}
 
-    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
+    // The destination fixes K at 2. Pass K directly, without a device readback.
+    // CHECK: llvm.call @wrap_top_k_static({{.*}}) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
 

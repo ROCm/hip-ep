@@ -54,6 +54,7 @@ set(_kernel_sources
     hip/pow_kernel.hip
     hip/swiglu_kernel.hip
     hip/swiglu_f32_kernel.hip
+    hip/rounded_scaled_add_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
