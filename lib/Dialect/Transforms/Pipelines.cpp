@@ -284,7 +284,7 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     translation.
   //
   //     Placement is load-bearing: it MUST run BEFORE MaterializeHostScalars
-  //     (6b).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
+  //     (6a).  The rank-0 fill bufferizes to `memref.alloc + linalg.fill`;
   //     only AFTER this pass does it become `memref.alloc + memref.store`,
   //     which is the shape MaterializeHostScalars recognises as a tiny
   //     host-fed scalar and redirects to host-mapped scratch.  If this ran
@@ -295,33 +295,32 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     device memory.  No-op on graphs that emit no linalg ops.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
-  // 6. HIP-specific buffer optimizations
+  // 6a. Correctness/ABI: redirect tiny host-fed memref.alloc ops (bufferized
+  //     `tensor.from_elements` shape arithmetic) to runtime-owned host-mapped
+  //     scratch before buffer reuse. This removes them from the memref.alloc
+  //     set, so OptimizeMemRefs cannot coalesce a host-written scalar with a
+  //     slot whose preceding device use may still be asynchronous.
+  //
+  //     PromoteStridedHipOperands only introduces alloc + memref.copy
+  //     temporaries, not host-stored scalar allocations, so it does not need
+  //     to precede this pass. See MaterializeHostScalars.cpp;
+  //     pipeline-static-shape-lockdown.mlir locks down this ordering.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 6b. Reuse the remaining ordinary allocations. Keep this pass generic:
+  //     target-specific host/device placement has already been resolved by
+  //     MaterializeHostScalars.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
-  // The remaining pre-pooling passes have two distinct roles:
-  //   - Correctness/ABI passes that must introduce or redirect allocations
-  //     before pooling (6a and 6b).
-  //   - Shape preconditions used only to improve pool quality (grouped in 6c).
-
-  // 6a. Correctness/ABI: materialize identity-layout temporaries for
-  //     non-identity-layout DPS-input memrefs. The interface-based selection
-  //     covers plugin ops whose bare-pointer runtime ABI carries no descriptor
-  //     offset or strides. Runs after linalg cleanup and OptimizeMemRefs, and
-  //     before pooling so the temporaries become pool views rather than
-  //     per-inference allocations.
+  // 6c. Correctness/ABI: materialize identity-layout temporaries for
+  //     non-identity-layout DPS-input memrefs. This must run after
+  //     OptimizeMemRefs, which may introduce memref.reinterpret_cast views
+  //     whose offset or strides cannot be represented by the bare-pointer
+  //     runtime ABI. The new temporaries are pooled below.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
 
-  // 6b. Correctness/ABI: redirect tiny host-fed memref.alloc ops (bufferized
-  //     `tensor.from_elements` shape arithmetic) from the GPU pool to
-  //     runtime-owned host-mapped scratch. Must run after 6a so its candidate
-  //     analysis sees the final allocation set, and before pooling so
-  //     host-written buffers never become views into device memory. See
-  //     MaterializeHostScalars.cpp; pipeline-static-shape-lockdown.mlir locks
-  //     down this ordering.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
-
-  // 6c. Pool quality: normalize dynamic allocation sizes after all view and
+  // 6d. Pool quality: normalize dynamic allocation sizes after all view and
   //     allocation rewrites, immediately before hip-pool-allocs.
   addPoolAllocsShapePreconditionPasses(pm);
 

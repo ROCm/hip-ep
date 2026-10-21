@@ -2,20 +2,16 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Lockdown: a static-shape model with no host-fed scalar staging buffers
-// must flow through the MaterializeHostScalars + PoolAllocs reorder
-// (introduced for the dynseqlen regression) without picking up any host
-// scratch.  MaterializeHostScalars must reject every alloc here (no host
-// I/O on the f32 path, no integer/index element type on the staging path),
-// leaving PoolAllocs to handle the IR exactly as it did before the
-// reorder.
+// Lock down the pre-pooling pass order. Host-fed scalars must move to host
+// scratch before OptimizeMemRefs considers ordinary allocations for reuse,
+// while a static pure-GPU function must not pick up host scratch.
 //
 // If a future refactor relaxes MaterializeHostScalars's candidate filter
 // (e.g. drops the `hasHostIO` requirement, accepts f32, or removes the
 // arg-0 `!hip.context` check) this test fails immediately.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --hip-materialize-host-scalars --hip-pool-allocs %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-materialize-host-scalars --hip-optimize-memrefs --hip-promote-strided-operands --hip-pool-allocs %s | FileCheck %s
 
 // ===== Static, pure-GPU: no host I/O at all. =====
 //
@@ -40,4 +36,27 @@ func.func @static_pure_gpu_lockdown(
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>)
                             outs(%alloc1 : memref<8x8xf32>)
   return %alloc1 : memref<8x8xf32>
+}
+
+// The host-written scalar is replaced before OptimizeMemRefs runs, so it is a
+// view of host scratch rather than a reusable memref.alloc slot previously
+// occupied by an asynchronous HIP operation.
+//
+// CHECK-LABEL: func.func @host_scalar_excluded_from_reuse
+// CHECK: %[[SCRATCH:.*]] = hip.get_host_scratch
+// CHECK: %[[SHAPE:.*]] = memref.view %[[SCRATCH]]
+// CHECK: memref.store %{{.*}}, %[[SHAPE]][]
+// CHECK: hip.add{{.*}}ins(%[[SHAPE]]
+func.func @host_scalar_excluded_from_reuse(
+    %ctx: !hip.context, %a: memref<i64>, %b: memref<i64>,
+    %host_value: i64) -> memref<i64> {
+  %gpu_tmp = memref.alloc() : memref<i64>
+  hip.add(%ctx) ins(%a, %b : memref<i64>, memref<i64>)
+                outs(%gpu_tmp : memref<i64>)
+  %host_scalar = memref.alloc() : memref<i64>
+  memref.store %host_value, %host_scalar[] : memref<i64>
+  %out = memref.alloc() : memref<i64>
+  hip.add(%ctx) ins(%host_scalar, %a : memref<i64>, memref<i64>)
+                outs(%out : memref<i64>)
+  return %out : memref<i64>
 }

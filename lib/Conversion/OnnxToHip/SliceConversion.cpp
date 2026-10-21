@@ -10,6 +10,8 @@
 
 #include "llvm/ADT/APInt.h"
 
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -152,6 +154,66 @@ static mlir::Value normaliseOptional(mlir::Value v) {
 /// pathological walk.
 static constexpr int kHostIndexMaxDepth = 8;
 
+using ShapeBinaryBuilder = mlir::Value (*)(mlir::OpBuilder &, mlir::Location,
+                                           mlir::Value, mlir::Value);
+
+struct ShapeBinaryOp {
+  mlir::Value lhs;
+  mlir::Value rhs;
+  ShapeBinaryBuilder build;
+};
+
+/// Match a supported binary shape-arithmetic producer and normalize its
+/// operands. HIP DPS ops spell them as (ctx, lhs, rhs, out), while ONNX ops
+/// spell them as (lhs, rhs).
+static std::optional<ShapeBinaryOp> matchShapeBinaryOp(mlir::Operation *op) {
+  struct Spec {
+    llvm::StringRef hipName;
+    llvm::StringRef onnxName;
+    ShapeBinaryBuilder build;
+  };
+
+  static const Spec specs[] = {
+      {mlir::hip::AddOp::getOperationName(), "onnx.Add",
+       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
+          mlir::Value rhs) -> mlir::Value {
+         return mlir::arith::AddIOp::create(b, loc, lhs, rhs);
+       }},
+      {mlir::hip::SubOp::getOperationName(), "onnx.Sub",
+       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
+          mlir::Value rhs) -> mlir::Value {
+         return mlir::arith::SubIOp::create(b, loc, lhs, rhs);
+       }},
+      {mlir::hip::MulOp::getOperationName(), "onnx.Mul",
+       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
+          mlir::Value rhs) -> mlir::Value {
+         return mlir::arith::MulIOp::create(b, loc, lhs, rhs);
+       }},
+      {mlir::hip::DivOp::getOperationName(), "onnx.Div",
+       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
+          mlir::Value rhs) -> mlir::Value {
+         return mlir::arith::DivSIOp::create(b, loc, lhs, rhs);
+       }},
+  };
+
+  llvm::StringRef opName = op->getName().getStringRef();
+  for (const Spec &spec : specs) {
+    std::optional<unsigned> lhsPos;
+    if (opName == spec.hipName)
+      lhsPos = 1;
+    else if (opName == spec.onnxName)
+      lhsPos = 0;
+    else
+      continue;
+
+    if (op->getNumOperands() <= *lhsPos + 1)
+      return std::nullopt;
+    return ShapeBinaryOp{op->getOperand(*lhsPos), op->getOperand(*lhsPos + 1),
+                         spec.build};
+  }
+  return std::nullopt;
+}
+
 /// Resolve element \p idx of an integer shape tensor \p v to a host `index`
 /// SSA value, materializing `arith` ops as needed. Returns a null Value when
 /// the element is not host-computable.
@@ -245,39 +307,23 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     return mlir::tensor::DimOp::create(b, loc, input, dimIdx);
   }
 
-  // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
-  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
-  unsigned lhsPos = 0;
-  bool isHip = mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp,
-                         mlir::hip::DivOp>(def);
-  if (isHip)
-    lhsPos = 1;
-  else if (opName != "onnx.Sub" && opName != "onnx.Add" &&
-           opName != "onnx.Mul" && opName != "onnx.Div")
+  std::optional<ShapeBinaryOp> binary = matchShapeBinaryOp(def);
+  if (!binary)
     return {};
 
-  mlir::Value lhs = def->getOperand(lhsPos);
-  mlir::Value rhs = def->getOperand(lhsPos + 1);
   // A rank-0 or single-element operand is broadcast against the other.
   auto elemIdx = [&](mlir::Value operand) -> int64_t {
     auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
     return (t && t.hasStaticShape() && t.getNumElements() == 1) ? 0 : idx;
   };
-  mlir::Value l = resolveHostIndex(b, loc, lhs, elemIdx(lhs), depth + 1);
-  mlir::Value r = resolveHostIndex(b, loc, rhs, elemIdx(rhs), depth + 1);
+  mlir::Value l =
+      resolveHostIndex(b, loc, binary->lhs, elemIdx(binary->lhs), depth + 1);
+  mlir::Value r =
+      resolveHostIndex(b, loc, binary->rhs, elemIdx(binary->rhs), depth + 1);
   if (!l || !r)
     return {};
 
-  bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
-  bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
-  bool isDiv = isHip ? mlir::isa<mlir::hip::DivOp>(def) : opName == "onnx.Div";
-  if (isSub)
-    return mlir::arith::SubIOp::create(b, loc, l, r);
-  if (isAdd)
-    return mlir::arith::AddIOp::create(b, loc, l, r);
-  if (isDiv)
-    return mlir::arith::DivSIOp::create(b, loc, l, r);
-  return mlir::arith::MulIOp::create(b, loc, l, r);
+  return binary->build(b, loc, l, r);
 }
 
 /// Emit the number of elements ONNX Slice produces on one axis, given runtime
