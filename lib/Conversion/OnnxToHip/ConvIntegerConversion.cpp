@@ -13,13 +13,15 @@
 // tosa.conv2d. That accumulator is an exact int32 dot product only while
 // every partial sum fits in the 24-bit mantissa. An 8-bit value minus an
 // 8-bit zero point is at most 255 in magnitude, so each product is at most
-// 65025 and the reduction length (C/group)*kH*kW must be at most 258. A
+// 65025 and the reduction length (C/group)*product(kernel_shape) must be at
+// most 258. A
 // longer reduction casts to i32 and accumulates there. ONNX allows the int32
 // accumulator to wrap.
 //
-// A 1-D weight zero point is reshaped to [M, 1, 1, 1] before the subtract.
-// hip.sub right-aligns unequal ranks into the 4D broadcast ABI, so a bare
-// tensor<MxT> would land on W rather than the output-channel axis.
+// A 1-D weight zero point is reshaped to [M, 1, ...] before the subtract.
+// hip.sub right-aligns unequal ranks into the broadcast ABI, so a bare
+// tensor<MxT> would land on the trailing spatial axis rather than the
+// output-channel axis.
 //
 //   Before:
 //     %y = "onnx.ConvInteger"(%x, %w, %xzp, %wzp)
@@ -118,9 +120,8 @@ static mlir::Value reshapeTo(mlir::PatternRewriter &rewriter,
       .getResult();
 }
 
-/// Broadcast \p zp onto \p data. A length-M vector becomes [M, 1, 1, 1].
-/// A single element becomes a rank-0 scalar, which the 4D elementwise ABI
-/// left-pads to 1x1x1x1.
+/// Broadcast \p zp onto \p data. A length-M vector becomes [M, 1, ...].
+/// A single element becomes a rank-0 scalar.
 static mlir::Value alignZeroPoint(mlir::PatternRewriter &rewriter,
                                   mlir::Location loc, mlir::Value zp,
                                   mlir::RankedTensorType dataType,
@@ -186,12 +187,11 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   if (!inputType || !weightType || !resultType)
     return rewriter.notifyMatchFailure(op,
                                        "ConvInteger requires ranked tensors");
-  // hip.sub's lowering passes a 4D broadcast descriptor and rejects rank > 4.
-  // Rank 4 is the NCHW form used by quantized conv graphs.
-  if (inputType.getRank() != 4 || weightType.getRank() != 4 ||
-      resultType.getRank() != 4)
+  if ((inputType.getRank() != 3 && inputType.getRank() != 4) ||
+      weightType.getRank() != inputType.getRank() ||
+      resultType.getRank() != inputType.getRank())
     return rewriter.notifyMatchFailure(
-        op, "ConvInteger lowering supports rank-4 NCHW only");
+        op, "ConvInteger lowering supports rank-3 NCL and rank-4 NCHW only");
   if (!isEightBit(inputType.getElementType()) ||
       !isEightBit(weightType.getElementType()))
     return rewriter.notifyMatchFailure(
@@ -222,14 +222,15 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
               "of w's element type");
   }
 
-  const int64_t spatialDims = 2;
+  const bool is1D = inputType.getRank() == 3;
+  const int64_t spatialDims = inputType.getRank() - 2;
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
     if (mlir::failed(readI64Array(attr, kernelShape)))
       return rewriter.notifyMatchFailure(op, "ConvInteger kernel_shape");
   } else {
-    kernelShape.push_back(weightType.getDimSize(2));
-    kernelShape.push_back(weightType.getDimSize(3));
+    for (int64_t dim : llvm::seq<int64_t>(spatialDims))
+      kernelShape.push_back(weightType.getDimSize(dim + 2));
   }
   if (static_cast<int64_t>(kernelShape.size()) != spatialDims)
     return rewriter.notifyMatchFailure(
@@ -315,10 +316,12 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
       resultType.getDimSize(1) != outC)
     return rewriter.notifyMatchFailure(
         op, "ConvInteger result batch or channel count does not match");
-  if (kernelShape[0] != weightType.getDimSize(2) ||
-      kernelShape[1] != weightType.getDimSize(3))
-    return rewriter.notifyMatchFailure(
-        op, "ConvInteger kernel_shape does not match the weight spatial dims");
+  for (int64_t dim : llvm::seq<int64_t>(spatialDims)) {
+    if (kernelShape[dim] != weightType.getDimSize(dim + 2))
+      return rewriter.notifyMatchFailure(
+          op,
+          "ConvInteger kernel_shape does not match the weight spatial dims");
+  }
 
   for (int64_t i : llvm::seq<int64_t>(spatialDims)) {
     const int64_t numerator = inputType.getDimSize(2 + i) + pads[i] +
@@ -342,7 +345,9 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
 
   // ONNX FLOAT is datatype 1 and INT32 is 6. The cast kernel is selected
   // from the buffer types, not from this attribute.
-  const int64_t reduction = (inC / group) * kernelShape[0] * kernelShape[1];
+  int64_t reduction = inC / group;
+  for (int64_t kernel : kernelShape)
+    reduction *= kernel;
   const bool exactF32 = eightBitDotIsExactInF32(reduction);
   mlir::Type accType = rewriter.getI32Type();
   if (exactF32)
@@ -369,6 +374,34 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   auto convType = mlir::RankedTensorType::get(resultType.getShape(), accType);
   mlir::Value convInit = createEmptyTensor(rewriter, loc, convType, inputAcc);
 
+  llvm::SmallVector<mlir::ReassociationIndices> reassoc1d = {{0}, {1}, {2, 3}};
+  auto expandTo2D = [&](mlir::Value value,
+                        mlir::RankedTensorType type) -> mlir::Value {
+    llvm::SmallVector<int64_t> shape(type.getShape());
+    shape.insert(shape.end() - 1, 1);
+    auto expandedType =
+        mlir::RankedTensorType::get(shape, type.getElementType());
+    llvm::SmallVector<mlir::OpFoldResult> outputShape;
+    outputShape.push_back(rewriter.getIndexAttr(shape[0]));
+    outputShape.push_back(rewriter.getIndexAttr(shape[1]));
+    outputShape.push_back(rewriter.getIndexAttr(1));
+    outputShape.push_back(rewriter.getIndexAttr(shape[3]));
+    return mlir::tensor::ExpandShapeOp::create(rewriter, loc, expandedType,
+                                               value, reassoc1d, outputShape);
+  };
+
+  if (is1D) {
+    inputAcc = expandTo2D(
+        inputAcc, mlir::cast<mlir::RankedTensorType>(inputAcc.getType()));
+    weightAcc = expandTo2D(
+        weightAcc, mlir::cast<mlir::RankedTensorType>(weightAcc.getType()));
+    convInit = expandTo2D(convInit, convType);
+    kernelShape.insert(kernelShape.begin(), 1);
+    strides.insert(strides.begin(), 1);
+    pads = {0, pads[0], 0, pads[1]};
+    dilations.insert(dilations.begin(), 1);
+  }
+
   llvm::SmallVector<mlir::Value> operands = {context, inputAcc, weightAcc,
                                              convInit};
   llvm::SmallVector<mlir::NamedAttribute> attrs;
@@ -383,15 +416,19 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(
       rewriter.getNamedAttr("group", rewriter.getI64IntegerAttr(group)));
   auto conv = mlir::hip::ConvOp::create(rewriter, loc, operands, attrs);
+  mlir::Value convResult = conv.getResult(0);
+  if (is1D)
+    convResult = mlir::tensor::CollapseShapeOp::create(rewriter, loc, convType,
+                                                       convResult, reassoc1d);
   if (!exactF32) {
-    rewriter.replaceOp(op, conv.getResult(0));
+    rewriter.replaceOp(op, convResult);
     return mlir::success();
   }
 
   mlir::Value outInit = createEmptyTensor(rewriter, loc, resultType, convInit);
-  auto casted = mlir::hip::CastOp::create(
-      rewriter, loc, context, conv.getResult(0), outInit,
-      rewriter.getI64IntegerAttr(/*onnxTo=*/6));
+  auto casted =
+      mlir::hip::CastOp::create(rewriter, loc, context, convResult, outInit,
+                                rewriter.getI64IntegerAttr(/*onnxTo=*/6));
   rewriter.replaceOp(op, casted->getResult(0));
   return mlir::success();
 }

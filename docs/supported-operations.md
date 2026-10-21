@@ -113,7 +113,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QuantizeLinear | Custom HIP kernel |
 | DynamicQuantizeLinear | Decomposed to single-axis ReduceMin/ReduceMax, scale and zero-point math, and `hip.quantize_linear` with axis 0. A zero input range selects scale 1 |
 | DequantizeLinear | Custom HIP kernel |
-| ConvInteger | Decomposed to Cast, Sub, and `hip.conv`, then Cast back to i32 when `65025 * (C/group) * kH * kW` fits in the f32 mantissa. A longer reduction accumulates in i32 and is not rewritten to `hip.gemm`. Rank-4 NCHW, scalar or per-output-channel weight zero point |
+| ConvInteger | Decomposed to Cast, Sub, and `hip.conv`, then Cast back to i32 when `65025 * (C/group) * product(kernel_shape)` fits in the f32 mantissa. A longer reduction accumulates in i32 and is not rewritten to `hip.gemm`. Rank-3 NCL and rank-4 NCHW; rank-3 is expanded to the shared 2D path. Scalar or per-output-channel weight zero point |
 | MatMulInteger | Decomposed to Cast, Sub, and `hip.matmul`, then Cast back to i32 when `65025 * K` fits in the f32 mantissa. A longer K accumulates in i32. Rank 2–4. A size-1 batch on A is expanded to the result batch. A rank-2 B stays one shared matrix, and an i32 `hip.matmul` passes batch stride 0 for it. Scalar or per-row / per-column zero point |
 | QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |

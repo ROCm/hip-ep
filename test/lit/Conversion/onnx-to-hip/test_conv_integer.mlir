@@ -72,6 +72,33 @@ module {
   // CHECK-SAME: tensor<1x1x4x4xf32>
   // CHECK-NOT: onnx.ConvInteger
 
+  // Rank-3 NCL ConvInteger uses the shared rank-4 kernel path. Both the
+  // accumulation type and output are widened to NC1L, then collapsed to NCL.
+  func.func @conv_integer_1d(
+      %x: tensor<1x80x3000xui8>, %w: tensor<1280x80x3xi8>,
+      %xzp: tensor<ui8>, %wzp: tensor<i8>) -> tensor<1x1280x3000xi32> {
+    %y = "onnx.ConvInteger"(%x, %w, %xzp, %wzp) {
+      kernel_shape = [3],
+      strides = [1],
+      pads = [1, 1],
+      dilations = [1],
+      group = 1 : i64
+    } : (tensor<1x80x3000xui8>, tensor<1280x80x3xi8>, tensor<ui8>, tensor<i8>)
+        -> tensor<1x1280x3000xi32>
+    return %y : tensor<1x1280x3000xi32>
+  }
+
+  // CHECK-LABEL: func.func @conv_integer_1d
+  // CHECK: tensor.expand_shape
+  // CHECK-SAME: tensor<1x80x3000xf32> into tensor<1x80x1x3000xf32>
+  // CHECK: tensor.expand_shape
+  // CHECK-SAME: tensor<1280x80x3xf32> into tensor<1280x80x1x3xf32>
+  // CHECK: hip.conv
+  // CHECK-SAME: kernel_shape = [1, 3]
+  // CHECK-SAME: pads = [0, 1, 0, 1]
+  // CHECK: tensor.collapse_shape
+  // CHECK-NOT: onnx.ConvInteger
+
   // Rank 2 has no 4D broadcast path for the zero-point subtract.
   func.func @conv_integer_rank2_rejected(
       %x: tensor<1x4xui8>, %w: tensor<2x4xui8>) -> tensor<1x2xi32> {

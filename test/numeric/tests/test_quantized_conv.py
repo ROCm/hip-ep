@@ -48,6 +48,35 @@ def _conv_integer(x, w, x_zp, w_zp, *, stride=1, pad=0, group=1):
     )
 
 
+def _conv_integer_1d(x, w, x_zp, w_zp, *, stride=1, pad=0, group=1):
+    x_shape = list(x.shape)
+    w_shape = list(w.shape)
+    out_l = (x_shape[2] + pad + pad - w_shape[2]) // stride + 1
+    out_shape = [x_shape[0], w_shape[0], out_l]
+    x_dtype = TensorProto.INT8 if x.dtype == np.int8 else TensorProto.UINT8
+    x_info = helper.make_tensor_value_info("x", x_dtype, x_shape)
+    y_info = helper.make_tensor_value_info("y", TensorProto.INT32, out_shape)
+    node = helper.make_node(
+        "ConvInteger",
+        ["x", "w", "x_zp", "w_zp"],
+        ["y"],
+        kernel_shape=[w_shape[2]],
+        strides=[stride],
+        pads=[pad, pad],
+        dilations=[1],
+        group=group,
+        auto_pad="NOTSET",
+    )
+    inits = [
+        numpy_helper.from_array(w, "w"),
+        numpy_helper.from_array(np.asarray(x_zp, dtype=x.dtype), "x_zp"),
+        numpy_helper.from_array(np.asarray(w_zp, dtype=w.dtype), "w_zp"),
+    ]
+    return make_model_from_nodes(
+        [node], [x_info], [y_info], initializers=inits, opset=13
+    )
+
+
 class TestDynamicQuantizeLinear:
     def test_range_through_zero(self, model_runner):
         x = np.array([[[[-1.0, 0.0], [1.0, 2.0]]]], dtype=np.float32)
@@ -93,6 +122,16 @@ class TestDynamicQuantizeLinear:
 
 
 class TestConvInteger:
+    def test_1d(self, model_runner):
+        x = np.arange(1, 1 + 2 * 9, dtype=np.uint8).reshape(1, 2, 9)
+        w = np.array(
+            [[[1, 2, 3], [3, 2, 1]], [[2, 1, 0], [1, 0, 2]]],
+            dtype=np.int8,
+        )
+        model = _conv_integer_1d(x, w, np.uint8(1), np.int8(1), pad=1)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
     def test_scalar_zero_points(self, model_runner):
         x = np.full((1, 1, 2, 2), 10, dtype=np.uint8)
         w = np.full((1, 1, 1, 1), 3, dtype=np.uint8)
