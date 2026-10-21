@@ -5790,9 +5790,10 @@ def Hip_QLinearMatMulOp : Hip_DpsOp<"qlinear_matmul",
       y = saturate(round(acc * a_scale * b_scale / y_scale) + y_zp)
 
     `a` is [M, K], `b` is [K, N], and `y` is [M, N]. All three shapes are
-    static. Scales and zero points are a single f32 scale and a matching
-    8-bit zero point. The integer product accumulates in int64, then one f32
-    scale is applied with rintf (round to nearest, ties to even).
+    static. A's and Y's scale and zero point are one element. B's scale and
+    zero point are one element, or one value per output column. The integer
+    product accumulates in int64, then the f32 scale is applied with rintf
+    (round to nearest, ties to even).
 
     This op is not hip.qmatmul. hip.qmatmul fuses a QDQ chain and does not
     accept onnx.QLinearMatMul.

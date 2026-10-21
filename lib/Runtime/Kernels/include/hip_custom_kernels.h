@@ -385,8 +385,9 @@ HIP_KERNEL_API int hip_qlinear_conv(
  *                    / y_scale) + y_zp)
  *
  * a is [M, K], b is [K, N], y is [M, N]. Distinct from hip_qmatmul, which is
- * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. Scales and
- * zero points are per-tensor. Returns 0 on success.
+ * the QDQ fusion. Dtypes are HIP_DTYPE_INT8 or HIP_DTYPE_UINT8. A's and Y's
+ * scales and zero points are per-tensor. b_scale_count and b_zp_count are 1,
+ * or N for one value per output column. Returns 0 on success.
  */
 HIP_KERNEL_API int hip_qlinear_matmul(
     void* stream,
@@ -404,7 +405,9 @@ HIP_KERNEL_API int hip_qlinear_matmul(
     int64_t n,
     int a_dtype,
     int b_dtype,
-    int y_dtype);
+    int y_dtype,
+    int64_t b_scale_count,
+    int64_t b_zp_count);
 
 /* =========================================================================
  * Elementwise Unary (Neg / Sign / Cos / Sin / Not)

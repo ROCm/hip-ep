@@ -1110,8 +1110,9 @@ int wrap_qlinear_conv(
     int64_t output_zp_count);
 
 // Native onnx.QLinearMatMul. Rank-2 8-bit product, a is [M, K], b is [K, N],
-// y is [M, N]. Scales and zero points are per-tensor (count == 1). Dtypes are
-// HIPDNN_EP_DATATYPE_INT8 or UINT8.
+// y is [M, N]. A's and Y's scale and zero-point counts are 1. B's counts are
+// 1, or N for one value per output column. Dtypes are HIPDNN_EP_DATATYPE_INT8
+// or UINT8.
 int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
                         const void *a_zero_point, const void *b,
                         const void *b_scale, const void *b_zero_point,
