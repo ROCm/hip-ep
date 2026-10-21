@@ -4,7 +4,7 @@
 #
 
 """Numeric checks for com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-QLinearGlobalAveragePool.
+QLinearGlobalAveragePool / QLinearAveragePool.
 
 LIT only checks the lowered IR. These compare hip-ep against the ORT CPU
 reference, including rounding, broadcast, mixed int8/uint8 concat, and the
@@ -191,5 +191,40 @@ class TestQLinearGlobalAveragePool:
         model = _model([node], [X], [Y], inits)
         rng = np.random.default_rng(7)
         x = rng.integers(0, 32, in_shape, dtype=np.uint8)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1)
+
+
+class TestQLinearAveragePool:
+    @pytest.mark.parametrize(
+        "channels_last,in_shape,out_shape",
+        [
+            (0, [1, 2, 4, 4], [1, 2, 2, 2]),
+            (1, [1, 4, 4, 2], [1, 2, 2, 2]),
+        ],
+    )
+    def test_pool(self, model_runner, channels_last, in_shape, out_shape):
+        X = helper.make_tensor_value_info("X", TensorProto.INT8, in_shape)
+        Y = helper.make_tensor_value_info("Y", TensorProto.INT8, out_shape)
+        inits = [
+            _init("X_scale", 0.5, np.float32),
+            _init("X_zp", -2, np.int8),
+            _init("Y_scale", 0.25, np.float32),
+            _init("Y_zp", 1, np.int8),
+        ]
+        node = helper.make_node(
+            "QLinearAveragePool",
+            ["X", "X_scale", "X_zp", "Y_scale", "Y_zp"],
+            ["Y"],
+            domain="com.microsoft",
+            channels_last=channels_last,
+            kernel_shape=[2, 2],
+            strides=[2, 2],
+            pads=[0, 0, 0, 0],
+            count_include_pad=0,
+        )
+        model = _model([node], [X], [Y], inits)
+        rng = np.random.default_rng(3)
+        x = rng.integers(-16, 16, in_shape, dtype=np.int8)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1)

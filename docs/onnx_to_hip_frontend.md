@@ -99,6 +99,7 @@ packed `__half2` path for fp16 rows of even width.
 | `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
 | `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
 | `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
+| `QLinearAveragePool` (`com.microsoft`) | DQ + `hip.pool` + Q | `channels_last` transposed around the pool |
 | `QLinearMatMul` | `hip.qlinear_matmul` | `qlinear_matmul_kernel.hip` |
 
 `QLinearMatMul` is the native ONNX op: rank-2 8-bit `a` of shape `[M, K]` times

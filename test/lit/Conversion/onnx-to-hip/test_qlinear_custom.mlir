@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 // com.microsoft QLinearAdd / QLinearMul / QLinearConcat /
-// QLinearGlobalAveragePool arrive as onnx.Custom. They decompose into
+// QLinearGlobalAveragePool / QLinearAveragePool arrive as onnx.Custom. They
+// decompose into
 // DequantizeLinear + the float op + QuantizeLinear, and --hip-fusion-transform
 // then fuses per-tensor Add and Mul to hip.qadd / hip.qmul. Absent zero
 // points are onnx.NoValue and fuse as zp 0.
@@ -171,5 +172,48 @@ module {
     // CHECK: hip.transpose
     // CHECK: hip.quantize_linear
     return %y : tensor<1x1x1x8xui8>
+  }
+
+  // Overlapping window, so this stays hip.pool rather than the
+  // kernel==stride reshape/reduce decomposition.
+  func.func @qlinear_avgpool(%x: tensor<1x4x5x5xui8>) -> tensor<1x4x3x3xui8> {
+    // CHECK-LABEL: func.func @qlinear_avgpool
+    %x_scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<2> : tensor<ui8>} : () -> tensor<ui8>
+    %y_scale = "onnx.Constant"() {value = dense<0.05> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<1> : tensor<ui8>} : () -> tensor<ui8>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale, %y_zp) {
+      channels_last = 0 : si64, count_include_pad = 1 : si64,
+      kernel_shape = [3, 3], pads = [0, 0, 0, 0], strides = [1, 1],
+      domain_name = "com.microsoft", function_name = "QLinearAveragePool"
+    } : (tensor<1x4x5x5xui8>, tensor<f32>, tensor<ui8>, tensor<f32>, tensor<ui8>) -> tensor<1x4x3x3xui8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.dequantize_linear
+    // CHECK: hip.pool
+    // CHECK-SAME: count_include_pad = 1
+    // CHECK-SAME: kernel_shape = [3, 3]
+    // CHECK-SAME: pool_mode = 0
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x4x3x3xui8>
+  }
+
+  func.func @qlinear_avgpool_channels_last(%x: tensor<1x5x5x4xi8>) -> tensor<1x3x3x4xi8> {
+    // CHECK-LABEL: func.func @qlinear_avgpool_channels_last
+    %x_scale = "onnx.Constant"() {value = dense<0.1> : tensor<f32>} : () -> tensor<f32>
+    %x_zp = "onnx.Constant"() {value = dense<-2> : tensor<i8>} : () -> tensor<i8>
+    %y_scale = "onnx.Constant"() {value = dense<0.05> : tensor<f32>} : () -> tensor<f32>
+    %y_zp = "onnx.Constant"() {value = dense<1> : tensor<i8>} : () -> tensor<i8>
+    %y = "onnx.Custom"(%x, %x_scale, %x_zp, %y_scale, %y_zp) {
+      channels_last = 1 : si64, kernel_shape = [3, 3], strides = [1, 1],
+      domain_name = "com.microsoft", function_name = "QLinearAveragePool"
+    } : (tensor<1x5x5x4xi8>, tensor<f32>, tensor<i8>, tensor<f32>, tensor<i8>) -> tensor<1x3x3x4xi8>
+
+    // CHECK-NOT: onnx.Custom
+    // CHECK: hip.transpose
+    // CHECK: hip.pool
+    // CHECK: hip.transpose
+    // CHECK: hip.quantize_linear
+    return %y : tensor<1x3x3x4xi8>
   }
 }
