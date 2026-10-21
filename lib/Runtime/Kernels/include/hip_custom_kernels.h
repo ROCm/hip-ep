@@ -2154,6 +2154,53 @@ HIP_KERNEL_API int hip_rms_norm(
     int hip_dtype);
 
 /* =========================================================================
+ * Gated RMS Normalization (com.microsoft GatedRMSNorm)
+ * =========================================================================
+ *
+ *   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+ *
+ * input / gate / output are [outer, norm_size]; scale is [norm_size].
+ * `activation`: 0 = sigmoid(z), 1 = SiLU z * sigmoid(z). FP32 math, one
+ * rounding to the I/O type. `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_gated_rms_norm(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* gate,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
+ * Engram gate (com.microsoft EngramGate)
+ * =========================================================================
+ *
+ * key / query / output / normed: [rows, hidden] with rows = B * S * hc;
+ * value: [rows / hc, hidden]; scales: [hc, hidden]. Row r uses scale row
+ * r % hc and value row r / hc. conv_scale and normed may both be null.
+ * `hip_dtype`: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_engram_gate(
+    void* stream,
+    const void* key,
+    const void* query,
+    const void* value,
+    const void* key_scale,
+    const void* query_scale,
+    const void* conv_scale,
+    void* output,
+    void* normed,
+    int64_t rows,
+    int64_t hc,
+    int64_t hidden,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
  *

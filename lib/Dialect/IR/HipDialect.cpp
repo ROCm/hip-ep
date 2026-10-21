@@ -1376,6 +1376,125 @@ LogicalResult GroupNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// GatedRmsNormOp: ins(input, scale, gate), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedRmsNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatedRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedRmsNormOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getScale(), getGate(), getOutput()},
+          /*numInits=*/1))) {
+    return failure();
+  }
+  if (getActivation() != "silu" && getActivation() != "sigmoid") {
+    return emitOpError("activation must be \"silu\" or \"sigmoid\", got \"")
+           << getActivation() << "\"";
+  }
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto scaleType = dyn_cast<ShapedType>(getScale().getType());
+  if (!inputType || !inputType.hasRank() || inputType.getRank() < 1) {
+    return emitOpError("expected a ranked input of rank >= 1");
+  }
+  if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 1) {
+    return emitOpError("expected 1-D scale");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || !gateType.hasRank() ||
+      gateType.getShape() != inputType.getShape() ||
+      gateType.getElementType() != inputType.getElementType()) {
+    return emitOpError("gate shape and element type must match the input");
+  }
+  int64_t last = inputType.getDimSize(inputType.getRank() - 1);
+  int64_t groupWidth = scaleType.getDimSize(0);
+  if (!ShapedType::isDynamic(last) && !ShapedType::isDynamic(groupWidth) &&
+      (groupWidth <= 0 || last % groupWidth != 0)) {
+    return emitOpError("input last dimension ")
+           << last << " is not a multiple of the scale length " << groupWidth;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// EngramGateOp: ins(key, query, value, kscale, qscale, [cscale])
+//               outs(output, [normed])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EngramGateOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void EngramGateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult EngramGateOp::verify() {
+  size_t numOutputs = getOutputs().size();
+  if (numOutputs != 1 && numOutputs != 2) {
+    return emitOpError("expected 1 or 2 outputs, got ") << numOutputs;
+  }
+  if (numOutputs == 2 && !getConvNormScale()) {
+    return emitOpError("the second output requires conv_norm_scale");
+  }
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!keyType || !keyType.hasRank() || keyType.getRank() != 4) {
+    return emitOpError("expected key of rank 4 (B, S, hc, H)");
+  }
+  if (!queryType || !queryType.hasRank() ||
+      queryType.getShape() != keyType.getShape()) {
+    return emitOpError("query shape must match key");
+  }
+  if (!valueType || !valueType.hasRank() || valueType.getRank() != 3) {
+    return emitOpError("expected value of rank 3 (B, S, H)");
+  }
+
+  auto compatible = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  ArrayRef<int64_t> key = keyType.getShape();
+  ArrayRef<int64_t> value = valueType.getShape();
+  if (!compatible(value[0], key[0]) || !compatible(value[1], key[1]) ||
+      !compatible(value[2], key[3])) {
+    return emitOpError("value shape must be (B, S, H) of key (B, S, hc, H)");
+  }
+  SmallVector<Value> scales = {getKeyNormScale(), getQueryNormScale()};
+  if (getConvNormScale()) {
+    scales.push_back(getConvNormScale());
+  }
+  for (Value scale : scales) {
+    auto scaleType = dyn_cast<ShapedType>(scale.getType());
+    if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 2 ||
+        !compatible(scaleType.getDimSize(0), key[2]) ||
+        !compatible(scaleType.getDimSize(1), key[3])) {
+      return emitOpError("norm scales must have shape (hc, H)");
+    }
+  }
+  for (Value output : getOutputs()) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() || outputType.getRank() != 4 ||
+        !llvm::all_of(llvm::seq<int64_t>(0, 4), [&](int64_t i) {
+          return compatible(outputType.getDimSize(i), key[i]);
+        })) {
+      return emitOpError("outputs must have the key shape");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 

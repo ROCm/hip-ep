@@ -1480,6 +1480,24 @@ int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
                     int64_t groups, int64_t channels_last, int64_t activation,
                     int64_t data_type, float epsilon);
 
+// com.microsoft GatedRMSNorm:
+//   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+// over groups of norm_size consecutive elements; norm_size is the scale
+// length. activation 0 is sigmoid, 1 is SiLU.
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
+                        void *gate, void *output, int64_t input_num_elements,
+                        int64_t norm_size, int64_t element_size_bytes,
+                        int64_t activation, float epsilon);
+
+// com.microsoft EngramGate. key / query / output / normed are
+// (B, S, hc, hidden), value is (B, S, hidden), scales are (hc, hidden).
+// conv_scale may be null; normed may be null and requires conv_scale.
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

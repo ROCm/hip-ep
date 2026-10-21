@@ -1543,6 +1543,109 @@ def Hip_GroupNormOp : Hip_DpsOp<"group_norm", /*traits=*/[],
   let hasVerifier = 1;
 }
 
+def Hip_GatedRmsNormOp : Hip_DpsOp<"gated_rms_norm", /*traits=*/[],
+                                   /*outsAccessor=*/"Output",
+                                   /*autoReify=*/1,
+                                   /*autoInfer=*/1,
+                                   /*declareInfer=*/1> {
+  let summary = "com.microsoft GatedRMSNorm (RMS norm times an activated gate)";
+  let description = [{
+    Gated RMS normalization from the `com.microsoft` contrib operator:
+
+      y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+
+    `scale` is 1-D of length C. The input's last dimension is a multiple of
+    C and every C consecutive elements form one normalized group. `gate` has
+    the input's shape. `activation` is `silu` (act(z) = z * sigmoid(z)) or
+    `sigmoid`. Math is FP32 and the result is rounded to the element type
+    once.
+
+    Example:
+    ```mlir
+    hip.gated_rms_norm(%ctx)
+        ins(%input, %scale, %gate :
+            memref<1x1x6144xf16, 1>, memref<128xf16, 1>, memref<1x1x6144xf16, 1>)
+        outs(%output : memref<1x1x6144xf16, 1>)
+        {activation = "sigmoid", epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$output,
+    StrAttr:$activation,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $scale `,` $gate `:`
+        type($input) `,` type($scale) `,` type($gate)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_EngramGateOp : Hip_DpsOp<"engram_gate", [AttrSizedOperandSegments]> {
+  let summary = "com.microsoft EngramGate (similarity-gated engram value)";
+  let description = [{
+    Engram gate from the `com.microsoft` contrib operator. `key` and `query`
+    are (B, S, hc, H), `value` is (B, S, H) and the three scales are (hc, H).
+    For each (b, s, g) row, in FP32:
+
+      dot  = sum(key * key_norm_scale[g] * query * query_norm_scale[g])
+             * rsqrt(mean(key^2) + eps) * rsqrt(mean(query^2) + eps) / sqrt(H)
+      gate = sigmoid(dot == 0 ? 0 : sign(dot) * sqrt(max(|dot|, 1e-6)))
+      outputs[0] = round_T(gate * value[b, s])
+
+    The optional outputs[1] is the RMS norm of the rounded outputs[0] scaled
+    by `conv_norm_scale[g]`, which it requires.
+
+    Example:
+    ```mlir
+    hip.engram_gate(%ctx)
+        ins(%key, %query, %value, %kscale, %qscale, %cscale :
+            memref<1x1x4x2560xf16, 1>, memref<1x1x4x2560xf16, 1>,
+            memref<1x1x2560xf16, 1>, memref<4x2560xf16, 1>,
+            memref<4x2560xf16, 1>, memref<4x2560xf16, 1>)
+        outs(%out, %normed : memref<1x1x4x2560xf16, 1>,
+                             memref<1x1x4x2560xf16, 1>)
+        {epsilon = 9.99999997E-7 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$key_norm_scale,
+    Hip_TensorOrMemRef:$query_norm_scale,
+    Optional<Hip_TensorOrMemRef>:$conv_norm_scale,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $key `,` $query `,` $value `,` $key_norm_scale `,` $query_norm_scale
+        ( `,` $conv_norm_scale^ )?
+        `:` type($key) `,` type($query) `,` type($value) `,`
+        type($key_norm_scale) `,` type($query_norm_scale)
+        ( `,` type($conv_norm_scale)^ )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";

@@ -62,6 +62,8 @@ inline constexpr const char *kWrapInstanceNormalization =
 inline constexpr const char *kWrapBatchNormalization =
     "wrap_batch_normalization";
 inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
+inline constexpr const char *kWrapGatedRmsNorm = "wrap_gated_rms_norm";
+inline constexpr const char *kWrapEngramGate = "wrap_engram_gate";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
