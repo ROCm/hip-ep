@@ -140,9 +140,10 @@ module {
 
 // CHECK-LABEL: func.func @test_no_fold_non_shape_source
 // CHECK-NOT: onnx.Gather
-// Without onnx.Shape as the Gather source, the fold doesn't fire and the
-// generic Gather lowering (hip.gather) handles the op.
-// CHECK: hip.gather
+// GatherShapeFold does not fire (source is not onnx.Shape), but axis-0
+// Gather with a compile-time len-1 index still lowers to extract_slice.
+// CHECK: tensor.extract_slice {{.*}}[1] [1] [1]
+// CHECK-NOT: hip.gather
 
 // CHECK-LABEL: func.func @test_fold_shape_start_negative_k
 // CHECK-NOT: onnx.Shape
