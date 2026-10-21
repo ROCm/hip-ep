@@ -861,9 +861,19 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
                  const int64_t *data_shape, int64_t data_type) {
   (void)data;
   (void)indices;
-  (void)data_shape;
-  if (!state) {
+  if (!state || !data_shape) {
     fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    if (state)
+      hipdnn_ep_state_set_error_flag(state, -1);
+    return -1;
+  }
+  int64_t resolved_axis = axis;
+  if (resolved_axis < 0)
+    resolved_axis += rank;
+  if (resolved_axis >= 0 && resolved_axis < rank &&
+      data_shape[resolved_axis] <= 0) {
+    fprintf(stderr, "[MOCK] wrap_arg_max: empty reduction axis\n");
+    hipdnn_ep_state_set_error_flag(state, -1);
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "

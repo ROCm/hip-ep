@@ -52,16 +52,26 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
       state);
 
   (void)keepdims;
+  // main_graph drops this return value. A nonzero status also has to land in
+  // the device error flag, which inference_compute reads after the stream
+  // sync. Otherwise an empty axis (or a bad argument) looks like success and
+  // the index buffer stays unwritten.
+  auto finish = [&](int status) {
+    if (status != 0)
+      hipdnn_ep_state_set_error_flag(state, status);
+    return status;
+  };
+
   if (!state || !data || !indices || !data_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_arg_max: null argument\n");
-    return -1;
+    return finish(-1);
   }
 
   int hip_dtype = arg_max_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
     fprintf(stderr, "[REAL] wrap_arg_max: unsupported data_type=%lld\n",
             (long long)data_type);
-    return -1;
+    return finish(-1);
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
@@ -71,6 +81,6 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
       (long long)axis, (long long)keepdims, (long long)select_last_index,
       (long long)rank, hipdnn_ep_datatype_name(data_type));
 
-  return hip_arg_max(stream, data, indices, axis, select_last_index, rank,
-                     data_shape, hip_dtype);
+  return finish(hip_arg_max(stream, data, indices, axis, select_last_index,
+                            rank, data_shape, hip_dtype));
 }

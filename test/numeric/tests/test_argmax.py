@@ -124,3 +124,32 @@ class TestArgMax:
         )
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
+
+    def test_empty_reduction_axis_fails(self, model_runner):
+        # Dynamic extent so the zero length is a runtime shape, not a
+        # compile-time reject. A nonempty run proves the graph compiles;
+        # the empty axis must then fail instead of returning unwritten indices.
+        import onnxruntime as ort
+
+        x_info = helper.make_tensor_value_info(
+            "x", np_to_onnx_type(np.float32), ["N", "M"]
+        )
+        y_info = helper.make_tensor_value_info("y", np_to_onnx_type(np.int64), ["N"])
+        node = helper.make_node(
+            "ArgMax",
+            ["x"],
+            ["y"],
+            axis=1,
+            keepdims=0,
+            select_last_index=0,
+        )
+        model = make_model_from_nodes([node], [x_info], [y_info])
+        nonempty = np.array([[1.0, 3.0, 2.0], [0.0, 4.0, 1.0]], dtype=np.float32)
+        actual, expected = model_runner.run_sample(
+            model, [nonempty], name="argmax_dynamic_nonempty"
+        )
+        compare_outputs(actual, expected, atol=0)
+
+        empty = np.zeros((2, 0), dtype=np.float32)
+        with pytest.raises(ort.OrtException):
+            model_runner.run_sample(model, [empty], name="argmax_empty_axis")
