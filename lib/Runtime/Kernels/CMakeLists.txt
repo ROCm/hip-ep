@@ -74,6 +74,7 @@ set(_kernel_sources
     hip/batch_norm_kernel.hip
     hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
+    hip/hyper_connection_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip

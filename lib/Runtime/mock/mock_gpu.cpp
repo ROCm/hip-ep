@@ -1458,6 +1458,53 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
   return 0;
 }
 
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale) {
+  (void)streams;
+  (void)pre_mix;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_hyper_connection_pre_mix\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_hyper_connection_pre_mix(elements=%lld, "
+             "branches=%lld, hidden=%lld, feature_gate=%lld, "
+             "element_size=%lld, scale=%f)\n",
+             (long long)stream_num_elements, (long long)branches,
+             (long long)hidden, (long long)feature_gate,
+             (long long)element_size_bytes, (double)reduction_scale);
+  return 0;
+}
+
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes) {
+  (void)streams;
+  (void)block_output;
+  (void)post_mix;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_hyper_connection_post_mix\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_hyper_connection_post_mix(elements=%lld, "
+             "branches=%lld, hidden=%lld, feature_gate=%lld, "
+             "stream_mix=%s, element_size=%lld)\n",
+             (long long)stream_num_elements, (long long)branches,
+             (long long)hidden, (long long)feature_gate,
+             stream_mix ? "yes" : "no", (long long)element_size_bytes);
+  return 0;
+}
+
+
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *skip, void *gamma, void *bias,
                                     void *output, void *input_skip_bias_sum,

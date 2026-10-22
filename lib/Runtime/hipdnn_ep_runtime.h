@@ -1518,6 +1518,23 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                      void *output, void *normed, int64_t key_num_elements,
                      int64_t hc, int64_t hidden, int64_t element_size_bytes,
                      float epsilon);
+// com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
+// elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale);
+
+// com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]

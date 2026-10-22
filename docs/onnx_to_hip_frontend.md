@@ -77,6 +77,8 @@ existing `--convert-hip-to-llvm` pipeline.
 | `BranchwiseRMSNorm` (`com.microsoft`) | `hip.rms_norm` | `rms_norm_kernel.hip`; per-branch gain via grouped scale |
 | `GatedRMSNorm` (`com.microsoft`) | `hip.gated_rms_norm` | `rms_norm_kernel.hip` |
 | `EngramGate` (`com.microsoft`) | `hip.engram_gate` | `rms_norm_kernel.hip` |
+| `HyperConnectionPreMix` (`com.microsoft`) | `hip.hyper_connection_pre_mix` | `hyper_connection_kernel.hip` |
+| `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:

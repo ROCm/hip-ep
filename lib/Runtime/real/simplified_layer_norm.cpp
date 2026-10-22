@@ -224,3 +224,98 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                          key_scale, query_scale, conv_scale, output, normed,
                          rows, hc, hidden, epsilon, hip_dtype);
 }
+
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale) {
+  OP_PROFILE(
+      "hyper_connection",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "pre %lldx%lld", (long long)branches,
+                 (long long)hidden);
+        return std::string(b);
+      },
+      state);
+  if (!state || !streams || !pre_mix || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_hyper_connection_pre_mix\n");
+    return -1;
+  }
+  int64_t span = branches * hidden;
+  if (branches <= 0 || hidden <= 0 || span <= 0 ||
+      stream_num_elements % span != 0) {
+    fprintf(stderr,
+            "wrap_hyper_connection_pre_mix: elements=%lld branches=%lld "
+            "hidden=%lld\n",
+            (long long)stream_num_elements, (long long)branches,
+            (long long)hidden);
+    return -1;
+  }
+  int hip_dtype;
+  if (element_size_bytes == 2) {
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  } else if (element_size_bytes == 4) {
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  } else {
+    fprintf(stderr,
+            "wrap_hyper_connection_pre_mix: unsupported element_size %lld "
+            "(supported: 2=fp16, 4=fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  return hip_hyper_connection_pre_mix(
+      hipdnn_ep_state_get_stream(state), streams, pre_mix, output,
+      stream_num_elements / span, branches, hidden,
+      static_cast<int>(feature_gate), reduction_scale, hip_dtype);
+}
+
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes) {
+  OP_PROFILE(
+      "hyper_connection",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "post %lldx%lld", (long long)branches,
+                 (long long)hidden);
+        return std::string(b);
+      },
+      state);
+  if (!state || !streams || !block_output || !post_mix || !output) {
+    fprintf(stderr, "Invalid arguments to wrap_hyper_connection_post_mix\n");
+    return -1;
+  }
+  int64_t span = branches * hidden;
+  if (branches <= 0 || hidden <= 0 || span <= 0 ||
+      stream_num_elements % span != 0) {
+    fprintf(stderr,
+            "wrap_hyper_connection_post_mix: elements=%lld branches=%lld "
+            "hidden=%lld\n",
+            (long long)stream_num_elements, (long long)branches,
+            (long long)hidden);
+    return -1;
+  }
+  int hip_dtype;
+  if (element_size_bytes == 2) {
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  } else if (element_size_bytes == 4) {
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  } else {
+    fprintf(stderr,
+            "wrap_hyper_connection_post_mix: unsupported element_size %lld "
+            "(supported: 2=fp16, 4=fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  return hip_hyper_connection_post_mix(
+      hipdnn_ep_state_get_stream(state), streams, block_output, post_mix,
+      stream_mix, output, stream_num_elements / span, branches, hidden,
+      static_cast<int>(feature_gate), hip_dtype);
+}

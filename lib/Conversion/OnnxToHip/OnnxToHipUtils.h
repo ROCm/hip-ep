@@ -347,6 +347,8 @@ void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateHyperConnectionConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateOnnxRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
