@@ -682,6 +682,31 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
   return 0;
 }
 
+int wrap_dynamic_sparse_attention(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, const void *selected_indices,
+    const void *selected_counts, const void *seqlens_k, void *output,
+    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
+    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    int64_t capacity, int64_t max_selected, float scale) {
+  if (!state || !query || !key || !value || !past_key || !past_value ||
+      !selected_counts || !seqlens_k || !output || !present_key ||
+      !present_value) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_dynamic_sparse_attention\n");
+    return -1;
+  }
+  (void)selected_indices;
+  MOCK_PRINT("[MOCK] wrap_dynamic_sparse_attention(B=%lld, S=%lld, N=%lld, "
+             "kvN=%lld, D=%lld, cap=%lld, max_selected=%lld, scale=%f, "
+             "shared_cache=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)num_heads,
+             (long long)kv_num_heads, (long long)head_size, (long long)capacity,
+             (long long)max_selected, (double)scale,
+             past_key == present_key ? 1 : 0);
+  return 0;
+}
+
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
                      int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,

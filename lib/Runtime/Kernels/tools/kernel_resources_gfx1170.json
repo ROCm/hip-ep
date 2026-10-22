@@ -491,6 +491,13 @@
 "_Z17hip_cumsum_kernelIxEvPKT_PS0_xxxbb":[14,0,0,16,382,0,0],
 "_Z21hip_cumsum_kernel_f16PK6__halfPS_xxxbb":[13,0,0,16,382,0,0]
 },
+"dynamic_sparse_attention_kernel":{
+"_ZN12_GLOBAL__N_118dsa_combine_kernelILi128EEEvPKfPDF16_i":[19,0,0,16,358,15,100],
+"_ZN12_GLOBAL__N_118dsa_combine_kernelILi256EEEvPKfPDF16_i":[19,0,0,16,358,15,100],
+"_ZN12_GLOBAL__N_120dsa_attention_kernelILi128ELi2EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[125,0,0,4,1553,38,340],
+"_ZN12_GLOBAL__N_120dsa_attention_kernelILi256ELi4EEEvPKDF16_S2_S2_PKiS4_S4_PDF16_Pfiiiiiif":[126,0,0,4,1501,36,324],
+"_ZN12_GLOBAL__N_120dsa_kv_append_kernelEPKDv4_jS2_PS0_S3_PKiiiii":[15,0,0,16,178,0,0]
+},
 "elementwise_binary_kernel":{
 "_Z21elementwise_or_kernelPKhS0_Phx":[6,0,0,16,25,0,0],
 "_Z22elementwise_add_kernelI6__halfEvPKT_S3_PS1_x":[7,0,0,16,26,0,0],

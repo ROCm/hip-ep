@@ -2844,6 +2844,113 @@ LogicalResult GatedDeltaNetOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// DynamicSparseAttentionOp:
+//   ins(query, key, value, past_key, past_value, selected_indices,
+//       selected_counts, seqlens_k)
+//   outs(output, present_key, present_value)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicSparseAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/3);
+}
+
+void DynamicSparseAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicSparseAttentionOp::verify() {
+  SmallVector<Value> data = {
+      getQuery(),          getKey(),         getValue(),
+      getPastKey(),        getPastValue(),   getSelectedIndices(),
+      getSelectedCounts(), getSeqlensK(),    getOutput(),
+      getPresentKey(),     getPresentValue()};
+  if (failed(verifyDpsComputeOp(*this, data, 3))) {
+    return failure();
+  }
+
+  const int64_t numHeads = getNumHeads();
+  const int64_t kvNumHeads = getKvNumHeads();
+  if (numHeads <= 0 || kvNumHeads <= 0 || numHeads % kvNumHeads != 0) {
+    return emitOpError("num_heads (")
+           << numHeads << ") must be a positive multiple of kv_num_heads ("
+           << kvNumHeads << ")";
+  }
+  if (numHeads / kvNumHeads > 16) {
+    return emitOpError("num_heads / kv_num_heads must be at most 16, got ")
+           << numHeads / kvNumHeads;
+  }
+
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 4 || pastType.isDynamicDim(3)) {
+    return emitOpError("past_key must be rank 4 with a static head size");
+  }
+  const int64_t headSize = pastType.getDimSize(3);
+  if (headSize != 128 && headSize != 256) {
+    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  if (queryType.getRank() != 3) {
+    return emitOpError("query must be rank 3, got rank ")
+           << queryType.getRank();
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+  const int64_t rows =
+      ShapedType::isDynamic(batch) || ShapedType::isDynamic(seq) ? kAny
+                                                                 : batch * seq;
+  const int64_t cap = pastType.getDimSize(2);
+
+  Type f16 = Float16Type::get(getContext());
+  Type i32 = IntegerType::get(getContext(), 32);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  const SmallVector<int64_t> cacheShape = {batch, kvNumHeads, cap, headSize};
+  if (failed(
+          check(getQuery(), "query", f16, {batch, seq, numHeads * headSize})) ||
+      failed(
+          check(getKey(), "key", f16, {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getValue(), "value", f16,
+                   {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getPastKey(), "past_key", f16, cacheShape)) ||
+      failed(check(getPastValue(), "past_value", f16, cacheShape)) ||
+      failed(
+          check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
+      failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
+      failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
+      failed(check(getOutput(), "output", f16,
+                   {batch, seq, numHeads * headSize})) ||
+      failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
+      failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MultiHeadAttentionOp:
 //   ins(query, [key, value, bias, key_padding_mask, attention_bias,
 //                past_key, past_value, past_sequence_length,

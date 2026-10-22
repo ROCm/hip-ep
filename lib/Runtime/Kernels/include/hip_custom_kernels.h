@@ -3623,6 +3623,49 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float scale,
     int element_size_bytes);
 
+// com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
+// main cache, fp16, no rotary / qk-norm / sink.
+//   query            [B, S, N*D]
+//   key, value       [B, S, kvN*D]
+//   past_*, present_* [B, kvN, capacity, D]; past may alias present, otherwise
+//                    present is first filled from past
+//   selected_indices [B*S, max_selected] int32
+//   selected_counts  [B*S] int32, seqlens_k [B] int32
+//   output           [B, S, N*D]
+// D must be 128 or 256, N/kvN at most 16, all tensors 16-byte aligned.
+// workspace must hold hip_dynamic_sparse_attention_workspace_size() bytes.
+HIP_KERNEL_API size_t hip_dynamic_sparse_attention_workspace_size(
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t kv_num_heads,
+    int64_t head_size,
+    int64_t max_selected);
+
+HIP_KERNEL_API int hip_dynamic_sparse_attention(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* past_key,
+    const void* past_value,
+    const int32_t* selected_indices,
+    const int32_t* selected_counts,
+    const int32_t* seqlens_k,
+    void* output,
+    void* present_key,
+    void* present_value,
+    void* workspace,
+    size_t workspace_bytes,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t kv_num_heads,
+    int64_t head_size,
+    int64_t capacity,
+    int64_t max_selected,
+    float scale);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================

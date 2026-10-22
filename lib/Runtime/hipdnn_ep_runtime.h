@@ -1842,6 +1842,15 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
 
+// fp16 only. past_* may alias present_*.
+int wrap_dynamic_sparse_attention(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, const void *selected_indices,
+    const void *selected_counts, const void *seqlens_k, void *output,
+    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
+    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    int64_t capacity, int64_t max_selected, float scale);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================

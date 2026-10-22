@@ -4681,6 +4681,83 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp<"gated_delta_net"> {
   let hasVerifier = 1;
 }
 
+def Hip_DynamicSparseAttentionOp : Hip_DpsOp<"dynamic_sparse_attention"> {
+  let summary = "Attention over per-row selected KV positions "
+                "(com.microsoft DynamicSparseAttention)";
+  let description = [{
+    com.microsoft DynamicSparseAttention restricted to
+    attention_mode = selected_only, selected_kv_source = main, is_causal = 1,
+    separate Q/K/V, a past cache, and no rotary, q/k norm, local window or
+    head sink.
+
+    Shapes, with N = num_heads, kvN = kv_num_heads, D = head size:
+      query                   [B, S, N*D]          f16
+      key, value              [B, S, kvN*D]        f16
+      past_key, past_value    [B, kvN, Cap, D]     f16
+      selected_indices        [B*S, K]             i32
+      selected_counts         [B*S]                i32
+      seqlens_k               [B]                  i32
+      output                  [B, S, N*D]          f16
+      present_key/value       [B, kvN, Cap, D]     f16
+
+    D must be 128 or 256 and N / kvN at most 16. present starts as past (they
+    may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
+    written to cache position T - S + s when that lies in [0, Cap). Row
+    (b, s) attends from position T - S + s if S <= T <= Cap and has no
+    candidates otherwise. Its candidates are the first
+    clamp(selected_counts, 0, K) entries of selected_indices, keeping only
+    0 <= idx <= T - S + s; duplicates count each time. Head h uses KV head
+    h / (N / kvN). Logits are scale * q.k in fp32 and an empty candidate set
+    gives a zero output.
+
+    Example:
+    ```mlir
+    hip.dynamic_sparse_attention(%ctx)
+        ins(%q, %k, %v, %past_k, %past_v, %idx, %cnt, %seqlens :
+            memref<1x1x6144xf16, 1>, memref<1x1x512xf16, 1>,
+            memref<1x1x512xf16, 1>, memref<1x2x4096x256xf16, 1>,
+            memref<1x2x4096x256xf16, 1>, memref<1x2051xi32, 1>,
+            memref<1xi32, 1>, memref<1xi32, 1>)
+        outs(%out, %present_k, %present_v : memref<1x1x6144xf16, 1>,
+             memref<1x2x4096x256xf16, 1>, memref<1x2x4096x256xf16, 1>)
+        {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$past_key,
+    Hip_TensorOrMemRef:$past_value,
+    Hip_TensorOrMemRef:$selected_indices,
+    Hip_TensorOrMemRef:$selected_counts,
+    Hip_TensorOrMemRef:$seqlens_k,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_key,
+    Hip_TensorOrMemRef:$present_value,
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `,` $past_key `,` $past_value `,`
+        $selected_indices `,` $selected_counts `,` $seqlens_k
+        `:` type($query) `,` type($key) `,` type($value) `,`
+        type($past_key) `,` type($past_value) `,` type($selected_indices) `,`
+        type($selected_counts) `,` type($seqlens_k)
+    `)`
+    `outs` `(` $output `,` $present_key `,` $present_value `:`
+              type($output) `,` type($present_key) `,` type($present_value) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,

@@ -214,6 +214,7 @@ _WRAP_SUFFIX_TO_OP: dict[str, str] = {
     "mrotary_embedding": "MRotaryEmbedding",
     "linear_attention": "LinearAttention",
     "gated_delta_net": "GatedDeltaNet",
+    "dynamic_sparse_attention": "DynamicSparseAttention",
     "qmoe": "QMoE",
     "causal_conv_with_state": "CausalConvWithState",
     "ngram_hash_mapping": "NGramHashMapping",
