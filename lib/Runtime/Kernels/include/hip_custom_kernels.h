@@ -3592,6 +3592,56 @@ HIP_KERNEL_API int hip_causal_conv_prefill_nlc(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Channels-last activations AND state, with dilated taps: input and output are
+// [B, L, C], past_state and present_state are [B, S, C] with
+// S = (K-1) * dilation. Any seq_len >= 1. Over the virtual sequence
+// x = [past_state | input], output t is act(bias + sum_j w[c,j] * x[t + j*dilation])
+// and present_state is the last S positions of x, oldest first. past_state may
+// be null (zeros) and may alias present_state.
+HIP_KERNEL_API int hip_causal_conv_nlc_state(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t dilation,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
+// beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
+//   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
+//   decay, beta   [B, L, Hv]                 fp32, raw projections
+//   initial_state [B, Hv, dv, dk]            fp32, may alias final_state
+//   a_log, dt_bias [Hv]                      fp32
+//   output        [B, L, Hv, dv]             T
+//   final_state   [B, Hv, dv, dk]            fp32
+// dk must be 32, 64, 128 or 256 and Hv a multiple of Hqk.
+HIP_KERNEL_API int hip_gated_delta_net(
+    void* stream,
+    const void* qkv,
+    const float* decay,
+    const float* beta,
+    const float* initial_state,
+    const float* a_log,
+    const float* dt_bias,
+    void* output,
+    float* final_state,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v,
+    float scale,
+    int element_size_bytes);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================

@@ -369,7 +369,8 @@ int wrap_causal_conv_with_state(
     const void *weight, const void *bias, const void *past_state, void *output,
     void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
     int64_t kernel_size, int64_t ndim, int64_t activation,
-    int64_t element_size_bytes, int64_t channels_last) {
+    int64_t element_size_bytes, int64_t channels_last, int64_t dilation,
+    int64_t state_channels_last) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -387,8 +388,9 @@ int wrap_causal_conv_with_state(
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
-  MOCK_PRINT("[MOCK]   layout=%s,\n",
-             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)");
+  MOCK_PRINT("[MOCK]   layout=%s, state=%s, dilation=%lld,\n",
+             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)",
+             state_channels_last ? "(B,S,C)" : "(B,C,S)", (long long)dilation);
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 
@@ -655,6 +657,28 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !initial_state || !a_log ||
+      !dt_bias || !output || !final_state) {
+    fprintf(stderr, "Invalid required argument in wrap_gated_delta_net\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_gated_delta_net(B=%lld, L=%lld, Hqk=%lld, Hv=%lld, "
+             "dk=%lld, dv=%lld, scale=%f, elem=%lld)\n",
+             (long long)batch, (long long)seq_len, (long long)num_heads_qk,
+             (long long)num_heads_v, (long long)head_size_qk,
+             (long long)head_size_v, (double)scale,
+             (long long)element_size_bytes);
   return 0;
 }
 

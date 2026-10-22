@@ -1768,7 +1768,12 @@ int wrap_causal_conv_with_state(
     // 0=channels-first, 1=channels-last. Permutes input and output only: the
     // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
-    int64_t channels_last);
+    int64_t channels_last,
+    // Tap spacing; the state then holds (kernel_size - 1) * dilation
+    // positions. Values > 1 require state_channels_last.
+    int64_t dilation,
+    // 1 = carry state is (batch, state_len, channels). Requires channels_last.
+    int64_t state_channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1816,6 +1821,16 @@ int wrap_linear_attention(
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+
+// scale == 0 means 1 / sqrt(head_size_qk).
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
