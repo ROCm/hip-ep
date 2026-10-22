@@ -246,6 +246,13 @@ private:
                                     OrtSyncStream **streams,
                                     size_t num_tensors) noexcept;
 
+#if ORT_API_VERSION >= 32
+  static OrtStatus *ZeroTensorsImpl(OrtDataTransferImpl *this_ptr,
+                                    OrtValue **tensors,
+                                    OrtSyncStream **streams,
+                                    size_t num_tensors) noexcept;
+#endif
+
   static void ReleaseImpl(OrtDataTransferImpl *this_ptr) noexcept;
 
   const OrtApi &ort_api;

@@ -458,6 +458,11 @@ HipDataTransferImpl::HipDataTransferImpl(const OrtApi &ort_api_in)
   CanCopy = CanCopyImpl;
   CopyTensors = CopyTensorsImpl;
   Release = ReleaseImpl;
+#if ORT_API_VERSION >= 32
+  // ORT reads this field only when ort_version_supported >= 32, i.e. when the
+  // runtime ORT knows about it.
+  ZeroTensors = ZeroTensorsImpl;
+#endif
 }
 
 bool HipDataTransferImpl::CanCopyImpl(
@@ -639,6 +644,70 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
 
   return nullptr;
 }
+
+#if ORT_API_VERSION >= 32
+OrtStatus *HipDataTransferImpl::ZeroTensorsImpl(OrtDataTransferImpl *this_ptr,
+                                                OrtValue **tensors,
+                                                OrtSyncStream **streams,
+                                                size_t num_tensors) noexcept {
+  auto &impl = *static_cast<HipDataTransferImpl *>(this_ptr);
+  bool need_stream_sync = false;
+
+  for (size_t idx = 0; idx < num_tensors; ++idx) {
+    OrtValue *tensor = tensors[idx];
+    OrtSyncStream *stream = streams ? streams[idx] : nullptr;
+
+    size_t bytes = 0;
+    if (auto *st = impl.ort_api.GetTensorSizeInBytes(tensor, &bytes)) {
+      return st;
+    }
+    void *data = nullptr;
+    if (auto *st = impl.ort_api.GetTensorMutableData(tensor, &data)) {
+      return st;
+    }
+    if (bytes == 0) {
+      continue;
+    }
+
+    hipStream_t hip_stream = nullptr;
+    if (stream) {
+      hip_stream =
+          static_cast<hipStream_t>(impl.ort_api.SyncStream_GetHandle(stream));
+    }
+
+    // The memset runs on the device for every memory type ORT passes here
+    // (DEFAULT and HOST_ACCESSIBLE GPU memory). A host memset of host-mapped
+    // memory would race device work still queued on it.
+    hipError_t err = hipMemsetAsync(data, 0, bytes, hip_stream);
+    if (err != hipSuccess) {
+      return MakeHipStatus(impl.ort_api, err, "hipMemsetAsync");
+    }
+
+    if (!hip_stream) {
+      // Same ordering argument as the null-stream D2D copy in CopyTensorsImpl:
+      // hipMalloc memory is only reachable through the null stream or a
+      // blocking stream, both ordered after this memset. The host can read
+      // host-mapped memory directly, so wait for it.
+      const OrtMemoryDevice *device =
+          impl.ep_api.Value_GetMemoryDevice(tensor);
+      const bool device_only =
+          impl.ep_api.MemoryDevice_GetMemoryType(device) ==
+              OrtDeviceMemoryType_DEFAULT &&
+          DefaultMemoryIsDeviceOnly();
+      need_stream_sync = need_stream_sync || !device_only;
+    }
+  }
+
+  if (need_stream_sync) {
+    hipError_t err = hipStreamSynchronize(nullptr);
+    if (err != hipSuccess) {
+      return MakeHipStatus(impl.ort_api, err, "hipStreamSynchronize(nullptr)");
+    }
+  }
+
+  return nullptr;
+}
+#endif
 
 void HipDataTransferImpl::ReleaseImpl(
     OrtDataTransferImpl * /*this_ptr*/) noexcept {
