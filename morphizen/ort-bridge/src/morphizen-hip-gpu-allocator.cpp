@@ -24,6 +24,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -110,13 +111,41 @@ static_assert(LargeCapacity(64ull << 20) - (64ull << 20) >= 512 * 4096,
 // hipHostFree unpins pages and is as heavyweight as the hipHostMalloc that
 // pinned them, so holding the lock would serialize every other allocation
 // behind it.
-void ReleaseToDriver(const std::vector<void *> &buffers, int device_id) {
+void ReleaseToDriver(const std::vector<void *> &buffers, int device_id,
+                     bool device_only) {
   if (buffers.empty()) {
     return;
   }
   ScopedDevice _(device_id);
   for (void *p : buffers) {
-    (void)hipHostFree(p);
+    (void)(device_only ? hipFree(p) : hipHostFree(p));
+  }
+}
+
+hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
+  return device_only
+             ? hipMalloc(ptr, size)
+             : hipHostMalloc(ptr, size,
+                             hipHostMallocMapped | hipHostMallocCoherent);
+}
+
+bool DefaultMemoryIsDeviceOnly() noexcept {
+  static const bool device_only = [] {
+    const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
+    return env == nullptr || std::strcmp(env, "0") != 0;
+  }();
+  return device_only;
+}
+
+bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
+  if (memory_info == nullptr || !DefaultMemoryIsDeviceOnly()) {
+    return false;
+  }
+  try {
+    return Ort::ConstMemoryInfo(memory_info).GetDeviceMemoryType() ==
+           OrtDeviceMemoryType_DEFAULT;
+  } catch (const Ort::Exception &) {
+    return false;
   }
 }
 
@@ -143,7 +172,8 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
 
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
-    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
+    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)},
+      device_only_{UseDeviceOnly(memory_info)} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
@@ -291,28 +321,15 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       self->TrimLarge(stale);
     }
   }
-  ReleaseToDriver(stale, self->device_id_);
+  ReleaseToDriver(stale, self->device_id_, self->device_only_);
 
   ScopedDevice _(self->device_id_);
 
-  // On AMD APU iGPU (the only hardware MorphiZen EP currently targets) the
-  // GPU shares physical memory with the CPU, so we use hipHostMalloc(Mapped)
-  // for both DEFAULT and HOST_ACCESSIBLE OrtMemoryInfos: the same pointer is
-  // dereferenceable from CPU and GPU. (hipMalloc would return a GPU-only
-  // virtual address that the host cannot deref, which crashes OGA's KV
-  // cache zero-init.)
-  //
-  // TODO(discrete-gpu): on a discrete AMD GPU (PCIe), DEFAULT memory should
-  // be hipMalloc'd into VRAM for locality + to avoid the host coherency
-  // traffic. HOST_ACCESSIBLE should keep using hipHostMalloc(Mapped). To
-  // do that we need to (a) read OrtMemoryInfoGetMemType from memory_info_
-  // and branch here, and (b) update OGA's MorphiZenEP::Memory struct to
-  // stop aliasing p_cpu_ = p_device_ and instead route Zero / CopyDeviceToCpu
-  // / CopyCpuToDevice through the HIP runtime. Tracked separately because
-  // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
+  // DEFAULT memory is device-only: OGA's AMDGPU GpuMemory reaches it solely
+  // through CopyTensors. HOST_ACCESSIBLE memory must stay host-mapped since
+  // OGA's PinnedMemory aliases p_cpu_ = p_device_.
   void *ptr = nullptr;
-  hipError_t err = hipHostMalloc(&ptr, alloc_size,
-                                 hipHostMallocMapped | hipHostMallocCoherent);
+  hipError_t err = DriverAlloc(&ptr, alloc_size, self->device_only_);
   if (err != hipSuccess) {
     // The large pool may be sitting on pinned pages this allocation could use,
     // and failing while holding reclaimable memory would be worse than not
@@ -323,15 +340,15 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       self->DrainLarge(drained);
     }
     if (!drained.empty()) {
-      ReleaseToDriver(drained, self->device_id_);
-      err = hipHostMalloc(&ptr, alloc_size,
-                          hipHostMallocMapped | hipHostMallocCoherent);
+      ReleaseToDriver(drained, self->device_id_, self->device_only_);
+      err = DriverAlloc(&ptr, alloc_size, self->device_only_);
     }
   }
   if (err != hipSuccess) {
-    LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
-               << alloc_size << " bytes (device " << self->device_id_
-               << "): " << hipGetErrorString(err);
+    LOG(ERROR) << "[MorphiZen HIP] "
+               << (self->device_only_ ? "hipMalloc" : "hipHostMalloc")
+               << " failed for " << alloc_size << " bytes (device "
+               << self->device_id_ << "): " << hipGetErrorString(err);
     return nullptr;
   }
   {
@@ -398,7 +415,7 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       }
     }
   }
-  ReleaseToDriver(to_release, self->device_id_);
+  ReleaseToDriver(to_release, self->device_id_, self->device_only_);
 }
 
 HipGpuAllocator::~HipGpuAllocator() {
@@ -409,9 +426,9 @@ HipGpuAllocator::~HipGpuAllocator() {
   ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
   for (const auto &kv : ptr_to_size_) {
-    hipError_t err = hipHostFree(kv.first);
+    hipError_t err = device_only_ ? hipFree(kv.first) : hipHostFree(kv.first);
     if (err != hipSuccess) {
-      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device "
+      LOG(WARNING) << "[MorphiZen HIP] driver free failed (device "
                    << device_id_ << "): " << hipGetErrorString(err);
     }
   }
@@ -441,6 +458,11 @@ HipDataTransferImpl::HipDataTransferImpl(const OrtApi &ort_api_in)
   CanCopy = CanCopyImpl;
   CopyTensors = CopyTensorsImpl;
   Release = ReleaseImpl;
+#if ORT_API_VERSION >= 32
+  // ORT reads this field only when ort_version_supported >= 32, i.e. when the
+  // runtime ORT knows about it.
+  ZeroTensors = ZeroTensorsImpl;
+#endif
 }
 
 bool HipDataTransferImpl::CanCopyImpl(
@@ -542,8 +564,12 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
                                  hipMemcpyDeviceToDevice, hip_stream);
           } else {
             err = hipMemcpy(dst_data, src_data, bytes, hipMemcpyDeviceToDevice);
-            // hipMemcpy D2D is not host-synchronous; force a sync below.
-            need_stream_sync = true;
+            // hipMemcpy D2D can return before the copy completes. hipMalloc
+            // memory needs no wait: the host cannot read it, and every later
+            // access runs on the null stream or on a blocking stream, both
+            // ordered after this copy. Host-mapped DEFAULT memory can be read
+            // directly, so wait for it.
+            need_stream_sync = !DefaultMemoryIsDeviceOnly();
           }
         }
       } else {
@@ -618,6 +644,68 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
 
   return nullptr;
 }
+
+#if ORT_API_VERSION >= 32
+OrtStatus *HipDataTransferImpl::ZeroTensorsImpl(OrtDataTransferImpl *this_ptr,
+                                                OrtValue **tensors,
+                                                OrtSyncStream **streams,
+                                                size_t num_tensors) noexcept {
+  auto &impl = *static_cast<HipDataTransferImpl *>(this_ptr);
+  bool need_stream_sync = false;
+
+  for (size_t idx = 0; idx < num_tensors; ++idx) {
+    OrtValue *tensor = tensors[idx];
+    OrtSyncStream *stream = streams ? streams[idx] : nullptr;
+
+    size_t bytes = 0;
+    if (auto *st = impl.ort_api.GetTensorSizeInBytes(tensor, &bytes)) {
+      return st;
+    }
+    void *data = nullptr;
+    if (auto *st = impl.ort_api.GetTensorMutableData(tensor, &data)) {
+      return st;
+    }
+    if (bytes == 0) {
+      continue;
+    }
+
+    hipStream_t hip_stream = nullptr;
+    if (stream) {
+      hip_stream =
+          static_cast<hipStream_t>(impl.ort_api.SyncStream_GetHandle(stream));
+    }
+
+    // The memset runs on the device for every memory type ORT passes here
+    // (DEFAULT and HOST_ACCESSIBLE GPU memory). A host memset of host-mapped
+    // memory would race device work still queued on it.
+    hipError_t err = hipMemsetAsync(data, 0, bytes, hip_stream);
+    if (err != hipSuccess) {
+      return MakeHipStatus(impl.ort_api, err, "hipMemsetAsync");
+    }
+
+    if (!hip_stream) {
+      // Same ordering argument as the null-stream D2D copy in CopyTensorsImpl:
+      // hipMalloc memory is only reachable through the null stream or a
+      // blocking stream, both ordered after this memset. The host can read
+      // host-mapped memory directly, so wait for it.
+      const OrtMemoryDevice *device = impl.ep_api.Value_GetMemoryDevice(tensor);
+      const bool device_only = impl.ep_api.MemoryDevice_GetMemoryType(device) ==
+                                   OrtDeviceMemoryType_DEFAULT &&
+                               DefaultMemoryIsDeviceOnly();
+      need_stream_sync = need_stream_sync || !device_only;
+    }
+  }
+
+  if (need_stream_sync) {
+    hipError_t err = hipStreamSynchronize(nullptr);
+    if (err != hipSuccess) {
+      return MakeHipStatus(impl.ort_api, err, "hipStreamSynchronize(nullptr)");
+    }
+  }
+
+  return nullptr;
+}
+#endif
 
 void HipDataTransferImpl::ReleaseImpl(
     OrtDataTransferImpl * /*this_ptr*/) noexcept {

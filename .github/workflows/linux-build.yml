@@ -25,7 +25,13 @@ env:
   # inside rocmlirTriton (external/llvm-project); the repo + pinned commit are
   # read from cmake/deps.txt at build time and the commit keys the llvm-install
   # cache. Bumping the pin only invalidates that cache.
-  ONNXRUNTIME_VERSION: "1.31.0"
+  ONNXRUNTIME_REPO: "pschlan-amd/onnxruntime"
+  # Tag checked out from ONNXRUNTIME_REPO. It keys the ORT-dependent caches,
+  # so push a new tag for every change instead of moving an existing one.
+  ONNXRUNTIME_TAG: "v1.32.0-zt.1"
+  # Must be a PEP 440 version: OGA's setup.py reads it from the environment
+  # for the wheel's onnxruntime>= requirement.
+  ONNXRUNTIME_VERSION: "1.32.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
@@ -35,7 +41,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2768"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -200,14 +206,14 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
+          key: linux-ort-${{ env.ONNXRUNTIME_TAG }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
 
-      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
+      - name: Checkout ONNX Runtime ${{ env.ONNXRUNTIME_TAG }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: Microsoft/onnxruntime
-          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          repository: ${{ env.ONNXRUNTIME_REPO }}
+          ref: ${{ env.ONNXRUNTIME_TAG }}
           path: source-onnxruntime
           submodules: true
           fetch-depth: 1
@@ -324,7 +330,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_TAG }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
