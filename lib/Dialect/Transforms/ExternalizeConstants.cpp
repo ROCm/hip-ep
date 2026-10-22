@@ -68,9 +68,9 @@ namespace {
 
 constexpr int64_t kConstantAlignment = 64;
 // Logical element count (a 4-bit packed byte holds two), so quantization does
-// not move a table across the line. Sits
-// above the largest token embedding of common local LLMs (Gemma-3-27B,
-// 1.41e9) and below per-layer embedding tables (Gemma 3n E2B, 2.01e9).
+// not move a table across the line. Sits above the largest token embedding of
+// common local LLMs (Gemma-3-27B, 1.41e9) and below per-layer embedding tables
+// (Gemma 3n E2B, 2.01e9).
 constexpr int64_t kMinDiskResidentGatherElements = 1600000000;
 
 using SourceKind = hip::ConstantOp::SourceKind;
@@ -410,6 +410,11 @@ private:
           return false;
         }
         if (gbq.getBits() == 4) {
+          // Packed along quantize_axis: on axis 0 a stored row holds two
+          // table rows, so rows cannot be read independently.
+          if (isAxis0(static_cast<int64_t>(gbq.getQuantizeAxis()))) {
+            return false;
+          }
           elementsPerStored = 2;
         }
       } else {

@@ -736,6 +736,33 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes) {
+  (void)indices;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_from_file\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gather_from_file(constant=%lld, axis=%lld, "
+             "data_num_elements=%lld, indices_num_elements=%lld, "
+             "output_num_elements=%lld, axis_size=%lld, inner_size=%lld, "
+             "element_size=%lld, indices_element_size=%lld)\n",
+             (long long)constant_index, (long long)axis,
+             (long long)data_num_elements, (long long)indices_num_elements,
+             (long long)output_num_elements, (long long)axis_size,
+             (long long)inner_size, (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
+
+  return 0;
+}
+
 int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  void *output, int64_t axis, int64_t indices_rank,
                  int64_t output_rank, const int64_t *indices_shape,

@@ -104,25 +104,36 @@ struct RowCopyTask {
 };
 
 // Prefetch issues the slice's reads concurrently so the copy below does not
-// fault the rows in one at a time.
+// fault the rows in one at a time. A null row is written as zeros.
 void copy_rows(const RowCopyTask &t) {
 #ifdef _WIN32
-  std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges(t.end - t.begin);
+  std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+  ranges.reserve(t.end - t.begin);
   for (size_t i = t.begin; i < t.end; ++i) {
-    ranges[i - t.begin].VirtualAddress = const_cast<uint8_t *>(t.rows[i]);
-    ranges[i - t.begin].NumberOfBytes = t.row_bytes;
+    if (t.rows[i]) {
+      ranges.push_back({const_cast<uint8_t *>(t.rows[i]), t.row_bytes});
+    }
   }
-  PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+  if (!ranges.empty()) {
+    PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+  }
 #else
   const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
   for (size_t i = t.begin; i < t.end; ++i) {
+    if (!t.rows[i]) {
+      continue;
+    }
     uintptr_t begin = reinterpret_cast<uintptr_t>(t.rows[i]) & ~(page - 1);
     uintptr_t end = reinterpret_cast<uintptr_t>(t.rows[i]) + t.row_bytes;
     madvise(reinterpret_cast<void *>(begin), end - begin, MADV_WILLNEED);
   }
 #endif
   for (size_t i = t.begin; i < t.end; ++i) {
-    std::memcpy(t.dst + i * t.row_bytes, t.rows[i], t.row_bytes);
+    if (t.rows[i]) {
+      std::memcpy(t.dst + i * t.row_bytes, t.rows[i], t.row_bytes);
+    } else {
+      std::memset(t.dst + i * t.row_bytes, 0, t.row_bytes);
+    }
   }
 }
 
@@ -1161,40 +1172,12 @@ static int ensure_disk_gather_staging(RuntimeState *state, size_t size) {
   return 0;
 }
 
-int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
-                          void *indices, void *output, int64_t axis,
-                          int64_t data_num_elements,
-                          int64_t indices_num_elements,
-                          int64_t output_num_elements, int64_t axis_size,
-                          int64_t inner_size, int64_t element_size_bytes,
-                          int64_t indices_element_size_bytes) {
-  OP_PROFILE(
-      "gather_from_file",
-      [&] {
-        char b[64];
-        snprintf(b, sizeof(b), "n=%lld", (long long)indices_num_elements);
-        return std::string(b);
-      },
-      state);
-  if (!state || !output || axis != 0 ||
-      data_num_elements != axis_size * inner_size ||
-      output_num_elements != indices_num_elements * inner_size) {
-    fprintf(stderr,
-            "wrap_gather_from_file: constant %lld does not match an axis-0 "
-            "gather of a disk-resident table\n",
-            (long long)constant_index);
-    return -1;
-  }
-  return hipdnn_ep_disk_constant_gather_rows(
-      state, constant_index, indices, indices_num_elements,
-      indices_element_size_bytes, axis_size, inner_size * element_size_bytes,
-      output, /*allow_out_of_range=*/false);
-}
-
-int hipdnn_ep_disk_constant_gather_rows(
-    RuntimeState *state, int64_t constant_index, const void *indices,
-    int64_t num_indices, int64_t index_bytes, int64_t num_rows,
-    int64_t row_bytes, void *dst, bool allow_out_of_range) {
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst) {
   if (!state || !state->disk_constants || constant_index < 0 ||
       (size_t)constant_index >= state->num_constants || !indices || !dst ||
       (index_bytes != 4 && index_bytes != 8)) {
@@ -1237,16 +1220,9 @@ int hipdnn_ep_disk_constant_gather_rows(
     if (row < 0) {
       row += num_rows;
     }
-    if (row < 0 || row >= num_rows) {
-      if (!allow_out_of_range) {
-        fprintf(stderr,
-                "disk-resident gather: index %lld out of range [0, %lld)\n",
-                (long long)row, (long long)num_rows);
-        return -1;
-      }
-      row = 0;
-    }
-    rows[(size_t)k] = table.data + (size_t)row * (size_t)row_bytes;
+    rows[(size_t)k] = row < 0 || row >= num_rows
+                          ? nullptr
+                          : table.data + (size_t)row * (size_t)row_bytes;
   }
   gather_rows(rows, (size_t)row_bytes, host_rows);
 

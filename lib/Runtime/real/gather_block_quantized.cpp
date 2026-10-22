@@ -253,13 +253,17 @@ extern "C" int wrap_gather_block_quantized_from_file(
       },
       state);
 
+  auto isAxis0 = [data_rank](int64_t axis) {
+    return axis == 0 || axis == -data_rank;
+  };
   if (!state || !data_shape || !indices_shape || data_rank < 1 ||
-      (gather_axis != 0 && gather_axis != -data_rank) ||
+      !isAxis0(gather_axis) || (bits == 4 && isAxis0(quantize_axis)) ||
       (indices_dtype != HIPDNN_EP_DATATYPE_INT32 &&
        indices_dtype != HIPDNN_EP_DATATYPE_INT64)) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized_from_file: constant "
-            "%lld is not an axis-0 gather with i32/i64 indices\n",
+            "%lld is not an axis-0 gather of rows packed along another axis "
+            "with i32/i64 indices\n",
             (long long)constant_index);
     return -1;
   }
@@ -283,7 +287,7 @@ extern "C" int wrap_gather_block_quantized_from_file(
   int64_t index_bytes = indices_dtype == HIPDNN_EP_DATATYPE_INT64 ? 8 : 4;
   if (hipdnn_ep_disk_constant_gather_rows(
           state, constant_index, indices, num_indices, index_bytes,
-          data_shape[0], row_bytes, rows, /*allow_out_of_range=*/true) != 0) {
+          data_shape[0], row_bytes, rows) != 0) {
     return -1;
   }
   return gather_block_quantized(
