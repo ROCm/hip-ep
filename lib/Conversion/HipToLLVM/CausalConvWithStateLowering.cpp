@@ -74,12 +74,6 @@ struct CausalConvWithStateOpLowering
       return op.emitError("channels_last requires a rank-3 input (ndim=1)");
     bool stateChannelsLast = op.getStateChannelsLast();
     int64_t dilation = op.getDilation();
-    if (stateChannelsLast && !channelsLast) {
-      return op.emitError("state_channels_last requires channels_last");
-    }
-    if (dilation < 1 || (dilation != 1 && !stateChannelsLast)) {
-      return op.emitError("dilation > 1 requires state_channels_last");
-    }
 
     Value batchSize =
         getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);

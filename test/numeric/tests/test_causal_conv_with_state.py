@@ -178,6 +178,7 @@ def _make_nlc_state_model(
     dilation: int,
     with_bias: bool,
     dtype: np.dtype = np.float16,
+    with_past: bool = True,
 ):
     """ONNX `channels_last = 1`: input, output and state are all channels-last,
     and the state holds (K - 1) * dilation positions."""
@@ -203,7 +204,8 @@ def _make_nlc_state_model(
         inputs_w.append("bias")
     else:
         inputs_w.append("")
-    inputs_w.append("past_state")
+    if with_past:
+        inputs_w.append("past_state")
 
     node = helper.make_node(
         "CausalConvWithState",
@@ -220,7 +222,7 @@ def _make_nlc_state_model(
     ms_opset = helper.make_opsetid("com.microsoft", 1)
     return make_model_from_nodes(
         [node],
-        [X, State],
+        [X, State] if with_past else [X],
         [Y, Present],
         initializers=initializers,
         opset=17,
@@ -454,22 +456,31 @@ class TestCausalConvWideKernel:
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
 
     @pytest.mark.parametrize(
-        "seq_len,dilation,with_bias,dtype",
+        "seq_len,dilation,with_bias,dtype,channels,with_past",
         [
             # Qwen3.8 ple_conv: K=4, dilation=3, no bias, state (B, 9, C).
-            (1, 3, False, np.float16),
-            (4, 3, False, np.float16),  # seq_len < state_len
-            (128, 3, False, np.float16),
-            (16, 1, True, np.float16),
-            (37, 2, True, np.float32),
+            (1, 3, False, np.float16, 96, True),
+            (4, 3, False, np.float16, 96, True),  # seq_len < state_len
+            (128, 3, False, np.float16, 96, True),
+            (16, 1, True, np.float16, 96, True),
+            (37, 2, True, np.float32, 96, True),
+            (5, 3, False, np.float16, 300, True),
+            (6, 3, True, np.float32, 96, False),
         ],
     )
     def test_ccws_channels_last_state_dilation(
-        self, model_runner, seq_len, dilation, with_bias, dtype
+        self, model_runner, seq_len, dilation, with_bias, dtype, channels, with_past
     ):
-        batch, channels, kernel_size = 2, 96, 4
+        batch, kernel_size = 2, 4
         model = _make_nlc_state_model(
-            batch, channels, seq_len, kernel_size, dilation, with_bias, dtype
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            dilation,
+            with_bias,
+            dtype,
+            with_past,
         )
 
         rng = np.random.default_rng(0xA0 + seq_len + dilation)
@@ -478,7 +489,8 @@ class TestCausalConvWideKernel:
             rng.standard_normal((batch, (kernel_size - 1) * dilation, channels)) * 0.5
         ).astype(dtype)
 
-        actual, expected = model_runner.run_sample(model, [x, state])
+        feeds = [x, state] if with_past else [x]
+        actual, expected = model_runner.run_sample(model, feeds)
         if dtype == np.float32:
             compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
         else:

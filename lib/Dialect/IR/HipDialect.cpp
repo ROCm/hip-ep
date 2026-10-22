@@ -2336,6 +2336,54 @@ void CausalConvWithStateOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult CausalConvWithStateOp::verify() {
+  auto dilation = static_cast<int64_t>(getDilation());
+  if (dilation < 1) {
+    return emitOpError("dilation must be at least 1, got ") << dilation;
+  }
+  if (getStateChannelsLast() && !getChannelsLast()) {
+    return emitOpError("state_channels_last requires channels_last");
+  }
+  if (dilation != 1 && !getStateChannelsLast()) {
+    return emitOpError("dilation > 1 requires state_channels_last");
+  }
+  if (!getStateChannelsLast()) {
+    return success();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  if (inputType.getRank() != 3 || weightType.getRank() != 3) {
+    return emitOpError("state_channels_last requires rank-3 input and weight");
+  }
+  if (weightType.isDynamicDim(2)) {
+    return emitOpError("state_channels_last requires a static kernel size");
+  }
+  int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+  int64_t channels = inputType.getDimSize(2);
+  SmallVector<Value, 2> states = {getPresentState()};
+  if (getPastState()) {
+    states.push_back(getPastState());
+  }
+  for (Value state : states) {
+    auto stateType = cast<ShapedType>(state.getType());
+    if (stateType.getRank() != 3) {
+      return emitOpError("state must be rank 3, got rank ")
+             << stateType.getRank();
+    }
+    if (!stateType.isDynamicDim(1) && stateType.getDimSize(1) != stateLen) {
+      return emitOpError("state dim 1 must be (kernel_size - 1) * dilation = ")
+             << stateLen << ", got " << stateType.getDimSize(1);
+    }
+    if (!ShapedType::isDynamic(channels) && !stateType.isDynamicDim(2) &&
+        stateType.getDimSize(2) != channels) {
+      return emitOpError("state dim 2 must match the input channels ")
+             << channels << ", got " << stateType.getDimSize(2);
+    }
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GemmOp
 //===----------------------------------------------------------------------===//
@@ -2386,7 +2434,8 @@ void LinearAttentionOp::getEffects(
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GatedDeltaNetOp::getDpsInitsMutable() {
-  return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
 }
 
 void GatedDeltaNetOp::getEffects(

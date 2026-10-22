@@ -3832,6 +3832,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
   // Absorbs a surrounding [0,2,1] Transpose pair into `channels_last`.
   // See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
   let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 
   // OpStateOpInterface: construct this instance's per-session MIOpen
   // descriptor/algo cache (CausalConvState). No compile-time params — the

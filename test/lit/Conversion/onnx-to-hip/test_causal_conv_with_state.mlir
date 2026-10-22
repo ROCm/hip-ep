@@ -17,6 +17,7 @@
 // 8. causal_conv_state_window            — rejected
 // 9. causal_conv_dilated_channels_first  — rejected
 // 10. causal_conv_bf16                   — rejected
+// 11. causal_conv_channels_last_bad_state — rejected
 //
 // All static cases assert:
 // - context argument prepended
@@ -275,6 +276,27 @@ module {
   }
 
   // CHECK-LABEL: func.func @causal_conv_bf16
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: onnx.Custom
+
+  func.func @causal_conv_channels_last_bad_state(
+      %input: tensor<1x8x64xf16>,
+      %weight: tensor<64x1x4xf16>,
+      %past_state: tensor<1x3x64xf16>
+  ) -> (tensor<1x8x64xf16>, tensor<1x3x64xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %past_state) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      channels_last = 1 : si64,
+      dilation = 2 : si64,
+      ndim = 1 : si64
+    } : (tensor<1x8x64xf16>, tensor<64x1x4xf16>, none, tensor<1x3x64xf16>)
+      -> (tensor<1x8x64xf16>, tensor<1x3x64xf16>)
+    return %output, %present_state : tensor<1x8x64xf16>, tensor<1x3x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_channels_last_bad_state
   // CHECK-NOT: hip.causal_conv_with_state
   // CHECK: onnx.Custom
 }

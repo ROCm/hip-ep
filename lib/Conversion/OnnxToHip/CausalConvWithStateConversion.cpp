@@ -112,6 +112,30 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   auto presentStateType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
 
+  if (channelsLast) {
+    auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+    int64_t channels = inputType.getDimSize(2);
+    if (!weightType || weightType.getRank() != 3 ||
+        !weightType.hasStaticShape() || weightType.getDimSize(1) != 1 ||
+        mlir::ShapedType::isDynamic(channels) ||
+        weightType.getDimSize(0) != channels) {
+      return rewriter.notifyMatchFailure(
+          op, "channels_last = 1 needs a static (C, 1, K) weight matching the "
+              "input channels");
+    }
+    int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+    auto isStateType = [&](mlir::Type type) {
+      auto st = mlir::dyn_cast<mlir::RankedTensorType>(type);
+      return st && st.getRank() == 3 && st.getDimSize(1) == stateLen &&
+             st.getDimSize(2) == channels;
+    };
+    if (!isStateType(presentStateType) ||
+        (pastState && !isStateType(pastState.getType()))) {
+      return rewriter.notifyMatchFailure(
+          op, "channels_last = 1 state must be (B, (K - 1) * dilation, C)");
+    }
+  }
+
   // Create DPS init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
   mlir::Value presentStateInit = createEmptyTensor(
