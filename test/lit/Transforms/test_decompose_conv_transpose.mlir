@@ -19,7 +19,7 @@
 // 10. many_residues - stride^2 past the kernel-count cap, op survives
 // 11. result_rank_mismatch - rank-3 result, op survives
 // 12. batch_mismatch       - result batch != input batch, op survives
-// 13. out_pad_no_slack     - output_padding with no slack -> grid is grown
+// 13. out_pad_no_slack     - equal taps, so interleave; grid still grows
 // 14. result_too_large     - result past the output_padding bound, op survives
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6 and 7 use
@@ -347,18 +347,20 @@ module {
   }
 
   // CHECK-LABEL: func.func @out_pad_no_slack
-  // The grid is 10x10 rather than the natural 8x8, which is what makes room
-  // for the output_padding the 8x8 grid could not have held.
-  // CHECK: tensor.empty() : tensor<1x1x10x10xf32>
-  // Each residue keeps a single tap and pads 0 in front, 1 behind, so its
-  // output is 5x5 and the trailing row/column is convolved from past-the-end
-  // input only.
-  // CHECK: hip.conv
+  // Each residue keeps a single tap and the same padding, so the residues
+  // become one wide convolution (4 * M output channels) whose result is
+  // interleaved by one transpose, rather than four strided inserts.
+  // The trailing pad is 1, which stretches each residue to 5x5 and the
+  // interleaved grid to 10x10 -- room for the output_padding.
+  // CHECK-NOT: tensor.insert_slice
+  // CHECK: hip.conv({{.*}} tensor<4x1x1x1xf32>)
   // CHECK-SAME: pads = [0, 0, 1, 1]
-  // CHECK: tensor.insert_slice {{.*}}[0, 0, 0, 0] [1, 1, 5, 5] [1, 1, 2, 2]
-  // CHECK: tensor.insert_slice {{.*}}[0, 0, 0, 1] [1, 1, 5, 5] [1, 1, 2, 2]
-  // CHECK: tensor.insert_slice {{.*}}[0, 0, 1, 0] [1, 1, 5, 5] [1, 1, 2, 2]
-  // CHECK: tensor.insert_slice {{.*}}[0, 0, 1, 1] [1, 1, 5, 5] [1, 1, 2, 2]
+  // CHECK-SAME: tensor<1x4x5x5xf32>
+  // CHECK-NOT: hip.conv(
+  // CHECK-NOT: tensor.concat
+  // CHECK: tensor.expand_shape {{.*}} {{\[}}[0], [1, 2, 3], [4], [5]] {{.*}} into tensor<1x2x2x1x5x5xf32>
+  // CHECK: hip.transpose
+  // CHECK-SAME: perm = [0, 3, 4, 1, 5, 2]
   // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 0] [1, 1, 9, 9] [1, 1, 1, 1]
   // CHECK-NOT: hip.conv_transpose
 
