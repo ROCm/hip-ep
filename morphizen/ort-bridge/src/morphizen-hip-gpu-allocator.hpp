@@ -126,8 +126,8 @@ private:
   void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
   void TrimLarge(std::vector<void *> &out);
   void DrainLarge(std::vector<void *> &out);
-  void EvictIdleSets(size_t need, std::vector<void *> &out);
-  void DrainSets(std::vector<void *> &out);
+  void EvictIdleReuse(size_t need, std::vector<void *> &out);
+  void DrainReuse(std::vector<void *> &out);
   void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown);
   bool ReplacesLiveBuffer(size_t size) const;
   bool ReplacedByLiveBuffer(size_t requested) const;
@@ -149,14 +149,15 @@ private:
   // memory contract.
   //
   // Requests above 16 MB bypass the classes: each is allocated at exactly its
-  // size and returned to the driver on Free. The exception is a tensor that is
-  // re-created a little longer on every inference, such as a KV cache run with
-  // past_present_share_buffer=false, where no two steps ask for the same size
-  // and every step would page-pin a fresh buffer. A request slightly larger
-  // than a buffer still checked out is taken as that pattern and allocated
-  // with growth headroom. Only such buffers, and the buffers they replaced,
-  // are kept on Free, keyed by capacity, and a request takes the smallest one
-  // that covers it. Tensors that keep their size, such as a shared
+  // size and kept on Free in one of two pools. The growth pool is for a tensor
+  // that is re-created a little longer on every inference, such as a KV cache
+  // run with past_present_share_buffer=false, where no two steps ask for the
+  // same size and every step would page-pin a fresh buffer. A request slightly
+  // larger than a buffer still checked out is taken as that pattern and
+  // allocated with growth headroom. Only such buffers, and the buffers they
+  // replaced, go to the growth pool on Free, keyed by capacity, and a request
+  // takes the smallest one that covers it. Tensors that keep their size, such
+  // as a shared
   // past/present KV buffer, never qualify for this growth pool.
   //
   // The first version of a growing tensor, such as the KV cache a new
@@ -166,7 +167,7 @@ private:
   // request is therefore allocated with the headroom, including those of
   // tensors that keep their size.
   //
-  // A kept buffer is released as soon as nothing can reuse it: when a request
+  // A growth buffer is released as soon as nothing can reuse it: when a request
   // outgrows its capacity or jumps past it, and all at once when none of the
   // grown buffers is checked out any more. The allocator can outlive the
   // session that grew them (a caller may share one allocator across models),
@@ -175,20 +176,21 @@ private:
   // for while others are still cycling, and a driver allocation failure
   // drains the pool and retries.
   //
-  // Sets of same-sized buffers are the other exception: the shared
-  // past/present KV cache of a generator is one buffer per layer and per K/V,
-  // all freed together when the generator goes away, and the next generator
-  // asks for the same set again. A large buffer that is not kept for growth
-  // goes to a separate set pool when another buffer of its requested size is
-  // still checked out, or when the set pool already holds its capacity; a
-  // lone transient never qualifies. A request takes a set buffer under the
-  // same fit rule as the growth pool. A set bucket is idle from a free until
-  // its next hit, and a driver allocation first releases idle set buffers,
-  // least recently used first, until it has released as many bytes as it
-  // allocates, so a workload whose shapes change hands the memory over
-  // instead of adding to it. Unlike the growth pool, set buffers outlive the
-  // tensors that used them: they stay until an allocation evicts them, a
-  // driver allocation fails, or the allocator is destroyed.
+  // Every other large buffer goes to the reuse pool, such as the shared
+  // past/present KV cache a generator frees when it goes away and the next
+  // generator asks for again, or a per-inference activation above the
+  // classes. Handing such buffers back to the driver costs more than the
+  // call: on an APU, hipMalloc memory is carved from system memory in
+  // high-order blocks, and each block the page allocator cannot supply wakes
+  // kcompactd, whose page migrations evict this process's GPU queues. A
+  // request takes a reuse buffer under the same fit rule as the growth pool.
+  // A reuse bucket is idle from a free until its next hit, and a driver
+  // allocation first releases idle reuse buffers, least recently used first,
+  // until it has released as many bytes as it allocates, so a workload whose
+  // shapes change hands the memory over instead of adding to it. Unlike the
+  // growth pool, reuse buffers outlive the tensors that used them: they stay
+  // until an allocation evicts them, a driver allocation fails, or the
+  // allocator is destroyed.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
@@ -213,20 +215,20 @@ private:
     uint64_t last_used = 0;
   };
   std::map<size_t, LargeBucket> large_free_;
-  // Set pool, keyed by capacity like large_free_; empty buckets are erased.
-  struct SetBucket {
+  // Reuse pool, keyed by capacity like large_free_; empty buckets are erased.
+  struct ReuseBucket {
     std::vector<void *> free;
     // large_ops_ at the last hit or free here; orders idle buckets for
     // eviction.
     uint64_t last_used = 0;
     bool idle = true;
   };
-  std::map<size_t, SetBucket> set_free_;
+  std::map<size_t, ReuseBucket> reuse_free_;
   // Checked-out large buffers. `grown` marks a buffer handed to a request that
   // replaced a live buffer a little smaller than itself, whether allocated
-  // with headroom or reused from the pool. Those are pooled on Free, as is a
-  // buffer that a live one has replaced; every other large buffer goes
-  // straight back to the driver.
+  // with headroom or reused from the pool. Those go to the growth pool on
+  // Free, as does a buffer that a live one has replaced; every other large
+  // buffer goes to the reuse pool.
   struct LargeLive {
     size_t requested;
     bool grown;

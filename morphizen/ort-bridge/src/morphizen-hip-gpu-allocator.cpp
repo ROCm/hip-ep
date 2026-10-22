@@ -259,21 +259,21 @@ void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
   large_free_.clear();
 }
 
-// A set bucket that has been hit since its last free is being refilled by
-// the set that freed into it; taking from it would only make that set's
-// remaining requests miss in turn.
-void HipGpuAllocator::EvictIdleSets(size_t need, std::vector<void *> &out) {
+// A reuse bucket that has been hit since its last free is being refilled by
+// the buffers that freed into it, such as a KV set; taking from it would only
+// make that set's remaining requests miss in turn.
+void HipGpuAllocator::EvictIdleReuse(size_t need, std::vector<void *> &out) {
   size_t released = 0;
   while (released < need) {
-    auto victim = set_free_.end();
-    for (auto it = set_free_.begin(); it != set_free_.end(); ++it) {
+    auto victim = reuse_free_.end();
+    for (auto it = reuse_free_.begin(); it != reuse_free_.end(); ++it) {
       if (it->second.idle &&
-          (victim == set_free_.end() ||
+          (victim == reuse_free_.end() ||
            it->second.last_used < victim->second.last_used)) {
         victim = it;
       }
     }
-    if (victim == set_free_.end()) {
+    if (victim == reuse_free_.end()) {
       return;
     }
     auto &buffers = victim->second.free;
@@ -284,19 +284,19 @@ void HipGpuAllocator::EvictIdleSets(size_t need, std::vector<void *> &out) {
       released += victim->first;
     }
     if (buffers.empty()) {
-      set_free_.erase(victim);
+      reuse_free_.erase(victim);
     }
   }
 }
 
-void HipGpuAllocator::DrainSets(std::vector<void *> &out) {
-  for (auto &entry : set_free_) {
+void HipGpuAllocator::DrainReuse(std::vector<void *> &out) {
+  for (auto &entry : reuse_free_) {
     for (void *ptr : entry.second.free) {
       ptr_to_size_.erase(ptr);
       out.push_back(ptr);
     }
   }
-  set_free_.clear();
+  reuse_free_.clear();
 }
 
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
@@ -347,8 +347,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         }
         return ptr;
       }
-      if (auto sit = self->set_free_.lower_bound(size);
-          sit != self->set_free_.end() && sit->first <= LargeCapacity(size)) {
+      if (auto sit = self->reuse_free_.lower_bound(size);
+          sit != self->reuse_free_.end() && sit->first <= LargeCapacity(size)) {
         void *ptr = sit->second.free.back();
         sit->second.free.pop_back();
         sit->second.last_used = self->large_ops_;
@@ -357,7 +357,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         self->grown_reused_ |= grown;
         self->NoteLargeCheckedOut(ptr, size, grown);
         if (sit->second.free.empty()) {
-          self->set_free_.erase(sit);
+          self->reuse_free_.erase(sit);
         }
         return ptr;
       }
@@ -369,7 +369,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       // Here rather than in FreeImpl so that path keeps a single exit and
       // cannot drop a buffer from ptr_to_size_ without unpinning it.
       self->TrimLarge(stale);
-      self->EvictIdleSets(alloc_size, stale);
+      self->EvictIdleReuse(alloc_size, stale);
     }
   }
   ReleaseToDriver(stale, self->device_id_, self->device_only_);
@@ -389,7 +389,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     {
       std::lock_guard<std::mutex> lk(self->pool_mutex_);
       self->DrainLarge(drained);
-      self->DrainSets(drained);
+      self->DrainReuse(drained);
     }
     if (!drained.empty()) {
       ReleaseToDriver(drained, self->device_id_, self->device_only_);
@@ -436,13 +436,11 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       const size_t capacity = it->second;
       ++self->large_ops_;
       bool keep = false;
-      bool in_set = false;
       if (auto live = self->large_live_.find(p);
           live != self->large_live_.end()) {
         const bool grown = live->second.grown;
         keep = grown || self->ReplacedByLiveBuffer(live->second.requested);
         auto req = self->live_requested_.find(live->second.requested);
-        in_set = req->second > 1;
         if (--req->second == 0) {
           self->live_requested_.erase(req);
         }
@@ -456,14 +454,11 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
         auto &bucket = self->large_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
-      } else if (in_set || self->set_free_.count(capacity) != 0) {
-        auto &bucket = self->set_free_[capacity];
+      } else {
+        auto &bucket = self->reuse_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
         bucket.idle = true;
-      } else {
-        self->ptr_to_size_.erase(it);
-        to_release.push_back(p);
       }
       if (self->grown_live_count_ == 0 && !self->large_free_.empty()) {
         // No grown buffer is checked out: the growing tensors were released or
@@ -495,7 +490,7 @@ HipGpuAllocator::~HipGpuAllocator() {
     fl.clear();
   }
   large_free_.clear();
-  set_free_.clear();
+  reuse_free_.clear();
   ptr_to_size_.clear();
 }
 
