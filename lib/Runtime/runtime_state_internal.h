@@ -34,6 +34,15 @@ struct DiskConstant {
   int64_t size;
 };
 
+// Copies the rows of disk-resident constant `constant_index` selected by device
+// `indices` into device `dst`, in index order, and synchronizes state->stream.
+// Negative indices wrap. With `allow_out_of_range`, an out-of-range index
+// leaves its slot in `dst` unspecified instead of failing.
+int hipdnn_ep_disk_constant_gather_rows(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    int64_t num_indices, int64_t index_bytes, int64_t num_rows,
+    int64_t row_bytes, void *dst, bool allow_out_of_range);
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {

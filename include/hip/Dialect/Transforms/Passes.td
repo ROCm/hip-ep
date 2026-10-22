@@ -777,8 +777,9 @@ def ExternalizeConstantsPass
     `hip-resolve-extern-constants`.
 
     With `skip-constant-data`, a file-backed carrier of at least 1.6e9
-    elements whose every use is the `data` operand of an axis-0 `hip.gather`
-    gets a `disk_resident` unit entry in its
+    logical elements (4-bit `hip.gather_block_quantized` data counts two per
+    byte) whose every use is the `data` operand of an axis-0 `hip.gather` or
+    `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
     `hip.external_data`, takes no range in the GPU constants layout, and is
     recorded with source kind `DiskFile`.
 

@@ -1153,7 +1153,7 @@ static int ensure_disk_gather_staging(RuntimeState *state, size_t size) {
   }
   if (hipHostMalloc(&state->disk_gather_staging, size, hipHostMallocDefault) !=
       hipSuccess) {
-    fprintf(stderr, "wrap_gather_from_file: hipHostMalloc(%zu) failed\n", size);
+    fprintf(stderr, "disk-resident gather: hipHostMalloc(%zu) failed\n", size);
     state->disk_gather_staging = nullptr;
     return 1;
   }
@@ -1176,65 +1176,84 @@ int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
         return std::string(b);
       },
       state);
-  if (!state || !state->disk_constants || constant_index < 0 ||
-      (size_t)constant_index >= state->num_constants || !indices || !output) {
-    fprintf(stderr, "wrap_gather_from_file: invalid arguments (index=%lld)\n",
-            (long long)constant_index);
-    return -1;
-  }
-  const DiskConstant &table = state->disk_constants[constant_index];
-  const size_t row_bytes = (size_t)(inner_size * element_size_bytes);
-  if (!table.data || axis != 0 ||
-      (int64_t)row_bytes * axis_size != table.size ||
+  if (!state || !output || axis != 0 ||
       data_num_elements != axis_size * inner_size ||
-      output_num_elements != indices_num_elements * inner_size ||
-      (indices_element_size_bytes != 4 && indices_element_size_bytes != 8)) {
+      output_num_elements != indices_num_elements * inner_size) {
     fprintf(stderr,
             "wrap_gather_from_file: constant %lld does not match an axis-0 "
             "gather of a disk-resident table\n",
             (long long)constant_index);
     return -1;
   }
+  return hipdnn_ep_disk_constant_gather_rows(
+      state, constant_index, indices, indices_num_elements,
+      indices_element_size_bytes, axis_size, inner_size * element_size_bytes,
+      output, /*allow_out_of_range=*/false);
+}
 
-  const size_t indices_bytes =
-      (size_t)(indices_num_elements * indices_element_size_bytes);
-  const size_t indices_region = (indices_bytes + 63) & ~size_t(63);
-  const size_t output_bytes = (size_t)indices_num_elements * row_bytes;
-  if (ensure_disk_gather_staging(state, indices_region + output_bytes) != 0) {
+int hipdnn_ep_disk_constant_gather_rows(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    int64_t num_indices, int64_t index_bytes, int64_t num_rows,
+    int64_t row_bytes, void *dst, bool allow_out_of_range) {
+  if (!state || !state->disk_constants || constant_index < 0 ||
+      (size_t)constant_index >= state->num_constants || !indices || !dst ||
+      (index_bytes != 4 && index_bytes != 8)) {
+    fprintf(stderr, "disk-resident gather: invalid arguments (index=%lld)\n",
+            (long long)constant_index);
+    return -1;
+  }
+  const DiskConstant &table = state->disk_constants[constant_index];
+  if (!table.data || num_rows <= 0 || row_bytes <= 0 ||
+      row_bytes * num_rows != table.size) {
+    fprintf(stderr,
+            "disk-resident gather: constant %lld is not a disk-resident table "
+            "of %lld rows x %lld bytes\n",
+            (long long)constant_index, (long long)num_rows,
+            (long long)row_bytes);
+    return -1;
+  }
+
+  const size_t indices_size = (size_t)(num_indices * index_bytes);
+  const size_t indices_region = (indices_size + 63) & ~size_t(63);
+  const size_t rows_size = (size_t)(num_indices * row_bytes);
+  if (ensure_disk_gather_staging(state, indices_region + rows_size) != 0) {
     return -1;
   }
   auto *host_indices = static_cast<uint8_t *>(state->disk_gather_staging);
   uint8_t *host_rows = host_indices + indices_region;
 
-  if (hipMemcpyAsync(host_indices, indices, indices_bytes,
-                     hipMemcpyDeviceToHost, state->stream) != hipSuccess ||
+  if (hipMemcpyAsync(host_indices, indices, indices_size, hipMemcpyDeviceToHost,
+                     state->stream) != hipSuccess ||
       hipStreamSynchronize(state->stream) != hipSuccess) {
-    fprintf(stderr, "wrap_gather_from_file: indices readback failed\n");
+    fprintf(stderr, "disk-resident gather: indices readback failed\n");
     return -1;
   }
 
-  std::vector<const uint8_t *> rows((size_t)indices_num_elements);
-  for (int64_t k = 0; k < indices_num_elements; ++k) {
-    int64_t row = indices_element_size_bytes == 8
+  std::vector<const uint8_t *> rows((size_t)num_indices);
+  for (int64_t k = 0; k < num_indices; ++k) {
+    int64_t row = index_bytes == 8
                       ? reinterpret_cast<const int64_t *>(host_indices)[k]
                       : reinterpret_cast<const int32_t *>(host_indices)[k];
     if (row < 0) {
-      row += axis_size;
+      row += num_rows;
     }
-    if (row < 0 || row >= axis_size) {
-      fprintf(stderr,
-              "wrap_gather_from_file: index %lld out of range [0, %lld)\n",
-              (long long)row, (long long)axis_size);
-      return -1;
+    if (row < 0 || row >= num_rows) {
+      if (!allow_out_of_range) {
+        fprintf(stderr,
+                "disk-resident gather: index %lld out of range [0, %lld)\n",
+                (long long)row, (long long)num_rows);
+        return -1;
+      }
+      row = 0;
     }
-    rows[(size_t)k] = table.data + (size_t)row * row_bytes;
+    rows[(size_t)k] = table.data + (size_t)row * (size_t)row_bytes;
   }
-  gather_rows(rows, row_bytes, host_rows);
+  gather_rows(rows, (size_t)row_bytes, host_rows);
 
-  if (hipMemcpyAsync(output, host_rows, output_bytes, hipMemcpyHostToDevice,
+  if (hipMemcpyAsync(dst, host_rows, rows_size, hipMemcpyHostToDevice,
                      state->stream) != hipSuccess ||
       hipStreamSynchronize(state->stream) != hipSuccess) {
-    fprintf(stderr, "wrap_gather_from_file: row upload failed\n");
+    fprintf(stderr, "disk-resident gather: row upload failed\n");
     return -1;
   }
   return 0;

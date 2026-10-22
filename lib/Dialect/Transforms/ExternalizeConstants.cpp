@@ -67,7 +67,8 @@ namespace hip {
 namespace {
 
 constexpr int64_t kConstantAlignment = 64;
-// Element count, so quantization does not move a table across the line. Sits
+// Logical element count (a 4-bit packed byte holds two), so quantization does
+// not move a table across the line. Sits
 // above the largest token embedding of common local LLMs (Gemma-3-27B,
 // 1.41e9) and below per-layer embedding tables (Gemma 3n E2B, 2.01e9).
 constexpr int64_t kMinDiskResidentGatherElements = 1600000000;
@@ -383,22 +384,40 @@ private:
   }
 
   bool isDiskResidentGatherTable(ConstantPlan &plan) const {
-    if (!skipData || !plan.externalize || plan.source != SourceKind::File ||
-        plan.numElements < kMinDiskResidentGatherElements) {
+    if (!skipData || !plan.externalize || plan.source != SourceKind::File) {
       return false;
     }
     Value result = plan.op.getResult();
+    if (result.use_empty()) {
+      return false;
+    }
     int64_t rank = plan.type.getRank();
-    return !result.use_empty() &&
-           llvm::all_of(result.getUses(), [&](OpOperand &use) {
-             auto gather = dyn_cast<hip::GatherOp>(use.getOwner());
-             if (!gather || use.getOperandNumber() !=
-                                gather.getDataMutable().getOperandNumber()) {
-               return false;
-             }
-             int64_t axis = static_cast<int64_t>(gather.getAxis());
-             return (axis < 0 ? axis + rank : axis) == 0;
-           });
+    auto isAxis0 = [rank](int64_t axis) {
+      return (axis < 0 ? axis + rank : axis) == 0;
+    };
+    int64_t elementsPerStored = 1;
+    for (OpOperand &use : result.getUses()) {
+      Operation *user = use.getOwner();
+      if (auto gather = dyn_cast<hip::GatherOp>(user)) {
+        if (use.getOperandNumber() !=
+                gather.getDataMutable().getOperandNumber() ||
+            !isAxis0(static_cast<int64_t>(gather.getAxis()))) {
+          return false;
+        }
+      } else if (auto gbq = dyn_cast<hip::GatherBlockQuantizedOp>(user)) {
+        if (use.getOperandNumber() != gbq.getDataMutable().getOperandNumber() ||
+            !isAxis0(static_cast<int64_t>(gbq.getGatherAxis()))) {
+          return false;
+        }
+        if (gbq.getBits() == 4) {
+          elementsPerStored = 2;
+        }
+      } else {
+        return false;
+      }
+    }
+    return plan.numElements * elementsPerStored >=
+           kMinDiskResidentGatherElements;
   }
 
   LogicalResult planInlineSource(ConstantPlan &plan) {

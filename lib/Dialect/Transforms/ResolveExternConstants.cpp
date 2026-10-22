@@ -138,13 +138,23 @@ void ResolveExternConstantsPass::runOnOperation() {
       auto getConstOp = hip::GetConstantOp::create(builder, loc, origMemRefType,
                                                    ctxArg, indexVal);
       if (info.diskResident) {
+        auto isGatherData = [](OpOperand &use) {
+          Operation *user = use.getOwner();
+          if (auto gather = dyn_cast<hip::GatherOp>(user)) {
+            return use.getOperandNumber() ==
+                   gather.getDataMutable().getOperandNumber();
+          }
+          if (auto gbq = dyn_cast<hip::GatherBlockQuantizedOp>(user)) {
+            return use.getOperandNumber() ==
+                   gbq.getDataMutable().getOperandNumber();
+          }
+          return false;
+        };
         for (OpOperand &use : getGlobalOp.getResult().getUses()) {
-          auto gather = dyn_cast<hip::GatherOp>(use.getOwner());
-          if (!gather || use.getOperandNumber() !=
-                             gather.getDataMutable().getOperandNumber()) {
+          if (!isGatherData(use)) {
             use.getOwner()->emitError(
-                "disk-resident constant has no GPU copy; only hip.gather data "
-                "may use it");
+                "disk-resident constant has no GPU copy; only hip.gather / "
+                "hip.gather_block_quantized data may use it");
             return signalPassFailure();
           }
         }
