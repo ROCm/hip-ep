@@ -1462,8 +1462,10 @@ int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
                                   void *pre_mix, void *output,
                                   int64_t stream_num_elements, int64_t branches,
                                   int64_t hidden, int64_t feature_gate,
+                                  int64_t gate_sigmoid,
                                   int64_t element_size_bytes,
                                   float reduction_scale) {
+  (void)gate_sigmoid;
   (void)streams;
   (void)pre_mix;
   (void)output;
@@ -1504,6 +1506,36 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
   return 0;
 }
 
+int wrap_hyper_connection_post_mix_norm(RuntimeState *state, void *streams,
+                                        void *block_output, void *gate,
+                                        void *stream_mix, void *norm_scale,
+                                        void *residual, void *normed,
+                                        int64_t stream_num_elements,
+                                        int64_t branches, int64_t hidden,
+                                        int64_t feature_gate,
+                                        int64_t gate_activation,
+                                        int64_t element_size_bytes,
+                                        float epsilon) {
+  (void)streams;
+  (void)block_output;
+  (void)gate;
+  (void)norm_scale;
+  (void)residual;
+  (void)normed;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_hyper_connection_post_mix_norm\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_hyper_connection_post_mix_norm(elements=%lld, "
+             "branches=%lld, hidden=%lld, feature_gate=%lld, "
+             "gate_activation=%lld, stream_mix=%s, element_size=%lld, "
+             "epsilon=%f)\n",
+             (long long)stream_num_elements, (long long)branches,
+             (long long)hidden, (long long)feature_gate,
+             (long long)gate_activation, stream_mix ? "yes" : "no",
+             (long long)element_size_bytes, (double)epsilon);
+  return 0;
+}
 
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *skip, void *gamma, void *bias,

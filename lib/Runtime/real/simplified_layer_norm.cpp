@@ -229,6 +229,7 @@ int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
                                   void *pre_mix, void *output,
                                   int64_t stream_num_elements, int64_t branches,
                                   int64_t hidden, int64_t feature_gate,
+                                  int64_t gate_sigmoid,
                                   int64_t element_size_bytes,
                                   float reduction_scale) {
   OP_PROFILE(
@@ -269,7 +270,8 @@ int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
   return hip_hyper_connection_pre_mix(
       hipdnn_ep_state_get_stream(state), streams, pre_mix, output,
       stream_num_elements / span, branches, hidden,
-      static_cast<int>(feature_gate), reduction_scale, hip_dtype);
+      static_cast<int>(feature_gate), static_cast<int>(gate_sigmoid),
+      reduction_scale, hip_dtype);
 }
 
 int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
@@ -318,4 +320,57 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
       hipdnn_ep_state_get_stream(state), streams, block_output, post_mix,
       stream_mix, output, stream_num_elements / span, branches, hidden,
       static_cast<int>(feature_gate), hip_dtype);
+}
+
+int wrap_hyper_connection_post_mix_norm(RuntimeState *state, void *streams,
+                                        void *block_output, void *gate,
+                                        void *stream_mix, void *norm_scale,
+                                        void *residual, void *normed,
+                                        int64_t stream_num_elements,
+                                        int64_t branches, int64_t hidden,
+                                        int64_t feature_gate,
+                                        int64_t gate_activation,
+                                        int64_t element_size_bytes,
+                                        float epsilon) {
+  OP_PROFILE(
+      "hyper_connection",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "post_norm %lldx%lld", (long long)branches,
+                 (long long)hidden);
+        return std::string(b);
+      },
+      state);
+  if (!state || !streams || !block_output || !gate || !norm_scale ||
+      !residual || !normed) {
+    fprintf(stderr, "Invalid arguments to wrap_hyper_connection_post_mix_norm\n");
+    return -1;
+  }
+  int64_t span = branches * hidden;
+  if (branches <= 0 || hidden <= 0 || span <= 0 ||
+      stream_num_elements % span != 0) {
+    fprintf(stderr,
+            "wrap_hyper_connection_post_mix_norm: elements=%lld branches=%lld "
+            "hidden=%lld\n",
+            (long long)stream_num_elements, (long long)branches,
+            (long long)hidden);
+    return -1;
+  }
+  int hip_dtype;
+  if (element_size_bytes == 2) {
+    hip_dtype = HIP_DTYPE_FLOAT16;
+  } else if (element_size_bytes == 4) {
+    hip_dtype = HIP_DTYPE_FLOAT32;
+  } else {
+    fprintf(stderr,
+            "wrap_hyper_connection_post_mix_norm: unsupported element_size "
+            "%lld (supported: 2=fp16, 4=fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  return hip_hyper_connection_post_mix_norm(
+      hipdnn_ep_state_get_stream(state), streams, block_output, gate,
+      stream_mix, norm_scale, residual, normed, stream_num_elements / span,
+      branches, hidden, static_cast<int>(feature_gate),
+      static_cast<int>(gate_activation), epsilon, hip_dtype);
 }

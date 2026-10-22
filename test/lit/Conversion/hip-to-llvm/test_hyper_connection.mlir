@@ -4,7 +4,7 @@
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // CHECK-LABEL: llvm.func @pre_mix
-// CHECK: llvm.call @wrap_hyper_connection_pre_mix({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, f32) -> i32
+// CHECK: llvm.call @wrap_hyper_connection_pre_mix({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32) -> i32
 func.func @pre_mix(%ctx: !hip.context) {
   %x = memref.alloc() : memref<1x4x10240xf16, 1>
   %g = memref.alloc() : memref<1x4x10240xf16, 1>

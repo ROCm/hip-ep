@@ -2253,6 +2253,7 @@ HIP_KERNEL_API int hip_hyper_connection_pre_mix(
     int64_t branches,
     int64_t hidden,
     int feature_gate,
+    int gate_sigmoid,
     float reduction_scale,
     int hip_dtype);
 
@@ -2269,6 +2270,22 @@ HIP_KERNEL_API int hip_hyper_connection_post_mix(
     int feature_gate,
     int hip_dtype);
 
+HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* gate,
+    const void* stream_mix,
+    const void* scale,
+    void* residual,
+    void* normed,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_activation,
+    float epsilon,
+    int hip_dtype);
 
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)

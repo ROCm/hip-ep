@@ -1700,8 +1700,10 @@ def Hip_HyperConnectionPreMixOp : Hip_DpsOp<"hyper_connection_pre_mix",
                                             /*declareInfer=*/1> {
   let summary = "com.microsoft HyperConnectionPreMix";
   let description = [{
-    Reduces C streams to one feature tensor. No activation is applied; a
-    preceding Sigmoid, when the model has one, stays outside this op. In FP32:
+    Reduces C streams to one feature tensor. `gate_sigmoid` 0 multiplies the
+    gate as given. `gate_sigmoid` 1 applies Sigmoid first and rounds that
+    result to the element type before the product, matching a separate
+    Sigmoid node. In FP32:
 
       Y[row, h] = reduction_scale * sum_c X[row, c, h] * pre_mix_gate[row, c, h]
 
@@ -1730,7 +1732,8 @@ def Hip_HyperConnectionPreMixOp : Hip_DpsOp<"hyper_connection_pre_mix",
     I64Attr:$hidden,
     I64Attr:$flattened,
     StrAttr:$gate_layout,
-    F32Attr:$reduction_scale
+    F32Attr:$reduction_scale,
+    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid
   );
 
   let assemblyFormat = [{
@@ -1802,6 +1805,58 @@ def Hip_HyperConnectionPostMixOp : Hip_DpsOp<"hyper_connection_post_mix",
   let hasVerifier = 1;
 }
 
+def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp<"hyper_connection_post_mix_norm",
+    /*traits=*/[AttrSizedOperandSegments],
+    /*outsAccessor=*/"Outputs",
+    /*autoReify=*/1,
+    /*autoInfer=*/0> {
+  let summary = "HyperConnectionPostMix fused with the following BranchwiseRMSNorm";
+  let description = [{
+    Post-mix followed by branchwise RMSNorm. `stream_mix` is optional and
+    defaults to the identity. `gate_activation` 0 multiplies `gate` as given.
+    `gate_activation` 1 treats `gate` as a pre-activation and applies
+    round(2 * sigmoid(round(gate / 4))) first. `gate_layout` matches
+    `hyper_connection_post_mix`. In FP32, each elementwise result is rounded
+    back to the element type before the next one:
+
+      g = gate_activation ? round(2 * round(sigmoid(round(gate / 4)))) : gate
+      base = stream_mix
+             ? sum_s stream_mix[row, s, k] * streams[row, s, h]
+             : streams[row, k, h]
+      residual = base + g * block_output
+      normed = branchwise_rms(residual) * scale
+
+    `outputs` is [residual, normed], both the streams shape. `norm_scale` is
+    1-D of length branches * hidden, one hidden-vector per branch.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$streams,
+    Hip_TensorOrMemRef:$block_output,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$norm_scale,
+    Optional<Hip_TensorOrMemRef>:$stream_mix,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$branches,
+    I64Attr:$hidden,
+    I64Attr:$flattened,
+    StrAttr:$gate_layout,
+    DefaultValuedAttr<I64Attr, "0">:$gate_activation,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $streams `,` $block_output `,` $gate `,` $norm_scale (`,` $stream_mix^)?
+        `:` type($streams) `,` type($block_output) `,` type($gate) `,`
+        type($norm_scale) (`,` type($stream_mix)^)?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
