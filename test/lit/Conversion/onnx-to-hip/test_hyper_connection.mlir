@@ -153,4 +153,61 @@ module {
     } : (tensor<1x2x10240xf16>, tensor<10240xf16>) -> tensor<1x2x10240xf16>
     return %y, %n : tensor<1x2x10240xf16>, tensor<1x2x10240xf16>
   }
+
+  // Absent epsilon uses the ORT default, 1e-5.
+  // CHECK-LABEL: func.func @post_mix_norm_default_epsilon
+  // CHECK: hip.hyper_connection_post_mix_norm
+  // CHECK-SAME: epsilon = 9.99999974E-6
+  func.func @post_mix_norm_default_epsilon(%x: tensor<2x3x32xf32>, %b: tensor<2x3x8xf32>, %g: tensor<2x3x4xf32>, %scale: tensor<32xf32>) -> (tensor<2x3x32xf32>, tensor<2x3x32xf32>) {
+    %y = "onnx.Custom"(%x, %b, %g) {
+      function_name = "HyperConnectionPostMix",
+      domain_name = "com.microsoft",
+      num_branches = 4 : si64
+    } : (tensor<2x3x32xf32>, tensor<2x3x8xf32>, tensor<2x3x4xf32>) -> tensor<2x3x32xf32>
+    %n = "onnx.Custom"(%y, %scale) {
+      function_name = "BranchwiseRMSNorm",
+      domain_name = "com.microsoft",
+      num_branches = 4 : si64
+    } : (tensor<2x3x32xf32>, tensor<32xf32>) -> tensor<2x3x32xf32>
+    return %y, %n : tensor<2x3x32xf32>, tensor<2x3x32xf32>
+  }
+
+  // (C, H) scale is not the fused rank-1 C*H form. PostMix lowers on its own.
+  // CHECK-LABEL: func.func @post_mix_norm_rank2_scale
+  // CHECK: hip.hyper_connection_post_mix(
+  // CHECK-NOT: hip.hyper_connection_post_mix_norm
+  // CHECK: hip.rms_norm
+  func.func @post_mix_norm_rank2_scale(%x: tensor<2x3x4x8xf32>, %b: tensor<2x3x8xf32>, %g: tensor<2x3x4xf32>, %scale: tensor<4x8xf32>) -> (tensor<2x3x4x8xf32>, tensor<2x3x4x8xf32>) {
+    %y = "onnx.Custom"(%x, %b, %g) {
+      function_name = "HyperConnectionPostMix",
+      domain_name = "com.microsoft"
+    } : (tensor<2x3x4x8xf32>, tensor<2x3x8xf32>, tensor<2x3x4xf32>) -> tensor<2x3x4x8xf32>
+    %n = "onnx.Custom"(%y, %scale) {
+      function_name = "BranchwiseRMSNorm",
+      domain_name = "com.microsoft",
+      epsilon = 1.000000e-05 : f32
+    } : (tensor<2x3x4x8xf32>, tensor<4x8xf32>) -> tensor<2x3x4x8xf32>
+    return %y, %n : tensor<2x3x4x8xf32>, tensor<2x3x4x8xf32>
+  }
+
+  // A scale defined after PostMix does not dominate the fused op.
+  // CHECK-LABEL: func.func @post_mix_norm_scale_after
+  // CHECK: hip.hyper_connection_post_mix(
+  // CHECK-NOT: hip.hyper_connection_post_mix_norm
+  // CHECK: hip.rms_norm
+  func.func @post_mix_norm_scale_after(%x: tensor<2x3x32xf32>, %b: tensor<2x3x8xf32>, %g: tensor<2x3x4xf32>) -> (tensor<2x3x32xf32>, tensor<2x3x32xf32>) {
+    %y = "onnx.Custom"(%x, %b, %g) {
+      function_name = "HyperConnectionPostMix",
+      domain_name = "com.microsoft",
+      num_branches = 4 : si64
+    } : (tensor<2x3x32xf32>, tensor<2x3x8xf32>, tensor<2x3x4xf32>) -> tensor<2x3x32xf32>
+    %scale = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<32xf32>} : () -> tensor<32xf32>
+    %n = "onnx.Custom"(%y, %scale) {
+      function_name = "BranchwiseRMSNorm",
+      domain_name = "com.microsoft",
+      epsilon = 1.000000e-05 : f32,
+      num_branches = 4 : si64
+    } : (tensor<2x3x32xf32>, tensor<32xf32>) -> tensor<2x3x32xf32>
+    return %y, %n : tensor<2x3x32xf32>, tensor<2x3x32xf32>
+  }
 }

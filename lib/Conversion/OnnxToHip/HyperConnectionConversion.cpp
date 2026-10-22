@@ -339,15 +339,30 @@ bool matchInjectChain(mlir::Value gate, InjectChain &chain) {
   return true;
 }
 
-// applicable is set once the norm user is the fusion target, so a shape
-// mismatch does not fall through to an unfused post-mix and leave the norm
-// without a lowering.
+// A BlockArgument of this block or an ancestor, or a value defined earlier
+// in the same block. The fused op is inserted at `op`, so the norm scale
+// has to dominate that point.
+bool definedBefore(mlir::Value value, mlir::Operation *op) {
+  if (mlir::isa<mlir::BlockArgument>(value)) {
+    mlir::Block *owner = mlir::cast<mlir::BlockArgument>(value).getOwner();
+    for (mlir::Operation *cursor = op; cursor; cursor = cursor->getParentOp()) {
+      if (cursor->getBlock() == owner)
+        return true;
+    }
+    return false;
+  }
+  mlir::Operation *def = value.getDefiningOp();
+  return def && def->getBlock() == op->getBlock() && def->isBeforeInBlock(op);
+}
+
+// Fuse a following BranchwiseRMSNorm only when its scale is rank-1 of length
+// branches * hidden and dominates this op. Anything else falls through to the
+// unfused post-mix; the standalone BranchwiseRMSNorm lowering then takes the
+// norm.
 mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
                                     mlir::PatternRewriter &rewriter,
                                     const StreamParams &params,
-                                    mlir::Value streamMix, int64_t gateLayout,
-                                    bool &applicable) {
-  applicable = false;
+                                    mlir::Value streamMix, int64_t gateLayout) {
   mlir::Operation *norm = nullptr;
   for (mlir::Operation *user : op->getResult(0).getUsers()) {
     auto funcName = user->getAttrOfType<mlir::StringAttr>("function_name");
@@ -363,7 +378,6 @@ mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
   if (!norm || norm->getNumOperands() != 2 || norm->getNumResults() != 1 ||
       norm->getOperand(0) != op->getResult(0))
     return mlir::failure();
-  applicable = true;
 
   mlir::Value gate = op->getOperand(2);
   int64_t gateActivation = 0;
@@ -380,7 +394,7 @@ mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
       mlir::dyn_cast<mlir::RankedTensorType>(norm->getResult(0).getType());
   if (!streamsType || !scaleType || !normType || scaleType.getRank() != 1 ||
       scaleType.getElementType() != streamsType.getElementType() ||
-      normType != streamsType)
+      normType != streamsType || !definedBefore(scale, op))
     return mlir::failure();
   int64_t scaleLen = scaleType.getDimSize(0);
   if (mlir::ShapedType::isDynamic(scaleLen) ||
@@ -390,7 +404,7 @@ mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
     if (attr.getValue().getSExtValue() != params.branches)
       return mlir::failure();
   }
-  float epsilon = 1e-6f;
+  float epsilon = 9.99999974E-6f;
   if (auto attr = norm->getAttrOfType<mlir::FloatAttr>("epsilon"))
     epsilon = attr.getValue().convertToFloat();
 
@@ -497,13 +511,9 @@ struct HyperConnectionPostMixToHip : public mlir::RewritePattern {
       }
     }
 
-    bool applicable = false;
-    if (mlir::succeeded(fusePostMixNorm(op, rewriter, params, streamMix,
-                                        gateLayout, applicable)))
+    if (mlir::succeeded(
+            fusePostMixNorm(op, rewriter, params, streamMix, gateLayout)))
       return mlir::success();
-    if (applicable)
-      return rewriter.notifyMatchFailure(
-          op, "HyperConnectionPostMix norm fusion inputs do not match");
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
