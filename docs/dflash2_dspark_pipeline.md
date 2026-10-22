@@ -4,139 +4,126 @@ Licensed under the MIT License.
 -->
 # DSpark and DFlash2 speculative decoding for Qwen3.8-27B on hip-ep
 
-How the DSpark and DFlash2 block drafters are exported to ONNX and run as speculative
-decoders on hip-ep on the AMD Strix Halo iGPU (gfx1151), driven by
+How the DSpark and DFlash2 block drafters run as speculative decoders on hip-ep on the AMD
+Strix Halo iGPU (gfx1151), driven by
 [`scripts/run_dflash2_dspark_pipeline.py`](../scripts/run_dflash2_dspark_pipeline.py).
 
 **Status.** On 240 Spec-Bench prompts (128 new tokens, baseline 13.36 tok/s), DFlash2 k=5 is
 fastest at **2.01x**, ahead of DSpark k=5 at 1.70x and the model's MTP head (k=2) at 1.41x.
-These are single passes, and the benchmark loops have a known EOS artifact (section 7), so
+These are single passes, and the benchmark loop has a known EOS artifact (section 5), so
 treat them as preliminary.
 
-**Where the files live.** This repository holds only the EP, this document and the pipeline
-script. Everything else is in a separate speculative-decoding workspace, `$WS`, with the
-hip-ep checkout at `$WS/hip-ep`:
+---
 
-| Location | Contents |
+## Scope: what is in this repository
+
+This change adds the pipeline script and this document. It makes **no hip-ep source change**:
+the drafters are exported to ONNX graphs that hip-ep already runs under
+`HIPDNN_EP_STRICT=1`, with no CPU fallback.
+
+The speculative-decoding logic itself (the ONNX exporter, the draft/verify/accept loop and
+the Spec-Bench driver) is host-side Python in an **external harness that is not part of
+hip-ep**. The script orchestrates it and does not reimplement it. The script calls these
+harness entry points, found in the directory given by `--harness` (or `$SPEC_HARNESS`):
+
+| Stage | Harness entry point |
 |---|---|
-| `$WS/tools/eagle3/` | the **harness**: exporters, runners, Spec-Bench driver (not hip-ep's own `tools/`) |
-| `$WS/design/` | probe scripts, PowerShell wrappers, results, phase reports |
-| `$WS/models/`, `$WS/data/` | target, drafters, embedding table (git-ignored); Spec-Bench questions |
-| `$WS/build/hip-ep/` | a hip-ep build tree, written `$BUILD` |
+| `export` | `qwen36_fixups.py` (target tap graph), `dflash_export.py` (drafter ONNX) |
+| `sanity`, `bench`, `summarize` | `qwen38_spec_bench.py` |
+| `validate` (opt-in) | `dflash_capture.py`, `dflash_parity.py`, `dflash_runner.py` |
 
-The pipeline script runs from `$WS/hip-ep`; harness commands
-(`.\.venv\Scripts\python.exe tools\eagle3\...`) run from `$WS`. The EAGLE-3 / MTP pipeline
-([`spec_decode_pipeline.md`](spec_decode_pipeline.md)) uses the same split.
+`preflight` checks that the `export` and `bench` entry points exist before anything runs.
+The EAGLE-3 / MTP
+pipeline ([`spec_decode_pipeline.md`](spec_decode_pipeline.md)) uses the same split.
 
 ---
 
 ## Quick start
 
-You need the workspace with its `.venv`, the target model with `mtp.onnx` and the embedding
-table (section 2), and a hip-ep build in `$WS/build/hip-ep`. Run everything from `$WS/hip-ep`.
-Any `python` will do: the script runs the harness with `$WS\.venv` and sets up `PATH` and the
-EP for it.
+You need:
+
+- a hip-ep build with [PR #1043](https://github.com/ROCm/hip-ep/pull/1043), built per
+  [`quick_start.md`](quick_start.md);
+- the harness directory and a Python 3.13 environment with `onnx`, `onnxruntime`, `numpy`,
+  `safetensors`, `tokenizers` and `huggingface_hub` (no torch);
+- a models root holding the target with `mtp.onnx` beside it, and its embedding table
+  (section 1);
+- Strix Halo gfx1151 on Windows 11 and NTFS, and about 10 GB of free disk.
+
+Run from the hip-ep checkout. `HARNESS`, `MODELS` and `BUILD` stand for your three paths:
 
 ```powershell
-# 1. check what is there (seconds, no GPU); every line should end OK, or TODO before export
-python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b --stages preflight
+$common = "--preset", "qwen38-27b", "--harness", $HARNESS, "--models-root", $MODELS, `
+          "--hipep-build", $BUILD, "--python", $PYTHON
 
-# 2. if anything is missing: download the drafters and build the graphs
-#    (about 1 minute after the download), then preflight runs again
-python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b --fetch --stages preflight,export
+# 1. check what is there (seconds, no GPU); every line should end OK, or TODO before export
+python scripts/run_dflash2_dspark_pipeline.py @common --stages preflight
+
+# 2. download the drafters at their pinned revisions and build the graphs (about 1 minute
+#    after the download); preflight runs again afterwards
+python scripts/run_dflash2_dspark_pipeline.py @common --fetch --stages preflight,export
 
 # 3. smoke test: one prompt per subtask on every arm (about 2 minutes)
-python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b --stages preflight,sanity
+python scripts/run_dflash2_dspark_pipeline.py @common --stages preflight,sanity
 
 # 4. the full Spec-Bench run (about 3 hours); the tables print at the end
-python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b `
-    --json ../design/results/qwen38/spec_bench.json
+python scripts/run_dflash2_dspark_pipeline.py @common --json results/qwen38_spec_bench.json
 
-# 5. after an interruption, continue the same JSON (the arguments after `--` go to the bench)
-python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b `
-    --json ../design/results/qwen38/spec_bench.json --stages bench,summarize -- --resume
+# 5. after an interruption, continue the same JSON (arguments after `--` go to the bench)
+python scripts/run_dflash2_dspark_pipeline.py @common --json results/qwen38_spec_bench.json `
+    --stages bench,summarize -- --resume
 ```
 
 Preflight marks each check `OK`, `TODO` (export will build it), `MISS` (stop and fix; the
-message says how) or `WARN`. To see the commands without running them, add `--dry-run`. If
-the checkout is not at `$WS/hip-ep`, pass `--harness`, `--models-root` and `--hipep-build`.
-Section 5 lists the stages and options, and section 8 covers errors.
+message says how) or `WARN`. Add `--dry-run` to print the commands without running them. When
+the checkout sits next to the harness in a workspace laid out as `$WS/hip-ep` and
+`$WS/tools/eagle3`, the four path flags can be omitted.
+
+**Stages.** A failing stage stops the run. Stages always run in this order, whatever order
+`--stages` lists them in.
+
+| Stage | Does |
+|---|---|
+| `preflight` | Checks every input, the taps in the target graph, that each drafter was exported for the layers that graph taps, that `target.onnx.data` is a hard link to this target's weights, the EP library, the harness Python's packages and free disk. |
+| `export` | Builds the tap graph and drafters if missing (`--fetch` downloads checkpoints). Re-exports a partial drafter; stops on a tap graph built with other flags. |
+| `sanity` | One prompt per subtask, 16 tokens, every arm. |
+| `bench` | The Spec-Bench run (`--json` required). Refuses an existing JSON unless `-- --resume` or `--overwrite`. Ctrl+C keeps the partial JSON and exits 130. |
+| `summarize` | Re-prints the tables from the JSON, no GPU (skipped if `bench` just printed them). |
+| `validate` | Opt-in, about 3 minutes: per drafter, ONNX-vs-reference parity and acceptance replay on hip-ep. |
+
+**Presets.**
+
+| Preset | Arms |
+|---|---|
+| `qwen38-27b` | `none, mtp:2, dspark:3, dspark:5, dflash2:3, dflash2:5` |
+| `qwen38-27b-dflash2`, `qwen38-27b-dspark` | `none` plus that drafter at k=3 and 5 |
+| `qwen36-27b`, `qwen36-27b-dflash2` | Qwen3.6-27B with the z-lab DFlash and community drafters; not covered here |
+
+Other options: `--arms`, `--per-task`, `--max-new`, `--max-context`, `--no-strict`,
+`--keep-env`, `--list-presets`. For a quick timed run, `--per-task 1 --max-new 32` takes about
+2 minutes. The script removes every hip-ep tuning variable (`HIPDNN_EP_DEBUG`,
+`HIPDNN_EP_PERF`, `HIPDNN_EP_MATMUL_*`, `HIPDNN_*_AUTOTUNE_MODE`) from its children and sets
+`HIPDNN_EP_STRICT=1`, so a leaked variable cannot change what is measured. Run GPU
+benchmarks serially.
 
 ---
 
-## 1. Overview
-
-DSpark and DFlash2 are **block drafters**: one draft call proposes up to 7 tokens, instead
-of the k sequential calls of an MTP or EAGLE-3 head, conditioned on hidden states from five
-intermediate target layers.
-
-```
- HF BF16 checkpoint --> dflash_export.py --> W4A16 draft ONNX (+ host codebooks)
-                                                        |
- AMD int4 target ONNX --> qwen36_fixups.py --> text_hipep_all.onnx (target + 5-layer tap
-                                                                    + MTP taps)
-                                                        v
-                         dflash_runner.py / qwen38_spec_bench.py / qwen38_chat.py:
-                         draft -> verify -> accept on hip-ep, IOBinding, device-resident caches
-```
-
-- All speculative logic is host-side Python in the harness; **no hip-ep source change**.
-- Both drafters share one exporter, one runtime class (`BlockDrafter`) and one loop.
-- CPU fallback is disabled, so an unsupported node fails loudly.
-- The target's files are never modified; new graphs share its weights through a hard link.
-- Every emitted token is the target's greedy argmax; outputs differ from k=0 only at fp16
-  near-ties.
-
----
-
-## 2. Environment and target
-
-Requirements: Strix Halo gfx1151 on Windows 11 and NTFS; hip-ep with
-[PR #1043](https://github.com/ROCm/hip-ep/pull/1043), built per
-[`quick_start.md`](quick_start.md); `$WS/.venv` (Python 3.13) with `onnx`, `onnxruntime`,
-`numpy`, `safetensors`, `tokenizers`, `huggingface_hub` (no torch); about 10 GB free disk.
-
-```powershell
-Set-Location $WS
-$BUILD = "$WS\build\hip-ep"
-$env:PATH = "$BUILD\_therock\bin;" + $env:PATH
-$env:HIPEP_EP_BIN = "$BUILD\bin"
-$env:PYTHONIOENCODING = "utf-8"
-$env:HIPDNN_EP_STRICT = "1"      # fail if a graph cannot compile fully on the GPU
-# before benchmarks, clear HIPDNN_EP_DEBUG, HIPDNN_EP_PERF and every HIPDNN_EP_MATMUL_* /
-# HIPDNN_*_AUTOTUNE_MODE override; a leaked one changes what is measured
-```
-
-The pipeline script does all of this for its children; you only need it to run harness
-commands by hand. Run GPU benchmarks serially.
+## 1. Target and drafters
 
 **Target.** AMD's `Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx` (HF tree
-`3d00750a`) in `$WS/models/amd_hipep_qwen38_27b/`, without the vision encoder. It takes
-`inputs_embeds`, so the host looks embeddings up from
-`$WS/models/qwen3.8-27b-mtp-src/embed_tokens_fp16.npy` (from the Qwen3.8 MTP work;
-`qwen36_embedding.py` can rebuild it). `mtp.onnx` must already sit beside the target.
+`3d00750a`), text graph only, in `<models-root>/models/amd_hipep_qwen38_27b/`. It takes
+`inputs_embeds`, so the host looks embeddings up from an fp16 table at
+`<models-root>/models/qwen3.8-27b-mtp-src/embed_tokens_fp16.npy`. `mtp.onnx` must already sit
+beside the target; this script does not build it. Qwen3.8-27B is hybrid (16 attention and
+48 Gated DeltaNet layers).
 
-**Tap graph.** Structure-only surgery that shares `text.onnx.data`:
+**Tap graph.** `export` writes `text_hipep_all.onnx` beside the target by structure-only
+surgery that shares `text.onnx.data`. It unprunes `lm_head` so every verify row gets logits,
+adds the MTP hidden taps, and adds one output `dflash_context [batch, seq, 25600]`: the
+residuals entering layers 6, 20, 34, 48 and 62. One graph serves every arm, so the baseline
+runs on identical weights.
 
-```powershell
-.\.venv\Scripts\python.exe tools\eagle3\qwen36_fixups.py `
-    --in-dir models\amd_hipep_qwen38_27b --in-model text.onnx --out text_hipep_all.onnx `
-    --no-repair-mask-ref --no-mha-to-gqa `
-    --unprune-lm-head --add-hidden-taps --add-dflash-context
-```
-
-`--unprune-lm-head` gives logits for every verify row; `--add-dflash-context` adds one output
-`dflash_context [batch, seq, 25600]`, the residuals entering layers 6, 20, 34, 48 and 62
-(`--dflash-layers` overrides); `--add-hidden-taps` feeds the MTP head, so one graph serves
-every arm. Without it, and with `--out text_hipep_dflash.onnx`, you get the drafter-only graph
-the single-prompt tools default to.
-
-Qwen3.8-27B is hybrid (16 attention + 48 Gated DeltaNet layers). The target runtime keeps all
-state on the device and double-buffers the DeltaNet state so one call can be rewound.
-
----
-
-## 3. Drafters: checkpoints, export and validation
+**Drafters.**
 
 | | DSpark | DFlash2 |
 |---|---|---|
@@ -149,23 +136,14 @@ state on the device and double-buffers the DeltaNet state so one call can be rew
 | Extra | - | 2-tap dynamic conv around attention and MLP |
 
 Both are 5-layer Qwen3-style transformers (hidden 5120, 32 Q / 8 KV heads) that reuse the
-target's embedding table and 248,320-token `lm_head`. Context rows `[*, 25600]` are projected
-into a persistent draft KV cache; the block attends non-causally over `[cache ; block]` and
-its rows are discarded after each call. Both were trained against the FP8 target, so
-acceptance on int4 is below the model cards.
+target's embedding table and 248,320-token `lm_head`. Context rows are projected into a
+persistent draft KV cache; the block attends non-causally over `[cache ; block]` and its rows
+are discarded after each call. Both were trained against the FP8 target, so acceptance on
+int4 is below the model cards.
 
-**Download and export.** `--fetch` downloads `model.safetensors` and `config.json` at the
-pinned revisions into `$WS/models/qwen3.8-27b-spec/src/{dspark,dflash2}`. Then:
-
-```powershell
-.\.venv\Scripts\python.exe tools\eagle3\dflash_export.py `
-    --src models\qwen3.8-27b-spec\src\dspark  --out-dir models\qwen3.8-27b-spec\dspark-w4a16
-.\.venv\Scripts\python.exe tools\eagle3\dflash_export.py `
-    --src models\qwen3.8-27b-spec\src\dflash2 --out-dir models\qwen3.8-27b-spec\dflash2-w4a16
-```
-
-Each output directory gets the graph (1.17 GB / 1.04 GB of weights), `draft_config.json`,
-`target.onnx.data` and, for DFlash2, two 127 MB codebooks. Export choices:
+**Export choices.** Each drafter directory under `<models-root>/models/qwen3.8-27b-spec/`
+gets the graph (1.17 GB / 1.04 GB of weights), `draft_config.json`, `target.onnx.data` and,
+for DFlash2, two 127 MB codebooks.
 
 - **W4A16**: linear layers as int4 `MatMulNBits` (block 32), norms and gather tables fp16.
 - **Shared `lm_head`**: `target.onnx.data` is an NTFS hard link to the target's 13.4 GB data,
@@ -175,34 +153,15 @@ Each output directory gets the graph (1.17 GB / 1.04 GB of weights), `draft_conf
 - **No `ArgMax` / `TopK`**: reduce-based argmax for DSpark and an exact two-stage top-16 for
   DFlash2 cut a call from 238 ms to 18 ms and from 79 ms to 17 ms.
 - **Draft cache**: per layer, two chained `GroupQueryAttention` appends fill one buffer and a
-  no-past `Attention` reads it under a host-built mask (section 6 explains why).
+  no-past `Attention` reads it under a host-built mask (section 3 explains why).
 
-**Validate** with `--ep hipgpu --iobinding` and `HIPDNN_EP_STRICT=1`, or the pipeline's
-`validate` stage:
-
-```powershell
-# record a greedy trajectory with context features (--prompt-file for the report prompt)
-.\.venv\Scripts\python.exe tools\eagle3\dflash_capture.py --ep hipgpu --iobinding --chat -n 256 `
-    --target-dir models\amd_hipep_qwen38_27b --target text_hipep_dflash.onnx `
-    --embed models\qwen3.8-27b-mtp-src\embed_tokens_fp16.npy `
-    --tokenizer-dir models\amd_hipep_qwen38_27b --out models\qwen3.8-27b-spec\ref\traj_phasem.npz
-# ONNX drafter vs the fp32 numpy reference (dflash_ref.py), same int4 weights
-.\.venv\Scripts\python.exe tools\eagle3\dflash_parity.py --ep hipgpu --iobinding --ref-quant `
-    --draft-dir models\qwen3.8-27b-spec\dspark-w4a16 --src models\qwen3.8-27b-spec\src\dspark `
-    --traj models\qwen3.8-27b-spec\ref\traj_report.npz
-# acceptance by depth on hip-ep
-.\.venv\Scripts\python.exe tools\eagle3\dflash_runner.py --ep hipgpu --iobinding `
-    --draft-dir models\qwen3.8-27b-spec\dflash2-w4a16 --replay models\qwen3.8-27b-spec\ref\traj_phasem.npz
-```
-
-Parity against the int4-rounded reference is 1.3-1.5% relative L2 on the hidden states, with
-21/21 (DSpark) and 19/21 (DFlash2, one near-tie) drafted tokens equal, on both CPU EP and
-hip-ep. Speculative runs verify at width 8 and k=0 at width 1, so fp16 reductions can flip a
-near-tie; `qwen38_verify_margin.py` checks a divergence is a tie, and every one checked was.
+**Validation.** Against an fp32 reference using the same int4-rounded weights, the ONNX
+drafters are within 1.3-1.5% relative L2 on the hidden states, with 21/21 (DSpark) and 19/21
+(DFlash2, one near-tie) drafted tokens equal, on both CPU EP and hip-ep.
 
 ---
 
-## 4. Runtime
+## 2. Runtime loop
 
 `pending` holds tokens the target committed but has not consumed; its last element is the
 **anchor**. Each iteration:
@@ -215,75 +174,19 @@ near-tie; `qwen38_verify_margin.py` checks a divergence is a tie, and every one 
            next verify call (DeltaNet state cannot be partially undone)
 ```
 
-Only accepted positions enter the draft cache, so it never needs replaying. Verify width
-(`pending + drafts`) is capped at 8 because width 8 costs 217 ms by default against 95 ms with
-`HIPDNN_EP_MATMUL_DP4A_MAX_M=8`; the runner sets that variable for its own process unless it
-is already set. hip-ep compiles per input shape, so the runner warms every verify width and
-draft context width before timing.
+Every emitted token is the target's greedy argmax. Only accepted positions enter the draft
+cache, so it never needs replaying. The target keeps all state on the device and
+double-buffers the DeltaNet state so one call can be rewound. Verify width
+(`pending + drafts`) is capped at 8 because width 8 costs 217 ms by default against 95 ms
+with `HIPDNN_EP_MATMUL_DP4A_MAX_M=8`, which the runtime sets for its own process unless it is
+already set. hip-ep compiles per input shape, so every verify width and draft context width
+is warmed before timing.
 
 ---
 
-## 5. Running it
+## 3. hip-ep behaviours that shaped the export
 
-**Single prompt**, sweeping k (0 is the baseline):
-
-```powershell
-.\.venv\Scripts\python.exe tools\eagle3\dflash_runner.py --ep hipgpu --iobinding --chat `
-    --draft-dir models\qwen3.8-27b-spec\dflash2-w4a16 `
-    --sweep 0,3,5,7 -n 128 --warmup 16 --max-context 1024 `
-    --json design\results\qwen38\dflash_e2e_dflash2_phasem.json
-```
-
-Useful options: `--prompt` / `--prompt-file`, `--width-cap` (8), `--max-pending` (8),
-`--dp4a-max-m` (8, 0 leaves the default), `--verify-text` (abort on divergence), `--show`.
-
-**Spec-Bench**, all arms paired per prompt on one loaded target:
-
-```powershell
-.\.venv\Scripts\python.exe tools\eagle3\qwen38_spec_bench.py --ep hipgpu --iobinding `
-    --arms none,mtp:2,dspark:3,dspark:5,dflash2:3,dflash2:5 --per-task 40 -n 128 `
-    --max-context 1792 --json design\results\qwen38\spec_bench.json
-```
-
-Arms are `none | mtp:<k> | dspark:<k> | dflash2:<k>`, optionally `:cap<N>` or `:mp<N>`.
-`--per-task N` takes the first N prompts of each of the six subtasks. The JSON is rewritten
-per prompt, so `--resume` continues and `--summarize-only` re-prints. 240 prompts take about
-3 hours.
-
-**Chat**: `qwen38_chat.py --ep hipgpu --iobinding --head dflash2`, with `/head`, `/k`,
-`/compare`, `/think` and `/stats`.
-
-**Pipeline script.** Each stage runs a harness command; a failing stage stops the run.
-Stages always run in the order below, whatever order `--stages` lists them in.
-
-| Stage | Does |
-|---|---|
-| `preflight` | Checks every input, the taps in the target graph, that each drafter was exported for the layers that graph taps, that `target.onnx.data` is a hard link to this target's weights, the build tree and free disk. |
-| `export` | Builds the tap graph and drafters if missing (`--fetch` downloads checkpoints). Re-exports a partial drafter; stops on a tap graph built with other flags. |
-| `sanity` | One prompt per subtask, 16 tokens, every arm. |
-| `bench` | The Spec-Bench run (`--json` required). Refuses an existing JSON unless `-- --resume` or `--overwrite`. |
-| `summarize` | Re-prints the tables from the JSON, no GPU (skipped if `bench` just printed them). |
-| `validate` | Opt-in, about 3 minutes: trajectories, parity and replay per drafter. |
-
-| Preset | Arms |
-|---|---|
-| `qwen38-27b` | `none, mtp:2, dspark:3, dspark:5, dflash2:3, dflash2:5` |
-| `qwen38-27b-dflash2`, `qwen38-27b-dspark` | `none` plus that drafter at k=3 and 5 |
-| `qwen36-27b`, `qwen36-27b-dflash2` | Qwen3.6-27B with z-lab DFlash and community drafters; not covered here |
-
-Options: `--harness`, `--models-root`, `--hipep-build`, `--python`, `--stages`, `--json`,
-`--overwrite`, `--arms` / `--per-task` / `--max-new` / `--max-context` overrides, `--fetch`,
-`--no-strict`, `--keep-env`, `--dry-run`, `--list-presets`. `--python` defaults to
-`$WS\.venv` and `--hipep-build` to `$WS\build\hip-ep` (or `$HIP_EP_BUILD`). Arguments after
-`--` go to `qwen38_spec_bench.py` (for example `-- --resume` or `-- --only-task qa`). Ctrl+C
-keeps what the bench has written and exits 130. Every stage has been run end to end on a
-fresh models root. For a quick timed run, `--per-task 1 --max-new 32` takes about 2 minutes.
-
----
-
-## 6. hip-ep behaviours that shaped the design
-
-Found with `$WS/design/scripts/dflash_probe_attn.py`; all are worked around in the exporter.
+All are worked around in the exporter.
 
 | Behaviour | Workaround |
 |---|---|
@@ -297,13 +200,13 @@ See also [`supported-operations.md`](supported-operations.md).
 
 ---
 
-## 7. Results
+## 4. Results
 
-Qwen3.8-27B int4 gs128, hipgpu EP, strict, greedy, 128 new tokens, verify width cap 8. Results
-are in `$WS/design/results/qwen38/`.
+Qwen3.8-27B int4 gs128, hipgpu EP, IOBinding, strict, greedy, 128 new tokens, verify width
+cap 8, `--preset qwen38-27b`.
 
-**Spec-Bench, 240 prompts** (40 per subtask, single pass). "Clean" drops 10 prompts hit by the
-EOS artifact below; intervals are 95% bootstrap over prompts.
+**Spec-Bench, 240 prompts** (first 40 per subtask, single pass). "Clean" drops 10 prompts hit
+by the EOS artifact (section 5); intervals are 95% bootstrap over prompts.
 
 | Arm | tok/s | speedup (CI) | clean speedup (CI) |
 |---|---|---|---|
@@ -326,48 +229,48 @@ EOS artifact below; intervals are 95% bootstrap over prompts.
 DFlash2 k=5 wins every subtask, and k=5 beats k=3 for both drafters (k=6 and 7 were not run).
 Acceptance by depth for DFlash2 k=5 is 83 / 63 / 46 / 33 / 25%.
 
-**Single prompts.** On the Phase-M prompt, DFlash2 k=3 reaches 23.68 tok/s (1.79x) and DSpark
-k=3 18.42 tok/s (1.39x), against 1.52x for MTP k=2. Offline acceptance tracks the llama.cpp
-report closely at k <= 4.
-
-**EOS artifact.** The benchmark loops stop only when the *last* pending token is EOS. If EOS
-lands mid-chain they run on to `--max-new` and truncate, so a short answer shows about
-2 tok/s. It hit 10 of 240 prompts (9 translation) and is not fixed yet; the chat tool already
-stops at the first EOS.
-
-Not yet done: repeated runs, longer generations and contexts, tie-checking every Spec-Bench
-divergence (127-138 of 240 outputs per arm are token-identical to the baseline).
+Speculative runs verify at width 8 and the baseline at width 1, so fp16 reductions can flip
+a near-tie: 127-138 of 240 outputs per arm are token-identical to the baseline. Every
+divergence checked was such a tie; not all were checked.
 
 ---
 
-## 8. Troubleshooting
+## 5. Known limitations
+
+- **EOS artifact.** The benchmark loop stops only when the *last* pending token is EOS. If
+  EOS lands mid-chain it runs on to `--max-new` and truncates, so a short answer shows about
+  2 tok/s. It hit 10 of 240 prompts (9 translation) and is not fixed yet.
+- Single passes only; no repeated runs, longer generations or longer contexts yet.
+
+---
+
+## 6. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| `has no output(s) ['dflash_context']` | Target graph built without `--add-dflash-context` (section 2). |
-| Access violation or `morphizen-ep.cpp:408` at session creation | Unconsumed node output or symbolic `Concat` in a hand-edited graph (section 6). |
+| `preflight` reports a `harness:` line as MISS | `--harness` does not point at the harness directory. |
+| `preflight` reports `harness python` MISS | That interpreter lacks a package the stage needs; install it or pass `--python`. |
+| `has no output(s) ['dflash_context']` | The target graph was built without the DFlash context tap; delete it and rerun `export`. |
+| Access violation or `morphizen-ep.cpp:408` at session creation | Unconsumed node output or symbolic `Concat` in a hand-edited graph (section 3). |
 | `registered ... but reports no devices` | ROCm runtime not on `PATH`, or a session without GPU access. |
-| Pages of JIT errors such as `Symbols not found: hipblasLtCreate` | An old `hipgpu.dll` was picked up (for example from `$WS\local\bin`) without its ROCm runtime. Check the `hip-ep` line the script prints; pass `--hipep-build`. |
-| `preflight` reports `harness python` MISS | That interpreter lacks a package the stage needs; install it in `$WS\.venv` or pass `--python`. |
+| Pages of JIT errors such as `Symbols not found: hipblasLtCreate` | An old `hipgpu.dll` was picked up without its ROCm runtime. Check the `hip-ep` line the script prints; pass `--hipep-build`. |
 | Load error naming an unsupported node | CPU fallback is off by design; fix the node. |
 | `draft cache overflow` / `KV overflow` | Raise `--max-context`. |
 | Hard-link failure, or `preflight` reports the `lm_head link` is not a hard link | Delete the drafter's `target.onnx.data` and export on the same NTFS volume as the target. |
-| `preflight` reports mismatched `tap layers` | The drafter and the tap graph disagree on the five layers (for example a Qwen3.8-tap drafter on a Qwen3.6-tap graph). Use the preset that pairs them; it would otherwise run with low acceptance and no error. |
+| `preflight` reports mismatched `tap layers` | The drafter and the tap graph disagree on the five layers. Use the preset that pairs them; it would otherwise run with low acceptance and no error. |
 | `bench` refuses to start: the JSON already exists | Add `-- --resume` to continue it, or `--overwrite` to start over. |
-| NaN / inf, large `draft_health` | Graph predates the residual scale; re-export. |
-| DSpark call ~240 ms, DFlash2 ~79 ms or more | Exported with `--argmax topk`; re-export with the default. |
 | Verify ~217 ms at width 8 | `HIPDNN_EP_MATMUL_DP4A_MAX_M` below 8. |
-| Inconsistent numbers | A leaked `HIPDNN_*` variable or another process on the GPU. |
-| ~2 tok/s on a speculative arm, mostly translation | The EOS artifact (section 7). |
+| Inconsistent numbers | A leaked `HIPDNN_*` variable (`--keep-env` was passed) or another process on the GPU. |
+| ~2 tok/s on a speculative arm, mostly translation | The EOS artifact (section 5). |
 
 ---
 
-## 9. References
+## 7. References
 
 - This repository: [`spec_decode_pipeline.md`](spec_decode_pipeline.md),
   [`quick_start.md`](quick_start.md), [`supported-operations.md`](supported-operations.md),
   [PR #1043](https://github.com/ROCm/hip-ep/pull/1043).
-- Workspace: project notes in `$WS/.cursor/skills/hip-ep-dspark-dflash2/`, interim report
-  `$WS/design/PHASE_W_QWEN38_DSPARK_DFLASH2.md`, earlier phases `$WS/design/PHASE_*.md`.
-- External: SpecForge `dflash.py` / `dspark.py`; llama.cpp b11120 (`src/models/dflash.cpp`,
-  `common/speculative.cpp`).
+- Drafter checkpoints: `RadixArk/Qwen3.8-27B-DSpark`, `incoai/Qwen3.8-27B-DFlash2` (Hugging
+  Face, revisions in section 1).
+- Reference implementations: SpecForge `dflash.py` / `dspark.py`; llama.cpp b11120
+  (`src/models/dflash.cpp`, `common/speculative.cpp`).

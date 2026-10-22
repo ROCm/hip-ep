@@ -67,9 +67,9 @@ needed when the checkout is not inside the workspace):
 
     # the full 240-prompt Spec-Bench run, and continuing it after an interruption
     python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b \
-        --json ../design/results/qwen38/spec_bench.json
+        --json results/qwen38_spec_bench.json
     python scripts/run_dflash2_dspark_pipeline.py --preset qwen38-27b \
-        --json ../design/results/qwen38/spec_bench.json \
+        --json results/qwen38_spec_bench.json \
         --stages bench,summarize -- --resume
 """
 
