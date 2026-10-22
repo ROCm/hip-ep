@@ -221,10 +221,24 @@ void HipGpuAllocator::TrimLarge(std::vector<void *> &out) {
   }
 }
 
+// A slot holds the last size that hashed to it, so a size counts as seen
+// only if no other size took its slot in between: a collision makes a
+// recurring size look new, which costs one more driver round trip, and never
+// the reverse. Slots are picked by the high bits of a Fibonacci hash: tensor
+// byte sizes are mostly multiples of a large power of two, so their low bits
+// carry almost nothing.
+bool HipGpuAllocator::SeenBefore(size_t size) {
+  const uint64_t mixed = static_cast<uint64_t>(size) * 0x9E3779B97F4A7C15ull;
+  size_t &slot = seen_sizes_[mixed >> (64 - kSeenSlotBits)];
+  const bool seen = slot == size;
+  slot = size;
+  return seen;
+}
+
 // Maintained on the pool-hit path too, not just on driver allocations.
 void HipGpuAllocator::NoteLargeCheckedOut(void *ptr, size_t requested,
-                                          bool grown) {
-  large_live_[ptr] = LargeLive{requested, grown};
+                                          bool grown, bool recurring) {
+  large_live_[ptr] = LargeLive{requested, grown, recurring};
   ++live_requested_[requested];
   if (grown) {
     ++grown_live_count_;
@@ -312,6 +326,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   // whether it replaces a live buffer or a grown buffer has been reused.
   size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
   bool grown = false;
+  bool recurring = false;
   std::vector<void *> stale;
 
   // Fast path: reuse a buffer with no driver call. A size class holds buffers
@@ -331,6 +346,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       }
     } else {
       ++self->large_ops_;
+      recurring = self->SeenBefore(size);
       auto it = self->large_free_.lower_bound(size);
       if (it != self->large_free_.end() && it->first <= LargeCapacity(size)) {
         void *ptr = it->second.free.back();
@@ -341,7 +357,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         // the growing tensors are gone.
         grown = self->ReplacesLiveBuffer(size);
         self->grown_reused_ |= grown;
-        self->NoteLargeCheckedOut(ptr, size, grown);
+        self->NoteLargeCheckedOut(ptr, size, grown, recurring);
         if (it->second.free.empty()) {
           self->large_free_.erase(it);
         }
@@ -355,7 +371,9 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         sit->second.idle = false;
         grown = self->ReplacesLiveBuffer(size);
         self->grown_reused_ |= grown;
-        self->NoteLargeCheckedOut(ptr, size, grown);
+        // Its capacity has been asked for before even if this exact size has
+        // not, or its slot was taken since.
+        self->NoteLargeCheckedOut(ptr, size, grown, true);
         if (sit->second.free.empty()) {
           self->reuse_free_.erase(sit);
         }
@@ -407,7 +425,7 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     self->ptr_to_size_[ptr] = alloc_size;
     if (cls < 0) {
-      self->NoteLargeCheckedOut(ptr, size, grown);
+      self->NoteLargeCheckedOut(ptr, size, grown, recurring);
     }
   }
   return ptr;
@@ -436,10 +454,12 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       const size_t capacity = it->second;
       ++self->large_ops_;
       bool keep = false;
+      bool recurring = false;
       if (auto live = self->large_live_.find(p);
           live != self->large_live_.end()) {
         const bool grown = live->second.grown;
         keep = grown || self->ReplacedByLiveBuffer(live->second.requested);
+        recurring = live->second.recurring;
         auto req = self->live_requested_.find(live->second.requested);
         if (--req->second == 0) {
           self->live_requested_.erase(req);
@@ -454,11 +474,14 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
         auto &bucket = self->large_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
-      } else {
+      } else if (recurring) {
         auto &bucket = self->reuse_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
         bucket.idle = true;
+      } else {
+        self->ptr_to_size_.erase(it);
+        to_release.push_back(p);
       }
       if (self->grown_live_count_ == 0 && !self->large_free_.empty()) {
         // No grown buffer is checked out: the growing tensors were released or

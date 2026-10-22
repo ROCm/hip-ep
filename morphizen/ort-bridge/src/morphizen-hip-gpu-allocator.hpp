@@ -121,14 +121,16 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
-  // All eight expect pool_mutex_ held. The first five append buffers the
+  // All nine expect pool_mutex_ held. The first five append buffers the
   // caller must hand to the driver after releasing it.
   void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
   void TrimLarge(std::vector<void *> &out);
   void DrainLarge(std::vector<void *> &out);
   void EvictIdleReuse(size_t need, std::vector<void *> &out);
   void DrainReuse(std::vector<void *> &out);
-  void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown);
+  bool SeenBefore(size_t size);
+  void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown,
+                           bool recurring);
   bool ReplacesLiveBuffer(size_t size) const;
   bool ReplacedByLiveBuffer(size_t requested) const;
 
@@ -157,8 +159,7 @@ private:
   // allocated with growth headroom. Only such buffers, and the buffers they
   // replaced, go to the growth pool on Free, keyed by capacity, and a request
   // takes the smallest one that covers it. Tensors that keep their size, such
-  // as a shared
-  // past/present KV buffer, never qualify for this growth pool.
+  // as a shared past/present KV buffer, never qualify for this growth pool.
   //
   // The first version of a growing tensor, such as the KV cache a new
   // generator prefills, has nothing to grow from. Allocated exactly, it could
@@ -176,14 +177,19 @@ private:
   // for while others are still cycling, and a driver allocation failure
   // drains the pool and retries.
   //
-  // Every other large buffer goes to the reuse pool, such as the shared
-  // past/present KV cache a generator frees when it goes away and the next
-  // generator asks for again, or a per-inference activation above the
-  // classes. Handing such buffers back to the driver costs more than the
-  // call: on an APU, hipMalloc memory is carved from system memory in
-  // high-order blocks, and each block the page allocator cannot supply wakes
-  // kcompactd, whose page migrations evict this process's GPU queues. A
-  // request takes a reuse buffer under the same fit rule as the growth pool.
+  // Every other large buffer whose size has been requested before goes to the
+  // reuse pool, such as the shared past/present KV cache a generator frees
+  // when it goes away and the next generator asks for again, or a
+  // per-inference activation above the classes. Handing such buffers back to
+  // the driver costs more than the call: on an APU, hipMalloc memory is
+  // carved from system memory in high-order blocks, and each block the page
+  // allocator cannot supply wakes kcompactd, whose page migrations evict this
+  // process's GPU queues. The first request of a size is still released on
+  // Free. A workload whose shapes change every inference, such as prompts of
+  // varying length, would never reuse those buffers, and keeping them would
+  // only move their release from Free, after the Run, to an eviction inside
+  // a later one, where hipFree and hipHostFree wait for the queued GPU work.
+  // A request takes a reuse buffer under the same fit rule as the growth pool.
   // A reuse bucket is idle from a free until its next hit, and a driver
   // allocation first releases idle reuse buffers, least recently used first,
   // until it has released as many bytes as it allocates, so a workload whose
@@ -224,14 +230,21 @@ private:
     bool idle = true;
   };
   std::map<size_t, ReuseBucket> reuse_free_;
+  // Recently requested large sizes, one per hash slot. Large requests come in
+  // a few dozen distinct sizes per inference, so 1024 slots keep a model's
+  // recurring sizes while a stream of one-off sizes cannot grow the table.
+  static constexpr unsigned kSeenSlotBits = 10;
+  std::array<size_t, size_t{1} << kSeenSlotBits> seen_sizes_{};
   // Checked-out large buffers. `grown` marks a buffer handed to a request that
   // replaced a live buffer a little smaller than itself, whether allocated
   // with headroom or reused from the pool. Those go to the growth pool on
-  // Free, as does a buffer that a live one has replaced; every other large
-  // buffer goes to the reuse pool.
+  // Free, as does a buffer that a live one has replaced. `recurring` marks a
+  // buffer whose size had been requested before, or that came from the reuse
+  // pool; of the others, only those go to the reuse pool.
   struct LargeLive {
     size_t requested;
     bool grown;
+    bool recurring;
   };
   std::unordered_map<void *, LargeLive> large_live_;
   // Requested size -> number of checked-out large buffers holding it.
