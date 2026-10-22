@@ -25,7 +25,8 @@ env:
   # inside rocmlirTriton (external/llvm-project); the repo + pinned commit are
   # read from cmake/deps.txt at build time and the commit keys the llvm-install
   # cache. Bumping the pin only invalidates that cache.
-  ONNXRUNTIME_VERSION: "1.31.0"
+  ONNXRUNTIME_REPO: "pschlan-amd/onnxruntime"
+  ONNXRUNTIME_VERSION: "1.32.0-zt.1"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
   # the pinned tag during the from-source build (an empty list applies nothing;
   # ORT is still built from source either way). Part of the ort-install cache
@@ -35,7 +36,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2768"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -206,7 +207,7 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: Microsoft/onnxruntime
+          repository: ${{ env.ONNXRUNTIME_REPO }}
           ref: v${{ env.ONNXRUNTIME_VERSION }}
           path: source-onnxruntime
           submodules: true

@@ -31,13 +31,14 @@ env:
   # rocmlirTriton (external/llvm-project). The repo + pinned commit are read
   # from cmake/deps.txt (single source of truth with the from-source fallback
   # in cmake/deps.cmake); the commit is the llvm-install cache key.
-  ONNXRUNTIME_VERSION: "1.31.0"
+  ONNXRUNTIME_REPO: "pschlan-amd/onnxruntime"
+  ONNXRUNTIME_VERSION: "1.32.0-zt.1"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.17.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712 2763 2765"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2763 2768"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -199,7 +200,7 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: Microsoft/onnxruntime
+          repository: ${{ env.ONNXRUNTIME_REPO }}
           ref: v${{ env.ONNXRUNTIME_VERSION }}
           path: source-onnxruntime
           submodules: true
