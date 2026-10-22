@@ -19,8 +19,8 @@
 //   - leaves the view ops in place -- only the alloc op itself changes,
 //   - when the output is returned through a rank-changing view (collapse_shape
 //     or expand_shape), stamps `hipdnn.abi_shape` / `hipdnn.abi_groups` so the
-//     HIP->LLVM lowering issues the output-allocator callback at the RETURNED
-//     (ONNX) rank rather than the internal compute rank (see
+//     HIP->LLVM lowering issues the output-allocator callback at the returned
+//     graph rank rather than the internal compute rank (see
 //     stampAbiReshapeAttrs).
 //
 // How outputs are found. Rather than listing every view op by hand, the pass
@@ -30,9 +30,9 @@
 // `memref.cast`, or a reshaped output such as a rank-4 conv result collapsed to
 // rank-2 before the return.
 //
-// Only public (graph-entry) functions are rewritten. Private helpers (e.g.
-// outlined `onnx.Loop` bodies) also take a `!hip.context` arg and return
-// allocs, but those buffers stay inside the DLL and are not EP outputs --
+// Only public (graph-entry) functions are rewritten. Private helper functions
+// may also take a `!hip.context` arg and return allocs, but those buffers stay
+// inside the DLL and are not EP outputs --
 // rewriting them would hand out an `out_idx` that clashes with the real
 // outputs. Functions whose arg 0 is not `!hip.context` are skipped too (no
 // runtime handle to pass to the new op). A pass-through output (a returned
@@ -276,9 +276,9 @@ static Value skipViews(Value value) {
 }
 
 /// Copy a returned buffer that is not rooted at `hip.alloc_output` into a new
-/// one and return the copy. The source is typically a graph input forwarded by
-/// `onnx.Identity`. The copy is what makes the output allocator run for this
-/// output index.
+/// one and return the copy. The source is typically a graph input returned
+/// directly or through a view. The copy is what makes the output allocator run
+/// for this output index.
 static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
                                          int64_t outIdx, OpBuilder &builder) {
   Value source = returnOp.getOperand(outIdx);
@@ -317,9 +317,9 @@ struct UseOutputAllocatorPass
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
 
-    // Only public (graph-entry) functions own EP outputs. Private helpers (e.g.
-    // outlined onnx.Loop bodies) also carry a !hip.context arg 0 and return
-    // memref.allocs, but their outputs are DLL-internal -> skip non-public.
+    // Only public (graph-entry) functions own EP outputs. Private helper
+    // functions may also carry a !hip.context arg 0 and return memref.allocs,
+    // but their outputs are DLL-internal -> skip non-public.
     if (!funcOp.isPublic() || funcOp.empty())
       return;
 
@@ -358,18 +358,19 @@ struct UseOutputAllocatorPass
     });
 
     // The single func.return of this graph-entry function. Used to recover the
-    // returned (ONNX ABI) value per output index for the collapse-shape ABI
+    // returned graph value per output index for the collapse-shape ABI
     // adjustment below.
     func::ReturnOp returnOp;
     funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
 
     // Bufferization may append scalar returns that carry dynamic result
-    // dimensions. They are internal ABI values, not ONNX graph outputs. If
-    // converted to hip.alloc_output, a host memref.store that materializes a
-    // dimension can target device output memory, so later GPU shape arithmetic
-    // may observe stale data. The graph metadata predates bufferization and
-    // therefore records the real output count. Keep the return-count fallback
-    // for standalone pass tests and hand-written IR without graph metadata.
+    // dimensions. They are internal dynamic-dimension results, not graph
+    // outputs. If converted to hip.alloc_output, a host memref.store that
+    // materializes a dimension can target device output memory, so later GPU
+    // shape arithmetic may observe stale data. The graph metadata predates
+    // bufferization and therefore records the graph output count. Keep the
+    // return-count fallback for standalone pass tests and hand-written IR
+    // without graph metadata.
     int64_t graphOutputCount =
         returnOp ? static_cast<int64_t>(returnOp.getNumOperands()) : 0;
     if (auto module = funcOp->getParentOfType<ModuleOp>()) {
@@ -414,9 +415,10 @@ struct UseOutputAllocatorPass
       allocOp.getResult().replaceAllUsesWith(replacement);
 
       // After RAUW the returned value's view chain is rooted at allocOutput.
-      // Record the ONNX return shape when it is a rank-reduced collapse of the
-      // internal compute buffer, so the lowering issues the output-allocator
-      // callback at the returned (ONNX) rank (see stampAbiReshapeAttrs).
+      // Record the returned graph shape when it is a rank-reduced collapse of
+      // the internal compute buffer, so the lowering issues the
+      // output-allocator callback at the returned graph rank (see
+      // stampAbiReshapeAttrs).
       if (allocOutput && retVal)
         stampAbiReshapeAttrs(allocOutput, retVal, builder);
 
