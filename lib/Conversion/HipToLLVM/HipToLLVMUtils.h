@@ -97,6 +97,7 @@ inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
+inline constexpr const char *kWrapMRotaryEmbedding = "wrap_mrotary_embedding";
 inline constexpr const char *kWrapElementwise =
     "wrap_elementwise"; // hip.mul/add/min/max (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
@@ -121,6 +122,10 @@ inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapDynamicSparseAttention =
+    "wrap_dynamic_sparse_attention";
+inline constexpr const char *kWrapSparseAttentionIndexer =
+    "wrap_sparse_attention_indexer";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
@@ -517,6 +522,10 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
+void populateDynamicSparseAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateSparseAttentionIndexerLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
