@@ -9,7 +9,8 @@ no past_sequence_length).
 ORT CPU has no SparseAttentionIndexer kernel, so the reference is a NumPy port
 of the ORT CUDA semantics. Scores are fp32 sums whose order differs between
 NumPy and the GPU, so blocks whose reference scores differ by at most
-_TIE_RTOL may come out in either order; everything else must match exactly.
+_TIE_RTOL may come out in either order. Exactly equal scores rank by block
+index ascending, and everything else must match exactly.
 """
 
 import numpy as np
@@ -157,8 +158,8 @@ def _sai_reference(query, qw, kw, cos, sin, mask, past, ratio, budget, eps, scal
 
 
 def _check_selected(actual, expected, rows, ratio, budget):
-    """Exact match, except that blocks whose reference scores lie within
-    _TIE_RTOL of each other may be ranked in either order."""
+    """Exact match, except that blocks whose reference scores differ but lie
+    within _TIE_RTOL of each other may be ranked in either order."""
     B, S, _ = expected.shape
     swapped = 0
     for b in range(B):
@@ -183,9 +184,15 @@ def _check_selected(actual, expected, rows, ratio, budget):
             tol = _TIE_RTOL * max(1.0, float(np.abs(score).max()))
             picked = score[blocks]
             assert np.all(np.diff(picked) <= tol), (b, s, "rank order")
+            for i in range(k - 1):
+                later = blocks[i + 1 :][picked[i + 1 :] == picked[i]]
+                assert np.all(later > blocks[i]), (b, s, "exact tie order")
             rest = np.setdiff1d(np.arange(nb), blocks)
             if rest.size:
                 assert score[rest].max() <= picked.min() + tol, (b, s, "selected set")
+                for r in rest:
+                    tied = blocks[picked == score[r]]
+                    assert np.all(tied < r), (b, s, "exact tie set")
     return swapped
 
 
@@ -226,9 +233,49 @@ def _run_case(
     kw = rng.uniform(0.5, 1.5, _D).astype(dtype)
     cos, sin = _rope_tables(rng, X, R, dtype, B if rank3 else None)
     past = rng.uniform(-1, 1, (B, P, _D)).astype(dtype)
+    return _run_feeds(
+        model_runner,
+        query,
+        qw,
+        kw,
+        cos,
+        sin,
+        mask,
+        past,
+        ratio=ratio,
+        budget=budget,
+        epsilon=epsilon,
+        scale=scale,
+    )
 
+
+def _run_feeds(
+    model_runner,
+    query,
+    qw,
+    kw,
+    cos,
+    sin,
+    mask,
+    past,
+    *,
+    ratio=4,
+    budget=2048,
+    epsilon=1e-6,
+    scale=0.0883883461,
+    exact=False,
+):
+    N = query.shape[2] // _D - 1
     model = _make_model(
-        N, R, rank3, mask is not None, dtype, ratio, budget, epsilon, scale
+        N,
+        cos.shape[-1],
+        cos.ndim == 3,
+        mask is not None,
+        query.dtype.type,
+        ratio,
+        budget,
+        epsilon,
+        scale,
     )
     feeds = [query, qw, kw, cos, sin] + ([mask] if mask is not None else []) + [past]
     actual = model_runner.backend.run(_persist(model_runner, model), feeds)
@@ -239,6 +286,9 @@ def _run_case(
     )
     np.testing.assert_array_equal(actual[1], present)
     assert actual[0].dtype == np.int32 and actual[0].shape == expected.shape
+    if exact:
+        np.testing.assert_array_equal(actual[0], expected)
+        return 0
     return _check_selected(actual[0], expected, rows, ratio, budget)
 
 
@@ -303,6 +353,30 @@ def test_f32_small_config(model_runner):
         epsilon=None,
         scale=None,
     )
+
+
+@pytest.mark.parametrize("S", [1, 8])
+def test_exact_ties_keep_block_order(model_runner, S):
+    """With an identity rotary, identical keys give every block the same
+    positive score and keys opposite to the queries give every block 0."""
+    B, P, N, R = 2, 200, 4, 64
+    dt = np.float16
+    rng = np.random.default_rng(20 + S)
+    cos = np.ones((B, P + S, R), dt)
+    sin = np.zeros((B, P + S, R), dt)
+    qw = rng.uniform(0.5, 1.5, _D).astype(dt)
+    kw = rng.uniform(0.5, 1.5, _D).astype(dt)
+
+    key_row = rng.uniform(-1, 1, _D).astype(dt)
+    query = rng.uniform(-1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    query[:, :, N * _D :] = key_row
+    past = np.broadcast_to(key_row, (B, P, _D)).copy()
+    _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
+
+    query = rng.uniform(0.1, 1, (B, S, (N + 1) * _D)).astype(dt)
+    query[:, :, N * _D :] = -rng.uniform(0.1, 1, (B, S, _D)).astype(dt)
+    past = -rng.uniform(0.1, 1, (B, P, _D)).astype(dt)
+    _run_feeds(model_runner, query, qw, kw, cos, sin, None, past, budget=64, exact=True)
 
 
 def _persist(model_runner, model):

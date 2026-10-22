@@ -24,7 +24,7 @@ _OPSETS = dict(opset=22, extra_opsets=[helper.make_opsetid("com.microsoft", 1)])
 _FLT_MAX = np.float32(np.finfo(np.float32).max)
 
 
-def _make_model(N, KV, D, K, scale):
+def _make_model(N, KV, D, K, scale, symbolic_head_dim=False):
     attrs = dict(
         num_heads=N,
         kv_num_heads=KV,
@@ -62,7 +62,7 @@ def _make_model(N, KV, D, K, scale):
         domain="com.microsoft",
         **attrs,
     )
-    cache = ["B", KV, "cap", D]
+    cache = ["B", KV, "cap", "kv_cache_dim" if symbolic_head_dim else D]
     inputs = [
         helper.make_tensor_value_info("query", TP.FLOAT16, ["B", "S", N * D]),
         helper.make_tensor_value_info("key", TP.FLOAT16, ["B", "S", KV * D]),
@@ -163,9 +163,23 @@ def _block_indices(rng, qpos, count):
     return idx.astype(np.int32)
 
 
-def _run(model_runner, q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, scale):
+def _run(
+    model_runner,
+    q,
+    k,
+    v,
+    past_k,
+    past_v,
+    sel,
+    counts,
+    seqlens,
+    N,
+    KV,
+    scale,
+    symbolic_head_dim=False,
+):
     D = past_k.shape[3]
-    model = _make_model(N, KV, D, sel.shape[1], scale)
+    model = _make_model(N, KV, D, sel.shape[1], scale, symbolic_head_dim)
     total = np.array(
         min(max(int(seqlens.max()) + 1, q.shape[1]), past_k.shape[2]), np.int32
     )
@@ -311,6 +325,61 @@ def test_head_dim_128_default_scale(model_runner):
         sel[s] = _block_indices(rng, L - S + s, K)
     seqlens = np.array([L - 1], np.int32)
     _run(model_runner, q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, None)
+
+
+def test_symbolic_cache_head_dim(model_runner):
+    N, KV, D, S, P, cap, K = 24, 2, 256, 2, 61, 80, 36
+    rng = np.random.default_rng(23)
+    q, k, v, past_k, past_v = _inputs(rng, 1, S, N, KV, D, cap)
+    L = P + S
+    sel = np.full((S, K), -1, np.int32)
+    counts = np.full(S, K, np.int32)
+    for s in range(S):
+        sel[s] = _block_indices(rng, L - S + s, K)
+    seqlens = np.array([L - 1], np.int32)
+    _run(
+        model_runner,
+        q,
+        k,
+        v,
+        past_k,
+        past_v,
+        sel,
+        counts,
+        seqlens,
+        N,
+        KV,
+        0.0625,
+        symbolic_head_dim=True,
+    )
+
+
+@pytest.mark.parametrize("N,KV,D", [(2, 2, 256), (4, 4, 128), (32, 2, 128)])
+def test_heads_per_group(model_runner, N, KV, D):
+    S, P, cap, K = 3, 90, 128, 40
+    rng = np.random.default_rng(N * 31 + KV)
+    q, k, v, past_k, past_v = _inputs(rng, 1, S, N, KV, D, cap)
+    L = P + S
+    sel = np.full((S, K), -1, np.int32)
+    counts = np.full(S, K, np.int32)
+    for s in range(S):
+        sel[s] = _block_indices(rng, L - S + s, K)
+    seqlens = np.array([L - 1], np.int32)
+    _run(model_runner, q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, None)
+
+
+def test_batch2_decode_split(model_runner):
+    """Two decode rows with long candidate lists take the split-K path."""
+    N, KV, D, cap, K = 24, 2, 256, 4096, 2051
+    B = 2
+    rng = np.random.default_rng(29)
+    q, k, v, past_k, past_v = _inputs(rng, B, 1, N, KV, D, cap)
+    seqlens = np.array([2999, 3700], np.int32)
+    counts = np.array([K, 1500], np.int32)
+    sel = np.full((B, K), -1, np.int32)
+    for b in range(B):
+        sel[b, : counts[b]] = _block_indices(rng, int(seqlens[b]), int(counts[b]))
+    _run(model_runner, q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, 0.0625)
 
 
 def _persist(model_runner, model):

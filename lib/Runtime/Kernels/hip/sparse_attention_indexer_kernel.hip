@@ -349,6 +349,7 @@ sai_pooled_score_kernel(const T *__restrict__ present,
   for (int idx = threadIdx.x; idx < rows * num_heads * kD; idx += kThreads) {
     q_lds[idx] = q_src[idx];
   }
+  __syncthreads();
   const int j = j0 + wave;
   const bool valid = j < blocks;
   float x[4];
@@ -852,6 +853,11 @@ extern "C" int hip_sparse_attention_indexer(
   }
   if (batch == 0) {
     return 0;
+  }
+  if (hipdnn_device_wave_size() != 32) {
+    fprintf(stderr, "[custom_kernels] hip_sparse_attention_indexer: requires "
+                    "a wave32 device\n");
+    return -1;
   }
   const Layout l =
       makeLayout(batch, seq_len, past_len, num_heads, compress_ratio);

@@ -254,7 +254,7 @@ MRotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   };
   auto posType = mlir::dyn_cast<mlir::RankedTensorType>(positionIds.getType());
   if (!posType || !posType.getElementType().isInteger(64) ||
-      posType.getRank() != 3 || dimMismatch(posType.getDimSize(0), 3) ||
+      posType.getRank() != 3 || posType.getDimSize(0) != 3 ||
       dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
       dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
     return rewriter.notifyMatchFailure(op,

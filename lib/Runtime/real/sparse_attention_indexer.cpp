@@ -18,12 +18,38 @@ int wrap_sparse_attention_indexer(
     void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
     int64_t num_heads, int64_t head_size, int64_t rotary_width,
     int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, float epsilon,
-    float scale) {
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_len > 0 && !past_key) ||
       !selected_indices || !present_key) {
     fprintf(stderr, "wrap_sparse_attention_indexer: null required argument\n");
+    return -1;
+  }
+  if (past_batch != batch) {
+    fprintf(stderr,
+            "wrap_sparse_attention_indexer: past_key batch %lld must be "
+            "B=%lld\n",
+            (long long)past_batch, (long long)batch);
+    return -1;
+  }
+  if (mask && (mask_batch != batch || mask_len != past_len + seq_len)) {
+    fprintf(stderr,
+            "wrap_sparse_attention_indexer: mask [%lld, %lld] must be "
+            "[B=%lld, P+S=%lld]\n",
+            (long long)mask_batch, (long long)mask_len, (long long)batch,
+            (long long)(past_len + seq_len));
+    return -1;
+  }
+  if (sin_rows != rotary_rows ||
+      (rotary_batched && (cos_batch != batch || sin_batch != batch))) {
+    fprintf(stderr,
+            "wrap_sparse_attention_indexer: cos_cache (batch %lld, rows %lld) "
+            "and sin_cache (batch %lld, rows %lld) must match, with batch "
+            "B=%lld when rank 3\n",
+            (long long)cos_batch, (long long)rotary_rows, (long long)sin_batch,
+            (long long)sin_rows, (long long)batch);
     return -1;
   }
 

@@ -27,18 +27,24 @@ module {
     // CHECK-LABEL: llvm.func @sai(
     // CHECK: %[[B:.*]] = llvm.extractvalue %[[Q:.*]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[S:.*]] = llvm.extractvalue %[[Q]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
-    // CHECK: %[[P:.*]] = llvm.extractvalue %{{.*}}[3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[P:.*]] = llvm.extractvalue %[[PAST:.*]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[N:.*]] = llvm.mlir.constant(4 : i64) : i64
     // CHECK: %[[D:.*]] = llvm.mlir.constant(128 : i64) : i64
     // CHECK: %[[R:.*]] = llvm.mlir.constant(64 : i64) : i64
-    // CHECK: %[[X:.*]] = llvm.extractvalue %{{.*}}[3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[X:.*]] = llvm.extractvalue %[[COS:.*]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
     // CHECK: %[[BATCHED:.*]] = llvm.mlir.constant(1 : i64) : i64
     // CHECK: %[[RATIO:.*]] = llvm.mlir.constant(4 : i64) : i64
     // CHECK: %[[BUDGET:.*]] = llvm.mlir.constant(2048 : i64) : i64
     // CHECK: %[[ELEM:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK: %[[PB:.*]] = llvm.extractvalue %[[PAST]][3, 0]
+    // CHECK: %[[MB:.*]] = llvm.extractvalue %[[MASK:.*]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
+    // CHECK: %[[ML:.*]] = llvm.extractvalue %[[MASK]][3, 1]
+    // CHECK: %[[CB:.*]] = llvm.extractvalue %[[COS]][3, 0]
+    // CHECK: %[[SB:.*]] = llvm.extractvalue %[[SIN:.*]][3, 0]
+    // CHECK: %[[SR:.*]] = llvm.extractvalue %[[SIN]][3, 1]
     // CHECK: %[[EPS:.*]] = llvm.mlir.constant(9.99999997E-7 : f32) : f32
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(0.0883883461 : f32) : f32
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[EPS]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %[[B]], %[[S]], %[[P]], %[[N]], %[[D]], %[[R]], %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %[[EPS]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
     return
   }
 
@@ -67,7 +73,13 @@ module {
     // CHECK-NEXT: %[[RATIO:.*]] = llvm.mlir.constant(4 : i64) : i64
     // CHECK-NEXT: %[[BUDGET:.*]] = llvm.mlir.constant(64 : i64) : i64
     // CHECK-NEXT: %[[ELEM:.*]] = llvm.mlir.constant(4 : i64) : i64
-    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %{{.*}}, %{{.*}})
+    // CHECK-NEXT: %[[PB:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: %[[MB:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[ML:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[CB:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[SB:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[SR:.*]] = llvm.mlir.constant(64 : i64) : i64
+    // CHECK: llvm.call @wrap_sparse_attention_indexer(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[NOMASK]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[X]], %[[BATCHED]], %[[RATIO]], %[[BUDGET]], %[[ELEM]], %[[PB]], %[[MB]], %[[ML]], %[[CB]], %[[SB]], %[[SR]], %{{.*}}, %{{.*}})
     return
   }
 }

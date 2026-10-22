@@ -44,7 +44,7 @@ struct SparseAttentionIndexerOpLowering
             ? extractContiguousMemRefPtr(adaptor.getMask(), rewriter, loc)
             : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
 
-    SmallVector<Value, 23> args = {
+    SmallVector<Value, 29> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getQueryNormWeight(), rewriter, loc),
@@ -67,11 +67,34 @@ struct SparseAttentionIndexerOpLowering
         createI64Const(op.getCompressRatio()),
         createI64Const(op.getTokenBudget()),
         createI64Const(queryType.getElementTypeBitWidth() / 8),
-        createF32Const(op.getEpsilon().convertToFloat()),
-        createF32Const(op.getScale().convertToFloat())};
+        getMemRefDimSize(pastType, 0, adaptor.getPastKey(), rewriter, loc)};
+    if (adaptor.getMask()) {
+      auto maskType = cast<MemRefType>(op.getMask().getType());
+      args.push_back(
+          getMemRefDimSize(maskType, 0, adaptor.getMask(), rewriter, loc));
+      args.push_back(
+          getMemRefDimSize(maskType, 1, adaptor.getMask(), rewriter, loc));
+    } else {
+      args.push_back(createI64Const(0));
+      args.push_back(createI64Const(0));
+    }
+    auto sinType = cast<MemRefType>(op.getSinCache().getType());
+    if (cosRank == 3) {
+      args.push_back(
+          getMemRefDimSize(cosType, 0, adaptor.getCosCache(), rewriter, loc));
+      args.push_back(
+          getMemRefDimSize(sinType, 0, adaptor.getSinCache(), rewriter, loc));
+    } else {
+      args.push_back(createI64Const(0));
+      args.push_back(createI64Const(0));
+    }
+    args.push_back(getMemRefDimSize(sinType, cosRank - 2, adaptor.getSinCache(),
+                                    rewriter, loc));
+    args.push_back(createF32Const(op.getEpsilon().convertToFloat()));
+    args.push_back(createF32Const(op.getScale().convertToFloat()));
 
-    SmallVector<Type, 23> paramTypes(10, ptrType);
-    paramTypes.append(11, i64Type);
+    SmallVector<Type, 29> paramTypes(10, ptrType);
+    paramTypes.append(17, i64Type);
     paramTypes.append(2, f32Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(

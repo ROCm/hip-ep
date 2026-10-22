@@ -30,9 +30,15 @@ struct DynamicSparseAttentionOpLowering
 
     auto queryType = cast<MemRefType>(op.getQuery().getType());
     auto pastType = cast<MemRefType>(op.getPastKey().getType());
+    auto pastValueType = cast<MemRefType>(op.getPastValue().getType());
+    auto presentKeyType = cast<MemRefType>(op.getPresentKey().getType());
+    auto presentValueType = cast<MemRefType>(op.getPresentValue().getType());
     auto indicesType = cast<MemRefType>(op.getSelectedIndices().getType());
+    auto countsType = cast<MemRefType>(op.getSelectedCounts().getType());
+    auto seqlensType = cast<MemRefType>(op.getSeqlensK().getType());
+    const int64_t headSize = queryType.getDimSize(2) / op.getNumHeads();
 
-    SmallVector<Value, 21> args = {
+    SmallVector<Value, 35> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getKey(), rewriter, loc),
@@ -49,16 +55,29 @@ struct DynamicSparseAttentionOpLowering
         getMemRefDimSize(queryType, 1, adaptor.getQuery(), rewriter, loc),
         createI64Const(op.getNumHeads()),
         createI64Const(op.getKvNumHeads()),
-        createI64Const(pastType.getDimSize(3)),
+        createI64Const(headSize),
         getMemRefDimSize(pastType, 2, adaptor.getPastKey(), rewriter, loc),
         getMemRefDimSize(indicesType, 1, adaptor.getSelectedIndices(), rewriter,
-                         loc),
-        LLVM::ConstantOp::create(
-            rewriter, loc, f32Type,
-            rewriter.getF32FloatAttr(op.getScale().convertToFloat()))};
+                         loc)};
+    auto appendDims = [&](MemRefType type, Value memref,
+                          ArrayRef<unsigned> dims) {
+      for (unsigned dim : dims) {
+        args.push_back(getMemRefDimSize(type, dim, memref, rewriter, loc));
+      }
+    };
+    appendDims(pastType, adaptor.getPastKey(), {0, 1, 3});
+    appendDims(pastValueType, adaptor.getPastValue(), {0, 1, 2, 3});
+    appendDims(presentKeyType, adaptor.getPresentKey(), {2, 3});
+    appendDims(presentValueType, adaptor.getPresentValue(), {2, 3});
+    appendDims(indicesType, adaptor.getSelectedIndices(), {0});
+    appendDims(countsType, adaptor.getSelectedCounts(), {0});
+    appendDims(seqlensType, adaptor.getSeqlensK(), {0});
+    args.push_back(LLVM::ConstantOp::create(
+        rewriter, loc, f32Type,
+        rewriter.getF32FloatAttr(op.getScale().convertToFloat())));
 
-    SmallVector<Type, 21> paramTypes(12, ptrType);
-    paramTypes.append(7, i64Type);
+    SmallVector<Type, 35> paramTypes(12, ptrType);
+    paramTypes.append(21, i64Type);
     paramTypes.push_back(f32Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(

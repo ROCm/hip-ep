@@ -4700,7 +4700,9 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp<"dynamic_sparse_attention"> {
       output                  [B, S, N*D]          f16
       present_key/value       [B, kvN, Cap, D]     f16
 
-    D must be 128 or 256 and N / kvN at most 16. present starts as past (they
+    D = query width / N must be 128 or 256 and N / kvN at most 16; scale must
+    be finite and non-negative. Dynamic dims, including the cache head dim,
+    are checked against these shapes at run time. present starts as past (they
     may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
     written to cache position T - S + s when that lies in [0, Cap). Row
     (b, s) attends from position T - S + s if S <= T <= Cap and has no
@@ -4777,6 +4779,9 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp<"sparse_attention_indexer"> {
       past_key            [B, P, D]
       selected_indices    [B, S, K * r + r - 1] i32
       present_key         [B, T, D]
+    The last dims of past_key, present_key and selected_indices must be
+    static, epsilon finite and non-negative. Dynamic dims are checked against
+    these shapes at run time.
 
     Row (b, s) sees visible = ascending t <= P + s with mask[b, t] != 0.
     Block j is visible[r*j .. r*j + r - 1] for j < len(visible) / r. Its key

@@ -80,12 +80,41 @@ module {
   }
 
   // CHECK-LABEL: func.func @dsa_dynamic_cache_head_size
-  // CHECK-DAG: %[[PKS:.*]] = tensor.cast %{{.*}} : tensor<?x2x?x?xf16> to tensor<?x2x?x256xf16>
-  // CHECK-DAG: %[[PVS:.*]] = tensor.cast %{{.*}} : tensor<?x2x?x?xf16> to tensor<?x2x?x256xf16>
-  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %[[PKS]], %[[PVS]], {{.*}}) outs({{.*}} : tensor<?x?x6144xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>)
-  // CHECK-DAG: %[[RK:.*]] = tensor.cast %[[R]]#1 : tensor<?x2x?x256xf16> to tensor<?x2x?x?xf16>
-  // CHECK-DAG: %[[RV:.*]] = tensor.cast %[[R]]#2 : tensor<?x2x?x256xf16> to tensor<?x2x?x?xf16>
-  // CHECK: return %[[R]]#0, %[[RK]], %[[RV]]
+  // CHECK-SAME: %[[PK:[^:]*]]: tensor<?x2x?x?xf16>, %[[PV:[^:]*]]: tensor<?x2x?x?xf16>
+  // CHECK-NOT: tensor.cast
+  // CHECK: %[[PKI:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x2x?x?xf16>
+  // CHECK: %[[PVI:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x2x?x?xf16>
+  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %[[PK]], %[[PV]], {{.*}} : tensor<?x?x6144xf16>, tensor<?x?x512xf16>, tensor<?x?x512xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>, {{.*}}) outs(%{{.*}}, %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>)
+  // CHECK-NOT: tensor.cast
+  // CHECK: return %[[R]]#0, %[[R]]#1, %[[R]]#2
+
+  func.func @dsa_negative_scale(
+      %q: tensor<1x1x6144xf16>,
+      %k: tensor<1x1x512xf16>,
+      %v: tensor<1x1x512xf16>,
+      %past_k: tensor<1x2x4096x256xf16>,
+      %past_v: tensor<1x2x4096x256xf16>,
+      %idx: tensor<1x2051xi32>,
+      %cnt: tensor<1xi32>,
+      %seqlens: tensor<1xi32>,
+      %total: tensor<i32>
+  ) -> (tensor<1x1x6144xf16>, tensor<1x2x4096x256xf16>, tensor<1x2x4096x256xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %out, %pk, %pv = "onnx.Custom"(%q, %k, %v, %past_k, %past_v, %none, %none, %idx, %cnt, %seqlens, %total) {
+      function_name = "DynamicSparseAttention",
+      domain_name = "com.microsoft",
+      num_heads = 24 : si64,
+      kv_num_heads = 2 : si64,
+      scale = -6.250000e-02 : f32
+    } : (tensor<1x1x6144xf16>, tensor<1x1x512xf16>, tensor<1x1x512xf16>, tensor<1x2x4096x256xf16>, tensor<1x2x4096x256xf16>, none, none, tensor<1x2051xi32>, tensor<1xi32>, tensor<1xi32>, tensor<i32>)
+      -> (tensor<1x1x6144xf16>, tensor<1x2x4096x256xf16>, tensor<1x2x4096x256xf16>)
+    return %out, %pk, %pv : tensor<1x1x6144xf16>, tensor<1x2x4096x256xf16>, tensor<1x2x4096x256xf16>
+  }
+
+  // CHECK-LABEL: func.func @dsa_negative_scale
+  // CHECK-NOT: hip.dynamic_sparse_attention
+  // CHECK: "onnx.Custom"
+  // CHECK-SAME: scale = -6.250000e-02 : f32
 
   func.func @dsa_default_scale(
       %q: tensor<1x4x1024xf16>,

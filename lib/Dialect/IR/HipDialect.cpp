@@ -17,6 +17,7 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include <cmath>
 #include <limits>
 
 using namespace mlir;
@@ -1601,7 +1602,7 @@ LogicalResult MRotaryEmbeddingOp::verify() {
 
   auto posType = cast<ShapedType>(getPositionIds().getType());
   if (!posType.getElementType().isInteger(64) || posType.getRank() != 3 ||
-      dimMismatch(posType.getDimSize(0), 3) ||
+      posType.getDimSize(0) != 3 ||
       dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
       dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
     return emitOpError("position_ids must be i64 [3, B, S], got ") << posType;
@@ -2883,20 +2884,26 @@ LogicalResult DynamicSparseAttentionOp::verify() {
            << numHeads / kvNumHeads;
   }
 
-  auto pastType = cast<ShapedType>(getPastKey().getType());
-  if (pastType.getRank() != 4 || pastType.isDynamicDim(3)) {
-    return emitOpError("past_key must be rank 4 with a static head size");
-  }
-  const int64_t headSize = pastType.getDimSize(3);
-  if (headSize != 128 && headSize != 256) {
-    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  const float scale = getScale().convertToFloat();
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return emitOpError("scale must be finite and non-negative");
   }
 
   constexpr int64_t kAny = ShapedType::kDynamic;
   auto queryType = cast<ShapedType>(getQuery().getType());
-  if (queryType.getRank() != 3) {
-    return emitOpError("query must be rank 3, got rank ")
-           << queryType.getRank();
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
+      queryType.getDimSize(2) % numHeads != 0) {
+    return emitOpError("query must be rank 3 with a static last dim that is a "
+                       "multiple of num_heads");
+  }
+  const int64_t headSize = queryType.getDimSize(2) / numHeads;
+  if (headSize != 128 && headSize != 256) {
+    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 4) {
+    return emitOpError("past_key must be rank 4, got rank ")
+           << pastType.getRank();
   }
   const int64_t batch = queryType.getDimSize(0);
   const int64_t seq = queryType.getDimSize(1);
@@ -2994,8 +3001,9 @@ LogicalResult SparseAttentionIndexerOp::verify() {
                        "got ")
            << budget / ratio;
   }
-  if (getEpsilon().convertToFloat() < 0.0f) {
-    return emitOpError("epsilon must be non-negative");
+  const float epsilon = getEpsilon().convertToFloat();
+  if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+    return emitOpError("epsilon must be finite and non-negative");
   }
 
   constexpr int64_t kAny = ShapedType::kDynamic;
@@ -3033,6 +3041,14 @@ LogicalResult SparseAttentionIndexerOp::verify() {
   if (pastType.getRank() != 3) {
     return emitOpError("past_key must be rank 3, got rank ")
            << pastType.getRank();
+  }
+  auto selectedType = cast<ShapedType>(getSelectedIndices().getType());
+  auto presentType = cast<ShapedType>(getPresentKey().getType());
+  if (pastType.isDynamicDim(2) ||
+      (presentType.getRank() == 3 && presentType.isDynamicDim(2)) ||
+      (selectedType.getRank() == 3 && selectedType.isDynamicDim(2))) {
+    return emitOpError("past_key, present_key and selected_indices must have "
+                       "a static last dim");
   }
   const int64_t past = pastType.getDimSize(1);
   const int64_t total =

@@ -2690,8 +2690,8 @@
 "_ZN12_GLOBAL__N_117sai_pooled_kernelIfEEvPKT_PKiS5_S3_S3_S3_Pfiiiiiixf":[36,0,0,16,419,8,32],
 "_ZN12_GLOBAL__N_117sai_select_kernelEPKfPKiS3_Piiiiiiiii":[31,0,0,16,1637,53,776],
 "_ZN12_GLOBAL__N_118sai_scatter_kernelEPKxPKiPiS4_iiii":[21,0,0,16,474,11,76],
-"_ZN12_GLOBAL__N_123sai_pooled_score_kernelIDF16_EEvPKT_PKiS5_S3_S3_S3_PKfPfiiiiiiiiiixff":[33,0,0,16,558,9,48],
-"_ZN12_GLOBAL__N_123sai_pooled_score_kernelIfEEvPKT_PKiS5_S3_S3_S3_PKfPfiiiiiiiiiixff":[37,0,0,16,556,9,48]
+"_ZN12_GLOBAL__N_123sai_pooled_score_kernelIDF16_EEvPKT_PKiS5_S3_S3_S3_PKfPfiiiiiiiiiixff":[33,0,0,16,562,9,48],
+"_ZN12_GLOBAL__N_123sai_pooled_score_kernelIfEEvPKT_PKiS5_S3_S3_S3_PKfPfiiiiiiiiiixff":[37,0,0,16,559,9,48]
 },
 "strided_copy_kernel":{
 "_ZN12_GLOBAL__N_119strided_copy_kernelIhEEvPT_PKS1_NS_17StridedCopyParamsE":[25,0,0,16,489,0,0],

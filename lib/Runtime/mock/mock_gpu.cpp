@@ -688,7 +688,14 @@ int wrap_dynamic_sparse_attention(
     const void *selected_counts, const void *seqlens_k, void *output,
     void *present_key, void *present_value, int64_t batch, int64_t seq_len,
     int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
-    int64_t capacity, int64_t max_selected, float scale) {
+    int64_t capacity, int64_t max_selected, int64_t past_key_batch,
+    int64_t past_key_heads, int64_t past_key_head_size,
+    int64_t past_value_batch, int64_t past_value_heads,
+    int64_t past_value_capacity, int64_t past_value_head_size,
+    int64_t present_key_capacity, int64_t present_key_head_size,
+    int64_t present_value_capacity, int64_t present_value_head_size,
+    int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    float scale) {
   if (!state || !query || !key || !value || !past_key || !past_value ||
       !selected_counts || !seqlens_k || !output || !present_key ||
       !present_value) {
@@ -697,6 +704,20 @@ int wrap_dynamic_sparse_attention(
     return -1;
   }
   (void)selected_indices;
+  (void)past_key_batch;
+  (void)past_key_heads;
+  (void)past_key_head_size;
+  (void)past_value_batch;
+  (void)past_value_heads;
+  (void)past_value_capacity;
+  (void)past_value_head_size;
+  (void)present_key_capacity;
+  (void)present_key_head_size;
+  (void)present_value_capacity;
+  (void)present_value_head_size;
+  (void)indices_rows;
+  (void)counts_rows;
+  (void)seqlens_len;
   MOCK_PRINT("[MOCK] wrap_dynamic_sparse_attention(B=%lld, S=%lld, N=%lld, "
              "kvN=%lld, D=%lld, cap=%lld, max_selected=%lld, scale=%f, "
              "shared_cache=%d)\n",
@@ -714,8 +735,9 @@ int wrap_sparse_attention_indexer(
     void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
     int64_t num_heads, int64_t head_size, int64_t rotary_width,
     int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, float epsilon,
-    float scale) {
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_len > 0 && !past_key) ||
       !selected_indices || !present_key) {
@@ -723,6 +745,12 @@ int wrap_sparse_attention_indexer(
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
   }
+  (void)past_batch;
+  (void)mask_batch;
+  (void)mask_len;
+  (void)cos_batch;
+  (void)sin_batch;
+  (void)sin_rows;
   MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, P=%lld, "
              "N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, r=%lld, "
              "budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",

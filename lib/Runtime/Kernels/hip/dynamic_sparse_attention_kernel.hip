@@ -496,6 +496,11 @@ extern "C" int hip_dynamic_sparse_attention(
                     "caches must be 16-byte aligned\n");
     return -1;
   }
+  if (hipdnn_device_wave_size() != 32) {
+    fprintf(stderr, "[custom_kernels] hip_dynamic_sparse_attention: requires "
+                    "a wave32 device with WMMA\n");
+    return -1;
+  }
   const int64_t rows = batch * seq_len;
   const int splits = numSplits(rows, kv_num_heads, max_selected);
   const size_t needed = hip_dynamic_sparse_attention_workspace_size(

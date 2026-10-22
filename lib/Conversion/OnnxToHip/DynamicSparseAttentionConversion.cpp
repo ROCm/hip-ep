@@ -200,23 +200,17 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
       !matches(op->getResult(0), f16, {batch, seq, numHeads * headSize})) {
     return rewriter.notifyMatchFailure(op, "output must be f16 like query");
   }
-  auto withStaticHeadSize = [&](mlir::RankedTensorType type) {
-    llvm::SmallVector<int64_t> shape(type.getShape());
-    shape[3] = headSize;
-    return mlir::RankedTensorType::get(shape, type.getElementType());
-  };
   auto getPresentType = [&](unsigned idx,
                             mlir::Value past) -> mlir::RankedTensorType {
     mlir::Type type = op->getResult(idx).getType();
     if (mlir::isa<mlir::NoneType>(type)) {
-      return withStaticHeadSize(
-          mlir::cast<mlir::RankedTensorType>(past.getType()));
+      return mlir::cast<mlir::RankedTensorType>(past.getType());
     }
     auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type);
     if (!ranked || !matches(op->getResult(idx), f16, cacheShape)) {
       return nullptr;
     }
-    return withStaticHeadSize(ranked);
+    return ranked;
   };
   auto presentKeyType = getPresentType(1, pastKey);
   auto presentValueType = getPresentType(2, pastValue);
@@ -229,6 +223,10 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   if (auto attr = op->getAttrOfType<mlir::FloatAttr>("scale")) {
     scale = static_cast<float>(attr.getValueAsDouble());
   }
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return rewriter.notifyMatchFailure(op,
+                                       "scale must be finite and non-negative");
+  }
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure)) {
@@ -236,16 +234,6 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   }
 
   mlir::Location loc = op->getLoc();
-  auto refine = [&](mlir::Value v) -> mlir::Value {
-    auto type = mlir::cast<mlir::RankedTensorType>(v.getType());
-    if (!type.isDynamicDim(3)) {
-      return v;
-    }
-    return mlir::tensor::CastOp::create(rewriter, loc, withStaticHeadSize(type),
-                                        v);
-  };
-  pastKey = refine(pastKey);
-  pastValue = refine(pastValue);
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
   mlir::Value presentKeyInit =
       createEmptyTensor(rewriter, loc, presentKeyType, pastKey);
@@ -261,16 +249,7 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   state.addAttribute("kv_num_heads", rewriter.getI64IntegerAttr(kvNumHeads));
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
   mlir::Operation *hipOp = rewriter.create(state);
-  llvm::SmallVector<mlir::Value, 3> results(hipOp->getResults());
-  for (unsigned idx = 1; idx < 3; ++idx) {
-    mlir::Type origType = op->getResult(idx).getType();
-    if (mlir::isa<mlir::RankedTensorType>(origType) &&
-        origType != results[idx].getType()) {
-      results[idx] =
-          mlir::tensor::CastOp::create(rewriter, loc, origType, results[idx]);
-    }
-  }
-  rewriter.replaceOp(op, results);
+  rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
 

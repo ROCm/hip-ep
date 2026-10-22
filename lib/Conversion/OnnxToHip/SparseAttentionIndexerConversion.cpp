@@ -65,8 +65,9 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (auto attr = op->getAttrOfType<mlir::FloatAttr>("epsilon")) {
     epsilon = static_cast<float>(attr.getValueAsDouble());
   }
-  if (epsilon < 0.0f) {
-    return rewriter.notifyMatchFailure(op, "epsilon must be non-negative");
+  if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+    return rewriter.notifyMatchFailure(
+        op, "epsilon must be finite and non-negative");
   }
 
   const size_t numOps = op->getNumOperands();
@@ -163,17 +164,27 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   if (cosRank == 3) {
     cacheShape.insert(cacheShape.begin(), batch);
   }
-  if (!matches(cosCache, elem, cacheShape) ||
-      !matches(sinCache, elem, cacheShape)) {
+  if (!matches(cosCache, elem, cacheShape)) {
     return rewriter.notifyMatchFailure(
         op, "cos/sin caches must be [X, R] or [B, X, R] of the query type");
   }
-  if (!matches(pastKey, elem, {batch, kAny, kHeadSize})) {
+  llvm::SmallVector<int64_t> sinShape(cacheShape);
+  for (int64_t i = 0; i < cosRank; ++i) {
+    if (!cosType.isDynamicDim(i)) {
+      sinShape[i] = cosType.getDimSize(i);
+    }
+  }
+  if (!matches(sinCache, elem, sinShape)) {
+    return rewriter.notifyMatchFailure(op, "sin_cache must have the shape of "
+                                           "cos_cache");
+  }
+  auto pastType = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+  if (!pastType || pastType.isDynamicDim(2) ||
+      !matches(pastKey, elem, {batch, kAny, kHeadSize})) {
     return rewriter.notifyMatchFailure(op,
                                        "past_key must be [B, P, 128] of the "
                                        "query type");
   }
-  auto pastType = mlir::cast<mlir::RankedTensorType>(pastKey.getType());
   const int64_t past = pastType.getDimSize(1);
   const int64_t total =
       mlir::ShapedType::isDynamic(past) || mlir::ShapedType::isDynamic(seq)
@@ -188,19 +199,24 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
         op, "SparseAttentionIndexer qsa expects 2 results");
   }
   const int64_t capacity = budget + ratio - 1;
-  if (!matches(op->getResult(0), rewriter.getI32Type(),
+  auto selectedType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!selectedType || selectedType.getRank() != 3 ||
+      selectedType.getDimSize(2) != capacity ||
+      !matches(op->getResult(0), rewriter.getI32Type(),
                {batch, seq, capacity})) {
     return rewriter.notifyMatchFailure(
-        op, "selected_indices must be i32 [B, S, token_budget + r - 1]");
+        op, "selected_indices must be i32 [B, S, token_budget + r - 1] with a "
+            "static last dim");
   }
-  if (!matches(op->getResult(1), elem, {batch, total, kHeadSize})) {
+  auto presentType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  if (!presentType || presentType.getRank() != 3 ||
+      presentType.isDynamicDim(2) ||
+      !matches(op->getResult(1), elem, {batch, total, kHeadSize})) {
     return rewriter.notifyMatchFailure(
         op, "present_key must be [B, P + S, 128] of the query type");
   }
-  auto selectedType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto presentType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
 
   float scale = 1.0f / std::sqrt(static_cast<float>(kHeadSize));
   if (auto attr = op->getAttrOfType<mlir::FloatAttr>("scale")) {
@@ -213,8 +229,16 @@ mlir::LogicalResult SparseAttentionIndexerToHip::matchAndRewrite(
   }
 
   mlir::Location loc = op->getLoc();
-  mlir::Value selectedInit =
-      createEmptyTensor(rewriter, loc, selectedType, query);
+  llvm::SmallVector<mlir::Value> selectedDims;
+  for (int64_t i = 0; i < 2; ++i) {
+    if (selectedType.isDynamicDim(i)) {
+      selectedDims.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, query, i));
+    }
+  }
+  mlir::Value selectedInit = mlir::tensor::EmptyOp::create(
+      rewriter, loc, selectedType.getShape(), selectedType.getElementType(),
+      selectedDims);
 
   llvm::SmallVector<mlir::Value> presentDims;
   if (presentType.isDynamicDim(0)) {

@@ -1842,16 +1842,27 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
 
-// fp16 only. past_* may alias present_*.
+// fp16 only. past_* may alias present_*. head_size is query width / num_heads
+// and capacity is past_key dim 2; the remaining dims are runtime shapes that
+// must agree with them, else -1 before any launch.
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
     const void *selected_counts, const void *seqlens_k, void *output,
     void *present_key, void *present_value, int64_t batch, int64_t seq_len,
     int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
-    int64_t capacity, int64_t max_selected, float scale);
+    int64_t capacity, int64_t max_selected, int64_t past_key_batch,
+    int64_t past_key_heads, int64_t past_key_head_size,
+    int64_t past_value_batch, int64_t past_value_heads,
+    int64_t past_value_capacity, int64_t past_value_head_size,
+    int64_t present_key_capacity, int64_t present_key_head_size,
+    int64_t present_value_capacity, int64_t present_value_head_size,
+    int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    float scale);
 
 // past_key may be null when past_len == 0; mask may be null (all visible).
+// mask_* are ignored without a mask and cos_batch / sin_batch unless
+// rotary_batched; shape disagreement returns -1 before any launch.
 int wrap_sparse_attention_indexer(
     RuntimeState *state, const void *query, const void *query_norm_weight,
     const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
@@ -1859,8 +1870,9 @@ int wrap_sparse_attention_indexer(
     void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
     int64_t num_heads, int64_t head_size, int64_t rotary_width,
     int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
-    int64_t token_budget, int64_t element_size_bytes, float epsilon,
-    float scale);
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

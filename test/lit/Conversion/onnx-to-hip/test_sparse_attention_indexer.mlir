@@ -121,4 +121,53 @@ module {
   // CHECK-LABEL: func.func @sai_separate_key
   // CHECK-NOT: hip.sparse_attention_indexer
   // CHECK: "onnx.Custom"
+
+  func.func @sai_dynamic_capacity(
+      %qk: tensor<?x?x640xf16>,
+      %qw: tensor<128xf16>,
+      %kw: tensor<128xf16>,
+      %cos: tensor<?x?x64xf16>,
+      %sin: tensor<?x?x64xf16>,
+      %mask: tensor<?x?xi64>,
+      %past: tensor<?x?x128xf16>
+  ) -> (tensor<?x?x?xi32>, tensor<?x?x128xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %sel, %present = "onnx.Custom"(%qk, %none, %qw, %kw, %cos, %sin, %mask, %past) {
+      function_name = "SparseAttentionIndexer",
+      domain_name = "com.microsoft",
+      policy_mode = "qsa",
+      compress_ratio = 4 : si64,
+      token_budget = 2048 : si64
+    } : (tensor<?x?x640xf16>, none, tensor<128xf16>, tensor<128xf16>, tensor<?x?x64xf16>, tensor<?x?x64xf16>, tensor<?x?xi64>, tensor<?x?x128xf16>)
+      -> (tensor<?x?x?xi32>, tensor<?x?x128xf16>)
+    return %sel, %present : tensor<?x?x?xi32>, tensor<?x?x128xf16>
+  }
+
+  // CHECK-LABEL: func.func @sai_dynamic_capacity
+  // CHECK-NOT: hip.sparse_attention_indexer
+  // CHECK: "onnx.Custom"
+
+  func.func @sai_sin_rows_mismatch(
+      %qk: tensor<1x1x640xf16>,
+      %qw: tensor<128xf16>,
+      %kw: tensor<128xf16>,
+      %cos: tensor<8x64xf16>,
+      %sin: tensor<9x64xf16>,
+      %past: tensor<1x7x128xf16>
+  ) -> (tensor<1x1x2051xi32>, tensor<1x8x128xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %sel, %present = "onnx.Custom"(%qk, %none, %qw, %kw, %cos, %sin, %none, %past) {
+      function_name = "SparseAttentionIndexer",
+      domain_name = "com.microsoft",
+      policy_mode = "qsa",
+      compress_ratio = 4 : si64,
+      token_budget = 2048 : si64
+    } : (tensor<1x1x640xf16>, none, tensor<128xf16>, tensor<128xf16>, tensor<8x64xf16>, tensor<9x64xf16>, none, tensor<1x7x128xf16>)
+      -> (tensor<1x1x2051xi32>, tensor<1x8x128xf16>)
+    return %sel, %present : tensor<1x1x2051xi32>, tensor<1x8x128xf16>
+  }
+
+  // CHECK-LABEL: func.func @sai_sin_rows_mismatch
+  // CHECK-NOT: hip.sparse_attention_indexer
+  // CHECK: "onnx.Custom"
 }
