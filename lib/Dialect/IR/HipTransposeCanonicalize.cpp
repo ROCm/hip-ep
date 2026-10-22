@@ -22,15 +22,15 @@
 //
 // Two patterns, because the general rewrite cannot always fire:
 //
-//   * Composition needs the inner Transpose to die, or a chain with a second
-//     reader trades one permutation for two.
-//   * Collapsing to the identity does not: it replaces the outer Transpose with
-//     a value that already exists, so the inner op's other readers are no
+//   * Composition needs the first Transpose to die, or a chain whose
+//     intermediate has another reader trades one permutation for two.
+//   * Collapsing to the identity does not: it replaces the second Transpose
+//     with a value that already exists, so the first op's other readers are no
 //     reason to keep permuting on this path.
 //
 // Both run in the tensor domain, on the canonicalizer Pipelines.cpp schedules
 // before bufferization -- early enough that the folded buffers are never
-// allocated. Afterwards a Transpose has no results, the producer chain is not
+// allocated. Afterwards a Transpose has no results, the chain is not
 // expressible, and the guards below fail closed.
 //===----------------------------------------------------------------------===//
 
@@ -64,86 +64,87 @@ bool isIdentity(ArrayRef<int64_t> perm) {
                       [&](int64_t i) { return perm[i] == i; });
 }
 
-/// Compose `outer` after `inner`.
+/// Compose `secondPerm` after `firstPerm`.
 ///
 /// `perm` reads "output dim i is input dim perm[i]", so for
-/// `m = T(x, inner)` and `y = T(m, outer)`:
+/// `m = T(x, firstPerm)` and `y = T(m, secondPerm)`:
 ///
-///   y.shape[i] = m.shape[outer[i]] = x.shape[inner[outer[i]]]
+///   y.shape[i] = m.shape[secondPerm[i]] = x.shape[firstPerm[secondPerm[i]]]
 ///
-/// which makes the single equivalent permutation `inner[outer[i]]`. Getting the
-/// order backwards still yields a permutation, and still verifies, so the
-/// bounds check below is the only thing standing between a typo and silently
-/// reinterpreted data.
-bool composePermutations(ArrayRef<int64_t> inner, ArrayRef<int64_t> outer,
+/// which makes the single equivalent permutation `firstPerm[secondPerm[i]]`.
+/// Getting the order backwards still yields a permutation, and still verifies,
+/// so the bounds check below is the only thing standing between a typo and
+/// silently reinterpreted data.
+bool composePermutations(ArrayRef<int64_t> firstPerm,
+                         ArrayRef<int64_t> secondPerm,
                          SmallVectorImpl<int64_t> &composed) {
-  if (inner.size() != outer.size())
+  if (firstPerm.size() != secondPerm.size())
     return false;
-  for (int64_t index : outer) {
-    if (index < 0 || index >= static_cast<int64_t>(inner.size()))
+  for (int64_t index : secondPerm) {
+    if (index < 0 || index >= static_cast<int64_t>(firstPerm.size()))
       return false;
-    composed.push_back(inner[index]);
+    composed.push_back(firstPerm[index]);
   }
   return true;
 }
 
-/// Only a Transpose that feeds `transpose` its data. A producer reached through
-/// the destination operand instead would make the rewrite drop a write.
-TransposeOp getProducerTranspose(TransposeOp transpose) {
-  auto producer = transpose.getInput().getDefiningOp<TransposeOp>();
-  if (!producer || producer->getNumResults() != 1)
+/// The Transpose that runs before `second`, only if it feeds `second` its data.
+/// One reached through the destination operand instead would make the rewrite
+/// drop a write.
+TransposeOp getFirstTranspose(TransposeOp second) {
+  auto first = second.getInput().getDefiningOp<TransposeOp>();
+  if (!first || first->getNumResults() != 1)
     return nullptr;
-  if (transpose.getInput() != producer->getResult(0))
+  if (second.getInput() != first->getResult(0))
     return nullptr;
-  return producer;
+  return first;
 }
 
 /// `T(T(x, p), q)` -> `T(x, p o q)`, or `x` when the two undo each other.
 struct FoldTransposeChain : public OpRewritePattern<TransposeOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(TransposeOp transpose,
+  LogicalResult matchAndRewrite(TransposeOp second,
                                 PatternRewriter &rewriter) const override {
-    if (transpose->getNumResults() != 1)
-      return rewriter.notifyMatchFailure(transpose, "not in tensor form");
+    if (second->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(second, "not in tensor form");
 
-    TransposeOp producer = getProducerTranspose(transpose);
-    if (!producer)
-      return rewriter.notifyMatchFailure(transpose,
+    TransposeOp first = getFirstTranspose(second);
+    if (!first)
+      return rewriter.notifyMatchFailure(second,
                                          "input is not a transpose result");
 
-    SmallVector<int64_t> innerPerm, outerPerm, composed;
-    if (!getPermutation(producer, innerPerm) ||
-        !getPermutation(transpose, outerPerm) ||
-        !composePermutations(innerPerm, outerPerm, composed))
-      return rewriter.notifyMatchFailure(transpose, "unreadable permutations");
+    SmallVector<int64_t> firstPerm, secondPerm, composed;
+    if (!getPermutation(first, firstPerm) ||
+        !getPermutation(second, secondPerm) ||
+        !composePermutations(firstPerm, secondPerm, composed))
+      return rewriter.notifyMatchFailure(second, "unreadable permutations");
 
     if (isIdentity(composed)) {
-      Value source = producer.getInput();
+      Value source = first.getInput();
       // The composition says the shapes agree. Confirm it against the types
       // rather than trust it: a mismatch here means the permutations did not
       // describe what the tensors actually are, and substituting the source
       // would hand the consumer a differently shaped buffer.
-      if (source.getType() != transpose->getResult(0).getType())
+      if (source.getType() != second->getResult(0).getType())
         return rewriter.notifyMatchFailure(
-            transpose, "identity permutation over mismatched types");
-      rewriter.replaceOp(transpose, source);
+            second, "identity permutation over mismatched types");
+      rewriter.replaceOp(second, source);
       return success();
     }
 
     // Rewriting to one Transpose is only a win if the intermediate stops being
     // materialized; otherwise this adds a third permutation beside the two it
     // meant to replace.
-    if (!producer->getResult(0).hasOneUse())
-      return rewriter.notifyMatchFailure(producer,
+    if (!first->getResult(0).hasOneUse())
+      return rewriter.notifyMatchFailure(first,
                                          "intermediate has other readers");
 
     // The destination this op already owns has the result type and is defined
     // ahead of it, so it dominates its new use.
     rewriter.replaceOpWithNewOp<TransposeOp>(
-        transpose, transpose->getResultTypes(), transpose.getCtx(),
-        producer.getInput(), transpose.getOutput(),
-        rewriter.getI64ArrayAttr(composed));
+        second, second->getResultTypes(), second.getCtx(), first.getInput(),
+        second.getOutput(), rewriter.getI64ArrayAttr(composed));
     return success();
   }
 };

@@ -14,7 +14,7 @@
 // per token per Transpose to reproduce its input exactly.
 //
 // The negative cases are the point of the guards: a chain whose intermediate
-// has a second reader must not be rewritten into a third permutation, and a
+// has another reader must not be rewritten into a third permutation, and a
 // permutation pair that does not actually compose to the identity must not be
 // substituted away, because doing so hands the consumer a different shape.
 
@@ -45,8 +45,8 @@ module {
   // one. [1,2,0] after [2,0,1] composes to the identity of neither, so the
   // result is a single Transpose carrying the composed permutation.
   //
-  // inner = [2,0,1], outer = [1,2,0]  ->  composed[i] = inner[outer[i]]
-  //                                    =  [inner[1], inner[2], inner[0]]
+  // first = [2,0,1], second = [1,2,0]  ->  composed[i] = first[second[i]]
+  //                                     =  [first[1], first[2], first[0]]
   //                                    =  [0, 1, 2]
   // which is the identity, so this pair also disappears entirely.
   // --------------------------------------------------------------------------
@@ -71,7 +71,7 @@ module {
   // Positive: a chain that composes to a real permutation becomes one
   // Transpose rather than two.
   //
-  // inner = [1,0,2], outer = [0,2,1]  ->  [inner[0], inner[2], inner[1]]
+  // first = [1,0,2], second = [0,2,1]  ->  [first[0], first[2], first[1]]
   //                                    =  [1, 2, 0]
   // --------------------------------------------------------------------------
   // CHECK-LABEL: func.func @compose_chain
@@ -109,17 +109,17 @@ module {
   }
 
   // --------------------------------------------------------------------------
-  // Negative: the intermediate is returned as well, so the inner Transpose
-  // keeps running. The outer one still collapses -- the pair is the identity
+  // Negative: the intermediate is returned as well, so the first Transpose
+  // keeps running. The second one still collapses -- the pair is the identity
   // and substituting the source removes a permutation without adding one --
-  // but the inner must survive for its second reader.
+  // but the first must survive for its other reader.
   // --------------------------------------------------------------------------
-  // CHECK-LABEL: func.func @keep_inner_for_second_reader
+  // CHECK-LABEL: func.func @keep_first_for_other_reader
   // CHECK:         %[[MID:.*]] = hip.transpose
   // CHECK-SAME:      perm = [0, 2, 1, 3]
   // CHECK-NOT:     hip.transpose
   // CHECK:         return %arg1, %[[MID]]
-  func.func @keep_inner_for_second_reader(
+  func.func @keep_first_for_other_reader(
       %ctx: !hip.context,
       %kv: tensor<1x32x4096x96xf16>)
       -> (tensor<1x32x4096x96xf16>, tensor<1x4096x32x96xf16>) {
@@ -135,16 +135,16 @@ module {
   }
 
   // --------------------------------------------------------------------------
-  // Negative: a non-identity chain whose intermediate has a second reader.
+  // Negative: a non-identity chain whose intermediate has another reader.
   // Rewriting to the composed permutation would leave three Transposes where
   // there were two, so both are left alone.
   // --------------------------------------------------------------------------
-  // CHECK-LABEL: func.func @keep_chain_with_second_reader
+  // CHECK-LABEL: func.func @keep_chain_with_other_reader
   // CHECK:         hip.transpose
   // CHECK-SAME:      perm = [1, 0, 2]
   // CHECK:         hip.transpose
   // CHECK-SAME:      perm = [0, 2, 1]
-  func.func @keep_chain_with_second_reader(
+  func.func @keep_chain_with_other_reader(
       %ctx: !hip.context,
       %x: tensor<2x3x4xf32>)
       -> (tensor<3x4x2xf32>, tensor<3x2x4xf32>) {
