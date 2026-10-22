@@ -1675,7 +1675,6 @@ LogicalResult HyperConnectionPostMixOp::verify() {
   return success();
 }
 
-
 //===----------------------------------------------------------------------===//
 // HyperConnectionPostMixNormOp:
 //   ins(streams, block_output, gate, norm_scale, [stream_mix])
@@ -1718,6 +1717,24 @@ LogicalResult HyperConnectionPostMixNormOp::verify() {
     return emitOpError("expected ranked streams and a 1-D norm scale");
   if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
     return emitOpError("streams must be f16 or f32");
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  if (getFlattened()) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
   auto gateType = dyn_cast<ShapedType>(getGate().getType());
   if (!gateType || gateType.getElementType() != streams.getElementType())
     return emitOpError("gate must match the streams element type");

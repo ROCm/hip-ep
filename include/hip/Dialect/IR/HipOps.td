@@ -1815,7 +1815,7 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp<"hyper_connection_post_mix_norm
     Post-mix followed by branchwise RMSNorm. `stream_mix` is optional and
     defaults to the identity. `gate_activation` 0 multiplies `gate` as given.
     `gate_activation` 1 treats `gate` as a pre-activation and applies
-    round(2 * sigmoid(round(gate / 4))) first. `gate_layout` matches
+    round(2 * round(sigmoid(round(gate / 4)))) first. `gate_layout` matches
     `hyper_connection_post_mix`. In FP32, each elementwise result is rounded
     back to the element type before the next one:
 

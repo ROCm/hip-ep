@@ -698,7 +698,6 @@ struct EngramGateOpLowering : public ConvertOpToLLVMPattern<EngramGateOp> {
   }
 };
 
-
 // hip.hyper_connection_pre_mix -> wrap_hyper_connection_pre_mix
 struct HyperConnectionPreMixOpLowering
     : public ConvertOpToLLVMPattern<HyperConnectionPreMixOp> {
@@ -851,11 +850,12 @@ struct HyperConnectionPostMixNormOpLowering
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-               InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
-               GatedRmsNormOpLowering, EngramGateOpLowering,
-               HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
-               HyperConnectionPostMixNormOpLowering>(converter);
+  patterns
+      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
+           GatedRmsNormOpLowering, EngramGateOpLowering,
+           HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
+           HyperConnectionPostMixNormOpLowering>(converter);
 }
 
 } // namespace hip

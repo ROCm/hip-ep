@@ -143,7 +143,6 @@ int launch_post(hipStream_t stream, const void *streams,
   return 0;
 }
 
-// One block per (row, branch).
 template <typename T>
 __device__ float hc_gate(float raw, int gate_activation) {
   if (!gate_activation)
@@ -151,6 +150,7 @@ __device__ float hc_gate(float raw, int gate_activation) {
   return hc_round<T>(hc_sigmoid<T>(hc_round<T>(raw / 4.f)) * 2.f);
 }
 
+// One block per (row, branch).
 template <typename T>
 __global__ void hip_hc_post_mix_norm_kernel(
     const T *__restrict__ streams, const T *__restrict__ block_output,

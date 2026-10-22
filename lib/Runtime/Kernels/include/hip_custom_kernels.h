@@ -2241,8 +2241,8 @@ HIP_KERNEL_API int hip_engram_gate(
  * streams are [rows, branches, hidden]. feature_gate 0 indexes the gate as
  * [rows, branches]; 1 indexes it as [rows, branches, hidden]. Pre-mix
  * multiplies by reduction_scale. Post-mix adds post_mix * block_output;
- * stream_mix null keeps the original stream. FP32 math, one rounding.
- * hip_dtype: FLOAT16 or FLOAT32.
+ * stream_mix null keeps the original stream. Pre-mix and post-mix use FP32
+ * math and one rounding. hip_dtype: FLOAT16 or FLOAT32.
  */
 HIP_KERNEL_API int hip_hyper_connection_pre_mix(
     void* stream,
@@ -2270,6 +2270,7 @@ HIP_KERNEL_API int hip_hyper_connection_post_mix(
     int feature_gate,
     int hip_dtype);
 
+/* Gate chain and residual each round to the element type before the norm. */
 HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
     void* stream,
     const void* streams,
