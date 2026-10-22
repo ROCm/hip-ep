@@ -695,3 +695,99 @@ class TestGroupNorm:
         x = rng.uniform(-2, 2, shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
+def _make_embed_layer_norm_model(
+    batch: int,
+    seq: int,
+    hidden: int,
+    *,
+    with_position_ids: bool,
+):
+    """com.microsoft.EmbedLayerNormalization over a small f32 table.
+
+    The CPU reference counts ones in the mask. Position ids are either an
+    explicit input or omitted, in which case positions are 0 .. seq-1.
+    """
+    vocab = 32
+    max_pos = seq + 2
+    ids = helper.make_tensor_value_info("ids", TensorProto.INT32, [batch, seq])
+    segments = helper.make_tensor_value_info(
+        "segments", TensorProto.INT32, [batch, seq]
+    )
+    mask = helper.make_tensor_value_info("mask", TensorProto.INT32, [batch, seq])
+    output = helper.make_tensor_value_info(
+        "output", TensorProto.FLOAT, [batch, seq, hidden]
+    )
+    mask_index = helper.make_tensor_value_info("mask_index", TensorProto.INT32, [batch])
+    rng = np.random.default_rng(21)
+    initializers = [
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [vocab, hidden]).astype(np.float32), name="word"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [max_pos, hidden]).astype(np.float32),
+            name="position",
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-1, 1, [2, hidden]).astype(np.float32), name="segment"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(0.5, 1.5, [hidden]).astype(np.float32), name="gamma"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-0.5, 0.5, [hidden]).astype(np.float32), name="beta"
+        ),
+    ]
+    inputs = ["ids", "segments", "word", "position", "segment", "gamma", "beta", "mask"]
+    graph_inputs = [ids, segments, mask]
+    if with_position_ids:
+        position_ids = helper.make_tensor_value_info(
+            "position_ids", TensorProto.INT32, [1, seq]
+        )
+        inputs.append("position_ids")
+        graph_inputs.append(position_ids)
+    node = helper.make_node(
+        "EmbedLayerNormalization",
+        inputs,
+        ["output", "mask_index"],
+        domain="com.microsoft",
+        epsilon=1e-12,
+    )
+    return make_model_from_nodes(
+        [node],
+        graph_inputs,
+        [output, mask_index],
+        initializers=initializers,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestEmbedLayerNorm:
+    """Gather + add + LayerNormalization decomposition of the embedding fusion."""
+
+    def test_embed_layer_norm_with_position_ids(self, model_runner):
+        batch, seq, hidden = 2, 6, 8
+        model = _make_embed_layer_norm_model(batch, seq, hidden, with_position_ids=True)
+        rng = np.random.default_rng(22)
+        ids = rng.integers(0, 32, size=[batch, seq], dtype=np.int32)
+        segments = rng.integers(0, 2, size=[batch, seq], dtype=np.int32)
+        mask = np.ones([batch, seq], dtype=np.int32)
+        mask[:, 4:] = 0
+        position_ids = np.array([[0, 2, 1, 3, 0, 0]], dtype=np.int32)
+        actual, expected = model_runner.run_sample(
+            model, [ids, segments, mask, position_ids]
+        )
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+
+    def test_embed_layer_norm_default_positions(self, model_runner):
+        batch, seq, hidden = 1, 5, 8
+        model = _make_embed_layer_norm_model(
+            batch, seq, hidden, with_position_ids=False
+        )
+        rng = np.random.default_rng(23)
+        ids = rng.integers(0, 32, size=[batch, seq], dtype=np.int32)
+        segments = rng.integers(0, 2, size=[batch, seq], dtype=np.int32)
+        mask = np.array([[1, 1, 1, 0, 0]], dtype=np.int32)
+        actual, expected = model_runner.run_sample(model, [ids, segments, mask])
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)

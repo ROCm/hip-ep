@@ -93,6 +93,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
 | GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
+| EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |
 | SkipSimplifiedLayerNormalization (`com.microsoft`) | Custom HIP kernel, add and norm fused |
