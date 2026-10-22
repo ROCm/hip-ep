@@ -152,11 +152,158 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// com.microsoft.MRotaryEmbedding -> hip.mrotary_embedding
+struct MRotaryEmbeddingToHip : public mlir::RewritePattern {
+  MRotaryEmbeddingToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+MRotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
+                                       mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "MRotaryEmbedding") {
+    return rewriter.notifyMatchFailure(op, "not a MRotaryEmbedding operation");
+  }
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for MRotaryEmbedding");
+  }
+  if (op->getNumOperands() != 4 || op->getNumResults() != 1) {
+    return rewriter.notifyMatchFailure(
+        op, "MRotaryEmbedding expects 4 operands and 1 result");
+  }
+
+  auto readInt = [&](llvm::StringRef name, int64_t defaultVal) {
+    auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+    return attr ? attr.getValue().getSExtValue() : defaultVal;
+  };
+  if (readInt("interleaved", 0) != 0) {
+    return rewriter.notifyMatchFailure(op, "interleaved must be 0");
+  }
+  if (readInt("is_packed_batching", 0) != 0) {
+    return rewriter.notifyMatchFailure(op, "is_packed_batching must be 0");
+  }
+  const int64_t layout = readInt("mrope_layout", 0);
+  if (layout != 0 && layout != 1) {
+    return rewriter.notifyMatchFailure(op, "mrope_layout must be 0 or 1");
+  }
+  float scale = 1.0f;
+  if (auto attr = op->getAttrOfType<mlir::FloatAttr>("scale")) {
+    scale = static_cast<float>(attr.getValueAsDouble());
+  }
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value positionIds = op->getOperand(1);
+  mlir::Value cosCache = op->getOperand(2);
+  mlir::Value sinCache = op->getOperand(3);
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() != 3 || inputType.isDynamicDim(2)) {
+    return rewriter.notifyMatchFailure(
+        op, "input must be rank 3 with a static hidden dim");
+  }
+  mlir::Type elem = inputType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return rewriter.notifyMatchFailure(op, "input must be f16 or f32");
+  }
+  const int64_t hidden = inputType.getDimSize(2);
+  const int64_t numHeads = readInt("num_heads", 0);
+  if (numHeads <= 0 || hidden % numHeads != 0) {
+    return rewriter.notifyMatchFailure(
+        op, "num_heads must be positive and divide the hidden dim");
+  }
+  const int64_t headSize = hidden / numHeads;
+  int64_t rotaryDim = readInt("rotary_embedding_dim", 0);
+  if (rotaryDim == 0) {
+    rotaryDim = headSize;
+  }
+  if (rotaryDim <= 0 || rotaryDim % 2 != 0 || rotaryDim > headSize) {
+    return rewriter.notifyMatchFailure(
+        op, "rotary_embedding_dim must be positive, even and <= head size");
+  }
+  const int64_t half = rotaryDim / 2;
+
+  auto sectionAttr = op->getAttrOfType<mlir::ArrayAttr>("mrope_section");
+  if (!sectionAttr || sectionAttr.size() != 3) {
+    return rewriter.notifyMatchFailure(op,
+                                       "mrope_section must have 3 elements");
+  }
+  llvm::SmallVector<int64_t, 3> section;
+  for (mlir::Attribute a : sectionAttr) {
+    auto i = mlir::dyn_cast<mlir::IntegerAttr>(a);
+    if (!i || i.getValue().getSExtValue() < 0) {
+      return rewriter.notifyMatchFailure(
+          op, "mrope_section values must be non-negative integers");
+    }
+    section.push_back(i.getValue().getSExtValue());
+  }
+  if (section[0] + section[1] + section[2] != half) {
+    return rewriter.notifyMatchFailure(
+        op, "mrope_section must sum to rotary_embedding_dim / 2");
+  }
+
+  auto dimMismatch = [](int64_t got, int64_t want) {
+    return !mlir::ShapedType::isDynamic(got) &&
+           !mlir::ShapedType::isDynamic(want) && got != want;
+  };
+  auto posType = mlir::dyn_cast<mlir::RankedTensorType>(positionIds.getType());
+  if (!posType || !posType.getElementType().isInteger(64) ||
+      posType.getRank() != 3 || dimMismatch(posType.getDimSize(0), 3) ||
+      dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
+      dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
+    return rewriter.notifyMatchFailure(op,
+                                       "position_ids must be i64 [3, B, S]");
+  }
+  for (mlir::Value cache : {cosCache, sinCache}) {
+    auto cacheType = mlir::dyn_cast<mlir::RankedTensorType>(cache.getType());
+    if (!cacheType || cacheType.getElementType() != elem ||
+        cacheType.getRank() != 2 || cacheType.getDimSize(1) != half) {
+      return rewriter.notifyMatchFailure(
+          op, "cos_cache / sin_cache must be [max_position, "
+              "rotary_embedding_dim / 2] with the input element type");
+    }
+  }
+  if (dimMismatch(
+          mlir::cast<mlir::ShapedType>(cosCache.getType()).getDimSize(0),
+          mlir::cast<mlir::ShapedType>(sinCache.getType()).getDimSize(0))) {
+    return rewriter.notifyMatchFailure(
+        op, "cos_cache and sin_cache must have the same shape");
+  }
+
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || resultType.getElementType() != elem ||
+      resultType.getRank() != 3) {
+    return rewriter.notifyMatchFailure(op, "output must match the input");
+  }
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure)) {
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  }
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::MRotaryEmbeddingOp::create(
+      rewriter, loc, *ctxOrFailure, input, positionIds, cosCache, sinCache,
+      init, rewriter.getI64IntegerAttr(numHeads),
+      rewriter.getI64IntegerAttr(rotaryDim), rewriter.getI64ArrayAttr(section),
+      rewriter.getI64IntegerAttr(layout), rewriter.getF32FloatAttr(scale));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
-  patterns.add<RotaryEmbeddingToHip>(ctx);
+  patterns.add<RotaryEmbeddingToHip, MRotaryEmbeddingToHip>(ctx);
 }
 
 } // namespace hip

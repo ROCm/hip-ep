@@ -2604,6 +2604,8 @@
 "_Z23rope_interleaved_kernelIfEvPKT_PKxS2_S2_PS0_iiiiiiii":[13,0,0,16,350,0,0],
 "_Z24rope_half_rotated_kernelI6__halfEvPKT_PKxS3_S3_PS1_iiiiiiii":[12,0,0,16,223,0,0],
 "_Z24rope_half_rotated_kernelIfEvPKT_PKxS2_S2_PS0_iiiiiiii":[14,0,0,16,236,0,0],
+"_Z25mrope_half_rotated_kernelI6__halfEvPKT_PKxS3_S3_PS1_iiiiiiiiiiiif":[10,0,0,16,254,0,0],
+"_Z25mrope_half_rotated_kernelIfEvPKT_PKxS2_S2_PS0_iiiiiiiiiiiif":[12,0,0,16,252,0,0],
 "_Z26rope_copy_remaining_kernelI6__halfEvPKT_PS1_iiiiii":[9,0,0,16,300,0,0],
 "_Z26rope_copy_remaining_kernelIfEvPKT_PS0_iiiiii":[9,0,0,16,300,0,0]
 },

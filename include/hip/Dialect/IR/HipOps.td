@@ -1839,6 +1839,75 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   }];
 }
 
+def Hip_MRotaryEmbeddingOp : Hip_DpsOp<"mrotary_embedding", /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "Multimodal rotary position embedding (M-RoPE)";
+  let description = [{
+    com.microsoft MRotaryEmbedding restricted to rank-3 input,
+    interleaved = 0 and is_packed_batching = 0.
+
+    Shapes, with T = f16 or f32:
+      input, output        [B, S, num_heads * head_size]          T
+      position_ids         [3, B, S]                              i64
+      cos_cache, sin_cache [max_position, rotary_embedding_dim/2] T
+
+    The three position_ids streams are T, H and W. `mrope_section` = [t, h, w]
+    with t + h + w = rotary_embedding_dim / 2 assigns each cache column c a
+    stream k(c):
+      mrope_layout = 0: c < t -> T, c < t + h -> H, otherwise W.
+      mrope_layout = 1: H if c % 3 == 1 and c < 3h, W if c % 3 == 2 and
+                        c < 3w, otherwise T.
+    For every token and head, with half = rotary_embedding_dim / 2,
+    p = position_ids[k(c), b, s], cs = T(cos_cache[p, c] * scale) and
+    sn = T(sin_cache[p, c] * scale):
+      out[c]        = x[c] * cs - x[c + half] * sn
+      out[c + half] = x[c + half] * cs + x[c] * sn
+    Channels [rotary_embedding_dim, head_size) are copied. A column whose p is
+    outside [0, max_position) is copied unrotated.
+
+    Example:
+    ```mlir
+    hip.mrotary_embedding(%ctx)
+        ins(%input, %position_ids, %cos_cache, %sin_cache :
+            memref<1x7x6144xf16, 1>, memref<3x1x7xi64, 1>,
+            memref<262144x32xf16, 1>, memref<262144x32xf16, 1>)
+        outs(%output : memref<1x7x6144xf16, 1>)
+        {mrope_layout = 1 : i64, mrope_section = [11, 11, 10],
+         num_heads = 24 : i64, rotary_embedding_dim = 64 : i64,
+         scale = 1.0 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$position_ids,
+    Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$num_heads,
+    I64Attr:$rotary_embedding_dim,
+    I64ArrayAttr:$mrope_section,
+    DefaultValuedAttr<I64Attr, "0">:$mrope_layout,
+    DefaultValuedAttr<F32Attr, "1.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($position_ids) `,` type($cos_cache) `,`
+        type($sin_cache)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
                                           /*operandGetters=*/["A", "B"],
                                           /*outsAccessor=*/"C"> {

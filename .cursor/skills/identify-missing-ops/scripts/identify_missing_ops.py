@@ -211,6 +211,7 @@ _WRAP_SUFFIX_TO_OP: dict[str, str] = {
     "group_query_attention": "GroupQueryAttention",
     "multi_head_attention": "MultiHeadAttention",
     "rotary_embedding": "RotaryEmbedding",
+    "mrotary_embedding": "MRotaryEmbedding",
     "linear_attention": "LinearAttention",
     "gated_delta_net": "GatedDeltaNet",
     "qmoe": "QMoE",

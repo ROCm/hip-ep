@@ -1401,6 +1401,31 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
   return 0;
 }
 
+int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                           void *cos_cache, void *sin_cache, void *output,
+                           int64_t batch_size, int64_t seq_len,
+                           int64_t num_heads, int64_t head_dim,
+                           int64_t rotary_dim, int64_t max_position,
+                           int64_t section_t, int64_t section_h,
+                           int64_t section_w, int64_t mrope_layout, float scale,
+                           int64_t element_size_bytes) {
+  if (!state || !input || !position_ids || !cos_cache || !sin_cache ||
+      !output) {
+    fprintf(stderr, "Invalid required argument in wrap_mrotary_embedding\n");
+    return -1;
+  }
+  MOCK_PRINT(
+      "[MOCK] wrap_mrotary_embedding(batch=%lld, seq_len=%lld, "
+      "num_heads=%lld, head_dim=%lld, rotary_dim=%lld, "
+      "max_position=%lld, section=[%lld,%lld,%lld], layout=%lld, "
+      "scale=%f, element_size=%lld)\n",
+      (long long)batch_size, (long long)seq_len, (long long)num_heads,
+      (long long)head_dim, (long long)rotary_dim, (long long)max_position,
+      (long long)section_t, (long long)section_h, (long long)section_w,
+      (long long)mrope_layout, (double)scale, (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
                   int64_t input_num_elements, int64_t scale_num_elements,
                   int64_t norm_num_elements, int64_t element_size_bytes,

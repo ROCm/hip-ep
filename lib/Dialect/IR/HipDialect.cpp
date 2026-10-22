@@ -1523,6 +1523,115 @@ void RopeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// MRotaryEmbeddingOp: ins(input, position_ids, cos_cache, sin_cache),
+//                     outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MRotaryEmbeddingOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MRotaryEmbeddingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MRotaryEmbeddingOp::verify() {
+  if (failed(verifyDpsComputeOp(*this,
+                                {getInput(), getPositionIds(), getCosCache(),
+                                 getSinCache(), getOutput()},
+                                1))) {
+    return failure();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elem = inputType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("input must be f16 or f32, got ") << elem;
+  }
+  if (inputType.getRank() != 3) {
+    return emitOpError("input must be rank 3, got rank ")
+           << inputType.getRank();
+  }
+  if (inputType.isDynamicDim(2)) {
+    return emitOpError("input dim 2 must be static");
+  }
+  const int64_t hidden = inputType.getDimSize(2);
+  const int64_t numHeads = getNumHeads();
+  if (numHeads <= 0 || hidden % numHeads != 0) {
+    return emitOpError("input dim 2 (")
+           << hidden << ") must be a positive multiple of num_heads ("
+           << numHeads << ")";
+  }
+  const int64_t headSize = hidden / numHeads;
+  const int64_t rotaryDim = getRotaryEmbeddingDim();
+  if (rotaryDim <= 0 || rotaryDim % 2 != 0 || rotaryDim > headSize) {
+    return emitOpError("rotary_embedding_dim must be positive, even and at "
+                       "most the head size ")
+           << headSize << ", got " << rotaryDim;
+  }
+  const int64_t half = rotaryDim / 2;
+
+  ArrayAttr section = getMropeSection();
+  if (section.size() != 3) {
+    return emitOpError("mrope_section must have 3 elements, got ")
+           << section.size();
+  }
+  int64_t sectionSum = 0;
+  for (Attribute a : section) {
+    int64_t v = cast<IntegerAttr>(a).getInt();
+    if (v < 0) {
+      return emitOpError("mrope_section values must be non-negative");
+    }
+    sectionSum += v;
+  }
+  if (sectionSum != half) {
+    return emitOpError("mrope_section must sum to rotary_embedding_dim / 2 = ")
+           << half << ", got " << sectionSum;
+  }
+  if (getMropeLayout() != 0 && getMropeLayout() != 1) {
+    return emitOpError("mrope_layout must be 0 or 1, got ") << getMropeLayout();
+  }
+
+  auto dimMismatch = [](int64_t got, int64_t want) {
+    return !ShapedType::isDynamic(got) && !ShapedType::isDynamic(want) &&
+           got != want;
+  };
+
+  auto posType = cast<ShapedType>(getPositionIds().getType());
+  if (!posType.getElementType().isInteger(64) || posType.getRank() != 3 ||
+      dimMismatch(posType.getDimSize(0), 3) ||
+      dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
+      dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
+    return emitOpError("position_ids must be i64 [3, B, S], got ") << posType;
+  }
+
+  for (Value cache : {getCosCache(), getSinCache()}) {
+    auto cacheType = cast<ShapedType>(cache.getType());
+    if (cacheType.getElementType() != elem || cacheType.getRank() != 2 ||
+        cacheType.getDimSize(1) != half) {
+      return emitOpError("cos_cache and sin_cache must be ")
+             << elem << " [max_position, " << half << "], got " << cacheType;
+    }
+  }
+  if (dimMismatch(cast<ShapedType>(getCosCache().getType()).getDimSize(0),
+                  cast<ShapedType>(getSinCache().getType()).getDimSize(0))) {
+    return emitOpError("cos_cache and sin_cache must have the same shape");
+  }
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != elem || outputType.getRank() != 3 ||
+      dimMismatch(outputType.getDimSize(0), inputType.getDimSize(0)) ||
+      dimMismatch(outputType.getDimSize(1), inputType.getDimSize(1)) ||
+      dimMismatch(outputType.getDimSize(2), hidden)) {
+    return emitOpError("output must match the input shape and type, got ")
+           << outputType;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MiopenAddOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

@@ -91,6 +91,7 @@ inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
+inline constexpr const char *kWrapMRotaryEmbedding = "wrap_mrotary_embedding";
 inline constexpr const char *kWrapElementwise =
     "wrap_elementwise"; // hip.mul/add/min/max (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";

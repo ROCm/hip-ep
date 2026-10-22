@@ -948,6 +948,28 @@ HIP_KERNEL_API int hip_rope_forward(
     int64_t element_size_bytes,
     int64_t is_bnsh);
 
+// com.microsoft MRotaryEmbedding (hip.mrotary_embedding). A column whose
+// position is outside [0, max_position) is copied unrotated.
+HIP_KERNEL_API int hip_mrope_forward(
+    void* stream,
+    const void* input,
+    const void* position_ids,
+    const void* cos_cache,
+    const void* sin_cache,
+    void* output,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t rotary_dim,
+    int64_t max_position,
+    int64_t section_t,
+    int64_t section_h,
+    int64_t section_w,
+    int64_t mrope_layout,
+    float scale,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * GQA Device Kernel Launchers
  * =========================================================================
