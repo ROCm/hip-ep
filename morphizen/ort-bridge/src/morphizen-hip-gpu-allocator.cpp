@@ -129,6 +129,45 @@ hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
                              hipHostMallocMapped | hipHostMallocCoherent);
 }
 
+constexpr uint64_t kKeepAllPoolMemory = UINT64_MAX;
+
+// Returns false with nothing created on failure, leaving large requests to
+// hipMalloc.
+bool CreateDefaultPool(int device_id, hipMemPool_t *pool, hipStream_t *stream) {
+  const char *env = std::getenv("MORPHIZEN_DEFAULT_MEMPOOL");
+  if (env == nullptr || std::strcmp(env, "1") != 0) {
+    return false;
+  }
+  int device = device_id;
+  if (device < 0 && hipGetDevice(&device) != hipSuccess) {
+    return false;
+  }
+  int supported = 0;
+  if (hipDeviceGetAttribute(&supported, hipDeviceAttributeMemoryPoolsSupported,
+                            device) != hipSuccess ||
+      supported == 0) {
+    LOG(WARNING) << "[MorphiZen HIP] device " << device
+                 << " has no stream-ordered memory pools; using hipMalloc";
+    return false;
+  }
+  hipMemPoolProps props = {};
+  props.allocType = hipMemAllocationTypePinned;
+  props.location.type = hipMemLocationTypeDevice;
+  props.location.id = device;
+  if (hipMemPoolCreate(pool, &props) != hipSuccess) {
+    return false;
+  }
+  uint64_t threshold = kKeepAllPoolMemory;
+  if (hipMemPoolSetAttribute(*pool, hipMemPoolAttrReleaseThreshold,
+                             &threshold) != hipSuccess ||
+      hipStreamCreateWithFlags(stream, hipStreamNonBlocking) != hipSuccess) {
+    (void)hipMemPoolDestroy(*pool);
+    *pool = nullptr;
+    return false;
+  }
+  return true;
+}
+
 bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr) {
     return false;
@@ -176,6 +215,52 @@ HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
   Info = InfoImpl;
   Reserve = ReserveImpl;
   GetStats = nullptr;
+  if (device_only_) {
+    ScopedDevice _(device_id_);
+    hipMemPool_t pool = nullptr;
+    hipStream_t stream = nullptr;
+    if (CreateDefaultPool(device_id_, &pool, &stream)) {
+      pool_ = pool;
+      pool_stream_ = stream;
+    }
+  }
+}
+
+void *HipGpuAllocator::PoolAlloc(size_t size) {
+  ScopedDevice _(device_id_);
+  void *ptr = nullptr;
+  hipError_t err = hipMallocFromPoolAsync(&ptr, size, pool_, pool_stream_);
+  if (err != hipSuccess) {
+    // Free chunks mapped elsewhere in the pool may hold the memory this
+    // request needs.
+    (void)hipMemPoolTrimTo(pool_, 0);
+    err = hipMallocFromPoolAsync(&ptr, size, pool_, pool_stream_);
+  }
+  if (err != hipSuccess) {
+    LOG(ERROR) << "[MorphiZen HIP] hipMallocFromPoolAsync failed for " << size
+               << " bytes (device " << device_id_
+               << "): " << hipGetErrorString(err);
+    return nullptr;
+  }
+  // HIP creates the pool's address ranges on first use and starts each with
+  // a release threshold of zero, whatever the pool's was; setting it again
+  // reaches any range this request created before a free can unmap it.
+  uint64_t threshold = kKeepAllPoolMemory;
+  (void)hipMemPoolSetAttribute(pool_, hipMemPoolAttrReleaseThreshold,
+                               &threshold);
+  std::lock_guard<std::mutex> lk(pool_mutex_);
+  ptr_to_size_[ptr] = size;
+  return ptr;
+}
+
+// The sync hands the block back to the pool's address range, where a request
+// of another size can take it. A block left in the pool's free list serves
+// only requests up to 1/8 smaller, and once those blocks outweigh the ones in
+// use, HIP unmaps every free chunk regardless of the release threshold.
+void HipGpuAllocator::PoolFree(void *p) {
+  ScopedDevice _(device_id_);
+  (void)hipFreeAsync(p, pool_stream_);
+  (void)hipStreamSynchronize(pool_stream_);
 }
 
 // A capacity the model has just grown past cannot serve this request or any
@@ -321,6 +406,9 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   auto *self = static_cast<HipGpuAllocator *>(this_);
 
   const int cls = SizeClassIndex(size);
+  if (cls < 0 && self->pool_ != nullptr) {
+    return self->PoolAlloc(size);
+  }
   // Bytes to allocate on a miss: the class capacity for a pooled request, and
   // for a large one either the exact size or a grown capacity depending on
   // whether it replaces a live buffer or a grown buffer has been reused.
@@ -438,6 +526,7 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
   auto *self = static_cast<HipGpuAllocator *>(this_);
   // Only ever holds p: this path never evicts.
   std::vector<void *> to_release;
+  bool from_pool = false;
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     auto it = self->ptr_to_size_.find(p);
@@ -450,6 +539,9 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       // ptr_to_size_ so the destructor can release it. Safe to reuse without
       // a stream sync: see the pool comment in the header.
       self->free_lists_[cls].push_back(p);
+    } else if (self->pool_ != nullptr) {
+      self->ptr_to_size_.erase(it);
+      from_pool = true;
     } else {
       const size_t capacity = it->second;
       ++self->large_ops_;
@@ -492,6 +584,9 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       }
     }
   }
+  if (from_pool) {
+    self->PoolFree(p);
+  }
   ReleaseToDriver(to_release, self->device_id_, self->device_only_);
 }
 
@@ -503,11 +598,21 @@ HipGpuAllocator::~HipGpuAllocator() {
   ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
   for (const auto &kv : ptr_to_size_) {
-    hipError_t err = device_only_ ? hipFree(kv.first) : hipHostFree(kv.first);
+    hipError_t err = (pool_ != nullptr && SizeClassIndex(kv.second) < 0)
+                         ? hipFreeAsync(kv.first, pool_stream_)
+                     : device_only_ ? hipFree(kv.first)
+                                    : hipHostFree(kv.first);
     if (err != hipSuccess) {
       LOG(WARNING) << "[MorphiZen HIP] driver free failed (device "
                    << device_id_ << "): " << hipGetErrorString(err);
     }
+  }
+  if (pool_ != nullptr) {
+    // Destroying a pool frees only the blocks returned to it, so every
+    // checked-out one must be freed first.
+    (void)hipStreamSynchronize(pool_stream_);
+    (void)hipMemPoolDestroy(pool_);
+    (void)hipStreamDestroy(pool_stream_);
   }
   for (auto &fl : free_lists_) {
     fl.clear();

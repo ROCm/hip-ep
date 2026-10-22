@@ -21,6 +21,11 @@
 #include <unordered_map>
 #include <vector>
 
+// hipMemPool_t and hipStream_t, without pulling the HIP headers into the
+// factory.
+struct ihipMemPoolHandle_t;
+struct ihipStream_t;
+
 namespace morphizen {
 
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
@@ -133,6 +138,10 @@ private:
                            bool recurring);
   bool ReplacesLiveBuffer(size_t size) const;
   bool ReplacedByLiveBuffer(size_t requested) const;
+  // Call without pool_mutex_ held: PoolAlloc takes it to track the buffer,
+  // and FreeImpl untracks a buffer before handing it to PoolFree.
+  void *PoolAlloc(size_t size);
+  void PoolFree(void *p);
 
   // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
   // (page-pinning) call: ORT re-allocates the per-Run input device-copy
@@ -268,6 +277,20 @@ private:
   // DEFAULT memory comes from hipMalloc (not host-dereferenceable) unless
   // MORPHIZEN_DEFAULT_HIPMALLOC=0; HOST_ACCESSIBLE stays hipHostMalloc.
   bool device_only_;
+
+  // With MORPHIZEN_DEFAULT_MEMPOOL=1, large DEFAULT requests bypass the growth
+  // and reuse pools and come from a HIP stream-ordered memory pool instead.
+  // HIP backs it with a reserved virtual address range that it maps with
+  // physical memory in 128 MiB chunks, places requests best-fit and merges
+  // freed neighbours, so a freed block can serve a request of any size. With
+  // the release threshold at its maximum the chunks stay mapped until the
+  // destructor: after the first inference of the largest shape, no request
+  // allocates system memory, and varying shapes cannot grow the pool past
+  // that inference's peak plus fragmentation. Nothing else runs on
+  // pool_stream_, so a block freed on it is reusable at once, under the same
+  // contract the pools above rely on.
+  ihipMemPoolHandle_t *pool_ = nullptr;
+  ihipStream_t *pool_stream_ = nullptr;
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared
