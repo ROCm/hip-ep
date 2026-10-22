@@ -369,7 +369,8 @@ int wrap_causal_conv_with_state(
     const void *weight, const void *bias, const void *past_state, void *output,
     void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
     int64_t kernel_size, int64_t ndim, int64_t activation,
-    int64_t element_size_bytes, int64_t channels_last) {
+    int64_t element_size_bytes, int64_t channels_last, int64_t dilation,
+    int64_t state_channels_last) {
   (void)op_state_slot;
   if (!state || !input || !weight || !output || !present_state) {
     fprintf(stderr,
@@ -387,8 +388,9 @@ int wrap_causal_conv_with_state(
   MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
              (long long)ndim, act_name, (long long)activation,
              (long long)element_size_bytes);
-  MOCK_PRINT("[MOCK]   layout=%s,\n",
-             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)");
+  MOCK_PRINT("[MOCK]   layout=%s, state=%s, dilation=%lld,\n",
+             channels_last ? "channels_last(B,L,C)" : "channels_first(B,C,L)",
+             state_channels_last ? "(B,S,C)" : "(B,C,S)", (long long)dilation);
   MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
              past_state ? "yes" : "null");
 
@@ -658,6 +660,28 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
   return 0;
 }
 
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !initial_state || !a_log ||
+      !dt_bias || !output || !final_state) {
+    fprintf(stderr, "Invalid required argument in wrap_gated_delta_net\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_gated_delta_net(B=%lld, L=%lld, Hqk=%lld, Hv=%lld, "
+             "dk=%lld, dv=%lld, scale=%f, elem=%lld)\n",
+             (long long)batch, (long long)seq_len, (long long)num_heads_qk,
+             (long long)num_heads_v, (long long)head_size_qk,
+             (long long)head_size_v, (double)scale,
+             (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
                      int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
@@ -764,6 +788,34 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
   return 0;
 }
 
+int wrap_ngram_hash_mapping(RuntimeState *state, void *input_ids,
+                            void *multipliers, void *vocab_sizes,
+                            void *past_ids, void *head_offsets,
+                            void *eos_token_id, void *segment_ids,
+                            void *hash_ids, void *present_ids, int64_t batch,
+                            int64_t seq_len, int64_t max_ngram_size,
+                            int64_t n_head_per_ngram, int64_t pad_id,
+                            int64_t reset_on_eos, int64_t element_size_bytes) {
+  (void)input_ids;
+  (void)multipliers;
+  (void)vocab_sizes;
+  (void)hash_ids;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_ngram_hash_mapping\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_ngram_hash_mapping(B=%lld, S=%lld, N=%lld, "
+             "heads=%lld, pad=%lld, reset_on_eos=%lld, elem=%lld, past=%d, "
+             "offsets=%d, eos=%d, seg=%d, present=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)max_ngram_size,
+             (long long)n_head_per_ngram, (long long)pad_id,
+             (long long)reset_on_eos, (long long)element_size_bytes,
+             past_ids != nullptr, head_offsets != nullptr,
+             eos_token_id != nullptr, segment_ids != nullptr,
+             present_ids != nullptr);
+  return 0;
+}
+
 int wrap_compress(RuntimeState *state, void *input, void *condition,
                   void *output, int64_t flatten, int64_t axis,
                   int64_t input_rank, int64_t output_rank,
@@ -853,6 +905,33 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
   MOCK_PRINT("[MOCK] wrap_random_normal_like(rank=%lld, has_seed=%lld, "
              "data_type=%lld)\n",
              (long long)rank, (long long)has_seed, (long long)data_type);
+  return 0;
+}
+
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type) {
+  (void)data;
+  (void)indices;
+  if (!state || !data_shape) {
+    fprintf(stderr, "Invalid state in wrap_arg_max\n");
+    if (state)
+      hipdnn_ep_state_set_error_flag(state, -1);
+    return -1;
+  }
+  int64_t resolved_axis = axis;
+  if (resolved_axis < 0)
+    resolved_axis += rank;
+  if (resolved_axis >= 0 && resolved_axis < rank &&
+      data_shape[resolved_axis] <= 0) {
+    fprintf(stderr, "[MOCK] wrap_arg_max: empty reduction axis\n");
+    hipdnn_ep_state_set_error_flag(state, -1);
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_arg_max(axis=%lld, keepdims=%lld, "
+             "select_last_index=%lld, rank=%lld, data_type=%lld)\n",
+             (long long)axis, (long long)keepdims, (long long)select_last_index,
+             (long long)rank, (long long)data_type);
   return 0;
 }
 
@@ -1269,6 +1348,19 @@ int wrap_swish(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
+                int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_swiglu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_swiglu(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
 extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
@@ -1328,6 +1420,44 @@ int wrap_rms_norm(RuntimeState *state, void *input, void *scale, void *output,
   return 0;
 }
 
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
+                        void *gate, void *output, int64_t input_num_elements,
+                        int64_t norm_size, int64_t element_size_bytes,
+                        int64_t activation, float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gated_rms_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gated_rms_norm(input_num_elements=%lld, "
+             "norm_size=%lld, element_size=%lld, activation=%lld, "
+             "epsilon=%f)\n",
+             (long long)input_num_elements, (long long)norm_size,
+             (long long)element_size_bytes, (long long)activation,
+             (double)epsilon);
+
+  return 0;
+}
+
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_engram_gate\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_engram_gate(key_num_elements=%lld, hc=%lld, "
+             "hidden=%lld, normed=%s, element_size=%lld, epsilon=%f)\n",
+             (long long)key_num_elements, (long long)hc, (long long)hidden,
+             normed ? "yes" : "no", (long long)element_size_bytes,
+             (double)epsilon);
+
+  return 0;
+}
+
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     void *skip, void *gamma, void *bias,
                                     void *output, void *input_skip_bias_sum,
@@ -1371,6 +1501,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
              zero_points ? "yes" : "null", g_idx ? "yes" : "null",
              bias ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
+                      void *output, int64_t n, int64_t k, int64_t block_size,
+                      int64_t quant_type) {
+  (void)packed;
+  (void)absmax;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_dequant_bnb4\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_dequant_bnb4(N=%lld, K=%lld, block_size=%lld, "
+             "quant_type=%lld)\n",
+             (long long)n, (long long)k, (long long)block_size,
+             (long long)quant_type);
   return 0;
 }
 

@@ -67,7 +67,9 @@ mirror are produced for both artifact formats
   is present in the native artifact too.
 
 The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
-opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+opening the artifact. `NATIVE` is available only when the EP is built with
+`-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON` (default `OFF`); otherwise session
+setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
 
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
@@ -166,7 +168,7 @@ Dynamic dimensions are encoded as `-1`.
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
-| `input_count` | `int64` | Number of model inputs |
+| `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
 | `inputs[i].element_size` | `int64` | Bytes per element of input `i` |

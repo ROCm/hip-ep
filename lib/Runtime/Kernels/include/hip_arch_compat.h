@@ -84,6 +84,26 @@
  * encoding. The accumulator is always 8 elements/lane in both encodings. */
 #define HIPDNN_WMMA_FRAG_ELEMS (HIPDNN_WMMA_GFX12 ? 8 : 16)
 
+/* Wave32 VGPRs per SIMD on the arch this device pass compiles for: 1536 on
+ * gfx1100, gfx1101 and gfx1151, 1024 on the other gfx11 parts, on gfx1170, and
+ * on gfx11-generic, which must fit its smallest member. amdgpu_waves_per_eu(N)
+ * is a budget of HIPDNN_VGPRS_PER_SIMD / N registers, so a register tile sized
+ * for one file can spill on the other. Unlisted archs get 1024, the smaller
+ * budget. */
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1151__)
+#  define HIPDNN_VGPRS_PER_SIMD 1536
+#else
+#  define HIPDNN_VGPRS_PER_SIMD 1024
+#endif
+
+/* The occupancy that gives a kernel R VGPRs on this target. A wave count
+ * worked out for gfx1151's file grants a third fewer registers on the
+ * gfx11-generic binary gfx1150 / 1151 / 1152 run, so a kernel that needs R
+ * registers asks for amdgpu_waves_per_eu(HIPDNN_WAVES_FOR_VGPRS(R)) instead.
+ * The 1024 fallback for unlisted archs can only make the request more
+ * generous (fewer waves, more registers), never cause a spill. */
+#define HIPDNN_WAVES_FOR_VGPRS(R) (HIPDNN_VGPRS_PER_SIMD / (R))
+
 #if HIPDNN_WMMA_GFX12
 #  define HIPDNN_WMMA_F32_16X16X16_F16(a, b, c)                               \
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12((a), (b), (c))

@@ -26,8 +26,10 @@ namespace {
 //            ...}
 //
 // Input and output quantization is per-tensor. Weight quantization is
-// per-tensor or per output channel. auto_pad must be NOTSET; the pads
-// attribute carries the window. Bias is optional.
+// per-tensor or per output channel. auto_pad is resolved to explicit pads
+// before the kernel runs: NOTSET keeps the pads attribute, VALID clears
+// them, and SAME_UPPER / SAME_LOWER split the pad budget the same way
+// hip.conv does. Bias is optional.
 static FailureOr<SmallVector<int64_t>>
 readI64Array(Operation *op, StringRef name, int64_t count,
              ArrayRef<int64_t> fallback) {
@@ -101,12 +103,6 @@ struct QLinearConvToHip : public RewritePattern {
         (op->getNumOperands() != 8 && op->getNumOperands() != 9))
       return rewriter.notifyMatchFailure(
           op, "onnx.QLinearConv expects 8 or 9 operands and 1 result");
-
-    if (auto padMode = op->getAttrOfType<StringAttr>("auto_pad")) {
-      if (padMode.getValue() != "NOTSET")
-        return rewriter.notifyMatchFailure(
-            op, "onnx.QLinearConv auto_pad must be NOTSET");
-    }
 
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (failed(ctxOrFailure))
@@ -183,6 +179,37 @@ struct QLinearConvToHip : public RewritePattern {
         strides[1] <= 0 || dilations[0] <= 0 || dilations[1] <= 0)
       return rewriter.notifyMatchFailure(
           op, "kernel, stride, and dilation entries must be positive");
+
+    // hip.qlinear_conv stores explicit pads. SAME_* and VALID replace the
+    // attribute; the odd pad goes to the end for SAME_UPPER and to the
+    // beginning for SAME_LOWER, matching hip.conv.
+    StringRef autoPad = "NOTSET";
+    if (auto padMode = op->getAttrOfType<StringAttr>("auto_pad"))
+      autoPad = padMode.getValue();
+    if (autoPad == "VALID") {
+      pads.assign(4, 0);
+    } else if (autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER") {
+      for (int axis : {0, 1}) {
+        if (inputType.isDynamicDim(axis + 2))
+          return rewriter.notifyMatchFailure(
+              op, "onnx.QLinearConv auto_pad=SAME_* requires static spatial "
+                  "dims");
+      }
+      for (int axis : {0, 1}) {
+        int64_t effective = (kernel[axis] - 1) * dilations[axis] + 1;
+        int64_t padTotal =
+            (resultType.getDimSize(axis + 2) - 1) * strides[axis] + effective -
+            inputType.getDimSize(axis + 2);
+        if (padTotal < 0)
+          padTotal = 0;
+        int64_t half = padTotal / 2;
+        pads[axis] = autoPad == "SAME_UPPER" ? half : padTotal - half;
+        pads[axis + 2] = padTotal - pads[axis];
+      }
+    } else if (autoPad != "NOTSET") {
+      return rewriter.notifyMatchFailure(
+          op, "onnx.QLinearConv unknown auto_pad value");
+    }
 
     int64_t outChannels = weightsType.isDynamicDim(0)
                               ? ShapedType::kDynamic

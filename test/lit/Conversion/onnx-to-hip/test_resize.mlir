@@ -242,4 +242,62 @@ module {
     // CHECK: return
     return %y : tensor<?x?x?x?xf32>
   }
+
+  // Test 12: quantized nearest upsample. Empty roi and scales are the
+  // 0-element tensors an exporter emits for omitted inputs; sizes is the
+  // output shape. nearest_mode round_prefer_ceil is 1.
+  func.func @test_resize_nearest_ui8(%arg0: tensor<1x256x13x13xui8>)
+      -> tensor<1x256x26x26xui8> {
+    // CHECK-LABEL: func.func @test_resize_nearest_ui8
+    %roi = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %scales = "onnx.Constant"() {value = dense<> : tensor<0xf32>} : () -> tensor<0xf32>
+    %sizes = "onnx.Constant"() {value = dense<[1, 256, 26, 26]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "nearest",
+         coordinate_transformation_mode = "half_pixel",
+         nearest_mode = "round_prefer_ceil"}
+        : (tensor<1x256x13x13xui8>, tensor<0xf32>, tensor<0xf32>, tensor<4xi64>)
+        -> tensor<1x256x26x26xui8>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: tensor.empty() : tensor<1x256x26x26xui8>
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 0
+    // CHECK-SAME: mode = 0
+    // CHECK-SAME: nearest_mode = 1
+    return %y : tensor<1x256x26x26xui8>
+  }
+
+  // Test 13: signless int8 nearest uses the same index-copy path.
+  func.func @test_resize_nearest_i8(%arg0: tensor<1x128x26x26xi8>)
+      -> tensor<1x128x52x52xi8> {
+    // CHECK-LABEL: func.func @test_resize_nearest_i8
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.NoValue"() {value} : () -> none
+    %sizes = "onnx.Constant"() {value = dense<[1, 128, 52, 52]> : tensor<4xi64>}
+        : () -> tensor<4xi64>
+    %y = "onnx.Resize"(%arg0, %roi, %scales, %sizes)
+        {mode = "nearest", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x128x26x26xi8>, none, none, tensor<4xi64>)
+        -> tensor<1x128x52x52xi8>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: mode = 0
+    return %y : tensor<1x128x52x52xi8>
+  }
+
+  // Test 14: linear on uint8 would interpolate stored codes. Leave it.
+  func.func @test_resize_linear_ui8_rejected(%arg0: tensor<1x3x8x8xui8>)
+      -> tensor<1x3x16x16xui8> {
+    // CHECK-LABEL: func.func @test_resize_linear_ui8_rejected
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0, 2.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x3x8x8xui8>, none, tensor<4xf32>) -> tensor<1x3x16x16xui8>
+    // CHECK: onnx.Resize
+    // CHECK-NOT: hip.resize
+    return %y : tensor<1x3x16x16xui8>
+  }
 }

@@ -52,6 +52,7 @@ set(_kernel_sources
     hip/trilu_kernel.hip
     hip/swish_kernel.hip
     hip/pow_kernel.hip
+    hip/swiglu_kernel.hip
     hip/softplus_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/qelementwise_kernel.hip
@@ -80,9 +81,11 @@ set(_kernel_sources
     hip/gather_elements_kernel.hip
     hip/top_k_kernel.hip
     hip/random_normal_like_kernel.hip
+    hip/arg_max_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
+    hip/ngram_hash_mapping_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
@@ -91,10 +94,12 @@ set(_kernel_sources
     hip/grid_sample_kernel.hip
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
+    hip/dequant_bnb4_kernel.hip
     hip/qmoe_kernel.hip
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
+    hip/gated_delta_net_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip

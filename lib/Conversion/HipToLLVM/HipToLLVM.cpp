@@ -6,7 +6,9 @@
 #include "HipToLLVMUtils.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
 
 namespace mlir {
@@ -247,6 +249,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGatherElementsLoweringPatterns(typeConverter, patterns);
   populateTopKLoweringPatterns(typeConverter, patterns);
   populateRandomNormalLikeLoweringPatterns(typeConverter, patterns);
+  populateArgMaxLoweringPatterns(typeConverter, patterns);
   populateScatterElementsLoweringPatterns(typeConverter, patterns);
   populateCompressLoweringPatterns(typeConverter, patterns);
   populateOneHotLoweringPatterns(typeConverter, patterns);
@@ -258,16 +261,19 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGqaLoweringPatterns(typeConverter, patterns);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
+  populateDequantBnb4LoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateQMoEAmdLoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
   populateQdqLoweringPatterns(typeConverter, patterns);
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
+  populateGatedDeltaNetLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);
   populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
+  populateNGramHashMappingLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
   populateEqualLoweringPatterns(typeConverter, patterns);
   populateOrLoweringPatterns(typeConverter, patterns);
@@ -373,6 +379,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
+
+  // A ui8 If condition is compared as signless i8. Lowering the readback
+  // inserts the reverse cast, and that round trip is not executable LLVM.
+  // Drop casts whose chain returns to the original type.
+  SmallVector<UnrealizedConversionCastOp> casts;
+  module.walk(
+      [&](UnrealizedConversionCastOp castOp) { casts.push_back(castOp); });
+  reconcileUnrealizedCasts(casts);
 
   if (failed(transformMainFunction(module)))
     signalPassFailure();

@@ -2793,6 +2793,7 @@ static inline void launchFlashDecodeConfig(
       case 3:  LAUNCH_SCALAR(3);  break;
       case 4:  LAUNCH_SCALAR(4);  break;
       case 5:  LAUNCH_SCALAR(5);  break;
+      case 6:  LAUNCH_SCALAR(6);  break;
       case 8:  LAUNCH_SCALAR(8);  break;
       case 16: LAUNCH_SCALAR(16); break;
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
@@ -3134,8 +3135,9 @@ static int runGqaFlashDecode(
     bool allow_autotune) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128), HPG=5
-  // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
-  // d=128 is rejected to keep template bloat bounded; no current model needs it.
+  // (Qwen2.5-14B's 40:8 at d=128), HPG=6 (Qwen3.6/3.8-27B's 24:4 at d=256) and
+  // HPG=8 (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
+  // bloat bounded; no current model needs it.
   if (G <= 0 || H % G != 0) {
     fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
     return -1;
@@ -3143,11 +3145,11 @@ static int runGqaFlashDecode(
   const int hpg = H / G;
   // Scalar decode is templated for these HpG (GQA + MHA); WMMA is layered on
   // top where flash_decode_wmma_supported() says so. Anything else is rejected.
-  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 8 &&
-      hpg != 16) {
+  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 6 &&
+      hpg != 8 && hpg != 16) {
     fprintf(stderr,
             "hip_gqa_flash_decode: unsupported HPG=%d (must be "
-            "1/2/3/4/5/8/16; H=%d, G=%d)\n",
+            "1/2/3/4/5/6/8/16; H=%d, G=%d)\n",
             hpg, H, G);
     return -1;
   }
@@ -3671,7 +3673,20 @@ gqa_flash_prefill_v6x_kernel(
             // Scores stay unscaled; m_reg is kept in scaled log2 units, so
             // p = exp2(s * c - m). c > 0, so the max commutes with the scaling.
             const float c = scale * kLog2e;
+#if HIPDNN_WMMA_GFX12
             half16_t Pb[M_TILES][S_TILES_J];
+#else
+            // gfx11 builds P^T as packed fp16 pairs (see below) and keeps them
+            // as 32-bit lanes until the WMMA reads them. The loop is rotated, so
+            // Pb is carried across the back edge into the next tile's value
+            // GEMM; carried as half16, ROCm 7.16's 16-bit-register codegen
+            // rebuilds every odd element at the join with a no-op pair
+            // (v_lshrrev_b32 then v_mov_b16 back into the same .h half): 32
+            // extra dependent VALU per KV step at d128 BKV32, 9-15% slower for
+            // the 8-wave blocks. 7.14 kept the dwords.
+            typedef int int8v_t __attribute__((ext_vector_type(8)));
+            int8v_t Pb[M_TILES][S_TILES_J];
+#endif
             float corr[M_TILES];
             #pragma unroll
             for (int mi = 0; mi < M_TILES; ++mi) {
@@ -3715,14 +3730,13 @@ gqa_flash_prefill_v6x_kernel(
                     // match. That leaves one swap per packed pair and no
                     // per-half select.
                     typedef _Float16 half2v_t __attribute__((ext_vector_type(2)));
-                    typedef int int8v_t __attribute__((ext_vector_type(8)));
                     int8v_t pk;
                     #pragma unroll
                     for (int j = 0; j < kAcc / 2; ++j)
                         pk[j] = __builtin_bit_cast(int, half2v_t{own[2 * j], own[2 * j + 1]});
                     #pragma unroll
                     for (int j = 0; j < kAcc / 2; ++j) pk[kAcc / 2 + j] = v6_swap_halves(pk[j]);
-                    Pb[mi][sj] = __builtin_bit_cast(half16_t, pk);
+                    Pb[mi][sj] = pk;
 #endif
                 }
                 rsum += v6_swap_halves(rsum);
@@ -3754,9 +3768,19 @@ gqa_flash_prefill_v6x_kernel(
                     const half16_t v_frag = HALF16_LOAD(
                         &V_lds[(tj * 16 + wmma_lane) * VT_STR + tk * 16], pair);
                     #pragma unroll
-                    for (int mi = 0; mi < M_TILES; ++mi)
+                    for (int mi = 0; mi < M_TILES; ++mi) {
+#if HIPDNN_WMMA_GFX12
+                        const half16_t p_frag = Pb[mi][tk];
+#else
+                        // The empty asm emits nothing; it keeps the carried value
+                        // typed as dwords so it is not re-split into halves.
+                        int8v_t p_dw = Pb[mi][tk];
+                        asm("" : "+v"(p_dw));
+                        const half16_t p_frag = __builtin_bit_cast(half16_t, p_dw);
+#endif
                         O_frag[mi][tj] = HIPDNN_WMMA_F32_16X16X16_F16(
-                            v_frag, Pb[mi][tk], O_frag[mi][tj]);
+                            v_frag, p_frag, O_frag[mi][tj]);
+                    }
                 }
             }
         }
