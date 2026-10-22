@@ -8,10 +8,7 @@
 //       -> hip.hyper_connection_pre_mix
 //   onnx.Custom(com.microsoft.HyperConnectionPostMix)
 //       -> hip.hyper_connection_post_mix
-//
-// The math follows the ORT CPU kernels: FP32 products, one rounding back to
-// the element type, and no activation inside the op. Stream layout is
-// (..., C, H), or (..., C * H) when num_branches is set.
+//          or hip.hyper_connection_post_mix_norm
 //
 //===----------------------------------------------------------------------===//
 
@@ -342,11 +339,9 @@ bool matchInjectChain(mlir::Value gate, InjectChain &chain) {
   return true;
 }
 
-// Fold a following BranchwiseRMSNorm into the post-mix. stream_mix and a
-// feature gate are kept. The 2 * sigmoid(x / 4) chain is folded only when
-// that chain is actually present. applicable is set once the norm user is
-// the fusion target, so a shape mismatch does not fall through to an
-// unfused post-mix and leave the norm without a lowering.
+// applicable is set once the norm user is the fusion target, so a shape
+// mismatch does not fall through to an unfused post-mix and leave the norm
+// without a lowering.
 mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
                                     mlir::PatternRewriter &rewriter,
                                     const StreamParams &params,

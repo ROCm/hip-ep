@@ -79,6 +79,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `EngramGate` (`com.microsoft`) | `hip.engram_gate` | `rms_norm_kernel.hip` |
 | `HyperConnectionPreMix` (`com.microsoft`) | `hip.hyper_connection_pre_mix` | `hyper_connection_kernel.hip` |
 | `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |
+| `HyperConnectionPostMix` + `BranchwiseRMSNorm` | `hip.hyper_connection_post_mix_norm` | `hyper_connection_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:

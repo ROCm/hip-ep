@@ -4,11 +4,8 @@
  *
  * com.microsoft HyperConnectionPreMix / HyperConnectionPostMix.
  *
- * Streams are (row, branch, hidden) in memory. A flattened (..., C * H)
- * tensor is that layout with no extra transpose. Gates are either one value
- * per branch or one value per (branch, hidden), already activated by the
- * graph. Products accumulate in FP32 and each output is rounded once, which
- * is the ORT CPU contract.
+ * Streams are (row, branch, hidden). A flattened (..., C * H) tensor is
+ * that layout with no extra transpose.
  */
 
 #include "hip_custom_kernels.h"
@@ -146,10 +143,7 @@ int launch_post(hipStream_t stream, const void *streams,
   return 0;
 }
 
-// One block per (row, branch). Post-mix, then branchwise RMSNorm.
-// stream_mix null is the identity. gate_activation 1 applies
-// round(2 * sigmoid(round(gate / 4))) before the product. feature_gate 0
-// is one gate per branch; 1 is one gate per hidden element.
+// One block per (row, branch).
 template <typename T>
 __device__ float hc_gate(float raw, int gate_activation) {
   if (!gate_activation)
