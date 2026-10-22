@@ -3666,6 +3666,52 @@ HIP_KERNEL_API int hip_dynamic_sparse_attention(
     int64_t max_selected,
     float scale);
 
+// com.microsoft SparseAttentionIndexer, policy_mode=qsa, packed QK, no
+// past_sequence_length. T = fp16 (element_size_bytes 2) or fp32 (4).
+//   query            [B, S, (N+1)*D] T; the last D channels are the key
+//   query/key_norm_weight [D] T
+//   cos/sin_cache    [X, R] (rotary_batched 0) or [B, X, R] (1) T
+//   mask             [B, P+S] int64 or null (all visible)
+//   past_key         [B, P, D] T, may be null when P == 0
+//   selected_indices [B, S, token_budget + r - 1] int32
+//   present_key      [B, P+S, D] T
+// D must be 128, 1 <= N <= 8, R even in (0, D], token_budget / r <= 512.
+// workspace must hold hip_sparse_attention_indexer_workspace_size() bytes.
+HIP_KERNEL_API size_t hip_sparse_attention_indexer_workspace_size(
+    int64_t batch,
+    int64_t seq_len,
+    int64_t past_len,
+    int64_t num_heads,
+    int64_t head_size,
+    int64_t compress_ratio);
+
+HIP_KERNEL_API int hip_sparse_attention_indexer(
+    void* stream,
+    const void* query,
+    const void* query_norm_weight,
+    const void* key_norm_weight,
+    const void* cos_cache,
+    const void* sin_cache,
+    const int64_t* mask,
+    const void* past_key,
+    int32_t* selected_indices,
+    void* present_key,
+    void* workspace,
+    size_t workspace_bytes,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t past_len,
+    int64_t num_heads,
+    int64_t head_size,
+    int64_t rotary_width,
+    int64_t rotary_rows,
+    int64_t rotary_batched,
+    int64_t compress_ratio,
+    int64_t token_budget,
+    int element_size_bytes,
+    float epsilon,
+    float scale);
+
 /* =========================================================================
  * Conv — general forward convolution (1D / 2D / 3D spatial)
  * =========================================================================

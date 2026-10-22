@@ -299,6 +299,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateLinearAttentionConversionPatterns(patterns, ctx);
   populateGatedDeltaNetConversionPatterns(patterns, ctx);
   populateDynamicSparseAttentionConversionPatterns(patterns, ctx);
+  populateSparseAttentionIndexerConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);

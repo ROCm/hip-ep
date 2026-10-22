@@ -1851,6 +1851,17 @@ int wrap_dynamic_sparse_attention(
     int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
     int64_t capacity, int64_t max_selected, float scale);
 
+// past_key may be null when past_len == 0; mask may be null (all visible).
+int wrap_sparse_attention_indexer(
+    RuntimeState *state, const void *query, const void *query_norm_weight,
+    const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
+    const void *mask, const void *past_key, void *selected_indices,
+    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
+    int64_t num_heads, int64_t head_size, int64_t rotary_width,
+    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
+    int64_t token_budget, int64_t element_size_bytes, float epsilon,
+    float scale);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================

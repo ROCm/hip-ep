@@ -118,6 +118,8 @@ inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
 inline constexpr const char *kWrapDynamicSparseAttention =
     "wrap_dynamic_sparse_attention";
+inline constexpr const char *kWrapSparseAttentionIndexer =
+    "wrap_sparse_attention_indexer";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
@@ -515,6 +517,8 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
 void populateDynamicSparseAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateSparseAttentionIndexerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);

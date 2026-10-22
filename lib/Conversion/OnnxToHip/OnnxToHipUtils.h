@@ -393,6 +393,8 @@ void populateGatedDeltaNetConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateDynamicSparseAttentionConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx);
+void populateSparseAttentionIndexerConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,

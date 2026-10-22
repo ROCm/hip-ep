@@ -215,6 +215,7 @@ _WRAP_SUFFIX_TO_OP: dict[str, str] = {
     "linear_attention": "LinearAttention",
     "gated_delta_net": "GatedDeltaNet",
     "dynamic_sparse_attention": "DynamicSparseAttention",
+    "sparse_attention_indexer": "SparseAttentionIndexer",
     "qmoe": "QMoE",
     "causal_conv_with_state": "CausalConvWithState",
     "ngram_hash_mapping": "NGramHashMapping",

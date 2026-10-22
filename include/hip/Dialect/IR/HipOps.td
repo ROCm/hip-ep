@@ -4758,6 +4758,85 @@ def Hip_DynamicSparseAttentionOp : Hip_DpsOp<"dynamic_sparse_attention"> {
   let hasVerifier = 1;
 }
 
+def Hip_SparseAttentionIndexerOp : Hip_DpsOp<"sparse_attention_indexer"> {
+  let summary = "Query-aware selection of KV token blocks "
+                "(com.microsoft SparseAttentionIndexer, policy_mode = qsa)";
+  let description = [{
+    com.microsoft SparseAttentionIndexer restricted to policy_mode = qsa with
+    packed QK (no separate key) and no past_sequence_length, so present_key
+    is past_key with the new keys appended.
+
+    Shapes, with N query heads (at most 8), D = 128, R the rotary width
+    (even, <= D),
+    X rotary rows, P past length, T = P + S, r = compress_ratio,
+    K = token_budget / r (at most 512):
+      query               [B, S, (N + 1) * D]   f16 or f32; key = last D
+      query/key_norm_weight [D]
+      cos/sin_cache       [X, R] or [B, X, R]
+      mask (optional)     [B, T]                i64, nonzero = visible
+      past_key            [B, P, D]
+      selected_indices    [B, S, K * r + r - 1] i32
+      present_key         [B, T, D]
+
+    Row (b, s) sees visible = ascending t <= P + s with mask[b, t] != 0.
+    Block j is visible[r*j .. r*j + r - 1] for j < len(visible) / r. Its key
+    is the fp32 mean of those present_key rows, RMS-normalized
+    (x * rsqrt(mean(x^2) + epsilon) * key_norm_weight) and rotated by the
+    split-half RoPE on the first R channels at cos/sin row
+    clamp(visible[r*j], 0, X - 1). Each query head is normalized with
+    query_norm_weight and rotated at row clamp(P + s, 0, X - 1). The score is
+    scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
+    ordered by score descending then block index ascending, emit their r
+    token indices; the remaining visible tail follows and -1 fills the rest.
+
+    Example:
+    ```mlir
+    hip.sparse_attention_indexer(%ctx)
+        ins(%q, %qw, %kw, %cos, %sin, %past :
+            memref<1x1x640xf16, 1>, memref<128xf16, 1>, memref<128xf16, 1>,
+            memref<1x?x64xf16, 1>, memref<1x?x64xf16, 1>,
+            memref<1x?x128xf16, 1>)
+        mask(%mask : memref<1x?xi64, 1>)
+        outs(%sel, %present : memref<1x1x2051xi32, 1>, memref<1x?x128xf16, 1>)
+        {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+         epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$query_norm_weight,
+    Hip_TensorOrMemRef:$key_norm_weight,
+    Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache,
+    Hip_TensorOrMemRef:$past_key,
+    Optional<Hip_TensorOrMemRef>:$mask,
+    Hip_TensorOrMemRef:$selected_indices,
+    Hip_TensorOrMemRef:$present_key,
+    I64Attr:$compress_ratio,
+    I64Attr:$token_budget,
+    F32Attr:$epsilon,
+    F32Attr:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $query_norm_weight `,` $key_norm_weight `,` $cos_cache `,`
+        $sin_cache `,` $past_key
+        `:` type($query) `,` type($query_norm_weight) `,`
+        type($key_norm_weight) `,` type($cos_cache) `,` type($sin_cache) `,`
+        type($past_key)
+    `)`
+    (`mask` `(` $mask^ `:` type($mask) `)`)?
+    `outs` `(` $selected_indices `,` $present_key `:`
+              type($selected_indices) `,` type($present_key) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,

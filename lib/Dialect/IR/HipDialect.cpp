@@ -2951,6 +2951,145 @@ LogicalResult DynamicSparseAttentionOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// SparseAttentionIndexerOp:
+//   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
+//       past_key) [mask(mask)]
+//   outs(selected_indices, present_key)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
+      /*length=*/2);
+}
+
+void SparseAttentionIndexerOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SparseAttentionIndexerOp::verify() {
+  SmallVector<Value> data = {getQuery(),         getQueryNormWeight(),
+                             getKeyNormWeight(), getCosCache(),
+                             getSinCache(),      getPastKey()};
+  if (getMask()) {
+    data.push_back(getMask());
+  }
+  data.push_back(getSelectedIndices());
+  data.push_back(getPresentKey());
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  const int64_t ratio = getCompressRatio();
+  const int64_t budget = getTokenBudget();
+  if (ratio <= 0 || budget <= 0 || budget % ratio != 0) {
+    return emitOpError("token_budget (")
+           << budget << ") must be a positive multiple of compress_ratio ("
+           << ratio << ")";
+  }
+  if (budget / ratio > 512) {
+    return emitOpError("token_budget / compress_ratio must be at most 512, "
+                       "got ")
+           << budget / ratio;
+  }
+  if (getEpsilon().convertToFloat() < 0.0f) {
+    return emitOpError("epsilon must be non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  constexpr int64_t kHeadSize = 128;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  Type elem = queryType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("query element type must be f16 or f32, got ") << elem;
+  }
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2)) {
+    return emitOpError("query must be rank 3 with a static width");
+  }
+  const int64_t width = queryType.getDimSize(2);
+  const int64_t numHeads = width / kHeadSize - 1;
+  if (width % kHeadSize != 0 || numHeads < 1 || numHeads > 8) {
+    return emitOpError("query width must be (N + 1) * 128 with 1 <= N <= 8, "
+                       "got ")
+           << width;
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+
+  auto cosType = cast<ShapedType>(getCosCache().getType());
+  const int64_t cosRank = cosType.getRank();
+  if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
+    return emitOpError("cos_cache must be rank 2 or 3 with a static width");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
+    return emitOpError("rotary width must be even and in (0, 128], got ")
+           << rotary;
+  }
+
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 3) {
+    return emitOpError("past_key must be rank 3, got rank ")
+           << pastType.getRank();
+  }
+  const int64_t past = pastType.getDimSize(1);
+  const int64_t total =
+      ShapedType::isDynamic(past) || ShapedType::isDynamic(seq) ? kAny
+                                                                : past + seq;
+
+  Type i32 = IntegerType::get(getContext(), 32);
+  Type i64 = IntegerType::get(getContext(), 64);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  SmallVector<int64_t> cacheShape = {kAny, rotary};
+  if (cosRank == 3) {
+    cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
+                   {kHeadSize})) ||
+      failed(check(getKeyNormWeight(), "key_norm_weight", elem, {kHeadSize})) ||
+      failed(check(getCosCache(), "cos_cache", elem, cacheShape)) ||
+      failed(check(getSinCache(), "sin_cache", elem, cacheShape)) ||
+      failed(check(getPastKey(), "past_key", elem, {batch, kAny, kHeadSize})) ||
+      (getMask() && failed(check(getMask(), "mask", i64, {batch, total}))) ||
+      failed(check(getSelectedIndices(), "selected_indices", i32,
+                   {batch, seq, budget + ratio - 1})) ||
+      failed(check(getPresentKey(), "present_key", elem,
+                   {batch, total, kHeadSize}))) {
+    return failure();
+  }
+  auto sinType = cast<ShapedType>(getSinCache().getType());
+  for (int64_t i = 0; i < cosRank; ++i) {
+    if (!cosType.isDynamicDim(i) && !sinType.isDynamicDim(i) &&
+        cosType.getDimSize(i) != sinType.getDimSize(i)) {
+      return emitOpError("sin_cache must have the shape of cos_cache");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MultiHeadAttentionOp:
 //   ins(query, [key, value, bias, key_padding_mask, attention_bias,
 //                past_key, past_value, past_sequence_length,

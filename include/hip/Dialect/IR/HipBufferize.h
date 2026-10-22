@@ -190,6 +190,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     DynamicSparseAttentionOp::attachInterface<
         HipDstBufferizableModel<DynamicSparseAttentionOp>>(*ctx);
+    SparseAttentionIndexerOp::attachInterface<
+        HipDstBufferizableModel<SparseAttentionIndexerOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);

@@ -707,6 +707,34 @@ int wrap_dynamic_sparse_attention(
   return 0;
 }
 
+int wrap_sparse_attention_indexer(
+    RuntimeState *state, const void *query, const void *query_norm_weight,
+    const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
+    const void *mask, const void *past_key, void *selected_indices,
+    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
+    int64_t num_heads, int64_t head_size, int64_t rotary_width,
+    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
+    int64_t token_budget, int64_t element_size_bytes, float epsilon,
+    float scale) {
+  if (!state || !query || !query_norm_weight || !key_norm_weight ||
+      !cos_cache || !sin_cache || (past_len > 0 && !past_key) ||
+      !selected_indices || !present_key) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_sparse_attention_indexer\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, P=%lld, "
+             "N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, r=%lld, "
+             "budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
+             (long long)batch, (long long)seq_len, (long long)past_len,
+             (long long)num_heads, (long long)head_size,
+             (long long)rotary_width, (long long)rotary_rows,
+             (long long)rotary_batched, (long long)compress_ratio,
+             (long long)token_budget, (long long)element_size_bytes,
+             (double)epsilon, (double)scale, mask ? 1 : 0);
+  return 0;
+}
+
 int wrap_elementwise(RuntimeState *state, int op_state_slot, void *lhs,
                      void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
                      int64_t lhs_h, int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,

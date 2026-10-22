@@ -353,6 +353,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gated_delta_net.cpp runtime_gated_delta_net.bc)
     compile_to_bitcode(real/dynamic_sparse_attention.cpp
                        runtime_dynamic_sparse_attention.bc)
+    compile_to_bitcode(real/sparse_attention_indexer.cpp
+                       runtime_sparse_attention_indexer.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
@@ -457,6 +459,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gated_delta_net.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_sparse_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_sparse_attention_indexer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
