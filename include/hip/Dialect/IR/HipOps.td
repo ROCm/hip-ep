@@ -4020,13 +4020,21 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
     Example:
     ```mlir
     hip.gqa(%ctx)
-        ins(%query, %key, %value, %past_key, %past_value,
-            %seqlens_k, %total_seq_len :
-            tensor<1x128x4096xf16>, ...)
+        ins(%query, %seqlens_k, %total_seq_len :
+            tensor<1x1x4096xf16>, tensor<1xi32>, tensor<i32>)
+        key(%key : tensor<1x1x1024xf16>)
+        value(%value : tensor<1x1x1024xf16>)
+        past_key(%past_key : tensor<1x8x127x128xf16>)
+        past_value(%past_value : tensor<1x8x127x128xf16>)
         outs(%output, %present_key, %present_value :
-             tensor<1x128x4096xf16>, ...)
+             tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>,
+             tensor<1x8x128x128xf16>)
         {num_heads = 32, kv_num_heads = 8, scale = 0.0884}
     ```
+
+    Optional operands are written as named clauses after `ins(...)` (and
+    `output_qk(...)` after `outs(...)`), so a printed op parses back to the
+    same operands whichever of them are present.
   }];
 
   let arguments = (ins
@@ -4297,9 +4305,9 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [Attr
     Example (basic self-attention with separate Q/K/V):
     ```mlir
     hip.multi_head_attention(%ctx)
-        ins(%query, %key, %value :
-            memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
-            memref<1x128x4096xf16, 1>)
+        ins(%query : memref<1x128x4096xf16, 1>)
+        key(%key : memref<1x128x4096xf16, 1>)
+        value(%value : memref<1x128x4096xf16, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {num_heads = 32 : i64, scale = 0.0 : f32,
          mask_filter_value = -1.000000e+04 : f32, unidirectional = 0 : i64}
