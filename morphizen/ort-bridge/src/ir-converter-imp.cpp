@@ -274,8 +274,10 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph &graph) const {
     new_outputs.push_back(node_arg);
     MY_LOG(3) << "Added output: " << value_info.GetName();
   }
-  // guess output
-  new_outputs = guess_missing_output(new_outputs, graph);
+  // ORT never makes a dangling top-level value a fused-node output.
+  if (graph_.is_subgraph()) {
+    new_outputs = guess_missing_output(new_outputs, graph);
+  }
 
   morphizen_cxx::GraphRef(graph).set_outputs(new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
