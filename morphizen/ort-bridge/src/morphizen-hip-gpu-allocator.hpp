@@ -16,7 +16,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -31,8 +30,8 @@ namespace morphizen {
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
-// Requests larger than the last class (> 16 MB) do not use this table; they go
-// through the capacity-keyed large pool described on HipGpuAllocator.
+// Requests larger than the last class (> 16 MB) do not use this table; see
+// HipGpuAllocator for how they are served.
 //
 // The class boundaries are generated at compile time in four tiers, with the
 // tier edges de-duplicated where they meet:
@@ -102,11 +101,12 @@ inline constexpr SizeClassTable kSizeClassTable = BuildSizeClasses();
 inline constexpr const size_t *kSizeClasses = detail::kSizeClassTable.data;
 inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 
-// hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
-// per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
-// info and one HOST_ACCESSIBLE info — both currently route to the same
-// mapped pinned allocator, since AMD APU iGPU shares physical memory with
-// the host). ORT keeps the allocator alive for the matching session.
+// OrtAllocator for the EP's GPU memory. One instance is created per
+// OrtMemoryInfo registered with OrtEpDevice: one DEFAULT GPU info, backed by
+// device memory (hipMalloc and a HIP memory pool) that only CopyTensors and
+// kernels touch, and one HOST_ACCESSIBLE info, backed by
+// hipHostMalloc(Mapped|Coherent) since OGA's PinnedMemory aliases its host
+// and device pointers. ORT keeps the allocator alive for the matching session.
 struct HipGpuAllocator : OrtAllocator {
   // memory_info ownership stays with the factory. The OrtMemoryInfo's
   // device_id (extracted via OrtApi::MemoryInfoGetId at construction time)
@@ -115,7 +115,7 @@ struct HipGpuAllocator : OrtAllocator {
   // GPU that the OrtEpDevice actually represents (instead of always hitting
   // device 0).
   HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api);
-  // Frees every pinned buffer this allocator ever handed out (both the
+  // Frees every buffer this allocator ever handed out (both the
   // currently-free pool entries and any still checked out). Called by the
   // factory's ReleaseAllocator at session teardown.
   ~HipGpuAllocator();
@@ -126,28 +126,11 @@ private:
   static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
   static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
-  // All nine expect pool_mutex_ held. The first five append buffers the
-  // caller must hand to the driver after releasing it.
-  void DropOutgrown(size_t size, bool grown, std::vector<void *> &out);
-  void TrimLarge(std::vector<void *> &out);
-  void DrainLarge(std::vector<void *> &out);
-  void EvictIdleReuse(size_t need, std::vector<void *> &out);
-  void DrainReuse(std::vector<void *> &out);
-  bool SeenBefore(size_t size);
-  void NoteLargeCheckedOut(void *ptr, size_t requested, bool grown,
-                           bool recurring);
-  bool ReplacesLiveBuffer(size_t size) const;
-  bool ReplacedByLiveBuffer(size_t requested) const;
-  // Call without pool_mutex_ held: PoolAlloc takes it to track the buffer,
-  // and FreeImpl untracks a buffer before handing it to PoolFree.
-  void *PoolAlloc(size_t size);
-  void PoolFree(void *p);
-
-  // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
-  // (page-pinning) call: ORT re-allocates the per-Run input device-copy
-  // buffers and (allocator mode) the graph-output buffers on EVERY inference,
-  // so without caching the EP pays dozens of hipHostMalloc + hipHostFree per
-  // Compute (the dominant non-compute cost on small fixed-shape graphs).
+  // Fixed size-class caching allocator. Driver allocations are heavyweight
+  // calls: ORT re-allocates the per-Run input device-copy buffers and
+  // (allocator mode) the graph-output buffers on EVERY inference, so without
+  // caching the EP pays dozens of driver allocations and frees per Compute
+  // (the dominant non-compute cost on small fixed-shape graphs).
   //
   // A request is rounded up to one of kSizeClasses and served from that
   // class's free list; the buffer is allocated at the full class capacity, so
@@ -159,136 +142,58 @@ private:
   // project's per-session "grow-on-demand, never shrink, free at cleanup"
   // memory contract.
   //
-  // Requests above 16 MB bypass the classes: each is allocated at exactly its
-  // size and kept on Free in one of two pools. The growth pool is for a tensor
-  // that is re-created a little longer on every inference, such as a KV cache
-  // run with past_present_share_buffer=false, where no two steps ask for the
-  // same size and every step would page-pin a fresh buffer. A request slightly
-  // larger than a buffer still checked out is taken as that pattern and
-  // allocated with growth headroom. Only such buffers, and the buffers they
-  // replaced, go to the growth pool on Free, keyed by capacity, and a request
-  // takes the smallest one that covers it. Tensors that keep their size, such
-  // as a shared past/present KV buffer, never qualify for this growth pool.
+  // Requests above 16 MB bypass the classes and are allocated at exactly their
+  // size. A DEFAULT one comes from a HIP stream-ordered memory pool, which
+  // can serve a request of any size from freed memory, such as the KV cache
+  // of a generator that replaces another, a KV tensor re-created a little
+  // longer every step, or activations sized by a varying prompt length.
   //
-  // The first version of a growing tensor, such as the KV cache a new
-  // generator prefills, has nothing to grow from. Allocated exactly, it could
-  // not serve the step after its successor replaces it, and that step would
-  // page-pin a second set. Once a grown buffer has been reused, every large
-  // request is therefore allocated with the headroom, including those of
-  // tensors that keep their size.
+  // On Linux HIP backs the pool with a reserved address range that it maps
+  // with physical memory in 128 MiB chunks, places requests best-fit and
+  // merges freed neighbours. The release threshold is at its maximum there,
+  // so the chunks stay mapped until the destructor: after the first inference
+  // of the largest shape no request allocates system memory, and varying
+  // shapes cannot grow the pool past that inference's peak plus
+  // fragmentation. Allocating instead costs more than the call on an APU,
+  // where hipMalloc memory is carved from system memory in high-order blocks
+  // and each block the page allocator cannot supply wakes kcompactd, whose
+  // page migrations evict this process's GPU queues.
   //
-  // A growth buffer is released as soon as nothing can reuse it: when a request
-  // outgrows its capacity or jumps past it, and all at once when none of the
-  // grown buffers is checked out any more. The allocator can outlive the
-  // session that grew them (a caller may share one allocator across models),
-  // so retention is tied to the tensors rather than to the allocator's
-  // lifetime. TrimLarge additionally ages out capacities that stop being asked
-  // for while others are still cycling, and a driver allocation failure
-  // drains the pool and retries.
+  // On Windows HIP has no such range: each pool block is its own driver
+  // allocation, reused only by requests up to 1/8 smaller, so retaining
+  // blocks would grow without bound on shapes that change every inference.
+  // The threshold is zero there and a block goes back to the driver once
+  // freed; the pool still spares Free the wait for queued GPU work that
+  // hipFree incurs.
   //
-  // Every other large buffer whose size has been requested before goes to the
-  // reuse pool, such as the shared past/present KV cache a generator frees
-  // when it goes away and the next generator asks for again, or a
-  // per-inference activation above the classes. Handing such buffers back to
-  // the driver costs more than the call: on an APU, hipMalloc memory is
-  // carved from system memory in high-order blocks, and each block the page
-  // allocator cannot supply wakes kcompactd, whose page migrations evict this
-  // process's GPU queues. The first request of a size is still released on
-  // Free. A workload whose shapes change every inference, such as prompts of
-  // varying length, would never reuse those buffers, and keeping them would
-  // only move their release from Free, after the Run, to an eviction inside
-  // a later one, where hipFree and hipHostFree wait for the queued GPU work.
-  // A request takes a reuse buffer under the same fit rule as the growth pool.
-  // A reuse bucket is idle from a free until its next hit, and a driver
-  // allocation first releases idle reuse buffers, least recently used first,
-  // until it has released as many bytes as it allocates, so a workload whose
-  // shapes change hands the memory over instead of adding to it. Unlike the
-  // growth pool, reuse buffers outlive the tensors that used them: they stay
-  // until an allocation evicts them, a driver allocation fails, or the
-  // allocator is destroyed.
+  // A large HOST_ACCESSIBLE request is allocated and freed directly, as is a
+  // large DEFAULT one if the device has no memory pools.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
   // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
-  // already drained before it can be handed back out.
+  // already drained before it can be handed back out. For the same reason
+  // pool blocks are freed on pool_stream_, which runs nothing else, so the
+  // pool treats them as reusable at once.
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
   std::array<std::vector<void *>, kNumSizeClasses> free_lists_;
-  // Every pointer hipHostMalloc'd by this allocator that is still outstanding
-  // -> its allocated byte size (the rounded-up class capacity for pooled
-  // buffers, the exact size for large ones). Pooled buffers stay tracked for
-  // the allocator's lifetime (Free only moves them onto a free list) so the
+  // Every pointer this allocator handed out that is still outstanding -> its
+  // allocated byte size (the rounded-up class capacity for pooled buffers,
+  // the exact size for large ones). Pooled buffers stay tracked for the
+  // allocator's lifetime (Free only moves them onto a free list) so the
   // destructor can release them; a large buffer is erased from this map in
-  // FreeImpl when it is freed back to the driver.
+  // FreeImpl when it is freed.
   std::unordered_map<void *, size_t> ptr_to_size_;
-
-  // Large pool. Ordered so a request can find the smallest capacity that fits
-  // it with one lower_bound; empty buckets are erased.
-  struct LargeBucket {
-    std::vector<void *> free;
-    // large_ops_ at the last hit or free here; read as an age by TrimLarge.
-    uint64_t last_used = 0;
-  };
-  std::map<size_t, LargeBucket> large_free_;
-  // Reuse pool, keyed by capacity like large_free_; empty buckets are erased.
-  struct ReuseBucket {
-    std::vector<void *> free;
-    // large_ops_ at the last hit or free here; orders idle buckets for
-    // eviction.
-    uint64_t last_used = 0;
-    bool idle = true;
-  };
-  std::map<size_t, ReuseBucket> reuse_free_;
-  // Recently requested large sizes, one per hash slot. Large requests come in
-  // a few dozen distinct sizes per inference, so 1024 slots keep a model's
-  // recurring sizes while a stream of one-off sizes cannot grow the table.
-  static constexpr unsigned kSeenSlotBits = 10;
-  std::array<size_t, size_t{1} << kSeenSlotBits> seen_sizes_{};
-  // Checked-out large buffers. `grown` marks a buffer handed to a request that
-  // replaced a live buffer a little smaller than itself, whether allocated
-  // with headroom or reused from the pool. Those go to the growth pool on
-  // Free, as does a buffer that a live one has replaced. `recurring` marks a
-  // buffer whose size had been requested before, or that came from the reuse
-  // pool; of the others, only those go to the reuse pool.
-  struct LargeLive {
-    size_t requested;
-    bool grown;
-    bool recurring;
-  };
-  std::unordered_map<void *, LargeLive> large_live_;
-  // Requested size -> number of checked-out large buffers holding it.
-  std::map<size_t, size_t> live_requested_;
-  size_t grown_live_count_ = 0;
-  // Set by the first pool hit for a grown request, which a tensor growing
-  // step by step produces and a tensor that keeps its size never does.
-  bool grown_reused_ = false;
-  // Ticked on every large alloc and free, so bucket age tracks pool activity
-  // rather than wall time (an idle session must not lose its working set).
-  uint64_t large_ops_ = 0;
-  // Reset whenever the pool drains, so TrimLarge's slack follows the current
-  // working set rather than the largest one this allocator ever served.
-  size_t peak_live_count_ = 0;
 
   const OrtMemoryInfo *memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"
   // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
   // current HIP device in that case rather than failing the allocation.
   int device_id_;
-  // DEFAULT memory comes from hipMalloc (not host-dereferenceable) unless
-  // MORPHIZEN_DEFAULT_HIPMALLOC=0; HOST_ACCESSIBLE stays hipHostMalloc.
+  // True for DEFAULT memory, which is not host-dereferenceable.
   bool device_only_;
-
-  // With MORPHIZEN_DEFAULT_MEMPOOL=1, large DEFAULT requests bypass the growth
-  // and reuse pools and come from a HIP stream-ordered memory pool instead.
-  // HIP backs it with a reserved virtual address range that it maps with
-  // physical memory in 128 MiB chunks, places requests best-fit and merges
-  // freed neighbours, so a freed block can serve a request of any size. With
-  // the release threshold at its maximum the chunks stay mapped until the
-  // destructor: after the first inference of the largest shape, no request
-  // allocates system memory, and varying shapes cannot grow the pool past
-  // that inference's peak plus fragmentation. Nothing else runs on
-  // pool_stream_, so a block freed on it is reusable at once, under the same
-  // contract the pools above rely on.
+  // Set for DEFAULT memory on a device with memory pools.
   ihipMemPoolHandle_t *pool_ = nullptr;
   ihipStream_t *pool_stream_ = nullptr;
 };
