@@ -673,11 +673,19 @@ static int launch_la_cols(hipStream_t s, const void* q, const void* k, const voi
                        static_cast<const T*>(be), static_cast<const T*>(sin),                 \
                        static_cast<T*>(st), static_cast<T*>(o),                               \
                        seq_len, n_tok, Hq, Hkv, Nk, dk, dv, scale, rule, dpk, bph)
+    (void)hipGetLastError();
     if (islice == 8) LA_COLS_LAUNCH(8);
     else if (islice == 32) LA_COLS_LAUNCH(32);
     else LA_COLS_LAUNCH(16);
 #undef LA_COLS_LAUNCH
-    return hipGetLastError() == hipSuccess ? 0 : -1;
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] linear_attention_decode_kernel_cols launch failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+    }
+    return 0;
 }
 
 static int la_cols_dispatch(void* stream, const void* q, const void* k, const void* v,
