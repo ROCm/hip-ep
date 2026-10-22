@@ -17,6 +17,7 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include <cmath>
 #include <limits>
 
 using namespace mlir;
@@ -1507,6 +1508,256 @@ LogicalResult EngramGateOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// HyperConnectionPreMixOp: ins(streams, pre_mix) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPreMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPreMixOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateSigmoid() != 0 && getGateSigmoid() != 1)
+    return emitOpError("gate_sigmoid must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPreMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getRank() < 1)
+    return emitOpError("expected a ranked output");
+  if (output.getElementType() != streams.getElementType())
+    return emitOpError("output element type must match streams");
+  int64_t outputHidden = output.getDimSize(output.getRank() - 1);
+  if (!ShapedType::isDynamic(outputHidden) && outputHidden != hidden)
+    return emitOpError("output must end in hidden");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixOp: ins(streams, block_output, post_mix, [stream_mix])
+//                           outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPostMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixOp::verify() {
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getPostMix()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  auto block = dyn_cast<ShapedType>(getBlockOutput().getType());
+  if (!block || !block.hasRank() || block.getRank() < 1)
+    return emitOpError("expected a ranked block_output");
+  if (block.getElementType() != streams.getElementType())
+    return emitOpError("block_output element type must match streams");
+  int64_t blockHidden = block.getDimSize(block.getRank() - 1);
+  if (!ShapedType::isDynamic(blockHidden) && blockHidden != hidden)
+    return emitOpError("block_output must end in hidden");
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPostMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getShape() != streams.getShape() ||
+      output.getElementType() != streams.getElementType())
+    return emitOpError("output shape and element type must match streams");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || !mixType.hasRank() ||
+        mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix element type must match streams");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixNormOp:
+//   ins(streams, block_output, gate, norm_scale, [stream_mix])
+//   outs(residual, normed)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HyperConnectionPostMixNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixNormOp::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected residual and normed outputs");
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getGate(),
+                                  getNormScale()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutputs()[0]);
+  dataOperands.push_back(getOutputs()[1]);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+    return failure();
+  if (getBranches() <= 0 || getHidden() <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (getFlattened() != 0 && getFlattened() != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateActivation() != 0 && getGateActivation() != 1)
+    return emitOpError("gate_activation must be 0 or 1");
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  auto scale = dyn_cast<ShapedType>(getNormScale().getType());
+  if (!streams || !streams.hasRank() || !scale || !scale.hasRank() ||
+      scale.getRank() != 1)
+    return emitOpError("expected ranked streams and a 1-D norm scale");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  if (getFlattened()) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || gateType.getElementType() != streams.getElementType())
+    return emitOpError("gate must match the streams element type");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix must match the streams element type");
+  }
+  int64_t scaleLen = scale.getDimSize(0);
+  if (!ShapedType::isDynamic(scaleLen) &&
+      scaleLen != getBranches() * getHidden())
+    return emitOpError("norm scale length must be branches * hidden");
+  for (Value out : getOutputs()) {
+    auto outType = dyn_cast<ShapedType>(out.getType());
+    if (!outType || outType.getShape() != streams.getShape() ||
+        outType.getElementType() != streams.getElementType())
+      return emitOpError("outputs must match the streams shape and type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1520,6 +1771,115 @@ void RopeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MRotaryEmbeddingOp: ins(input, position_ids, cos_cache, sin_cache),
+//                     outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MRotaryEmbeddingOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MRotaryEmbeddingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MRotaryEmbeddingOp::verify() {
+  if (failed(verifyDpsComputeOp(*this,
+                                {getInput(), getPositionIds(), getCosCache(),
+                                 getSinCache(), getOutput()},
+                                1))) {
+    return failure();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elem = inputType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("input must be f16 or f32, got ") << elem;
+  }
+  if (inputType.getRank() != 3) {
+    return emitOpError("input must be rank 3, got rank ")
+           << inputType.getRank();
+  }
+  if (inputType.isDynamicDim(2)) {
+    return emitOpError("input dim 2 must be static");
+  }
+  const int64_t hidden = inputType.getDimSize(2);
+  const int64_t numHeads = getNumHeads();
+  if (numHeads <= 0 || hidden % numHeads != 0) {
+    return emitOpError("input dim 2 (")
+           << hidden << ") must be a positive multiple of num_heads ("
+           << numHeads << ")";
+  }
+  const int64_t headSize = hidden / numHeads;
+  const int64_t rotaryDim = getRotaryEmbeddingDim();
+  if (rotaryDim <= 0 || rotaryDim % 2 != 0 || rotaryDim > headSize) {
+    return emitOpError("rotary_embedding_dim must be positive, even and at "
+                       "most the head size ")
+           << headSize << ", got " << rotaryDim;
+  }
+  const int64_t half = rotaryDim / 2;
+
+  ArrayAttr section = getMropeSection();
+  if (section.size() != 3) {
+    return emitOpError("mrope_section must have 3 elements, got ")
+           << section.size();
+  }
+  int64_t sectionSum = 0;
+  for (Attribute a : section) {
+    int64_t v = cast<IntegerAttr>(a).getInt();
+    if (v < 0) {
+      return emitOpError("mrope_section values must be non-negative");
+    }
+    sectionSum += v;
+  }
+  if (sectionSum != half) {
+    return emitOpError("mrope_section must sum to rotary_embedding_dim / 2 = ")
+           << half << ", got " << sectionSum;
+  }
+  if (getMropeLayout() != 0 && getMropeLayout() != 1) {
+    return emitOpError("mrope_layout must be 0 or 1, got ") << getMropeLayout();
+  }
+
+  auto dimMismatch = [](int64_t got, int64_t want) {
+    return !ShapedType::isDynamic(got) && !ShapedType::isDynamic(want) &&
+           got != want;
+  };
+
+  auto posType = cast<ShapedType>(getPositionIds().getType());
+  if (!posType.getElementType().isInteger(64) || posType.getRank() != 3 ||
+      posType.getDimSize(0) != 3 ||
+      dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
+      dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
+    return emitOpError("position_ids must be i64 [3, B, S], got ") << posType;
+  }
+
+  for (Value cache : {getCosCache(), getSinCache()}) {
+    auto cacheType = cast<ShapedType>(cache.getType());
+    if (cacheType.getElementType() != elem || cacheType.getRank() != 2 ||
+        cacheType.getDimSize(1) != half) {
+      return emitOpError("cos_cache and sin_cache must be ")
+             << elem << " [max_position, " << half << "], got " << cacheType;
+    }
+  }
+  if (dimMismatch(cast<ShapedType>(getCosCache().getType()).getDimSize(0),
+                  cast<ShapedType>(getSinCache().getType()).getDimSize(0))) {
+    return emitOpError("cos_cache and sin_cache must have the same shape");
+  }
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != elem || outputType.getRank() != 3 ||
+      dimMismatch(outputType.getDimSize(0), inputType.getDimSize(0)) ||
+      dimMismatch(outputType.getDimSize(1), inputType.getDimSize(1)) ||
+      dimMismatch(outputType.getDimSize(2), hidden)) {
+    return emitOpError("output must match the input shape and type, got ")
+           << outputType;
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2730,6 +3090,267 @@ LogicalResult GatedDeltaNetOp::verify() {
           check(getFinalState(), "final_state", f32,
                 {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
     return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DynamicSparseAttentionOp:
+//   ins(query, key, value, past_key, past_value, selected_indices,
+//       selected_counts, seqlens_k)
+//   outs(output, present_key, present_value)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicSparseAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/3);
+}
+
+void DynamicSparseAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicSparseAttentionOp::verify() {
+  SmallVector<Value> data = {
+      getQuery(),          getKey(),         getValue(),
+      getPastKey(),        getPastValue(),   getSelectedIndices(),
+      getSelectedCounts(), getSeqlensK(),    getOutput(),
+      getPresentKey(),     getPresentValue()};
+  if (failed(verifyDpsComputeOp(*this, data, 3))) {
+    return failure();
+  }
+
+  const int64_t numHeads = getNumHeads();
+  const int64_t kvNumHeads = getKvNumHeads();
+  if (numHeads <= 0 || kvNumHeads <= 0 || numHeads % kvNumHeads != 0) {
+    return emitOpError("num_heads (")
+           << numHeads << ") must be a positive multiple of kv_num_heads ("
+           << kvNumHeads << ")";
+  }
+  if (numHeads / kvNumHeads > 16) {
+    return emitOpError("num_heads / kv_num_heads must be at most 16, got ")
+           << numHeads / kvNumHeads;
+  }
+
+  const float scale = getScale().convertToFloat();
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return emitOpError("scale must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
+      queryType.getDimSize(2) % numHeads != 0) {
+    return emitOpError("query must be rank 3 with a static last dim that is a "
+                       "multiple of num_heads");
+  }
+  const int64_t headSize = queryType.getDimSize(2) / numHeads;
+  if (headSize != 128 && headSize != 256) {
+    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 4) {
+    return emitOpError("past_key must be rank 4, got rank ")
+           << pastType.getRank();
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+  const int64_t rows =
+      ShapedType::isDynamic(batch) || ShapedType::isDynamic(seq) ? kAny
+                                                                 : batch * seq;
+  const int64_t cap = pastType.getDimSize(2);
+
+  Type f16 = Float16Type::get(getContext());
+  Type i32 = IntegerType::get(getContext(), 32);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  const SmallVector<int64_t> cacheShape = {batch, kvNumHeads, cap, headSize};
+  if (failed(
+          check(getQuery(), "query", f16, {batch, seq, numHeads * headSize})) ||
+      failed(
+          check(getKey(), "key", f16, {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getValue(), "value", f16,
+                   {batch, seq, kvNumHeads * headSize})) ||
+      failed(check(getPastKey(), "past_key", f16, cacheShape)) ||
+      failed(check(getPastValue(), "past_value", f16, cacheShape)) ||
+      failed(
+          check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
+      failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
+      failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
+      failed(check(getOutput(), "output", f16,
+                   {batch, seq, numHeads * headSize})) ||
+      failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
+      failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// SparseAttentionIndexerOp:
+//   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
+//       past_key) [mask(mask)]
+//   outs(selected_indices, present_key)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
+      /*length=*/2);
+}
+
+void SparseAttentionIndexerOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SparseAttentionIndexerOp::verify() {
+  SmallVector<Value> data = {getQuery(),         getQueryNormWeight(),
+                             getKeyNormWeight(), getCosCache(),
+                             getSinCache(),      getPastKey()};
+  if (getMask()) {
+    data.push_back(getMask());
+  }
+  data.push_back(getSelectedIndices());
+  data.push_back(getPresentKey());
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  const int64_t ratio = getCompressRatio();
+  const int64_t budget = getTokenBudget();
+  if (ratio <= 0 || budget <= 0 || budget % ratio != 0) {
+    return emitOpError("token_budget (")
+           << budget << ") must be a positive multiple of compress_ratio ("
+           << ratio << ")";
+  }
+  if (budget / ratio > 512) {
+    return emitOpError("token_budget / compress_ratio must be at most 512, "
+                       "got ")
+           << budget / ratio;
+  }
+  const float epsilon = getEpsilon().convertToFloat();
+  if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+    return emitOpError("epsilon must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  constexpr int64_t kHeadSize = 128;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  Type elem = queryType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("query element type must be f16 or f32, got ") << elem;
+  }
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2)) {
+    return emitOpError("query must be rank 3 with a static width");
+  }
+  const int64_t width = queryType.getDimSize(2);
+  const int64_t numHeads = width / kHeadSize - 1;
+  if (width % kHeadSize != 0 || numHeads < 1 || numHeads > 8) {
+    return emitOpError("query width must be (N + 1) * 128 with 1 <= N <= 8, "
+                       "got ")
+           << width;
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+
+  auto cosType = cast<ShapedType>(getCosCache().getType());
+  const int64_t cosRank = cosType.getRank();
+  if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
+    return emitOpError("cos_cache must be rank 2 or 3 with a static width");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1);
+  if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
+    return emitOpError("rotary width must be even and in (0, 128], got ")
+           << rotary;
+  }
+
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 3) {
+    return emitOpError("past_key must be rank 3, got rank ")
+           << pastType.getRank();
+  }
+  auto selectedType = cast<ShapedType>(getSelectedIndices().getType());
+  auto presentType = cast<ShapedType>(getPresentKey().getType());
+  if (pastType.isDynamicDim(2) ||
+      (presentType.getRank() == 3 && presentType.isDynamicDim(2)) ||
+      (selectedType.getRank() == 3 && selectedType.isDynamicDim(2))) {
+    return emitOpError("past_key, present_key and selected_indices must have "
+                       "a static last dim");
+  }
+  const int64_t past = pastType.getDimSize(1);
+  const int64_t total =
+      ShapedType::isDynamic(past) || ShapedType::isDynamic(seq) ? kAny
+                                                                : past + seq;
+
+  Type i32 = IntegerType::get(getContext(), 32);
+  Type i64 = IntegerType::get(getContext(), 64);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  SmallVector<int64_t> cacheShape = {kAny, rotary};
+  if (cosRank == 3) {
+    cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
+                   {kHeadSize})) ||
+      failed(check(getKeyNormWeight(), "key_norm_weight", elem, {kHeadSize})) ||
+      failed(check(getCosCache(), "cos_cache", elem, cacheShape)) ||
+      failed(check(getSinCache(), "sin_cache", elem, cacheShape)) ||
+      failed(check(getPastKey(), "past_key", elem, {batch, kAny, kHeadSize})) ||
+      (getMask() && failed(check(getMask(), "mask", i64, {batch, total}))) ||
+      failed(check(getSelectedIndices(), "selected_indices", i32,
+                   {batch, seq, budget + ratio - 1})) ||
+      failed(check(getPresentKey(), "present_key", elem,
+                   {batch, total, kHeadSize}))) {
+    return failure();
+  }
+  auto sinType = cast<ShapedType>(getSinCache().getType());
+  for (int64_t i = 0; i < cosRank; ++i) {
+    if (!cosType.isDynamicDim(i) && !sinType.isDynamicDim(i) &&
+        cosType.getDimSize(i) != sinType.getDimSize(i)) {
+      return emitOpError("sin_cache must have the shape of cos_cache");
+    }
   }
   return success();
 }

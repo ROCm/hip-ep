@@ -1692,6 +1692,172 @@ def Hip_EngramGateOp : Hip_DpsOp<"engram_gate", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+def Hip_HyperConnectionPreMixOp : Hip_DpsOp<"hyper_connection_pre_mix",
+                                            /*traits=*/[],
+                                            /*outsAccessor=*/"Output",
+                                            /*autoReify=*/1,
+                                            /*autoInfer=*/1,
+                                            /*declareInfer=*/1> {
+  let summary = "com.microsoft HyperConnectionPreMix";
+  let description = [{
+    Reduces C streams to one feature tensor. `gate_sigmoid` 0 multiplies the
+    gate as given. `gate_sigmoid` 1 applies Sigmoid first and rounds that
+    result to the element type before the product, matching a separate
+    Sigmoid node. In FP32:
+
+      Y[row, h] = reduction_scale * sum_c X[row, c, h] * pre_mix_gate[row, c, h]
+
+    `flattened` 1 stores streams as (..., C * H) with `branches` == C.
+    `flattened` 0 stores them as (..., C, H). `gate_layout` is `feature`
+    when the gate is (..., C, H) or flattened (..., C * H), and `branch`
+    when it is (..., C) or (..., C, 1). The product is accumulated in FP32
+    and rounded to the element type once. f16 and f32 only.
+
+    Example:
+    ```mlir
+    hip.hyper_connection_pre_mix(%ctx)
+        ins(%streams, %pre_mix : memref<1x4x10240xf16, 1>, memref<1x4x10240xf16, 1>)
+        outs(%output : memref<1x4x2560xf16, 1>)
+        {branches = 4 : i64, flattened = 1 : i64, gate_layout = "feature",
+         hidden = 2560 : i64, reduction_scale = 2.500000e-01 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$streams,
+    Hip_TensorOrMemRef:$pre_mix,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$branches,
+    I64Attr:$hidden,
+    I64Attr:$flattened,
+    StrAttr:$gate_layout,
+    F32Attr:$reduction_scale,
+    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $streams `,` $pre_mix `:` type($streams) `,` type($pre_mix)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_HyperConnectionPostMixOp : Hip_DpsOp<"hyper_connection_post_mix",
+                                             /*traits=*/[],
+                                             /*outsAccessor=*/"Output",
+                                             /*autoReify=*/1,
+                                             /*autoInfer=*/1,
+                                             /*declareInfer=*/1> {
+  let summary = "com.microsoft HyperConnectionPostMix";
+  let description = [{
+    Writes each stream back and injects one block output. `stream_mix` is
+    optional and defaults to the identity. No activation is applied. In FP32:
+
+      base = stream_mix
+             ? sum_s stream_mix[row, s, k] * streams[row, s, h]
+             : streams[row, k, h]
+      Y[row, k, h] = base + post_mix_gate[row, k, h] * block_output[row, h]
+
+    Stream layout and `gate_layout` match `hyper_connection_pre_mix`, except
+    a flattened (..., C * H) gate is not a post-mix shape. The sum is
+    accumulated in FP32 and rounded to the element type once. f16 and f32.
+
+    Example:
+    ```mlir
+    hip.hyper_connection_post_mix(%ctx)
+        ins(%streams, %block_output, %post_mix :
+            memref<1x4x10240xf16, 1>, memref<1x4x2560xf16, 1>,
+            memref<1x4x4xf16, 1>)
+        outs(%output : memref<1x4x10240xf16, 1>)
+        {branches = 4 : i64, flattened = 1 : i64, gate_layout = "branch",
+         hidden = 2560 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$streams,
+    Hip_TensorOrMemRef:$block_output,
+    Hip_TensorOrMemRef:$post_mix,
+    Optional<Hip_TensorOrMemRef>:$stream_mix,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$branches,
+    I64Attr:$hidden,
+    I64Attr:$flattened,
+    StrAttr:$gate_layout
+  );
+
+  // stream_mix is the only optional operand, so its presence follows the
+  // operand count. AttrSizedOperandSegments needs two variadic operands.
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $streams `,` $block_output `,` $post_mix (`,` $stream_mix^)?
+        `:` type($streams) `,` type($block_output) `,` type($post_mix)
+        (`,` type($stream_mix)^)?
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp<"hyper_connection_post_mix_norm",
+    /*traits=*/[AttrSizedOperandSegments],
+    /*outsAccessor=*/"Outputs",
+    /*autoReify=*/1,
+    /*autoInfer=*/0> {
+  let summary = "HyperConnectionPostMix fused with the following BranchwiseRMSNorm";
+  let description = [{
+    Post-mix followed by branchwise RMSNorm. `stream_mix` is optional and
+    defaults to the identity. `gate_activation` 0 multiplies `gate` as given.
+    `gate_activation` 1 treats `gate` as a pre-activation and applies
+    round(2 * round(sigmoid(round(gate / 4)))) first. `gate_layout` matches
+    `hyper_connection_post_mix`. In FP32, each elementwise result is rounded
+    back to the element type before the next one:
+
+      g = gate_activation ? round(2 * round(sigmoid(round(gate / 4)))) : gate
+      base = stream_mix
+             ? sum_s stream_mix[row, s, k] * streams[row, s, h]
+             : streams[row, k, h]
+      residual = base + g * block_output
+      normed = branchwise_rms(residual) * scale
+
+    `outputs` is [residual, normed], both the streams shape. `norm_scale` is
+    1-D of length branches * hidden, one hidden-vector per branch.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$streams,
+    Hip_TensorOrMemRef:$block_output,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$norm_scale,
+    Optional<Hip_TensorOrMemRef>:$stream_mix,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$branches,
+    I64Attr:$hidden,
+    I64Attr:$flattened,
+    StrAttr:$gate_layout,
+    DefaultValuedAttr<I64Attr, "0">:$gate_activation,
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $streams `,` $block_output `,` $gate `,` $norm_scale (`,` $stream_mix^)?
+        `:` type($streams) `,` type($block_output) `,` type($gate) `,`
+        type($norm_scale) (`,` type($stream_mix)^)?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
@@ -1837,6 +2003,75 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_MRotaryEmbeddingOp : Hip_DpsOp<"mrotary_embedding", /*traits=*/[],
+                                       /*outsAccessor=*/"Output",
+                                       /*autoReify=*/1,
+                                       /*autoInfer=*/1,
+                                       /*declareInfer=*/1> {
+  let summary = "Multimodal rotary position embedding (M-RoPE)";
+  let description = [{
+    com.microsoft MRotaryEmbedding restricted to rank-3 input,
+    interleaved = 0 and is_packed_batching = 0.
+
+    Shapes, with T = f16 or f32:
+      input, output        [B, S, num_heads * head_size]          T
+      position_ids         [3, B, S]                              i64
+      cos_cache, sin_cache [max_position, rotary_embedding_dim/2] T
+
+    The three position_ids streams are T, H and W. `mrope_section` = [t, h, w]
+    with t + h + w = rotary_embedding_dim / 2 assigns each cache column c a
+    stream k(c):
+      mrope_layout = 0: c < t -> T, c < t + h -> H, otherwise W.
+      mrope_layout = 1: H if c % 3 == 1 and c < 3h, W if c % 3 == 2 and
+                        c < 3w, otherwise T.
+    For every token and head, with half = rotary_embedding_dim / 2,
+    p = position_ids[k(c), b, s], cs = T(cos_cache[p, c] * scale) and
+    sn = T(sin_cache[p, c] * scale):
+      out[c]        = x[c] * cs - x[c + half] * sn
+      out[c + half] = x[c + half] * cs + x[c] * sn
+    Channels [rotary_embedding_dim, head_size) are copied. A column whose p is
+    outside [0, max_position) is copied unrotated.
+
+    Example:
+    ```mlir
+    hip.mrotary_embedding(%ctx)
+        ins(%input, %position_ids, %cos_cache, %sin_cache :
+            memref<1x7x6144xf16, 1>, memref<3x1x7xi64, 1>,
+            memref<262144x32xf16, 1>, memref<262144x32xf16, 1>)
+        outs(%output : memref<1x7x6144xf16, 1>)
+        {mrope_layout = 1 : i64, mrope_section = [11, 11, 10],
+         num_heads = 24 : i64, rotary_embedding_dim = 64 : i64,
+         scale = 1.0 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$position_ids,
+    Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$num_heads,
+    I64Attr:$rotary_embedding_dim,
+    I64ArrayAttr:$mrope_section,
+    DefaultValuedAttr<I64Attr, "0">:$mrope_layout,
+    DefaultValuedAttr<F32Attr, "1.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($position_ids) `,` type($cos_cache) `,`
+        type($sin_cache)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
@@ -4606,6 +4841,167 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp<"gated_delta_net"> {
     `)`
     `outs` `(` $output `,` $final_state `:`
               type($output) `,` type($final_state) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_DynamicSparseAttentionOp : Hip_DpsOp<"dynamic_sparse_attention"> {
+  let summary = "Attention over per-row selected KV positions "
+                "(com.microsoft DynamicSparseAttention)";
+  let description = [{
+    com.microsoft DynamicSparseAttention restricted to
+    attention_mode = selected_only, selected_kv_source = main, is_causal = 1,
+    separate Q/K/V, a past cache, and no rotary, q/k norm, local window or
+    head sink.
+
+    Shapes, with N = num_heads, kvN = kv_num_heads, D = head size:
+      query                   [B, S, N*D]          f16
+      key, value              [B, S, kvN*D]        f16
+      past_key, past_value    [B, kvN, Cap, D]     f16
+      selected_indices        [B*S, K]             i32
+      selected_counts         [B*S]                i32
+      seqlens_k               [B]                  i32
+      output                  [B, S, N*D]          f16
+      present_key/value       [B, kvN, Cap, D]     f16
+
+    D = query width / N must be 128 or 256 and N / kvN at most 16; scale must
+    be finite and non-negative. Dynamic dims, including the cache head dim,
+    are checked against these shapes at run time. present starts as past (they
+    may share a buffer). With T = seqlens_k[b] + 1, token s of batch b is
+    written to cache position T - S + s when that lies in [0, Cap). Row
+    (b, s) attends from position T - S + s if S <= T <= Cap and has no
+    candidates otherwise. Its candidates are the first
+    clamp(selected_counts, 0, K) entries of selected_indices, keeping only
+    0 <= idx <= T - S + s; duplicates count each time. Head h uses KV head
+    h / (N / kvN). Logits are scale * q.k in fp32 and an empty candidate set
+    gives a zero output.
+
+    Example:
+    ```mlir
+    hip.dynamic_sparse_attention(%ctx)
+        ins(%q, %k, %v, %past_k, %past_v, %idx, %cnt, %seqlens :
+            memref<1x1x6144xf16, 1>, memref<1x1x512xf16, 1>,
+            memref<1x1x512xf16, 1>, memref<1x2x4096x256xf16, 1>,
+            memref<1x2x4096x256xf16, 1>, memref<1x2051xi32, 1>,
+            memref<1xi32, 1>, memref<1xi32, 1>)
+        outs(%out, %present_k, %present_v : memref<1x1x6144xf16, 1>,
+             memref<1x2x4096x256xf16, 1>, memref<1x2x4096x256xf16, 1>)
+        {num_heads = 24 : i64, kv_num_heads = 2 : i64, scale = 6.250000e-02 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$past_key,
+    Hip_TensorOrMemRef:$past_value,
+    Hip_TensorOrMemRef:$selected_indices,
+    Hip_TensorOrMemRef:$selected_counts,
+    Hip_TensorOrMemRef:$seqlens_k,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_key,
+    Hip_TensorOrMemRef:$present_value,
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `,` $past_key `,` $past_value `,`
+        $selected_indices `,` $selected_counts `,` $seqlens_k
+        `:` type($query) `,` type($key) `,` type($value) `,`
+        type($past_key) `,` type($past_value) `,` type($selected_indices) `,`
+        type($selected_counts) `,` type($seqlens_k)
+    `)`
+    `outs` `(` $output `,` $present_key `,` $present_value `:`
+              type($output) `,` type($present_key) `,` type($present_value) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_SparseAttentionIndexerOp : Hip_DpsOp<"sparse_attention_indexer"> {
+  let summary = "Query-aware selection of KV token blocks "
+                "(com.microsoft SparseAttentionIndexer, policy_mode = qsa)";
+  let description = [{
+    com.microsoft SparseAttentionIndexer restricted to policy_mode = qsa with
+    packed QK (no separate key) and no past_sequence_length, so present_key
+    is past_key with the new keys appended.
+
+    Shapes, with N query heads (at most 8), D = 128, R the rotary width
+    (even, <= D),
+    X rotary rows, P past length, T = P + S, r = compress_ratio,
+    K = token_budget / r (at most 512):
+      query               [B, S, (N + 1) * D]   f16 or f32; key = last D
+      query/key_norm_weight [D]
+      cos/sin_cache       [X, R] or [B, X, R]
+      mask (optional)     [B, T]                i64, nonzero = visible
+      past_key            [B, P, D]
+      selected_indices    [B, S, K * r + r - 1] i32
+      present_key         [B, T, D]
+    The last dims of past_key, present_key and selected_indices must be
+    static, epsilon finite and non-negative. Dynamic dims are checked against
+    these shapes at run time.
+
+    Row (b, s) sees visible = ascending t <= P + s with mask[b, t] != 0.
+    Block j is visible[r*j .. r*j + r - 1] for j < len(visible) / r. Its key
+    is the fp32 mean of those present_key rows, RMS-normalized
+    (x * rsqrt(mean(x^2) + epsilon) * key_norm_weight) and rotated by the
+    split-half RoPE on the first R channels at cos/sin row
+    clamp(visible[r*j], 0, X - 1). Each query head is normalized with
+    query_norm_weight and rotated at row clamp(P + s, 0, X - 1). The score is
+    scale * sum_h max(0, q_h . k_j) in fp32. The top min(K, blocks) blocks,
+    ordered by score descending then block index ascending, emit their r
+    token indices; the remaining visible tail follows and -1 fills the rest.
+
+    Example:
+    ```mlir
+    hip.sparse_attention_indexer(%ctx)
+        ins(%q, %qw, %kw, %cos, %sin, %past :
+            memref<1x1x640xf16, 1>, memref<128xf16, 1>, memref<128xf16, 1>,
+            memref<1x?x64xf16, 1>, memref<1x?x64xf16, 1>,
+            memref<1x?x128xf16, 1>)
+        mask(%mask : memref<1x?xi64, 1>)
+        outs(%sel, %present : memref<1x1x2051xi32, 1>, memref<1x?x128xf16, 1>)
+        {compress_ratio = 4 : i64, token_budget = 2048 : i64,
+         epsilon = 9.99999997E-7 : f32, scale = 0.0883883461 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$query_norm_weight,
+    Hip_TensorOrMemRef:$key_norm_weight,
+    Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache,
+    Hip_TensorOrMemRef:$past_key,
+    Optional<Hip_TensorOrMemRef>:$mask,
+    Hip_TensorOrMemRef:$selected_indices,
+    Hip_TensorOrMemRef:$present_key,
+    I64Attr:$compress_ratio,
+    I64Attr:$token_budget,
+    F32Attr:$epsilon,
+    F32Attr:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $query_norm_weight `,` $key_norm_weight `,` $cos_cache `,`
+        $sin_cache `,` $past_key
+        `:` type($query) `,` type($query_norm_weight) `,`
+        type($key_norm_weight) `,` type($cos_cache) `,` type($sin_cache) `,`
+        type($past_key)
+    `)`
+    (`mask` `(` $mask^ `:` type($mask) `)`)?
+    `outs` `(` $selected_indices `,` $present_key `:`
+              type($selected_indices) `,` type($present_key) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 

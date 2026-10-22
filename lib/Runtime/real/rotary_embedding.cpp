@@ -101,3 +101,52 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
 
   return rc;
 }
+
+int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                           void *cos_cache, void *sin_cache, void *output,
+                           int64_t batch_size, int64_t seq_len,
+                           int64_t num_heads, int64_t head_dim,
+                           int64_t rotary_dim, int64_t max_position,
+                           int64_t section_t, int64_t section_h,
+                           int64_t section_w, int64_t mrope_layout, float scale,
+                           int64_t element_size_bytes) {
+  OP_PROFILE(
+      "mrotary_emb",
+      [&] {
+        char b[96];
+        snprintf(b, sizeof(b), "h=%lld,hd=%lld,rd=%lld,layout=%lld",
+                 (long long)num_heads, (long long)head_dim,
+                 (long long)rotary_dim, (long long)mrope_layout);
+        return std::string(b);
+      },
+      state);
+  if (!state || !input || !position_ids || !cos_cache || !sin_cache ||
+      !output) {
+    fprintf(stderr, "wrap_mrotary_embedding: null required argument\n");
+    return -1;
+  }
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_mrotary_embedding: null stream\n");
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_mrotary_embedding: batch=%lld, seq_len=%lld, "
+      "num_heads=%lld, head_dim=%lld, rotary_dim=%lld, max_position=%lld, "
+      "section=[%lld,%lld,%lld], layout=%lld, scale=%f, elem_size=%lld\n",
+      (long long)batch_size, (long long)seq_len, (long long)num_heads,
+      (long long)head_dim, (long long)rotary_dim, (long long)max_position,
+      (long long)section_t, (long long)section_h, (long long)section_w,
+      (long long)mrope_layout, (double)scale, (long long)element_size_bytes);
+
+  int rc = hip_mrope_forward(
+      stream, input, position_ids, cos_cache, sin_cache, output, batch_size,
+      seq_len, num_heads, head_dim, rotary_dim, max_position, section_t,
+      section_h, section_w, mrope_layout, scale, element_size_bytes);
+  if (rc != 0) {
+    fprintf(stderr,
+            "wrap_mrotary_embedding: hip_mrope_forward failed (rc=%d)\n", rc);
+  }
+  return rc;
+}
