@@ -71,3 +71,35 @@ class TestDanglingOutputs:
         data = np.random.default_rng(1303).standard_normal((4, 8)).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [data])
         compare_outputs(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_dead_node_in_loop_body(self, model_runner):
+        body = helper.make_graph(
+            [
+                helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+                helper.make_node("Sigmoid", ["v_in"], ["v_out"]),
+                helper.make_node("Neg", ["v_in"], ["dead"]),
+            ],
+            "body",
+            [
+                helper.make_tensor_value_info("iter", TensorProto.INT64, []),
+                helper.make_tensor_value_info("cond_in", TensorProto.BOOL, []),
+                helper.make_tensor_value_info("v_in", _F32, [4, 8]),
+            ],
+            [
+                helper.make_tensor_value_info("cond_out", TensorProto.BOOL, []),
+                helper.make_tensor_value_info("v_out", _F32, [4, 8]),
+            ],
+        )
+        x = helper.make_tensor_value_info("x", _F32, [4, 8])
+        y = helper.make_tensor_value_info("y", _F32, [4, 8])
+        trip = numpy_helper.from_array(np.array(3, dtype=np.int64), "trip")
+        cond = numpy_helper.from_array(np.array(True), "cond")
+        model = make_model_from_nodes(
+            [helper.make_node("Loop", ["trip", "cond", "x"], ["y"], body=body)],
+            [x],
+            [y],
+            initializers=[trip, cond],
+        )
+        data = np.random.default_rng(1304).standard_normal((4, 8)).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [data])
+        compare_outputs(actual, expected, rtol=1e-3, atol=1e-3)
