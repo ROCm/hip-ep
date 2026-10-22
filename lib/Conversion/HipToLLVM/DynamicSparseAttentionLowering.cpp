@@ -38,7 +38,7 @@ struct DynamicSparseAttentionOpLowering
     auto seqlensType = cast<MemRefType>(op.getSeqlensK().getType());
     const int64_t headSize = queryType.getDimSize(2) / op.getNumHeads();
 
-    SmallVector<Value, 35> args = {
+    SmallVector<Value, 41> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getKey(), rewriter, loc),
@@ -72,12 +72,16 @@ struct DynamicSparseAttentionOpLowering
     appendDims(indicesType, adaptor.getSelectedIndices(), {0});
     appendDims(countsType, adaptor.getSelectedCounts(), {0});
     appendDims(seqlensType, adaptor.getSeqlensK(), {0});
+    appendDims(cast<MemRefType>(op.getKey().getType()), adaptor.getKey(),
+               {0, 1, 2});
+    appendDims(cast<MemRefType>(op.getValue().getType()), adaptor.getValue(),
+               {0, 1, 2});
     args.push_back(LLVM::ConstantOp::create(
         rewriter, loc, f32Type,
         rewriter.getF32FloatAttr(op.getScale().convertToFloat())));
 
-    SmallVector<Type, 35> paramTypes(12, ptrType);
-    paramTypes.append(21, i64Type);
+    SmallVector<Type, 41> paramTypes(12, ptrType);
+    paramTypes.append(27, i64Type);
     paramTypes.push_back(f32Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(

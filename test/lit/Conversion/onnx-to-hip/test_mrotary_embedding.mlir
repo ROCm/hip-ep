@@ -136,4 +136,24 @@ module {
   // CHECK-LABEL: func.func @mrope_dynamic_streams
   // CHECK-NOT: hip.mrotary_embedding
   // CHECK: "onnx.Custom"
+
+  func.func @mrope_output_mismatch(
+      %x: tensor<1x2x512xf16>,
+      %pos: tensor<3x1x2xi64>,
+      %cos: tensor<4096x32xf16>,
+      %sin: tensor<4096x32xf16>
+  ) -> tensor<1x3x512xf16> {
+    %0 = "onnx.Custom"(%x, %pos, %cos, %sin) {
+      function_name = "MRotaryEmbedding",
+      domain_name = "com.microsoft",
+      mrope_section = [11 : si64, 11 : si64, 10 : si64],
+      num_heads = 2 : si64,
+      rotary_embedding_dim = 64 : si64
+    } : (tensor<1x2x512xf16>, tensor<3x1x2xi64>, tensor<4096x32xf16>, tensor<4096x32xf16>) -> tensor<1x3x512xf16>
+    return %0 : tensor<1x3x512xf16>
+  }
+
+  // CHECK-LABEL: func.func @mrope_output_mismatch
+  // CHECK-NOT: hip.mrotary_embedding
+  // CHECK: "onnx.Custom"
 }

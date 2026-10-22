@@ -279,7 +279,10 @@ MRotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
   if (!resultType || resultType.getElementType() != elem ||
-      resultType.getRank() != 3) {
+      resultType.getRank() != 3 ||
+      dimMismatch(resultType.getDimSize(0), inputType.getDimSize(0)) ||
+      dimMismatch(resultType.getDimSize(1), inputType.getDimSize(1)) ||
+      dimMismatch(resultType.getDimSize(2), hidden)) {
     return rewriter.notifyMatchFailure(op, "output must match the input");
   }
 

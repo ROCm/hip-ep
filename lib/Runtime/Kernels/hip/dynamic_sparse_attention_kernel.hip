@@ -518,6 +518,8 @@ extern "C" int hip_dynamic_sparse_attention(
   const size_t cache_bytes = static_cast<size_t>(batch * kv_num_heads) *
                              capacity * head_size * sizeof(_Float16);
   hipError_t err = hipSuccess;
+  // Full-cache copy only when past and present are distinct buffers;
+  // shared-buffer decode skips it and appends in place.
   if (past_key != present_key) {
     err = hipMemcpyAsync(present_key, past_key, cache_bytes,
                          hipMemcpyDeviceToDevice, s);

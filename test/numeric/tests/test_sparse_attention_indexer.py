@@ -9,8 +9,10 @@ no past_sequence_length).
 ORT CPU has no SparseAttentionIndexer kernel, so the reference is a NumPy port
 of the ORT CUDA semantics. Scores are fp32 sums whose order differs between
 NumPy and the GPU, so blocks whose reference scores differ by at most
-_TIE_RTOL may come out in either order. Exactly equal scores rank by block
-index ascending, and everything else must match exactly.
+_TIE_RTOL may come out in either order; that includes non-zero scores that
+are equal only by fp32 coincidence. Zero scores (every head clamped) tie
+exactly on both sides and rank by block index ascending, and everything else
+must match exactly.
 """
 
 import numpy as np
@@ -88,9 +90,21 @@ def _leading_rope(x, cos_row, sin_row):
     return out.astype(np.float32)
 
 
+def _block_scores(qrot, krot, sc):
+    """qrot [..., N, D] x krot [nb, D] -> [..., nb] fp32 head-summed ReLU."""
+    dots = np.matmul(qrot, krot.T).astype(np.float32)
+    score = np.zeros(dots.shape[:-2] + dots.shape[-1:], np.float32)
+    for h in range(dots.shape[-2]):
+        score = score + np.fmax(dots[..., h, :], np.float32(0.0))
+    return (score * sc).astype(np.float32) + np.float32(0.0)
+
+
+_REF_ROWS = 64
+
+
 def _sai_reference(query, qw, kw, cos, sin, mask, past, ratio, budget, eps, scale):
-    """Returns (selected_indices, present_key, rows) where rows[b][s] is
-    (visible positions, block scores) for the tie-aware comparison."""
+    """Returns (selected_indices, present_key, row_info) where row_info(b, s)
+    is (visible positions, block scores) for the tie-aware comparison."""
     B, S, W = query.shape
     N = W // _D - 1
     P = past.shape[1]
@@ -112,11 +126,9 @@ def _sai_reference(query, qw, kw, cos, sin, mask, past, ratio, budget, eps, scal
     kw32 = kw.astype(np.float32)
     sc = np.float32(scale)
 
-    def clamp(p):
-        return min(max(int(p), 0), maxpos - 1)
-
     selected = np.full((B, S, cap), -1, np.int32)
-    rows = []
+    per_batch = []
+    rows_idx = np.arange(S)
     for b in range(B):
         visible_all = np.nonzero(mask[b] != 0)[0]
         nb_all = len(visible_all) // ratio
@@ -128,36 +140,42 @@ def _sai_reference(query, qw, kw, cos, sin, mask, past, ratio, budget, eps, scal
                 pooled = pooled + pk32[b, groups_all[:, t]]
             pooled = (pooled / np.float32(ratio)).astype(np.float32)
             pooled = _rms_norm(pooled, kw32, eps)
-            kpos = [clamp(p) for p in groups_all[:, 0]]
+            kpos = np.clip(groups_all[:, 0], 0, maxpos - 1)
             krot = _leading_rope(pooled, cos32[b, kpos], sin32[b, kpos])
-        row_info = []
-        for s in range(S):
-            qp = clamp(P + s)
-            qrot = _leading_rope(
-                _rms_norm(q32[b, s], qw32, eps), cos32[b, qp], sin32[b, qp]
-            )
-            visible = visible_all[visible_all <= P + s]
-            nb = len(visible) // ratio
-            emitted = min(budget // ratio, nb)
-            score = np.zeros(nb, np.float32)
-            if nb:
-                dots = (qrot @ krot[:nb].T).astype(np.float32)
-                for h in range(N):
-                    score = score + np.fmax(dots[h], np.float32(0.0))
-                score = (score * sc).astype(np.float32) + np.float32(0.0)
-                order = np.lexsort((np.arange(nb), -score))
-                for rank in range(emitted):
-                    selected[b, s, rank * ratio : (rank + 1) * ratio] = groups_all[
-                        order[rank]
-                    ]
-            tail = visible[nb * ratio :]
-            selected[b, s, emitted * ratio : emitted * ratio + len(tail)] = tail
-            row_info.append((visible, score))
-        rows.append(row_info)
-    return selected, present, rows
+        qp = np.clip(P + rows_idx, 0, maxpos - 1)
+        qrot = _leading_rope(
+            _rms_norm(q32[b], qw32, eps), cos32[b, qp][:, None], sin32[b, qp][:, None]
+        )
+        nvis = np.searchsorted(visible_all, P + rows_idx, side="right")
+        nb = nvis // ratio
+        emitted = np.minimum(budget // ratio, nb)
+        for s0 in range(0, S, _REF_ROWS):
+            s1 = min(S, s0 + _REF_ROWS)
+            kmax = int(emitted[s0:s1].max())
+            if kmax == 0:
+                continue
+            width = int(nb[s1 - 1])
+            score = _block_scores(qrot[s0:s1], krot[:width], sc)
+            score[np.arange(width)[None, :] >= nb[s0:s1, None]] = -np.inf
+            order = np.argsort(-score, axis=1, kind="stable")[:, :kmax]
+            picks = groups_all[order].reshape(s1 - s0, kmax * ratio)
+            keep = np.arange(kmax * ratio)[None, :] < emitted[s0:s1, None] * ratio
+            selected[b, s0:s1, : kmax * ratio] = np.where(keep, picks, -1)
+        for t in range(ratio - 1):
+            idx = nb * ratio + t
+            ok = np.nonzero(idx < nvis)[0]
+            selected[b, ok, emitted[ok] * ratio + t] = visible_all[idx[ok]]
+        per_batch.append((visible_all, nvis, qrot, krot))
+
+    def row_info(b, s):
+        visible_all, nvis, qrot, krot = per_batch[b]
+        visible = visible_all[: nvis[s]]
+        return visible, _block_scores(qrot[s], krot[: len(visible) // ratio], sc)
+
+    return selected, present, row_info
 
 
-def _check_selected(actual, expected, rows, ratio, budget):
+def _check_selected(actual, expected, row_info, ratio, budget):
     """Exact match, except that blocks whose reference scores differ but lie
     within _TIE_RTOL of each other may be ranked in either order."""
     B, S, _ = expected.shape
@@ -167,7 +185,7 @@ def _check_selected(actual, expected, rows, ratio, budget):
             if np.array_equal(actual[b, s], expected[b, s]):
                 continue
             swapped += 1
-            visible, score = rows[b][s]
+            visible, score = row_info(b, s)
             nb = len(score)
             k = min(budget // ratio, nb)
             np.testing.assert_array_equal(
@@ -184,15 +202,17 @@ def _check_selected(actual, expected, rows, ratio, budget):
             tol = _TIE_RTOL * max(1.0, float(np.abs(score).max()))
             picked = score[blocks]
             assert np.all(np.diff(picked) <= tol), (b, s, "rank order")
-            for i in range(k - 1):
-                later = blocks[i + 1 :][picked[i + 1 :] == picked[i]]
-                assert np.all(later > blocks[i]), (b, s, "exact tie order")
+            zero = blocks[picked == 0]
+            assert np.all(np.diff(zero) > 0), (b, s, "zero tie order")
             rest = np.setdiff1d(np.arange(nb), blocks)
             if rest.size:
                 assert score[rest].max() <= picked.min() + tol, (b, s, "selected set")
-                for r in rest:
-                    tied = blocks[picked == score[r]]
-                    assert np.all(tied < r), (b, s, "exact tie set")
+                if zero.size:
+                    assert np.all(rest[score[rest] == 0] > zero.max()), (
+                        b,
+                        s,
+                        "zero tie set",
+                    )
     return swapped
 
 
@@ -281,7 +301,7 @@ def _run_feeds(
     actual = model_runner.backend.run(_persist(model_runner, model), feeds)
     eff_eps = 1e-6 if epsilon is None else epsilon
     eff_scale = 1.0 / np.sqrt(_D) if scale is None else scale
-    expected, present, rows = _sai_reference(
+    expected, present, row_info = _sai_reference(
         query, qw, kw, cos, sin, mask, past, ratio, budget, eff_eps, eff_scale
     )
     np.testing.assert_array_equal(actual[1], present)
@@ -289,7 +309,7 @@ def _run_feeds(
     if exact:
         np.testing.assert_array_equal(actual[0], expected)
         return 0
-    return _check_selected(actual[0], expected, rows, ratio, budget)
+    return _check_selected(actual[0], expected, row_info, ratio, budget)
 
 
 @pytest.mark.parametrize("S", [1, 7, 64, 600])
@@ -300,6 +320,15 @@ def test_prefill(model_runner, S):
 @pytest.mark.parametrize("P", [1000, 4000])
 def test_decode(model_runner, P):
     _run_case(model_runner, B=1, S=1, P=P, seed=P)
+
+
+def test_prefill_multi_chunk(model_runner):
+    """Scores past a 128 MiB budget split the query rows into chunks of
+    budget / (B * ((P + S) / ratio + N * D) * 4 bytes) rows."""
+    B, S, P, N, ratio = 1, 2100, 60000, 8, 4
+    chunk_rows = (128 << 20) // (B * ((P + S) // ratio + N * _D) * 4)
+    assert 0 < chunk_rows < S
+    _run_case(model_runner, B=B, S=S, P=P, seed=10, N=N, ratio=ratio)
 
 
 def test_decode_past_crossing_topk(model_runner):

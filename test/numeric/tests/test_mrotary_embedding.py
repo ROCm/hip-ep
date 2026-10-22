@@ -35,6 +35,7 @@ def _run(
     t_onnx,
     max_pos=4096,
     scale=None,
+    symbolic=False,
 ):
     rot = rot_attr or head
     hidden = num_heads * head
@@ -60,13 +61,14 @@ def _run(
         domain="com.microsoft",
         **attrs,
     )
+    b_dim, s_dim = ("B", "S") if symbolic else (batch, seq)
     model = make_model_from_nodes(
         [node],
         [
-            helper.make_tensor_value_info("input", t_onnx, [batch, seq, hidden]),
-            helper.make_tensor_value_info("position_ids", TP.INT64, [3, batch, seq]),
+            helper.make_tensor_value_info("input", t_onnx, [b_dim, s_dim, hidden]),
+            helper.make_tensor_value_info("position_ids", TP.INT64, [3, b_dim, s_dim]),
         ],
-        [helper.make_tensor_value_info("output", t_onnx, [batch, seq, hidden])],
+        [helper.make_tensor_value_info("output", t_onnx, [b_dim, s_dim, hidden])],
         initializers=[
             numpy_helper.from_array(cos, "cos_cache"),
             numpy_helper.from_array(sin, "sin_cache"),
@@ -94,6 +96,21 @@ class TestMRotaryEmbedding:
             section=(11, 11, 10),
             layout=1,
             t_onnx=TP.FLOAT16,
+        )
+
+    @pytest.mark.parametrize("batch,seq", [(1, 1), (2, 9)])
+    def test_qwen38_symbolic_dims(self, model_runner, batch, seq):
+        _run(
+            model_runner,
+            batch=batch,
+            seq=seq,
+            num_heads=24,
+            head=256,
+            rot_attr=64,
+            section=(11, 11, 10),
+            layout=1,
+            t_onnx=TP.FLOAT16,
+            symbolic=True,
         )
 
     def test_qwen38_full_cache(self, model_runner):

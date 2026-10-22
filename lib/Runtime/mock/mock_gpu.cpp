@@ -695,6 +695,8 @@ int wrap_dynamic_sparse_attention(
     int64_t present_key_capacity, int64_t present_key_head_size,
     int64_t present_value_capacity, int64_t present_value_head_size,
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
     float scale) {
   if (!state || !query || !key || !value || !past_key || !past_value ||
       !selected_counts || !seqlens_k || !output || !present_key ||
@@ -703,6 +705,12 @@ int wrap_dynamic_sparse_attention(
             "Invalid required argument in wrap_dynamic_sparse_attention\n");
     return -1;
   }
+  (void)key_batch;
+  (void)key_seq_len;
+  (void)key_width;
+  (void)value_batch;
+  (void)value_seq_len;
+  (void)value_width;
   (void)selected_indices;
   (void)past_key_batch;
   (void)past_key_heads;
@@ -1489,12 +1497,16 @@ int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
                            int64_t rotary_dim, int64_t max_position,
                            int64_t section_t, int64_t section_h,
                            int64_t section_w, int64_t mrope_layout, float scale,
-                           int64_t element_size_bytes) {
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows) {
   if (!state || !input || !position_ids || !cos_cache || !sin_cache ||
       !output) {
     fprintf(stderr, "Invalid required argument in wrap_mrotary_embedding\n");
     return -1;
   }
+  (void)position_batch;
+  (void)position_seq_len;
+  (void)sin_rows;
   MOCK_PRINT(
       "[MOCK] wrap_mrotary_embedding(batch=%lld, seq_len=%lld, "
       "num_heads=%lld, head_dim=%lld, rotary_dim=%lld, "

@@ -197,7 +197,9 @@ struct MRotaryEmbeddingOpLowering
     const int64_t headSize = inputType.getDimSize(2) / numHeads;
     ArrayAttr section = op.getMropeSection();
 
-    SmallVector<Value, 18> args = {
+    auto posType = cast<MemRefType>(op.getPositionIds().getType());
+    auto sinType = cast<MemRefType>(op.getSinCache().getType());
+    SmallVector<Value, 21> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getPositionIds(), rewriter, loc),
@@ -217,12 +219,15 @@ struct MRotaryEmbeddingOpLowering
         LLVM::ConstantOp::create(
             rewriter, loc, f32Type,
             rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
-        createI64Const(inputType.getElementType().getIntOrFloatBitWidth() / 8)};
+        createI64Const(inputType.getElementType().getIntOrFloatBitWidth() / 8),
+        getMemRefDimSize(posType, 1, adaptor.getPositionIds(), rewriter, loc),
+        getMemRefDimSize(posType, 2, adaptor.getPositionIds(), rewriter, loc),
+        getMemRefDimSize(sinType, 0, adaptor.getSinCache(), rewriter, loc)};
 
-    SmallVector<Type, 18> paramTypes(6, ptrType);
+    SmallVector<Type, 21> paramTypes(6, ptrType);
     paramTypes.append(10, i64Type);
     paramTypes.push_back(f32Type);
-    paramTypes.push_back(i64Type);
+    paramTypes.append(4, i64Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMRotaryEmbedding, paramTypes, i32Type);

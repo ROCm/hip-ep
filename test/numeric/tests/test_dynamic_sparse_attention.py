@@ -382,6 +382,58 @@ def test_batch2_decode_split(model_runner):
     _run(model_runner, q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, 0.0625)
 
 
+def test_shared_past_present_decode(model_runner):
+    """OGA-style decode: past_* and present_* are bound to the same device
+    buffers, so the cache is updated in place across two steps."""
+    import onnxruntime as ort
+
+    backend = model_runner.backend
+    if not hasattr(backend, "create_session"):
+        pytest.skip("backend does not expose an ORT session for IO binding")
+    N, KV, D, cap, K = 24, 2, 256, 512, 96
+    rng = np.random.default_rng(31)
+    sess = backend.create_session(
+        _persist(model_runner, _make_model(N, KV, D, K, 0.0625))
+    )
+    _, _, _, past_k, past_v = _inputs(rng, 1, 1, N, KV, D, cap)
+    L = 300
+    past_k[:, :, L:] = np.nan
+    past_v[:, :, L:] = np.nan
+
+    def gpu(arr):
+        return ort.OrtValue.ortvalue_from_numpy(
+            arr, device_type="gpu", vendor_id=0x1002
+        )
+
+    cache_k, cache_v = gpu(past_k), gpu(past_v)
+    for step in range(2):
+        q, k, v, _, _ = _inputs(rng, 1, 1, N, KV, D, 1)
+        seqlens = np.array([L - 1 + step], np.int32)
+        sel = _block_indices(rng, L - 1 + step, K)[None, :]
+        counts = np.array([K], np.int32)
+        total = np.array(L + step, np.int32)
+        io = sess.io_binding()
+        for name, arr in zip(
+            ["query", "key", "value", "selected_indices", "selected_counts"]
+            + ["seqlens_k", "total_sequence_length"],
+            [q, k, v, sel, counts, seqlens, total],
+        ):
+            io.bind_cpu_input(name, arr)
+        io.bind_ortvalue_input("past_key", cache_k)
+        io.bind_ortvalue_input("past_value", cache_v)
+        io.bind_output("output")
+        io.bind_ortvalue_output("present_key", cache_k)
+        io.bind_ortvalue_output("present_value", cache_v)
+        sess.run_with_iobinding(io)
+
+        out, past_k, past_v = _dsa_reference(
+            q, k, v, past_k, past_v, sel, counts, seqlens, N, KV, 0.0625
+        )
+        compare_outputs([io.copy_outputs_to_cpu()[0]], [out], atol=5e-3, rtol=0.0)
+        np.testing.assert_array_equal(cache_k.numpy(), past_k)
+        np.testing.assert_array_equal(cache_v.numpy(), past_v)
+
+
 def _persist(model_runner, model):
     sub = model_runner._next_subdir()
     path = sub / "model.onnx"

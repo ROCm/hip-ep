@@ -48,8 +48,14 @@ module {
     // CHECK: %[[IDXR:.*]] = llvm.extractvalue %{{.*}}[3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
     // CHECK: %[[CNTR:.*]] = llvm.extractvalue %{{.*}}[3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
     // CHECK: %[[SEQR:.*]] = llvm.extractvalue %{{.*}}[3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
+    // CHECK: %[[KB:.*]] = llvm.extractvalue %[[KM:.*]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[KS:.*]] = llvm.extractvalue %[[KM]][3, 1]
+    // CHECK: %[[KW:.*]] = llvm.mlir.constant(512 : i64) : i64
+    // CHECK: %[[VB:.*]] = llvm.extractvalue %[[VM:.*]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[VS:.*]] = llvm.extractvalue %[[VM]][3, 1]
+    // CHECK: %[[VW:.*]] = llvm.mlir.constant(512 : i64) : i64
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(6.250000e-02 : f32) : f32
-    // CHECK: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[B]], %[[S]], %[[N]], %[[KVN]], %[[D]], %[[CAP]], %[[K]], %[[PKB]], %[[PKH]], %[[PKD]], %[[PVB]], %[[PVH]], %[[PVC]], %[[PVD]], %[[OKC]], %[[OKD]], %[[OVC]], %[[OVD]], %[[IDXR]], %[[CNTR]], %[[SEQR]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32) -> i32
+    // CHECK: llvm.call @wrap_dynamic_sparse_attention(%{{.*}}, %[[B]], %[[S]], %[[N]], %[[KVN]], %[[D]], %[[CAP]], %[[K]], %[[PKB]], %[[PKH]], %[[PKD]], %[[PVB]], %[[PVH]], %[[PVC]], %[[PVD]], %[[OKC]], %[[OKD]], %[[OVC]], %[[OVD]], %[[IDXR]], %[[CNTR]], %[[SEQR]], %[[KB]], %[[KS]], %[[KW]], %[[VB]], %[[VS]], %[[VW]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32) -> i32
     return
   }
 }

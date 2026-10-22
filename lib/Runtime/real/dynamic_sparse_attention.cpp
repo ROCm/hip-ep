@@ -24,11 +24,26 @@ int wrap_dynamic_sparse_attention(
     int64_t present_key_capacity, int64_t present_key_head_size,
     int64_t present_value_capacity, int64_t present_value_head_size,
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
     float scale) {
   if (!state || !query || !key || !value || !past_key || !past_value ||
       !selected_counts || !seqlens_k || !output || !present_key ||
       !present_value) {
     fprintf(stderr, "wrap_dynamic_sparse_attention: null required argument\n");
+    return -1;
+  }
+  const int64_t kv_width = kv_num_heads * head_size;
+  if (key_batch != batch || key_seq_len != seq_len || key_width != kv_width ||
+      value_batch != batch || value_seq_len != seq_len ||
+      value_width != kv_width) {
+    fprintf(stderr,
+            "wrap_dynamic_sparse_attention: key [%lld, %lld, %lld] and value "
+            "[%lld, %lld, %lld] must both be [B=%lld, S=%lld, %lld]\n",
+            (long long)key_batch, (long long)key_seq_len, (long long)key_width,
+            (long long)value_batch, (long long)value_seq_len,
+            (long long)value_width, (long long)batch, (long long)seq_len,
+            (long long)kv_width);
     return -1;
   }
   if (past_key_batch != batch || past_key_heads != kv_num_heads ||

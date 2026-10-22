@@ -109,7 +109,8 @@ int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
                            int64_t rotary_dim, int64_t max_position,
                            int64_t section_t, int64_t section_h,
                            int64_t section_w, int64_t mrope_layout, float scale,
-                           int64_t element_size_bytes) {
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows) {
   OP_PROFILE(
       "mrotary_emb",
       [&] {
@@ -123,6 +124,21 @@ int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
   if (!state || !input || !position_ids || !cos_cache || !sin_cache ||
       !output) {
     fprintf(stderr, "wrap_mrotary_embedding: null required argument\n");
+    return -1;
+  }
+  if (position_batch != batch_size || position_seq_len != seq_len) {
+    fprintf(stderr,
+            "wrap_mrotary_embedding: position_ids [3, %lld, %lld] must be "
+            "[3, B=%lld, S=%lld]\n",
+            (long long)position_batch, (long long)position_seq_len,
+            (long long)batch_size, (long long)seq_len);
+    return -1;
+  }
+  if (sin_rows != max_position) {
+    fprintf(stderr,
+            "wrap_mrotary_embedding: sin_cache rows %lld must equal cos_cache "
+            "rows %lld\n",
+            (long long)sin_rows, (long long)max_position);
     return -1;
   }
   void *stream = hipdnn_ep_state_get_stream(state);

@@ -32,7 +32,10 @@ module {
     // CHECK: %[[LAYOUT:.*]] = llvm.mlir.constant(1 : i64) : i64
     // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(1.000000e+00 : f32) : f32
     // CHECK: %[[ELEM:.*]] = llvm.mlir.constant(2 : i64) : i64
-    // CHECK: llvm.call @wrap_mrotary_embedding(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[B]], %[[S]], %[[NH]], %[[HD]], %[[RD]], %[[MAXP]], %[[ST]], %[[SH]], %[[SW]], %[[LAYOUT]], %[[SCALE]], %[[ELEM]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, i64) -> i32
+    // CHECK: %[[PB:.*]] = llvm.extractvalue %[[P:.*]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[PS:.*]] = llvm.extractvalue %[[P]][3, 2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<3 x i64>, array<3 x i64>)>
+    // CHECK: %[[SINR:.*]] = llvm.mlir.constant(262144 : i64) : i64
+    // CHECK: llvm.call @wrap_mrotary_embedding(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[B]], %[[S]], %[[NH]], %[[HD]], %[[RD]], %[[MAXP]], %[[ST]], %[[SH]], %[[SW]], %[[LAYOUT]], %[[SCALE]], %[[ELEM]], %[[PB]], %[[PS]], %[[SINR]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, i64, i64, i64, i64) -> i32
     return
   }
 }

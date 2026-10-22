@@ -455,6 +455,7 @@ extern "C" int hip_mrope_forward(
   }
 
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();
   const int block_size = 256;
   const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
   auto launch = [&](auto type_tag) {

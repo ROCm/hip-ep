@@ -1461,7 +1461,9 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
-// hip.mrotary_embedding
+// hip.mrotary_embedding. max_position is cos_cache dim 0; position_ids dims
+// 1..2 and sin_cache dim 0 must agree with the input / cos_cache, else -1
+// before any launch.
 int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
                            void *cos_cache, void *sin_cache, void *output,
                            int64_t batch_size, int64_t seq_len,
@@ -1469,7 +1471,8 @@ int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
                            int64_t rotary_dim, int64_t max_position,
                            int64_t section_t, int64_t section_h,
                            int64_t section_w, int64_t mrope_layout, float scale,
-                           int64_t element_size_bytes);
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows);
 
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`
@@ -1858,6 +1861,8 @@ int wrap_dynamic_sparse_attention(
     int64_t present_key_capacity, int64_t present_key_head_size,
     int64_t present_value_capacity, int64_t present_value_head_size,
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
     float scale);
 
 // past_key may be null when past_len == 0; mask may be null (all visible).
