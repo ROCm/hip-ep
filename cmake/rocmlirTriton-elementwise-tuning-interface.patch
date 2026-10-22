@@ -1,0 +1,28 @@
+diff --git a/mlir/include/mlir/Dialect/Rock/IR/RockAttrDefs.td b/mlir/include/mlir/Dialect/Rock/IR/RockAttrDefs.td
+index 2a71aafecf..744e31b7e5 100644
+--- a/mlir/include/mlir/Dialect/Rock/IR/RockAttrDefs.td
++++ b/mlir/include/mlir/Dialect/Rock/IR/RockAttrDefs.td
+@@ -646,6 +646,9 @@ def Rock_ElementwiseParamsAttr
+     int64_t getUseInThreadTranspose() { return -1; }
+     int64_t getUseBufferOps() { return -1; }
+     int64_t getUseBufferAtomics() { return -1; }
++    int64_t getUseReductionLayout() { return -1; }
++    int64_t getUseOptimizeEpilogue() { return -1; }
++    int64_t getUseBf16x3ForF32() { return -1; }
+     int64_t getScheduleHint() { return -1; }
+   }];
+ 
+diff --git a/mlir/lib/Dialect/Rock/Transforms/GridwiseElementwiseToBlockwise.cpp b/mlir/lib/Dialect/Rock/Transforms/GridwiseElementwiseToBlockwise.cpp
+index cbae50e5ce..b833212b9e 100644
+--- a/mlir/lib/Dialect/Rock/Transforms/GridwiseElementwiseToBlockwise.cpp
++++ b/mlir/lib/Dialect/Rock/Transforms/GridwiseElementwiseToBlockwise.cpp
+@@ -112,7 +112,8 @@ RockGridwiseElementwiseToBlockwisePass::processKernel(func::FuncOp func) {
+     else
+       b.setInsertionPointAfter(bid.getDefiningOp());
+     auto loadMarker = LoadMarkerOp::create(b, loc, tileType, input, tilingViews,
+-                                           ValueRange{bid});
++                                           ValueRange{bid},
++                                           rock::CacheModifier::NONE);
+     propagateOutputType(input, loadMarker.getResult());
+   }
+ 
