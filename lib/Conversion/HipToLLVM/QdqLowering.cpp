@@ -69,8 +69,9 @@ LogicalResult isDataTypeSupported(Operation *op, Type quantElem, Type floatElem,
 // Value width the runtime should assume for the quantized side. A packed
 // 4-bit tensor keeps its i8/ui8 element type -- which carries only the
 // signedness -- and its logical shape, so the width has to travel separately.
-// Anything but 8-bit storage under the flag means the producer and this
-// lowering disagree, which would hand the runtime a stride nothing agreed on.
+// The op verifiers already require 8-bit storage under the flag; the check
+// here is a backstop for IR that reaches this lowering unverified, where
+// anything else would hand the runtime a stride nothing agreed on.
 FailureOr<int64_t> resolveQuantBits(Operation *op, Type quantElem,
                                     int64_t packedBits,
                                     ConversionPatternRewriter &rewriter) {

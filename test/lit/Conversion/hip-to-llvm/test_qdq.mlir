@@ -86,7 +86,7 @@ func.func @dequantize_linear_no_zp(%ctx: !hip.context,
 // ONNX gives QuantizeLinear no int32 output, so only i8/ui8/i16/ui16 are
 // accepted here and a wider integer must fail to legalize rather than reach
 // the runtime as HIPDNN_EP_DATATYPE_INT32. The dequantize direction does take
-// i32 (case 10) -- the asymmetry is the spec's, not an oversight.
+// i32 (case 8) -- the asymmetry is the spec's, not an oversight.
 
 func.func @quantize_linear_bad_storage(%ctx: !hip.context,
                                        %x: memref<8x128xf32, 1>,
@@ -168,26 +168,7 @@ func.func @dequantize_linear_packed_uint4(%ctx: !hip.context,
 
 // -----
 
-// ===== 7: packed_int4 rejected on 16-bit storage =====
-// Nothing packs two 4-bit values into an i16, so the flag can only mean the
-// producer and this lowering disagree. Fail rather than emit input_bits = 4
-// against a 16-bit stride.
-
-func.func @dequantize_linear_packed_int4_bad_width(%ctx: !hip.context,
-                                                   %x: memref<8x128xi16, 1>,
-                                                   %scale: memref<f32, 1>,
-                                                   %y: memref<8x128xf32, 1>) {
-  // expected-error @below {{failed to legalize operation 'hip.dequantize_linear'}}
-  hip.dequantize_linear(%ctx)
-      ins(%x, %scale : memref<8x128xi16, 1>, memref<f32, 1>)
-      outs(%y : memref<8x128xf32, 1>)
-      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
-  return
-}
-
-// -----
-
-// ===== 8: QuantizeLinear, packed UINT4 =====
+// ===== 7: QuantizeLinear, packed UINT4 =====
 // The mirror of case 6 on the quantize side: output_bits becomes 4 while the
 // ui8 output type still reaches the runtime as UINT8 = 7, and the shapes stay
 // logical even though only half the output buffer is written.
@@ -212,24 +193,7 @@ func.func @quantize_linear_packed_uint4(%ctx: !hip.context,
 
 // -----
 
-// ===== 9: packed_int4 rejected on a 16-bit quantize target =====
-
-func.func @quantize_linear_packed_int4_bad_width(%ctx: !hip.context,
-                                                 %x: memref<8x128xf32, 1>,
-                                                 %scale: memref<f32, 1>,
-                                                 %y: memref<8x128xi16, 1>) {
-  // expected-error @below {{failed to legalize operation 'hip.quantize_linear'}}
-  hip.quantize_linear(%ctx)
-      ins(%x, %scale : memref<8x128xf32, 1>, memref<f32, 1>)
-      outs(%y : memref<8x128xi16, 1>)
-      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
-       saturate = 1 : i64, packed_bits = 4 : i64}
-  return
-}
-
-// -----
-
-// ===== 10: DequantizeLinear accepts i32 storage =====
+// ===== 8: DequantizeLinear accepts i32 storage =====
 // A QDQ exporter quantizes a conv/gemm bias to int32 at
 // input_scale * weight_scale, so this is the shape a biased QDQ conv leaves
 // behind once the fusion declines it. input_dtype must reach the runtime as

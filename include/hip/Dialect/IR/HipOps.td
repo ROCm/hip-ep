@@ -5661,8 +5661,8 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     `packed_bits` names a sub-byte target: 4 for ONNX INT4 / UINT4, 2 for a
     2-bit one, and 0 - the default - for an unpacked target stored at its
     element type's own width, one value per element. For a nonzero
-    `packed_bits` = b, `$output` and `$zero_point` keep their i8 / ui8 element
-    type and logical shape, but only the first ceil(numel * b / 8) bytes of
+    `packed_bits` = b, `$output` and `$zero_point` keep an 8-bit integer
+    element type (verified) and their logical shape, but only the first ceil(numel * b / 8) bytes of
     `$output` are written: 8 / b values per byte, least significant field
     first, over the flattened row-major sequence. The buffer is still
     allocated at the logical element count, so its tail is left untouched, and
@@ -5690,6 +5690,8 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     Hip_PackedBitsAttr:$packed_bits
   );
 
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $scale `:`
         type($input) `,` type($scale) `)`
@@ -5714,7 +5716,8 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     `packed_bits` names a sub-byte source: 4 for ONNX INT4 / UINT4, 2 for a
     2-bit one, and 0 - the default - for an unpacked source stored at its
     element type's own width, one value per element. Sources with a nonzero
-    `packed_bits` = b import as i8 / ui8 at the LOGICAL element count while
+    `packed_bits` = b import as i8 / ui8 (verified: 8-bit integer storage is
+    required) at the LOGICAL element count while
     `$input` and `$zero_point` only hold ceil(numel * b / 8) bytes, 8 / b
     values per byte, least significant field first, over the flattened
     row-major sequence.
@@ -5742,6 +5745,8 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     I64Attr:$block_size,
     Hip_PackedBitsAttr:$packed_bits
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $scale `:`

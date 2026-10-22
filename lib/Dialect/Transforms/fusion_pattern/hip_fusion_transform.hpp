@@ -235,25 +235,35 @@ hasExtractableQdqZeropoint(mlir::PatternRewriter &, mlir::PDLResultList &,
   return mlir::success(tryHipQdqZeropoint(op, /*absentValue=*/0).has_value());
 }
 
-/// op is a Q/DQ whose quantized side has one of the element widths listed in
-/// the `widths` array attribute
+/// op is a Q/DQ whose quantized values have one of the widths listed in the
+/// `widths` array attribute
 inline mlir::LogicalResult
 isHipQdqQuantizedWidth(mlir::PatternRewriter &, mlir::PDLResultList &,
                        llvm::ArrayRef<mlir::PDLValue> args) {
   if (args.size() != 2)
     return mlir::failure();
+  auto *op = args[0].dyn_cast<mlir::Operation *>();
   auto widths = mlir::dyn_cast_or_null<mlir::ArrayAttr>(
       args[1].dyn_cast<mlir::Attribute>());
-  auto intType =
-      getQdqQuantizedElementType(args[0].dyn_cast<mlir::Operation *>());
+  auto intType = getQdqQuantizedElementType(op);
   if (!widths || !intType)
     return mlir::failure();
+  // The value width, not the storage width: a packed payload keeps 8-bit
+  // storage (the Q/DQ verifiers enforce it) at its logical element count, so
+  // only `packed_bits` tells a 4- or 2-bit payload from an 8-bit one, on either
+  // side of the Q/DQ pair.
+  int64_t packedBits = 0;
+  if (auto dq = mlir::dyn_cast<mlir::hip::DequantizeLinearOp>(op))
+    packedBits = dq.getPackedBits();
+  else if (auto q = mlir::dyn_cast<mlir::hip::QuantizeLinearOp>(op))
+    packedBits = q.getPackedBits();
+  int64_t valueWidth =
+      packedBits ? packedBits : static_cast<int64_t>(intType.getWidth());
   // A width the kernel does not implement must leave the unfused chain in
   // place rather than fuse into a kernel that would reject it at runtime.
   return mlir::success(llvm::any_of(widths, [&](mlir::Attribute width) {
     auto widthAttr = mlir::dyn_cast<mlir::IntegerAttr>(width);
-    return widthAttr &&
-           widthAttr.getInt() == static_cast<int64_t>(intType.getWidth());
+    return widthAttr && widthAttr.getInt() == valueWidth;
   }));
 }
 
@@ -363,6 +373,13 @@ hasMatchingHipQdqParams(mlir::PatternRewriter &, mlir::PDLResultList &,
   // different mapping.
   mlir::IntegerType dqType = getQdqQuantizedElementType(dq);
   if (!dqType || dqType != getQdqQuantizedElementType(q))
+    return mlir::failure();
+
+  // A packed payload shares bytes between values. Packing that differs between
+  // the ends hands consumers bytes in the wrong layout, and even matching
+  // packing would have the layout op move whole bytes rather than the 4- or
+  // 2-bit fields inside them, so neither end may be packed.
+  if (dq.getPackedBits() != 0 || q.getPackedBits() != 0)
     return mlir::failure();
 
   // block_size > 0 subdivides each slice, a granularity a single splat

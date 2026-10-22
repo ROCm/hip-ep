@@ -3935,9 +3935,34 @@ void SizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+// A packed payload is defined against byte storage: 8 / packed_bits values per
+// byte of an i8 / ui8 buffer. Any other storage width would leave the byte
+// count, and with it every reader's view of the buffer, undefined, so the
+// quantized operand and its zero point must both be 8-bit integers.
+static LogicalResult verifyPackedQdqStorage(Operation *op, int64_t packedBits,
+                                            Value quantized, Value zeroPoint) {
+  if (packedBits == 0)
+    return success();
+  for (Value value : {quantized, zeroPoint}) {
+    if (!value)
+      continue;
+    Type elemType = getElementTypeOrSelf(value.getType());
+    if (!elemType.isInteger(8))
+      return op->emitOpError("packed_bits = ")
+             << packedBits << " expects 8-bit integer storage, got "
+             << elemType;
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
 //===----------------------------------------------------------------------===//
+
+LogicalResult QuantizeLinearOp::verify() {
+  return verifyPackedQdqStorage(*this, getPackedBits(), getOutput(),
+                                getZeroPoint());
+}
 
 MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
   return getOutputMutable();
@@ -3952,6 +3977,11 @@ void QuantizeLinearOp::getEffects(
 //===----------------------------------------------------------------------===//
 // DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
 //===----------------------------------------------------------------------===//
+
+LogicalResult DequantizeLinearOp::verify() {
+  return verifyPackedQdqStorage(*this, getPackedBits(), getInput(),
+                                getZeroPoint());
+}
 
 MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
   return getOutputMutable();
