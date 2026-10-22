@@ -136,6 +136,15 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
     // Nothing stamps `packed_bits` onto a QuantizeLinear yet -- unlike a
     // packed constant, a sub-byte target leaves no trace in the IR to detect.
     // Forwarded so the lowering and runtime below are reachable once one does.
+    //
+    // FIXME: an ONNX INT4 / UINT4 QuantizeLinear therefore lowers as an 8-bit
+    // quantize: it saturates to the int8 / uint8 range instead of [-8, 7] /
+    // [0, 15] and writes one value per byte instead of two. The importer maps
+    // INT4 / UINT4 to i8 / ui8 for every value, so the target width is gone by
+    // the time this pattern runs. It could come from the `output_dtype`
+    // attribute (opset 21+), from a packed y_zero_point constant (not a scalar
+    // one, which is one byte either way), or from the importer keeping the
+    // width. This predates `packed_bits`; it is not introduced by it.
     if (auto packed = op->getAttrOfType<mlir::IntegerAttr>(kPackedBitsAttr))
       hipOp->setAttr(kPackedBitsAttr, packed);
     rewriter.replaceOp(op, hipOp->getResults());
