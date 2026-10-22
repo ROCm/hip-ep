@@ -40,7 +40,7 @@ namespace {
 ///   %biased = hip.add %ctx, %qkv, %qkv_b
 ///   %q = tensor.extract_slice %biased[0, 0, 0][batch, seq, 512][1, 1, 1]
 ///   ...
-///   %out = hip.gqa(%ctx) ins(%q, %k, %v, %seqlens, %total_seq, ...)
+///   %out = hip.gqa(%ctx) ins(%q, %seqlens, %total_seq) key(%k) value(%v) ...
 ///            {no_causal = true, num_heads = 1, kv_num_heads = 1}
 struct AttentionToHip : public mlir::RewritePattern {
   AttentionToHip(mlir::MLIRContext *ctx)
