@@ -54,38 +54,107 @@ static Type promoteRankZero(Type type) {
                                tensorType.getEncoding());
 }
 
-template <typename AnchorOp>
-class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
-public:
-  FuseAnchorPointwise(MLIRContext *context, int *counter,
-                      PatternBenefit benefit = 1)
-      : OpRewritePattern<AnchorOp>(context, benefit), counter(counter) {}
+static bool isaPointwiseOp(Operation *op) {
+  return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp, TanhOp,
+                         SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
+                         LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
+                         AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
+                         RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
+                         SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
+}
 
-  LogicalResult matchAndRewrite(AnchorOp anchorOp,
-                                PatternRewriter &rewriter) const override {
-    DestinationStyleOpInterface endOp = anchorOp;
-    Operation *prevOp = nullptr;
+static bool isaAnchorOp(Operation *op) {
+  return isa_and_present<ConvOp, MatmulOp, GemmOp>(op);
+}
+
+// MIGraphX fuse_mlir `reshaper_names()`, minus broadcast and multibroadcast
+// (`make_conv_dot_reshaper_names` drops those on the conv/dot path). squeeze,
+// flatten, and unsqueeze are tensor.collapse_shape / tensor.expand_shape here,
+// and reshape is tensor.reshape. `slice` is not in this set.
+static bool isReshaperOp(Operation *op) {
+  return isa_and_present<TransposeOp, tensor::ReshapeOp, tensor::ExpandShapeOp,
+                         tensor::CollapseShapeOp>(op);
+}
+
+// The tensor a reshaper reads. hip.transpose is DPS, so this is its data
+// input, not the context or the init.
+static Value reshaperData(Operation *op) {
+  if (auto transpose = dyn_cast<TransposeOp>(op))
+    return transpose.getInput();
+  if (auto reshape = dyn_cast<tensor::ReshapeOp>(op))
+    return reshape.getSource();
+  if (auto expand = dyn_cast<tensor::ExpandShapeOp>(op))
+    return expand.getSrc();
+  if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(op))
+    return collapse.getSrc();
+  return {};
+}
+
+// Walk back through single-input reshapers. A pointwise op whose data comes
+// from a conv/matmul/gemm across only these ops belongs to the anchor pattern.
+static Operation *stripReshapers(Operation *def) {
+  while (def && isReshaperOp(def)) {
+    Value data = reshaperData(def);
+    def = data ? data.getDefiningOp() : nullptr;
+  }
+  return def;
+}
+
+// Outline `start` and the single-use pointwise chain that consumes it into one
+// rocMlir function. `start` is a conv/matmul/gemm or the head of a pointwise
+// chain; rocMLIR compiles the latter with no FusionRoot (PR 122 elementwise).
+static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
+                                         PatternRewriter &rewriter,
+                                         int *counter) {
+    DestinationStyleOpInterface endOp = start;
     SetVector<Value> operands;
     SetVector<Operation *> ops;
 
     // Fail on dynamic shapes
-    for (Value operand : anchorOp->getOperands()) {
+    for (Value operand : start->getOperands()) {
       if (auto tensorType = dyn_cast<TensorType>(operand.getType());
           tensorType && !tensorType.hasStaticShape())
-        return rewriter.notifyMatchFailure(anchorOp,
+        return rewriter.notifyMatchFailure(start,
                                            "only static shapes are supported");
     }
 
-    // Match all pointwise-ops
-    do {
-      if (prevOp) {
-        endOp = dyn_cast<DestinationStyleOpInterface>(*prevOp->user_begin());
+    // Match the pointwise chain, stepping through reshapers the way MIGraphX
+    // `match::skip(conv_dot_reshaper_names)` does. tensor.reshape has no
+    // output buffer, so it is absorbed only when a pointwise op or
+    // hip.transpose follows it. hip.transpose itself may end the chain.
+    auto advance = [&](Operation *from) -> bool {
+      if (!from->hasOneUse())
+        return false;
+      Operation *user = *from->user_begin();
+      SmallVector<Operation *> layout;
+      while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
+        if (!user->hasOneUse())
+          return false;
+        layout.push_back(user);
+        user = *user->user_begin();
       }
+      if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
+        return false;
+      auto next = dyn_cast<DestinationStyleOpInterface>(user);
+      if (!next)
+        return false;
+      ops.insert_range(layout);
+      Value carried = layout.empty() ? from->getResult(0) : layout.back()->getResult(0);
+      endOp = next;
       auto newOperands = endOp.getDpsInputs();
-      if (prevOp) {
-        newOperands.erase(newOperands.begin() +
-                          prevOp->use_begin()->getOperandNumber());
+      if (auto it = llvm::find(newOperands, carried); it != newOperands.end())
+        newOperands.erase(it);
+      operands.insert_range(newOperands);
+      for (auto init : endOp.getDpsInits()) {
+        if (Operation *initOp = init.getDefiningOp())
+          ops.insert(initOp);
       }
+      ops.insert(endOp);
+      return true;
+    };
+
+    {
+      auto newOperands = endOp.getDpsInputs();
       operands.insert_range(newOperands);
       for (auto init : endOp.getDpsInits()) {
         // An init with no producer is a block argument, which cannot be cloned.
@@ -94,13 +163,14 @@ public:
           ops.insert(initOp);
       }
       ops.insert(endOp);
-      prevOp = endOp;
-    } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
+    }
+    while (advance(endOp))
+      ;
 
     // Remove the hip.context operand
     auto context = operands.front();
     if (!isa<mlir::hip::ContextType>(context.getType())) {
-      return rewriter.notifyMatchFailure(anchorOp,
+      return rewriter.notifyMatchFailure(start,
                                          "first operand not hip.context");
     }
     operands.erase(operands.begin());
@@ -181,7 +251,7 @@ public:
     // before the op that reads it.
     ops = topologicalSort(ops);
 
-    auto parentModule = anchorOp->template getParentOfType<ModuleOp>();
+    auto parentModule = start->getParentOfType<ModuleOp>();
     func::FuncOp newFunc;
     {
       PatternRewriter::InsertionGuard guard(rewriter);
@@ -248,17 +318,96 @@ public:
         SymbolRefAttr::get(newFunc), context, dispatchOperands,
         endOp.getDpsInits().front());
 
-    rewriter.replaceOp(endOp, rocMlirOp);
+    // The matched op may be the head of the chain rather than `endOp`. Erase
+    // the originals once nothing reads them, or the greedy driver matches the
+    // head again and outlines a second kernel.
+    Operation *end = endOp.getOperation();
+    rewriter.replaceOp(end, rocMlirOp);
+    for (Operation *op : llvm::reverse(ops)) {
+      if (op == end || !op->use_empty())
+        continue;
+      rewriter.eraseOp(op);
+    }
     return success();
+}
+
+template <typename AnchorOp>
+class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
+public:
+  FuseAnchorPointwise(MLIRContext *context, int *counter,
+                      PatternBenefit benefit = 1)
+      : OpRewritePattern<AnchorOp>(context, benefit), counter(counter) {}
+
+  LogicalResult matchAndRewrite(AnchorOp anchorOp,
+                                PatternRewriter &rewriter) const override {
+    return outlineRocMlirChain(anchorOp, rewriter, counter);
   }
 
-  bool isaPointwiseOp(Operation *op) const {
-    return isa_and_present<MulOp, AddOp, MinOp, MaxOp, SiluOp, SigmoidOp,
-                           TanhOp, SoftplusOp, GeluOp, BiasGeluOp, FastGeluOp,
-                           LeakyReluOp, ReciprocalOp, SqrtOp, DivOp, EqualOp,
-                           AndOp, OrOp, NotOp, CosOp, ErfOp, SinOp, CeilOp,
-                           RoundOp, AtanOp, FloorOp, ExpOp, LogOp, AbsOp, NegOp,
-                           SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
+private:
+  int *counter = nullptr;
+};
+
+// True when some op in the forward chain reads a single-use conv, gemm, or
+// matmul. The anchor pattern can fuse that chain, so the pointwise pattern
+// must not outline it. The head's own inputs are not enough: a cast of a
+// resize can sit in front of an add that consumes the conv.
+static bool chainConsumesSingleUseAnchor(Operation *from) {
+  while (from) {
+    if (auto dps = dyn_cast<DestinationStyleOpInterface>(from)) {
+      for (Value input : dps.getDpsInputs()) {
+        Operation *def = input.getDefiningOp();
+        if (!def)
+          continue;
+        def = stripReshapers(def);
+        if (def && isaAnchorOp(def) && def->hasOneUse())
+          return true;
+      }
+    }
+    if (!from->hasOneUse())
+      return false;
+    Operation *user = *from->user_begin();
+    while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
+      if (!user->hasOneUse())
+        return false;
+      user = *user->user_begin();
+    }
+    if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
+      return false;
+    from = user;
+  }
+  return false;
+}
+
+// A pointwise chain whose producer is not a conv, matmul, or gemm. The anchor
+// patterns own a chain that starts at one of those, so this only claims the
+// head of a chain they leave behind.
+class FusePointwiseChain : public RewritePattern {
+public:
+  FusePointwiseChain(MLIRContext *context, int *counter)
+      : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context),
+        counter(counter) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (!isaPointwiseOp(op))
+      return failure();
+    auto pointwise = cast<DestinationStyleOpInterface>(op);
+    for (Value input : pointwise.getDpsInputs()) {
+      Operation *def = input.getDefiningOp();
+      if (!def)
+        continue;
+      def = stripReshapers(def);
+      if (def && isaPointwiseOp(def))
+        return rewriter.notifyMatchFailure(
+            op, "not the head of a pointwise chain");
+      if (def && isaAnchorOp(def))
+        return rewriter.notifyMatchFailure(
+            op, "pointwise chain is the epilogue of an anchor");
+    }
+    if (chainConsumesSingleUseAnchor(op))
+      return rewriter.notifyMatchFailure(
+          op, "pointwise chain is the epilogue of an anchor");
+    return outlineRocMlirChain(pointwise, rewriter, counter);
   }
 
 private:
@@ -277,6 +426,7 @@ public:
     int counter = 0;
     patterns.add<FuseAnchorPointwise<MatmulOp>, FuseAnchorPointwise<ConvOp>,
                  FuseAnchorPointwise<GemmOp>>(ctx, &counter);
+    patterns.add<FusePointwiseChain>(ctx, &counter);
 
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
       signalPassFailure();

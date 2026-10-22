@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Rock/IR/Rock.h"
 #include "mlir/Dialect/Rock/IR/RockTuningParamAttrInterface.h"
 #include "mlir/Dialect/Rock/Tuning/RockTuning.h"
+#include "mlir/Dialect/Rock/utility/loweringUtils.h"
 #include "mlir/InitRocMLIRDialects.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -745,6 +746,32 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
       pendingWinners.push_back(std::move(pending));
       return true;
     }
+  }
+
+  // Elementwise kernels have no quick-tuning space: createTunableParamSpace
+  // fatals on them. They compile with the same default AffixTuningParameters
+  // uses when no perf_config was selected (tile 256, 4 waves, 1 stage).
+  bool elementwise = false;
+  module.walk([&](func::FuncOp func) {
+    if (rock::isElementwiseKernel(func))
+      elementwise = true;
+  });
+  if (elementwise) {
+    constexpr llvm::StringLiteral kDefaultElementwisePerfConfig(
+        "elem:v1:256,1,4,1,0");
+    if (deferCacheHits) {
+      DeferredCacheHit hit;
+      hit.kernelName = kernelName.str();
+      hit.rockModule = std::move(rockModule);
+      hit.perfConfig = kDefaultElementwisePerfConfig.str();
+      cacheHits.push_back(std::move(hit));
+      return true;
+    }
+    const auto compileStart = std::chrono::steady_clock::now();
+    bool ok = compilePerfConfig(rockModule, arch, kDefaultElementwisePerfConfig,
+                                out);
+    times.perfConfigCompileMs += millisecondsSince(compileStart);
+    return ok;
   }
 
   std::unique_ptr<rock::TuningParamSet> space(
