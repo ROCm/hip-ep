@@ -124,6 +124,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QLinearLeakyRelu (`com.microsoft`) | Decomposed to DequantizeLinear + LeakyRelu + QuantizeLinear. int8 or uint8. `alpha` defaults to 0.01. `Y_zero_point` may be omitted |
 | QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
+| GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; no `cu_seqlens` or state capture |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |

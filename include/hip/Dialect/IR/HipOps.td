@@ -3849,15 +3849,22 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `channels_last` is set, in which case 1D input is (batch_size, seq_len,
     channels). Weight layout: (channels, 1, k_1, ...) for depthwise
     convolution. The carry state stores the last (k-1) positions along the
-    causal axis for incremental decode, and is (batch, channels, k-1) in both
-    layouts -- only input and output are permuted, so a layout change never
-    invalidates a carried state.
+    causal axis for incremental decode, and is (batch, channels, k-1) under
+    either `channels_last` setting -- only input and output are permuted, so
+    that layout change never invalidates a carried state.
 
     `channels_last` exists because the surrounding graph is channels-last: a
     channels-first convolution has to be bracketed by a Transpose pair, and at
     the Qwen3.6 footprint that pair costs more than the convolution it serves.
     The canonicalizer sets the attribute while absorbing both Transposes.
     Only ndim=1 is supported channels-last.
+
+    `state_channels_last` additionally moves the carry state to (batch,
+    state_len, channels), the ONNX `channels_last = 1` layout. It requires
+    `channels_last`. `dilation` spaces the kernel taps along the sequence axis:
+    tap j of output t reads position t - (k-1-j) * dilation, and the carry
+    state holds state_len = (k-1) * dilation positions. `dilation` > 1 requires
+    `state_channels_last`.
 
     Example (1D):
     ```mlir
@@ -3889,7 +3896,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
     DefaultValuedAttr<I64Attr, "1">:$ndim,               // 1, 2, or 3
-    DefaultValuedAttr<BoolAttr, "false">:$channels_last  // input/output (B, L, C)
+    DefaultValuedAttr<BoolAttr, "false">:$channels_last,  // input/output (B, L, C)
+    DefaultValuedAttr<I64Attr, "1">:$dilation,
+    DefaultValuedAttr<BoolAttr, "false">:$state_channels_last  // state (B, S, C)
   );
 
   let assemblyFormat = [{
@@ -3913,6 +3922,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
   // Absorbs a surrounding [0,2,1] Transpose pair into `channels_last`.
   // See lib/Dialect/IR/HipCausalConvCanonicalize.cpp.
   let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 
   // OpStateOpInterface: construct this instance's per-session MIOpen
   // descriptor/algo cache (CausalConvState). No compile-time params — the
@@ -4531,6 +4541,75 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
               type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_GatedDeltaNetOp : Hip_DpsOp<"gated_delta_net"> {
+  let summary = "Gated delta rule recurrence (com.microsoft GatedDeltaNet)";
+  let description = [{
+    com.microsoft GatedDeltaNet restricted to packed QKV,
+    update_rule = gated_delta, gate_activation = qwen,
+    beta_activation = sigmoid and qk_l2_norm = 1.
+
+    Shapes, with Hv, dv, dk taken from the state and
+    Hqk = (P - Hv*dv) / (2*dk):
+      qkv           [B, L, P]          T = f16 or f32, row = [q | k | v]
+                                       with Hqk*dk, Hqk*dk, Hv*dv elements
+      decay, beta   [B, L, Hv]         f32
+      initial_state [B, Hv, dv, dk]    f32, V-major
+      a_log, dt_bias [Hv]              f32
+      output        [B, L, Hv, dv]     T
+      final_state   [B, Hv, dv, dk]    f32
+
+    Hv must be a multiple of Hqk and dk one of 32, 64, 128, 256. For each
+    token and value head hv, with hq = hv * Hqk / Hv:
+      q, k  = heads hq of the q and k segments, each scaled by
+              rsqrt(sum(x^2) + 1e-12)
+      g     = -exp(a_log[hv]) * softplus(decay + dt_bias[hv])
+      b     = sigmoid(beta)
+      S     = exp(g) * S
+      delta = b * (v - S^T k)
+      S     = S + k (x) delta
+      o     = scale * S^T q
+    `scale` = 0 means 1 / sqrt(dk).
+
+    Example:
+    ```mlir
+    hip.gated_delta_net(%ctx)
+        ins(%qkv, %decay, %beta, %state, %a_log, %dt_bias :
+            memref<1x1x10240xf16, 1>, memref<1x1x48xf32, 1>,
+            memref<1x1x48xf32, 1>, memref<1x48x128x128xf32, 1>,
+            memref<48xf32, 1>, memref<48xf32, 1>)
+        outs(%out, %final : memref<1x1x48x128xf16, 1>,
+                            memref<1x48x128x128xf32, 1>)
+        {scale = 0.0 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$qkv,
+    Hip_TensorOrMemRef:$decay,
+    Hip_TensorOrMemRef:$beta,
+    Hip_TensorOrMemRef:$initial_state,
+    Hip_TensorOrMemRef:$a_log,
+    Hip_TensorOrMemRef:$dt_bias,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$final_state,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $qkv `,` $decay `,` $beta `,` $initial_state `,` $a_log `,` $dt_bias
+        `:` type($qkv) `,` type($decay) `,` type($beta) `,`
+        type($initial_state) `,` type($a_log) `,` type($dt_bias)
+    `)`
+    `outs` `(` $output `,` $final_state `:`
+              type($output) `,` type($final_state) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],

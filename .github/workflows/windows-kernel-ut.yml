@@ -1,0 +1,170 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Windows Kernel Unit Test
+
+# Runs the standalone kernel unit tests (lib/Runtime/Kernels/unit_test) on the
+# self-hosted AMD GPU box against the gpu-test-package of the same run. Pull
+# requests and merge groups run them only when they touch
+# lib/Runtime/Kernels/ or this file; pushes and manual runs always do.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.detect.outputs.run }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Detect kernel changes
+        id: detect
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MQ_BASE: ${{ github.event.merge_group.base_sha }}
+          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) range="$PR_BASE...$PR_HEAD" ;;
+            merge_group)  range="$MQ_BASE..$MQ_HEAD" ;;
+            *)
+              echo "$EVENT: running kernel unit tests unconditionally"
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if ! files=$(git diff --name-only "$range"); then
+            echo "::warning::git diff $range failed; running kernel unit tests"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          hits=$(printf '%s\n' "$files" | grep -E '^(lib/Runtime/Kernels/|\.github/workflows/windows-kernel-ut\.yml$)' || true)
+          if [ -n "$hits" ]; then
+            echo "Kernel-related changes in $range:"
+            printf '%s\n' "$hits"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No kernel-related changes in $range; skipping kernel unit tests"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  run:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: StrixHalo
+    timeout-minutes: 30
+    concurrency:
+      group: kernel-ut-${{ github.ref }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          taskkill /f /im "hipdnn-kernel-ut*" >nul 2>&1 || ver >nul
+          if exist kernel-ut-package rd /s /q kernel-ut-package
+
+      - name: Download GPU test package
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-package
+          path: kernel-ut-package
+
+      - name: Run kernel unit tests (GPU)
+        shell: cmd
+        working-directory: kernel-ut-package/bin
+        run: hipdnn-kernel-ut.exe --mode lookup --coverage 1
+
+      - name: Upload kernel unit-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-ut-results
+          path: kernel-ut-package/bin/out/
+          if-no-files-found: warn
+
+      - name: Publish kernel unit-test results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $csv = "kernel-ut-package/bin/out/results.csv"
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
+          $prNumber = "${{ github.event.pull_request.number }}"
+
+          if (Test-Path $csv) {
+            $rows = @(Import-Csv $csv)
+            $suites = @($rows | Where-Object { $_.shape -eq "suite" })
+            $table = "| Op | Leaf | Arch | Cases | Failed | Suite (ms) | Verdict |`n" +
+                     "|----|------|------|------:|-------:|-----------:|---------|`n"
+            $totalCases = 0
+            $totalFailed = 0
+            foreach ($s in $suites) {
+              $cases = @($rows | Where-Object { $_.op -eq $s.op -and $_.leaf -eq $s.leaf -and $_.shape -ne "suite" })
+              $failed = @($cases | Where-Object { $_.verdict -eq "FAIL" }).Count
+              $totalCases += $cases.Count
+              $totalFailed += $failed
+              $ms = [math]::Round([double]$s.time_ms, 1)
+              $table += "| $($s.op) | $($s.leaf) | $($s.arch) | $($cases.Count) | $failed | $ms | $($s.verdict) |`n"
+            }
+            $failedLeaves = @($suites | Where-Object { $_.verdict -ne "PASS" }).Count
+            $table += "`nLeaves: $($suites.Count) ($failedLeaves failed) | Cases: $totalCases ($totalFailed failed)`n"
+          } else {
+            $table = "No results: ``$csv`` was not written.`n"
+          }
+
+          $summary = "## Kernel Unit Test Results`n`n" + $table +
+                     "`nMode: lookup | Coverage: 1 | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
+
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-kernel-ut-results -->"
+            $body = "$marker`n$summary"
+            $env:KUT_MARKER = $marker
+
+            $ids = gh api --paginate "repos/${{ github.repository }}/issues/$prNumber/comments" `
+              --jq '.[] | select(.body != null and (.body | startswith($ENV.KUT_MARKER))) | .id'
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "WARNING: gh api unreachable, skipping kernel UT PR comment"
+              return
+            }
+            $existing = @($ids) | Select-Object -First 1
+
+            if ($existing) {
+              Write-Host "Updating existing kernel UT PR comment $existing"
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
+                -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update kernel UT PR comment" }
+            } else {
+              Write-Host "Creating new kernel UT PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create kernel UT PR comment" }
+            }
+          }
