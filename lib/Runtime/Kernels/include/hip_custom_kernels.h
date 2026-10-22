@@ -1448,11 +1448,19 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+/* Scratch hip_top_k wants for this shape, or 0 when it needs none (only the
+ * chunked two-pass path for long last-axis rows with 2 <= k <= 32 does). With
+ * a smaller or null workspace those rows take the one-pass kernel. */
+HIP_KERNEL_API size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
+                                                const int64_t* x_shape,
+                                                int64_t k);
+
 HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
                              void* indices, int64_t axis, int64_t largest,
                              int64_t sorted, int64_t rank,
                              const int64_t* x_shape, int64_t k,
-                             int element_size_bytes);
+                             int element_size_bytes, void* workspace,
+                             size_t workspace_bytes);
 
 // Fill `output` with Normal(mean, scale) samples. `shape` has `rank` dims
 // (rank 0 is one element). `seed` selects the counter-hash generator.

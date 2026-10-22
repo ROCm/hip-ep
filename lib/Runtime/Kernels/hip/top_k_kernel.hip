@@ -10,7 +10,6 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
-#include <mutex>
 
 namespace {
 
@@ -378,35 +377,32 @@ __global__ void __launch_bounds__(kTopKSmallBlock)
       });
 }
 
-static std::mutex g_topk_scratch_mutex;
-static void *g_topk_scratch = nullptr;
-static size_t g_topk_scratch_bytes = 0;
+static bool topk_small_last_axis_ok(const TopKGeom &geom) {
+  return geom.k >= 2 && geom.k <= kTopKSmallMax && geom.k <= geom.axis_size &&
+         geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX;
+}
 
-static void *ensure_topk_scratch(size_t bytes) {
-  if (g_topk_scratch && g_topk_scratch_bytes >= bytes)
-    return g_topk_scratch;
-  if (g_topk_scratch)
-    hipFree(g_topk_scratch);
-  g_topk_scratch = nullptr;
-  g_topk_scratch_bytes = 0;
-  if (hipMalloc(&g_topk_scratch, bytes) != hipSuccess)
-    return nullptr;
-  g_topk_scratch_bytes = bytes;
-  return g_topk_scratch;
+static bool topk_two_pass_ok(const TopKGeom &geom) {
+  return topk_small_last_axis_ok(geom) && geom.axis_size > 2 * kTopKChunk &&
+         geom.num_rows <= 65535;
+}
+
+// Per-chunk (key, index) lists of the two-pass path: float keys, then int
+// indices.
+static size_t topk_two_pass_bytes(const TopKGeom &geom) {
+  const int64_t chunks = (geom.axis_size + kTopKChunk - 1) / kTopKChunk;
+  return static_cast<size_t>(geom.num_rows * chunks * geom.k) *
+         (sizeof(float) + sizeof(int));
 }
 
 template <typename T>
 static int launch_top_k_two_pass(hipStream_t stream, const T *data, T *values,
                                  int64_t *indices, const TopKGeom &geom,
-                                 int largest) {
+                                 int largest, void *workspace) {
   const int64_t chunks = (geom.axis_size + kTopKChunk - 1) / kTopKChunk;
   const int k = static_cast<int>(geom.k);
   const int64_t pairs = geom.num_rows * chunks * k;
-  std::lock_guard<std::mutex> lock(g_topk_scratch_mutex);
-  void *scratch = ensure_topk_scratch(static_cast<size_t>(pairs) * 8);
-  if (!scratch)
-    return -1;
-  float *ckey = static_cast<float *>(scratch);
+  float *ckey = static_cast<float *>(workspace);
   int *cidx = reinterpret_cast<int *>(ckey + pairs);
   (void)hipGetLastError();
   hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_chunk_pass_kernel<T>),
@@ -430,20 +426,19 @@ static int launch_top_k_two_pass(hipStream_t stream, const T *data, T *values,
 template <typename T>
 static int launch_top_k(void *stream, const void *data, void *values,
                         void *indices, const TopKGeom &geom, int largest,
-                        int sorted) {
+                        int sorted, void *workspace, size_t workspace_bytes) {
   if (geom.num_rows <= 0)
     return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  if (geom.k >= 2 && geom.k <= kTopKSmallMax && geom.k <= geom.axis_size &&
-      geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX &&
-      geom.axis_size > 2 * kTopKChunk && geom.num_rows <= 65535)
+  // Without enough workspace a long row still takes the one-pass kernel.
+  if (topk_two_pass_ok(geom) && workspace &&
+      workspace_bytes >= topk_two_pass_bytes(geom))
     return launch_top_k_two_pass(hip_stream, static_cast<const T *>(data),
                                  static_cast<T *>(values),
                                  static_cast<int64_t *>(indices), geom,
-                                 largest);
-  if (geom.k >= 2 && geom.k <= kTopKSmallMax && geom.k <= geom.axis_size &&
-      geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX) {
+                                 largest, workspace);
+  if (topk_small_last_axis_ok(geom)) {
     (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_small_last_axis_kernel<T>),
                        dim3(static_cast<unsigned>(geom.num_rows)),
@@ -495,32 +490,15 @@ static int launch_top_k(void *stream, const void *data, void *values,
   return 0;
 }
 
-} // namespace
-
-extern "C" int hip_top_k(void *stream, const void *data, void *values,
-                         void *indices, int64_t axis, int64_t largest,
-                         int64_t sorted, int64_t rank,
-                         const int64_t *x_shape, int64_t k,
-                         int element_size_bytes) {
-  if (!data || !values || !indices || !x_shape)
-    return -1;
-  if (rank <= 0 || rank > kMaxRank)
-    return -1;
-  if (k <= 0)
-    return 0;
-  if (k > 256) {
-    fprintf(stderr, "[custom_kernels] hip_top_k: K=%lld exceeds max 256\n",
-            (long long)k);
-    return -1;
-  }
-
-  TopKGeom geom{};
+static bool make_topk_geom(int64_t axis, int64_t rank, const int64_t *x_shape,
+                           int64_t k, TopKGeom &geom) {
+  geom = TopKGeom{};
   geom.rank = rank;
   geom.axis = axis;
   if (geom.axis < 0)
     geom.axis += rank;
   if (geom.axis < 0 || geom.axis >= rank)
-    return -1;
+    return false;
 
   geom.k = k;
   for (int64_t i = 0; i < rank; ++i)
@@ -549,6 +527,43 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
       continue;
     geom.num_rows *= geom.in_shape[i];
   }
+  return true;
+}
+
+} // namespace
+
+extern "C" size_t hip_top_k_workspace_bytes(int64_t axis, int64_t rank,
+                                            const int64_t *x_shape,
+                                            int64_t k) {
+  if (!x_shape || rank <= 0 || rank > kMaxRank || k <= 0)
+    return 0;
+  TopKGeom geom;
+  if (!make_topk_geom(axis, rank, x_shape, k, geom) || !topk_two_pass_ok(geom))
+    return 0;
+  return topk_two_pass_bytes(geom);
+}
+
+extern "C" int hip_top_k(void *stream, const void *data, void *values,
+                         void *indices, int64_t axis, int64_t largest,
+                         int64_t sorted, int64_t rank,
+                         const int64_t *x_shape, int64_t k,
+                         int element_size_bytes, void *workspace,
+                         size_t workspace_bytes) {
+  if (!data || !values || !indices || !x_shape)
+    return -1;
+  if (rank <= 0 || rank > kMaxRank)
+    return -1;
+  if (k <= 0)
+    return 0;
+  if (k > 256) {
+    fprintf(stderr, "[custom_kernels] hip_top_k: K=%lld exceeds max 256\n",
+            (long long)k);
+    return -1;
+  }
+
+  TopKGeom geom;
+  if (!make_topk_geom(axis, rank, x_shape, k, geom))
+    return -1;
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_top_k: axis=%lld, k=%lld, rank=%lld, "
@@ -561,15 +576,18 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
   case 2:
     return launch_top_k<__half>(stream, data, values, indices, geom,
                                 static_cast<int>(largest),
-                                static_cast<int>(sorted));
+                                static_cast<int>(sorted), workspace,
+                                workspace_bytes);
   case 4:
     return launch_top_k<float>(stream, data, values, indices, geom,
                                static_cast<int>(largest),
-                               static_cast<int>(sorted));
+                               static_cast<int>(sorted), workspace,
+                               workspace_bytes);
   case 8:
     return launch_top_k<double>(stream, data, values, indices, geom,
                               static_cast<int>(largest),
-                              static_cast<int>(sorted));
+                              static_cast<int>(sorted), workspace,
+                              workspace_bytes);
   default:
     fprintf(stderr,
             "[custom_kernels] hip_top_k: unsupported element_size=%d\n",
