@@ -59,12 +59,25 @@ struct DimInfo {
 /// reverse ops -- TOSA has no strided slice to lower a `step` to -- the
 /// sub-filters are computed here and materialized as new `hip.constant`s.
 ///
-/// Reassembly is a strided `tensor.insert_slice` per residue, which
+/// When every residue has the same kernel and the same padding (the filter
+/// length is a multiple of the stride, as in a 4x4 filter at stride 2), the
+/// residue filters are stacked along the output channels into one wide
+/// convolution, and its result is reassembled the way MIGraphX
+/// `reassemble_interleave` does it after its horizontal merge: reshape the
+/// channels to `[strideH, strideW, M]`, `hip.transpose` so each length sits
+/// next to its stride, then reshape to `[N, M, Ht*strideH, Wt*strideW]`.
+/// Emitting per-residue convolutions joined by a concat instead leaves the
+/// concat to bufferize into one strided copy per residue, element by element.
+/// A single residue (stride 1) has nothing to interleave and is copied onto
+/// the grid with one `tensor.insert_slice`.
+///
+/// When the tap counts differ, those convolutions cannot share one weight, so
+/// reassembly stays a strided `tensor.insert_slice` per residue, which
 /// bufferizes to a `memref.subview` + `memref.copy`. When every residue is
 /// non-empty (stride <= kernel) the residues tile the grid exactly, so the
 /// destination needs no zero-fill.
 ///
-/// Taking a 1-D slice of the 2x2-stride case, with a 3-tap filter [w0 w1 w2]
+/// Taking a 1-D slice of the unequal-tap case, with a 3-tap filter [w0 w1 w2]
 /// over a 4-long input, before:
 ///
 ///   hip.conv_transpose ins(%x : tensor<1x1x4xf32>, %w : tensor<1x1x3xf32>)
@@ -295,14 +308,22 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   SmallVector<APFloat> weightValues(weightAttr.getValues<APFloat>().begin(),
                                     weightAttr.getValues<APFloat>().end());
 
-  auto fullType =
-      resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
-  Value scattered =
-      tensor::EmptyOp::create(rewriter, loc, fullType.getShape(), elementType)
-          .getResult();
-
   const APFloat zero =
       APFloat::getZero(cast<FloatType>(elementType).getFloatSemantics());
+
+  struct Residue {
+    Value partial;
+    int64_t it0;
+    int64_t it1;
+    int64_t taps0;
+    int64_t taps1;
+    int64_t padBegin0;
+    int64_t padBegin1;
+    int64_t padEnd0;
+    int64_t padEnd1;
+  };
+  SmallVector<Residue> residues;
+  residues.reserve(dims[0].stride * dims[1].stride);
 
   for (int64_t it0 : llvm::seq<int64_t>(dims[0].stride)) {
     for (int64_t it1 : llvm::seq<int64_t>(dims[1].stride)) {
@@ -311,56 +332,138 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           (dims[0].kernel - it0 + dims[0].stride - 1) / dims[0].stride;
       const int64_t taps1 =
           (dims[1].kernel - it1 + dims[1].stride - 1) / dims[1].stride;
+      const int64_t padBegin0 = taps0 - 1;
+      const int64_t padBegin1 = taps1 - 1;
+      const int64_t padEnd0 = dims[0].trailingPad();
+      const int64_t padEnd1 = dims[1].trailingPad();
+      residues.push_back({Value(), it0, it1, taps0, taps1, padBegin0,
+                          padBegin1, padEnd0, padEnd1});
+    }
+  }
 
-      SmallVector<int64_t, 4> subShape{outChannels, inChannels, taps0, taps1};
-      SmallVector<APFloat> subValues(outChannels * inChannels * taps0 * taps1,
-                                     zero);
-      for (int64_t m : llvm::seq<int64_t>(outChannels))
-        for (int64_t c : llvm::seq<int64_t>(inChannels))
-          for (int64_t a : llvm::seq<int64_t>(taps0))
-            for (int64_t b : llvm::seq<int64_t>(taps1)) {
-              // Reversed tap order: position a holds tap (taps0 - 1 - a).
-              const int64_t y0 = it0 + (taps0 - 1 - a) * dims[0].stride;
-              const int64_t y1 = it1 + (taps1 - 1 - b) * dims[1].stride;
-              subValues[flatIndex(subShape, m, c, a, b)] =
-                  weightValues[flatIndex(weightShape, c, m, y0, y1)];
-            }
+  // Writes residue `r`'s filter, [M, C, taps0, taps1] row-major, into
+  // `values`: taps {it, it + stride, ...} reversed, input/output channels
+  // swapped relative to the ConvTranspose weight.
+  auto fillSubWeight = [&](const Residue &r, MutableArrayRef<APFloat> values) {
+    SmallVector<int64_t, 4> subShape{outChannels, inChannels, r.taps0,
+                                     r.taps1};
+    for (int64_t m : llvm::seq<int64_t>(outChannels))
+      for (int64_t c : llvm::seq<int64_t>(inChannels))
+        for (int64_t a : llvm::seq<int64_t>(r.taps0))
+          for (int64_t b : llvm::seq<int64_t>(r.taps1)) {
+            // Reversed tap order: position a holds tap (taps0 - 1 - a).
+            const int64_t y0 = r.it0 + (r.taps0 - 1 - a) * dims[0].stride;
+            const int64_t y1 = r.it1 + (r.taps1 - 1 - b) * dims[1].stride;
+            values[flatIndex(subShape, m, c, a, b)] =
+                weightValues[flatIndex(weightShape, c, m, y0, y1)];
+          }
+  };
 
-      auto subWeightType = RankedTensorType::get(subShape, elementType);
-      Value subWeight =
-          ConstantOp::create(rewriter, loc, subWeightType,
-                             DenseElementsAttr::get(subWeightType, subValues))
-              .getResult();
+  // A stride-1 convolution with `r`'s taps and pads producing `channels`
+  // output channels on the [Ht0, Ht1] residue grid.
+  auto emitResidueConv = [&](const Residue &r, int64_t channels,
+                             ArrayRef<APFloat> values) -> Value {
+    auto weightTy = RankedTensorType::get(
+        {channels, inChannels, r.taps0, r.taps1}, elementType);
+    Value weight = ConstantOp::create(rewriter, loc, weightTy,
+                                      DenseElementsAttr::get(weightTy, values))
+                       .getResult();
+    auto outTy = resultType.clone(
+        {numBatch, channels, dims[0].htilda, dims[1].htilda});
+    Value init =
+        tensor::EmptyOp::create(rewriter, loc, outTy.getShape(), elementType)
+            .getResult();
+    return ConvOp::create(
+               rewriter, loc, TypeRange{outTy},
+               ValueRange{ctx, op.getInput(), weight, init},
+               ArrayRef<NamedAttribute>{
+                   rewriter.getNamedAttr("kernel_shape",
+                                         rewriter.getI64ArrayAttr(
+                                             {r.taps0, r.taps1})),
+                   rewriter.getNamedAttr("strides",
+                                         rewriter.getI64ArrayAttr({1, 1})),
+                   rewriter.getNamedAttr(
+                       "pads", rewriter.getI64ArrayAttr({r.padBegin0,
+                                                         r.padBegin1,
+                                                         r.padEnd0,
+                                                         r.padEnd1})),
+                   rewriter.getNamedAttr("dilations",
+                                         rewriter.getI64ArrayAttr({1, 1})),
+                   rewriter.getNamedAttr("group",
+                                         rewriter.getI64IntegerAttr(1))})
+        .getResult(0);
+  };
 
-      auto partialType = resultType.clone(
-          {numBatch, outChannels, dims[0].htilda, dims[1].htilda});
-      Value partialInit =
-          tensor::EmptyOp::create(rewriter, loc, partialType.getShape(),
-                                  elementType)
-              .getResult();
-      Value partial =
-          ConvOp::create(
-              rewriter, loc, TypeRange{partialType},
-              ValueRange{ctx, op.getInput(), subWeight, partialInit},
-              ArrayRef<NamedAttribute>{
-                  rewriter.getNamedAttr(
-                      "kernel_shape", rewriter.getI64ArrayAttr({taps0, taps1})),
-                  rewriter.getNamedAttr("strides",
-                                        rewriter.getI64ArrayAttr({1, 1})),
-                  rewriter.getNamedAttr(
-                      "pads", rewriter.getI64ArrayAttr(
-                                  {taps0 - 1, taps1 - 1, dims[0].trailingPad(),
-                                   dims[1].trailingPad()})),
-                  rewriter.getNamedAttr("dilations",
-                                        rewriter.getI64ArrayAttr({1, 1})),
-                  rewriter.getNamedAttr("group",
-                                        rewriter.getI64IntegerAttr(1))})
-              .getResult(0);
+  const Residue &first = residues.front();
+  const bool equalResidues =
+      residues.size() > 1 &&
+      llvm::all_of(residues, [&](const Residue &residue) {
+        return residue.taps0 == first.taps0 && residue.taps1 == first.taps1 &&
+               residue.padBegin0 == first.padBegin0 &&
+               residue.padBegin1 == first.padBegin1 &&
+               residue.padEnd0 == first.padEnd0 &&
+               residue.padEnd1 == first.padEnd1;
+      });
 
+  Value scattered;
+  if (equalResidues) {
+    // MIGraphX reassemble_interleave, with the residues already merged into
+    // one convolution. Its output channel is (it0 * strideW + it1) * M + m,
+    // so viewing it as [N, S0, S1, M, Ht0, Ht1] and moving each stride next
+    // to its length is a DepthToSpace (DCR) -- one transpose, no concat.
+    const int64_t ht0 = dims[0].htilda;
+    const int64_t ht1 = dims[1].htilda;
+    const int64_t stride0 = dims[0].stride;
+    const int64_t stride1 = dims[1].stride;
+    const int64_t numResidues = static_cast<int64_t>(residues.size());
+    const int64_t perResidue =
+        outChannels * inChannels * first.taps0 * first.taps1;
+    SmallVector<APFloat> wideValues(numResidues * perResidue, zero);
+    for (int64_t i : llvm::seq<int64_t>(numResidues))
+      fillSubWeight(residues[i], MutableArrayRef<APFloat>(wideValues)
+                                     .slice(i * perResidue, perResidue));
+    Value wide =
+        emitResidueConv(first, numResidues * outChannels, wideValues);
+
+    auto splitType = RankedTensorType::get(
+        {numBatch, stride0, stride1, outChannels, ht0, ht1}, elementType);
+    SmallVector<ReassociationIndices> splitReassoc{{0}, {1, 2, 3}, {4}, {5}};
+    Value split = tensor::ExpandShapeOp::create(rewriter, loc, splitType,
+                                                wide, splitReassoc)
+                      .getResult();
+    auto transposedType = RankedTensorType::get(
+        {numBatch, outChannels, ht0, stride0, ht1, stride1}, elementType);
+    Value transposeInit =
+        tensor::EmptyOp::create(rewriter, loc, transposedType.getShape(),
+                                elementType)
+            .getResult();
+    // [N, S0, S1, M, Ht0, Ht1] -> [N, M, Ht0, S0, Ht1, S1].
+    Value transposed =
+        TransposeOp::create(rewriter, loc, ctx, split, transposeInit,
+                            rewriter.getI64ArrayAttr({0, 3, 4, 1, 5, 2}))
+            .getResult(0);
+    auto gridType = resultType.clone(
+        {numBatch, outChannels, dims[0].full, dims[1].full});
+    SmallVector<ReassociationIndices> collapseReassoc{{0}, {1}, {2, 3}, {4, 5}};
+    scattered = tensor::CollapseShapeOp::create(rewriter, loc, gridType,
+                                                transposed, collapseReassoc)
+                    .getResult();
+  } else {
+    auto fullType =
+        resultType.clone({numBatch, outChannels, dims[0].full, dims[1].full});
+    scattered =
+        tensor::EmptyOp::create(rewriter, loc, fullType.getShape(), elementType)
+            .getResult();
+    for (Residue &residue : residues) {
+      SmallVector<APFloat> subValues(
+          outChannels * inChannels * residue.taps0 * residue.taps1, zero);
+      fillSubWeight(residue, subValues);
+      residue.partial = emitResidueConv(residue, outChannels, subValues);
       // Residue itilda lands on output positions {itilda + k * stride}.
       SmallVector<OpFoldResult> offsets{
           rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
-          rewriter.getIndexAttr(it0), rewriter.getIndexAttr(it1)};
+          rewriter.getIndexAttr(residue.it0),
+          rewriter.getIndexAttr(residue.it1)};
       SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(numBatch),
                                       rewriter.getIndexAttr(outChannels),
                                       rewriter.getIndexAttr(dims[0].htilda),
@@ -370,8 +473,9 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
           rewriter.getIndexAttr(dims[0].stride),
           rewriter.getIndexAttr(dims[1].stride)};
       scattered =
-          tensor::InsertSliceOp::create(rewriter, loc, partial, scattered,
-                                        offsets, sizes, insertStrides)
+          tensor::InsertSliceOp::create(rewriter, loc, residue.partial,
+                                        scattered, offsets, sizes,
+                                        insertStrides)
               .getResult();
     }
   }
