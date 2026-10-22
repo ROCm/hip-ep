@@ -1540,16 +1540,12 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
 // PostMix fused with the following branchwise RMSNorm. stream_mix may be
 // null. feature_gate and gate_activation match the HIP op. residual and
 // normed are both written.
-int wrap_hyper_connection_post_mix_norm(RuntimeState *state, void *streams,
-                                        void *block_output, void *gate,
-                                        void *stream_mix, void *norm_scale,
-                                        void *residual, void *normed,
-                                        int64_t stream_num_elements,
-                                        int64_t branches, int64_t hidden,
-                                        int64_t feature_gate,
-                                        int64_t gate_activation,
-                                        int64_t element_size_bytes,
-                                        float epsilon);
+int wrap_hyper_connection_post_mix_norm(
+    RuntimeState *state, void *streams, void *block_output, void *gate,
+    void *stream_mix, void *norm_scale, void *residual, void *normed,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
+    float epsilon);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]

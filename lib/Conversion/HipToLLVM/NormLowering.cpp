@@ -823,8 +823,8 @@ struct HyperConnectionPostMixNormOpLowering
         rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
-    Value epsilon = LLVM::ConstantOp::create(rewriter, loc, f32Type,
-                                             op.getEpsilonAttr());
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getStreams(), rewriter, loc),

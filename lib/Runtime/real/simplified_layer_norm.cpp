@@ -322,16 +322,12 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
       static_cast<int>(feature_gate), hip_dtype);
 }
 
-int wrap_hyper_connection_post_mix_norm(RuntimeState *state, void *streams,
-                                        void *block_output, void *gate,
-                                        void *stream_mix, void *norm_scale,
-                                        void *residual, void *normed,
-                                        int64_t stream_num_elements,
-                                        int64_t branches, int64_t hidden,
-                                        int64_t feature_gate,
-                                        int64_t gate_activation,
-                                        int64_t element_size_bytes,
-                                        float epsilon) {
+int wrap_hyper_connection_post_mix_norm(
+    RuntimeState *state, void *streams, void *block_output, void *gate,
+    void *stream_mix, void *norm_scale, void *residual, void *normed,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
+    float epsilon) {
   OP_PROFILE(
       "hyper_connection",
       [&] {
@@ -343,7 +339,8 @@ int wrap_hyper_connection_post_mix_norm(RuntimeState *state, void *streams,
       state);
   if (!state || !streams || !block_output || !gate || !norm_scale ||
       !residual || !normed) {
-    fprintf(stderr, "Invalid arguments to wrap_hyper_connection_post_mix_norm\n");
+    fprintf(stderr,
+            "Invalid arguments to wrap_hyper_connection_post_mix_norm\n");
     return -1;
   }
   int64_t span = branches * hidden;
