@@ -54,6 +54,39 @@ module {
   // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%[[CTX]]) ins(%[[Q]], %[[K]], %[[V]], %[[PK]], %[[PV]], %[[IDX]], %[[CNT]], %[[SEQ]] : tensor<?x?x6144xf16>, tensor<?x?x512xf16>, tensor<?x?x512xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>, tensor<?x2051xi32>, tensor<?xi32>, tensor<?xi32>) outs(%[[OUT]], %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>) {kv_num_heads = 2 : i64, num_heads = 24 : i64, scale = 6.250000e-02 : f32}
   // CHECK: return %[[R]]#0, %[[R]]#1, %[[R]]#2
 
+  func.func @dsa_dynamic_cache_head_size(
+      %q: tensor<?x?x6144xf16>,
+      %k: tensor<?x?x512xf16>,
+      %v: tensor<?x?x512xf16>,
+      %past_k: tensor<?x2x?x?xf16>,
+      %past_v: tensor<?x2x?x?xf16>,
+      %idx: tensor<?x2051xi32>,
+      %cnt: tensor<?xi32>,
+      %seqlens: tensor<?xi32>,
+      %total: tensor<i32>
+  ) -> (tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %out, %pk, %pv = "onnx.Custom"(%q, %k, %v, %past_k, %past_v, %none, %none, %idx, %cnt, %seqlens, %total, %none, %none, %none, %none, %none, %none) {
+      function_name = "DynamicSparseAttention",
+      domain_name = "com.microsoft",
+      num_heads = 24 : si64,
+      kv_num_heads = 2 : si64,
+      scale = 6.250000e-02 : f32,
+      attention_mode = "selected_only",
+      selected_kv_source = "main"
+    } : (tensor<?x?x6144xf16>, tensor<?x?x512xf16>, tensor<?x?x512xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>, none, none, tensor<?x2051xi32>, tensor<?xi32>, tensor<?xi32>, tensor<i32>, none, none, none, none, none, none)
+      -> (tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>)
+    return %out, %pk, %pv : tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @dsa_dynamic_cache_head_size
+  // CHECK-DAG: %[[PKS:.*]] = tensor.cast %{{.*}} : tensor<?x2x?x?xf16> to tensor<?x2x?x256xf16>
+  // CHECK-DAG: %[[PVS:.*]] = tensor.cast %{{.*}} : tensor<?x2x?x?xf16> to tensor<?x2x?x256xf16>
+  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %[[PKS]], %[[PVS]], {{.*}}) outs({{.*}} : tensor<?x?x6144xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>)
+  // CHECK-DAG: %[[RK:.*]] = tensor.cast %[[R]]#1 : tensor<?x2x?x256xf16> to tensor<?x2x?x?xf16>
+  // CHECK-DAG: %[[RV:.*]] = tensor.cast %[[R]]#2 : tensor<?x2x?x256xf16> to tensor<?x2x?x?xf16>
+  // CHECK: return %[[R]]#0, %[[RK]], %[[RV]]
+
   func.func @dsa_default_scale(
       %q: tensor<1x4x1024xf16>,
       %k: tensor<1x4x128xf16>,

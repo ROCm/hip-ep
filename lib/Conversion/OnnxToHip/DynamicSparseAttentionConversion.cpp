@@ -122,21 +122,20 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
     }
   }
 
-  auto pastType = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
-  if (!pastType || pastType.getRank() != 4 || pastType.isDynamicDim(3) ||
-      !pastType.getElementType().isF16()) {
+  auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
+  if (!queryType || queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
+      queryType.getDimSize(2) % numHeads != 0) {
     return rewriter.notifyMatchFailure(
-        op, "past_key must be f16 rank 4 with a static head size");
+        op, "query must be [B, S, num_heads * D] with a static last dim");
   }
-  const int64_t headSize = pastType.getDimSize(3);
+  const int64_t headSize = queryType.getDimSize(2) / numHeads;
   if (headSize != 128 && headSize != 256) {
     return rewriter.notifyMatchFailure(op, "head size must be 128 or 256");
   }
-  auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
-  if (!queryType || queryType.getRank() != 3 ||
-      queryType.getDimSize(2) != numHeads * headSize) {
-    return rewriter.notifyMatchFailure(op,
-                                       "query must be [B, S, num_heads * D]");
+  auto pastType = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
+  if (!pastType || pastType.getRank() != 4 ||
+      !pastType.getElementType().isF16()) {
+    return rewriter.notifyMatchFailure(op, "past_key must be f16 rank 4");
   }
 
   auto matches = [](mlir::Value v, mlir::Type expectedElem,
@@ -201,17 +200,23 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
       !matches(op->getResult(0), f16, {batch, seq, numHeads * headSize})) {
     return rewriter.notifyMatchFailure(op, "output must be f16 like query");
   }
+  auto withStaticHeadSize = [&](mlir::RankedTensorType type) {
+    llvm::SmallVector<int64_t> shape(type.getShape());
+    shape[3] = headSize;
+    return mlir::RankedTensorType::get(shape, type.getElementType());
+  };
   auto getPresentType = [&](unsigned idx,
                             mlir::Value past) -> mlir::RankedTensorType {
     mlir::Type type = op->getResult(idx).getType();
     if (mlir::isa<mlir::NoneType>(type)) {
-      return mlir::cast<mlir::RankedTensorType>(past.getType());
+      return withStaticHeadSize(
+          mlir::cast<mlir::RankedTensorType>(past.getType()));
     }
     auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type);
     if (!ranked || !matches(op->getResult(idx), f16, cacheShape)) {
       return nullptr;
     }
-    return ranked;
+    return withStaticHeadSize(ranked);
   };
   auto presentKeyType = getPresentType(1, pastKey);
   auto presentValueType = getPresentType(2, pastValue);
@@ -231,6 +236,16 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   }
 
   mlir::Location loc = op->getLoc();
+  auto refine = [&](mlir::Value v) -> mlir::Value {
+    auto type = mlir::cast<mlir::RankedTensorType>(v.getType());
+    if (!type.isDynamicDim(3)) {
+      return v;
+    }
+    return mlir::tensor::CastOp::create(rewriter, loc, withStaticHeadSize(type),
+                                        v);
+  };
+  pastKey = refine(pastKey);
+  pastValue = refine(pastValue);
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
   mlir::Value presentKeyInit =
       createEmptyTensor(rewriter, loc, presentKeyType, pastKey);
@@ -246,7 +261,16 @@ mlir::LogicalResult DynamicSparseAttentionToHip::matchAndRewrite(
   state.addAttribute("kv_num_heads", rewriter.getI64IntegerAttr(kvNumHeads));
   state.addAttribute("scale", rewriter.getF32FloatAttr(scale));
   mlir::Operation *hipOp = rewriter.create(state);
-  rewriter.replaceOp(op, hipOp->getResults());
+  llvm::SmallVector<mlir::Value, 3> results(hipOp->getResults());
+  for (unsigned idx = 1; idx < 3; ++idx) {
+    mlir::Type origType = op->getResult(idx).getType();
+    if (mlir::isa<mlir::RankedTensorType>(origType) &&
+        origType != results[idx].getType()) {
+      results[idx] =
+          mlir::tensor::CastOp::create(rewriter, loc, origType, results[idx]);
+    }
+  }
+  rewriter.replaceOp(op, results);
   return mlir::success();
 }
 
