@@ -73,5 +73,7 @@ module {
 // CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gather_disk_resident
+// CHECK: llvm.call @hipdnn_ep_constant_get
+// CHECK: %[[IDX:.*]] = llvm.mlir.constant(3 : i64) : i64
 // CHECK-NOT: llvm.call @wrap_gather(
-// CHECK: llvm.call @wrap_gather_from_file(%arg0, %{{[0-9]+}}, {{.*}}) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather_from_file(%arg0, %[[IDX]], {{.*}}) : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
