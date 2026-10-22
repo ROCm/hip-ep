@@ -7,19 +7,17 @@
 // while a static pure-GPU function must not pick up host scratch.
 //
 // If a future refactor relaxes MaterializeHostScalars's candidate filter
-// (e.g. drops the `hasHostIO` requirement, accepts f32, or removes the
-// arg-0 `!hip.context` check) this test fails immediately.
+// (e.g. drops the `hasHostIO` requirement or removes the arg-0
+// `!hip.context` check) this test fails immediately.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-materialize-host-scalars --hip-optimize-memrefs --hip-promote-strided-operands --hip-pool-allocs %s | FileCheck %s
 
 // ===== Static, pure-GPU: no host I/O at all. =====
 //
-// Two memref<8x8xf32> allocs flow through PoolAllocs as-is; no
-// hip.get_host_scratch is emitted because:
-//   - element type f32 is not isIntOrIndex (filter rejects),
-//   - no memref.store / memref.load user (the `hasHostIO` flag stays
-//     false even if the type filter is relaxed in the future).
+// Two memref<8x8xf32> allocs flow through PoolAllocs as-is. No
+// hip.get_host_scratch is emitted because there is no memref.store /
+// memref.load user, so the `hasHostIO` requirement rejects both allocations.
 //
 // CHECK-LABEL: func.func @static_pure_gpu_lockdown
 // CHECK-NOT: hip.get_host_scratch

@@ -4,13 +4,12 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/APInt.h"
-
-#include <optional>
 
 namespace mlir {
 namespace hip {
@@ -39,9 +38,9 @@ namespace {
 //     long after that landed). Worth knowing when reading the extent logic
 //     below: that runtime D2Hs starts/ends/axes/steps and synchronizes the
 //     stream on every call, so this op already costs a host sync per
-//     execution. Dynamic output dims are computed from
-//     the slice bounds when those are host-resolvable, and otherwise fall back
-//     to `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//     execution. Dynamic output dims are computed from the slice bounds using
+//     host-visible shape arithmetic where possible and synchronized scalar
+//     readback otherwise.
 //
 // That fallback is only an upper bound, and an upper bound is not a safe
 // stand-in for the extent: the extent this pattern puts on the `tensor.empty`
@@ -154,66 +153,6 @@ static mlir::Value normaliseOptional(mlir::Value v) {
 /// pathological walk.
 static constexpr int kHostIndexMaxDepth = 8;
 
-using ShapeBinaryBuilder = mlir::Value (*)(mlir::OpBuilder &, mlir::Location,
-                                           mlir::Value, mlir::Value);
-
-struct ShapeBinaryOp {
-  mlir::Value lhs;
-  mlir::Value rhs;
-  ShapeBinaryBuilder build;
-};
-
-/// Match a supported binary shape-arithmetic producer and normalize its
-/// operands. HIP DPS ops spell them as (ctx, lhs, rhs, out), while ONNX ops
-/// spell them as (lhs, rhs).
-static std::optional<ShapeBinaryOp> matchShapeBinaryOp(mlir::Operation *op) {
-  struct Spec {
-    llvm::StringRef hipName;
-    llvm::StringRef onnxName;
-    ShapeBinaryBuilder build;
-  };
-
-  static const Spec specs[] = {
-      {mlir::hip::AddOp::getOperationName(), "onnx.Add",
-       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
-          mlir::Value rhs) -> mlir::Value {
-         return mlir::arith::AddIOp::create(b, loc, lhs, rhs);
-       }},
-      {mlir::hip::SubOp::getOperationName(), "onnx.Sub",
-       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
-          mlir::Value rhs) -> mlir::Value {
-         return mlir::arith::SubIOp::create(b, loc, lhs, rhs);
-       }},
-      {mlir::hip::MulOp::getOperationName(), "onnx.Mul",
-       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
-          mlir::Value rhs) -> mlir::Value {
-         return mlir::arith::MulIOp::create(b, loc, lhs, rhs);
-       }},
-      {mlir::hip::DivOp::getOperationName(), "onnx.Div",
-       [](mlir::OpBuilder &b, mlir::Location loc, mlir::Value lhs,
-          mlir::Value rhs) -> mlir::Value {
-         return mlir::arith::DivSIOp::create(b, loc, lhs, rhs);
-       }},
-  };
-
-  llvm::StringRef opName = op->getName().getStringRef();
-  for (const Spec &spec : specs) {
-    std::optional<unsigned> lhsPos;
-    if (opName == spec.hipName)
-      lhsPos = 1;
-    else if (opName == spec.onnxName)
-      lhsPos = 0;
-    else
-      continue;
-
-    if (op->getNumOperands() <= *lhsPos + 1)
-      return std::nullopt;
-    return ShapeBinaryOp{op->getOperand(*lhsPos), op->getOperand(*lhsPos + 1),
-                         spec.build};
-  }
-  return std::nullopt;
-}
-
 /// Resolve element \p idx of an integer shape tensor \p v to a host `index`
 /// SSA value, materializing `arith` ops as needed. Returns a null Value when
 /// the element is not host-computable.
@@ -272,17 +211,6 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   llvm::StringRef opName = def->getName().getStringRef();
 
-  // Exporters commonly wrap a scalar shape-arithmetic result in a
-  // one-element Reshape before feeding it to Slice. The reshape does not alter
-  // the sole value, so peel it and continue resolving the producer. Without
-  // this, a dynamic end falls back to the input dimension and the Slice output
-  // descriptor remains over-sized even though the kernel copies fewer values.
-  if ((opName == "onnx.Reshape" || opName == "onnx.Squeeze" ||
-       opName == "onnx.Unsqueeze") &&
-      vType.hasStaticShape() && vType.getNumElements() == 1 &&
-      def->getNumOperands() >= 1)
-    return resolveHostIndex(b, loc, def->getOperand(0), 0, depth + 1);
-
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
   // `start` is normalized as ShapeToTensorDims normalizes it; `end` only bounds
   // how many elements exist, which the caller-side extent check above covers.
@@ -307,23 +235,54 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
     return mlir::tensor::DimOp::create(b, loc, input, dimIdx);
   }
 
-  std::optional<ShapeBinaryOp> binary = matchShapeBinaryOp(def);
-  if (!binary)
+  // Binary shape arithmetic. hip elementwise ops are DPS, so their operands are
+  // (ctx, lhs, rhs, out); the ONNX forms are plain (lhs, rhs).
+  unsigned lhsPos = 0;
+  bool isHip =
+      mlir::isa<mlir::hip::SubOp, mlir::hip::AddOp, mlir::hip::MulOp>(def);
+  if (isHip)
+    lhsPos = 1;
+  else if (opName != "onnx.Sub" && opName != "onnx.Add" && opName != "onnx.Mul")
     return {};
 
+  mlir::Value lhs = def->getOperand(lhsPos);
+  mlir::Value rhs = def->getOperand(lhsPos + 1);
   // A rank-0 or single-element operand is broadcast against the other.
   auto elemIdx = [&](mlir::Value operand) -> int64_t {
     auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
     return (t && t.hasStaticShape() && t.getNumElements() == 1) ? 0 : idx;
   };
-  mlir::Value l =
-      resolveHostIndex(b, loc, binary->lhs, elemIdx(binary->lhs), depth + 1);
-  mlir::Value r =
-      resolveHostIndex(b, loc, binary->rhs, elemIdx(binary->rhs), depth + 1);
+  mlir::Value l = resolveHostIndex(b, loc, lhs, elemIdx(lhs), depth + 1);
+  mlir::Value r = resolveHostIndex(b, loc, rhs, elemIdx(rhs), depth + 1);
   if (!l || !r)
     return {};
 
-  return binary->build(b, loc, l, r);
+  bool isSub = isHip ? mlir::isa<mlir::hip::SubOp>(def) : opName == "onnx.Sub";
+  bool isAdd = isHip ? mlir::isa<mlir::hip::AddOp>(def) : opName == "onnx.Add";
+  if (isSub)
+    return mlir::arith::SubIOp::create(b, loc, l, r);
+  if (isAdd)
+    return mlir::arith::AddIOp::create(b, loc, l, r);
+  return mlir::arith::MulIOp::create(b, loc, l, r);
+}
+
+/// Read element \p idx of a Slice bound tensor to a synchronized host `index`.
+/// Constants and host `tensor.from_elements` values fold without device
+/// traffic; other producers use the shared scalar-readback path.
+static mlir::Value readSliceBoundToIndex(mlir::OpBuilder &b, mlir::Location loc,
+                                         mlir::Value ctx, mlir::Value bound,
+                                         int64_t idx) {
+  if (!bound || idx < 0)
+    return {};
+  auto type = mlir::dyn_cast<mlir::RankedTensorType>(bound.getType());
+  if (!type || type.getRank() != 1 ||
+      !type.getElementType().isSignlessInteger())
+    return {};
+  if (type.hasStaticShape() && idx >= type.getNumElements())
+    return {};
+
+  mlir::Value scalar = readbackShapeEntryToHost(b, loc, ctx, bound, idx);
+  return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), scalar);
 }
 
 /// Emit the number of elements ONNX Slice produces on one axis, given runtime
@@ -632,23 +591,9 @@ struct SliceToHip : public mlir::RewritePattern {
     if (stepsVec.size() != axesVec.size())
       haveAxes = false;
 
-    // Compute each dynamic output dim from the slice bounds where possible;
-    // see the file header for why the data dim is not an acceptable substitute.
-    // Ops materialized by a resolution that then fails are pure and get DCE'd.
-    //
-    // Where the bounds do not resolve, the fallback keeps the upper bound and
-    // therefore keeps the over-sized shape. It could be exact instead:
-    // CompressConversion solves the same shrinking-extent problem by reading
-    // the true count back from the device with `hip.ReadbackDimOp`. That is not
-    // done here, but not because a readback is unaffordable on this op --
-    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
-    // so the sync is paid regardless. It is that a readback would add a second
-    // sync point, in the shape computation ahead of the slice, to serve a case
-    // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
-    // bounds, and host arithmetic is strictly better than a readback wherever
-    // it is available. If a model does land here, revisit it -- the cost is
-    // lower than it looks. Hence the debug line below: the fallback is a known
-    // performance cliff, and it should be findable without an RGP capture.
+    // Compute each dynamic output dim from the slice bounds. Preserve the
+    // existing host-arithmetic fast path, then use the shared synchronized
+    // scalar readback for producer chains that it cannot interpret.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
@@ -690,6 +635,10 @@ struct SliceToHip : public mlir::RewritePattern {
           }
           mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
           mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
+          if (!s)
+            s = readSliceBoundToIndex(rewriter, loc, context, starts, k);
+          if (!e)
+            e = readSliceBoundToIndex(rewriter, loc, context, ends, k);
           if (s && e)
             extent = buildAllocCapacity(
                 rewriter, loc, dim,

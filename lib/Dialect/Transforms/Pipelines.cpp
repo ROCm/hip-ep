@@ -308,8 +308,8 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
   // 6b. Reuse the remaining ordinary allocations. Keep this pass generic:
-  //     target-specific host/device placement has already been resolved by
-  //     MaterializeHostScalars.
+  //     MaterializeHostScalars has already removed the recognized host-written
+  //     scalar staging allocations from its memref.alloc candidate set.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
   // 6c. Correctness/ABI: materialize identity-layout temporaries for

@@ -202,9 +202,8 @@ module {
     return %r : tensor<?x?xi64>
   }
 
-  // Test 9: an opaque `starts` (a graph input, not shape arithmetic) is not
-  // host-resolvable, so the extent falls back to the data dim upper bound
-  // rather than emitting an extent that cannot be justified.
+  // Test 9: opaque bounds are synchronized to the host so the allocation uses
+  // the actual Slice extent instead of the data-dim upper bound.
   func.func @test_slice_native_opaque_starts(
       %data: tensor<?xi64>, %starts: tensor<1xi64>, %ends: tensor<1xi64>)
       -> tensor<?xi64> {
@@ -214,9 +213,9 @@ module {
         : (tensor<?xi64>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>) -> tensor<?xi64>
 
-    // CHECK-NOT: arith.minsi
-    // CHECK: %[[DIM:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?xi64>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xi64>
+    // CHECK-COUNT-2: hip.readback_scalar
+    // CHECK: arith.subi
+    // CHECK: tensor.empty(%{{.*}}) : tensor<?xi64>
     // CHECK: hip.slice
     return %r : tensor<?xi64>
   }
