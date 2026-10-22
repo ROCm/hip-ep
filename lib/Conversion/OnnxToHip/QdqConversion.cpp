@@ -133,9 +133,9 @@ struct QuantizeLinearToHip : public mlir::RewritePattern {
         rewriter, op->getLoc(), mlir::TypeRange{in.resultType}, in.context,
         in.input, in.scale, in.zeroPoint, in.init, axisAttr, blockSizeAttr,
         precisionAttr, saturateAttr);
-    // Nothing stamps `packed_bits` onto a QuantizeLinear yet -- unlike a
-    // packed constant, a sub-byte target leaves no trace in the IR to detect.
-    // Forwarded so the lowering and runtime below are reachable once one does.
+    // Forward an explicitly supplied logical width. Inferring a sub-byte width
+    // is outside this conversion because the storage type and logical extent
+    // do not encode it.
     if (auto packed = op->getAttrOfType<mlir::IntegerAttr>(kPackedBitsAttr))
       hipOp->setAttr(kPackedBitsAttr, packed);
     rewriter.replaceOp(op, hipOp->getResults());

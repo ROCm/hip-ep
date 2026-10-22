@@ -210,8 +210,9 @@ LogicalResult ConstantOp::verify() {
   // admissible packing is accepted rather than one being singled out.
   bool isPackedSubByte = false;
   if (elementBits == 8)
-    for (int64_t valuesPerByte : {2, 4, 8})
-      isPackedSubByte |= size == (numElements + valuesPerByte - 1) / valuesPerByte;
+    for (int64_t valuesPerByte : {2, 4})
+      isPackedSubByte |=
+          size == (numElements + valuesPerByte - 1) / valuesPerByte;
   if (size != expectedBytes && !isPackedSubByte)
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;

@@ -106,12 +106,10 @@ module {
   }
 
 // ===== Test 4: QuantizeLinear marked as a packed UINT4 target =====
-// The mirror of Test 3 on the quantize side. No pass stamps `packed_bits`
-// onto a QuantizeLinear yet -- a 4-bit target leaves no trace in the IR the
-// way a half-size constant buffer does -- so the marker is written by hand
-// here to cover the forwarding the rest of the stack depends on. output_dtype
-// 21 (ONNX UINT4) must not reach the hip op; the marker is what carries the
-// width, and the result type stays ui8 at the logical element count.
+// The mirror of Test 3 on the quantize side. The marker is written explicitly
+// to isolate its forwarding through this conversion. output_dtype 21 (ONNX
+// UINT4) must not reach the hip op; `packed_bits` carries the logical width,
+// and the result type stays ui8 at the logical element count.
 
 // CHECK-LABEL: func.func @test_quantize_linear_packed_uint4
 // CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<128x64xf32>, %[[SCALE:.*]]: tensor<f32>)

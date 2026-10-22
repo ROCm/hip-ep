@@ -5643,6 +5643,12 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   }];
 }
 
+// Sub-byte width of a quantized payload: 0 for unpacked storage at the element
+// type's own width, 4 for INT4 / UINT4, 2 for a 2-bit payload. These are the
+// only packings anything produces or reads, so any other value is rejected.
+def Hip_PackedBitsAttr
+    : DefaultValuedAttr<ConfinedAttr<I64Attr, [IntIsOneOf<[0, 2, 4]>]>, "0">;
+
 def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
   let summary = "ONNX QuantizeLinear";
   let description = [{
@@ -5653,10 +5659,11 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     y = saturate((x / y_scale) + y_zero_point).
 
     `packed_bits` names a sub-byte target: 4 for ONNX INT4 / UINT4, 2 for a
-    2-bit one, and 0 - the default - for a payload that occupies whole bytes.
-    `$output` and `$zero_point` keep their i8 / ui8 element type and logical
-    shape, but only the first ceil(numel * packed_bits / 8) bytes of `$output`
-    are written: 8 / packed_bits values per byte, least significant field
+    2-bit one, and 0 - the default - for an unpacked target stored at its
+    element type's own width, one value per element. For a nonzero
+    `packed_bits` = b, `$output` and `$zero_point` keep their i8 / ui8 element
+    type and logical shape, but only the first ceil(numel * b / 8) bytes of
+    `$output` are written: 8 / b values per byte, least significant field
     first, over the flattened row-major sequence. The buffer is still
     allocated at the logical element count, so its tail is left untouched, and
     only a consumer reading the same width recovers the values.
@@ -5666,9 +5673,8 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     4-bit tensor of the same length are indistinguishable by type, differing
     only in a byte count the type does not record.
 
-    Nothing sets this today -- unlike a packed constant, a sub-byte target
-    leaves no trace in the IR to detect -- and whatever does must first
-    establish that every consumer can be marked as well.
+    Producers therefore state the width explicitly, and consumers preserve it
+    until an operation that understands the packed representation reads it.
   }];
 
   let arguments = (ins
@@ -5681,7 +5687,7 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     I64Attr:$block_size,
     I64Attr:$precision,
     I64Attr:$saturate,
-    DefaultValuedAttr<I64Attr, "0">:$packed_bits
+    Hip_PackedBitsAttr:$packed_bits
   );
 
   let assemblyFormat = [{
@@ -5706,11 +5712,12 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     See QuantizeLinear for details on quantization granularity.
 
     `packed_bits` names a sub-byte source: 4 for ONNX INT4 / UINT4, 2 for a
-    2-bit one, and 0 - the default - for a payload that occupies whole bytes.
-    Those import as i8 / ui8 at the LOGICAL element count while `$input` and
-    `$zero_point` only hold ceil(numel * packed_bits / 8) bytes, 8 /
-    packed_bits values per byte, least significant field first, over the
-    flattened row-major sequence.
+    2-bit one, and 0 - the default - for an unpacked source stored at its
+    element type's own width, one value per element. Sources with a nonzero
+    `packed_bits` = b import as i8 / ui8 at the LOGICAL element count while
+    `$input` and `$zero_point` only hold ceil(numel * b / 8) bytes, 8 / b
+    values per byte, least significant field first, over the flattened
+    row-major sequence.
 
     The element type keeps the signedness but cannot express the width, and
     neither can the extent, which stays logical: a 2-bit and a 4-bit tensor of
@@ -5733,7 +5740,7 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis,
     I64Attr:$block_size,
-    DefaultValuedAttr<I64Attr, "0">:$packed_bits
+    Hip_PackedBitsAttr:$packed_bits
   );
 
   let assemblyFormat = [{
