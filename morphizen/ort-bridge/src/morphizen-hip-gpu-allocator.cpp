@@ -688,12 +688,10 @@ OrtStatus *HipDataTransferImpl::ZeroTensorsImpl(OrtDataTransferImpl *this_ptr,
       // hipMalloc memory is only reachable through the null stream or a
       // blocking stream, both ordered after this memset. The host can read
       // host-mapped memory directly, so wait for it.
-      const OrtMemoryDevice *device =
-          impl.ep_api.Value_GetMemoryDevice(tensor);
-      const bool device_only =
-          impl.ep_api.MemoryDevice_GetMemoryType(device) ==
-              OrtDeviceMemoryType_DEFAULT &&
-          DefaultMemoryIsDeviceOnly();
+      const OrtMemoryDevice *device = impl.ep_api.Value_GetMemoryDevice(tensor);
+      const bool device_only = impl.ep_api.MemoryDevice_GetMemoryType(device) ==
+                                   OrtDeviceMemoryType_DEFAULT &&
+                               DefaultMemoryIsDeviceOnly();
       need_stream_sync = need_stream_sync || !device_only;
     }
   }

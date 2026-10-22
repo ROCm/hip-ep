@@ -248,8 +248,7 @@ private:
 
 #if ORT_API_VERSION >= 32
   static OrtStatus *ZeroTensorsImpl(OrtDataTransferImpl *this_ptr,
-                                    OrtValue **tensors,
-                                    OrtSyncStream **streams,
+                                    OrtValue **tensors, OrtSyncStream **streams,
                                     size_t num_tensors) noexcept;
 #endif
 
