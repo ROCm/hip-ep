@@ -5,9 +5,57 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/SymbolTable.h"
+
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
+
+// A single compile-time axis is the product of the input dims after that axis.
+// keepdims=0 deletes the axis, so matching input and output shapes from the
+// trailing end is ambiguous when the deleted extent equals a surviving
+// neighbor: [1, 6, 5, 5] -> [1, 6, 5] matches the last 5 and reports
+// inner_size=5, but axis 3 has inner_size=1. By the time this pattern runs,
+// that constant may still be a memref.global or already an llvm.mlir.global.
+static FailureOr<int64_t> innerSizeFromConstantAxis(Value axes,
+                                                    ArrayRef<int64_t> inShape) {
+  Value root = axes;
+  while (auto castOp = root.getDefiningOp<memref::CastOp>())
+    root = castOp.getSource();
+  auto getGlobal = root.getDefiningOp<memref::GetGlobalOp>();
+  if (!getGlobal)
+    return failure();
+  auto module = getGlobal->getParentOfType<ModuleOp>();
+  if (!module)
+    return failure();
+  Operation *sym = SymbolTable::lookupSymbolIn(module, getGlobal.getNameAttr());
+  if (!sym)
+    return failure();
+  Attribute init;
+  if (auto global = dyn_cast<memref::GlobalOp>(sym))
+    init = global.getInitialValueAttr();
+  else if (auto global = dyn_cast<LLVM::GlobalOp>(sym)) {
+    if (std::optional<Attribute> value = global.getValue())
+      init = *value;
+  }
+  auto dense = dyn_cast_or_null<DenseIntElementsAttr>(init);
+  if (!dense || dense.getNumElements() != 1)
+    return failure();
+  int64_t axis = (*dense.getValues<APInt>().begin()).getSExtValue();
+  int64_t rank = static_cast<int64_t>(inShape.size());
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank)
+    return failure();
+  int64_t inner = 1;
+  for (int64_t dim : inShape.drop_front(axis + 1))
+    inner *= dim;
+  if (inner <= 0)
+    return failure();
+  return inner;
+}
 
 // Generic template for reduction-style ops with the shared
 //   (data, axes, output, keepdims, noop_with_empty_axes)
@@ -78,10 +126,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value keepdimsVal = createI64Const(op.getKeepdims());
     Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
-    // inner_size = product of input dims AFTER the reduced axis, derived purely
-    // from the static input/output shapes (no need for the axes values): align
-    // input & output shapes from the trailing end and multiply the dims that
-    // match; the first mismatch is the reduced axis. The runtime kernel uses
+    // inner_size = product of input dims AFTER the reduced axis. A constant
+    // axis supplies that directly. Otherwise align the input and output shapes
+    // from the trailing end and multiply the dims that match; the first
+    // mismatch is the reduced axis. The runtime kernel uses
     // this stride so a NON-trailing-axis reduce (e.g. NCHW channel-axis
     // LayerNorm2d, axes=[1]) reads the correct strided elements instead of
     // contiguous trailing ones.
@@ -109,18 +157,24 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     //     // kernel does out[oo*4096+ii] = sum_r data[oo*512*4096 + r*4096 +
     //     ii]
     //
-    // Assumption: the reduced axis is the FIRST position where input and output
-    // shapes diverge when aligned from the trailing end. This holds for the
-    // standard ONNX reduce ops we lower (single reduced axis, keepdims or not).
-    // `axes` is a runtime memref here so we cannot cross-check the inferred
-    // axis against it at compile time; the inner<=0 / outNum%inner!=0 fallback
-    // below (and the dynamic-shape guard) keep us on the original contiguous
-    // path when the inference does not apply.
-    //
-    // Falls back to 1 (contiguous fast path, original behavior) for any dynamic
-    // dim or if the trailing-match product does not divide the output size.
+    // A constant axis wins. Otherwise the reduced axis is the first position
+    // where the input and output shapes diverge when aligned from the trailing
+    // end. That shape match is wrong for keepdims=0 when a deleted extent
+    // equals the dim that slides into its place, so a runtime axes memref
+    // still uses it only as a fallback. inner<=0 or a product that does not
+    // divide the output size falls back to 1, the contiguous path.
     int64_t innerSize = 1;
-    if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
+    bool innerFromAxis = false;
+    if (dataType.hasStaticShape()) {
+      if (FailureOr<int64_t> fromAxis =
+              innerSizeFromConstantAxis(op.getAxes(), dataType.getShape());
+          succeeded(fromAxis)) {
+        innerSize = *fromAxis;
+        innerFromAxis = true;
+      }
+    }
+    if (!innerFromAxis && dataType.hasStaticShape() &&
+        outputType.hasStaticShape()) {
       llvm::ArrayRef<int64_t> inShape = dataType.getShape();
       llvm::ArrayRef<int64_t> outShape = outputType.getShape();
       int64_t i = static_cast<int64_t>(inShape.size()) - 1;
@@ -130,8 +184,10 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         --i;
         --o;
       }
+    }
+    if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
       int64_t outNum = 1;
-      for (int64_t d : outShape)
+      for (int64_t d : outputType.getShape())
         outNum *= d;
       if (innerSize <= 0 || (outNum % innerSize) != 0)
         innerSize = 1;
