@@ -256,6 +256,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
 
+  // Must stay a blocking stream (no hipStreamNonBlocking): HipDataTransferImpl
+  // returns from null-stream device copies without waiting and relies on this
+  // stream being ordered after them.
   if (hipStreamCreate(&state->stream) != hipSuccess) {
     fprintf(stderr, "Failed to create HIP stream\n");
     free(state);

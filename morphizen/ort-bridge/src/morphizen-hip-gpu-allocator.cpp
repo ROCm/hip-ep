@@ -129,12 +129,16 @@ hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
                              hipHostMallocMapped | hipHostMallocCoherent);
 }
 
+bool DefaultMemoryIsDeviceOnly() noexcept {
+  static const bool device_only = [] {
+    const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
+    return env == nullptr || std::strcmp(env, "0") != 0;
+  }();
+  return device_only;
+}
+
 bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
-  if (memory_info == nullptr) {
-    return false;
-  }
-  const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
-  if (env != nullptr && std::strcmp(env, "0") == 0) {
+  if (memory_info == nullptr || !DefaultMemoryIsDeviceOnly()) {
     return false;
   }
   try {
@@ -555,8 +559,12 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
                                  hipMemcpyDeviceToDevice, hip_stream);
           } else {
             err = hipMemcpy(dst_data, src_data, bytes, hipMemcpyDeviceToDevice);
-            // hipMemcpy D2D is not host-synchronous; force a sync below.
-            need_stream_sync = true;
+            // hipMemcpy D2D can return before the copy completes. hipMalloc
+            // memory needs no wait: the host cannot read it, and every later
+            // access runs on the null stream or on a blocking stream, both
+            // ordered after this copy. Host-mapped DEFAULT memory can be read
+            // directly, so wait for it.
+            need_stream_sync = !DefaultMemoryIsDeviceOnly();
           }
         }
       } else {
