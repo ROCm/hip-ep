@@ -32,7 +32,12 @@ env:
   # from cmake/deps.txt (single source of truth with the from-source fallback
   # in cmake/deps.cmake); the commit is the llvm-install cache key.
   ONNXRUNTIME_REPO: "pschlan-amd/onnxruntime"
-  ONNXRUNTIME_VERSION: "1.32.0-zt.1"
+  # Tag checked out from ONNXRUNTIME_REPO. It keys the ORT-dependent caches,
+  # so push a new tag for every change instead of moving an existing one.
+  ONNXRUNTIME_TAG: "v1.32.0-zt.1"
+  # Must be a PEP 440 version: OGA's setup.py reads it from the environment
+  # for the wheel's onnxruntime>= requirement.
+  ONNXRUNTIME_VERSION: "1.32.0"
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.17.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
@@ -176,7 +181,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=dep-ort-${{ env.ONNXRUNTIME_TAG }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe ort-install
         id: cache-ort
@@ -196,12 +201,12 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
+      - name: Checkout ONNX Runtime ${{ env.ONNXRUNTIME_TAG }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ env.ONNXRUNTIME_REPO }}
-          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          ref: ${{ env.ONNXRUNTIME_TAG }}
           path: source-onnxruntime
           submodules: true
           fetch-depth: 1
@@ -322,7 +327,7 @@ jobs:
           EP_REF="${{ env.AMDGPU_EP_REF }}"
           AMDPR_KEY="${{ env.AMDGPU_PR_PATCHES }}"
           AMDPR_KEY="${AMDPR_KEY// /-}"
-          echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+          echo "value=windows-amdgpu-${EP_REF:0:7}-amdpr${AMDPR_KEY}-deps${DEPS_HASH}-ort${{ env.ONNXRUNTIME_TAG }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe amdgpu-artifacts
         id: cache-amdgpu
@@ -515,7 +520,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_TAG }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
       - name: Probe oga-artifacts
         id: cache-oga
