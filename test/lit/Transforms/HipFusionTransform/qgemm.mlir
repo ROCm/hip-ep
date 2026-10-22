@@ -245,3 +245,169 @@ func.func @qgemm_per_channel_w8_no_bias(%ctx: !hip.context,
 
   return %q : tensor<4x3xi8>
 }
+
+// -----
+
+// The width checks read the value width: B below is 8-bit storage, but
+// `packed_bits = 2` makes it a 2-bit payload, which hip.qgemm's B_bits (4 or
+// 8) cannot express. Checked against the storage width it would pass and fuse
+// into a B_bits = 2 hip.qgemm that the verifier rejects, so the dequantize and
+// hip.gemm have to stay.
+// CHECK-LABEL: func.func @qgemm_w2_stays_unfused
+// CHECK-NOT:     hip.qgemm
+// CHECK:         hip.dequantize_linear{{.*}}packed_bits = 2
+// CHECK:         hip.gemm
+// CHECK:         hip.quantize_linear
+// CHECK-NOT:     hip.qgemm
+func.func @qgemm_w2_stays_unfused(%ctx: !hip.context,
+                                  %a: tensor<16x64xi8>,
+                                  %b: tensor<64x8xi8>) -> tensor<16x8xi8> {
+  %a_scale = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %a_zp = hip.constant {value = dense<-5> : tensor<i8>} : tensor<i8>
+  %b_scale = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %b_zp = hip.constant {value = dense<1> : tensor<i8>} : tensor<i8>
+  %y_scale = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %y_zp = hip.constant {value = dense<7> : tensor<i8>} : tensor<i8>
+
+  %e0 = tensor.empty() : tensor<16x64xf32>
+  %dq_a = hip.dequantize_linear(%ctx)
+      ins(%a, %a_scale : tensor<16x64xi8>, tensor<f32>)
+      zero_point(%a_zp : tensor<i8>)
+      outs(%e0 : tensor<16x64xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<16x64xf32>
+
+  %e1 = tensor.empty() : tensor<64x8xf32>
+  %dq_b = hip.dequantize_linear(%ctx)
+      ins(%b, %b_scale : tensor<64x8xi8>, tensor<f32>)
+      zero_point(%b_zp : tensor<i8>)
+      outs(%e1 : tensor<64x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 2 : i64}
+      : tensor<64x8xf32>
+
+  %e2 = tensor.empty() : tensor<16x8xf32>
+  %gemm = hip.gemm(%ctx)
+      ins(%dq_a, %dq_b : tensor<16x64xf32>, tensor<64x8xf32>)
+      outs(%e2 : tensor<16x8xf32>)
+      {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+       transA = 0 : i64, transB = 0 : i64} : tensor<16x8xf32>
+
+  %e3 = tensor.empty() : tensor<16x8xi8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%gemm, %y_scale : tensor<16x8xf32>, tensor<f32>)
+      zero_point(%y_zp : tensor<i8>)
+      outs(%e3 : tensor<16x8xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64} : tensor<16x8xi8>
+
+  return %q : tensor<16x8xi8>
+}
+
+// -----
+
+// The per-feature form of the case above, whose patterns check B's width the
+// same way.
+// CHECK-LABEL: func.func @qgemm_per_channel_w2_stays_unfused
+// CHECK-NOT:     hip.qgemm
+// CHECK:         hip.dequantize_linear{{.*}}packed_bits = 2
+// CHECK:         hip.gemm
+// CHECK:         hip.quantize_linear
+// CHECK-NOT:     hip.qgemm
+func.func @qgemm_per_channel_w2_stays_unfused(%ctx: !hip.context,
+                                              %a: tensor<4x6xi8>)
+    -> tensor<4x3xi8> {
+  %b = hip.constant {location = "w.bin", offset = 0 : i64, size = 5 : i64} : tensor<6x3xi8>
+  %b_zp = hip.constant {location = "w.bin", offset = 8 : i64, size = 1 : i64} : tensor<3xi8>
+  %b_scale = hip.constant {location = "w.bin", offset = 12 : i64, size = 12 : i64} : tensor<3xf32>
+  %a_scale = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %a_zp = hip.constant {value = dense<-5> : tensor<i8>} : tensor<i8>
+  %y_scale = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %y_zp = hip.constant {value = dense<7> : tensor<i8>} : tensor<i8>
+
+  %e0 = tensor.empty() : tensor<4x6xf32>
+  %dq_a = hip.dequantize_linear(%ctx)
+      ins(%a, %a_scale : tensor<4x6xi8>, tensor<f32>)
+      zero_point(%a_zp : tensor<i8>)
+      outs(%e0 : tensor<4x6xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<4x6xf32>
+
+  %e1 = tensor.empty() : tensor<6x3xf32>
+  %dq_b = hip.dequantize_linear(%ctx)
+      ins(%b, %b_scale : tensor<6x3xi8>, tensor<3xf32>)
+      zero_point(%b_zp : tensor<3xi8>)
+      outs(%e1 : tensor<6x3xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_bits = 2 : i64}
+      : tensor<6x3xf32>
+
+  %e2 = tensor.empty() : tensor<4x3xf32>
+  %gemm = hip.gemm(%ctx)
+      ins(%dq_a, %dq_b : tensor<4x6xf32>, tensor<6x3xf32>)
+      outs(%e2 : tensor<4x3xf32>)
+      {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+       transA = 0 : i64, transB = 0 : i64} : tensor<4x3xf32>
+
+  %e3 = tensor.empty() : tensor<4x3xi8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%gemm, %y_scale : tensor<4x3xf32>, tensor<f32>)
+      zero_point(%y_zp : tensor<i8>)
+      outs(%e3 : tensor<4x3xi8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64} : tensor<4x3xi8>
+
+  return %q : tensor<4x3xi8>
+}
+
+// -----
+
+// The result side reads the value width too: a quantize marked
+// `packed_bits = 4` writes two nibbles per byte, while hip.qgemm writes one
+// value per byte of its ui8 output. Checked against the storage width it would
+// fuse and drop the packing without a diagnostic, so the quantize and hip.gemm
+// have to stay.
+// CHECK-LABEL: func.func @qgemm_packed_output_stays_unfused
+// CHECK-NOT:     hip.qgemm
+// CHECK:         hip.gemm
+// CHECK:         hip.quantize_linear
+// CHECK-SAME:      packed_bits = 4
+// CHECK-NOT:     hip.qgemm
+func.func @qgemm_packed_output_stays_unfused(%ctx: !hip.context,
+                                             %a: tensor<16x64xui8>,
+                                             %b: tensor<64x8xi8>)
+    -> tensor<16x8xui8> {
+  %a_scale = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %a_zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %b_scale = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
+  %b_zp = hip.constant {value = dense<-3> : tensor<i8>} : tensor<i8>
+  %y_scale = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %y_zp = hip.constant {value = dense<8> : tensor<ui8>} : tensor<ui8>
+
+  %e0 = tensor.empty() : tensor<16x64xf32>
+  %dq_a = hip.dequantize_linear(%ctx)
+      ins(%a, %a_scale : tensor<16x64xui8>, tensor<f32>)
+      zero_point(%a_zp : tensor<ui8>)
+      outs(%e0 : tensor<16x64xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<16x64xf32>
+
+  %e1 = tensor.empty() : tensor<64x8xf32>
+  %dq_b = hip.dequantize_linear(%ctx)
+      ins(%b, %b_scale : tensor<64x8xi8>, tensor<f32>)
+      zero_point(%b_zp : tensor<i8>)
+      outs(%e1 : tensor<64x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<64x8xf32>
+
+  %e2 = tensor.empty() : tensor<16x8xf32>
+  %gemm = hip.gemm(%ctx)
+      ins(%dq_a, %dq_b : tensor<16x64xf32>, tensor<64x8xf32>)
+      outs(%e2 : tensor<16x8xf32>)
+      {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+       transA = 0 : i64, transB = 0 : i64} : tensor<16x8xf32>
+
+  %e3 = tensor.empty() : tensor<16x8xui8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%gemm, %y_scale : tensor<16x8xf32>, tensor<f32>)
+      zero_point(%y_zp : tensor<ui8>)
+      outs(%e3 : tensor<16x8xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64, packed_bits = 4 : i64} : tensor<16x8xui8>
+
+  return %q : tensor<16x8xui8>
+}

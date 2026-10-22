@@ -49,13 +49,15 @@ Pattern HipQGemm with benefit(10) {
 
   // A16W8, A8W8 and their 4-bit-weight variants. The bound on A is that the
   // kernel splits only A into byte planes, so a 16-bit A stays exact while a
-  // 16-bit B would have no path through it. A 4-bit B is 8-bit STORAGE holding
-  // two nibbles per byte, so it passes the same check and is told apart by
-  // ExtractHipQdqValueBits below. The bias is read straight out of memory and
-  // may additionally be the int32 an ONNX quantizer emits at
+  // 16-bit B would have no path through it. The widths are value widths: a
+  // 4-bit B is 8-bit storage holding two nibbles per byte, and its
+  // `packed_bits` is what the check reads, so any other packing stays unfused
+  // rather than becoming a B_bits hip.qgemm rejects. ExtractHipQdqValueBits
+  // below passes the same width on as B_bits. The bias is read straight out of
+  // memory and may additionally be the int32 an ONNX quantizer emits at
   // c_scale = a_scale * b_scale.
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
-  IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[4, 8]">);
   IsHipQdqQuantizedWidth(dq_c, attr<"[8, 16, 32]">);
 
   // Five operands: hip.gemm is DPS and its C is present here, so the init
@@ -142,7 +144,7 @@ Pattern HipQGemmNoBias with benefit(10) {
                                        b_tail: ValueRange);
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
-  IsHipQdqQuantizedWidth(dq_b, attr<"[8]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[4, 8]">);
 
   let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
 
@@ -213,13 +215,12 @@ Pattern HipQGemmPerChannelWeight with benefit(9) {
                                        c_tail: ValueRange);
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[4, 8]">);
   IsHipQdqQuantizedWidth(dq_c, attr<"[8, 16, 32]">);
 
   let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, dq_c.0, gemm_init: Value);
   // transB is what decides whether N is B's last axis or the one before it, so
   // the weight's quantized axis only means something relative to its consumer.
-  // B's width is checked there too, which is why there is no separate width
-  // constraint on dq_b here.
   IsHipPerChannelQuantizedWeight(dq_b, gemm);
 
   let q = op<hip.quantize_linear>(ctx, gemm.0, y_scale: Value,
@@ -286,6 +287,7 @@ Pattern HipQGemmNoBiasPerChannelWeight with benefit(9) {
                                        b_zero_points: Value, b_init: Value);
 
   IsHipQdqQuantizedWidth(dq_a, attr<"[8, 16]">);
+  IsHipQdqQuantizedWidth(dq_b, attr<"[4, 8]">);
 
   let gemm = op<hip.gemm>(ctx, dq_a.0, dq_b.0, gemm_init: Value);
   IsHipPerChannelQuantizedWeight(dq_b, gemm);
