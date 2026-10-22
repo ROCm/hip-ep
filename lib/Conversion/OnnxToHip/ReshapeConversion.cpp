@@ -811,6 +811,7 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
             mlir::RankedTensorType::get({(int64_t)outputRank}, elemTy);
         mlir::Value newShape = mlir::tensor::FromElementsOp::create(
             rewriter, loc, newShapeTy, dims);
+
         auto reshapeOp = mlir::tensor::ReshapeOp::create(
             rewriter, loc, outputType, data, newShape);
         rewriter.replaceOp(op, reshapeOp.getResult());

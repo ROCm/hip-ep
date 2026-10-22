@@ -363,25 +363,6 @@ struct UseOutputAllocatorPass
     func::ReturnOp returnOp;
     funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
 
-    // Bufferization may append scalar returns that carry dynamic result
-    // dimensions. They are internal dynamic-dimension results, not graph
-    // outputs. If converted to hip.alloc_output, a host memref.store that
-    // materializes a dimension can target device output memory, so later GPU
-    // shape arithmetic may observe stale data. The graph metadata predates
-    // bufferization and therefore records the graph output count. Keep the
-    // return-count fallback for standalone pass tests and hand-written IR
-    // without graph metadata.
-    int64_t graphOutputCount =
-        returnOp ? static_cast<int64_t>(returnOp.getNumOperands()) : 0;
-    if (auto module = funcOp->getParentOfType<ModuleOp>()) {
-      if (auto outputShapes =
-              module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes"))
-        graphOutputCount = static_cast<int64_t>(outputShapes.size());
-    }
-    llvm::erase_if(outputs, [graphOutputCount](const auto &entry) {
-      return entry.second >= graphOutputCount;
-    });
-
     // Phase 2 -- rewrite (IR mutation only; the analysis is no longer queried).
     OpBuilder builder(funcOp.getContext());
     DominanceInfo dominance(funcOp);
@@ -429,7 +410,8 @@ struct UseOutputAllocatorPass
     // never went through memref.alloc, so phase 2 did not allocate it. Copy it
     // into an EP-owned buffer so the output-allocator callback still runs.
     if (returnOp)
-      for (int64_t outIdx = 0; outIdx < graphOutputCount; ++outIdx)
+      for (int64_t outIdx = 0;
+           outIdx < static_cast<int64_t>(returnOp.getNumOperands()); ++outIdx)
         materializePassthroughOutput(returnOp, ctx, outIdx, builder);
   }
 };
