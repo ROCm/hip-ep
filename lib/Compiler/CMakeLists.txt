@@ -30,7 +30,10 @@ if(ENABLE_ROCMLIRTRITON)
   target_sources(LibHipCompiler PRIVATE
     RocMlirKernelCompiler.cpp
     RocMlirAutotune.cpp
+    ${CMAKE_SOURCE_DIR}/tools/problem-cache/nearest_conv_tune.cpp
   )
+  target_include_directories(LibHipCompiler PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/problem-cache)
   # Benchmarking calls HIP host APIs, so the file compiles to a stub unless
   # this build both permits them and knows the runtime library name to resolve
   # them from. Published rather than left implicit because hip-rocmlir-compiler
