@@ -116,8 +116,7 @@ static bool isHostAccessed(Value buffer) {
     if (isa<memref::LoadOp, memref::StoreOp>(user))
       return true;
     if (auto view = dyn_cast<ViewLikeOpInterface>(user))
-      if (view.getViewSource() == buffer &&
-          isHostAccessed(view->getResult(0)))
+      if (view.getViewSource() == buffer && isHostAccessed(view->getResult(0)))
         return true;
   }
   return false;
