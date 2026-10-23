@@ -115,7 +115,7 @@ namespace {
 /// takes any operand's static extent if one exists (else stays dynamic), and
 /// the axis dim is the sum of operand extents (dynamic if any operand is
 /// dynamic there). Example: `Concat((1x?x1152, ?x?x?), axis=1)` -> `1x?x1152`.
-static Type inferConcatResult(Operation *op) {
+static RankedTensorType inferConcatResult(Operation *op) {
   if (op->getNumOperands() == 0 || op->getNumResults() != 1)
     return {};
   auto axisAttr = op->getAttrOfType<IntegerAttr>("axis");
@@ -230,11 +230,11 @@ static bool named(StringRef name, ArrayRef<StringRef> ops) {
 
 static bool preservesShape(StringRef name) {
   static constexpr StringRef kOps[] = {
-      "onnx.Cast", "onnx.Identity", "onnx.Sqrt", "onnx.Reciprocal",
-      "onnx.Tanh", "onnx.Softmax",  "onnx.Relu", "onnx.Sigmoid",
-      "onnx.Exp",  "onnx.Log",      "onnx.Neg",  "onnx.Abs",
-      "onnx.Erf",  "onnx.Floor",    "onnx.Ceil", "onnx.Round",
-      "onnx.Not",  "onnx.Sign"};
+      "onnx.Cast",    "onnx.Identity", "onnx.Sqrt",  "onnx.Reciprocal",
+      "onnx.Tanh",    "onnx.Softmax",  "onnx.Relu",  "onnx.LeakyRelu",
+      "onnx.Sigmoid", "onnx.Exp",      "onnx.Log",   "onnx.Neg",
+      "onnx.Abs",     "onnx.Erf",      "onnx.Floor", "onnx.Ceil",
+      "onnx.Round",   "onnx.Not",      "onnx.Sign"};
   return named(name, kOps);
 }
 
@@ -617,6 +617,36 @@ static RankedTensorType inferConvResult(Operation *op) {
         in + pads[s] + pads[spatial + s] - dilations[s] * (kernel[s] - 1) - 1;
     shape[2 + s] = floorDiv(numer, strides[s]) + 1;
   }
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
+/// `onnx.ConvTranspose` takes its output channel extent from the second
+/// weight dimension times group. Exporters that provide `output_shape` give
+/// the spatial extents directly, avoiding a loss of rank before conversion.
+static RankedTensorType inferConvTransposeResult(Operation *op) {
+  if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto weightType = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+  if (!inputType || !weightType || inputType.getRank() < 3 ||
+      inputType.getRank() > 5 || weightType.getRank() != inputType.getRank())
+    return {};
+
+  int64_t group = 1;
+  if (auto attr = op->getAttrOfType<IntegerAttr>("group"))
+    group = attr.getSInt();
+  if (group <= 0 || weightType.isDynamicDim(1))
+    return {};
+
+  int64_t spatialRank = inputType.getRank() - 2;
+  SmallVector<int64_t> shape(inputType.getShape().begin(),
+                             inputType.getShape().end());
+  shape[1] = weightType.getDimSize(1) * group;
+  auto outputShape = op->getAttrOfType<ArrayAttr>("output_shape");
+  if (!outputShape || outputShape.size() != static_cast<size_t>(spatialRank))
+    return {};
+  for (int64_t i : llvm::seq<int64_t>(spatialRank))
+    shape[2 + i] = cast<IntegerAttr>(outputShape[i]).getSInt();
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
@@ -1094,9 +1124,10 @@ static RankedTensorType inferUpsampleResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
-/// Dispatch a forward shape rule for `op` when any result is unranked.
-/// `out` receives one type per result. Returns failure when no rule can rank
-/// every unranked result from the operands. Register new op rules below.
+/// Dispatch a forward shape rule for `op` when a result is unranked or has a
+/// dynamic dimension. `out` receives one type per result. Returns failure when
+/// no rule can refine every result from the operands. Register new op rules
+/// below.
 ///
 /// Why this is keyed on op name (and not the HIP dialect / an interface).
 /// Rank must be established BEFORE `convert-onnx-to-hip`: an unranked result
@@ -1123,9 +1154,15 @@ static RankedTensorType inferUpsampleResult(Operation *op) {
 /// own `inferShapes`, so no per-op rule lives here anymore.
 static LogicalResult inferUnrankedOnnxResults(Operation *op,
                                               SmallVectorImpl<Type> &out) {
+  auto needsShapeRefinement = [](Type type) {
+    if (isa<UnrankedTensorType>(type))
+      return true;
+    if (auto ranked = dyn_cast<RankedTensorType>(type))
+      return !ranked.hasStaticShape();
+    return false;
+  };
   if (op->getNumResults() == 0 ||
-      !llvm::any_of(op->getResultTypes(),
-                    [](Type type) { return isa<UnrankedTensorType>(type); }))
+      !llvm::any_of(op->getResultTypes(), needsShapeRefinement))
     return failure();
 
   StringRef name = op->getName().getStringRef();
@@ -1137,7 +1174,7 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
   };
 
   if (name == "onnx.Concat")
-    return pushSingle(dyn_cast<RankedTensorType>(inferConcatResult(op)));
+    return pushSingle(inferConcatResult(op));
   if (name == "onnx.Reshape")
     return pushSingle(inferReshapeResult(op));
   if (name == "onnx.Transpose")
@@ -1162,6 +1199,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
     return pushSingle(inferPadResult(op));
   if (name == "onnx.Conv")
     return pushSingle(inferConvResult(op));
+  if (name == "onnx.ConvTranspose")
+    return pushSingle(inferConvTransposeResult(op));
   if (name == "onnx.InstanceNormalization") {
     if (op->getNumOperands() < 1)
       return failure();
@@ -1179,8 +1218,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
   return failure();
 }
 
-/// Forward-propagate rank onto unranked `onnx.*` results within `body` until
-/// no further result can be ranked.
+/// Forward-propagate static shape information onto incomplete `onnx.*` results
+/// within `body` until no further result can be refined.
 ///
 /// A single in-program-order walk suffices for a straight-line body (every
 /// operand is defined by an earlier op or a block arg, so a producer is
