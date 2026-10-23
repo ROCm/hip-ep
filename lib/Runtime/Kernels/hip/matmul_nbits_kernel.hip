@@ -5674,6 +5674,19 @@ static int tuneWmmaConfig(
                              b_row_bytes);
         });
 
+        // Drain sticky launch errors per candidate. A losing config that fails
+        // to launch (e.g. invalid block/shared-mem on this shape) would
+        // otherwise leave hipGetLastError set; the production launch of the
+        // winner then looks like it failed even when it succeeded (lm_head
+        // N=128256 on gfx1201). Skip the failed candidate so it cannot win.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
             "wt=%dx%d bk=%2d : %.4f ms\n",
@@ -6626,6 +6639,15 @@ static int tuneWmmaConfigI8(
                                scales, zeros, gs, ngk, C, ldc, has_zp);
         });
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-i8 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma-i8 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
             cid, cfg.bm, cfg.bn, cfg.swizzle_n, cfg_ms);
@@ -7342,6 +7364,15 @@ static int tuneWmmaConfigU3(
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u3 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
@@ -7993,6 +8024,15 @@ static int tuneWmmaConfigU2(
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
+
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u2 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
