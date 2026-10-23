@@ -33,6 +33,7 @@ add_library(OnnxToHip STATIC
   NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
+  HyperConnectionConversion.cpp
   RotaryEmbeddingConversion.cpp
   OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp

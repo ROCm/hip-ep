@@ -1507,6 +1507,256 @@ LogicalResult EngramGateOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// HyperConnectionPreMixOp: ins(streams, pre_mix) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPreMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPreMixOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateSigmoid() != 0 && getGateSigmoid() != 1)
+    return emitOpError("gate_sigmoid must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPreMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getRank() < 1)
+    return emitOpError("expected a ranked output");
+  if (output.getElementType() != streams.getElementType())
+    return emitOpError("output element type must match streams");
+  int64_t outputHidden = output.getDimSize(output.getRank() - 1);
+  if (!ShapedType::isDynamic(outputHidden) && outputHidden != hidden)
+    return emitOpError("output must end in hidden");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixOp: ins(streams, block_output, post_mix, [stream_mix])
+//                           outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPostMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixOp::verify() {
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getPostMix()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  auto block = dyn_cast<ShapedType>(getBlockOutput().getType());
+  if (!block || !block.hasRank() || block.getRank() < 1)
+    return emitOpError("expected a ranked block_output");
+  if (block.getElementType() != streams.getElementType())
+    return emitOpError("block_output element type must match streams");
+  int64_t blockHidden = block.getDimSize(block.getRank() - 1);
+  if (!ShapedType::isDynamic(blockHidden) && blockHidden != hidden)
+    return emitOpError("block_output must end in hidden");
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPostMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getShape() != streams.getShape() ||
+      output.getElementType() != streams.getElementType())
+    return emitOpError("output shape and element type must match streams");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || !mixType.hasRank() ||
+        mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix element type must match streams");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixNormOp:
+//   ins(streams, block_output, gate, norm_scale, [stream_mix])
+//   outs(residual, normed)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HyperConnectionPostMixNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixNormOp::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected residual and normed outputs");
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getGate(),
+                                  getNormScale()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutputs()[0]);
+  dataOperands.push_back(getOutputs()[1]);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+    return failure();
+  if (getBranches() <= 0 || getHidden() <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (getFlattened() != 0 && getFlattened() != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateActivation() != 0 && getGateActivation() != 1)
+    return emitOpError("gate_activation must be 0 or 1");
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  auto scale = dyn_cast<ShapedType>(getNormScale().getType());
+  if (!streams || !streams.hasRank() || !scale || !scale.hasRank() ||
+      scale.getRank() != 1)
+    return emitOpError("expected ranked streams and a 1-D norm scale");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  if (getFlattened()) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || gateType.getElementType() != streams.getElementType())
+    return emitOpError("gate must match the streams element type");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix must match the streams element type");
+  }
+  int64_t scaleLen = scale.getDimSize(0);
+  if (!ShapedType::isDynamic(scaleLen) &&
+      scaleLen != getBranches() * getHidden())
+    return emitOpError("norm scale length must be branches * hidden");
+  for (Value out : getOutputs()) {
+    auto outType = dyn_cast<ShapedType>(out.getType());
+    if (!outType || outType.getShape() != streams.getShape() ||
+        outType.getElementType() != streams.getElementType())
+      return emitOpError("outputs must match the streams shape and type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 

@@ -2235,6 +2235,60 @@ HIP_KERNEL_API int hip_engram_gate(
     int hip_dtype);
 
 /* =========================================================================
+ * Hyper-connection mix (com.microsoft HyperConnectionPreMix / PostMix)
+ * =========================================================================
+ *
+ * streams are [rows, branches, hidden]. feature_gate 0 indexes the gate as
+ * [rows, branches]; 1 indexes it as [rows, branches, hidden]. Pre-mix
+ * multiplies by reduction_scale. Post-mix adds post_mix * block_output;
+ * stream_mix null keeps the original stream. Pre-mix and post-mix use FP32
+ * math and one rounding. hip_dtype: FLOAT16 or FLOAT32.
+ */
+HIP_KERNEL_API int hip_hyper_connection_pre_mix(
+    void* stream,
+    const void* streams,
+    const void* pre_mix,
+    void* output,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_sigmoid,
+    float reduction_scale,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_hyper_connection_post_mix(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* post_mix,
+    const void* stream_mix,
+    void* output,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int hip_dtype);
+
+/* Gate chain and residual each round to the element type before the norm. */
+HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* gate,
+    const void* stream_mix,
+    const void* scale,
+    void* residual,
+    void* normed,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_activation,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================
  *

@@ -99,6 +99,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | BranchwiseRMSNorm (`com.microsoft`) | Lowered to RMSNormalization over the branch axis. f16/f32; the scale input is required |
 | GatedRMSNorm (`com.microsoft`) | Custom HIP kernel; silu, swish or sigmoid gate. f16/f32 |
 | EngramGate (`com.microsoft`) | Custom HIP kernel, including the optional `gated_value_normed` output. f16/f32 |
+| HyperConnectionPreMix (`com.microsoft`) | Custom HIP kernel; folds a preceding Sigmoid. f16/f32 |
+| HyperConnectionPostMix (`com.microsoft`) | Custom HIP kernel; optional stream mix, fused with a following BranchwiseRMSNorm. f16/f32 |
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
