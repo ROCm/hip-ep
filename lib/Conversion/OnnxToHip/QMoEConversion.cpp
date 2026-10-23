@@ -160,6 +160,14 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu");
 
+  // Every wrap_qmoe path takes fp16 activations and 4-bit experts; the fused
+  // SwiGLU decode would misread wider weights instead of rejecting them.
+  if (!mlir::getElementTypeOrSelf(input.getType()).isF16() ||
+      expertWeightBitsAttr.getInt() != 4) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: only fp16 input with expert_weight_bits=4 is supported");
+  }
+
   // wrap_qmoe rejects every other combination at runtime.
   const int64_t swigluFusion = swigluFusionAttr.getInt();
   if (swigluFusion != 1 &&
