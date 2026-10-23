@@ -46,7 +46,6 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
     normAxis += outRank;
 
   llvm::SmallVector<mlir::Value> dynSizes;
-  int64_t inDim = 0;
   for (int64_t outDim : llvm::seq<int64_t>(0, outRank)) {
     if (!resultType.isDynamicDim(outDim))
       continue;
@@ -80,8 +79,11 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
       dynSizes.push_back(mlir::arith::IndexCastOp::create(
           rewriter, loc, rewriter.getIndexType(), depthHost));
     } else {
+      // Static dims are skipped above, so the indices dim must come from
+      // outDim itself rather than from a counter of dynamic dims.
+      int64_t inDim = outDim < normAxis ? outDim : outDim - 1;
       dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, indices, inDim++));
+          mlir::tensor::DimOp::create(rewriter, loc, indices, inDim));
     }
   }
 

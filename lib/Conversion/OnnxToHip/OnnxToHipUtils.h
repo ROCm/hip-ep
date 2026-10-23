@@ -347,6 +347,8 @@ void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateHyperConnectionConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateOnnxRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
@@ -381,12 +383,20 @@ void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
+void populateNGramHashMappingConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateWhereConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+void populateGatedDeltaNetConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
+void populateDynamicSparseAttentionConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
+void populateSparseAttentionIndexerConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,

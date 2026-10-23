@@ -77,6 +77,9 @@ existing `--convert-hip-to-llvm` pipeline.
 | `BranchwiseRMSNorm` (`com.microsoft`) | `hip.rms_norm` | `rms_norm_kernel.hip`; per-branch gain via grouped scale |
 | `GatedRMSNorm` (`com.microsoft`) | `hip.gated_rms_norm` | `rms_norm_kernel.hip` |
 | `EngramGate` (`com.microsoft`) | `hip.engram_gate` | `rms_norm_kernel.hip` |
+| `HyperConnectionPreMix` (`com.microsoft`) | `hip.hyper_connection_pre_mix` | `hyper_connection_kernel.hip` |
+| `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |
+| `HyperConnectionPostMix` + `BranchwiseRMSNorm` | `hip.hyper_connection_post_mix_norm` | `hyper_connection_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:
@@ -102,6 +105,8 @@ packed `__half2` path for fp16 rows of even width.
 | `QLinearMul` (`com.microsoft`) | `hip.qmul` | decomposed, then QDQ fusion |
 | `QLinearConcat` (`com.microsoft`) | DQ + Concat + Q | no fused kernel |
 | `QLinearGlobalAveragePool` (`com.microsoft`) | DQ + `hip.global_pool` + Q | `channels_last` transposed around the pool |
+| `QLinearAveragePool` (`com.microsoft`) | DQ + `hip.pool` + Q | `channels_last` transposed around the pool |
+| `QLinearLeakyRelu` (`com.microsoft`) | DQ + `hip.leaky_relu` + Q | int8 or uint8, then the f32 LeakyRelu kernel |
 | `QLinearMatMul` | `hip.qlinear_matmul` | `qlinear_matmul_kernel.hip` |
 
 `QLinearMatMul` is the native ONNX op: rank-2 8-bit `a` of shape `[M, K]` times
