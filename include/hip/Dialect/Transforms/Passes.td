@@ -759,6 +759,46 @@ def ResolveExternConstantsPass
   ];
 }
 
+def PromoteDeviceConstantsPass
+    : Pass<"hip-promote-device-constants", "mlir::func::FuncOp"> {
+  let summary = "Give device reads of a tensor arith.constant a hip.constant";
+  let description = [{
+    A tensor `arith.constant` bufferizes to a `memref.global` in host memory,
+    so anything that reads it from the device gets a host pointer: a hip op
+    passes it to its kernel, and a copy -- `tensor.insert_slice`, or the copy
+    bufferization makes before a hip op writes a constant DPS init -- lowers
+    to a device-to-device memcpy. This pass moves every such read (any hip op
+    operand, `tensor.insert_slice` source or destination) to one
+    `hip.constant` with the same value, which hip-externalize-constants places
+    in device memory. Reads through `tensor.cast`, `tensor.expand_shape`,
+    `tensor.collapse_shape`, `tensor.extract_slice` and `tensor.reshape` (its
+    data operand) are followed: the view is cloned onto the `hip.constant` and
+    only the device read moves to the clone. All other uses keep the
+    `arith.constant`, so host-side folding is unaffected.
+
+    Before:
+
+        %c = arith.constant dense<1> : tensor<3xi64>
+        %g = hip.gather(%ctx) ins(%t, %c : ...) outs(%e : ...)
+        %x = tensor.extract %c[%i] : tensor<3xi64>
+
+    After:
+
+        %c = arith.constant dense<1> : tensor<3xi64>
+        %d = hip.constant {value = dense<1> : tensor<3xi64>} : tensor<3xi64>
+        %g = hip.gather(%ctx) ins(%t, %d : ...) outs(%e : ...)
+        %x = tensor.extract %c[%i] : tensor<3xi64>
+
+    Run immediately before hip-externalize-constants, after hip-infer-shapes
+    and hip-fusion-transform, whose rewrite driver folds views of arith
+    constants that this pass would otherwise leave as views of a hip.constant.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def ExternalizeConstantsPass
     : Pass<"hip-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Apply storage policy to hip.constant carriers";
