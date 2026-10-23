@@ -19,9 +19,10 @@
 // whose stride aliases. A listed pad of 0 keeps the dense layout.
 //
 // Before:
-//   %w = hip.constant {memory_address = A, size = 8388608} :
-//   tensor<4096x32x64xui8> hip.matmul_nbits(%ctx) ins(%a, %w, %s : ...) ... {K
-//   = 4096, N = 4096, ...}
+//   %w = hip.constant {memory_address = A, size = 8388608}
+//            : tensor<4096x32x64xui8>
+//   hip.matmul_nbits(%ctx) ins(%a, %w, %s : ...)
+//            ... {K = 4096, N = 4096, ...}
 //
 // After:
 //   %w = hip.constant {memory_address = A, size = 8388608, row_bytes = 2048}
