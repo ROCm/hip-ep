@@ -1741,6 +1741,24 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
   return (err == hipSuccess) ? 0 : -1;
 }
 
+int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
+  if (code == 0)
+    return 0;
+  if (!state || !state->device_error_flag || !state->stream) {
+    fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
+    return -1;
+  }
+  // Same stream as the post-graph read. Synchronize before returning so the
+  // stack source is not read after this call, and so the flag is visible even
+  // if the caller returns without launching another kernel.
+  hipError_t err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
+                                  hipMemcpyHostToDevice, state->stream);
+  if (err != hipSuccess)
+    return -1;
+  err = hipStreamSynchronize(state->stream);
+  return (err == hipSuccess) ? 0 : -1;
+}
+
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
   if (!state || !state->device_error_flag || !state->stream) {
     fprintf(stderr,

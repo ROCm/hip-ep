@@ -357,4 +357,39 @@ module {
 
     return %r : tensor<2x6xf32>
   }
+
+  // Test 15: Slice of a length-3 vector from index 3 through INT64_MAX. ONNX
+  // clamps both bounds to 3 and the result is empty. extract_slice cannot use
+  // offset 3 on a dim of 3, so the view is taken at offset 0 with size 0.
+  func.func @test_slice_decompose_empty_past_end(%input: tensor<3xi64>)
+      -> tensor<0xi64> {
+    // CHECK-LABEL: func.func @test_slice_decompose_empty_past_end
+    %starts = arith.constant dense<3> : tensor<1xi64>
+    %ends = arith.constant dense<9223372036854775807> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends)
+        : (tensor<3xi64>, tensor<1xi64>, tensor<1xi64>) -> tensor<0xi64>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: hip.slice
+    // CHECK: tensor.extract_slice {{.*}}[0] [0] [1] : tensor<3xi64> to tensor<0xi64>
+
+    return %r : tensor<0xi64>
+  }
+
+  // Test 16: slicing an already-empty axis. offset 0 is still out of range
+  // on a dim of 0, so the result is tensor.empty.
+  func.func @test_slice_decompose_empty_source(%input: tensor<0xi64>)
+      -> tensor<0xi64> {
+    // CHECK-LABEL: func.func @test_slice_decompose_empty_source
+    %starts = arith.constant dense<0> : tensor<1xi64>
+    %ends = arith.constant dense<0> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends)
+        : (tensor<0xi64>, tensor<1xi64>, tensor<1xi64>) -> tensor<0xi64>
+
+    // CHECK-NOT: onnx.Slice
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK: tensor.empty() : tensor<0xi64>
+
+    return %r : tensor<0xi64>
+  }
 }

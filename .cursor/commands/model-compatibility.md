@@ -14,5 +14,6 @@ Follow the **model-compatibility** project skill (`.cursor/skills/model-compatib
    - Add `-VoePackageRoot "<path>"` when `$env:VOE_PACKAGE_ROOT` is not set.
    - If you see `[VOE_NOT_CONFIGURED]`, use **AskQuestion**: provide VOE path (re-run with `-VoePackageRoot`) or skip dump (re-run with `-SkipDump`).
 3. Read `<OutputDir>/model_compatibility_report.md` (OutputDir is auto-derived unless I pass `-OutputDir`).
-4. For every **unsupported** or **partial** operator, run the diagnose playbook in `.cursor/skills/model-compatibility/diagnose.md` before responding.
-5. Report using `.cursor/skills/model-compatibility/report_template.md` (status display: full→supported, partial→partial, unsupported→unsupported). Include supported-instance percentage in the summary line.
+4. For every **blocked**, **lowering-broken**, and **partial** operator, add the converter file and the check that rejects it, as the skill's "After the run" section requires. For an **unsupported** operator, name the closest runtime under `lib/Runtime/real/`.
+5. Append `## Kernel attribute support` to the report, as that same section requires. Record each attribute value this model sets that the kernel does not implement. Do not put ORT session creation in the report.
+6. Report using `.cursor/skills/model-compatibility/report_template.md` (status display: full→supported, partial→partial, unsupported→unsupported). Include the supported-instance percentage, then the kernel-attribute section.

@@ -172,11 +172,79 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
   }
 };
 
+struct MRotaryEmbeddingOpLowering
+    : public ConvertOpToLLVMPattern<MRotaryEmbeddingOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MRotaryEmbeddingOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto cosType = cast<MemRefType>(op.getCosCache().getType());
+    const int64_t numHeads = op.getNumHeads();
+    const int64_t headSize = inputType.getDimSize(2) / numHeads;
+    ArrayAttr section = op.getMropeSection();
+
+    auto posType = cast<MemRefType>(op.getPositionIds().getType());
+    auto sinType = cast<MemRefType>(op.getSinCache().getType());
+    SmallVector<Value, 21> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getPositionIds(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getCosCache(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getSinCache(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc),
+        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc),
+        createI64Const(numHeads),
+        createI64Const(headSize),
+        createI64Const(op.getRotaryEmbeddingDim()),
+        getMemRefDimSize(cosType, 0, adaptor.getCosCache(), rewriter, loc),
+        createI64Const(cast<IntegerAttr>(section[0]).getInt()),
+        createI64Const(cast<IntegerAttr>(section[1]).getInt()),
+        createI64Const(cast<IntegerAttr>(section[2]).getInt()),
+        createI64Const(op.getMropeLayout()),
+        LLVM::ConstantOp::create(
+            rewriter, loc, f32Type,
+            rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
+        createI64Const(inputType.getElementType().getIntOrFloatBitWidth() / 8),
+        getMemRefDimSize(posType, 1, adaptor.getPositionIds(), rewriter, loc),
+        getMemRefDimSize(posType, 2, adaptor.getPositionIds(), rewriter, loc),
+        getMemRefDimSize(sinType, 0, adaptor.getSinCache(), rewriter, loc)};
+
+    SmallVector<Type, 21> paramTypes(6, ptrType);
+    paramTypes.append(10, i64Type);
+    paramTypes.push_back(f32Type);
+    paramTypes.append(4, i64Type);
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMRotaryEmbedding, paramTypes, i32Type);
+    if (failed(funcOp)) {
+      return failure();
+    }
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RopeOpLowering>(converter);
+  patterns.add<RopeOpLowering, MRotaryEmbeddingOpLowering>(converter);
 }
 
 } // namespace hip

@@ -147,3 +147,50 @@ class TestQLinearConv:
         x = np.random.default_rng(14).integers(0, 5, size=(1, 2, 3, 3), dtype=np.uint8)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_same_upper_odd_pad(self, model_runner):
+        # 4x4 input, 3x3 kernel, stride 2 produces 2x2. The pad budget is 1,
+        # so SAME_UPPER pads only the bottom and right. A symmetric pad changes
+        # the corner sums below.
+        x = np.arange(16, dtype=np.uint8).reshape(1, 1, 4, 4)
+        w = np.ones((1, 1, 3, 3), dtype=np.int8)
+        x_info = helper.make_tensor_value_info("x", TensorProto.UINT8, [1, 1, 4, 4])
+        y_info = helper.make_tensor_value_info("y", TensorProto.UINT8, [1, 1, 2, 2])
+        node = helper.make_node(
+            "QLinearConv",
+            [
+                "x",
+                "x_scale",
+                "x_zero_point",
+                "w",
+                "w_scale",
+                "w_zero_point",
+                "y_scale",
+                "y_zero_point",
+            ],
+            ["y"],
+            kernel_shape=[3, 3],
+            strides=[2, 2],
+            dilations=[1, 1],
+            group=1,
+            auto_pad="SAME_UPPER",
+        )
+        inits = [
+            numpy_helper.from_array(np.array(1.0, dtype=np.float32), "x_scale"),
+            numpy_helper.from_array(np.array(0, dtype=np.uint8), "x_zero_point"),
+            numpy_helper.from_array(w, "w"),
+            numpy_helper.from_array(np.array(1.0, dtype=np.float32), "w_scale"),
+            numpy_helper.from_array(np.array(0, dtype=np.int8), "w_zero_point"),
+            numpy_helper.from_array(np.array(1.0, dtype=np.float32), "y_scale"),
+            numpy_helper.from_array(np.array(0, dtype=np.uint8), "y_zero_point"),
+        ]
+        model = make_model_from_nodes(
+            [node], [x_info], [y_info], initializers=inits, opset=12
+        )
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        got = np.asarray(actual[0])
+        assert int(got[0, 0, 0, 0]) == 45
+        assert int(got[0, 0, 0, 1]) == 39
+        assert int(got[0, 0, 1, 0]) == 66
+        assert int(got[0, 0, 1, 1]) == 50
