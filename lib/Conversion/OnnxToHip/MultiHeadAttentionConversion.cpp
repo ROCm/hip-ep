@@ -55,7 +55,8 @@ bool presentConcatenatesPast(mlir::Operation *op, mlir::Value pastKey,
                              mlir::Value key) {
   if (op->getNumResults() < 3)
     return false;
-  auto present = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto present =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
   auto past = mlir::dyn_cast<mlir::RankedTensorType>(pastKey.getType());
   auto step = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
   if (!present || !past || !step || present.getRank() != 4 ||
@@ -248,14 +249,19 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
           op, "unshared self-attn expects BSH query/key and BNSH past");
 
     auto i32Ty = rewriter.getIntegerType(32);
-    mlir::Value pastLen = mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2);
+    mlir::Value pastLen =
+        mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2);
     mlir::Value stepLen = mlir::tensor::DimOp::create(rewriter, loc, key, 1);
-    mlir::Value total = mlir::arith::AddIOp::create(rewriter, loc, pastLen, stepLen);
+    mlir::Value total =
+        mlir::arith::AddIOp::create(rewriter, loc, pastLen, stepLen);
     mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
     mlir::Value last = mlir::arith::SubIOp::create(rewriter, loc, total, one);
-    mlir::Value lastI32 = mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, last);
-    mlir::Value totalI32 = mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, total);
-    mlir::Value batchSize = mlir::tensor::DimOp::create(rewriter, loc, query, 0);
+    mlir::Value lastI32 =
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, last);
+    mlir::Value totalI32 =
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, total);
+    mlir::Value batchSize =
+        mlir::tensor::DimOp::create(rewriter, loc, query, 0);
     mlir::Value seqlensK = mlir::tensor::SplatOp::create(
         rewriter, loc, lastI32,
         mlir::RankedTensorType::get({mlir::ShapedType::kDynamic}, i32Ty),
@@ -332,8 +338,10 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
       mlir::OpBuilder::InsertionGuard guard(rewriter);
       if (hoist) {
         for (mlir::Operation &existing : *entry) {
-          auto attr = existing.getAttrOfType<mlir::IntegerAttr>("hip.cross_seqlens");
-          if (attr && attr.getInt() == skv && mlir::isa<mlir::tensor::SplatOp>(existing))
+          auto attr =
+              existing.getAttrOfType<mlir::IntegerAttr>("hip.cross_seqlens");
+          if (attr && attr.getInt() == skv &&
+              mlir::isa<mlir::tensor::SplatOp>(existing))
             seqlensK = existing.getResult(0);
         }
         rewriter.setInsertionPointToStart(entry);
@@ -341,7 +349,8 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
       if (!seqlensK) {
         mlir::Value skvValue = mlir::arith::ConstantOp::create(
             rewriter, loc, rewriter.getIntegerAttr(i32Ty, skv));
-        mlir::Value batchSize = mlir::tensor::DimOp::create(rewriter, loc, key, 0);
+        mlir::Value batchSize =
+            mlir::tensor::DimOp::create(rewriter, loc, key, 0);
         auto splat = mlir::tensor::SplatOp::create(
             rewriter, loc, skvValue,
             mlir::RankedTensorType::get({mlir::ShapedType::kDynamic}, i32Ty),
