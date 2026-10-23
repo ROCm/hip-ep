@@ -160,6 +160,35 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu");
 
+  // Every wrap_qmoe path takes fp16 activations and 4-bit experts; the fused
+  // SwiGLU decode would misread wider weights instead of rejecting them.
+  if (!mlir::getElementTypeOrSelf(input.getType()).isF16() ||
+      expertWeightBitsAttr.getInt() != 4) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: only fp16 input with expert_weight_bits=4 is supported");
+  }
+
+  // wrap_qmoe rejects every other combination at runtime.
+  const int64_t swigluFusion = swigluFusionAttr.getInt();
+  if (swigluFusion != 1 &&
+      !(swigluFusion == 0 && activationTypeAttr.getValue() == "relu2")) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: only swiglu_fusion=1, or swiglu_fusion=0 with "
+            "activation_type=relu2, is supported");
+  }
+
+  // weights_prepacked (ORT default -1): 0 is the schema [E, N, K/pack]
+  // layout, and -1 / 1 are EP-defined. This EP's default layout is the schema
+  // one, and it has no alternate layout.
+  auto prepackedAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("weights_prepacked");
+  const int64_t weightsPrepacked = prepackedAttr ? prepackedAttr.getSInt() : -1;
+  if (weightsPrepacked != -1 && weightsPrepacked != 0) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: weights_prepacked must be -1 or 0 (schema [E, N, K/pack] "
+            "weights); no alternate prepacked layout is implemented");
+  }
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 

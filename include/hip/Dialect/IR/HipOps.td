@@ -1023,6 +1023,10 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
       L = clamp(l, -swiglu_limit, swiglu_limit)
       result = G * sigmoid(activation_alpha * G) * (L + activation_beta)
 
+    relu2 formula (when swiglu_fusion=0 and activation_type="relu2", so fc1
+    has no gate/linear split):
+      result = relu(fc1_out)^2
+
     Weight packing follows MatMulNBits convention: uint8 packed,
     dequantized = (quantized - 8) * scale for 4-bit weights.
 
