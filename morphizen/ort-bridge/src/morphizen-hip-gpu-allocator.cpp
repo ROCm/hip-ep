@@ -24,6 +24,7 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -110,13 +111,37 @@ static_assert(LargeCapacity(64ull << 20) - (64ull << 20) >= 512 * 4096,
 // hipHostFree unpins pages and is as heavyweight as the hipHostMalloc that
 // pinned them, so holding the lock would serialize every other allocation
 // behind it.
-void ReleaseToDriver(const std::vector<void *> &buffers, int device_id) {
+void ReleaseToDriver(const std::vector<void *> &buffers, int device_id,
+                     bool device_only) {
   if (buffers.empty()) {
     return;
   }
   ScopedDevice _(device_id);
   for (void *p : buffers) {
-    (void)hipHostFree(p);
+    (void)(device_only ? hipFree(p) : hipHostFree(p));
+  }
+}
+
+hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
+  return device_only
+             ? hipMalloc(ptr, size)
+             : hipHostMalloc(ptr, size,
+                             hipHostMallocMapped | hipHostMallocCoherent);
+}
+
+bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
+  if (memory_info == nullptr) {
+    return false;
+  }
+  const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
+  if (env != nullptr && std::strcmp(env, "0") == 0) {
+    return false;
+  }
+  try {
+    return Ort::ConstMemoryInfo(memory_info).GetDeviceMemoryType() ==
+           OrtDeviceMemoryType_DEFAULT;
+  } catch (const Ort::Exception &) {
+    return false;
   }
 }
 
@@ -143,7 +168,8 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
 
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
-    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
+    : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)},
+      device_only_{UseDeviceOnly(memory_info)} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
@@ -233,6 +259,46 @@ void HipGpuAllocator::DrainLarge(std::vector<void *> &out) {
   large_free_.clear();
 }
 
+// A reuse bucket that has been hit since its last free is being refilled by
+// the buffers that freed into it, such as a KV set; taking from it would only
+// make that set's remaining requests miss in turn.
+void HipGpuAllocator::EvictIdleReuse(size_t need, std::vector<void *> &out) {
+  size_t released = 0;
+  while (released < need) {
+    auto victim = reuse_free_.end();
+    for (auto it = reuse_free_.begin(); it != reuse_free_.end(); ++it) {
+      if (it->second.idle &&
+          (victim == reuse_free_.end() ||
+           it->second.last_used < victim->second.last_used)) {
+        victim = it;
+      }
+    }
+    if (victim == reuse_free_.end()) {
+      return;
+    }
+    auto &buffers = victim->second.free;
+    while (!buffers.empty() && released < need) {
+      ptr_to_size_.erase(buffers.back());
+      out.push_back(buffers.back());
+      buffers.pop_back();
+      released += victim->first;
+    }
+    if (buffers.empty()) {
+      reuse_free_.erase(victim);
+    }
+  }
+}
+
+void HipGpuAllocator::DrainReuse(std::vector<void *> &out) {
+  for (auto &entry : reuse_free_) {
+    for (void *ptr : entry.second.free) {
+      ptr_to_size_.erase(ptr);
+      out.push_back(ptr);
+    }
+  }
+  reuse_free_.clear();
+}
+
 void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
@@ -281,6 +347,20 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
         }
         return ptr;
       }
+      if (auto sit = self->reuse_free_.lower_bound(size);
+          sit != self->reuse_free_.end() && sit->first <= LargeCapacity(size)) {
+        void *ptr = sit->second.free.back();
+        sit->second.free.pop_back();
+        sit->second.last_used = self->large_ops_;
+        sit->second.idle = false;
+        grown = self->ReplacesLiveBuffer(size);
+        self->grown_reused_ |= grown;
+        self->NoteLargeCheckedOut(ptr, size, grown);
+        if (sit->second.free.empty()) {
+          self->reuse_free_.erase(sit);
+        }
+        return ptr;
+      }
       grown = self->ReplacesLiveBuffer(size);
       if (grown || self->grown_reused_) {
         alloc_size = LargeCapacity(size);
@@ -289,30 +369,18 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
       // Here rather than in FreeImpl so that path keeps a single exit and
       // cannot drop a buffer from ptr_to_size_ without unpinning it.
       self->TrimLarge(stale);
+      self->EvictIdleReuse(alloc_size, stale);
     }
   }
-  ReleaseToDriver(stale, self->device_id_);
+  ReleaseToDriver(stale, self->device_id_, self->device_only_);
 
   ScopedDevice _(self->device_id_);
 
-  // On AMD APU iGPU (the only hardware MorphiZen EP currently targets) the
-  // GPU shares physical memory with the CPU, so we use hipHostMalloc(Mapped)
-  // for both DEFAULT and HOST_ACCESSIBLE OrtMemoryInfos: the same pointer is
-  // dereferenceable from CPU and GPU. (hipMalloc would return a GPU-only
-  // virtual address that the host cannot deref, which crashes OGA's KV
-  // cache zero-init.)
-  //
-  // TODO(discrete-gpu): on a discrete AMD GPU (PCIe), DEFAULT memory should
-  // be hipMalloc'd into VRAM for locality + to avoid the host coherency
-  // traffic. HOST_ACCESSIBLE should keep using hipHostMalloc(Mapped). To
-  // do that we need to (a) read OrtMemoryInfoGetMemType from memory_info_
-  // and branch here, and (b) update OGA's MorphiZenEP::Memory struct to
-  // stop aliasing p_cpu_ = p_device_ and instead route Zero / CopyDeviceToCpu
-  // / CopyCpuToDevice through the HIP runtime. Tracked separately because
-  // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
+  // DEFAULT memory is device-only: OGA's AMDGPU GpuMemory reaches it solely
+  // through CopyTensors. HOST_ACCESSIBLE memory must stay host-mapped since
+  // OGA's PinnedMemory aliases p_cpu_ = p_device_.
   void *ptr = nullptr;
-  hipError_t err = hipHostMalloc(&ptr, alloc_size,
-                                 hipHostMallocMapped | hipHostMallocCoherent);
+  hipError_t err = DriverAlloc(&ptr, alloc_size, self->device_only_);
   if (err != hipSuccess) {
     // The large pool may be sitting on pinned pages this allocation could use,
     // and failing while holding reclaimable memory would be worse than not
@@ -321,17 +389,18 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     {
       std::lock_guard<std::mutex> lk(self->pool_mutex_);
       self->DrainLarge(drained);
+      self->DrainReuse(drained);
     }
     if (!drained.empty()) {
-      ReleaseToDriver(drained, self->device_id_);
-      err = hipHostMalloc(&ptr, alloc_size,
-                          hipHostMallocMapped | hipHostMallocCoherent);
+      ReleaseToDriver(drained, self->device_id_, self->device_only_);
+      err = DriverAlloc(&ptr, alloc_size, self->device_only_);
     }
   }
   if (err != hipSuccess) {
-    LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
-               << alloc_size << " bytes (device " << self->device_id_
-               << "): " << hipGetErrorString(err);
+    LOG(ERROR) << "[MorphiZen HIP] "
+               << (self->device_only_ ? "hipMalloc" : "hipHostMalloc")
+               << " failed for " << alloc_size << " bytes (device "
+               << self->device_id_ << "): " << hipGetErrorString(err);
     return nullptr;
   }
   {
@@ -381,13 +450,15 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
         }
       }
 
-      if (!keep || self->grown_live_count_ == 0) {
-        self->ptr_to_size_.erase(it);
-        to_release.push_back(p);
-      } else {
+      if (keep && self->grown_live_count_ != 0) {
         auto &bucket = self->large_free_[capacity];
         bucket.free.push_back(p);
         bucket.last_used = self->large_ops_;
+      } else {
+        auto &bucket = self->reuse_free_[capacity];
+        bucket.free.push_back(p);
+        bucket.last_used = self->large_ops_;
+        bucket.idle = true;
       }
       if (self->grown_live_count_ == 0 && !self->large_free_.empty()) {
         // No grown buffer is checked out: the growing tensors were released or
@@ -398,7 +469,7 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       }
     }
   }
-  ReleaseToDriver(to_release, self->device_id_);
+  ReleaseToDriver(to_release, self->device_id_, self->device_only_);
 }
 
 HipGpuAllocator::~HipGpuAllocator() {
@@ -409,9 +480,9 @@ HipGpuAllocator::~HipGpuAllocator() {
   ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
   for (const auto &kv : ptr_to_size_) {
-    hipError_t err = hipHostFree(kv.first);
+    hipError_t err = device_only_ ? hipFree(kv.first) : hipHostFree(kv.first);
     if (err != hipSuccess) {
-      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device "
+      LOG(WARNING) << "[MorphiZen HIP] driver free failed (device "
                    << device_id_ << "): " << hipGetErrorString(err);
     }
   }
@@ -419,6 +490,7 @@ HipGpuAllocator::~HipGpuAllocator() {
     fl.clear();
   }
   large_free_.clear();
+  reuse_free_.clear();
   ptr_to_size_.clear();
 }
 
