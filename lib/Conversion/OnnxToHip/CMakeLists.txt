@@ -33,6 +33,7 @@ add_library(OnnxToHip STATIC
   NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
+  HyperConnectionConversion.cpp
   RotaryEmbeddingConversion.cpp
   OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp
@@ -62,6 +63,9 @@ add_library(OnnxToHip STATIC
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
+  GatedDeltaNetConversion.cpp
+  DynamicSparseAttentionConversion.cpp
+  SparseAttentionIndexerConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp

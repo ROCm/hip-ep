@@ -48,6 +48,9 @@ add_library(HipToLLVM STATIC
   AndLowering.cpp
   DivLowering.cpp
   LinearAttentionLowering.cpp
+  GatedDeltaNetLowering.cpp
+  DynamicSparseAttentionLowering.cpp
+  SparseAttentionIndexerLowering.cpp
   UnaryElementwiseLowering.cpp
   CumSumLowering.cpp
   PadLowering.cpp

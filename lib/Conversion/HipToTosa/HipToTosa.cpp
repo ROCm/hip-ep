@@ -518,6 +518,10 @@ struct CausalConvWithStateConverter final
       return rewriter.notifyMatchFailure(op, "expected tensor mode");
     if (op.getNdim() != 1)
       return rewriter.notifyMatchFailure(op, "only 1-D causal conv is TOSA");
+    if (op.getDilation() != 1 || op.getStateChannelsLast()) {
+      return rewriter.notifyMatchFailure(
+          op, "dilated or channels-last-state causal conv is not TOSA");
+    }
 
     Location loc = op.getLoc();
     auto inType = dyn_cast<RankedTensorType>(adaptor.getInput().getType());
