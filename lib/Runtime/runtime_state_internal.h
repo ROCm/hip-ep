@@ -390,6 +390,9 @@ struct RuntimeState {
   // constants blob so the weights keep placement priority over it; null when
   // the session runs without an arena.
   void *transient_arena;
+  // Set by the EP while it records one Compute() into a HIP graph. Host syncs
+  // and device readbacks are illegal during stream capture and are skipped.
+  bool graph_capturing;
 };
 
 // Every session-owned device transient (pools, workspace, op scratch) must be

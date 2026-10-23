@@ -97,6 +97,13 @@ public:
   void add_cpu_profile(const char *name, double cpu_start_us,
                        double cpu_ms) const;
 
+  // HIP graph hooks (see hipdnn_ep_runtime.h). supports_graph() is false when
+  // the artifact predates any of them; the others are then never called.
+  bool supports_graph() const;
+  void set_graph_capture(bool capturing) const;
+  uint64_t alloc_fingerprint() const;
+  void note_graph_replay() const;
+
   // Diagnostic-only accessor: returns the hipStream_t used by
   // inference_compute, as a void*.  Relies on RuntimeState
   // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
@@ -158,6 +165,13 @@ private:
   // resolve-once / null-when-absent contract as flush_op_profile_fn_ above.
   using AddCpuProfileFn = void (*)(void *, const char *, double, double);
   AddCpuProfileFn add_cpu_profile_fn_;
+
+  using SetGraphCaptureFn = void (*)(void *, int);
+  using AllocFingerprintFn = uint64_t (*)(void *);
+  using NoteGraphReplayFn = void (*)(void *);
+  SetGraphCaptureFn set_graph_capture_fn_;
+  AllocFingerprintFn alloc_fingerprint_fn_;
+  NoteGraphReplayFn note_graph_replay_fn_;
 };
 
 } // namespace mlir_compilation::customop

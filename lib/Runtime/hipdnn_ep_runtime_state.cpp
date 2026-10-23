@@ -565,6 +565,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->sai_past_len_cached_valid = false;
   state->sai_past_len_cached_val = 0;
   state->sai_past_len_cached_ptr = nullptr;
+  state->graph_capturing = false;
   state->loop_iter_cpu_buf = nullptr;
   state->loop_iter_capacity = 0;
   state->loop_iter_dev = nullptr;
@@ -1466,6 +1467,72 @@ extern "C"
   hipdnn_ep_set_current_stream(static_cast<void *>(state->stream));
 }
 
+// HIP graph hooks (same dllexport contract as begin_compute). The EP brackets
+// a stream capture of one Compute() with set_graph_capture(1/0), replays the
+// graph while alloc_fingerprint is unchanged, and reports each replay.
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_set_graph_capture(RuntimeState *state,
+                                                 int capturing) {
+  if (!state)
+    return;
+  state->graph_capturing = capturing != 0;
+}
+
+// Hash of every grow-on-demand device/host buffer the compiled graph can bake
+// into kernel arguments. A grow frees the old block, so a captured graph is
+// only valid while this value is unchanged.
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        uint64_t hipdnn_ep_runtime_alloc_fingerprint(RuntimeState *state) {
+  if (!state)
+    return 0;
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  auto mix_buf = [&mix](const void *p, size_t n) {
+    mix(reinterpret_cast<uintptr_t>(p));
+    mix(n);
+  };
+  for (int i = 0; i < state->num_pool_domains; ++i)
+    mix_buf(state->pool_base[i], state->pool_size[i]);
+  for (int i = 0; i < state->num_scan_pool_domains; ++i)
+    mix_buf(state->scan_pool_base[i], state->scan_pool_size[i]);
+  mix_buf(state->disk_gather_staging, state->disk_gather_staging_size);
+  mix_buf(state->workspace, state->workspace_size);
+  mix_buf(state->host_scratch_base, state->host_scratch_size);
+  mix_buf(state->qmoe_scratch, state->qmoe_scratch_size);
+  mix_buf(state->qmoe_host_scratch, state->qmoe_host_scratch_size);
+  mix_buf(state->qmoe_amd_scratch, state->qmoe_amd_scratch_size);
+  mix_buf(state->qmoe_amd_host_scratch, state->qmoe_amd_host_scratch_size);
+  mix_buf(state->conv_scratch, state->conv_scratch_size);
+  mix_buf(state->qlpnormalization_scratch,
+          state->qlpnormalization_scratch_size);
+  mix_buf(state->qsigmoid_scratch, state->qsigmoid_scratch_size);
+  mix_buf(state->matmul_dp4a_scratch, state->matmul_dp4a_scratch_size);
+  mix_buf(state->la_scratch, state->la_scratch_size);
+  mix_buf(state->gqa_fp32_adapter_scratch,
+          state->gqa_fp32_adapter_scratch_size);
+  mix_buf(state->loop_iter_cpu_buf, state->loop_iter_capacity);
+  return h;
+}
+
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_note_graph_replay(RuntimeState *state) {
+  // Nothing to advance: the GQA decode-length estimate reads the seqlens_k
+  // copy the captured graph re-issues into pinned memory on every replay.
+  (void)state;
+}
+
 // Per-op profile flush hook. Moved out of hipdnn_ep_stream_sync (which is on
 // the inference_compute hot path) so the resolve + map + fprintf cost lands
 // AFTER the EP closes its wall_ms timing window. Same dllexport contract as
@@ -2260,6 +2327,10 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
             "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
     return -1;
   }
+  // The readback targets this stack frame; a captured graph would replay it
+  // into a dead address. Replays reset the flag at entry but never read it.
+  if (state->graph_capturing)
+    return 0;
 
   int host_error = 0;
   hipError_t err =

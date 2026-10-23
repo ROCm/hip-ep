@@ -645,6 +645,11 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     (void)hipEventRecord(g_perf.d2h_end, stream);
   }
 
+  // A capturing stream cannot be synchronized; the EP syncs after it launches
+  // the instantiated graph.
+  if (state->graph_capturing)
+    return HIPDNN_EP_SUCCESS;
+
   if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
       hipSuccess) {
     fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");

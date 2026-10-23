@@ -27,11 +27,13 @@
 #endif
 #include <algorithm>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -576,6 +578,7 @@ struct OutputAllocatorCtx {
   std::vector<PendingD2H> pending_d2h; // filled during compute, consumed after
   // Output-completeness guard: which metadata outputs received an alloc call.
   std::vector<bool> allocated;
+  std::vector<GraphOutput> *record = nullptr; // optional, for graph capture
 };
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
@@ -635,6 +638,9 @@ void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
     void *ort_ptr = out_tensor.GetTensorMutableRawData();
 
     octx->allocated[static_cast<size_t>(out_idx)] = true;
+    if (octx->record)
+      octx->record->push_back(
+          {ort_idx, out_shape, ort_ptr, mem_type == TENSOR_MEMORY_GPU});
 
     if (mem_type == TENSOR_MEMORY_GPU) {
       // Zero-copy: ORT buffer is already GPU-accessible (e.g. the EP's
@@ -742,6 +748,7 @@ MlirCustomOp::~MlirCustomOp() {
     (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_stop_));
     ep_perf_ev_stop_ = nullptr;
   }
+  drop_graph();
 #endif
 }
 
@@ -749,8 +756,8 @@ MlirCustomOp::~MlirCustomOp() {
 // hip.alloc_output. The EP installs a per-Compute callback that hands each
 // graph output an ORT (or GPU-scratch) buffer; host outputs are D2H-copied
 // afterwards. See the OutputAllocatorCtx / output_allocate_cb block above.
-void MlirCustomOp::compute_with_output_allocator(
-    OrtKernelContext *context) const {
+int MlirCustomOp::compute_with_output_allocator(
+    OrtKernelContext *context, std::vector<GraphOutput> *outputs) const {
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
@@ -780,6 +787,7 @@ void MlirCustomOp::compute_with_output_allocator(
   octx.output_index_map = &output_index_map_;
   octx.host_out_scratch = &host_out_scratch_;
   octx.allocated.assign(metadata_.outputs().size(), false);
+  octx.record = outputs;
 
   output_allocator_t alloc;
   alloc.self = &octx;
@@ -853,10 +861,193 @@ void MlirCustomOp::compute_with_output_allocator(
 #endif
 
   MY_LOG(2) << "compute_with_output_allocator completed";
+  return ret;
 }
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+namespace {
+
+// 0 = off, 1 = on, 2 = on + one stderr line per capture / drop.
+int graph_mode() {
+  static const int mode = [] {
+    const std::string v = hipdnn_ep::env_string("HIPDNN_EP_HIP_GRAPH");
+    return v.empty() ? 0 : std::atoi(v.c_str());
+  }();
+  return mode;
+}
+
+// Eager runs with an unchanged signature before one is captured. The first
+// decode steps after a prefill still grow pools and seed the length estimate.
+constexpr int kGraphWarmupRuns = 2;
+// Replays before a re-capture refreshes length-dependent plans; must stay
+// below the runtime's kGraphPlanHeadroom (real/gqa.cpp).
+constexpr int kGraphMaxReplays = 192;
+
+// Goes to HIPDNN_EP_HIP_GRAPH_LOG when set (stderr is not always visible from
+// hosting processes), else stderr.
+void graph_log(const char *fmt, ...) {
+  if (graph_mode() < 2)
+    return;
+  static std::mutex mu;
+  static FILE *out = [] {
+    const std::string path = hipdnn_ep::env_string("HIPDNN_EP_HIP_GRAPH_LOG");
+    FILE *f = path.empty() ? nullptr : std::fopen(path.c_str(), "a");
+    return f ? f : stderr;
+  }();
+  std::lock_guard<std::mutex> lock(mu);
+  va_list ap;
+  va_start(ap, fmt);
+  std::fprintf(out, "[hip-graph] ");
+  std::vfprintf(out, fmt, ap);
+  std::fputc('\n', out);
+  std::fflush(out);
+  va_end(ap);
+}
+
+uint64_t input_signature(const TensorData &inputs, bool *all_gpu) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  *all_gpu = true;
+  for (size_t i = 0; i < inputs.tensors.size(); ++i) {
+    const tensor_t &t = inputs.tensors[i];
+    mix(reinterpret_cast<uintptr_t>(t.data));
+    mix(static_cast<uint64_t>(t.rank));
+    for (int64_t d : inputs.shapes[i])
+      mix(static_cast<uint64_t>(d));
+    *all_gpu = *all_gpu && t.memory_type == TENSOR_MEMORY_GPU;
+  }
+  return h;
+}
+
+} // namespace
+
+void MlirCustomOp::drop_graph() const {
+  if (graph_.exec) {
+    (void)hipGraphExecDestroy(static_cast<hipGraphExec_t>(graph_.exec));
+    graph_.exec = nullptr;
+  }
+  graph_.outputs.clear();
+  graph_.replays = 0;
+}
+
+void MlirCustomOp::compute_with_graph(OrtKernelContext *context) const {
+  GraphCache &g = graph_;
+  hipStream_t stream =
+      static_cast<hipStream_t>(inference_state_->get_stream_raw());
+  bool all_gpu = false;
+  const uint64_t sig =
+      input_signature(marshal_input_tensors(context, input_index_map_),
+                      &all_gpu);
+
+  if (g.exec && sig == g.last_sig && g.replays < kGraphMaxReplays &&
+      inference_state_->alloc_fingerprint() == g.alloc_fp) {
+    Ort::KernelContext ctx(context);
+    bool outputs_match = true;
+    for (const GraphOutput &o : g.outputs) {
+      auto t = ctx.GetOutput(o.ort_idx, o.shape);
+      outputs_match = outputs_match && t.GetTensorMutableRawData() == o.ptr;
+    }
+    if (outputs_match) {
+      if (hipGraphLaunch(static_cast<hipGraphExec_t>(g.exec), stream) ==
+              hipSuccess &&
+          hipStreamSynchronize(stream) == hipSuccess) {
+        inference_state_->note_graph_replay();
+        ++g.replays;
+        return;
+      }
+      LOG(ERROR) << "HIP graph replay failed: "
+                 << hipGetErrorString(hipGetLastError())
+                 << "; falling back to eager execution";
+      g.disabled = true;
+    } else if (++g.output_moves >= 2) {
+      graph_log("ORT keeps moving outputs; graphs disabled");
+      g.disabled = true;
+    }
+  }
+  if (g.exec) {
+    graph_log("drop graph after %d replays", g.replays);
+    drop_graph();
+    // One eager pass before re-capturing lets buffers sized from the advanced
+    // length estimate grow outside the capture.
+    g.same_sig_runs = std::min(g.same_sig_runs, kGraphWarmupRuns - 1);
+  }
+
+  if (sig == g.last_sig) {
+    ++g.same_sig_runs;
+  } else {
+    graph_log("node %p: new input signature after %d runs (all_gpu=%d)",
+              (void *)this, g.same_sig_runs, all_gpu ? 1 : 0);
+    g.last_sig = sig;
+    g.same_sig_runs = 1;
+  }
+
+  inference_state_->begin_compute();
+  if (g.disabled || !all_gpu || g.same_sig_runs <= kGraphWarmupRuns) {
+    std::vector<GraphOutput> outputs;
+    compute_with_output_allocator(context, &outputs);
+    for (const GraphOutput &o : outputs)
+      g.disabled = g.disabled || !o.on_gpu;
+    return;
+  }
+
+  std::vector<GraphOutput> outputs;
+  hipGraph_t graph = nullptr;
+  hipGraphExec_t exec = nullptr;
+  hipError_t err = hipStreamBeginCapture(stream, hipStreamCaptureModeRelaxed);
+  if (err == hipSuccess) {
+    inference_state_->set_graph_capture(true);
+    const int ret = compute_with_output_allocator(context, &outputs);
+    inference_state_->set_graph_capture(false);
+    err = hipStreamEndCapture(stream, &graph);
+    if (err == hipSuccess && ret != 0)
+      err = hipErrorUnknown;
+  }
+  if (err == hipSuccess)
+    err = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+  if (graph)
+    (void)hipGraphDestroy(graph);
+  if (err == hipSuccess) {
+    g.exec = exec;
+    g.alloc_fp = inference_state_->alloc_fingerprint();
+    g.outputs = std::move(outputs);
+    err = hipGraphLaunch(exec, stream);
+    if (err == hipSuccess)
+      err = hipStreamSynchronize(stream);
+    if (err == hipSuccess) {
+      graph_log("captured %zu outputs", g.outputs.size());
+      return;
+    }
+    drop_graph();
+  }
+
+  // Nothing captured ran on the device; redo this Compute() eagerly.
+  LOG(WARNING) << "HIP graph capture failed (" << hipGetErrorString(err)
+               << "); this node runs eagerly from now on";
+  graph_log("capture failed: %s", hipGetErrorString(err));
+  (void)hipGetLastError();
+  g.disabled = true;
+  inference_state_->begin_compute();
+  compute_with_output_allocator(context);
+}
+#endif // HIPDNN_EP_LINK_HIP_HOST
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (graph_mode() > 0 && !graph_.last_sig && !graph_.disabled)
+    graph_log("node %p: supports_graph=%d perf=%d", (void *)this,
+              inference_state_->supports_graph() ? 1 : 0,
+              perf_enabled() ? 1 : 0);
+  if (graph_mode() > 0 && !perf_enabled() && !graph_.disabled &&
+      inference_state_->supports_graph()) {
+    compute_with_graph(context);
+    return;
+  }
+#endif
 
   // Tell the runtime that a new forward pass is starting so per-Compute()
   // caches (currently the GQA seqlens_k cache) are invalidated. No-op if

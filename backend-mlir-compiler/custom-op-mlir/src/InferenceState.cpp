@@ -62,6 +62,12 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
   add_cpu_profile_fn_ =
       artifact.get_method<void, void *, const char *, double, double>(
           "hipdnn_ep_runtime_add_cpu_profile");
+  set_graph_capture_fn_ = artifact.get_method<void, void *, int>(
+      hipdnn::abi::kRuntimeSetGraphCapture);
+  alloc_fingerprint_fn_ = artifact.get_method<uint64_t, void *>(
+      hipdnn::abi::kRuntimeAllocFingerprint);
+  note_graph_replay_fn_ =
+      artifact.get_method<void, void *>(hipdnn::abi::kRuntimeNoteGraphReplay);
 }
 
 InferenceState::InferenceState(PrivateTag, void *state,
@@ -69,7 +75,8 @@ InferenceState::InferenceState(PrivateTag, void *state,
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
       set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr),
-      add_cpu_profile_fn_(nullptr) {
+      add_cpu_profile_fn_(nullptr), set_graph_capture_fn_(nullptr),
+      alloc_fingerprint_fn_(nullptr), note_graph_replay_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
@@ -211,6 +218,23 @@ void InferenceState::add_cpu_profile(const char *name, double cpu_start_us,
   if (add_cpu_profile_fn_ && state_) {
     add_cpu_profile_fn_(state_, name, cpu_start_us, cpu_ms);
   }
+}
+
+bool InferenceState::supports_graph() const {
+  return state_ && set_graph_capture_fn_ && alloc_fingerprint_fn_ &&
+         note_graph_replay_fn_;
+}
+
+void InferenceState::set_graph_capture(bool capturing) const {
+  set_graph_capture_fn_(state_, capturing ? 1 : 0);
+}
+
+uint64_t InferenceState::alloc_fingerprint() const {
+  return alloc_fingerprint_fn_(state_);
+}
+
+void InferenceState::note_graph_replay() const {
+  note_graph_replay_fn_(state_);
 }
 
 // First-field cast onto RuntimeState (see runtime_state_internal.h).

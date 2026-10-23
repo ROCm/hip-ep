@@ -31,6 +31,12 @@ inline constexpr const char *kSetOutputAllocator =
     "hipdnn_ep_set_output_allocator";
 inline constexpr const char *kRuntimeFlushOpProfile =
     "hipdnn_ep_runtime_flush_op_profile";
+inline constexpr const char *kRuntimeSetGraphCapture =
+    "hipdnn_ep_runtime_set_graph_capture";
+inline constexpr const char *kRuntimeAllocFingerprint =
+    "hipdnn_ep_runtime_alloc_fingerprint";
+inline constexpr const char *kRuntimeNoteGraphReplay =
+    "hipdnn_ep_runtime_note_graph_replay";
 
 // Per-op-state-slots C-ABI symbol names (see
 // docs/design/op-state-slots-design.md). kOpStatesInitFn is emitted by

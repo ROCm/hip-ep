@@ -502,6 +502,19 @@ void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state);
 void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state, const char *name,
                                        double cpu_start_us, double cpu_ms);
 
+// HIP graph hooks, used by the EP to record one Compute() with stream capture
+// and replay it.
+//   set_graph_capture(1/0) brackets the captured Compute(): stream syncs and
+//     device readbacks are skipped and length-dependent plans leave headroom.
+//   alloc_fingerprint hashes every grow-on-demand buffer a graph can
+//     reference; a captured graph is valid only while it is unchanged.
+//   note_graph_replay advances the host length estimate by the step the
+//     captured forward pass made.
+// Optional like begin_compute: a model.dll predating them disables graphs.
+void hipdnn_ep_runtime_set_graph_capture(RuntimeState *state, int capturing);
+uint64_t hipdnn_ep_runtime_alloc_fingerprint(RuntimeState *state);
+void hipdnn_ep_runtime_note_graph_replay(RuntimeState *state);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:

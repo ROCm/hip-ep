@@ -26,6 +26,27 @@ struct HostOutputScratch {
   size_t capacity = 0; // bytes currently allocated at ptr
 };
 
+// One ORT output as handed to the DLL during a Compute().
+struct GraphOutput {
+  int ort_idx = 0;
+  std::vector<int64_t> shape;
+  void *ptr = nullptr;
+  bool on_gpu = false;
+};
+
+// HIP graph replay of a Compute() whose inputs (addresses and shapes) repeat,
+// e.g. LLM decode over static IO buffers. Enabled by HIPDNN_EP_HIP_GRAPH=1.
+struct GraphCache {
+  bool disabled = false;   // a capture failed or outputs kept moving
+  uint64_t last_sig = 0;   // input signature of the previous Compute()
+  int same_sig_runs = 0;   // consecutive eager runs with last_sig
+  void *exec = nullptr;    // hipGraphExec_t
+  uint64_t alloc_fp = 0;   // runtime buffer fingerprint at capture
+  int replays = 0;         // replays since capture
+  int output_moves = 0;    // replays refused because ORT moved an output
+  std::vector<GraphOutput> outputs;
+};
+
 // Custom Op implementation for MLIR-compiled models
 // Loads artifacts from EPContext and executes inference
 class MlirCustomOp : public morphizen::CustomOpImp {
@@ -46,8 +67,16 @@ public:
 private:
   // Output-allocator dispatch (2-arg inference_compute). Installs a per-Compute
   // callback that allocates each graph output in-graph, then performs any
-  // host-output device->host copies.
-  void compute_with_output_allocator(OrtKernelContext *context) const;
+  // host-output device->host copies. Returns inference_compute's code; when
+  // `outputs` is set it receives every output handed to the DLL.
+  int compute_with_output_allocator(
+      OrtKernelContext *context,
+      std::vector<GraphOutput> *outputs = nullptr) const;
+
+  // HIP graph path (see GraphCache): replays, captures after warm-up, or runs
+  // eagerly. Always completes the Compute().
+  void compute_with_graph(OrtKernelContext *context) const;
+  void drop_graph() const;
 
   // Inference state owns the artifact (clear ownership via unique_ptr)
   std::unique_ptr<customop::InferenceState> inference_state_;
@@ -81,6 +110,8 @@ private:
   // Mutable because Compute() is const but lazy-init writes these once.
   mutable void *ep_perf_ev_start_ = nullptr;
   mutable void *ep_perf_ev_stop_ = nullptr;
+
+  mutable GraphCache graph_;
 };
 
 } // namespace mlir_compilation
