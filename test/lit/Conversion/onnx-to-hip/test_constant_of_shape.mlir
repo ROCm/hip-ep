@@ -7,9 +7,7 @@
 //      ops that broadcast a scalar (today onnx.Where) -> a rank-0 fill-value
 //      buffer (tensor.empty + linalg.fill), elide the full-size buffer.
 //   2. ConstantOfShapeFold: shape input is a compile-time constant AND result
-//      type is fully static -> a splat constant; no runtime work. A float
-//      fill becomes a hip.constant (device constants), an integer one an
-//      arith.constant.
+//      type is fully static -> single splat arith.constant; no runtime work.
 //   3. ConstantOfShapeDynamic (fallback): shape input is non-constant OR
 //      result has at least one dynamic dim -> tensor.splat whose dynamic
 //      dim sizes are read out of the shape tensor at runtime via
@@ -29,7 +27,7 @@ module {
     %r = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<2x3xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK: hip.constant {{.*}}value = dense<0.000000e+00> : tensor<2x3xf32>
+    // CHECK: arith.constant dense<0.000000e+00> : tensor<2x3xf32>
 
     return %r : tensor<2x3xf32>
   }
@@ -43,7 +41,7 @@ module {
     } : (tensor<2xi64>) -> tensor<2x2xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
-    // CHECK: hip.constant {{.*}}value = dense<1.500000e+00> : tensor<2x2xf32>
+    // CHECK: arith.constant dense<1.500000e+00> : tensor<2x2xf32>
 
     return %r : tensor<2x2xf32>
   }

@@ -46,6 +46,7 @@ add_library(HipDialectTransforms STATIC
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
+  PromoteDeviceConstants.cpp
   PromoteStridedHipOperands.cpp
   RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp

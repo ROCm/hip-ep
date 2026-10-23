@@ -137,6 +137,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
+| `hip-promote-device-constants` | func.func | Give every device read of a tensor `arith.constant` (hip op operands, `tensor.insert_slice` source/destination; directly or through cast/reshape/slice views) one `hip.constant` with the same value, so externalization puts it in device memory; host uses keep the `arith.constant`. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
@@ -241,6 +242,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
+  func.func(hip-promote-device-constants)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)

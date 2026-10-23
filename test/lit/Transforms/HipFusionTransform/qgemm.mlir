@@ -245,3 +245,56 @@ func.func @qgemm_per_channel_w8_no_bias(%ctx: !hip.context,
 
   return %q : tensor<4x3xi8>
 }
+
+// -----
+
+// The scales and zero points read through arith.constant as well as
+// hip.constant: a folded constant is still an arith.constant when fusion runs.
+// CHECK-LABEL: func.func @qgemm_no_bias_arith_constants
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<16x64xui8>, %[[B:.*]]: tensor<64x8xi8>) -> tensor<16x8xui8> {
+// CHECK-NEXT:    %[[INIT:.*]] = tensor.empty() : tensor<16x8xui8>
+// CHECK-NEXT:    %[[QGEMM:.*]] = hip.qgemm(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<16x64xui8>, tensor<64x8xi8>) outs(%[[INIT]] : tensor<16x8xui8>) {A_scale = 5.000000e-01 : f32, A_zero_point = 128 : i64, B_scale = 2.500000e-01 : f32, B_zero_point = -3 : i64, Y_scale = 1.250000e-01 : f32, Y_zero_point = 200 : i64} : tensor<16x8xui8>
+// CHECK-NEXT:    return %[[QGEMM]] : tensor<16x8xui8>
+// CHECK-NEXT:  }
+func.func @qgemm_no_bias_arith_constants(%ctx: !hip.context,
+                                         %a: tensor<16x64xui8>,
+                                         %b: tensor<64x8xi8>)
+    -> tensor<16x8xui8> {
+  %a_scale = arith.constant dense<0.5> : tensor<f32>
+  %a_zp = arith.constant dense<128> : tensor<ui8>
+  %b_scale = arith.constant dense<0.25> : tensor<f32>
+  %b_zp = arith.constant dense<-3> : tensor<i8>
+  %y_scale = arith.constant dense<0.125> : tensor<f32>
+  %y_zp = arith.constant dense<200> : tensor<ui8>
+
+  %e0 = tensor.empty() : tensor<16x64xf32>
+  %dq_a = hip.dequantize_linear(%ctx)
+      ins(%a, %a_scale : tensor<16x64xui8>, tensor<f32>)
+      zero_point(%a_zp : tensor<ui8>)
+      outs(%e0 : tensor<16x64xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<16x64xf32>
+
+  %e1 = tensor.empty() : tensor<64x8xf32>
+  %dq_b = hip.dequantize_linear(%ctx)
+      ins(%b, %b_scale : tensor<64x8xi8>, tensor<f32>)
+      zero_point(%b_zp : tensor<i8>)
+      outs(%e1 : tensor<64x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<64x8xf32>
+
+  %e2 = tensor.empty() : tensor<16x8xf32>
+  %gemm = hip.gemm(%ctx)
+      ins(%dq_a, %dq_b : tensor<16x64xf32>, tensor<64x8xf32>)
+      outs(%e2 : tensor<16x8xf32>)
+      {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32,
+       transA = 0 : i64, transB = 0 : i64} : tensor<16x8xf32>
+
+  %e3 = tensor.empty() : tensor<16x8xui8>
+  %q = hip.quantize_linear(%ctx)
+      ins(%gemm, %y_scale : tensor<16x8xf32>, tensor<f32>)
+      zero_point(%y_zp : tensor<ui8>)
+      outs(%e3 : tensor<16x8xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 8 : i64,
+       saturate = 1 : i64} : tensor<16x8xui8>
+
+  return %q : tensor<16x8xui8>
+}

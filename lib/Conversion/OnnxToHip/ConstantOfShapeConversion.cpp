@@ -40,7 +40,9 @@ namespace {
 //      collapses to a single splat `arith.constant`. No runtime work; the
 //      whole computation is materialised at compile time. This is the
 //      common case for transformer-style "allocate a zero KV/mask tensor"
-//      patterns once shape inference + constant folding have run.
+//      patterns once shape inference + constant folding have run. The arith
+//      form keeps the fill visible to host-side folds; a hip op that reads it
+//      gets a device copy from hip-promote-device-constants.
 //
 //   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic
@@ -350,22 +352,8 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
       }
     }
 
-    // A float fill may be read by a device kernel. Emit it as an onnx.Constant,
-    // which the second constant sweep turns into a hip.constant carrier in
-    // device memory. An `arith.constant` here instead bufferizes to a
-    // `memref.global` in host memory. Integer fills stay arith constants: they
-    // are shapes and indices, read on the host or folded away.
-    mlir::Value cst;
-    if (mlir::isa<mlir::FloatType>(elemType)) {
-      mlir::OperationState state(op->getLoc(), "onnx.Constant");
-      state.addTypes(outTensorType);
-      state.addAttribute("value", splatAttr);
-      if (auto outputs = op->getAttr("node.outputs"))
-        state.addAttribute("node.outputs", outputs);
-      cst = rewriter.create(state)->getResult(0);
-    } else {
-      cst = mlir::arith::ConstantOp::create(rewriter, op->getLoc(), splatAttr);
-    }
+    mlir::Value cst =
+        mlir::arith::ConstantOp::create(rewriter, op->getLoc(), splatAttr);
     rewriter.replaceOp(op, cst);
     return mlir::success();
   }

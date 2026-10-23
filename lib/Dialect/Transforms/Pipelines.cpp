@@ -131,6 +131,14 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // A tensor arith.constant read from the device would bufferize to host
+  // memory; give those reads a hip.constant, which externalization below places
+  // on the device. Last before externalization: shape inference has reified
+  // through the arith form, and fusion's rewrite driver has folded views of
+  // arith constants into new constants, neither of which sees through a
+  // hip.constant.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createPromoteDeviceConstantsPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing
