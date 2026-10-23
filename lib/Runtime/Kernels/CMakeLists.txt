@@ -74,6 +74,7 @@ set(_kernel_sources
     hip/batch_norm_kernel.hip
     hip/group_norm_kernel.hip
     hip/rms_norm_kernel.hip
+    hip/hyper_connection_kernel.hip
     hip/skip_rms_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
@@ -85,6 +86,7 @@ set(_kernel_sources
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip
+    hip/ngram_hash_mapping_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/conv_kernel.hip
@@ -98,6 +100,9 @@ set(_kernel_sources
     hip/qmoe_ragged_mm_kernel.hip
     hip/qmoe_amd_kernel.hip
     hip/linear_attention_kernel.hip
+    hip/gated_delta_net_kernel.hip
+    hip/dynamic_sparse_attention_kernel.hip
+    hip/sparse_attention_indexer_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
     hip/slice_kernel.hip
