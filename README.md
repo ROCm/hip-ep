@@ -8,6 +8,8 @@ Licensed under the MIT License.
 
 The provider integrates with ONNX Runtime through the MorphiZen pass framework. By default, compiled models are emitted as OS-portable LLVM bitcode and JIT-loaded in-process when a session is created. Native per-model libraries remain available as an opt-in artifact format.
 
+See the [HIP EP website](https://rocm.github.io/hip-ep/) for documentation and benchmarks.
+
 ## Highlights
 
 - **MLIR compiler pipeline** — lowers ONNX graphs to HIP and LLVM IR.
