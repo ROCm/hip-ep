@@ -382,9 +382,24 @@ static bool topk_small_last_axis_ok(const TopKGeom &geom) {
          geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX;
 }
 
+// K above the per-thread list size kTopKSmallMax stays exact in the two-pass
+// kernels as long as no thread is handed more than kTopKSmallMax candidates in
+// either pass: then every thread list holds its whole share and is never
+// truncated (chunk pass: kTopKChunk / block, merge pass: chunks * K / block).
+// That covers the low-rank candidate head of EAGLE-4 drafts (K = 128 over a
+// 248k vocab: 61 chunks, 31 candidates per thread in the merge).
+constexpr int64_t kTopKTwoPassMaxK = 256;
+
 static bool topk_two_pass_ok(const TopKGeom &geom) {
-  return topk_small_last_axis_ok(geom) && geom.axis_size > 2 * kTopKChunk &&
-         geom.num_rows <= 65535;
+  if (geom.axis_size <= 2 * kTopKChunk || geom.num_rows > 65535)
+    return false;
+  if (topk_small_last_axis_ok(geom))
+    return true;
+  const int64_t chunks = (geom.axis_size + kTopKChunk - 1) / kTopKChunk;
+  const int64_t per_thread = kTopKSmallBlock * kTopKSmallMax;
+  return geom.k > kTopKSmallMax && geom.k <= kTopKTwoPassMaxK &&
+         geom.axis == geom.rank - 1 && geom.axis_size < INT32_MAX &&
+         kTopKChunk <= per_thread && chunks * geom.k <= per_thread;
 }
 
 // Per-chunk (key, index) lists of the two-pass path: float keys, then int

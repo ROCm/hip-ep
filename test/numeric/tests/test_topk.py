@@ -77,6 +77,8 @@ class TestTopK:
             (2, 32000, 1),  # argmax / argmin over a vocab row
             (3, 1000, 16),  # one block per row
             (2, 20000, 32),  # rows past 8192 take the chunked two-pass path
+            (2, 248320, 128),  # 32 < k <= 256 stays on the two-pass path
+            (1, 100000, 256),
         ],
     )
     def test_topk_last_axis_vocab(self, model_runner, rows, cols, k, largest):
