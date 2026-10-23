@@ -769,6 +769,22 @@ class TestGroupQueryAttention:
             "GQA prefix output is all-zero; the chunk-opt clamp regressed."
         )
 
+        # ---- The KV-cache append and RoPE kernels derive the past from
+        # seqlens_k on the device as well. Unclamped, the negative past made
+        # the append kernels skip the batch, leaving the cache unwritten, so
+        # the prompt's keys and values must land in slots [0, real_count).
+        for ep_cache, cpu_cache, name in (
+            (ep_outputs_full[1], narrow_expected[1], "present_key"),
+            (ep_outputs_full[2], narrow_expected[2], "present_value"),
+        ):
+            ep_slots = ep_cache[:, :, :real_count, :]
+            cpu_slots = cpu_cache[:, :, :real_count, :]
+            compare_outputs([ep_slots], [cpu_slots], atol=2e-3)
+            assert np.any(ep_slots != 0), (
+                f"{name} slots [0, {real_count}) are all-zero; the padded "
+                "prompt was not appended to the KV cache."
+            )
+
     def test_gqa_decode_early_cache_llama_shape(self, model_runner):
         """GQA single-token decode right after prefill (Llama-3.1-8B pattern).
 
