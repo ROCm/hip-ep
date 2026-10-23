@@ -3199,8 +3199,10 @@ HIP_KERNEL_API int hip_qmoe_amd_route(
 
 /* relu2 activation (fp16 only): output[i] = relu(input[i])^2, elementwise
  * over n*width elements. Used by com.amd QMoE for both the per-expert and
- * shared-expert branches. input == output is allowed (the callers activate in
- * place), so neither pointer is declared __restrict__ in the kernel.
+ * shared-expert branches, and by com.microsoft QMoE prefill with
+ * swiglu_fusion=0 / activation_type=relu2. input == output is allowed (the
+ * com.amd callers activate in place), so neither pointer is declared
+ * __restrict__ in the kernel.
  */
 HIP_KERNEL_API int hip_qmoe_amd_relu2(
     void* stream,
@@ -3301,7 +3303,9 @@ HIP_KERNEL_API int hip_qmoe_amd_prefill_grouped_wmma(
  * general path's scatter_add rounds to fp16 after every expert.
  *
  * FP16 activations, 4-bit symmetric (zero-point 8) weights, no bias -- the
- * only configuration com.amd QMoE has. Call
+ * only configuration com.amd QMoE has. com.microsoft QMoE decode with
+ * swiglu_fusion=0 / activation_type=relu2 also uses it when that op carries
+ * neither zero points nor bias. Call
  * hip_qmoe_amd_decode_fused_supported() first: the packed-nibble main loop
  * needs 32-element K tiles and power-of-two quant blocks, so shapes outside
  * that must keep using the general path.

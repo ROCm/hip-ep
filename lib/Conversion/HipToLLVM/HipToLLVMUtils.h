@@ -198,6 +198,11 @@ inline constexpr int64_t kStridesIdx = 4;
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 
+// com.microsoft QMoE (hip.qmoe / wrap_qmoe) relu2 activation identifier.
+// Must match HIPDNN_EP_QMOE_ACTIVATION_RELU2 in
+// lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEActivationRelu2 = 5;
+
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.

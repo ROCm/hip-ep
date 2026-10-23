@@ -99,7 +99,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     }
 
     StringRef activationType = op.getActivationType();
-    int64_t activationTypeEnum = 0;
+    int64_t activationTypeEnum;
     if (activationType == "relu") {
       activationTypeEnum = 0;
     } else if (activationType == "gelu") {
@@ -110,6 +110,11 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       activationTypeEnum = 3;
     } else if (activationType == "identity") {
       activationTypeEnum = 4;
+    } else if (activationType == "relu2") {
+      activationTypeEnum = kQMoEActivationRelu2;
+    } else {
+      return op.emitOpError("unsupported activation_type '")
+             << activationType << "'";
     }
 
     Value kVal = createI64Const(op.getK());

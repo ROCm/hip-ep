@@ -44,9 +44,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     return -1;
   }
 
-  if (swiglu_fusion != 1) {
-    fprintf(stderr, "wrap_qmoe: only swiglu_fusion=1 supported, got %lld\n",
-            (long long)swiglu_fusion);
+  // Interleaved SwiGLU (fc1 rows are gate/linear pairs) or an unfused relu2
+  // (fc1 rows are the intermediate). activation_type is not read for SwiGLU.
+  const bool swiglu = swiglu_fusion == 1;
+  const bool relu2 =
+      swiglu_fusion == 0 && activation_type == HIPDNN_EP_QMOE_ACTIVATION_RELU2;
+  if (!swiglu && !relu2) {
+    fprintf(stderr,
+            "wrap_qmoe: unsupported swiglu_fusion=%lld activation_type=%lld "
+            "(supported: swiglu_fusion=1, or swiglu_fusion=0 with relu2)\n",
+            (long long)swiglu_fusion, (long long)activation_type);
     return -1;
   }
 
@@ -92,7 +99,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
   int result = 0;
 
-  int64_t fusion_inter = 2 * inter_size;
+  const int64_t fc1_n = swiglu ? 2 * inter_size : inter_size;
   int64_t k_blocks_fc1 = (hidden_size + block_size - 1) / block_size;
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t routed_rows = num_tokens * k;
@@ -108,7 +115,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   constexpr int64_t kGroupedBigTile = 32;
   auto grouped_fits = [&](int64_t tile_rows) {
     return hip_matmul_nbits_wmma_smallm_grouped_supported(
-               -1, tile_rows, fusion_inter, hidden_size, expert_weight_bits,
+               -1, tile_rows, fc1_n, hidden_size, expert_weight_bits,
                block_size, elem_size) &&
            hip_matmul_nbits_wmma_smallm_grouped_supported(
                -1, tile_rows, hidden_size, inter_size, expert_weight_bits,
@@ -130,7 +137,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
   size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
-  size_t sz_fc1_buf = align_up_64(routed_rows * fusion_inter * elem_size);
+  size_t sz_fc1_buf = align_up_64(routed_rows * fc1_n * elem_size);
   // Fused decode (num_tokens == 1) reuses act_buf and fc2_buf as the [k,
   // inter] activation slots and [k, hidden] per-expert output slots needed
   // by hip_qmoe_decode_fused (gather/scatter happen inline inside the
@@ -249,7 +256,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // scatter_add) sequence below. d_act_buf is reused as the [k, inter]
   // activation slots, d_fc2_buf as the [k, hidden] per-expert output slots
   // (gather/scatter happen inline via expert_indices).
-  if (num_tokens == 1) {
+  if (num_tokens == 1 && swiglu) {
     // W4A8 dp4a decode variant (env-gated). Requires fp16 and 32-aligned
     // block_size / hidden / inter (all true for the MoE targets: block_size
     // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
@@ -281,6 +288,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     return 0;
   }
 
+  // relu2 decode: the com.amd fused decode kernels compute exactly
+  // fc2(relu(fc1(x))^2) weighted by the routing slots, with no gate/linear
+  // pairing. They implement neither zero points nor bias, so those (and
+  // shapes the packed-nibble loop cannot tile) take the general path below,
+  // which handles one token like any other routed row count.
+  if (num_tokens == 1 && relu2 && !fc1_zero_points && !fc2_zero_points &&
+      !fc1_bias && !fc2_bias &&
+      hip_qmoe_amd_decode_fused_supported(hidden_size, inter_size, block_size,
+                                          expert_weight_bits, elem_size)) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: relu2 fused decode path (k=%lld)\n",
+                      (long long)k);
+    HIP_CHECK(hip_qmoe_amd_decode_fused(
+        stream, input, d_expert_indices, d_expert_weights, fc1_weights,
+        fc1_scales, fc2_weights, fc2_scales, d_act_buf, d_fc2_buf, output,
+        hidden_size, inter_size, k, expert_weight_bits, block_size, elem_size));
+    return 0;
+  }
+
   // Device-driven prefill path. The bucket launch creates every descriptor
   // consumed below and resets two independent persistent queues. FC1 gathers
   // source token rows through d_sorted_token_ids; FC2 consumes the contiguous
@@ -293,6 +318,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               (long long)expert_weight_bits);
       return -1;
     }
+
+    // fc1 output [routed_rows, fc1_n] -> activation [routed_rows, inter].
+    auto activate = [&]() -> int {
+      if (swiglu)
+        return hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
+                               inter_size, activation_alpha, activation_beta,
+                               swiglu_limit, elem_size);
+      return hip_qmoe_amd_relu2(stream, d_fc1_buf, d_act_buf, routed_rows,
+                                inter_size, elem_size);
+    };
 
     // The small-M kernel reads the packed zero points directly; only the
     // ragged GEMM needs them unpacked.
@@ -308,7 +343,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc1_zero_points) {
         fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
             *zpc, stream, fc1_zero_points,
-            static_cast<int>(num_experts * fusion_inter),
+            static_cast<int>(num_experts * fc1_n),
             static_cast<int>(k_blocks_fc1));
         if (!fc1_pre_zp_u8) {
           result = -1;
@@ -370,11 +405,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             n, kdim, expert_weight_bits, block_size, elem_size);
       };
       HIP_CHECK(grouped_fc(d_gather_buf, fc1_weights, fc1_scales,
-                           fc1_zero_points, fc1_bias, d_fc1_buf, fusion_inter,
+                           fc1_zero_points, fc1_bias, d_fc1_buf, fc1_n,
                            hidden_size));
-      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
-                                inter_size, activation_alpha, activation_beta,
-                                swiglu_limit, elem_size));
+      HIP_CHECK(activate());
       HIP_CHECK(grouped_fc(d_act_buf, fc2_weights, fc2_scales, fc2_zero_points,
                            fc2_bias, d_fc2_buf, hidden_size, inter_size));
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
@@ -386,12 +419,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, input, d_sorted_token_ids, d_row_groups, d_row_group_count,
         d_fc1_queue_head, fc1_weights, fc1_scales, fc1_pre_zp_u8, fc1_bias,
-        d_fc1_buf, routed_rows, num_experts, fusion_inter, hidden_size,
-        block_size, elem_size));
+        d_fc1_buf, routed_rows, num_experts, fc1_n, hidden_size, block_size,
+        elem_size));
 
-    HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
-                              inter_size, activation_alpha, activation_beta,
-                              swiglu_limit, elem_size));
+    HIP_CHECK(activate());
 
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, d_act_buf, /*input_row_ids=*/nullptr, d_row_groups,

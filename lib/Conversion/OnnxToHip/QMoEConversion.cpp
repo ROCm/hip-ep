@@ -160,6 +160,18 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu");
 
+  // wrap_qmoe implements exactly two activation layouts: interleaved SwiGLU
+  // (swiglu_fusion=1, fc1 rows are gate/linear pairs) and an unfused relu2
+  // (swiglu_fusion=0, fc1 rows are the intermediate). Leave everything else
+  // unconverted rather than compile a call the runtime rejects.
+  const int64_t swigluFusion = swigluFusionAttr.getInt();
+  if (swigluFusion != 1 &&
+      !(swigluFusion == 0 && activationTypeAttr.getValue() == "relu2")) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: only swiglu_fusion=1, or swiglu_fusion=0 with "
+            "activation_type=relu2, is supported");
+  }
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 

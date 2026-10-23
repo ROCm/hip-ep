@@ -14,6 +14,9 @@
 // - Attribute propagation (expert_weight_bits, k, block_size, activation, etc.)
 // - Tensor-first DPS: tensor.empty() used as output init
 // - Proper !hip.context threading through operations
+// - swiglu_fusion=0 with activation_type="relu2" converts (fc1 rows are the
+//   intermediate, not gate/linear pairs); any other unfused activation stays
+//   onnx.Custom because wrap_qmoe does not implement it
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -59,4 +62,74 @@ module {
   // CHECK-SAME: expert_weight_bits = 4
   // CHECK-SAME: k = 4
   // CHECK-NOT: onnx.Custom
+
+  // ===== Test 2: unfused relu2 experts with router_weights =====
+  //
+  // fc1 is [E, inter, hidden/2] (inter = 1856, not 2 * inter) and fc2 is
+  // [E, hidden, inter/2]; the mixing weights come from router_weights
+  // (operand 14) while router_probs only selects the experts.
+
+  func.func @test_relu2_unfused(
+      %input: tensor<1x4x2688xf16>,
+      %router_probs: tensor<4x128xf16>,
+      %router_weights: tensor<4x128xf16>) -> tensor<1x4x2688xf16> {
+    %fc1_w = "onnx.Constant"() {value = dense<1> : tensor<128x1856x1344xui8>} : () -> tensor<128x1856x1344xui8>
+    %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<128x1856x84xf16>} : () -> tensor<128x1856x84xf16>
+    %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<128x2688x928xui8>} : () -> tensor<128x2688x928xui8>
+    %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<128x2688x58xf16>} : () -> tensor<128x2688x58xf16>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s,
+                       %none, %none, %none, %none, %none, %none, %none, %router_weights) {
+      function_name = "QMoE",
+      domain_name = "com.microsoft",
+      activation_alpha = 1.000000e+00 : f32, activation_beta = 0.000000e+00 : f32,
+      activation_type = "relu2",
+      block_size = 32 : si64, expert_weight_bits = 4 : si64, k = 6 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 0 : si64,
+      use_sparse_mixer = 0 : si64,
+      onnx_node_name = "QMoE_relu2"
+    } : (tensor<1x4x2688xf16>, tensor<4x128xf16>,
+         tensor<128x1856x1344xui8>, tensor<128x1856x84xf16>, none,
+         tensor<128x2688x928xui8>, tensor<128x2688x58xf16>,
+         none, none, none, none, none, none, none, tensor<4x128xf16>) -> tensor<1x4x2688xf16>
+    return %Y : tensor<1x4x2688xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_relu2_unfused
+  // CHECK: hip.qmoe
+  // CHECK-SAME: tensor<128x1856x1344xui8>, tensor<128x1856x84xf16>,
+  // CHECK-SAME: tensor<128x2688x928xui8>, tensor<128x2688x58xf16>)
+  // CHECK-SAME: router_weights(%{{.*}} : tensor<4x128xf16>)
+  // CHECK-SAME: activation_type = "relu2"
+  // CHECK-SAME: k = 6
+  // CHECK-SAME: swiglu_fusion = 0
+  // CHECK-NOT: onnx.Custom
+
+  // ===== Test 3: an unfused activation other than relu2 is not converted =====
+
+  func.func @test_unfused_silu_rejected(
+      %input: tensor<1x4x64xf16>,
+      %router_probs: tensor<4x8xf16>) -> tensor<1x4x64xf16> {
+    %fc1_w = "onnx.Constant"() {value = dense<1> : tensor<8x128x32xui8>} : () -> tensor<8x128x32xui8>
+    %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<8x128x2xf16>} : () -> tensor<8x128x2xf16>
+    %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<8x64x64xui8>} : () -> tensor<8x64x64xui8>
+    %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<8x64x4xf16>} : () -> tensor<8x64x4xf16>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE",
+      domain_name = "com.microsoft",
+      activation_type = "silu",
+      block_size = 32 : si64, expert_weight_bits = 4 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 0 : si64,
+      use_sparse_mixer = 0 : si64,
+      onnx_node_name = "QMoE_silu"
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x32xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x64xui8>, tensor<8x64x4xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_unfused_silu_rejected
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
 }

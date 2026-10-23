@@ -13,6 +13,7 @@
 // - Pointer extraction for present optional operands (fc1_bias, fc2_bias)
 // - Dimension extraction (num_tokens, hidden_size, inter_size, num_experts)
 // - Attribute-to-constant lowering (k, expert_weight_bits, block_size, activation, etc.)
+// - Unfused relu2 (swiglu_fusion = 0): inter_size is fc1 dim 1 unhalved
 // ============================================================================
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
@@ -93,4 +94,41 @@ module {
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
   // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
+
+  // ===== Test 3: unfused relu2 (swiglu_fusion = 0) =====
+  //
+  // fc1 rows are the intermediate itself, so inter_size is fc1 dim 1 (1856)
+  // with no halving, and activation_type lowers to the relu2 identifier 5.
+
+  func.func @test_qmoe_relu2(%ctx: !hip.context,
+      %input: memref<1x4x2688xf16, 1>,
+      %router: memref<4x128xf16, 1>,
+      %fc1_w: memref<128x1856x1344xui8, 1>,
+      %fc1_s: memref<128x1856x84xf16, 1>,
+      %fc2_w: memref<128x2688x928xui8, 1>,
+      %fc2_s: memref<128x2688x58xf16, 1>,
+      %router_w: memref<4x128xf16, 1>,
+      %output: memref<1x4x2688xf16, 1>) {
+    hip.qmoe(%ctx) ins(
+        %input, %router,
+        %fc1_w, %fc1_s,
+        %fc2_w, %fc2_s :
+        memref<1x4x2688xf16, 1>, memref<4x128xf16, 1>,
+        memref<128x1856x1344xui8, 1>, memref<128x1856x84xf16, 1>,
+        memref<128x2688x928xui8, 1>, memref<128x2688x58xf16, 1>)
+        router_weights(%router_w : memref<4x128xf16, 1>)
+        outs(%output : memref<1x4x2688xf16, 1>)
+        {expert_weight_bits = 4 : i64, k = 6 : i64, block_size = 32 : i64,
+         normalize_routing_weights = 1 : i64, swiglu_fusion = 0 : i64,
+         use_sparse_mixer = 0 : i64,
+         activation_alpha = 1.000000e+00 : f32, activation_beta = 0.000000e+00 : f32,
+         swiglu_limit = 7.000000e+00 : f32, activation_type = "relu2"}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @test_qmoe_relu2
+  // CHECK: llvm.mlir.constant(1856 : i64)
+  // CHECK-NOT: llvm.sdiv
+  // CHECK: llvm.mlir.constant(5 : i64)
+  // CHECK: llvm.call @wrap_qmoe
 }
