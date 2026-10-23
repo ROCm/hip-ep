@@ -5026,6 +5026,32 @@ static bool wmmaConfigSupported(const WmmaConfig& c, int N, int K, int gs) {
     return K % wmmaBk(c) == 0;
 }
 
+// launchDequant uses grid.y = N. HIP caps maxGridSize[1] (65536 on gfx1201);
+// a !fused config that won at a smaller donor N is unlaunchable for lm_head
+// (N=128256). Cached once so LUT validation and the online tuner share it.
+static int dequantMaxGridY() {
+    static const int y = [] {
+        hipDeviceProp_t p{};
+        if (hipGetDeviceProperties(&p, 0) != hipSuccess || p.maxGridSize[1] <= 0)
+            return 65536;
+        return p.maxGridSize[1];
+    }();
+    return y;
+}
+
+// Query-shape launchability for LUT nearest and the online sweep. A config that
+// is legal at a nearby measured point can still be illegal here (padded stride,
+// BK vs K, dequant grid.y). Validators must use this so resolve walks outwards
+// instead of handing production an unlaunchable winner.
+static bool wmmaConfigLaunchable(const WmmaConfig& c, int /*M*/, int N, int K,
+                                 int gs, int b_row_bytes) {
+    if (!wmmaConfigSupported(c, N, K, gs)) return false;
+    // Separate dequant has no stride argument; padded B must stay fused.
+    if (b_row_bytes != 0 && !c.fused) return false;
+    if (!c.fused && N > dequantMaxGridY()) return false;
+    return true;
+}
+
 // Config to fall back on when the requested one cannot serve the shape.
 // Config 9 ({128, 64, sw=4, fused}, BK = 32) is the historical default and is
 // supported for every K the dispatcher lets through; the scan is there so this
@@ -5040,20 +5066,27 @@ static int wmmaFallbackConfig(int N, int K, int gs) {
 /* WMMA half of the LUT bridge; see the GEMV half above kGemvConfigs for the
  * cache-then-LUT-then-sweep ordering this serves. */
 
-// wmmaConfigApplies needs the shape, so the validator carries it through ctx.
+// Full query shape so the validator can reject configs that only work at a
+// nearby donor point (see wmmaConfigLaunchable).
 struct MatmulNbitsWmmaLutCtx {
+    int m;
     int n;
+    int k;
     int gs;
+    int b_row_bytes;
 };
 
-static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs) {
+static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
+                                  const MatmulNbitsWmmaLutCtx& ctx) {
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         const WmmaConfig& c = kWmmaConfigs[cid];
         if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
             c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
             continue;
         if (wmmaBk(c) != g.bk) continue;
-        if (!wmmaConfigApplies(c, N, gs)) continue;
+        if (!wmmaConfigLaunchable(c, ctx.m, ctx.n, ctx.k, ctx.gs,
+                                  ctx.b_row_bytes))
+            return -1;
         return cid;
     }
     return -1;
@@ -5061,7 +5094,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs
 
 static bool matmulNbitsWmmaValidator(void* ctx, const matmul_lut::WmmaAnswer& g) {
     const auto* c = static_cast<const MatmulNbitsWmmaLutCtx*>(ctx);
-    return wmmaConfigFromGeometry(g, c->n, c->gs) >= 0;
+    return wmmaConfigFromGeometry(g, *c) >= 0;
 }
 
 // Returns a kWmmaConfigs index from the LUT, or -1 on a miss.
@@ -5077,18 +5110,11 @@ static int matmulNbitsLutWmmaConfig(int M, int N, int K, int gs, bool has_zp,
     req.group_size = gs;
     req.has_zp = has_zp;
     req.b_row_bytes = b_row_bytes;
-    MatmulNbitsWmmaLutCtx ctx{N, gs};
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, b_row_bytes};
     const matmul_lut::Result r =
         matmul_lut::resolve(req, matmulNbitsWmmaValidator, nullptr, &ctx);
     if (r.source == matmul_lut::Source::None) return -1;
-    const int cid = wmmaConfigFromGeometry(r.wmma, N, gs);
-    // A padded stride can only be served by a fused config; the dequant pass
-    // behind a !fused one has no stride argument.
-    if (cid >= 0 && b_row_bytes != 0 && !kWmmaConfigs[cid].fused) return -1;
-    // The geometry match above does not see K, so a table row can name a config
-    // whose BK does not divide it. Reject here rather than let the launch fall
-    // back, which would cache a config that is replaced on every call.
-    if (cid >= 0 && K % wmmaBk(kWmmaConfigs[cid]) != 0) return -1;
+    const int cid = wmmaConfigFromGeometry(r.wmma, ctx);
     if (cid >= 0)
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels] LUT hit (src=%d d=%.3f) M=%d N=%d K=%d gs=%d "
@@ -5547,7 +5573,7 @@ static int tuneWmmaConfig(
      * sweep, not here -- see autotune/matmul_nbits. */
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         auto& cfg = kWmmaConfigs[cid];
-        if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
+        if (!wmmaConfigLaunchable(cfg, M, N, K, gs, b_row_bytes)) continue;
         if (fused_only && !cfg.fused) continue;
 
         for (int w = 0; w < WARMUP; w++)
@@ -5562,6 +5588,19 @@ static int tuneWmmaConfig(
                              b_row_bytes);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
+
+        // Drain sticky launch errors per candidate. A losing config that fails
+        // to launch (e.g. invalid block/shared-mem on this shape) would
+        // otherwise leave hipGetLastError set; the production launch of the
+        // winner then looks like it failed even when it succeeded (lm_head
+        // N=128256 on gfx1201). Skip the failed candidate so it cannot win.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
@@ -6509,6 +6548,15 @@ static int tuneWmmaConfigI8(
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-i8 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
@@ -7228,6 +7276,15 @@ static int tuneWmmaConfigU3(
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u3 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
+
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
 
@@ -7879,6 +7936,15 @@ static int tuneWmmaConfigU2(
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
+
+        // See tuneWmmaConfig: drain sticky launch errors per candidate.
+        hipError_t launch_err = hipGetLastError();
+        if (launch_err != hipSuccess) {
+            MATMUL_NBITS_AUTOTUNE_LOG(
+                "[custom_kernels]   wmma-u2 config[%2d] SKIP launch failed: %s\n",
+                cid, hipGetErrorString(launch_err));
+            continue;
+        }
 
         float ms = 0.0f;
         hipEventElapsedTime(&ms, ev0, ev1);
