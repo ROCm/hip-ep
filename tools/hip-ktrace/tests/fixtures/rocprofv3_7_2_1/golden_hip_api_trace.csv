@@ -1,0 +1,3 @@
+"Domain","Function","Process_Id","Thread_Id","Correlation_Id","Start_Timestamp","End_Timestamp"
+"HIP_RUNTIME_API_EXT","hipMalloc",4242,4242,1,1000000000,1000000100
+"HIP_RUNTIME_API_EXT","hipLaunchKernel",4242,4242,2,1000000200,1000000300
