@@ -1,0 +1,83 @@
+diff --git a/src/generator/generators.cpp b/src/generator/generators.cpp
+index 2cd67565..97500cc9 100644
+--- a/src/generator/generators.cpp
++++ b/src/generator/generators.cpp
+@@ -67,13 +67,14 @@ static bool _ = (Ort::InitApi(), false);
+ bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
+   // Some models fall back to CPU attention, where continuation is valid because their KV cache is
+   // also on CPU. Other listed providers preserve appendable KV state across generation turns.
+-  constexpr std::array<DeviceType, 6> supported_devices{
++  constexpr std::array<DeviceType, 7> supported_devices{
+       DeviceType::CPU,
+       DeviceType::CUDA,
+       DeviceType::WEBGPU,
+       DeviceType::OpenVINO,
+       DeviceType::NvTensorRtRtx,
+-      DeviceType::RyzenAI};
++      DeviceType::RyzenAI,
++      DeviceType::AMDGPU};
+   return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
+          supported_devices.end();
+ }
+diff --git a/src/models/multi_modal.cpp b/src/models/multi_modal.cpp
+index 41546a74..72f8ab1a 100644
+--- a/src/models/multi_modal.cpp
++++ b/src/models/multi_modal.cpp
+@@ -542,6 +542,19 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
+   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+ }
+ 
++void DecoderState::RewindTo(size_t index) {
++  position_inputs_->RewindTo(index);
++  if (kv_cache_)
++    kv_cache_->RewindTo(index);
++  if (recurrent_state_)
++    recurrent_state_->RewindTo(index);
++}
++
++void DecoderState::SnapshotState(size_t position) {
++  if (recurrent_state_)
++    recurrent_state_->Snapshot(position);
++}
++
+ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+     : State{params, model},
+       model_{model},
+@@ -686,6 +699,14 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
+   return audio_output_ ? SampleAudioOrText(logits) : logits;
+ }
+ 
++void MultiModalPipelineState::RewindTo(size_t index) {
++  decoder_state_->RewindTo(index);
++}
++
++void MultiModalPipelineState::SnapshotState(size_t position) {
++  decoder_state_->SnapshotState(position);
++}
++
+ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {
+   if (!audio_output_->InAudio()) {
+     return logits;
+diff --git a/src/models/multi_modal.h b/src/models/multi_modal.h
+index 780c81d5..6b4e5bc7 100644
+--- a/src/models/multi_modal.h
++++ b/src/models/multi_modal.h
+@@ -168,6 +168,8 @@ struct DecoderState : State {
+   DecoderState& operator=(const DecoderState&) = delete;
+ 
+   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
++  void RewindTo(size_t index) override;
++  void SnapshotState(size_t position) override;
+   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+ 
+   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
+@@ -204,6 +206,8 @@ struct MultiModalPipelineState : State {
+ 
+   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                         DeviceSpan<int32_t> next_indices) override;
++  void RewindTo(size_t index) override;
++  void SnapshotState(size_t position) override;
+ 
+   OrtValue* GetInput(const char* name) override;
+ 
+   OrtValue* GetOutput(const char* name) override;
