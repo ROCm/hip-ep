@@ -1011,25 +1011,21 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
     Implements the com.microsoft QMoE operator (ONNX v1.25+ compatible): quantized
-    Mixture-of-Experts with top-k expert routing and a SwiGLU or relu2
-    activation.
+    Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
 
     Routes each token to its top-k experts, performs quantized linear
-    projections (fc1 up, fc2 down) per expert with int4 dequantization,
-    applies the activation, and combines expert outputs.
+    projections (fc1 gate+up, fc2 down) per expert with int4 dequantization,
+    applies activation (SwiGLU by default), and combines expert outputs.
 
-    SwiGLU formula (when swiglu_fusion=1, interleaved in fc1 output, so fc1
-    has 2 * inter rows):
+    SwiGLU formula (when swiglu_fusion=1, interleaved in fc1 output):
       g, l = interleaved_split(fc1_out)
       G = clamp(g, max=swiglu_limit)
       L = clamp(l, -swiglu_limit, swiglu_limit)
       result = G * sigmoid(activation_alpha * G) * (L + activation_beta)
 
-    relu2 formula (when swiglu_fusion=0 and activation_type="relu2"; fc1 has
-    inter rows and no gate/linear split):
+    relu2 formula (when swiglu_fusion=0 and activation_type="relu2", so fc1
+    has no gate/linear split):
       result = relu(fc1_out)^2
-
-    These are the only two combinations the runtime implements.
 
     Weight packing follows MatMulNBits convention: uint8 packed,
     dequantized = (quantized - 8) * scale for 4-bit weights.

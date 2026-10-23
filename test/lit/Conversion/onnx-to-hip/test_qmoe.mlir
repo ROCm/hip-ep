@@ -14,11 +14,8 @@
 // - Attribute propagation (expert_weight_bits, k, block_size, activation, etc.)
 // - Tensor-first DPS: tensor.empty() used as output init
 // - Proper !hip.context threading through operations
-// - swiglu_fusion=0 with activation_type="relu2" converts (fc1 rows are the
-//   intermediate, not gate/linear pairs); any other unfused activation stays
-//   onnx.Custom because wrap_qmoe does not implement it
-// - weights_prepacked: absent (ORT default -1) and 0 both mean the schema
-//   [E, N, K/pack] layout the kernels read; 1 stays onnx.Custom
+// - swiglu_fusion=0 converts only with activation_type="relu2"
+// - weights_prepacked absent (-1) or 0 converts; 1 stays onnx.Custom
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -66,10 +63,6 @@ module {
   // CHECK-NOT: onnx.Custom
 
   // ===== Test 2: unfused relu2 experts with router_weights =====
-  //
-  // fc1 is [E, inter, hidden/2] (inter = 1856, not 2 * inter) and fc2 is
-  // [E, hidden, inter/2]; the mixing weights come from router_weights
-  // (operand 14) while router_probs only selects the experts.
 
   func.func @test_relu2_unfused(
       %input: tensor<1x4x2688xf16>,

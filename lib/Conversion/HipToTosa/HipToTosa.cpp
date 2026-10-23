@@ -7679,9 +7679,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
   if (op.getNumResults() != 1)
     return std::nullopt;
 
-  // Only the interleaved-SwiGLU envelope (no fc3) is modelled here; the
-  // runtime's unfused relu2 mode stays on the HIP kernel. With
-  // swiglu_fusion=1 the runtime ignores activation_type, so it is not gated.
+  // Only the runtime's interleaved-SwiGLU mode (no fc3) is modelled here.
+  // activation_type is ignored in that mode, so it is not gated.
   if (op.getSwigluFusion() != 1 || op.getUseSparseMixer() != 0)
     return std::nullopt;
   if (op.getFc3ExpertsWeights() || op.getFc3Scales() ||

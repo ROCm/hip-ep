@@ -160,10 +160,7 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                                 ? activationTypeStrAttr
                                 : rewriter.getStringAttr("relu");
 
-  // wrap_qmoe implements exactly two activation layouts: interleaved SwiGLU
-  // (swiglu_fusion=1, fc1 rows are gate/linear pairs) and an unfused relu2
-  // (swiglu_fusion=0, fc1 rows are the intermediate). Leave everything else
-  // unconverted rather than compile a call the runtime rejects.
+  // wrap_qmoe rejects every other combination at runtime.
   const int64_t swigluFusion = swigluFusionAttr.getInt();
   if (swigluFusion != 1 &&
       !(swigluFusion == 0 && activationTypeAttr.getValue() == "relu2")) {
@@ -172,11 +169,9 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
             "activation_type=relu2, is supported");
   }
 
-  // `weights_prepacked` (ORT default -1) names the layout of the int fc1/fc2
-  // weights: 0 is the schema layout [E, N, K * bits / 8], and the layouts -1
-  // and 1 select are left to each execution provider. The kernels here read
-  // the schema layout directly, so it is this EP's default (-1) as well as 0;
-  // there is no alternate layout (1).
+  // weights_prepacked (ORT default -1): 0 is the schema [E, N, K/pack]
+  // layout, and -1 / 1 are EP-defined. This EP's default layout is the schema
+  // one, and it has no alternate layout.
   auto prepackedAttr =
       op->getAttrOfType<mlir::IntegerAttr>("weights_prepacked");
   const int64_t weightsPrepacked = prepackedAttr ? prepackedAttr.getSInt() : -1;

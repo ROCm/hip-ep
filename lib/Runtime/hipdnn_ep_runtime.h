@@ -1707,10 +1707,8 @@ int wrap_dequantize_linear(
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
-// applies activation, and combines results. Two modes are implemented:
-// swiglu_fusion=1 (interleaved SwiGLU, activation_type not read) and
-// swiglu_fusion=0 with activation_type=HIPDNN_EP_QMOE_ACTIVATION_RELU2; any
-// other combination is rejected.
+// applies activation (SwiGLU, or relu2 with swiglu_fusion=0), and combines
+// results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
 #define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
 
@@ -1743,12 +1741,9 @@ int wrap_qmoe(
 // com.amd QMoE operation wrapper (LatentMoE).
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
-// correction-bias routing (vs softmax), relu2 activation, and a mandatory
-// latent projection + shared-expert branch. Shares only sub-kernels with
-// lib/Runtime/real/qmoe.cpp: the generic int4 GEMM / gather / bucket /
-// scatter ones, and in the other direction hip_qmoe_amd_relu2 and
-// hip_qmoe_amd_decode_fused, which wrap_qmoe's relu2 mode reuses. Neither
-// wrapper calls into the other. Hip_QMoEAmdOp in
+// correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
+// mandatory latent projection + shared-expert branch. Shares only sub-kernels
+// with lib/Runtime/real/qmoe.cpp, not any code path. Hip_QMoEAmdOp in
 // include/hip/Dialect/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers

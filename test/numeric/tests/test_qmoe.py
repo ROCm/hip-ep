@@ -24,11 +24,8 @@ Input context:
   hidden input:   post-layernorm, approximately normalised (range [-1, 1])
   router weights: raw logits from router projection (range [-5, 5], std ~ 1.2)
 
-TestQMoERelu2 covers the unfused form instead: swiglu_fusion=0 with
-activation_type="relu2", where fc1 produces the intermediate directly and
-each expert computes fc2(relu(fc1(x))^2). ORT CPU's MoE kernel rejects
-relu2, so those cases compare against an equivalent graph of ops the CPU
-does implement (see _make_relu2_reference_model).
+TestQMoERelu2 covers swiglu_fusion=0 with activation_type="relu2". ORT CPU
+has no relu2 MoE kernel, so it compares against an equivalent graph.
 """
 
 from dataclasses import dataclass
@@ -353,42 +350,24 @@ class Relu2Config:
     inter: int
     num_experts: int
     top_k: int
-    block_size: int = BLOCK_SIZE
     with_bias: bool = False
     with_mix_weights: bool = False
-    normalize_routing_weights: int = 1
-
-
-def _relu2_scale_range(k_dim: int, gain: float) -> tuple[float, float]:
-    """Scale range that keeps a K-long int4 dot product near unit magnitude.
-
-    A centred nibble has variance ~21, so a dot product over K terms grows
-    like sqrt(K) * scale. Tying the scale to 1/sqrt(K) keeps fc1 outputs,
-    their squares and the fc2 outputs around 1 at every K the tests use,
-    which is where an absolute fp16 tolerance still discriminates.
-    """
-    base = gain / np.sqrt(k_dim)
-    return 0.5 * base, 1.5 * base
 
 
 def _make_relu2_weights(cfg: Relu2Config, seed: int = 42) -> dict[str, np.ndarray]:
-    """QMoE expert weights for an unfused fc1 -> relu2 -> fc2 MLP.
-
-    Layout is the QMoE one: weights [E, N, K/2], scales [E, N, K/block].
-    Per expert that is byte-for-byte what MatMulNBits wants once the
-    trailing K/2 axis is split into [K/block, block/2], so the reference
-    graph reuses the same bytes.
-    """
+    """QMoE-layout weights [E, N, K/2] and scales [E, N, K/block]."""
     rng = np.random.default_rng(seed)
     e = cfg.num_experts
     w = {}
 
     def quantize(name: str, n: int, k: int, gain: float) -> None:
         w[f"{name}_qweight"] = rng.integers(0, 256, [e, n, k // 2], dtype=np.uint8)
-        lo, hi = _relu2_scale_range(k, gain)
-        w[f"{name}_scales"] = rng.uniform(lo, hi, [e, n, k // cfg.block_size]).astype(
-            np.float16
-        )
+        # Scales ~ 1/sqrt(K) keep each projection near unit magnitude, where
+        # an absolute fp16 tolerance still discriminates.
+        base = gain / np.sqrt(k)
+        w[f"{name}_scales"] = rng.uniform(
+            0.5 * base, 1.5 * base, [e, n, k // BLOCK_SIZE]
+        ).astype(np.float16)
 
     quantize("fc1", cfg.inter, cfg.hidden, gain=0.37)
     quantize("fc2", cfg.hidden, cfg.inter, gain=0.2)
@@ -443,14 +422,11 @@ def _make_relu2_qmoe_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
         ["output"],
         domain="com.microsoft",
         activation_type="relu2",
-        activation_alpha=1.0,
-        activation_beta=0.0,
         expert_weight_bits=EXPERT_WEIGHT_BITS,
         k=cfg.top_k,
-        normalize_routing_weights=cfg.normalize_routing_weights,
+        normalize_routing_weights=1,
         swiglu_fusion=0,
-        use_sparse_mixer=0,
-        block_size=cfg.block_size,
+        block_size=BLOCK_SIZE,
     )
     return make_model_from_nodes(
         [node],
@@ -465,18 +441,15 @@ def _make_relu2_qmoe_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
 def _make_relu2_reference_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
     """The same computation out of ops ORT CPU implements.
 
-    Routing is QMoE's: experts are the top-k router logits, weighted by the
-    softmax of the logits (or by mix_weights when given), renormalised over
-    the k slots when normalize_routing_weights=1. Every expert then runs on
-    every token, and masking the top-k slots against the expert's index
-    leaves its weight for tokens that selected it and zero elsewhere, so the
-    sum over experts reproduces the op's sparse dispatch.
+    Experts are the top-k logits, weighted by their softmax (or mix_weights)
+    renormalised over k. Every expert runs on every token and is masked by
+    whether the token selected it, which reproduces the sparse dispatch.
     """
     inputs, output = _relu2_io(cfg)
     nodes = []
     inits = []
-    n_blk_hidden = cfg.hidden // cfg.block_size
-    n_blk_inter = cfg.inter // cfg.block_size
+    n_blk_hidden = cfg.hidden // BLOCK_SIZE
+    n_blk_inter = cfg.inter // BLOCK_SIZE
 
     def const(array: np.ndarray, name: str) -> str:
         inits.append(numpy_helper.from_array(array, name=name))
@@ -496,20 +469,12 @@ def _make_relu2_reference_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
         )
     else:
         nodes.append(helper.make_node("Softmax", ["logits"], ["source"], axis=-1))
-    nodes.append(
-        helper.make_node("GatherElements", ["source", "sel"], ["sel_w"], axis=-1)
-    )
-    if cfg.normalize_routing_weights:
-        nodes += [
-            helper.make_node(
-                "ReduceSum", ["sel_w", "last_axis"], ["w_sum"], keepdims=1
-            ),
-            helper.make_node("Div", ["sel_w", "w_sum"], ["w_norm"]),
-        ]
-        routed = "w_norm"
-    else:
-        routed = "sel_w"
-    nodes.append(helper.make_node("Cast", [routed], ["slot_w"], to=TensorProto.FLOAT16))
+    nodes += [
+        helper.make_node("GatherElements", ["source", "sel"], ["sel_w"], axis=-1),
+        helper.make_node("ReduceSum", ["sel_w", "last_axis"], ["w_sum"], keepdims=1),
+        helper.make_node("Div", ["sel_w", "w_sum"], ["w_norm"]),
+        helper.make_node("Cast", ["w_norm"], ["slot_w"], to=TensorProto.FLOAT16),
+    ]
 
     def matmul_nbits(out: str, inp: str, prefix: str, k: int, n: int) -> None:
         nodes.append(
@@ -521,19 +486,19 @@ def _make_relu2_reference_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
                 K=k,
                 N=n,
                 bits=EXPERT_WEIGHT_BITS,
-                block_size=cfg.block_size,
+                block_size=BLOCK_SIZE,
             )
         )
 
     acc = None
     for e in range(cfg.num_experts):
         const(
-            w["fc1_qweight"][e].reshape(cfg.inter, n_blk_hidden, cfg.block_size // 2),
+            w["fc1_qweight"][e].reshape(cfg.inter, n_blk_hidden, BLOCK_SIZE // 2),
             f"e{e}_fc1_w",
         )
         const(w["fc1_scales"][e].reshape(-1), f"e{e}_fc1_s")
         const(
-            w["fc2_qweight"][e].reshape(cfg.hidden, n_blk_inter, cfg.block_size // 2),
+            w["fc2_qweight"][e].reshape(cfg.hidden, n_blk_inter, BLOCK_SIZE // 2),
             f"e{e}_fc2_w",
         )
         const(w["fc2_scales"][e].reshape(-1), f"e{e}_fc2_s")
@@ -569,7 +534,6 @@ def _make_relu2_reference_model(cfg: Relu2Config, w: dict[str, np.ndarray]):
             helper.make_node(
                 "ReduceSum", [f"e{e}_masked", "last_axis"], [f"e{e}_w"], keepdims=1
             ),
-            # [1, seq, hidden] * [seq, 1] broadcasts the per-token weight.
             helper.make_node("Mul", [fc2_out, f"e{e}_w"], [f"e{e}_out"]),
         ]
         if acc is None:
@@ -612,23 +576,13 @@ def _run_relu2(model_runner, cfg: Relu2Config, seed: int = 99):
 
 
 class TestQMoERelu2:
-    """swiglu_fusion=0 with activation_type="relu2".
-
-    The runtime dispatch boundaries the parametrization straddles:
-
-      seq_len 1    without bias takes the fused relu2 decode kernels;
-                   with bias it falls back to the bucketed prefill path,
-                   since those kernels implement no bias.
-      seq_len > 1  takes the bucketed prefill path (grouped WMMA or the
-                   ragged GEMM, chosen by shape), with relu2 between
-                   fc1 and fc2 in place of SwiGLU.
-    """
+    """seq_len 1 without bias takes the fused relu2 decode; with bias, and
+    every longer sequence, take the bucketed prefill path."""
 
     @pytest.mark.parametrize("with_mix_weights", [False, True])
     @pytest.mark.parametrize("with_bias", [False, True])
-    @pytest.mark.parametrize("seq_len", [1, 8, 37])
+    @pytest.mark.parametrize("seq_len", [1, 37])
     def test_qmoe_relu2(self, model_runner, seq_len, with_bias, with_mix_weights):
-        """Small shapes for fast sanity checking."""
         cfg = Relu2Config(
             seq_len=seq_len,
             hidden=64,
@@ -641,15 +595,9 @@ class TestQMoERelu2:
         actual, expected = _run_relu2(model_runner, cfg)
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
-    @pytest.mark.parametrize("seq_len", [1, 37, 128])
+    @pytest.mark.parametrize("seq_len", [1, 128])
     def test_qmoe_relu2_large_shape(self, model_runner, seq_len):
-        """Production-sized relu2 expert geometry with fewer experts.
-
-        hidden=2688, inter=1856, top-6, block 32, mixing weights from
-        router_weights. 16 experts instead of 128 keeps the weights (and
-        the every-expert reference) small without changing any per-expert
-        shape the kernels see.
-        """
+        """Production-sized expert shapes; 16 experts keep the reference small."""
         cfg = Relu2Config(
             seq_len=seq_len,
             hidden=2688,

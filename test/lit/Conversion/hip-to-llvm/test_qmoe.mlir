@@ -95,10 +95,7 @@ module {
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
   // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
 
-  // ===== Test 3: unfused relu2 (swiglu_fusion = 0) =====
-  //
-  // fc1 rows are the intermediate itself, so inter_size is fc1 dim 1 (1856)
-  // with no halving, and activation_type lowers to the relu2 identifier 5.
+  // ===== Test 3: unfused relu2: inter_size is fc1 dim 1, not halved =====
 
   func.func @test_qmoe_relu2(%ctx: !hip.context,
       %input: memref<1x4x2688xf16, 1>,
