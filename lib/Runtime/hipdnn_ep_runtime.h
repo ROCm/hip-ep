@@ -419,11 +419,14 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Device-side runtime error flag (set by kernels or host wrappers, observed
+// after the graph by inference_compute). Intended for operators that detect
+// runtime-invalid inputs (e.g. Range delta==0, ArgMax of an empty axis) and
+// need to propagate an error code back through main_graph. Generated graphs
+// discard most wrap_* statuses, so a nonzero status must also be stored here.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -1110,8 +1113,9 @@ int wrap_qlinear_conv(
     int64_t output_zp_count);
 
 // Native onnx.QLinearMatMul. Rank-2 8-bit product, a is [M, K], b is [K, N],
-// y is [M, N]. Scales and zero points are per-tensor (count == 1). Dtypes are
-// HIPDNN_EP_DATATYPE_INT8 or UINT8.
+// y is [M, N]. A's and Y's scale and zero-point counts are 1. B's counts are
+// 1, or N for one value per output column. Dtypes are HIPDNN_EP_DATATYPE_INT8
+// or UINT8.
 int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
                         const void *a_zero_point, const void *b,
                         const void *b_scale, const void *b_zero_point,
@@ -1199,6 +1203,14 @@ int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
                             int64_t scale_bits, int64_t seed_bits,
                             int64_t has_seed, int64_t data_type);
 
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
+
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
                           int64_t reduction_id, int64_t rank,
@@ -1221,6 +1233,15 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  int64_t num_output_elements, int64_t element_size_bytes,
                  int64_t indices_element_size_bytes,
                  int64_t depth_element_size_bytes);
+
+int wrap_ngram_hash_mapping(RuntimeState *state, void *input_ids,
+                            void *multipliers, void *vocab_sizes,
+                            void *past_ids, void *head_offsets,
+                            void *eos_token_id, void *segment_ids,
+                            void *hash_ids, void *present_ids, int64_t batch,
+                            int64_t seq_len, int64_t max_ngram_size,
+                            int64_t n_head_per_ngram, int64_t pad_id,
+                            int64_t reset_on_eos, int64_t element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -1440,6 +1461,19 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
+// hip.mrotary_embedding. max_position is cos_cache dim 0; position_ids dims
+// 1..2 and sin_cache dim 0 must agree with the input / cos_cache, else -1
+// before any launch.
+int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                           void *cos_cache, void *sin_cache, void *output,
+                           int64_t batch_size, int64_t seq_len,
+                           int64_t num_heads, int64_t head_dim,
+                           int64_t rotary_dim, int64_t max_position,
+                           int64_t section_t, int64_t section_h,
+                           int64_t section_w, int64_t mrope_layout, float scale,
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows);
+
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`
 // (the product of the input dims from `axis` on). It is independent of
@@ -1480,6 +1514,52 @@ int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
                     int64_t groups, int64_t channels_last, int64_t activation,
                     int64_t data_type, float epsilon);
 
+// com.microsoft GatedRMSNorm:
+//   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+// over groups of norm_size consecutive elements; norm_size is the scale
+// length. activation 0 is sigmoid, 1 is SiLU.
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
+                        void *gate, void *output, int64_t input_num_elements,
+                        int64_t norm_size, int64_t element_size_bytes,
+                        int64_t activation, float epsilon);
+
+// com.microsoft EngramGate. key / query / output / normed are
+// (B, S, hc, hidden), value is (B, S, hidden), scales are (hc, hidden).
+// conv_scale may be null; normed may be null and requires conv_scale.
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon);
+// com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
+// elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t gate_sigmoid,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale);
+
+// com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes);
+
+// PostMix fused with the following branchwise RMSNorm. stream_mix may be
+// null. feature_gate and gate_activation match the HIP op. residual and
+// normed are both written.
+int wrap_hyper_connection_post_mix_norm(
+    RuntimeState *state, void *streams, void *block_output, void *gate,
+    void *stream_mix, void *norm_scale, void *residual, void *normed,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
+    float epsilon);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
@@ -1515,6 +1595,12 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+
+// Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
+                      void *output, int64_t n, int64_t k, int64_t block_size,
+                      int64_t quant_type);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
@@ -1723,7 +1809,12 @@ int wrap_causal_conv_with_state(
     // 0=channels-first, 1=channels-last. Permutes input and output only: the
     // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
-    int64_t channels_last);
+    int64_t channels_last,
+    // Tap spacing; the state then holds (kernel_size - 1) * dilation
+    // positions. Values > 1 require state_channels_last.
+    int64_t dilation,
+    // 1 = carry state is (batch, state_len, channels). Requires channels_last.
+    int64_t state_channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1771,6 +1862,50 @@ int wrap_linear_attention(
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+
+// scale == 0 means 1 / sqrt(head_size_qk).
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes);
+
+// fp16 only. past_* may alias present_*. head_size is query width / num_heads
+// and capacity is past_key dim 2; the remaining dims are runtime shapes that
+// must agree with them, else -1 before any launch.
+int wrap_dynamic_sparse_attention(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, const void *selected_indices,
+    const void *selected_counts, const void *seqlens_k, void *output,
+    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
+    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    int64_t capacity, int64_t max_selected, int64_t past_key_batch,
+    int64_t past_key_heads, int64_t past_key_head_size,
+    int64_t past_value_batch, int64_t past_value_heads,
+    int64_t past_value_capacity, int64_t past_value_head_size,
+    int64_t present_key_capacity, int64_t present_key_head_size,
+    int64_t present_value_capacity, int64_t present_value_head_size,
+    int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
+    float scale);
+
+// past_key may be null when past_len == 0; mask may be null (all visible).
+// mask_* are ignored without a mask and cos_batch / sin_batch unless
+// rotary_batched; shape disagreement returns -1 before any launch.
+int wrap_sparse_attention_indexer(
+    RuntimeState *state, const void *query, const void *query_norm_weight,
+    const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
+    const void *mask, const void *past_key, void *selected_indices,
+    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
+    int64_t num_heads, int64_t head_size, int64_t rotary_width,
+    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

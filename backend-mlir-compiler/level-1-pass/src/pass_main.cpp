@@ -11,6 +11,7 @@
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // Protobuf
@@ -271,6 +273,36 @@ static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
     MY_LOG(1) << "Fusion failed: " << fuse_error.comments;
     LOG(WARNING) << "Failed to create MLIR fusion: " << fuse_error.comments;
     return false;
+  }
+
+  // try_fuse follows explicit operands, so a graph input used only through
+  // an If/Loop/Scan body is missing from MetaDef::inputs. Put those used
+  // inputs back, in graph-argument order. Leave an argument out when nothing
+  // in the graph reads it: it is not a fused-node input, and listing it makes
+  // MetaDef longer than the ORT node.
+  {
+    std::vector<std::string> discovered{meta_def->inputs().begin(),
+                                        meta_def->inputs().end()};
+    std::unordered_set<std::string> discoveredSet(discovered.begin(),
+                                                  discovered.end());
+    std::vector<std::string> kept;
+    kept.reserve(input_names.size());
+    for (const auto &input : graphRef.inputs()) {
+      const std::string &name = input.name();
+      if (discoveredSet.count(name) != 0 || !input.find_consumers().empty())
+        kept.push_back(name);
+    }
+    for (const auto &name : discovered) {
+      if (std::find(kept.begin(), kept.end(), name) == kept.end())
+        kept.push_back(name);
+    }
+    if (kept != discovered) {
+      MY_LOG(1) << "Restoring used graph inputs (" << kept.size()
+                << ") over try_fuse inputs (" << discovered.size() << ")";
+      meta_def->clear_inputs();
+      for (const auto &name : kept)
+        meta_def->add_inputs(name);
+    }
   }
 
   MY_LOG(1) << "Fusion successful, attaching metadata";

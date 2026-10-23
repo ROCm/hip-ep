@@ -77,9 +77,16 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
               "window of 1..3 axes");
 
     int64_t dataType = getHipdnnDataType(inputType.getElementType());
-    if (dataType < 0 || (dataType > 2 && dataType != 6))
+    bool floatType = dataType == HIPDNN_EP_DATATYPE_FLOAT ||
+                     dataType == HIPDNN_EP_DATATYPE_HALF ||
+                     dataType == HIPDNN_EP_DATATYPE_BFLOAT16 ||
+                     dataType == HIPDNN_EP_DATATYPE_DOUBLE;
+    bool nearestInt8 =
+        op.getMode() == 0 && (dataType == HIPDNN_EP_DATATYPE_INT8 ||
+                              dataType == HIPDNN_EP_DATATYPE_UINT8);
+    if (!floatType && !nearestInt8)
       return rewriter.notifyMatchFailure(
-          op, "Resize: only f16 / f32 / bf16 / f64 supported");
+          op, "Resize: float types, or int8/uint8 nearest");
 
     Value statePtr = adaptor.getCtx();
     Value inputPtr =

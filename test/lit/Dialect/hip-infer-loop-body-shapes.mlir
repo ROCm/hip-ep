@@ -159,6 +159,30 @@ func.func @reshape_rank_unknown(%x: tensor<?x256xi64>, %shape: tensor<?xi64>) ->
   return %r : tensor<*xi64>
 }
 
+// Concat cannot establish a rank until its operands are ranked. The pass must
+// decline that inference cleanly rather than dyn_casting a null type.
+// CHECK-LABEL: func.func @concat_unranked_operands
+// CHECK:         "onnx.Concat"{{.*}} -> tensor<*xf16>
+func.func @concat_unranked_operands(%lhs: tensor<*xf16>,
+                                    %rhs: tensor<*xf16>) -> tensor<*xf16> {
+  %result = "onnx.Concat"(%lhs, %rhs) {axis = 1 : si64} :
+      (tensor<*xf16>, tensor<*xf16>) -> tensor<*xf16>
+  return %result : tensor<*xf16>
+}
+
+// `output_shape` fixes ConvTranspose spatial extents while the weight and
+// group define its output channels.
+// CHECK-LABEL: func.func @conv_transpose_output_shape
+// CHECK:         "onnx.ConvTranspose"{{.*}} -> tensor<1x6x8x10xf32>
+func.func @conv_transpose_output_shape(%x: tensor<1x4x3x4xf32>,
+                                       %weight: tensor<4x3x4x4xf32>)
+    -> tensor<*xf32> {
+  %result = "onnx.ConvTranspose"(%x, %weight) {
+      group = 2 : si64, output_shape = [8, 10]
+    } : (tensor<1x4x3x4xf32>, tensor<4x3x4x4xf32>) -> tensor<*xf32>
+  return %result : tensor<*xf32>
+}
+
 // Constant entries of the shape vector are static dims. The runtime entry
 // stays dynamic. Transpose then permutes those dims.
 // CHECK-LABEL: func.func @reshape_static_shape_entries
@@ -227,4 +251,24 @@ func.func @upsample_scales_from_shape(%x: tensor<1x128x56x56xf32>) -> tensor<*xf
   %y = "onnx.Upsample"(%x, %scales) {mode = "nearest"}
       : (tensor<1x128x56x56xf32>, tensor<*xf32>) -> tensor<*xf32>
   return %y : tensor<*xf32>
+}
+
+// Upsample results may already have rank but retain dynamic dimensions. Fold
+// constant f16 scales through Div, Concat, and Cast to refine those dimensions.
+// CHECK-LABEL: func.func @upsample_refines_dynamic_dims
+// CHECK:         "onnx.Upsample"{{.*}} -> tensor<1x3x36x42xf32>
+// CHECK:         "onnx.Cast"{{.*}} -> tensor<1x3x36x42xf16>
+func.func @upsample_refines_dynamic_dims(%x: tensor<1x3x18x21xf32>) -> tensor<?x?x?x?xf16> {
+  %one = "onnx.Constant"() {value = dense<1.0> : tensor<2xf16>} : () -> tensor<2xf16>
+  %input = "onnx.Constant"() {value = dense<[18.0, 21.0]> : tensor<2xf16>} : () -> tensor<2xf16>
+  %output = "onnx.Constant"() {value = dense<[36.0, 42.0]> : tensor<2xf16>} : () -> tensor<2xf16>
+  %spatial_scales = "onnx.Div"(%output, %input) : (tensor<2xf16>, tensor<2xf16>) -> tensor<2xf16>
+  %scales_f16 = "onnx.Concat"(%one, %spatial_scales) {axis = 0 : si64}
+      : (tensor<2xf16>, tensor<2xf16>) -> tensor<4xf16>
+  %scales = "onnx.Cast"(%scales_f16) {to = f32} : (tensor<4xf16>) -> tensor<4xf32>
+  %upsample = "onnx.Upsample"(%x, %scales) {mode = "nearest"}
+      : (tensor<1x3x18x21xf32>, tensor<4xf32>) -> tensor<?x?x?x?xf32>
+  %result = "onnx.Cast"(%upsample) {to = f16}
+      : (tensor<?x?x?x?xf32>) -> tensor<?x?x?x?xf16>
+  return %result : tensor<?x?x?x?xf16>
 }
