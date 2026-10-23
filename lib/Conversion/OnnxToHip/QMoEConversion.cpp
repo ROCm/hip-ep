@@ -172,6 +172,20 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
             "activation_type=relu2, is supported");
   }
 
+  // `weights_prepacked` (ORT default -1) names the layout of the int fc1/fc2
+  // weights: 0 is the schema layout [E, N, K * bits / 8], and the layouts -1
+  // and 1 select are left to each execution provider. The kernels here read
+  // the schema layout directly, so it is this EP's default (-1) as well as 0;
+  // there is no alternate layout (1).
+  auto prepackedAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("weights_prepacked");
+  const int64_t weightsPrepacked = prepackedAttr ? prepackedAttr.getSInt() : -1;
+  if (weightsPrepacked != -1 && weightsPrepacked != 0) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: weights_prepacked must be -1 or 0 (schema [E, N, K/pack] "
+            "weights); no alternate prepacked layout is implemented");
+  }
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 

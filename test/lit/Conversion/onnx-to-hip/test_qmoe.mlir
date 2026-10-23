@@ -17,6 +17,8 @@
 // - swiglu_fusion=0 with activation_type="relu2" converts (fc1 rows are the
 //   intermediate, not gate/linear pairs); any other unfused activation stays
 //   onnx.Custom because wrap_qmoe does not implement it
+// - weights_prepacked: absent (ORT default -1) and 0 both mean the schema
+//   [E, N, K/pack] layout the kernels read; 1 stays onnx.Custom
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -86,7 +88,7 @@ module {
       activation_type = "relu2",
       block_size = 32 : si64, expert_weight_bits = 4 : si64, k = 6 : si64,
       normalize_routing_weights = 1 : si64, swiglu_fusion = 0 : si64,
-      use_sparse_mixer = 0 : si64,
+      use_sparse_mixer = 0 : si64, weights_prepacked = 0 : si64,
       onnx_node_name = "QMoE_relu2"
     } : (tensor<1x4x2688xf16>, tensor<4x128xf16>,
          tensor<128x1856x1344xui8>, tensor<128x1856x84xf16>, none,
@@ -130,6 +132,34 @@ module {
   }
 
   // CHECK-LABEL: func.func @test_unfused_silu_rejected
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
+
+  // ===== Test 4: weights_prepacked = 1 (an alternate prepacked layout) =====
+
+  func.func @test_weights_prepacked_alternate_rejected(
+      %input: tensor<1x4x64xf16>,
+      %router_probs: tensor<4x8xf16>) -> tensor<1x4x64xf16> {
+    %fc1_w = "onnx.Constant"() {value = dense<1> : tensor<8x128x32xui8>} : () -> tensor<8x128x32xui8>
+    %fc1_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<8x128x2xf16>} : () -> tensor<8x128x2xf16>
+    %fc2_w = "onnx.Constant"() {value = dense<1> : tensor<8x64x32xui8>} : () -> tensor<8x64x32xui8>
+    %fc2_s = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<8x64x2xf16>} : () -> tensor<8x64x2xf16>
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router_probs, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE",
+      domain_name = "com.microsoft",
+      activation_type = "swiglu",
+      block_size = 32 : si64, expert_weight_bits = 4 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64, weights_prepacked = 1 : si64,
+      onnx_node_name = "QMoE_prepacked_alternate"
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x32xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x32xui8>, tensor<8x64x2xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_weights_prepacked_alternate_rejected
   // CHECK-NOT: hip.qmoe
   // CHECK: onnx.Custom
 }
