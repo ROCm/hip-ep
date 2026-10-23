@@ -49,7 +49,7 @@ config table still accepts wins.
 
 | Tier | Key | Answers |
 |---|---|---|
-| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | the shapes in `shapes/` — every MatMulNBits node in 20 shipped models |
+| **Exact** | phase, bits, `N`, `K`, group_size, zero-point, row-stride, M-bucket | the shapes in `shapes/` — every MatMulNBits node in 20 shipped models, plus the hand-added `Internal` rows |
 | **Fuzzy** | same, but `N` and `K` collapsed to octave buckets | a model nobody measured whose layer dims land near a measured one |
 | **Fallback** | phase + bits only | guarantees a hit; the config that won most often for that phase |
 
@@ -83,7 +83,8 @@ changes rather than its existence, and the whole table is rejected.
 ## Regenerating
 
 ```powershell
-# 1. shape inventory (only when the model set changes)
+# 1. shape inventory (only when the model set changes). extract_shapes.py does
+#    not emit the hand-added `Internal` rows; keep them in the new csv.
 python scripts/extract_shapes.py `
     --models ../../../../../../ModelFiles/oga_models `
     --out shapes/oga_models_bits4.csv --bits 4
