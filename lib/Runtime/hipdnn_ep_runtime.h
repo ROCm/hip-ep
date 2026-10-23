@@ -1234,6 +1234,15 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  int64_t indices_element_size_bytes,
                  int64_t depth_element_size_bytes);
 
+int wrap_ngram_hash_mapping(RuntimeState *state, void *input_ids,
+                            void *multipliers, void *vocab_sizes,
+                            void *past_ids, void *head_offsets,
+                            void *eos_token_id, void *segment_ids,
+                            void *hash_ids, void *present_ids, int64_t batch,
+                            int64_t seq_len, int64_t max_ngram_size,
+                            int64_t n_head_per_ngram, int64_t pad_id,
+                            int64_t reset_on_eos, int64_t element_size_bytes);
+
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
@@ -1452,6 +1461,19 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
+// hip.mrotary_embedding. max_position is cos_cache dim 0; position_ids dims
+// 1..2 and sin_cache dim 0 must agree with the input / cos_cache, else -1
+// before any launch.
+int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                           void *cos_cache, void *sin_cache, void *output,
+                           int64_t batch_size, int64_t seq_len,
+                           int64_t num_heads, int64_t head_dim,
+                           int64_t rotary_dim, int64_t max_position,
+                           int64_t section_t, int64_t section_h,
+                           int64_t section_w, int64_t mrope_layout, float scale,
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows);
+
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`
 // (the product of the input dims from `axis` on). It is independent of
@@ -1509,6 +1531,34 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                      void *output, void *normed, int64_t key_num_elements,
                      int64_t hc, int64_t hidden, int64_t element_size_bytes,
                      float epsilon);
+// com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
+// elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t gate_sigmoid,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale);
+
+// com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes);
+
+// PostMix fused with the following branchwise RMSNorm. stream_mix may be
+// null. feature_gate and gate_activation match the HIP op. residual and
+// normed are both written.
+int wrap_hyper_connection_post_mix_norm(
+    RuntimeState *state, void *streams, void *block_output, void *gate,
+    void *stream_mix, void *norm_scale, void *residual, void *normed,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
+    float epsilon);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
@@ -1759,7 +1809,12 @@ int wrap_causal_conv_with_state(
     // 0=channels-first, 1=channels-last. Permutes input and output only: the
     // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
-    int64_t channels_last);
+    int64_t channels_last,
+    // Tap spacing; the state then holds (kernel_size - 1) * dilation
+    // positions. Values > 1 require state_channels_last.
+    int64_t dilation,
+    // 1 = carry state is (batch, state_len, channels). Requires channels_last.
+    int64_t state_channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1807,6 +1862,50 @@ int wrap_linear_attention(
     int64_t beta_per_head, float scale, int64_t chunk_size,
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
+
+// scale == 0 means 1 / sqrt(head_size_qk).
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes);
+
+// fp16 only. past_* may alias present_*. head_size is query width / num_heads
+// and capacity is past_key dim 2; the remaining dims are runtime shapes that
+// must agree with them, else -1 before any launch.
+int wrap_dynamic_sparse_attention(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, const void *selected_indices,
+    const void *selected_counts, const void *seqlens_k, void *output,
+    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
+    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    int64_t capacity, int64_t max_selected, int64_t past_key_batch,
+    int64_t past_key_heads, int64_t past_key_head_size,
+    int64_t past_value_batch, int64_t past_value_heads,
+    int64_t past_value_capacity, int64_t past_value_head_size,
+    int64_t present_key_capacity, int64_t present_key_head_size,
+    int64_t present_value_capacity, int64_t present_value_head_size,
+    int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
+    float scale);
+
+// past_key may be null when past_len == 0; mask may be null (all visible).
+// mask_* are ignored without a mask and cos_batch / sin_batch unless
+// rotary_batched; shape disagreement returns -1 before any launch.
+int wrap_sparse_attention_indexer(
+    RuntimeState *state, const void *query, const void *query_norm_weight,
+    const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
+    const void *mask, const void *past_key, void *selected_indices,
+    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
+    int64_t num_heads, int64_t head_size, int64_t rotary_width,
+    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt

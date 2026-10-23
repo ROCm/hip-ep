@@ -329,6 +329,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
+    compile_to_bitcode(real/ngram_hash_mapping.cpp runtime_ngram_hash_mapping.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_l2.cpp runtime_reduce_l2.bc)
@@ -349,6 +350,11 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/and.cpp runtime_and.bc)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
+    compile_to_bitcode(real/gated_delta_net.cpp runtime_gated_delta_net.bc)
+    compile_to_bitcode(real/dynamic_sparse_attention.cpp
+                       runtime_dynamic_sparse_attention.bc)
+    compile_to_bitcode(real/sparse_attention_indexer.cpp
+                       runtime_sparse_attention_indexer.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
     compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
@@ -432,6 +438,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ngram_hash_mapping.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_l2.bc
@@ -450,6 +457,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_and.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gated_delta_net.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_sparse_attention.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_sparse_attention_indexer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc

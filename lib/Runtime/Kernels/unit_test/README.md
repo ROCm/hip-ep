@@ -143,26 +143,20 @@ tests (the option is on by default), `hipdnn-kernel-ut.exe` reaches
 `install/bin/kernel-tests/` next to it, failing if the controller or an arch's
 executables are missing.
 
-A GPU job that wants the results runs the controller from the downloaded
-`gpu-test-package/bin` (suggested; self-hosted GPU runner):
+`windows-kernel-ut.yml` (the `kernel_ut` job of `windows-build.yml`) runs
+`hipdnn-kernel-ut.exe --mode lookup --coverage 1` from the downloaded
+`gpu-test-package/bin` on the self-hosted `StrixHalo` runner:
 
-```yaml
-- name: Run kernel unit tests (GPU)
-  shell: cmd
-  working-directory: gpu-test-package/bin
-  run: hipdnn-kernel-ut.exe --mode lookup --coverage 1
+| Event | Runs when |
+|---|---|
+| `pull_request`, `merge_group` | The diff touches `lib/Runtime/Kernels/` or `windows-kernel-ut.yml`; otherwise the job is skipped. |
+| `push`, `workflow_dispatch` | Always. |
 
-- name: Upload kernel unit-test report
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: kernel-ut-results
-    path: gpu-test-package/bin/out/
-```
-
-The step fails on any non-zero exit code. The uploaded `results.csv` shows
-which op, leaf and shape failed, and a failing leaf's `.stderr.log` sits next
-to it.
+The job fails on any non-zero exit code. It uploads `bin/out/` as the
+`kernel-ut-results` artifact (`results.csv` shows which op, leaf and shape
+failed; a failing leaf's `.stderr.log` sits next to it), writes a per-leaf
+table to the job summary, and on a pull request posts the same table as a PR
+comment.
 
 ## These are unit tests — comprehensive shapes, not a perf sweep
 
