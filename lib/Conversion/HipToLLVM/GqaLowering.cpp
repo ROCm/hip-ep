@@ -18,6 +18,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#if HIP_EP_GQA_IMPL_ID != 0
+    // The runtime's element_size_bytes argument cannot distinguish BF16 from
+    // FP16. Ring builds reject ambiguous types before erasing that information.
+    Type queryElement =
+        cast<MemRefType>(op.getQuery().getType()).getElementType();
+    if (!queryElement.isF16() && !queryElement.isF32())
+      return op.emitOpError(
+          "Ring GQA builds require FP16 or FP32 query tensors");
+    for (Value operand : {op.getKey(), op.getValue(), op.getOutput()}) {
+      if (operand &&
+          cast<MemRefType>(operand.getType()).getElementType() != queryElement)
+        return op.emitOpError(
+            "Ring GQA builds require matching query/key/value/output types");
+    }
+    if (op.getKQuantType() == "NONE" && op.getVQuantType() == "NONE") {
+      for (Value operand : {op.getPastKey(), op.getPastValue(),
+                            op.getPresentKey(), op.getPresentValue()}) {
+        if (operand && cast<MemRefType>(operand.getType()).getElementType() !=
+                           queryElement)
+          return op.emitOpError(
+              "Ring GQA builds require matching unquantized cache types");
+      }
+    }
+#endif
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -218,6 +242,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       }
     }
 
+    // Dynamic or packed cache widths need a separate ABI: the logical head
+    // dimension from Q cannot describe their physical allocation.
+    bool widthABI = queryType.isDynamicDim(2);
+    int64_t logicalWidth =
+        widthABI ? -1 : queryType.getDimSize(2) / headDimDivisor;
+    for (Value cache : {op.getPastKey(), op.getPastValue(), op.getPresentKey(),
+                        op.getPresentValue()}) {
+      if (!cache)
+        continue;
+      auto type = cast<MemRefType>(cache.getType());
+      if (type.getRank() == 4 &&
+          (type.isDynamicDim(3) || type.getDimSize(3) != logicalWidth))
+        widthABI = true;
+    }
+    auto cacheWidth = [&](Value original, Value converted) -> Value {
+      if (!original)
+        return createI64Const(0);
+      auto type = cast<MemRefType>(original.getType());
+      // v1 requires BNSD caches. Other ranks cannot accidentally pass width=66.
+      return type.getRank() == 4
+                 ? getMemRefDimSize(type, 3, converted, rewriter, loc)
+                 : createI64Const(0);
+    };
+
     // Function signature matches wrap_group_query_attention() in gqa.cpp
     SmallVector<Type, 42> paramTypes = {
         ptrType, // state
@@ -269,8 +317,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // seq_len_new_kv
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
+    if (widthABI)
+      paramTypes.append(4, i64Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, widthABI ? "wrap_group_query_attention_v2" : kWrapGQA,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
@@ -293,6 +344,13 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal};
 
+    if (widthABI) {
+      args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));
+      args.push_back(cacheWidth(op.getPastValue(), adaptor.getPastValue()));
+      args.push_back(cacheWidth(op.getPresentKey(), adaptor.getPresentKey()));
+      args.push_back(
+          cacheWidth(op.getPresentValue(), adaptor.getPresentValue()));
+    }
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);

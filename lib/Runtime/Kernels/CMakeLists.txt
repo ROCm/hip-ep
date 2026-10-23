@@ -38,6 +38,7 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
+    hip/turboquant_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
@@ -240,7 +241,21 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
+if(HIP_EP_GQA_IMPL_ID)
+    list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
+endif()
+
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    set(_ring_device_enabled 0)
+    if(_arch STREQUAL "gfx1151")
+        set(_ring_device_enabled 1)
+    endif()
+    set(_ring_compile_options "")
+    if(HIP_EP_GQA_IMPL_ID)
+        list(APPEND _ring_compile_options
+            -DHIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID}
+            -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
+    endif()
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
@@ -255,11 +270,15 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
+        COMPILE_OPTIONS ${_ring_compile_options}
         OFFLOAD_ARCHS
             ${_arch}
         DEPENDS
             HipSchemas
     )
+    if(HIP_EP_GQA_IMPL_ID AND NOT WIN32)
+        target_compile_options(${_target} PRIVATE ${_ring_compile_options})
+    endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"

@@ -1,0 +1,57 @@
+--- a/src/generator/generators.cpp
++++ b/src/generator/generators.cpp
+@@ -67,13 +67,14 @@
+ bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
+   // Some models fall back to CPU attention, where continuation is valid because their KV cache is
+   // also on CPU. Other listed providers preserve appendable KV state across generation turns.
+-  constexpr std::array<DeviceType, 6> supported_devices{
++  constexpr std::array<DeviceType, 7> supported_devices{
+       DeviceType::CPU,
+       DeviceType::CUDA,
+       DeviceType::WEBGPU,
+       DeviceType::OpenVINO,
+       DeviceType::NvTensorRtRtx,
+-      DeviceType::RyzenAI};
++      DeviceType::RyzenAI,
++      DeviceType::AMDGPU};
+   return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
+          supported_devices.end();
+ }
+--- a/src/decoding/standard_decoding_strategy.h
++++ b/src/decoding/standard_decoding_strategy.h
+@@ -16,6 +16,7 @@
+ // Commits exactly one token per Step.
+ struct StandardDecodingStrategy final : DecodingStrategy {
+   void Step(Generator& g) override;
++  void PrepareForAppend(Generator& g) override;
+ };
+ 
+ }  // namespace Generators
+\ No newline at end of file
+--- a/src/decoding/standard_decoding_strategy.cpp
++++ b/src/decoding/standard_decoding_strategy.cpp
+@@ -60,6 +60,14 @@
+   }
+ }
+ 
++void StandardDecodingStrategy::PrepareForAppend(Generator& g) {
++  // Token selection appends to the sequence before its KV is evaluated. Flush
++  // that one token before adding a new prompt so positions and cached history
++  // describe the same committed sequence. Already-computed logits need no work.
++  if (g.last_action_ == Generator::Action::generated && !g.computed_logits_)
++    g.ComputeLogits(g.search_->GetNextTokens());
++}
++
+ void StandardDecodingStrategy::Step(Generator& g) {
+   // Phi3 models switch rope factors at a threshold token; recompute position
+   // IDs and KV cache by rewinding and re-appending the sequence.
+--- a/test/cpp/engine/request_lifecycle_tests.cpp
++++ b/test/cpp/engine/request_lifecycle_tests.cpp
+@@ -233,6 +233,7 @@
+ TEST(ContinuousDecodingDeviceSupportTest, MatchesKvCacheCapabilityContract) {
+   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CPU));
+   EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::CUDA));
++  EXPECT_TRUE(SupportsContinuousDecoding(DeviceType::AMDGPU));
+   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::DML));
+   EXPECT_FALSE(SupportsContinuousDecoding(DeviceType::QnnHtp));
+ }

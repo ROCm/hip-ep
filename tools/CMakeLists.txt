@@ -18,3 +18,6 @@ add_subdirectory(hip-inspect)
 # hip-test is dual-format (bitcode via LlvmIrJit, native .dll/.so via
 # morphizen::Plugin), using the same loaders the EP uses at runtime.
 add_subdirectory(hip-test)
+
+# Optional CPU-generated experimental codec assets.
+add_subdirectory(turboquant)

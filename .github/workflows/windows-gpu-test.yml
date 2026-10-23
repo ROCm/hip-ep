@@ -624,6 +624,9 @@ jobs:
               Write-Host "WARNING: gh api unreachable, skipping L2 PR comment"
             }
           }
+          # Fork PR tokens cannot write comments. Reporting is best-effort;
+          # do not let the pwsh runner propagate gh's exit code after a warning.
+          exit 0
 
       # Parse QPS from result files and publish:
       #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
@@ -833,6 +836,8 @@ jobs:
               Write-Host "WARNING: gh api unreachable, skipping PR comment"
             }
           }
+          # The summary is already saved; comment failures are non-fatal.
+          exit 0
 
       - name: Check DLL sizes vs main
         if: always()
@@ -1007,6 +1012,5 @@ jobs:
             Write-Host "ERROR: one or more watched DLLs grew by more than 1 MiB vs main"
             exit 1
           }
-          if (-not $gotBaseline) {
-            exit 0
-          }
+          # Only the size gate above should fail this step, not PR reporting.
+          exit 0

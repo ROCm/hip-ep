@@ -298,6 +298,17 @@ jobs:
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
+      # This workflow uses the default GQA implementation, which omits Ring.
+      # Exercise the exported stubs on the GPU-free build runner, not the GPU job.
+      - name: Check unavailable TurboQuant append exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          for library in staging/bin/custom_kernels_*.dll; do
+            python tools/turboquant/check_unavailable_append.py \
+              --library "$library" --dll-dir "$(cygpath -w "$PWD/staging/bin")"
+          done
+
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
         with:
