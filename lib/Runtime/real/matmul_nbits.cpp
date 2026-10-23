@@ -612,8 +612,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  // The compiler pads a weight's rows only for bits=4 with whole quant groups
-  // (hip-pad-matmul-nbits-weights); anything else is a malformed module.
+  // The compiler lays out a weight's rows only for bits=4 with whole quant
+  // groups (hip-pad-matmul-nbits-weights); anything else is a malformed module.
   if (b_row_bytes != 0 && (bits != 4 || block_size <= 0 ||
                            K % block_size != 0 || b_row_bytes < K / 2)) {
     fprintf(stderr,
@@ -623,6 +623,12 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
             (long long)block_size);
     return -1;
   }
+  // b_row_bytes == K/2 is a weight the compiler kept dense on purpose (its
+  // table measured it no slower dense): no per-call repack below, and the
+  // kernels get the dense layout (0).
+  const bool laid_out_by_compiler = b_row_bytes != 0;
+  if (b_row_bytes == K / 2)
+    b_row_bytes = 0;
 
   // ONNX MatMulNBits allows `scales` to be fp16 or fp32 independent of the
   // packed-weight dtype (this lm_head-style model uses fp32 activations +
@@ -826,9 +832,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   //
   // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
   // them. wave64 (CDNA) has already taken the hipBLASLt path above. A weight
-  // the compiler already padded (b_row_bytes != 0) needs no repack and goes
-  // straight to the strided dispatch below.
-  if (b_row_bytes == 0 && !hipdnn_device_is_wave64() && bits == 4 &&
+  // the compiler laid out (padded, or kept dense on purpose) needs no repack
+  // and goes straight to the dispatch below.
+  if (!laid_out_by_compiler && !hipdnn_device_is_wave64() && bits == 4 &&
       batch_count == 1 && (K % 32 == 0) && M >= 16 && elem_size == 2 &&
       block_size > 0 && (K % block_size == 0) && !bias && shouldPadRow(K)) {
     const void *zeros_fp16 = nullptr;

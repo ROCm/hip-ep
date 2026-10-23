@@ -69,6 +69,11 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Per-weight int4 MatMulNBits row pads, "
                      "N:K:block_size:zero_points=pad_bytes (see "
                      "hip-pad-matmul-nbits-weights)")};
+  Option<int64_t> matmulNBitsDefaultRowPad{
+      *this, "matmul-nbits-default-row-pad",
+      llvm::cl::desc("Row pad for an aliasing int4 MatMulNBits weight that "
+                     "matmul-nbits-row-pads does not list; 0 pads none"),
+      llvm::cl::init(0)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.

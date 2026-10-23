@@ -938,8 +938,10 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     I64Attr:$accuracy_level,
     I64Attr:$zp_elem_size,  // zero_points element size: 1=uint8 packed, 2=fp16
     DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
-    // Byte pitch of B's rows when hip-pad-matmul-nbits-weights stored the
-    // weight row-padded; 0 means the dense [N, k_blocks * blob_size] layout.
+    // Byte pitch of B's rows as laid out by hip-pad-matmul-nbits-weights:
+    // above K/2 the weight is stored row-padded; K/2 keeps it dense on purpose
+    // (the runtime does not repack it). 0: dense, not laid out by the
+    // compiler; the runtime may repack an aliasing weight per call.
     DefaultValuedAttr<I64Attr, "0">:$b_row_bytes
   );
 

@@ -73,7 +73,9 @@ struct WmmaAnswer {
   int wt_n = 0;
   int bk = 0;
   bool fused = true;
-  int weu = 0;
+  /* Set when the table lists the config as an extended entry
+   * (WMMA_EXT_CONFIGS), with that entry's pipeline options. */
+  bool ext = false;
   int variant = 0;
 };
 
@@ -119,6 +121,15 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
  * weights `row-pads` format). Empty when the table is absent, incompatible or
  * has none. The string lives for the process. */
 const char* rowPadTable();
+
+/* The table's pad, in bytes, for an aliasing weight the row-pad list does not
+ * name. 0 when the table is absent, incompatible or sets none: such weights
+ * then stay dense and the runtime repacks them per call. */
+int defaultRowPad();
+
+/* Whether the table names an extended WMMA entry, i.e. the device was measured
+ * with them. Only then does the runtime sweep time them too. */
+bool extendedConfigsMeasured();
 
 /* Diagnostics for the debug log: whether a table loaded at all, how many
  * points it has, and how many were dropped as unusable. */

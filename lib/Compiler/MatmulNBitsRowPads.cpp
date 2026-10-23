@@ -67,7 +67,7 @@ std::string thisModuleDirectory() {
 
 } // namespace
 
-std::vector<std::string> queryMatmulNBitsRowPads() {
+MatmulNBitsRowPads queryMatmulNBitsRowPads() {
   std::string arch = hip_get_env("HIP_CUSTOM_KERNELS_ARCH");
 #ifdef HIPDNN_CK_DEFAULT_ARCH
   if (arch.empty())
@@ -82,35 +82,45 @@ std::vector<std::string> queryMatmulNBitsRowPads() {
     return {};
 
   using RowPadTableFn = const char *(*)();
+  using DefaultRowPadFn = int (*)();
   RowPadTableFn table = nullptr;
+  DefaultRowPadFn defaultPad = nullptr;
 #ifdef _WIN32
   const std::string lib = dir + "\\custom_kernels_" + arch + ".dll";
   if (void *mod = LoadLibraryExA(lib.c_str(), nullptr,
-                                 HIPDNN_LOAD_WITH_ALTERED_SEARCH_PATH))
+                                 HIPDNN_LOAD_WITH_ALTERED_SEARCH_PATH)) {
     table = reinterpret_cast<RowPadTableFn>(
         GetProcAddress(mod, "hip_matmul_nbits_u4_row_pad_table"));
+    defaultPad = reinterpret_cast<DefaultRowPadFn>(
+        GetProcAddress(mod, "hip_matmul_nbits_u4_default_row_pad"));
+  }
 #else
   const std::string lib = dir + "/libcustom_kernels_" + arch + ".so";
-  if (void *mod = dlopen(lib.c_str(), RTLD_LAZY))
+  if (void *mod = dlopen(lib.c_str(), RTLD_LAZY)) {
     table = reinterpret_cast<RowPadTableFn>(
         dlsym(mod, "hip_matmul_nbits_u4_row_pad_table"));
+    defaultPad = reinterpret_cast<DefaultRowPadFn>(
+        dlsym(mod, "hip_matmul_nbits_u4_default_row_pad"));
+  }
 #endif
   // The library stays loaded: it is the one the runtime loads for this model.
-  if (!table) {
-    COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: no table in "
-                       << lib << "; default rule\n");
+  if (!table || !defaultPad) {
+    COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: none in "
+                       << lib << "; weights stay dense\n");
     return {};
   }
 
-  std::vector<std::string> entries;
+  MatmulNBitsRowPads pads;
+  pads.defaultPad = defaultPad();
   llvm::SmallVector<llvm::StringRef> parts;
   llvm::StringRef(table()).split(parts, ',', /*MaxSplit=*/-1,
                                  /*KeepEmpty=*/false);
   for (llvm::StringRef part : parts)
-    entries.push_back(part.trim().str());
-  COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: "
-                     << entries.size() << " entries from " << lib << "\n");
-  return entries;
+    pads.entries.push_back(part.trim().str());
+  COMPILER_DEBUG_LOG("[CompilerDriver] MatMulNBits row pads: default "
+                     << pads.defaultPad << ", " << pads.entries.size()
+                     << " entries from " << lib << "\n");
+  return pads;
 }
 
 } // namespace hip::compiler

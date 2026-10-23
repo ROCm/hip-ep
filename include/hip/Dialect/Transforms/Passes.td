@@ -766,9 +766,12 @@ def PadMatMulNBitsWeightsPass
     For each `hip.constant` whose only users are tensor-mode bits=4
     `hip.matmul_nbits` ops reading it as B, with block_size dividing K,
     retypes the carrier to `[N, K/2 + pad]` and sets each user's `b_row_bytes`
-    to that pitch. The pad is the weight's `row-pads` entry when listed (0
-    keeps the dense layout), otherwise 256 bytes when the row stride K/2
-    aliases into a few cache sets and 0 when it does not. External carriers
+    to that pitch. The pad is the weight's `row-pads` entry when listed,
+    otherwise `default-row-pad` when the row stride K/2 aliases into a few
+    cache sets; any other weight is left as it is. A listed pad of 0 keeps the
+    dense layout and sets `b_row_bytes = K/2`, which tells the runtime not to
+    repack it. The compiler driver fills both options from the device's
+    autotune table; a device without one pads nothing. External carriers
     keep their dense source and gain `row_bytes = K/2`, which
     `hip-externalize-constants` and the runtime loader expand at storage time;
     inline carriers are rewritten to padded bytes.
@@ -782,6 +785,9 @@ def PadMatMulNBitsWeightsPass
     ListOption<"rowPads", "row-pads", "std::string",
                "Per-weight row pads, `N:K:block_size:zero_points=pad_bytes` "
                "(zero_points 0 or 1, pad a multiple of 16)">,
+    Option<"defaultRowPad", "default-row-pad", "int64_t", /*default=*/"0",
+           "Pad in bytes for an aliasing weight `row-pads` does not list "
+           "(a multiple of 16; 0 leaves such weights to the runtime)">,
   ];
   let dependentDialects = ["mlir::hip::HipDialect"];
 }

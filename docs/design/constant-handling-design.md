@@ -253,14 +253,22 @@ runs just before the externalizer. An int4 MatMulNBits weight is retyped to
 `[N, K/2 + pad]` and marked `row_bytes = K/2`; its users get
 `b_row_bytes = K/2 + pad`. The carrier's `size` stays the dense source size.
 
-The pad comes from the per-weight row-pad table of the device's MatMulNBits
-autotune table (`row_pads` in `lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/<arch>.json`),
-which records, per (N, K, block size, zero points), the pad with the lowest
-prefill plus decode time; 0 keeps the dense layout. The compiler driver reads it
-from `custom_kernels_<arch>` (`hip_matmul_nbits_u4_row_pad_table`) and passes it
-as the pass's `row-pads` option. A weight the table does not list gets 256
-bytes when its stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288,
-14336, ...) and stays dense otherwise.
+The pad comes from the device's MatMulNBits autotune table
+(`lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/<arch>.json`), which the
+compiler driver reads from `custom_kernels_<arch>` and passes as the pass's
+options:
+
+- `row_pads` (`row-pads`, via `hip_matmul_nbits_u4_row_pad_table`): per
+  (N, K, block size, zero points), the pad with the lowest prefill plus decode
+  time. A listed pad of 0 keeps the weight dense and sets its users'
+  `b_row_bytes` to K/2, which tells the runtime not to repack it.
+- `default_row_pad` (`default-row-pad`, via
+  `hip_matmul_nbits_u4_default_row_pad`): the pad for an unlisted weight whose
+  stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...).
+
+A device whose table sets neither (every arch but gfx1151 today) pads nothing:
+its weights stay dense and the runtime repacks aliasing ones per prefill call,
+as before.
 
 The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
 `hipdnn.constant_sizes` describe the stored layout:

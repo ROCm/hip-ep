@@ -29,7 +29,7 @@ namespace {
 
 namespace fbs = hipdnn_ep::matmul_nbits_autotune::fbs;
 
-constexpr uint32_t kSchemaVersion = 5;
+constexpr uint32_t kSchemaVersion = 4;
 // Bump when the config tables or the meaning of a stored geometry changes.
 // A table stamped with an older ABI is rejected outright rather than allowed to
 // pick configs that no longer mean what they meant when they were measured.
@@ -128,9 +128,12 @@ struct Table {
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
   // row_pads as the compiler's `N:K:block_size:zero_points=pad_bytes` list.
   std::string row_pads;
+  int default_row_pad = 0;
+  bool extended_configs = false;   // some config names an extended entry
   bool loaded = false;
   uint32_t points = 0;
   uint32_t invalid_points = 0;
+  uint32_t invalid_extended_configs = 0;
   uint32_t invalid_row_pads = 0;
   std::atomic<uint32_t> rejected{0};
 };
@@ -243,13 +246,25 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
       a.wmma.wt_n = c->wt_n();
       a.wmma.bk = c->bk();
       a.wmma.fused = c->fused() != 0;
-      a.wmma.weu = c->weu();
-      a.wmma.variant = c->variant();
     } else {
       a.gemv.threads = c->threads();
       a.gemv.tile_n = c->tile_n();
     }
     t.pool.push_back(a);
+  }
+
+  if (lut->extended_configs()) {
+    for (const fbs::MatmulNbitsExtendedConfig* e : *lut->extended_configs()) {
+      const unsigned idx = e->config();
+      if (idx >= t.pool.size() || t.pool[idx].kind != fbs::MatmulNbitsConfigKind::Wmma ||
+          t.pool[idx].wmma.ext) {
+        ++t.invalid_extended_configs;
+        continue;
+      }
+      t.pool[idx].wmma.ext = true;
+      t.pool[idx].wmma.variant = e->variant();
+      t.extended_configs = true;
+    }
   }
 
   for (const fbs::MatmulNbitsTunePoint* p : *lut->points()) {
@@ -309,13 +324,21 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     }
   }
 
+  // Same 16-byte rule as a listed pad.
+  if (lut->default_row_pad() % 16 == 0)
+    t.default_row_pad = lut->default_row_pad();
+  else
+    ++t.invalid_row_pads;
+
   t.loaded = true;
   if (logOn())
     fprintf(stderr,
             "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
-            "%u row pads (%u rejected), weights m=%.2f n=%.2f k=%.2f, for %s\n",
-            t.points, t.groups.size(), t.invalid_points, row_pads,
-            t.invalid_row_pads, t.wm, t.wn, t.wk,
+            "extended configs %s (%u rejected), %u row pads (%u rejected), "
+            "default row pad %d, weights m=%.2f n=%.2f k=%.2f, for %s\n",
+            t.points, t.groups.size(), t.invalid_points,
+            t.extended_configs ? "yes" : "no", t.invalid_extended_configs,
+            row_pads, t.invalid_row_pads, t.default_row_pad, t.wm, t.wn, t.wk,
             lut->gpu_arch() ? lut->gpu_arch()->c_str() : "?");
 }
 
@@ -479,6 +502,14 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
 
 const char* rowPadTable() {
   return table().row_pads.c_str();
+}
+
+int defaultRowPad() {
+  return table().default_row_pad;
+}
+
+bool extendedConfigsMeasured() {
+  return table().extended_configs;
 }
 
 Stats stats() {

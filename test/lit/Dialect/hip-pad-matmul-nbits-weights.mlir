@@ -3,21 +3,24 @@
 
 // hip-pad-matmul-nbits-weights retypes an int4 weight carrier to
 // [N, K/2 + pad] with row_bytes = K/2 and sets b_row_bytes on its users; the
-// pad is the weight's row-pads entry, or 256 bytes when the stride aliases.
+// pad is the weight's row-pads entry, or default-row-pad when the stride
+// aliases. Without either (a device whose table sets none) nothing changes.
 // hip-externalize-constants then stores it padded (full constants file) or
 // records the row layout for the runtime loader (streaming).
 
 // RUN: split-file %s %t
 // RUN: mkdir -p %t/full %t/stream
 // RUN: %python -c "import sys; open(sys.argv[1], 'wb').write(bytes((i * 7 + 1) % 251 for i in range(4096)))" %t/w.bin
-// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights %t/pad.mlir | FileCheck %s --check-prefix=PAD
-// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights %t/skip.mlir | FileCheck %s --check-prefix=SKIP
-// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=16' %t/pad.mlir | FileCheck %s --check-prefix=TABLE16
-// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=0' %t/pad.mlir | FileCheck %s --check-prefix=TABLE0
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' %t/pad.mlir | FileCheck %s --check-prefix=PAD
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights %t/pad.mlir | FileCheck %s --check-prefix=NOTABLE
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' %t/skip.mlir | FileCheck %s --check-prefix=SKIP
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256 row-pads=2:4096:128:0=16' %t/pad.mlir | FileCheck %s --check-prefix=TABLE16
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256 row-pads=2:4096:128:0=0' %t/pad.mlir | FileCheck %s --check-prefix=TABLE0
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:2880:64:0=32' %t/skip.mlir | FileCheck %s --check-prefix=LISTED
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BAD
-// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
-// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
+// RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BADDEFAULT
+// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
+// RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
 // RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 2 * 2304, len(d); assert d[0:2048] == s[0:2048] and d[2304:4352] == s[2048:4096]; assert d[2048:2304] == bytes(256) and d[4352:4608] == bytes(256)" %t/w.bin %t/full/model.constants.bin
 
 //--- pad.mlir
@@ -39,14 +42,21 @@ func.func @pad(%ctx: !hip.context, %a: tensor<4x4096xf16>,
   return %y : tensor<4x2xf16>
 }
 
-// A listed weight takes its table pad; a listed pad of 0 keeps it dense.
+// No table: the weight is left to the runtime (dense, repacked per call).
+// NOTABLE-LABEL: func.func @pad
+// NOTABLE:         hip.constant {location = "w.bin", offset = 0 : i64, size = 4096 : i64} : tensor<2x32x64xui8>
+// NOTABLE-NOT:     b_row_bytes
+
+// A listed weight takes its table pad; a listed pad of 0 keeps it dense and
+// marks the use with b_row_bytes = K/2 so the runtime does not repack it.
 // TABLE16-LABEL: func.func @pad
 // TABLE16:         hip.constant {{.*}}row_bytes = 2048 : i64{{.*}} : tensor<2x2064xui8>
 // TABLE16:         b_row_bytes = 2064 : i64
 // TABLE0-LABEL:  func.func @pad
 // TABLE0:          hip.constant {location = "w.bin", offset = 0 : i64, size = 4096 : i64} : tensor<2x32x64xui8>
-// TABLE0-NOT:      b_row_bytes
+// TABLE0:          b_row_bytes = 2048 : i64
 // BAD: malformed row-pads entry '2:4096:128:0=24'
+// BADDEFAULT: default-row-pad 24 is not a non-negative multiple of 16
 
 // STREAM:      module attributes
 // STREAM-SAME: hipdnn.constant_row_bytes = array<i64: 2048>
@@ -62,7 +72,7 @@ func.func @pad(%ctx: !hip.context, %a: tensor<4x4096xf16>,
 // SKIP-LABEL: func.func @not_aliasing
 // SKIP:         hip.constant {location = "w.bin", offset = 0 : i64, size = 2880 : i64} : tensor<2x45x32xui8>
 // SKIP-NOT:     b_row_bytes
-// A weight the default rule leaves dense is padded when the table lists it.
+// A weight the default rule leaves alone is padded when the table lists it.
 // LISTED-LABEL: func.func @not_aliasing
 // LISTED:         hip.constant {{.*}}row_bytes = 1440 : i64{{.*}} : tensor<2x1472xui8>
 // LISTED:         b_row_bytes = 1472 : i64

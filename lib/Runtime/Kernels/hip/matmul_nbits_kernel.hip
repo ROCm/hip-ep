@@ -4415,13 +4415,14 @@ constexpr int kWmmaVariantCuMode = 128;
 // CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
 // the workgroup's waves share one CU and its half of the LDS instead of
 // spreading over the WGP. It changes the kernel attributes only, so each
-// entry point is defined once per mode from the same body.
+// entry point is defined once per mode from the same body. waves_per_eu is 1,
+// as in the measurements: on gfx11 every value up to 6 allows 256 VGPRs.
 #define MATMUL_NBITS_WMMAX_KERNEL(NAME, USE_ZEROS, MODE_ATTR)                    \
-    template <int BM_T, int BN_T, int WT_M, int WT_N, int WAVES_EU, bool BC,    \
-              int BK_T, int VARIANT>                                            \
+    template <int BM_T, int BN_T, int WT_M, int WT_N, bool BC, int BK_T,        \
+              int VARIANT>                                                      \
     __global__ __attribute__((amdgpu_flat_work_group_size(                      \
         GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N), GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N)))) \
-    __attribute__((amdgpu_waves_per_eu(WAVES_EU))) MODE_ATTR void NAME(        \
+    __attribute__((amdgpu_waves_per_eu(1))) MODE_ATTR void NAME(               \
         int M, int N, int K, const _Float16* __restrict__ A, int lda,           \
         const unsigned char* __restrict__ B_packed,                             \
         const _Float16* __restrict__ scales, const _Float16* __restrict__ zeros, \
@@ -4434,10 +4435,17 @@ constexpr int kWmmaVariantCuMode = 128;
             M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
             C, ldc, swizzle_n, b_row_bytes);                                    \
     }
+// A device-code attribute: the host pass only sees the launch stub.
+#if defined(__HIP_DEVICE_COMPILE__)
+#define MATMUL_NBITS_CU_MODE __attribute__((target("cumode")))
+#else
+#define MATMUL_NBITS_CU_MODE
+#endif
 MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP, false, )
 MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP, true, )
-MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP_CU, false, __attribute__((target("cumode"))))
-MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP_CU, true, __attribute__((target("cumode"))))
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP_CU, false, MATMUL_NBITS_CU_MODE)
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP_CU, true, MATMUL_NBITS_CU_MODE)
+#undef MATMUL_NBITS_CU_MODE
 #undef MATMUL_NBITS_WMMAX_KERNEL
 #undef WMMAX_VARIANT_ARGS
 
@@ -5010,9 +5018,9 @@ struct WmmaConfig {
     // 0 means the default bm/(wt_m*wt_n). WT2x4 needs it set explicitly: the
     // default would be 16, and a K-step of 16 doubles the barrier count.
     int  bk = 0;
-    // Extended entries (WMMA_EXT_CONFIGS) set an explicit amdgpu_waves_per_eu
-    // hint; 0 keeps the per-WT default of the launch macros.
-    int  weu = 0;
+    // Extended entry (WMMA_EXT_CONFIGS): selected only through the LUT, or by
+    // the sweep on a device whose LUT names extended configs.
+    bool ext = false;
     // Pipeline options of GemmFp16U4ImplX, bitwise: 1 two-deep global
     // prefetch, 2 uniform base + 32-bit offsets, 4 store-first, 8/16/24
     // sched_group_barrier mode 1/2/3, 32 staged epilogue, 64 XOR LDS swizzle,
@@ -5020,28 +5028,26 @@ struct WmmaConfig {
     int  variant = 0;
 };
 
-static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.weu != 0; }
+static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 
-// Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, weu, variant, swizzle).
+// Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
 // Prefill winners from the docs/experiments/matmul-nbits-prefill-2026-10
-// search. Each needs weu != 0, and (geometry, weu, variant) must be unique so
-// the LUT can name it.
+// search. (geometry, swizzle, variant) must be unique among them so the LUT
+// can name each one (checked below).
 #define WMMA_EXT_CONFIGS(X)                     \
-    X( 32,  32, 1, 2, 64, 4,   0,  4)           \
-    X(128,  64, 2, 4, 64, 2,   3,  4)           \
-    X(128, 128, 2, 4, 32, 1, 116,  4)           \
-    X(128, 128, 2, 4, 32, 2, 116,  4)           \
-    X(128, 128, 2, 4, 64, 1, 124,  4)           \
-    X(128, 128, 2, 4, 64, 2, 100,  4)           \
-    X(128, 128, 2, 4, 64, 2, 124,  4)           \
-    X(128, 128, 4, 4, 32, 1,   1,  4)           \
-    X(128, 128, 4, 4, 32, 2,   3,  4)           \
-    X(128, 128, 2, 4, 64, 1,  67,  4)           \
-    X(128, 256, 2, 4, 32, 1,  92,  4)           \
-    X( 64,  64, 2, 2, 32, 1, 129,  4)           \
-    X(128, 128, 4, 4, 32, 1, 102,  4)           \
-    X(128,  64, 2, 4, 64, 1, 131,  4)           \
-    X(128, 128, 4, 4, 32, 1,  92,  4)
+    X( 32,  32, 1, 2, 64,   0,  4)              \
+    X(128,  64, 2, 4, 64,   3,  4)              \
+    X(128, 128, 2, 4, 32, 116,  4)              \
+    X(128, 128, 2, 4, 64, 124,  4)              \
+    X(128, 128, 2, 4, 64, 100,  4)              \
+    X(128, 128, 4, 4, 32,   1,  4)              \
+    X(128, 128, 4, 4, 32,   3,  4)              \
+    X(128, 128, 2, 4, 64,  67,  4)              \
+    X(128, 256, 2, 4, 32,  92,  4)              \
+    X( 64,  64, 2, 2, 32, 129,  4)              \
+    X(128, 128, 4, 4, 32, 102,  4)              \
+    X(128,  64, 2, 4, 64, 131,  4)              \
+    X(128, 128, 4, 4, 32,  92,  4)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---
@@ -5088,13 +5094,27 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     {128,  32,  4, false, 2, 1}, {128,  32,  8, false, 2, 1},
     // --- extended fused entries; appended so existing indices keep their
     //     meaning for HIPDNN_MATMUL_NBITS_WMMA_CFG and profiling scripts ---
-#define WMMA_EXT_ENTRY(BM, BN, WM, WN, BK, WEU, VAR, SW) \
-    {BM, BN, SW, true, WM, WN, BK, WEU, VAR},
+#define WMMA_EXT_ENTRY(BM, BN, WM, WN, BK, VAR, SW) \
+    {BM, BN, SW, true, WM, WN, BK, true, VAR},
     WMMA_EXT_CONFIGS(WMMA_EXT_ENTRY)
 #undef WMMA_EXT_ENTRY
 };
 static constexpr int kNumWmmaConfigs =
     static_cast<int>(sizeof(kWmmaConfigs) / sizeof(kWmmaConfigs[0]));
+
+static constexpr bool wmmaExtConfigsUnique() {
+    for (int i = 0; i < kNumWmmaConfigs; i++)
+        for (int j = i + 1; j < kNumWmmaConfigs; j++) {
+            const WmmaConfig& a = kWmmaConfigs[i];
+            const WmmaConfig& b = kWmmaConfigs[j];
+            if (a.ext && b.ext && a.bm == b.bm && a.bn == b.bn &&
+                a.swizzle_n == b.swizzle_n && a.wt_m == b.wt_m &&
+                a.wt_n == b.wt_n && a.bk == b.bk && a.variant == b.variant)
+                return false;
+        }
+    return true;
+}
+static_assert(wmmaExtConfigsUnique(), "two extended WMMA entries share a LUT name");
 
 static constexpr int wmmaThreads(const WmmaConfig& c) {
     return (c.bm / (16 * c.wt_m)) * (c.bn / (16 * c.wt_n)) * 32;
@@ -5159,7 +5179,7 @@ static int wmmaConfigFromGeometry(const matmul_lut::WmmaAnswer& g, int N, int gs
             c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused)
             continue;
         if (wmmaBk(c) != g.bk) continue;
-        if (c.weu != g.weu || c.variant != g.variant) continue;
+        if (c.ext != g.ext || c.variant != g.variant) continue;
         if (!wmmaConfigApplies(c, N, gs)) continue;
         return cid;
     }
@@ -5219,7 +5239,7 @@ static void launchDequant(
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk, 0);
 }
 
-template <int BM, int BN, int WM, int WN, int BK, int WEU, int VAR>
+template <int BM, int BN, int WM, int WN, int BK, int VAR>
 static void launchWmmaExt(
     hipStream_t stream, int M, int N, int K,
     const _Float16* A, int lda, const unsigned char* B,
@@ -5235,20 +5255,20 @@ static void launchWmmaExt(
                        K, A, lda, B, scales, zeros, gs, ngk, C, ldc,           \
                        swizzle_n, b_row_bytes)
     if constexpr (VAR == 0) {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, WEU, true, BK>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, WEU, false, BK>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, WEU, true, BK>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, WEU, false, BK>));
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, true, BK>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, 1, false, BK>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, true, BK>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, 1, false, BK>));
     } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, WEU, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, WEU, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, WEU, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, WEU, false, BK, VAR>));
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, false, BK, VAR>));
     } else {
-        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, WEU, true, BK, VAR>));
-        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, WEU, false, BK, VAR>));
-        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, WEU, true, BK, VAR>));
-        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, WEU, false, BK, VAR>));
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP<BM, BN, WM, WN, false, BK, VAR>));
     }
 #undef WMMA_EXT_LAUNCH
 }
@@ -5270,10 +5290,10 @@ static void launchWmmaConfig(
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
 
     if (wmmaConfigIsExt(c)) {
-#define WMMA_EXT_CASE(BM, BN, WM, WN, BK, WEU, VAR, SW)                        \
+#define WMMA_EXT_CASE(BM, BN, WM, WN, BK, VAR, SW)                             \
         if (c.bm == BM && c.bn == BN && c.wt_m == WM && c.wt_n == WN &&      \
-            wmmaBk(c) == BK && c.weu == WEU && c.variant == VAR) {           \
-            launchWmmaExt<BM, BN, WM, WN, BK, WEU, VAR>(                     \
+            wmmaBk(c) == BK && c.variant == VAR) {                           \
+            launchWmmaExt<BM, BN, WM, WN, BK, VAR>(                          \
                 stream, M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc,  \
                 has_zp, c.swizzle_n, b_row_bytes);                           \
             return;                                                          \
@@ -5700,10 +5720,15 @@ static int tuneWmmaConfig(
      * path, so it stays simple and fast. Any more careful measurement (clock
      * settling, multi-pass, structural tie-breaks) belongs in the offline LUT
      * sweep, not here -- see autotune/matmul_nbits. */
+    // Extended entries are timed only on a device whose LUT names them, i.e.
+    // one they were measured on; elsewhere the sweep keeps the original table.
+    const bool ext_ok = matmul_lut::extendedConfigsMeasured();
+
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
         auto& cfg = kWmmaConfigs[cid];
         if (!wmmaConfigSupported(cfg, N, K, gs)) continue;
         if (fused_only && !cfg.fused) continue;
+        if (cfg.ext && !ext_ok) continue;
 
         for (int w = 0; w < WARMUP; w++)
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
@@ -5723,12 +5748,12 @@ static int tuneWmmaConfig(
 
         MATMUL_NBITS_AUTOTUNE_LOG(
             "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d "
-            "wt=%dx%d bk=%2d weu=%d var=%d : %.4f ms\n",
+            "wt=%dx%d bk=%2d ext=%d var=%d : %.4f ms\n",
             cid, kWmmaConfigs[cid].fused ? "fused " : "dq+gem",
             kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
             kWmmaConfigs[cid].swizzle_n, kWmmaConfigs[cid].wt_m,
             kWmmaConfigs[cid].wt_n, wmmaBk(kWmmaConfigs[cid]),
-            kWmmaConfigs[cid].weu, kWmmaConfigs[cid].variant, ms / ITERS);
+            kWmmaConfigs[cid].ext ? 1 : 0, kWmmaConfigs[cid].variant, ms / ITERS);
 
         if (ms < best_ms) {
             best_ms = ms;
@@ -5744,14 +5769,14 @@ static int tuneWmmaConfig(
     // ordering -- indices shift whenever the table is edited.
     MATMUL_NBITS_AUTOTUNE_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d weu=%d var=%d "
+        "best config[%d] %s bm=%d bn=%d sw=%d wt=%dx%d bk=%d ext=%d var=%d "
         "(%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
         best_id, kWmmaConfigs[best_id].fused ? "fused" : "dq+gemm",
         kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
         kWmmaConfigs[best_id].swizzle_n, kWmmaConfigs[best_id].wt_m,
         kWmmaConfigs[best_id].wt_n, wmmaBk(kWmmaConfigs[best_id]),
-        kWmmaConfigs[best_id].weu, kWmmaConfigs[best_id].variant,
+        kWmmaConfigs[best_id].ext ? 1 : 0, kWmmaConfigs[best_id].variant,
         best_ms / ITERS);
 
     return best_id;
@@ -6024,7 +6049,7 @@ static bool preferWmmaTier(hipStream_t stream,
  * autotuner stays free -- which is what separates this from a repack.
  * ======================================================================= */
 
-/* Copies B into a buffer whose row stride is padded by kU4PadRowBytes, leaving
+/* Copies B into a buffer whose row stride is padded by one cache line, leaving
  * the within-row layout untouched. One thread per 16 bytes of a row. */
 __global__ void u4_prepack_padrow_kernel(
     const unsigned char* __restrict__ src,
@@ -6048,11 +6073,9 @@ __global__ void u4_prepack_padrow_kernel(
         for (int i = 0; i < bytes; i++) out[i] = in[i];
 }
 
-// Two cache lines. One line is enough to take the stride off a power of two
-// (the pathology is the line-granular set index), but over prefill and decode
-// together two lines measure faster, and decode needs the pad to be whole
-// lines. Must match kRowPadBytes in hip-pad-matmul-nbits-weights.
-static constexpr int kU4PadRowBytes = 256;
+// One cache line. Enough to take the stride off a power of two, and the
+// smallest amount that does: the pathology is the line-granular set index.
+static constexpr int kU4PadRowBytes = 128;
 
 // Row-padded B keeps the arrival layout, so its size is just the padded rows.
 extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
@@ -6061,6 +6084,10 @@ extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
 
 extern "C" const char* hip_matmul_nbits_u4_row_pad_table() {
     return matmul_lut::rowPadTable();
+}
+
+extern "C" int hip_matmul_nbits_u4_default_row_pad() {
+    return matmul_lut::defaultRowPad();
 }
 
 /* Callers are gated on group_size dividing K (see the host wrapper), so the

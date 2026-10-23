@@ -139,6 +139,7 @@ void mlir::hip::buildOnnxToHipPipelineTail(
     mlir::hip::PadMatMulNBitsWeightsPassOptions padOptions;
     padOptions.rowPads.assign(options.matmulNBitsRowPads.begin(),
                               options.matmulNBitsRowPads.end());
+    padOptions.defaultRowPad = options.matmulNBitsDefaultRowPad;
     pm.addPass(
         mlir::hip::createPadMatMulNBitsWeightsPass(std::move(padOptions)));
   }
