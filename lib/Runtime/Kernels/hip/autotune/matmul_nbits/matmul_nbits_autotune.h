@@ -114,6 +114,12 @@ using GemvValidator = bool (*)(void* ctx, const GemvAnswer&);
 Result resolve(const Request& request, WmmaValidator wmma_valid,
                GemvValidator gemv_valid, void* ctx);
 
+/* The table's per-weight row pads for this device, as comma-separated
+ * `N:K:block_size:zero_points=pad_bytes` entries (the hip-pad-matmul-nbits-
+ * weights `row-pads` format). Empty when the table is absent, incompatible or
+ * has none. The string lives for the process. */
+const char* rowPadTable();
+
 /* Diagnostics for the debug log: whether a table loaded at all, how many
  * points it has, and how many were dropped as unusable. */
 struct Stats {

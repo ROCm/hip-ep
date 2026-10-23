@@ -4405,57 +4405,40 @@ void MatMulNBitsWMMA_ZP(
 }
 
 // GemmFp16U4ImplX entries. VARIANT packs the pipeline options of
-// matmul_nbits_wmma_core_x.h; see wmmaVariant* below kWmmaConfigs.
+// matmul_nbits_wmma_core_x.h in bits 0-6 (see WmmaConfig::variant); bit 7
+// selects the CU-mode build of the same kernel.
 #define WMMAX_VARIANT_ARGS(V) \
     ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
     ((V) >> 5) & 1, ((V) >> 6) & 1
+constexpr int kWmmaVariantCuMode = 128;
 
-template <int BM_T, int BN_T, int WT_M, int WT_N, int WAVES_EU, bool BC,
-          int BK_T, int VARIANT>
-__global__
-__attribute__((amdgpu_flat_work_group_size(
-    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
-    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N))))
-__attribute__((amdgpu_waves_per_eu(WAVES_EU)))
-void MatMulNBitsWMMAX_NoZP(
-    int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
-    const unsigned char* __restrict__ B_packed,
-    const _Float16* __restrict__ scales,
-    const _Float16* __restrict__ zeros,
-    int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n, int b_row_bytes)
-{
-    GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, false, BC, true, BK_T, false,
-                    false, false, false, false, WMMAX_VARIANT_ARGS(VARIANT)>(
-        M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
-}
-
-template <int BM_T, int BN_T, int WT_M, int WT_N, int WAVES_EU, bool BC,
-          int BK_T, int VARIANT>
-__global__
-__attribute__((amdgpu_flat_work_group_size(
-    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
-    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N))))
-__attribute__((amdgpu_waves_per_eu(WAVES_EU)))
-void MatMulNBitsWMMAX_ZP(
-    int M, int N, int K,
-    const _Float16* __restrict__ A, int lda,
-    const unsigned char* __restrict__ B_packed,
-    const _Float16* __restrict__ scales,
-    const _Float16* __restrict__ zeros,
-    int group_size, int num_groups_k,
-    _Float16* __restrict__ C, int ldc,
-    int swizzle_n, int b_row_bytes)
-{
-    GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, true, BC, true, BK_T, false,
-                    false, false, false, false, WMMAX_VARIANT_ARGS(VARIANT)>(
-        M, N, K, A, lda, B_packed, scales, zeros,
-        group_size, num_groups_k, C, ldc, swizzle_n, b_row_bytes);
-}
-
+// CU mode is a per-kernel property (the descriptor's workgroup_processor_mode):
+// the workgroup's waves share one CU and its half of the LDS instead of
+// spreading over the WGP. It changes the kernel attributes only, so each
+// entry point is defined once per mode from the same body.
+#define MATMUL_NBITS_WMMAX_KERNEL(NAME, USE_ZEROS, MODE_ATTR)                    \
+    template <int BM_T, int BN_T, int WT_M, int WT_N, int WAVES_EU, bool BC,    \
+              int BK_T, int VARIANT>                                            \
+    __global__ __attribute__((amdgpu_flat_work_group_size(                      \
+        GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N), GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N)))) \
+    __attribute__((amdgpu_waves_per_eu(WAVES_EU))) MODE_ATTR void NAME(        \
+        int M, int N, int K, const _Float16* __restrict__ A, int lda,           \
+        const unsigned char* __restrict__ B_packed,                             \
+        const _Float16* __restrict__ scales, const _Float16* __restrict__ zeros, \
+        int group_size, int num_groups_k, _Float16* __restrict__ C, int ldc,    \
+        int swizzle_n, int b_row_bytes)                                         \
+    {                                                                           \
+        GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, true, BK_T,      \
+                        false, false, false, false, false,                      \
+                        WMMAX_VARIANT_ARGS(VARIANT)>(                           \
+            M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
+            C, ldc, swizzle_n, b_row_bytes);                                    \
+    }
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP, false, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP, true, )
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_NoZP_CU, false, __attribute__((target("cumode"))))
+MATMUL_NBITS_WMMAX_KERNEL(MatMulNBitsWMMAX_ZP_CU, true, __attribute__((target("cumode"))))
+#undef MATMUL_NBITS_WMMAX_KERNEL
 #undef WMMAX_VARIANT_ARGS
 
 // Specialized ragged-batch WMMA entry for QMoE prefill. Each z slice is one
@@ -5032,8 +5015,8 @@ struct WmmaConfig {
     int  weu = 0;
     // Pipeline options of GemmFp16U4ImplX, bitwise: 1 two-deep global
     // prefetch, 2 uniform base + 32-bit offsets, 4 store-first, 8/16/24
-    // sched_group_barrier mode 1/2/3, 32 staged epilogue, 64 XOR LDS swizzle.
-    // 0 on an extended entry runs the shipped core.
+    // sched_group_barrier mode 1/2/3, 32 staged epilogue, 64 XOR LDS swizzle,
+    // 128 CU mode. 0 on an extended entry runs the shipped core.
     int  variant = 0;
 };
 
@@ -5052,7 +5035,13 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.weu != 0; 
     X(128, 128, 2, 4, 64, 2, 100,  4)           \
     X(128, 128, 2, 4, 64, 2, 124,  4)           \
     X(128, 128, 4, 4, 32, 1,   1,  4)           \
-    X(128, 128, 4, 4, 32, 2,   3,  4)
+    X(128, 128, 4, 4, 32, 2,   3,  4)           \
+    X(128, 128, 2, 4, 64, 1,  67,  4)           \
+    X(128, 256, 2, 4, 32, 1,  92,  4)           \
+    X( 64,  64, 2, 2, 32, 1, 129,  4)           \
+    X(128, 128, 4, 4, 32, 1, 102,  4)           \
+    X(128,  64, 2, 4, 64, 1, 131,  4)           \
+    X(128, 128, 4, 4, 32, 1,  92,  4)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---
@@ -5250,6 +5239,11 @@ static void launchWmmaExt(
         else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMA_ZP<BM, BN, WM, WN, WEU, false, BK>));
         else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, WEU, true, BK>));
         else               WMMA_EXT_LAUNCH((MatMulNBitsWMMA_NoZP<BM, BN, WM, WN, WEU, false, BK>));
+    } else if constexpr ((VAR & kWmmaVariantCuMode) != 0) {
+        if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, WEU, true, BK, VAR>));
+        else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP_CU<BM, BN, WM, WN, WEU, false, BK, VAR>));
+        else if (bc)       WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, WEU, true, BK, VAR>));
+        else               WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_NoZP_CU<BM, BN, WM, WN, WEU, false, BK, VAR>));
     } else {
         if (has_zp && bc)  WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, WEU, true, BK, VAR>));
         else if (has_zp)   WMMA_EXT_LAUNCH((MatMulNBitsWMMAX_ZP<BM, BN, WM, WN, WEU, false, BK, VAR>));
@@ -6030,7 +6024,7 @@ static bool preferWmmaTier(hipStream_t stream,
  * autotuner stays free -- which is what separates this from a repack.
  * ======================================================================= */
 
-/* Copies B into a buffer whose row stride is padded by one cache line, leaving
+/* Copies B into a buffer whose row stride is padded by kU4PadRowBytes, leaving
  * the within-row layout untouched. One thread per 16 bytes of a row. */
 __global__ void u4_prepack_padrow_kernel(
     const unsigned char* __restrict__ src,
@@ -6054,13 +6048,19 @@ __global__ void u4_prepack_padrow_kernel(
         for (int i = 0; i < bytes; i++) out[i] = in[i];
 }
 
-// One cache line. Enough to take the stride off a power of two, and the
-// smallest amount that does: the pathology is the line-granular set index.
-static constexpr int kU4PadRowBytes = 128;
+// Two cache lines. One line is enough to take the stride off a power of two
+// (the pathology is the line-granular set index), but over prefill and decode
+// together two lines measure faster, and decode needs the pad to be whole
+// lines. Must match kRowPadBytes in hip-pad-matmul-nbits-weights.
+static constexpr int kU4PadRowBytes = 256;
 
 // Row-padded B keeps the arrival layout, so its size is just the padded rows.
 extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
     return static_cast<size_t>(N) * ((K / 2) + kU4PadRowBytes);
+}
+
+extern "C" const char* hip_matmul_nbits_u4_row_pad_table() {
+    return matmul_lut::rowPadTable();
 }
 
 /* Callers are gated on group_size dividing K (see the host wrapper), so the

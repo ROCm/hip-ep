@@ -249,12 +249,20 @@ artifact even though the IR remains unchanged.
 ### Row-padded constants
 
 `hip-pad-matmul-nbits-weights` (`lib/Dialect/Transforms/PadMatMulNBitsWeights.cpp`)
-runs just before the externalizer. An int4 MatMulNBits weight whose row stride
-K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...) is
-retyped to `[N, K/2 + 128]` and marked `row_bytes = K/2`; its users get
-`b_row_bytes = K/2 + 128`. The carrier's `size` stays the dense source size.
+runs just before the externalizer. An int4 MatMulNBits weight is retyped to
+`[N, K/2 + pad]` and marked `row_bytes = K/2`; its users get
+`b_row_bytes = K/2 + pad`. The carrier's `size` stays the dense source size.
 
-The externalizer plans the padded footprint (`N * (K/2 + 128)`), so offsets and
+The pad comes from the per-weight row-pad table of the device's MatMulNBits
+autotune table (`row_pads` in `lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/<arch>.json`),
+which records, per (N, K, block size, zero points), the pad with the lowest
+prefill plus decode time; 0 keeps the dense layout. The compiler driver reads it
+from `custom_kernels_<arch>` (`hip_matmul_nbits_u4_row_pad_table`) and passes it
+as the pass's `row-pads` option. A weight the table does not list gets 256
+bytes when its stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288,
+14336, ...) and stays dense otherwise.
+
+The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
 `hipdnn.constant_sizes` describe the stored layout:
 
 - full constants file: the padded bytes are written, and the bulk upload copies

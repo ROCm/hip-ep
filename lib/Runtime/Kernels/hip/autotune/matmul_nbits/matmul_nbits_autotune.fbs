@@ -82,7 +82,7 @@ enum MatmulNbitsZeroPoint : ubyte {
 enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
-  Padded = 2       // arrival + one 128 B cache line
+  Padded = 2       // arrival + 256 B (two cache lines)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +125,8 @@ struct MatmulNbitsTuneConfig {
   tile_n: ubyte;
 
   // Wmma extended-entry selectors (WmmaConfig::weu / ::variant in
-  // matmul_nbits_kernel.hip). 0/0 names an original kWmmaConfigs entry.
+  // matmul_nbits_kernel.hip; variant bit 7 is the CU-mode build). 0/0 names an
+  // original kWmmaConfigs entry.
   weu: ubyte;
   variant: ubyte;
 }
@@ -165,6 +166,19 @@ struct MatmulNbitsFallback {
   config: ubyte;
 }
 
+// Row pad of one int4 weight shape, which hip-pad-matmul-nbits-weights stores
+// once at load with a K/2 + pad_bytes row pitch. Measured per shape: the pad
+// with the lowest prefill plus decode time, the smaller one when they tie.
+// 0 keeps the arrival stride. A shape without an entry gets the compiler's
+// default (a fixed pad where the stride aliases into a few cache sets).
+struct MatmulNbitsRowPad {
+  group_size: MatmulNbitsGroupSize;
+  zero_point: MatmulNbitsZeroPoint;
+  pad_bytes: uint16;       // multiple of 16: B is loaded in 16-byte vectors
+  n: uint32;
+  k: uint32;
+}
+
 table MatmulNbitsAutotuneLut {
   schema_version: uint32 = 5;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
@@ -191,6 +205,9 @@ table MatmulNbitsAutotuneLut {
   configs: [MatmulNbitsTuneConfig];
   points: [MatmulNbitsTunePoint];
   fallbacks: [MatmulNbitsFallback];
+  // Appended, so a table without it still loads (every shape then gets the
+  // compiler's default pad).
+  row_pads: [MatmulNbitsRowPad];
 }
 
 root_type MatmulNbitsAutotuneLut;

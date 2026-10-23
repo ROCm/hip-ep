@@ -541,7 +541,8 @@ def _geomean_slowdown(ans, pts):
     return math.exp(sum(logs) / len(logs)) if logs else float("inf")
 
 
-def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
+def write_lut_json(out: Path, doc: dict, configs, fallbacks, points,
+                   row_pads=None) -> None:
     # One entry per line: compact enough to keep the file reviewable and to make
     # a regeneration diff readable, without the 20x blowup of indent=1.
     with open(out, "w", encoding="utf-8") as f:
@@ -556,7 +557,19 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
         f.write("\n ],\n \"points\": [\n")
         f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
                            for r in points))
+        if row_pads:
+            f.write("\n ],\n \"row_pads\": [\n")
+            f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
+                               for r in row_pads))
         f.write("\n ]\n}\n")
+
+
+def existing_row_pads(path: Path):
+    """row_pads of the table at `path`, which build and merge carry over: they
+    are measured separately from the tile winners (see lut/README.md)."""
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8")).get("row_pads")
 
 
 def cmd_merge(args) -> int:
@@ -656,9 +669,10 @@ def cmd_merge(args) -> int:
     fallback_rows = [resolved(r, a) for r, a in fb_rows]
     point_rows = [resolved(r, a) for r, a in rows]
     doc = {k: v for k, v in old.items()
-           if k not in ("configs", "fallbacks", "points")}
+           if k not in ("configs", "fallbacks", "points", "row_pads")}
     out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
-    write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, new_pool, fallback_rows, point_rows,
+                   old.get("row_pads"))
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
           f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
 
@@ -757,7 +771,8 @@ def cmd_build(args) -> int:
     }
     LUT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
-    write_lut_json(out, doc, pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, pool, fallback_rows, point_rows,
+                   existing_row_pads(out))
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
                    r["row_stride"]) for r in point_rows})

@@ -761,13 +761,15 @@ def ResolveExternConstantsPass
 
 def PadMatMulNBitsWeightsPass
     : Pass<"hip-pad-matmul-nbits-weights", "mlir::ModuleOp"> {
-  let summary = "Store aliasing-prone int4 MatMulNBits weights row-padded";
+  let summary = "Store int4 MatMulNBits weights row-padded";
   let description = [{
     For each `hip.constant` whose only users are tensor-mode bits=4
-    `hip.matmul_nbits` ops reading it as B, with block_size dividing K and a
-    row stride K/2 that aliases into a few cache sets, retypes the carrier to
-    `[N, K/2 + 128]` and sets each user's `b_row_bytes` to that pitch. External
-    carriers keep their dense source and gain `row_bytes = K/2`, which
+    `hip.matmul_nbits` ops reading it as B, with block_size dividing K,
+    retypes the carrier to `[N, K/2 + pad]` and sets each user's `b_row_bytes`
+    to that pitch. The pad is the weight's `row-pads` entry when listed (0
+    keeps the dense layout), otherwise 256 bytes when the row stride K/2
+    aliases into a few cache sets and 0 when it does not. External carriers
+    keep their dense source and gain `row_bytes = K/2`, which
     `hip-externalize-constants` and the runtime loader expand at storage time;
     inline carriers are rewritten to padded bytes.
 
@@ -776,6 +778,11 @@ def PadMatMulNBitsWeightsPass
     Must run after every pass that creates or rewrites MatMulNBits weights and
     before `hip-externalize-constants`.
   }];
+  let options = [
+    ListOption<"rowPads", "row-pads", "std::string",
+               "Per-weight row pads, `N:K:block_size:zero_points=pad_bytes` "
+               "(zero_points 0 or 1, pad a multiple of 16)">,
+  ];
   let dependentDialects = ["mlir::hip::HipDialect"];
 }
 

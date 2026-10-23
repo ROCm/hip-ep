@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
                        m, s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_u4_wmma_stride(nullptr, -1, m, s.n, s.k, s.gs, buf.a,
                                           s.k, buf.bpad, buf.sc, zp_f, buf.out,
-                                          s.n, s.k / 2 + 128);
+                                          s.n, static_cast<int>(need / s.n));
           HIP_OK(hipDeviceSynchronize());
         }
       }

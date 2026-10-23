@@ -63,6 +63,18 @@ Row stride is part of the prefill key because a padded buffer has a different
 winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so the two layouts must not
 share a row.
 
+## Row pads
+
+`row_pads` lists, per int4 weight shape (N, K, group size, zero points), the
+row pad `hip-pad-matmul-nbits-weights` stores the weight with at load: the pad
+from {0, 16, 128, 256} bytes with the lowest prefill (prompt 1024) plus
+128-token decode time, measured in three independent interleaved runs, taking
+the smaller pad when it is within noise of the fastest. A shape without an
+entry gets the compiler's default (256 bytes where the stride aliases). The
+compiler reads the list through `hip_matmul_nbits_u4_row_pad_table()` at compile
+time, so the layout and the Padded rows above come from the same measurement.
+`update_lut.py build` and `merge` carry `row_pads` over unchanged.
+
 ## Why the row stores geometry, not a config index
 
 `kWmmaConfigs` and `kGemvConfigs` are edited from time to time — the
@@ -73,7 +85,8 @@ launches the wrong kernel.
 So a row stores the tile geometry (`bm, bn, swizzle, wt_m, wt_n, bk, fused`, or
 `threads, tile_n`), plus `weu, variant` for the extended WMMA entries
 (`WMMA_EXT_CONFIGS`: an explicit waves-per-EU hint and the
-`GemmFp16U4ImplX` pipeline options; both 0 for the original entries), and the
+`GemmFp16U4ImplX` pipeline options, with `variant` bit 7 selecting the
+CU-mode build; both 0 for the original entries), and the
 runtime looks that geometry up in the live table
 while probing. A geometry the table no longer contains, or that is illegal for
 this shape, makes the probe **fall through to the next tier** instead of
