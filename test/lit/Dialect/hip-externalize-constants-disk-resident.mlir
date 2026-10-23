@@ -44,7 +44,7 @@ func.func @tables(%ctx: !hip.context, %idx: tensor<2xi64>,
     size = 4026531840 : i64, symbol_name_hint = "inner"
   } : tensor<262144x7680xf16>
   %0 = hip.gather(%ctx) ins(%ple, %idx : tensor<262144x7680xf16>, tensor<2xi64>)
-      outs(%rows_ple : tensor<2x7680xf16>) {axis = 0 : i64} : tensor<2x7680xf16>
+      outs(%rows_ple : tensor<2x7680xf16>) {axis = -2 : i64} : tensor<2x7680xf16>
   %1 = hip.gather(%ctx) ins(%embed, %idx : tensor<262208x5376xf16>, tensor<2xi64>)
       outs(%rows_emb : tensor<2x5376xf16>) {axis = 0 : i64} : tensor<2x5376xf16>
   %2 = hip.gather(%ctx) ins(%shared, %idx : tensor<262144x7680xf16>, tensor<2xi64>)

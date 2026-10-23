@@ -70,13 +70,14 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
     // axis attribute
     int64_t axisAttr = op.getAxis();
+    int64_t dataRank = dataType.getRank();
+    if (axisAttr < 0) {
+      axisAttr += dataRank;
+    }
     Value axisVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(axisAttr));
 
     // axis_size = data.shape[axis]; inner_size = product(data.shape[axis+1:]).
-    int64_t dataRank = dataType.getRank();
-    if (axisAttr < 0)
-      axisAttr += dataRank;
     Value axisSizeVal =
         getMemRefDimSize(dataType, static_cast<unsigned>(axisAttr),
                          adaptor.getData(), rewriter, loc);
