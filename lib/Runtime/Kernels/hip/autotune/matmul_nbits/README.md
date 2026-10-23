@@ -63,6 +63,26 @@ Row stride is part of the prefill key because a padded buffer has a different
 winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so the two layouts must not
 share a row.
 
+## Row pads
+
+A table may opt its device into storing int4 weights row-padded at load
+(`hip-pad-matmul-nbits-weights`), which removes the per-call repack:
+
+- `default_row_pad` is the pad, in bytes, for a weight whose stride aliases
+  (see `shouldPadRow`). 0, or a table without the field, pads nothing at load,
+  and the runtime keeps repacking such weights per call.
+- `row_pads` overrides it per int4 weight shape (N, K, group size, zero
+  points). A listed pad of 0 keeps that weight dense with no repack.
+
+Both come from measurement: the pad from {0, 16, 128, 256} bytes with the
+lowest prefill (prompt 1024) plus 128-token decode time, in the pad sweep and
+two re-measurements, taking the smaller pad when it is within noise of the
+fastest. The Padded rows above are measured at each weight's stored pad, so
+layout and rows come from the same data. The compiler reads both through
+`hip_matmul_nbits_u4_default_row_pad()` and `hip_matmul_nbits_u4_row_pad_table()`.
+`update_lut.py build` and `merge` carry them over unchanged. Only gfx1151 sets
+them today.
+
 ## Why the row stores geometry, not a config index
 
 `kWmmaConfigs` and `kGemvConfigs` are edited from time to time — the
@@ -76,6 +96,13 @@ while probing. A geometry the table no longer contains, or that is illegal for
 this shape, makes the probe **fall through to the next tier** instead of
 returning something unlaunchable. Stale table, degraded answer, never a wrong
 one.
+
+A config that names an extended WMMA entry (`WMMA_EXT_CONFIGS`: the
+`GemmFp16U4ImplX` pipeline options, `variant` bit 7 selecting the CU-mode
+build) is listed in `extended_configs` with that entry's `variant`; it matches
+only extended entries, and an unlisted config only the original ones. A table
+that lists none also keeps the extended entries out of the runtime sweep, so a
+device without measurements searches exactly the original table.
 
 `kernel_abi` (`"matmul_nbits-v1"`) is the coarser guard: bump it when a config's *meaning*
 changes rather than its existence, and the whole table is rejected.

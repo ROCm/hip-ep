@@ -35,6 +35,11 @@ table ConstantInfo {
   size:   int64;
   offset: int64;
   source: ConstantSource;
+  // Row-padded constant: the source holds size / row_pitch dense rows of
+  // row_bytes bytes, which the per-entry upload places row_pitch bytes apart
+  // (size is the padded footprint in the blob). 0 = dense, copied as-is.
+  row_bytes: int64 = 0;
+  row_pitch: int64 = 0;
 }
 
 table HipModelMetaInfo {

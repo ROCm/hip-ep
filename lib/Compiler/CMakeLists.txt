@@ -8,6 +8,7 @@ message(STATUS "Building Compiler Library")
 # Create compiler library
 add_library(LibHipCompiler STATIC
   CompilerDriver.cpp
+  MatmulNBitsRowPads.cpp
   PluginRegistry.cpp
   # Static compiler-plugin dispatch. Includes the CMake-generated
   # ${CMAKE_BINARY_DIR}/include/hip/Compiler/StaticLinkedPlugins.inc (see

@@ -629,6 +629,25 @@ static int per_entry_load_constants(RuntimeState *state,
     auto *c = constants->Get(i);
     size_t sz = (size_t)c->size();
     void *dst = static_cast<char *>(state->gpu_constants_blob) + c->offset();
+    // Row-padded constant: fetch the dense source rows, then place each at
+    // row_pitch in the blob (size is the padded footprint).
+    const size_t row_bytes = (size_t)c->row_bytes();
+    const size_t row_pitch = (size_t)c->row_pitch();
+    const bool padded = row_bytes != 0 && row_pitch >= row_bytes;
+    const size_t rows = padded ? sz / row_pitch : 0;
+    const size_t src_sz = padded ? rows * row_bytes : sz;
+    // Expands the fetched dense rows to row_pitch in place (last row first, so
+    // no row is overwritten before it moves) and uploads the footprint in one
+    // copy. staging holds sz bytes: the pre-scan sized it by footprint.
+    auto upload = [&]() -> bool {
+      if (padded) {
+        for (size_t r = rows; r-- > 0;) {
+          memmove(staging + r * row_pitch, staging + r * row_bytes, row_bytes);
+          memset(staging + r * row_pitch + row_bytes, 0, row_pitch - row_bytes);
+        }
+      }
+      return hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) == hipSuccess;
+    };
 
     switch (c->source_type()) {
     case mlir::hip::ConstantSource::SplatSource: {
@@ -664,12 +683,12 @@ static int per_entry_load_constants(RuntimeState *state,
         fref_cache_release(&fcache);
         return 1;
       }
-      if (fref_fetch(&fcache, file_offset, sz, staging) != 0) {
+      if (fref_fetch(&fcache, file_offset, src_sz, staging) != 0) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
-      if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
+      if (!upload()) {
         fprintf(stderr, "per_entry: hipMemcpy failed for file-ref entry %lld\n",
                 (long long)i);
         free(staging);
@@ -686,12 +705,12 @@ static int per_entry_load_constants(RuntimeState *state,
         fref_cache_release(&fcache);
         return 1;
       }
-      if (constants_file_fetch(&cfcache, mem_offset, sz, staging) != 0) {
+      if (constants_file_fetch(&cfcache, mem_offset, src_sz, staging) != 0) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
-      if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
+      if (!upload()) {
         fprintf(stderr, "per_entry: hipMemcpy failed for mem entry %lld\n",
                 (long long)i);
         free(staging);

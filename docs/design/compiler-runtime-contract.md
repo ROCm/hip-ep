@@ -166,8 +166,9 @@ Dynamic dimensions are encoded as `-1`.
 |-------|------|---------|
 | `version` | `int32` | Schema version |
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
-| `constants[i].size` | `int64` | Byte size of constant `i` |
+| `constants[i].size` | `int64` | Byte size of constant `i` (its footprint in the GPU blob) |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
+| `constants[i].row_bytes`, `.row_pitch` | `int64` | Streaming only, 0 when dense: the source holds `size / row_pitch` dense rows of `row_bytes`, which the per-entry upload places `row_pitch` apart (row-padded int4 MatMulNBits weights, see [constant-handling-design.md](constant-handling-design.md#row-padded-constants)) |
 | `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |

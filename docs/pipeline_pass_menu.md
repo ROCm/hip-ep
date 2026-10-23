@@ -137,6 +137,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
+| `hip-pad-matmul-nbits-weights` | module | Retype int4 `hip.matmul_nbits` weight carriers to `[N, K/2 + pad]` (`row_bytes = K/2`) and set the users' `b_row_bytes`, so the runtime reads them without a per-call repack. The pad is the weight's entry in the device's row-pad table (`row-pads`), else the table's `default-row-pad` where the stride aliases; the compiler driver fills both from the device's autotune table, and a device without one pads nothing. A listed pad of 0 keeps the weight dense with `b_row_bytes = K/2` (no runtime repack). `HIPDNN_EP_PAD_MATMUL_NBITS_WEIGHTS=0` skips it. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. |
@@ -241,6 +242,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
+  hip-pad-matmul-nbits-weights       (after every weight rewrite, before
+                                      externalization stores the bytes)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)

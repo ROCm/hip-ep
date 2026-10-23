@@ -93,6 +93,11 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_file_offsets");
   auto memOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_mem_offsets");
+  // Row-padded constants (hip-pad-matmul-nbits-weights), streaming mode only.
+  auto rowBytesAttr =
+      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_row_bytes");
+  auto rowPitchesAttr =
+      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_row_pitches");
 
   mlir::hip::HipModelMetaInfoT meta;
   meta.version = 1;
@@ -112,10 +117,16 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         fileOffsetsAttr ? fileOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
     auto memOffsets =
         memOffsetsAttr ? memOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
+    auto rowBytes =
+        rowBytesAttr ? rowBytesAttr.asArrayRef() : ArrayRef<int64_t>{};
+    auto rowPitches =
+        rowPitchesAttr ? rowPitchesAttr.asArrayRef() : ArrayRef<int64_t>{};
     for (auto i : llvm::seq<size_t>(0, sizes.size())) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
+      ci->row_bytes = (i < rowBytes.size()) ? rowBytes[i] : 0;
+      ci->row_pitch = (i < rowPitches.size()) ? rowPitches[i] : 0;
       auto kind = static_cast<mlir::hip::ConstantMetadataSourceKind>(
           (i < kinds.size())
               ? kinds[i]

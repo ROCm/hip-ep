@@ -76,6 +76,18 @@ fbs::MatmulNbitsGroupSize groupSizeClass(int gs) {
   }
 }
 
+int groupSizeValue(fbs::MatmulNbitsGroupSize gs) {
+  switch (gs) {
+  case fbs::MatmulNbitsGroupSize::G16: return 16;
+  case fbs::MatmulNbitsGroupSize::G32: return 32;
+  case fbs::MatmulNbitsGroupSize::G64: return 64;
+  case fbs::MatmulNbitsGroupSize::G128: return 128;
+  case fbs::MatmulNbitsGroupSize::G256: return 256;
+  case fbs::MatmulNbitsGroupSize::G512: return 512;
+  default: return 0;
+  }
+}
+
 /* The exact-match part of the key. Points sharing one of these are mutually
  * comparable by distance; points across two of them are not. */
 uint32_t groupKey(fbs::MatmulNbitsPhase phase, fbs::MatmulNbitsBits bits, fbs::MatmulNbitsGroupSize gs,
@@ -114,9 +126,15 @@ struct Table {
   std::unordered_map<uint32_t, std::vector<Point>> groups;
   std::unordered_map<uint32_t, uint16_t> fallbacks;
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
+  // row_pads as the compiler's `N:K:block_size:zero_points=pad_bytes` list.
+  std::string row_pads;
+  int default_row_pad = 0;
+  bool extended_configs = false;   // some config names an extended entry
   bool loaded = false;
   uint32_t points = 0;
   uint32_t invalid_points = 0;
+  uint32_t invalid_extended_configs = 0;
+  uint32_t invalid_row_pads = 0;
   std::atomic<uint32_t> rejected{0};
 };
 
@@ -235,6 +253,20 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     t.pool.push_back(a);
   }
 
+  if (lut->extended_configs()) {
+    for (const fbs::MatmulNbitsExtendedConfig* e : *lut->extended_configs()) {
+      const unsigned idx = e->config();
+      if (idx >= t.pool.size() || t.pool[idx].kind != fbs::MatmulNbitsConfigKind::Wmma ||
+          t.pool[idx].wmma.ext) {
+        ++t.invalid_extended_configs;
+        continue;
+      }
+      t.pool[idx].wmma.ext = true;
+      t.pool[idx].wmma.variant = e->variant();
+      t.extended_configs = true;
+    }
+  }
+
   for (const fbs::MatmulNbitsTunePoint* p : *lut->points()) {
     const unsigned idx = p->config();
     if (idx >= t.pool.size()) {   // dangling index: same treatment as a bad key
@@ -274,12 +306,39 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size) {
     }
   }
 
+  uint32_t row_pads = 0;
+  if (lut->row_pads()) {
+    for (const fbs::MatmulNbitsRowPad* r : *lut->row_pads()) {
+      const int gs = groupSizeValue(r->group_size());
+      if (gs == 0 || r->zero_point() == fbs::MatmulNbitsZeroPoint::Any ||
+          r->n() == 0 || r->k() == 0 || r->pad_bytes() % 16 != 0) {
+        ++t.invalid_row_pads;
+        continue;
+      }
+      if (!t.row_pads.empty()) t.row_pads += ',';
+      t.row_pads += std::to_string(r->n()) + ':' + std::to_string(r->k()) + ':' +
+                    std::to_string(gs) + ':' +
+                    (r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric ? '1' : '0') +
+                    '=' + std::to_string(r->pad_bytes());
+      ++row_pads;
+    }
+  }
+
+  // Same 16-byte rule as a listed pad.
+  if (lut->default_row_pad() % 16 == 0)
+    t.default_row_pad = lut->default_row_pad();
+  else
+    ++t.invalid_row_pads;
+
   t.loaded = true;
   if (logOn())
     fprintf(stderr,
             "[matmul-lut] loaded %u points in %zu groups (%u rejected), "
-            "weights m=%.2f n=%.2f k=%.2f, for %s\n",
-            t.points, t.groups.size(), t.invalid_points, t.wm, t.wn, t.wk,
+            "extended configs %s (%u rejected), %u row pads (%u rejected), "
+            "default row pad %d, weights m=%.2f n=%.2f k=%.2f, for %s\n",
+            t.points, t.groups.size(), t.invalid_points,
+            t.extended_configs ? "yes" : "no", t.invalid_extended_configs,
+            row_pads, t.invalid_row_pads, t.default_row_pad, t.wm, t.wn, t.wk,
             lut->gpu_arch() ? lut->gpu_arch()->c_str() : "?");
 }
 
@@ -439,6 +498,18 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
             static_cast<int>(phase), request.m, request.n, request.k,
             request.group_size, static_cast<int>(request.has_zp));
   return result;
+}
+
+const char* rowPadTable() {
+  return table().row_pads.c_str();
+}
+
+int defaultRowPad() {
+  return table().default_row_pad;
+}
+
+bool extendedConfigsMeasured() {
+  return table().extended_configs;
 }
 
 Stats stats() {
