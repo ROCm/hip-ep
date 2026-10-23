@@ -36,9 +36,6 @@ public:
   OrtStatus *convert_type_proto(const Ort::ConstTypeInfo &type_info,
                                 int *element_type,
                                 std::vector<int64_t> *shape) const;
-  std::vector<morphizen::NodeArg *>
-  guess_missing_output(std::vector<morphizen::NodeArg *> outputs,
-                       morphizen::Graph &graph) const;
 
 private:
   // Build a variant GRAPH AttributeProto for an ORT_OP_ATTR_GRAPH attr:
