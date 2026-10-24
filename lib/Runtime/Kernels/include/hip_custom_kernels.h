@@ -2754,7 +2754,13 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
     int is_float8_data,          // 1 if float8 e4m3fn
     int indices_is_int64,        // 1 = i64, 0 = i32
+    int compact_rows,            // see below
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
+
+/* compact_rows == 1 (gather_axis must be 0): `data` holds only the gathered
+ * rows, row k being the row of the k-th index in row-major `indices` order.
+ * `data_shape[0]` stays the full table extent, against which indices are
+ * range-checked; scales / zero_points are still addressed by the index. */
 
 /* =========================================================================
  * QuantizeLinear / DequantizeLinear

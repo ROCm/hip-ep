@@ -641,9 +641,9 @@
 "_ZN12_GLOBAL__N_128gatedDeltaNetRecurrentKernelIfLi64EEEvPKT_PKfS5_S5_S5_S5_PS1_Pfiiiif":[158,0,0,6,1391,33,520]
 },
 "gather_block_quantized_kernel":{
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI14__hip_bfloat16EEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,756,0,0],
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI6__halfEEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[39,0,0,16,742,0,0],
-"_ZN12_GLOBAL__N_129gather_block_quantized_kernelIfEEvPKhPKvPKT_S2_PS5_xiiiiiiiiiiiNS_9GbqDimsNDES9_S9_S9_":[39,0,0,16,730,0,0]
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI14__hip_bfloat16EEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[41,0,0,16,762,0,0],
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelI6__halfEEvPKhPKvPKT_S3_PS6_xiiiiiiiiiiiiNS_9GbqDimsNDESA_SA_SA_":[41,0,0,16,748,0,0],
+"_ZN12_GLOBAL__N_129gather_block_quantized_kernelIfEEvPKhPKvPKT_S2_PS5_xiiiiiiiiiiiiNS_9GbqDimsNDES9_S9_S9_":[41,0,0,16,736,0,0]
 },
 "gather_elements_kernel":{
 "_ZN12_GLOBAL__N_122gather_elements_kernelIjiEEvPKT_PKT0_PS1_xNS_18GatherElementsGeomE":[40,0,0,16,385,0,0],

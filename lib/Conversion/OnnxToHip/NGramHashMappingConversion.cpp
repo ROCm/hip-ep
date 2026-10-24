@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -81,6 +83,11 @@ NGramHashMappingToHip::matchAndRewrite(mlir::Operation *op,
   auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(inputIds.getType());
   if (!inputType || inputType.getRank() != 2) {
     return rewriter.notifyMatchFailure(op, "input_ids must be ranked rank-2");
+  }
+  if (inputType.getElementType().isSignlessInteger(32) &&
+      (*padId < std::numeric_limits<int32_t>::min() ||
+       *padId > std::numeric_limits<int32_t>::max())) {
+    return rewriter.notifyMatchFailure(op, "pad_id does not fit in i32");
   }
   if (eosTokenId) {
     auto eosType = mlir::dyn_cast<mlir::RankedTensorType>(eosTokenId.getType());
