@@ -17,6 +17,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -202,7 +203,48 @@ HipGetDevicePropsFn loadHipGetDeviceProperties() {
 }
 #endif
 
+// Put the hip ops `hipKernel` was outlined from back in place of each of its
+// dispatches in `module`, so they run on the HIP path instead.
+void inlineRocMlirKernel(ModuleOp module, func::FuncOp hipKernel) {
+  SmallVector<RocMlirOp> dispatches;
+  module.walk([&](RocMlirOp op) {
+    if (op.getKernel() == hipKernel.getSymName())
+      dispatches.push_back(op);
+  });
+  Block &body = hipKernel.getBody().front();
+  for (RocMlirOp dispatch : dispatches) {
+    OpBuilder builder(dispatch);
+    IRMapping mapping;
+    mapping.map(body.getArguments(), dispatch.getInputs());
+    for (Operation &op : body.without_terminator()) {
+      // The kernel has a poison where main_graph has the hip.context.
+      if (op.getNumResults() == 1 &&
+          isa<ContextType>(op.getResult(0).getType())) {
+        mapping.map(op.getResult(0), dispatch.getCtx());
+        continue;
+      }
+      builder.clone(op, mapping);
+    }
+    auto ret = cast<func::ReturnOp>(body.getTerminator());
+    SmallVector<Value> results = llvm::map_to_vector(
+        ret.getOperands(), [&](Value v) { return mapping.lookup(v); });
+    dispatch->replaceAllUsesWith(results);
+    dispatch->erase();
+  }
+}
+
 } // namespace
+
+bool hasRocMlirComputation(ModuleOp kernelModule) {
+  WalkResult gemm = kernelModule.walk([](Operation *op) {
+    return isa<rock::RockGemmWrapperInterface,
+               rock::RockGemmGemmWrapperInterface>(op)
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return gemm.wasInterrupted() ||
+         isRocMlirElementwiseKernelModule(kernelModule);
+}
 
 std::string resolveRocMlirArch() {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
@@ -345,6 +387,9 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                  kRocMlirElementwisePerfConfig, out);
   }
 
+  if (!hasRocMlirComputation(kernelModule))
+    return false;
+
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
   // callers substitute their own compileOne instead, which is why this is not
@@ -393,6 +438,14 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
+  // The hip form of each kernel, kept for one whose computation folds away
+  // in lowering: rocMLIR has nothing to compile for it, so its dispatches go
+  // back to the hip ops.
+  OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
+  for (auto func : module.getOps<func::FuncOp>())
+    if (func->hasAttr("rock.kernel"))
+      hipKernels->push_back(func.clone());
+
   // Lift the kernels out of `module` and convert them all to tosa in one go.
   // This used to clone the whole module for the conversion and then clone it
   // again per kernel, so a graph with N kernels made N+1 deep copies of the
@@ -428,6 +481,15 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       return module.emitError()
              << "rocMLIR high-level pipeline failed for kernel '" << name
              << "'";
+
+    if (!hasRocMlirComputation(*single)) {
+      if (options.log)
+        *options.log << options.logPrefix << " kernel '" << name
+                     << "' has no computation left after lowering; running "
+                        "its hip ops instead\n";
+      inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
+      continue;
+    }
 
     CompiledKernel &out = compiledByKernel[name];
     bool ok = options.compileOne
