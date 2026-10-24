@@ -397,17 +397,22 @@ static bool isReachedByChain(Operation *op) {
 
 // Whether the chain of an outlined anchor takes in `op`, either straight from
 // the anchor or through the chain ops between them, as in conv -> exp -> add.
+// Each op has at most one chain successor, so the ops this walks back over
+// form a tree and each is visited once.
 static bool isReachedByAnchorChain(Operation *op) {
-  for (Value input : cast<DestinationStyleOpInterface>(op).getDpsInputs()) {
-    Operation *pred = chainPredecessor(op, input);
-    if (!pred)
-      continue;
-    if (isOutlinedAnchor(pred))
-      return true;
-    bool chainStep = isa<TransposeOp>(pred) ||
-                     (isaPointwiseOp(pred) && isFusibleChainOp(pred));
-    if (chainStep && isReachedByAnchorChain(pred))
-      return true;
+  SmallVector<Operation *> worklist = {op};
+  while (!worklist.empty()) {
+    auto current = cast<DestinationStyleOpInterface>(worklist.pop_back_val());
+    for (Value input : current.getDpsInputs()) {
+      Operation *pred = chainPredecessor(current, input);
+      if (!pred)
+        continue;
+      if (isOutlinedAnchor(pred))
+        return true;
+      if (isa<TransposeOp>(pred) ||
+          (isaPointwiseOp(pred) && isFusibleChainOp(pred)))
+        worklist.push_back(pred);
+    }
   }
   return false;
 }
@@ -415,12 +420,13 @@ static bool isReachedByAnchorChain(Operation *op) {
 // True when an anchor chain takes in some op of the chain starting at `head`.
 // The anchor pattern fuses from there on, so the pointwise pattern must not
 // outline it. The head's own inputs are not enough: a cast of a resize can
-// sit in front of an add that consumes the conv.
+// sit in front of an add that consumes the conv. Every op of the chain lies
+// on the way back from its last op, so one walk from there covers them all.
 static bool chainJoinsAnchorChain(Operation *head) {
-  for (Operation *op = head; op; op = nextChainOp(op).getOperation())
-    if (isReachedByAnchorChain(op))
-      return true;
-  return false;
+  Operation *last = head;
+  while (Operation *next = nextChainOp(last).getOperation())
+    last = next;
+  return isReachedByAnchorChain(last);
 }
 
 static bool isIdentityCast(Operation *op) {
