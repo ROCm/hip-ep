@@ -281,6 +281,17 @@ void inlineRocMlirKernel(ModuleOp module, func::FuncOp hipKernel) {
 
 } // namespace
 
+bool hasRocMlirComputation(ModuleOp kernelModule) {
+  WalkResult gemm = kernelModule.walk([](Operation *op) {
+    return isa<rock::RockGemmWrapperInterface,
+               rock::RockGemmGemmWrapperInterface>(op)
+               ? WalkResult::interrupt()
+               : WalkResult::advance();
+  });
+  return gemm.wasInterrupted() ||
+         isRocMlirElementwiseKernelModule(kernelModule);
+}
+
 std::string resolveRocMlirArch() {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
   // called from CompilerDriver, and std::getenv there cannot see env vars set
@@ -456,6 +467,9 @@ bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                  kRocMlirElementwisePerfConfig, out);
   }
 
+  if (!hasRocMlirComputation(kernelModule))
+    return false;
+
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
   // callers substitute their own compileOne instead, which is why this is not
@@ -567,6 +581,15 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       return module.emitError()
              << "rocMLIR high-level pipeline failed for kernel '" << name
              << "'";
+
+    if (!hasRocMlirComputation(*single)) {
+      if (options.log)
+        *options.log << options.logPrefix << " kernel '" << name
+                     << "' has no computation left after lowering; running "
+                        "its hip ops instead\n";
+      runOnHipPath(name);
+      continue;
+    }
 
     CompiledKernel &out = compiledByKernel[name];
     bool ok = options.compileOne

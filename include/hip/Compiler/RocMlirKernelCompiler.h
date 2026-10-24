@@ -114,6 +114,12 @@ inline constexpr llvm::StringLiteral
 // Whether `kernelModule` (in rock form) holds an elementwise kernel.
 bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
 
+// Whether `kernelModule` (in rock form) has anything for rocMLIR to tune and
+// compile: a gemm-like op or an elementwise kernel. Lowering can fold all of
+// a kernel's computation away -- an identity cast, or hip.max(%x, %x) -- and
+// createTunableParamSpace aborts on what is left.
+bool hasRocMlirComputation(ModuleOp kernelModule);
+
 // Pick the first perfConfig out of the tuning search space and compile with
 // it, or kRocMlirElementwisePerfConfig for an elementwise kernel. Expects
 // `kernelModule` to already be in rock form. This is what a caller gets when
