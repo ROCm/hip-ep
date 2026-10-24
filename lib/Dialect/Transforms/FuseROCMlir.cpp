@@ -69,34 +69,18 @@ static bool isaAnchorOp(Operation *op) {
 
 // MIGraphX fuse_mlir `reshaper_names()`, minus broadcast and multibroadcast
 // (`make_conv_dot_reshaper_names` drops those on the conv/dot path). squeeze,
-// flatten, and unsqueeze are tensor.collapse_shape / tensor.expand_shape here.
-// tensor.reshape is left out: hip-to-tosa and rocMLIR have no lowering for it.
-// `slice` is not in this set.
-static bool isReshaperOp(Operation *op) {
-  return isa_and_present<TransposeOp, tensor::ExpandShapeOp,
-                         tensor::CollapseShapeOp>(op);
+// flatten, and unsqueeze are tensor.collapse_shape / tensor.expand_shape here,
+// and transpose is hip.transpose, which has an output buffer and so is a chain
+// step of its own rather than one of these. tensor.reshape is left out:
+// hip-to-tosa and rocMLIR have no lowering for it. `slice` is not in this set.
+static bool isLayoutOp(Operation *op) {
+  return isa_and_present<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(op);
 }
 
-// The tensor a reshaper reads. hip.transpose is DPS, so this is its data
-// input, not the context or the init.
-static Value reshaperData(Operation *op) {
-  if (auto transpose = dyn_cast<TransposeOp>(op))
-    return transpose.getInput();
+static Value layoutSource(Operation *op) {
   if (auto expand = dyn_cast<tensor::ExpandShapeOp>(op))
     return expand.getSrc();
-  if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(op))
-    return collapse.getSrc();
-  return {};
-}
-
-// Walk back through single-input reshapers. A pointwise op whose data comes
-// from a conv/matmul/gemm across only these ops belongs to the anchor pattern.
-static Operation *stripReshapers(Operation *def) {
-  while (def && isReshaperOp(def)) {
-    Value data = reshaperData(def);
-    def = data ? data.getDefiningOp() : nullptr;
-  }
-  return def;
+  return cast<tensor::CollapseShapeOp>(op).getSrc();
 }
 
 // hip-to-tosa converts only static shapes, and one op it cannot convert fails
@@ -122,6 +106,43 @@ static bool isFusibleChainOp(Operation *op) {
          isTosaExpressiblePointwiseOp(op);
 }
 
+// The op a chain ending at `from` grows into, or null where it stops. Every
+// walk over a chain steps with this, so they agree on where chains end.
+// expand_shape and collapse_shape have no output buffer, so they are stepped
+// over, and collected in `layout`, only when a pointwise op or hip.transpose
+// follows them.
+static DestinationStyleOpInterface
+nextChainOp(Operation *from, SmallVectorImpl<Operation *> *layout = nullptr) {
+  if (!from->hasOneUse())
+    return {};
+  Operation *user = *from->user_begin();
+  SmallVector<Operation *> skipped;
+  while (isLayoutOp(user)) {
+    if (!user->hasOneUse() || !hasStaticTensorTypes(user))
+      return {};
+    skipped.push_back(user);
+    user = *user->user_begin();
+  }
+  if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
+    return {};
+  if (!isFusibleChainOp(user))
+    return {};
+  auto next = dyn_cast<DestinationStyleOpInterface>(user);
+  if (next && layout)
+    layout->append(skipped);
+  return next;
+}
+
+// The op that `nextChainOp` steps from into `op` through `input`, if any.
+static Operation *chainPredecessor(Operation *op, Value input) {
+  Operation *def = input.getDefiningOp();
+  while (isLayoutOp(def))
+    def = layoutSource(def).getDefiningOp();
+  if (!def || nextChainOp(def) != op)
+    return nullptr;
+  return def;
+}
+
 // Outline `start` and the single-use pointwise chain that consumes it into one
 // rocMlir function. `start` is a conv/matmul/gemm or the head of a pointwise
 // chain; rocMLIR compiles the latter with no FusionRoot (PR 122 elementwise).
@@ -138,27 +159,12 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
                                        "only static shapes are supported");
 
   // Match the pointwise chain, stepping through reshapers the way MIGraphX
-  // `match::skip(conv_dot_reshaper_names)` does. expand_shape and
-  // collapse_shape have no output buffer, so they are absorbed only when a
-  // pointwise op or hip.transpose follows them. hip.transpose itself may end
+  // `match::skip(conv_dot_reshaper_names)` does. hip.transpose itself may end
   // the chain. The chain stops before any op hip-to-tosa cannot convert, so
   // the prefix still compiles and the rest stays on the HIP path.
   auto advance = [&](Operation *from) -> bool {
-    if (!from->hasOneUse())
-      return false;
-    Operation *user = *from->user_begin();
     SmallVector<Operation *> layout;
-    while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
-      if (!user->hasOneUse() || !hasStaticTensorTypes(user))
-        return false;
-      layout.push_back(user);
-      user = *user->user_begin();
-    }
-    if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
-      return false;
-    if (!isFusibleChainOp(user))
-      return false;
-    auto next = dyn_cast<DestinationStyleOpInterface>(user);
+    DestinationStyleOpInterface next = nextChainOp(from, &layout);
     if (!next)
       return false;
     ops.insert_range(layout);
@@ -368,33 +374,38 @@ private:
   int *counter = nullptr;
 };
 
-// True when some op in the forward chain reads a single-use conv, gemm, or
-// matmul. The anchor pattern can fuse that chain, so the pointwise pattern
-// must not outline it. The head's own inputs are not enough: a cast of a
-// resize can sit in front of an add that consumes the conv.
-static bool chainConsumesSingleUseAnchor(Operation *from) {
-  while (from) {
-    if (auto dps = dyn_cast<DestinationStyleOpInterface>(from)) {
-      for (Value input : dps.getDpsInputs()) {
-        Operation *def = input.getDefiningOp();
-        if (!def)
-          continue;
-        def = stripReshapers(def);
-        if (def && isaAnchorOp(def) && def->hasOneUse())
-          return true;
-      }
+// A conv, matmul, or gemm the anchor patterns outline, chain included.
+static bool isOutlinedAnchor(Operation *op) {
+  return isaAnchorOp(op) && hasStaticTensorTypes(op);
+}
+
+// Whether a chain started at another op takes in `op`. Anchors and fusible
+// pointwise ops start chains; hip.transpose is only ever a step in one.
+static bool isReachedByChain(Operation *op) {
+  for (Value input : cast<DestinationStyleOpInterface>(op).getDpsInputs()) {
+    Operation *pred = chainPredecessor(op, input);
+    if (!pred)
+      continue;
+    if (isa<TransposeOp>(pred)
+            ? isReachedByChain(pred)
+            : isOutlinedAnchor(pred) ||
+                  (isaPointwiseOp(pred) && isFusibleChainOp(pred)))
+      return true;
+  }
+  return false;
+}
+
+// True when an anchor chain takes in some op of the chain starting at `head`.
+// The anchor pattern fuses from there on, so the pointwise pattern must not
+// outline it. The head's own inputs are not enough: a cast of a resize can
+// sit in front of an add that consumes the conv.
+static bool chainConsumesSingleUseAnchor(Operation *head) {
+  for (Operation *op = head; op; op = nextChainOp(op).getOperation()) {
+    for (Value input : cast<DestinationStyleOpInterface>(op).getDpsInputs()) {
+      Operation *pred = chainPredecessor(op, input);
+      if (pred && isOutlinedAnchor(pred))
+        return true;
     }
-    if (!from->hasOneUse())
-      return false;
-    Operation *user = *from->user_begin();
-    while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
-      if (!user->hasOneUse())
-        return false;
-      user = *user->user_begin();
-    }
-    if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
-      return false;
-    from = user;
   }
   return false;
 }
@@ -415,23 +426,13 @@ public:
     if (!isFusibleChainOp(op))
       return rewriter.notifyMatchFailure(
           op, "hip-to-tosa cannot convert this op in a rock kernel");
-    auto pointwise = cast<DestinationStyleOpInterface>(op);
-    for (Value input : pointwise.getDpsInputs()) {
-      Operation *def = input.getDefiningOp();
-      if (!def)
-        continue;
-      def = stripReshapers(def);
-      if (def && isaPointwiseOp(def) && isFusibleChainOp(def))
-        return rewriter.notifyMatchFailure(op,
-                                           "not the head of a pointwise chain");
-      if (def && isaAnchorOp(def))
-        return rewriter.notifyMatchFailure(
-            op, "pointwise chain is the epilogue of an anchor");
-    }
+    if (isReachedByChain(op))
+      return rewriter.notifyMatchFailure(op, "not the head of a chain");
     if (chainConsumesSingleUseAnchor(op))
       return rewriter.notifyMatchFailure(
           op, "pointwise chain is the epilogue of an anchor");
-    return outlineRocMlirChain(pointwise, rewriter, counter);
+    return outlineRocMlirChain(cast<DestinationStyleOpInterface>(op), rewriter,
+                               counter);
   }
 
 private:

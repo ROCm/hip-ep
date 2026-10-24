@@ -31,6 +31,7 @@
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/TypeSwitch.h>
 
 #include <algorithm>
 #include <cmath>
@@ -8260,7 +8261,72 @@ bool isTosaExpressiblePointwiseOp(Operation *op) {
     return isTosaExpressibleLogical(op, {notOp.getX()});
   if (auto sign = dyn_cast<SignOp>(op))
     return isTosaExpressibleSign(sign);
-  return true;
+
+  if (op->getNumResults() != 1)
+    return false;
+  auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  if (!resultType || !resultType.hasStaticShape())
+    return false;
+  Type elementType = resultType.getElementType();
+  bool isFloat = isa<FloatType>(elementType);
+  auto broadcasts = [&](Value operand) {
+    return isBroadcastableOperandOf(operand, elementType, resultType);
+  };
+  auto sameType = [&](Value operand) {
+    return operand.getType() == resultType;
+  };
+  auto staticRankedInput = [](Value input) {
+    auto inputType = dyn_cast<RankedTensorType>(input.getType());
+    return inputType && inputType.hasStaticShape() ? inputType
+                                                   : RankedTensorType();
+  };
+
+  return TypeSwitch<Operation *, bool>(op)
+      .Case<AddOp, SubOp, MinOp, MaxOp, MulOp>([&](auto binary) {
+        return broadcasts(binary.getLhs()) && broadcasts(binary.getRhs());
+      })
+      .Case([&](DivOp div) {
+        return isTosaExpressibleDivType(elementType) &&
+               broadcasts(div.getLhs()) && broadcasts(div.getRhs());
+      })
+      .Case([&](ModOp mod) {
+        return isTosaExpressibleModType(elementType) && mod.getFmod() == 0 &&
+               broadcasts(mod.getLhs()) && broadcasts(mod.getRhs());
+      })
+      .Case<AbsOp, NegOp>([&](auto unary) { return sameType(unary.getX()); })
+      .Case<CeilOp, FloorOp, ExpOp, LogOp, SinOp, CosOp, TanhOp, ErfOp,
+            SigmoidOp, ReciprocalOp, SqrtOp, SoftplusOp, RoundOp, AtanOp>(
+          [&](auto unary) { return isFloat && sameType(unary.getX()); })
+      .Case<SiluOp, LeakyReluOp>(
+          [&](auto unary) { return isFloat && sameType(unary.getInput()); })
+      .Case([&](GeluOp gelu) {
+        StringRef approximate = gelu.getApproximate();
+        return isFloat && sameType(gelu.getInput()) &&
+               (approximate == "none" || approximate == "tanh");
+      })
+      .Case([&](BiasGeluOp gelu) {
+        return isFloat && sameType(gelu.getData()) &&
+               broadcasts(gelu.getBias());
+      })
+      .Case([&](FastGeluOp gelu) {
+        Value bias = gelu.getBias();
+        return isFloat && sameType(gelu.getInput()) &&
+               (!bias || broadcasts(bias));
+      })
+      .Case([&](WhereOp where) {
+        Type i1 = IntegerType::get(op->getContext(), 1);
+        return isBroadcastableOperandOf(where.getCondition(), i1, resultType) &&
+               broadcasts(where.getX()) && broadcasts(where.getY());
+      })
+      .Case([&](CastOp cast) {
+        RankedTensorType inputType = staticRankedInput(cast.getInput());
+        return inputType && inputType.getShape() == resultType.getShape();
+      })
+      .Case([&](TransposeOp transpose) {
+        RankedTensorType inputType = staticRankedInput(transpose.getInput());
+        return inputType && inputType.getRank() >= 1;
+      })
+      .Default(false);
 }
 
 } // namespace mlir::hip
