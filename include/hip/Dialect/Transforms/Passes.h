@@ -56,10 +56,11 @@ createExternalizeConstantsPass(morphizen::FileSystem *fs,
 std::unique_ptr<mlir::Pass>
 createGenerateInterfacePass(const CompilationOptionsT &options);
 
-/// Whether hip-to-tosa can convert a pointwise hip op: every tensor element
-/// type is one rocMLIR lowers (f16, bf16, f32, or signless i1/i8/i16/i32/i64),
-/// and compare, logical and sign ops meet the i1 rules that pass claims them
-/// by. hip-fuse-rocmlir keeps any other op out of a rock kernel.
+/// Whether hip-to-tosa can convert a pointwise hip op or hip.transpose: every
+/// tensor element type is one rocMLIR lowers (f16, bf16, f32, or signless
+/// i1/i8/i16/i32/i64) and the op meets the type, shape and attribute checks of
+/// its converter. False for any other op. hip-fuse-rocmlir keeps an op that
+/// fails this out of a rock kernel, where one unconverted op fails the kernel.
 bool isTosaExpressiblePointwiseOp(mlir::Operation *op);
 
 } // namespace hip
