@@ -141,3 +141,53 @@ func.func @different_blocks(%ctx: !hip.context, %x: tensor<1x4x4x4xf32>,
   }
   return %r : tensor<1x4x4x4xf32>
 }
+
+// -----
+
+// Integer filters are not merged: the merge concatenates them as floats.
+// CHECK-LABEL: func.func @integer_weights
+// CHECK-COUNT-2: hip.conv
+// CHECK-NOT: tensor.extract_slice
+func.func @integer_weights(%ctx: !hip.context, %x: tensor<1x4x4x4xi32>)
+    -> (tensor<1x4x4x4xi32>, tensor<1x4x4x4xi32>) {
+  %w0 = hip.constant {value = dense<1> : tensor<4x4x2x2xi32>}
+      : tensor<4x4x2x2xi32>
+  %w1 = hip.constant {value = dense<2> : tensor<4x4x2x2xi32>}
+      : tensor<4x4x2x2xi32>
+  %e0 = tensor.empty() : tensor<1x4x4x4xi32>
+  %e1 = tensor.empty() : tensor<1x4x4x4xi32>
+  %c0 = hip.conv(%ctx) ins(%x, %w0 : tensor<1x4x4x4xi32>, tensor<4x4x2x2xi32>)
+      outs(%e0 : tensor<1x4x4x4xi32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x4x4x4xi32>
+  %c1 = hip.conv(%ctx) ins(%x, %w1 : tensor<1x4x4x4xi32>, tensor<4x4x2x2xi32>)
+      outs(%e1 : tensor<1x4x4x4xi32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [2, 2],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x4x4x4xi32>
+  return %c0, %c1 : tensor<1x4x4x4xi32>, tensor<1x4x4x4xi32>
+}
+
+// -----
+
+// A sibling whose filter constant is also its init still merges, and the
+// constant is erased once, after the init is checked.
+// CHECK-LABEL: func.func @weight_as_init
+// CHECK: hip.conv
+// CHECK-SAME: tensor<2x1x1x1xf32>
+// CHECK-NOT: hip.conv
+func.func @weight_as_init(%ctx: !hip.context, %x: tensor<1x1x1x1xf32>)
+    -> (tensor<1x1x1x1xf32>, tensor<1x1x1x1xf32>) {
+  %w0 = hip.constant {value = dense<1.000000e-02> : tensor<1x1x1x1xf32>}
+      : tensor<1x1x1x1xf32>
+  %w1 = hip.constant {value = dense<2.000000e-02> : tensor<1x1x1x1xf32>}
+      : tensor<1x1x1x1xf32>
+  %c0 = hip.conv(%ctx) ins(%x, %w0 : tensor<1x1x1x1xf32>, tensor<1x1x1x1xf32>)
+      outs(%w0 : tensor<1x1x1x1xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x1x1x1xf32>
+  %c1 = hip.conv(%ctx) ins(%x, %w1 : tensor<1x1x1x1xf32>, tensor<1x1x1x1xf32>)
+      outs(%w1 : tensor<1x1x1x1xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x1x1x1xf32>
+  return %c0, %c1 : tensor<1x1x1x1xf32>, tensor<1x1x1x1xf32>
+}

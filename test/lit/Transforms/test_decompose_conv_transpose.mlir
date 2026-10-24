@@ -21,10 +21,12 @@
 // 12. batch_mismatch       - result batch != input batch, op survives
 // 13. out_pad_no_slack     - equal taps, so interleave; grid still grows
 // 14. result_too_large     - result past the output_padding bound, op survives
+// 15. equal_residue_values - exact wide filter: residue, channel and tap order
 //
-// Cases 1-5 use a splat filter and so only pin structure. Cases 6 and 7 use
-// distinct per-tap values, which is what actually catches a wrong tap phase,
-// a missing reversal, or a transposed channel mapping. Cases 11, 12 and 14
+// Cases 1-5 use a splat filter and so only pin structure. Cases 6, 7 and 15
+// use distinct per-tap values, which is what actually catches a wrong tap
+// phase, a missing reversal, a transposed channel mapping, or a wide filter
+// packed in the wrong order. Cases 11, 12 and 14
 // cover operand/result shape disagreements that no verifier rejects, so the
 // pattern has to reject them itself rather than build invalid IR.
 // ============================================================================
@@ -386,4 +388,48 @@ module {
 
   // CHECK-LABEL: func.func @result_too_large
   // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 15. Equal residues with several channels each way and distinct values:
+  //     the wide filter must be residue-major, then output channel, then
+  //     input channel, with each residue's taps reversed. A 4x2 kernel at
+  //     stride 2 gives four residues of 2x1 taps, and
+  //     w[c][m][y0][y1] = 24c + 8m + 2y0 + y1, so wide output channel
+  //     (2 * it0 + it1) * 3 + m holds, for each c, the taps
+  //     w[c][m][it0 + 2][it1] then w[c][m][it0][it1]. Residue (0, 0), m = 0
+  //     reads [[4], [0]] for c = 0 and [[28], [24]] for c = 1; a
+  //     channel-major packing, a missing [C, M] swap, or a missing reversal
+  //     each changes those values.
+  // --------------------------------------------------------------------------
+  func.func @equal_residue_values(%ctx: !hip.context, %x: tensor<1x2x3x3xf32>)
+      -> tensor<1x3x8x6xf32> {
+    %w = hip.constant {value = dense<[[[[0.0, 1.0], [2.0, 3.0], [4.0, 5.0], [6.0, 7.0]], [[8.0, 9.0], [10.0, 11.0], [12.0, 13.0], [14.0, 15.0]], [[16.0, 17.0], [18.0, 19.0], [20.0, 21.0], [22.0, 23.0]]], [[[24.0, 25.0], [26.0, 27.0], [28.0, 29.0], [30.0, 31.0]], [[32.0, 33.0], [34.0, 35.0], [36.0, 37.0], [38.0, 39.0]], [[40.0, 41.0], [42.0, 43.0], [44.0, 45.0], [46.0, 47.0]]]]>
+        : tensor<2x3x4x2xf32>} : tensor<2x3x4x2xf32>
+    %init = tensor.empty() : tensor<1x3x8x6xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x2x3x3xf32>,
+                                               tensor<2x3x4x2xf32>)
+        outs(%init : tensor<1x3x8x6xf32>)
+        {kernel_shape = [4, 2], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x3x8x6xf32>
+    return %y : tensor<1x3x8x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @equal_residue_values
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK: hip.constant {value = dense<{{\[}}
+  // CHECK-SAME: {{\[}}{{\[}}[4.000000e+00], [0.000000e+00]], {{\[}}[2.800000e+01], [2.400000e+01]]], {{\[}}{{\[}}[1.200000e+01], [8.000000e+00]], {{\[}}[3.600000e+01], [3.200000e+01]]], {{\[}}{{\[}}[2.000000e+01], [1.600000e+01]], {{\[}}[4.400000e+01], [4.000000e+01]]],
+  // CHECK-SAME: {{\[}}{{\[}}[5.000000e+00], [1.000000e+00]], {{\[}}[2.900000e+01], [2.500000e+01]]], {{\[}}{{\[}}[1.300000e+01], [9.000000e+00]], {{\[}}[3.700000e+01], [3.300000e+01]]], {{\[}}{{\[}}[2.100000e+01], [1.700000e+01]], {{\[}}[4.500000e+01], [4.100000e+01]]],
+  // CHECK-SAME: {{\[}}{{\[}}[6.000000e+00], [2.000000e+00]], {{\[}}[3.000000e+01], [2.600000e+01]]], {{\[}}{{\[}}[1.400000e+01], [1.000000e+01]], {{\[}}[3.800000e+01], [3.400000e+01]]], {{\[}}{{\[}}[2.200000e+01], [1.800000e+01]], {{\[}}[4.600000e+01], [4.200000e+01]]],
+  // CHECK-SAME: {{\[}}{{\[}}[7.000000e+00], [3.000000e+00]], {{\[}}[3.100000e+01], [2.700000e+01]]], {{\[}}{{\[}}[1.500000e+01], [1.100000e+01]], {{\[}}[3.900000e+01], [3.500000e+01]]], {{\[}}{{\[}}[2.300000e+01], [1.900000e+01]], {{\[}}[4.700000e+01], [4.300000e+01]]]]>
+  // CHECK-SAME: : tensor<12x2x2x1xf32>
+  // CHECK: hip.conv({{.*}} tensor<12x2x2x1xf32>)
+  // CHECK-SAME: kernel_shape = [2, 1], pads = [1, 0, 1, 0]
+  // CHECK-SAME: tensor<1x12x4x3xf32>
+  // CHECK: tensor.expand_shape {{.*}} into tensor<1x2x2x3x4x3xf32>
+  // CHECK: hip.transpose
+  // CHECK-SAME: perm = [0, 3, 4, 1, 5, 2]
+  // CHECK-SAME: tensor<1x3x4x2x3x2xf32>
+  // CHECK: tensor.collapse_shape {{.*}} into tensor<1x3x8x6xf32>
+  // CHECK-NOT: tensor.insert_slice
 }

@@ -24,7 +24,9 @@ namespace {
 // this pass; this is the only one.
 FailureOr<DenseElementsAttr> inlineWeight(ConvOp conv) {
   auto type = dyn_cast<RankedTensorType>(conv.getWeights().getType());
-  if (!type || !type.hasStaticShape() || type.getRank() != 4)
+  // The merge concatenates the filters as APFloat.
+  if (!type || !type.hasStaticShape() || type.getRank() != 4 ||
+      !isa<FloatType>(type.getElementType()))
     return failure();
   auto constant = conv.getWeights().getDefiningOp<ConstantOp>();
   if (!constant || constant.getSourceKind() != ConstantOp::SourceKind::Inline)
@@ -118,12 +120,14 @@ void mergeHorizontal(OpBuilder &builder, ArrayRef<ConvOp> convs,
     Value weight = conv.getWeights();
     Value init = conv.getOutput();
     conv.erase();
-    if (auto constant = weight.getDefiningOp<ConstantOp>();
-        constant && constant->use_empty())
-      constant.erase();
+    // The init first: it can be the same value as the weight, which must not
+    // be inspected once its constant is erased.
     if (auto empty = init.getDefiningOp<tensor::EmptyOp>();
         empty && empty->use_empty())
       empty.erase();
+    if (auto constant = weight.getDefiningOp<ConstantOp>();
+        constant && constant->use_empty())
+      constant.erase();
   }
 }
 
