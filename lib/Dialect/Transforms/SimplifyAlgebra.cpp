@@ -37,11 +37,28 @@ FailureOr<DenseElementsAttr> inlineWeight(ConvOp conv) {
   return value;
 }
 
+// A conv whose only use reaches a hip.transpose through reshapes, such as the
+// DepthToSpace interleave after a decomposed ConvTranspose. Fuse-rocmlir folds
+// that transpose into the conv's stores only while the conv has this single
+// use, so merging it would trade the fused store for a separate transpose of
+// each channel slice.
+bool feedsFusedTranspose(ConvOp conv) {
+  Operation *op = conv;
+  do {
+    if (!op->hasOneUse())
+      return false;
+    op = *op->user_begin();
+  } while (
+      isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp, tensor::ReshapeOp>(
+          op));
+  return isa<TransposeOp>(op);
+}
+
 // Same convolution operator and output shape. Weight shape is compared by the
 // caller. A different convolution on the same activation, such as a 3x3 next
 // to two 2x2 siblings, returns false and stays in its own cluster.
 bool sameHorizontal(ConvOp conv, ConvOp first) {
-  if (conv.getGroup() != 1 || conv.getBias())
+  if (conv.getGroup() != 1 || conv.getBias() || feedsFusedTranspose(conv))
     return false;
   if (conv.getKernelShape() != first.getKernelShape() ||
       conv.getStrides() != first.getStrides() ||
