@@ -423,9 +423,14 @@ bool CompilerDriver::runMLIRPasses(
       }
       // rocMLIR has no transposed-convolution anchor, so split
       // conv_transpose into plain convolutions before anything tries to
-      // outline a kernel around it.
+      // outline a kernel around it. Memory-address filters are readable
+      // under the same condition the tail's ExternalizeConstants reads them:
+      // an injected FileSystem means ONNX Runtime owns those initializers
+      // for the whole compile.
+      mlir::hip::DecomposeConvTransposePassOptions decomposeOpts;
+      decomposeOpts.allowMemorySources = fileSystem_ != nullptr;
       headPm.addNestedPass<mlir::func::FuncOp>(
-          mlir::hip::createDecomposeConvTransposePass());
+          mlir::hip::createDecomposeConvTransposePass(decomposeOpts));
       headPm.addPass(mlir::createCanonicalizerPass());
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createFuseROCMlirPass());
