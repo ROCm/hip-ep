@@ -645,3 +645,139 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       outs(%addEmpty : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
   return %r : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// An identity hip.cast lowers to its input, so a kernel of only that has no
+// arith or math op for rocMLIR to compile as elementwise. It stays on the HIP
+// path.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.cast
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %x: tensor<4xf32>) -> tensor<4xf32> {
+  %e = tensor.empty() : tensor<4xf32>
+  %r = hip.cast(%ctx) ins(%x : tensor<4xf32>) outs(%e : tensor<4xf32>)
+      {to = 1 : i64} : tensor<4xf32>
+  return %r : tensor<4xf32>
+}
+
+// -----
+
+// In front of an op that computes, an identity hip.cast still fuses.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.cast
+// CHECK: hip.mul
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %x: tensor<4xf32>,
+                      %y: tensor<4xf32>) -> tensor<4xf32> {
+  %castEmpty = tensor.empty() : tensor<4xf32>
+  %c = hip.cast(%ctx) ins(%x : tensor<4xf32>) outs(%castEmpty : tensor<4xf32>)
+      {to = 1 : i64} : tensor<4xf32>
+  %mulEmpty = tensor.empty() : tensor<4xf32>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK-NOT: hip.cast
+  // CHECK-NOT: hip.mul
+  // CHECK: return
+  %r = hip.mul(%ctx) ins(%c, %y : tensor<4xf32>, tensor<4xf32>)
+      outs(%mulEmpty : tensor<4xf32>) -> tensor<4xf32>
+  return %r : tensor<4xf32>
+}
+
+// -----
+
+// The conv's chain reaches the hip.add through the hip.exp, so the add is the
+// conv's epilogue and the cast on its other input is a kernel of its own.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.cast
+// CHECK-NOT: hip.conv
+// CHECK-NOT: hip.add
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: hip.cast
+// CHECK: hip.conv
+// CHECK: hip.exp
+// CHECK: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %skip: tensor<1x16x4x4xf32>) -> tensor<1x16x4x4xf16> {
+  %castEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  %cast = hip.cast(%ctx) ins(%skip : tensor<1x16x4x4xf32>)
+      outs(%castEmpty : tensor<1x16x4x4xf16>) {to = 10 : i64}
+      : tensor<1x16x4x4xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %expEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  %x = hip.exp(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%expEmpty : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  %addEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  // CHECK: hip.rocmlir
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK-NOT: hip.exp
+  // CHECK-NOT: hip.add
+  // CHECK: return
+  %r = hip.add(%ctx) ins(%x, %cast : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%addEmpty : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// The same through a hip.transpose: the conv's chain takes the transpose and
+// the add, and the cast is a kernel of its own.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.cast
+// CHECK-NOT: hip.conv
+// CHECK-NOT: hip.add
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: hip.cast
+// CHECK: hip.conv
+// CHECK: hip.transpose
+// CHECK: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %skip: tensor<1x4x4x16xf32>) -> tensor<1x4x4x16xf16> {
+  %castEmpty = tensor.empty() : tensor<1x4x4x16xf16>
+  %cast = hip.cast(%ctx) ins(%skip : tensor<1x4x4x16xf32>)
+      outs(%castEmpty : tensor<1x4x4x16xf16>) {to = 10 : i64}
+      : tensor<1x4x4x16xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %transEmpty = tensor.empty() : tensor<1x4x4x16xf16>
+  %t = hip.transpose(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%transEmpty : tensor<1x4x4x16xf16>) {perm = [0, 2, 3, 1]}
+      : tensor<1x4x4x16xf16>
+  %addEmpty = tensor.empty() : tensor<1x4x4x16xf16>
+  // CHECK: hip.rocmlir
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK-NOT: hip.transpose
+  // CHECK-NOT: hip.add
+  // CHECK: return
+  %r = hip.add(%ctx) ins(%t, %cast : tensor<1x4x4x16xf16>, tensor<1x4x4x16xf16>)
+      outs(%addEmpty : tensor<1x4x4x16xf16>) -> tensor<1x4x4x16xf16>
+  return %r : tensor<1x4x4x16xf16>
+}
