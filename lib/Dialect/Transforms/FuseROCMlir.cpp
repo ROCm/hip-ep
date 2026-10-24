@@ -69,10 +69,11 @@ static bool isaAnchorOp(Operation *op) {
 
 // MIGraphX fuse_mlir `reshaper_names()`, minus broadcast and multibroadcast
 // (`make_conv_dot_reshaper_names` drops those on the conv/dot path). squeeze,
-// flatten, and unsqueeze are tensor.collapse_shape / tensor.expand_shape here,
-// and reshape is tensor.reshape. `slice` is not in this set.
+// flatten, and unsqueeze are tensor.collapse_shape / tensor.expand_shape here.
+// tensor.reshape is left out: hip-to-tosa and rocMLIR have no lowering for it.
+// `slice` is not in this set.
 static bool isReshaperOp(Operation *op) {
-  return isa_and_present<TransposeOp, tensor::ReshapeOp, tensor::ExpandShapeOp,
+  return isa_and_present<TransposeOp, tensor::ExpandShapeOp,
                          tensor::CollapseShapeOp>(op);
 }
 
@@ -81,8 +82,6 @@ static bool isReshaperOp(Operation *op) {
 static Value reshaperData(Operation *op) {
   if (auto transpose = dyn_cast<TransposeOp>(op))
     return transpose.getInput();
-  if (auto reshape = dyn_cast<tensor::ReshapeOp>(op))
-    return reshape.getSource();
   if (auto expand = dyn_cast<tensor::ExpandShapeOp>(op))
     return expand.getSrc();
   if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(op))
@@ -100,235 +99,257 @@ static Operation *stripReshapers(Operation *def) {
   return def;
 }
 
+// hip-to-tosa converts only static shapes, and one op it cannot convert fails
+// the whole rock kernel.
+static bool hasStaticTensorTypes(Operation *op) {
+  auto isStatic = [](Type type) {
+    auto tensorType = dyn_cast<TensorType>(type);
+    return !tensorType || tensorType.hasStaticShape();
+  };
+  return llvm::all_of(op->getOperandTypes(), isStatic) &&
+         llvm::all_of(op->getResultTypes(), isStatic);
+}
+
+// Whether `op` can be cloned into a rock kernel as a chain step. A rank-0
+// result is excluded: promoteRankZero reshapes only the kernel arguments, so
+// the cloned ops would mix tensor<1xT> inputs with rank-0 inits.
+static bool isFusibleChainOp(Operation *op) {
+  bool scalarResult = llvm::any_of(op->getResultTypes(), [](Type type) {
+    auto tensorType = dyn_cast<RankedTensorType>(type);
+    return tensorType && tensorType.getRank() == 0;
+  });
+  return !scalarResult && hasStaticTensorTypes(op) &&
+         isTosaExpressiblePointwiseOp(op);
+}
+
 // Outline `start` and the single-use pointwise chain that consumes it into one
 // rocMlir function. `start` is a conv/matmul/gemm or the head of a pointwise
 // chain; rocMLIR compiles the latter with no FusionRoot (PR 122 elementwise).
 static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
                                          PatternRewriter &rewriter,
                                          int *counter) {
-    DestinationStyleOpInterface endOp = start;
-    SetVector<Value> operands;
-    SetVector<Operation *> ops;
+  DestinationStyleOpInterface endOp = start;
+  SetVector<Value> operands;
+  SetVector<Operation *> ops;
 
-    // Fail on dynamic shapes
-    for (Value operand : start->getOperands()) {
-      if (auto tensorType = dyn_cast<TensorType>(operand.getType());
-          tensorType && !tensorType.hasStaticShape())
-        return rewriter.notifyMatchFailure(start,
-                                           "only static shapes are supported");
-    }
+  // Fail on dynamic shapes
+  if (!hasStaticTensorTypes(start))
+    return rewriter.notifyMatchFailure(start,
+                                       "only static shapes are supported");
 
-    // Match the pointwise chain, stepping through reshapers the way MIGraphX
-    // `match::skip(conv_dot_reshaper_names)` does. tensor.reshape has no
-    // output buffer, so it is absorbed only when a pointwise op or
-    // hip.transpose follows it. hip.transpose itself may end the chain.
-    auto advance = [&](Operation *from) -> bool {
-      if (!from->hasOneUse())
+  // Match the pointwise chain, stepping through reshapers the way MIGraphX
+  // `match::skip(conv_dot_reshaper_names)` does. expand_shape and
+  // collapse_shape have no output buffer, so they are absorbed only when a
+  // pointwise op or hip.transpose follows them. hip.transpose itself may end
+  // the chain. The chain stops before any op hip-to-tosa cannot convert, so
+  // the prefix still compiles and the rest stays on the HIP path.
+  auto advance = [&](Operation *from) -> bool {
+    if (!from->hasOneUse())
+      return false;
+    Operation *user = *from->user_begin();
+    SmallVector<Operation *> layout;
+    while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
+      if (!user->hasOneUse() || !hasStaticTensorTypes(user))
         return false;
-      Operation *user = *from->user_begin();
-      SmallVector<Operation *> layout;
-      while (isReshaperOp(user) && !isa<TransposeOp>(user)) {
-        if (!user->hasOneUse())
-          return false;
-        layout.push_back(user);
-        user = *user->user_begin();
-      }
-      if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
-        return false;
-      auto next = dyn_cast<DestinationStyleOpInterface>(user);
-      if (!next)
-        return false;
-      ops.insert_range(layout);
-      Value carried = layout.empty() ? from->getResult(0) : layout.back()->getResult(0);
-      endOp = next;
-      auto newOperands = endOp.getDpsInputs();
-      if (auto it = llvm::find(newOperands, carried); it != newOperands.end())
-        newOperands.erase(it);
-      operands.insert_range(newOperands);
-      for (auto init : endOp.getDpsInits()) {
-        if (Operation *initOp = init.getDefiningOp())
-          ops.insert(initOp);
-      }
-      ops.insert(endOp);
-      return true;
-    };
-
-    {
-      auto newOperands = endOp.getDpsInputs();
-      operands.insert_range(newOperands);
-      for (auto init : endOp.getDpsInits()) {
-        // An init with no producer is a block argument, which cannot be cloned.
-        // It is picked up as a kernel argument below instead.
-        if (Operation *initOp = init.getDefiningOp())
-          ops.insert(initOp);
-      }
-      ops.insert(endOp);
+      layout.push_back(user);
+      user = *user->user_begin();
     }
-    while (advance(endOp))
-      ;
-
-    // Remove the hip.context operand
-    auto context = operands.front();
-    if (!isa<mlir::hip::ContextType>(context.getType())) {
-      return rewriter.notifyMatchFailure(start,
-                                         "first operand not hip.context");
+    if (!isaPointwiseOp(user) && !isa<TransposeOp>(user))
+      return false;
+    if (!isFusibleChainOp(user))
+      return false;
+    auto next = dyn_cast<DestinationStyleOpInterface>(user);
+    if (!next)
+      return false;
+    ops.insert_range(layout);
+    Value carried =
+        layout.empty() ? from->getResult(0) : layout.back()->getResult(0);
+    endOp = next;
+    auto newOperands = endOp.getDpsInputs();
+    if (auto it = llvm::find(newOperands, carried); it != newOperands.end())
+      newOperands.erase(it);
+    operands.insert_range(newOperands);
+    for (auto init : endOp.getDpsInits()) {
+      if (Operation *initOp = init.getDefiningOp())
+        ops.insert(initOp);
     }
-    operands.erase(operands.begin());
+    ops.insert(endOp);
+    return true;
+  };
 
-    // Pointwise scalar literals belong in the outlined subgraph, not the
-    // kernel ABI. A rank-0 buffer argument has no index for
-    // rock.transforms_to_ptr. Clone only inline constants: a dynamic Clip
-    // bound remains an argument.
-    SetVector<Value> kernelOperands;
-    for (Value operand : operands) {
-      if (isInlineScalarConstant(operand)) {
-        ops.insert(operand.getDefiningOp());
+  {
+    auto newOperands = endOp.getDpsInputs();
+    operands.insert_range(newOperands);
+    for (auto init : endOp.getDpsInits()) {
+      // An init with no producer is a block argument, which cannot be cloned.
+      // It is picked up as a kernel argument below instead.
+      if (Operation *initOp = init.getDefiningOp())
+        ops.insert(initOp);
+    }
+    ops.insert(endOp);
+  }
+  while (advance(endOp))
+    ;
+
+  // Remove the hip.context operand
+  auto context = operands.front();
+  if (!isa<mlir::hip::ContextType>(context.getType())) {
+    return rewriter.notifyMatchFailure(start, "first operand not hip.context");
+  }
+  operands.erase(operands.begin());
+
+  // Pointwise scalar literals belong in the outlined subgraph, not the
+  // kernel ABI. A rank-0 buffer argument has no index for
+  // rock.transforms_to_ptr. Clone only inline constants: a dynamic Clip
+  // bound remains an argument.
+  SetVector<Value> kernelOperands;
+  for (Value operand : operands) {
+    if (isInlineScalarConstant(operand)) {
+      ops.insert(operand.getDefiningOp());
+      continue;
+    }
+    kernelOperands.insert(operand);
+  }
+  operands = std::move(kernelOperands);
+
+  // A bitsandbytes dequant that feeds only this anchor belongs in the same
+  // rock kernel. HipToTosa turns it into a nibble lookup and a multiply, and
+  // the matmul into tosa.matmul. A dynamic activation never reaches this
+  // pattern, so that case stays a HIP dequant plus hipBLASLt.
+  SmallVector<Value> dequantResults;
+  for (Value operand : operands) {
+    auto dequant = operand.getDefiningOp<DequantBnb4Op>();
+    if (!dequant || !dequant->hasOneUse())
+      continue;
+    dequantResults.push_back(operand);
+  }
+  for (Value value : dequantResults) {
+    auto dequant = value.getDefiningOp<DequantBnb4Op>();
+    ops.insert(dequant);
+    operands.remove(value);
+    operands.insert(dequant.getPacked());
+    operands.insert(dequant.getAbsmax());
+  }
+
+  // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
+  // has to resolve inside that func. The DPS inputs above cover the data,
+  // but they do not cover what the inits are built from: an init is only a
+  // bare tensor.empty when the anchor already has the rank rocMLIR wants.
+  // A 1-D convolution does not -- convert-onnx-to-hip widens it to 2-D by
+  // wrapping the operands *and the init* in tensor.expand_shape -- so the
+  // init's producer is a reshape whose own operand is the empty. Cloning
+  // just the reshape leaves it pointing at an empty back in main_graph.
+  //
+  // Absorb producers that carry no operands and no side effects, so a
+  // materialised destination travels with the ops that use it instead of
+  // becoming a kernel argument. That keeps the signature rocMLIR sees
+  // unchanged for the shapes that already worked. Values already headed for
+  // the argument list stay there: a non-scalar weight is passed in even
+  // though hip.constant would otherwise qualify to be cloned.
+  SmallVector<Operation *> worklist(ops.begin(), ops.end());
+  while (!worklist.empty()) {
+    Operation *op = worklist.pop_back_val();
+    for (Value operand : op->getOperands()) {
+      if (operands.contains(operand))
         continue;
-      }
-      kernelOperands.insert(operand);
-    }
-    operands = std::move(kernelOperands);
-
-    // A bitsandbytes dequant that feeds only this anchor belongs in the same
-    // rock kernel. HipToTosa turns it into a nibble lookup and a multiply, and
-    // the matmul into tosa.matmul. A dynamic activation never reaches this
-    // pattern, so that case stays a HIP dequant plus hipBLASLt.
-    SmallVector<Value> dequantResults;
-    for (Value operand : operands) {
-      auto dequant = operand.getDefiningOp<DequantBnb4Op>();
-      if (!dequant || !dequant->hasOneUse())
+      Operation *producer = operand.getDefiningOp();
+      if (!producer || ops.contains(producer))
         continue;
-      dequantResults.push_back(operand);
-    }
-    for (Value value : dequantResults) {
-      auto dequant = value.getDefiningOp<DequantBnb4Op>();
-      ops.insert(dequant);
-      operands.remove(value);
-      operands.insert(dequant.getPacked());
-      operands.insert(dequant.getAbsmax());
-    }
-
-    // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
-    // has to resolve inside that func. The DPS inputs above cover the data,
-    // but they do not cover what the inits are built from: an init is only a
-    // bare tensor.empty when the anchor already has the rank rocMLIR wants.
-    // A 1-D convolution does not -- convert-onnx-to-hip widens it to 2-D by
-    // wrapping the operands *and the init* in tensor.expand_shape -- so the
-    // init's producer is a reshape whose own operand is the empty. Cloning
-    // just the reshape leaves it pointing at an empty back in main_graph.
-    //
-    // Absorb producers that carry no operands and no side effects, so a
-    // materialised destination travels with the ops that use it instead of
-    // becoming a kernel argument. That keeps the signature rocMLIR sees
-    // unchanged for the shapes that already worked. Values already headed for
-    // the argument list stay there: a non-scalar weight is passed in even
-    // though hip.constant would otherwise qualify to be cloned.
-    SmallVector<Operation *> worklist(ops.begin(), ops.end());
-    while (!worklist.empty()) {
-      Operation *op = worklist.pop_back_val();
-      for (Value operand : op->getOperands()) {
-        if (operands.contains(operand))
-          continue;
-        Operation *producer = operand.getDefiningOp();
-        if (!producer || ops.contains(producer))
-          continue;
-        if (producer->getNumOperands() != 0 || !isMemoryEffectFree(producer))
-          continue;
-        ops.insert(producer);
-        worklist.push_back(producer);
-      }
-    }
-
-    // Whatever is still read from outside has to be passed in, which costs one
-    // more kernel argument and is what any init producer that cannot be
-    // rematerialized -- a caller-supplied buffer, say -- falls back on.
-    for (Operation *op : ops)
-      for (Value operand : op->getOperands())
-        if (operand != context && !ops.contains(operand.getDefiningOp()))
-          operands.insert(operand);
-
-    // Cloning follows this order, so a producer absorbed above has to come
-    // before the op that reads it.
-    ops = topologicalSort(ops);
-
-    auto parentModule = start->getParentOfType<ModuleOp>();
-    func::FuncOp newFunc;
-    {
-      PatternRewriter::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(parentModule.getBody());
-      auto funcType = rewriter.getFunctionType(
-          llvm::map_to_vector(
-              operands, [](Value v) { return promoteRankZero(v.getType()); }),
-          endOp->getResultTypes());
-
-      newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
-                                     "rocMlir" + std::to_string((*counter)++),
-                                     funcType);
-      newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
-      newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
-      auto *funcBlock = newFunc.addEntryBlock();
-      rewriter.setInsertionPointToStart(funcBlock);
-      IRMapping mapping;
-
-      // Map the hip.context to ub.poison
-      mapping.map(context,
-                  ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
-                                       context.getType()));
-
-      // Map other operands
-      for (auto [idx, operand] : llvm::enumerate(operands)) {
-        mapping.map(operand, funcBlock->getArgument(idx));
-      }
-
-      for (auto *op : ops) {
-        rewriter.clone(*op, mapping);
-      }
-      auto returns =
-          llvm::map_to_vector(endOp->getResults(), [&mapping](Value v) {
-            return mapping.lookup(v);
-          });
-      func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
-    }
-
-    rewriter.setInsertionPointAfter(endOp);
-
-    // The graph outside keeps its rank-0 value; only what crosses into the
-    // kernel is reshaped, so the dispatch matches the signature built above.
-    SmallVector<Value> dispatchOperands;
-    dispatchOperands.reserve(operands.size());
-    Value rankOneShape;
-    for (Value operand : operands) {
-      Type promoted = promoteRankZero(operand.getType());
-      if (promoted == operand.getType()) {
-        dispatchOperands.push_back(operand);
+      if (producer->getNumOperands() != 0 || !isMemoryEffectFree(producer))
         continue;
-      }
-      if (!rankOneShape) {
-        auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
-        rankOneShape = arith::ConstantOp::create(
-            rewriter, rewriter.getUnknownLoc(), shapeType,
-            DenseIntElementsAttr::get(shapeType, ArrayRef<int64_t>{1}));
-      }
-      dispatchOperands.push_back(tensor::ReshapeOp::create(
-          rewriter, rewriter.getUnknownLoc(), promoted, operand, rankOneShape));
+      ops.insert(producer);
+      worklist.push_back(producer);
+    }
+  }
+
+  // Whatever is still read from outside has to be passed in, which costs one
+  // more kernel argument and is what any init producer that cannot be
+  // rematerialized -- a caller-supplied buffer, say -- falls back on.
+  for (Operation *op : ops)
+    for (Value operand : op->getOperands())
+      if (operand != context && !ops.contains(operand.getDefiningOp()))
+        operands.insert(operand);
+
+  // Cloning follows this order, so a producer absorbed above has to come
+  // before the op that reads it.
+  ops = topologicalSort(ops);
+
+  auto parentModule = start->getParentOfType<ModuleOp>();
+  func::FuncOp newFunc;
+  {
+    PatternRewriter::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(parentModule.getBody());
+    auto funcType = rewriter.getFunctionType(
+        llvm::map_to_vector(
+            operands, [](Value v) { return promoteRankZero(v.getType()); }),
+        endOp->getResultTypes());
+
+    newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
+                                   "rocMlir" + std::to_string((*counter)++),
+                                   funcType);
+    newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
+    newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
+    auto *funcBlock = newFunc.addEntryBlock();
+    rewriter.setInsertionPointToStart(funcBlock);
+    IRMapping mapping;
+
+    // Map the hip.context to ub.poison
+    mapping.map(context,
+                ub::PoisonOp::create(rewriter, rewriter.getUnknownLoc(),
+                                     context.getType()));
+
+    // Map other operands
+    for (auto [idx, operand] : llvm::enumerate(operands)) {
+      mapping.map(operand, funcBlock->getArgument(idx));
     }
 
-    auto rocMlirOp = RocMlirOp::create(
-        rewriter, rewriter.getUnknownLoc(), endOp->getResultTypes(),
-        SymbolRefAttr::get(newFunc), context, dispatchOperands,
-        endOp.getDpsInits().front());
-
-    // The matched op may be the head of the chain rather than `endOp`. Erase
-    // the originals once nothing reads them, or the greedy driver matches the
-    // head again and outlines a second kernel.
-    Operation *end = endOp.getOperation();
-    rewriter.replaceOp(end, rocMlirOp);
-    for (Operation *op : llvm::reverse(ops)) {
-      if (op == end || !op->use_empty())
-        continue;
-      rewriter.eraseOp(op);
+    for (auto *op : ops) {
+      rewriter.clone(*op, mapping);
     }
-    return success();
+    auto returns = llvm::map_to_vector(
+        endOp->getResults(), [&mapping](Value v) { return mapping.lookup(v); });
+    func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
+  }
+
+  rewriter.setInsertionPointAfter(endOp);
+
+  // The graph outside keeps its rank-0 value; only what crosses into the
+  // kernel is reshaped, so the dispatch matches the signature built above.
+  SmallVector<Value> dispatchOperands;
+  dispatchOperands.reserve(operands.size());
+  Value rankOneShape;
+  for (Value operand : operands) {
+    Type promoted = promoteRankZero(operand.getType());
+    if (promoted == operand.getType()) {
+      dispatchOperands.push_back(operand);
+      continue;
+    }
+    if (!rankOneShape) {
+      auto shapeType = RankedTensorType::get({1}, rewriter.getIndexType());
+      rankOneShape = arith::ConstantOp::create(
+          rewriter, rewriter.getUnknownLoc(), shapeType,
+          DenseIntElementsAttr::get(shapeType, ArrayRef<int64_t>{1}));
+    }
+    dispatchOperands.push_back(tensor::ReshapeOp::create(
+        rewriter, rewriter.getUnknownLoc(), promoted, operand, rankOneShape));
+  }
+
+  auto rocMlirOp =
+      RocMlirOp::create(rewriter, rewriter.getUnknownLoc(),
+                        endOp->getResultTypes(), SymbolRefAttr::get(newFunc),
+                        context, dispatchOperands, endOp.getDpsInits().front());
+
+  // The matched op may be the head of the chain rather than `endOp`. Erase
+  // the originals once nothing reads them, or the greedy driver matches the
+  // head again and outlines a second kernel.
+  Operation *end = endOp.getOperation();
+  rewriter.replaceOp(end, rocMlirOp);
+  for (Operation *op : llvm::reverse(ops)) {
+    if (op == end || !op->use_empty())
+      continue;
+    rewriter.eraseOp(op);
+  }
+  return success();
 }
 
 template <typename AnchorOp>
@@ -391,15 +412,18 @@ public:
                                 PatternRewriter &rewriter) const override {
     if (!isaPointwiseOp(op))
       return failure();
+    if (!isFusibleChainOp(op))
+      return rewriter.notifyMatchFailure(
+          op, "hip-to-tosa cannot convert this op in a rock kernel");
     auto pointwise = cast<DestinationStyleOpInterface>(op);
     for (Value input : pointwise.getDpsInputs()) {
       Operation *def = input.getDefiningOp();
       if (!def)
         continue;
       def = stripReshapers(def);
-      if (def && isaPointwiseOp(def))
-        return rewriter.notifyMatchFailure(
-            op, "not the head of a pointwise chain");
+      if (def && isaPointwiseOp(def) && isFusibleChainOp(def))
+        return rewriter.notifyMatchFailure(op,
+                                           "not the head of a pointwise chain");
       if (def && isaAnchorOp(def))
         return rewriter.notifyMatchFailure(
             op, "pointwise chain is the epilogue of an anchor");
