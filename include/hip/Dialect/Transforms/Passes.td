@@ -251,14 +251,18 @@ def SimplifyAlgebraPass : Pass<"hip-simplify-algebra", "mlir::func::FuncOp"> {
     the only one implemented is the horizontal convolution merge
     (`find_conv_dot_horiz_fusion`).
 
-    Users of one value are partitioned the way MIGraphX `group_by` does it.
-    A cluster of two or more `hip.conv` ops that share group 1, padding,
-    stride, dilation, kernel, and output shape, and whose weights are inline
-    `hip.constant`s of the same shape, is merged: the weights are concatenated
-    on the output-channel axis and replaced by one convolution. Each original
+    Users of one value in one block are partitioned the way MIGraphX
+    `group_by` does it. A cluster of two or more `hip.conv` ops that share
+    group 1, padding, stride, dilation, kernel, and output shape, and whose
+    weights are inline floating-point `hip.constant`s of the same shape, is
+    merged: the weights are concatenated on the output-channel axis and
+    replaced by one convolution placed before the first sibling. Each original
     result becomes a channel `tensor.extract_slice` of that convolution. A
     convolution that does not match, such as a 3x3 beside two 2x2 siblings,
-    stays on the original activation.
+    stays on the original activation. So does one whose only use reaches a
+    `hip.transpose` through reshapes, such as the interleave after a
+    decomposed ConvTranspose: `hip-fuse-rocmlir` folds that transpose into
+    the convolution's store only while the convolution has that single use.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
