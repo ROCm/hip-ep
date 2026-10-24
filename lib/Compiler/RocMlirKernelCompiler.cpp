@@ -30,6 +30,7 @@
 #include "mlir/Dialect/Rock/Tuning/RockTuning.h"
 #include "mlir/Dialect/Rock/utility/KnobUtils.h"
 #include "mlir/Dialect/Rock/utility/RocmDeviceName.h"
+#include "mlir/Dialect/Rock/utility/loweringUtils.h"
 #include "mlir/InitRocMLIRDialects.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -440,8 +441,21 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
   return succeeded(pm.run(kernelModule));
 }
 
+bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
+  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
+    return rock::isElementwiseKernel(f);
+  });
+}
+
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
+  if (isRocMlirElementwiseKernelModule(kernelModule)) {
+    if (!rock::tuningSetStr(kernelModule, kRocMlirElementwisePerfConfig))
+      return false;
+    return compileRocMlirBackend(kernelModule, arch,
+                                 kRocMlirElementwisePerfConfig, out);
+  }
+
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
   // callers substitute their own compileOne instead, which is why this is not

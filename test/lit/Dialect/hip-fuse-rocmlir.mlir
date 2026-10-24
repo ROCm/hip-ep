@@ -419,3 +419,102 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       : tensor<1x16x4x4xf32>
   return %r : tensor<1x16x4x4xf32>
 }
+
+// -----
+
+// A ui8 boolean has no hip-to-tosa lowering, so hip.less stays on the HIP
+// path. The chain stops before it and the hip.mul still compiles.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.less
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4xf16>,
+                      %b: tensor<4xf16>) -> tensor<4xui8> {
+  %mulEmpty = tensor.empty() : tensor<4xf16>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<4xf16>, tensor<4xf16>)
+      outs(%mulEmpty : tensor<4xf16>) -> tensor<4xf16>
+  %lessEmpty = tensor.empty() : tensor<4xui8>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK: hip.less
+  // CHECK: return
+  %r = hip.less(%ctx) ins(%m, %b : tensor<4xf16>, tensor<4xf16>)
+      outs(%lessEmpty : tensor<4xui8>) : tensor<4xui8>
+  return %r : tensor<4xui8>
+}
+
+// -----
+
+// tensor.reshape has no lowering inside a rock kernel, so it splits the chain
+// into two kernels and stays in main_graph.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: tensor.reshape
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: tensor.reshape
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x16xf16>,
+                      %b: tensor<1x16xf16>, %shape: tensor<2xindex>,
+                      %c: tensor<4x4xf16>) -> tensor<4x4xf16> {
+  %mulEmpty = tensor.empty() : tensor<1x16xf16>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<1x16xf16>, tensor<1x16xf16>)
+      outs(%mulEmpty : tensor<1x16xf16>) -> tensor<1x16xf16>
+  %rs = tensor.reshape %m(%shape)
+      : (tensor<1x16xf16>, tensor<2xindex>) -> tensor<4x4xf16>
+  %addEmpty = tensor.empty() : tensor<4x4xf16>
+  // CHECK: hip.rocmlir
+  // CHECK: tensor.reshape
+  // CHECK: hip.rocmlir
+  // CHECK: return
+  %r = hip.add(%ctx) ins(%rs, %c : tensor<4x4xf16>, tensor<4x4xf16>)
+      outs(%addEmpty : tensor<4x4xf16>) -> tensor<4x4xf16>
+  return %r : tensor<4x4xf16>
+}
+
+// -----
+
+// A dynamic consumer ends the chain: the static hip.mul is a kernel, and the
+// dynamic hip.add after it stays on the HIP path.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<16xf16>,
+                      %b: tensor<16xf16>, %d: index,
+                      %c: tensor<?xf16>) -> tensor<?xf16> {
+  %mulEmpty = tensor.empty() : tensor<16xf16>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<16xf16>, tensor<16xf16>)
+      outs(%mulEmpty : tensor<16xf16>) -> tensor<16xf16>
+  %addEmpty = tensor.empty(%d) : tensor<?xf16>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK: hip.add
+  // CHECK: return
+  %r = hip.add(%ctx) ins(%m, %c : tensor<16xf16>, tensor<?xf16>)
+      outs(%addEmpty : tensor<?xf16>) -> tensor<?xf16>
+  return %r : tensor<?xf16>
+}
+
+// -----
+
+// A rank-0 result stays on the HIP path: only kernel arguments are promoted
+// to tensor<1xT>, so a cloned scalar op would mix ranks.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.exp
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %x: tensor<f32>) -> tensor<f32> {
+  %e = tensor.empty() : tensor<f32>
+  %r = hip.exp(%ctx) ins(%x : tensor<f32>) outs(%e : tensor<f32>) : tensor<f32>
+  return %r : tensor<f32>
+}
