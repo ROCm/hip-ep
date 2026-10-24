@@ -8239,4 +8239,31 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 
 } // namespace
 
+bool isTosaExpressiblePointwiseOp(Operation *op) {
+  auto expressible = [](Type type) {
+    auto tensorType = dyn_cast<TensorType>(type);
+    if (!tensorType)
+      return true;
+    Type elementType = tensorType.getElementType();
+    return isTosaExpressibleFloat(elementType) ||
+           isTosaExpressibleInt(elementType);
+  };
+  if (!llvm::all_of(op->getOperandTypes(), expressible) ||
+      !llvm::all_of(op->getResultTypes(), expressible))
+    return false;
+  if (auto equal = dyn_cast<EqualOp>(op))
+    return isTosaExpressibleCompare(equal);
+  if (auto less = dyn_cast<LessOp>(op))
+    return isTosaExpressibleCompare(less);
+  if (auto andOp = dyn_cast<AndOp>(op))
+    return isTosaExpressibleLogical(op, {andOp.getLhs(), andOp.getRhs()});
+  if (auto orOp = dyn_cast<OrOp>(op))
+    return isTosaExpressibleLogical(op, {orOp.getLhs(), orOp.getRhs()});
+  if (auto notOp = dyn_cast<NotOp>(op))
+    return isTosaExpressibleLogical(op, {notOp.getX()});
+  if (auto sign = dyn_cast<SignOp>(op))
+    return isTosaExpressibleSign(sign);
+  return true;
+}
+
 } // namespace mlir::hip
