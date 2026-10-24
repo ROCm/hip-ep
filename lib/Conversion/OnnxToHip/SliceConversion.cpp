@@ -4,6 +4,7 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
 
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -37,9 +38,9 @@ namespace {
 //     long after that landed). Worth knowing when reading the extent logic
 //     below: that runtime D2Hs starts/ends/axes/steps and synchronizes the
 //     stream on every call, so this op already costs a host sync per
-//     execution. Dynamic output dims are computed from
-//     the slice bounds when those are host-resolvable, and otherwise fall back
-//     to `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//     execution. Dynamic output dims are computed from the slice bounds using
+//     host-visible shape arithmetic where possible and synchronized scalar
+//     readback otherwise.
 //
 // That fallback is only an upper bound, and an upper bound is not a safe
 // stand-in for the extent: the extent this pattern puts on the `tensor.empty`
@@ -263,6 +264,25 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
   if (isAdd)
     return mlir::arith::AddIOp::create(b, loc, l, r);
   return mlir::arith::MulIOp::create(b, loc, l, r);
+}
+
+/// Read element \p idx of a Slice bound tensor to a synchronized host `index`.
+/// Constants and host `tensor.from_elements` values fold without device
+/// traffic; other producers use the shared scalar-readback path.
+static mlir::Value readSliceBoundToIndex(mlir::OpBuilder &b, mlir::Location loc,
+                                         mlir::Value ctx, mlir::Value bound,
+                                         int64_t idx) {
+  if (!bound || idx < 0)
+    return {};
+  auto type = mlir::dyn_cast<mlir::RankedTensorType>(bound.getType());
+  if (!type || type.getRank() != 1 ||
+      !type.getElementType().isSignlessInteger())
+    return {};
+  if (type.hasStaticShape() && idx >= type.getNumElements())
+    return {};
+
+  mlir::Value scalar = readbackShapeEntryToHost(b, loc, ctx, bound, idx);
+  return mlir::arith::IndexCastOp::create(b, loc, b.getIndexType(), scalar);
 }
 
 /// Emit the number of elements ONNX Slice produces on one axis, given runtime
@@ -571,23 +591,9 @@ struct SliceToHip : public mlir::RewritePattern {
     if (stepsVec.size() != axesVec.size())
       haveAxes = false;
 
-    // Compute each dynamic output dim from the slice bounds where possible;
-    // see the file header for why the data dim is not an acceptable substitute.
-    // Ops materialized by a resolution that then fails are pure and get DCE'd.
-    //
-    // Where the bounds do not resolve, the fallback keeps the upper bound and
-    // therefore keeps the over-sized shape. It could be exact instead:
-    // CompressConversion solves the same shrinking-extent problem by reading
-    // the true count back from the device with `hip.ReadbackDimOp`. That is not
-    // done here, but not because a readback is unaffordable on this op --
-    // `wrap_slice` already D2Hs its own bounds and syncs the stream every call,
-    // so the sync is paid regardless. It is that a readback would add a second
-    // sync point, in the shape computation ahead of the slice, to serve a case
-    // no model in scope reaches: on Gemma-4 every sliced axis resolves from its
-    // bounds, and host arithmetic is strictly better than a readback wherever
-    // it is available. If a model does land here, revisit it -- the cost is
-    // lower than it looks. Hence the debug line below: the fallback is a known
-    // performance cliff, and it should be findable without an RGP capture.
+    // Compute each dynamic output dim from the slice bounds. Preserve the
+    // existing host-arithmetic fast path, then use the shared synchronized
+    // scalar readback for producer chains that it cannot interpret.
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i = 0; i < resultType.getRank(); ++i) {
       if (!resultType.isDynamicDim(i))
@@ -629,6 +635,10 @@ struct SliceToHip : public mlir::RewritePattern {
           }
           mlir::Value s = resolveHostIndex(rewriter, loc, starts, k, 0);
           mlir::Value e = resolveHostIndex(rewriter, loc, ends, k, 0);
+          if (!s)
+            s = readSliceBoundToIndex(rewriter, loc, context, starts, k);
+          if (!e)
+            e = readSliceBoundToIndex(rewriter, loc, context, ends, k);
           if (s && e)
             extent = buildAllocCapacity(
                 rewriter, loc, dim,
