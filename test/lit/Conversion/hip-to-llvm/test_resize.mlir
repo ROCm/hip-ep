@@ -132,4 +132,21 @@ module {
     // CHECK-NOT: hip.resize
     return
   }
+
+  // Test 9: axis 1 keeps its extent (floor(3 * 1.1) = 3) but has scale 1.1,
+  // so it joins the window: N, C = 1, window (H, W, C), scales 1.1, 1.5, 1.
+  func.func @resize_scales_unchanged_extent_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x3x1xf32, 1>,
+      %y: memref<1x3x4x1xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_scales_unchanged_extent_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x3x1xf32, 1>)
+                     outs(%y : memref<1x3x4x1xf32, 1>)
+                     {mode = 0, coord_transform = 3, nearest_mode = 2,
+                      scales = [1.0, 1.1, 1.5, 1.0]}
+    // CHECK-DAG: llvm.mlir.constant(1.100000e+00 : f64) : f64
+    // CHECK-DAG: llvm.mlir.constant(1.500000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled
+    return
+  }
 }

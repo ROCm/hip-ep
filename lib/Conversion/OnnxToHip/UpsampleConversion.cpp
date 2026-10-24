@@ -201,6 +201,18 @@ struct UpsampleToResize : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Upsample mode must be 'nearest' or 'linear'");
 
+    // Lowering plans the launch from the kept scales, so it must exist.
+    mlir::ArrayAttr scalesAttr;
+    if (scaleValues &&
+        resizeScalesDifferFromExtents(inputType, outputType, *scaleValues)) {
+      if (!planHipResizeLaunch(inputType, outputType, /*hostExtents=*/false,
+                               *scaleValues))
+        return rewriter.notifyMatchFailure(
+            op, "Upsample: a non-unit scale falls outside a trailing window "
+                "of at most 3 axes");
+      scalesAttr = rewriter.getF64ArrayAttr(*scaleValues);
+    }
+
     mlir::Location loc = op->getLoc();
     llvm::SmallVector<mlir::Value> dynSizes;
     for (int64_t i : llvm::seq<int64_t>(2)) {
@@ -211,10 +223,6 @@ struct UpsampleToResize : public mlir::RewritePattern {
     mlir::Value init =
         mlir::tensor::EmptyOp::create(rewriter, loc, outputType.getShape(),
                                       outputType.getElementType(), dynSizes);
-    mlir::ArrayAttr scalesAttr;
-    if (scaleValues &&
-        resizeScalesDifferFromExtents(inputType, outputType, *scaleValues))
-      scalesAttr = rewriter.getF64ArrayAttr(*scaleValues);
     auto hipOp = mlir::hip::ResizeOp::create(
         rewriter, loc, outputType, *ctxOrFailure, input, init,
         rewriter.getI64IntegerAttr(modeId),

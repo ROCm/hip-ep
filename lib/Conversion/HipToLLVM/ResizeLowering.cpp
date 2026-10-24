@@ -16,7 +16,7 @@ namespace {
 //
 // The kernel takes a copied prefix (N, C) and a trailing window of
 // spatial_rank axes (1..3).  planHipResizeLaunch chooses that split from
-// which extents change:
+// which extents change, and which axes have a kept scale other than 1:
 //
 //   NCHW  1x3x16x16 -> 1x3x32x32 : N, C,     spatial_rank=2, (H, W)
 //   NHWC  1x16x16x3 -> 1x32x32x3 : N, C=1,   spatial_rank=3, (H, W, C)
@@ -72,7 +72,12 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
         return rewriter.notifyMatchFailure(op, "invalid resize launch");
       launch = HipResizeLaunch{prefix, spatial};
     } else {
-      launch = planHipResizeLaunch(inputType, outputType);
+      SmallVector<double, 5> scaleValues;
+      if (ArrayAttr scales = op.getScalesAttr())
+        for (Attribute scale : scales)
+          scaleValues.push_back(cast<FloatAttr>(scale).getValueAsDouble());
+      launch = planHipResizeLaunch(inputType, outputType,
+                                   /*hostExtents=*/false, scaleValues);
     }
     if (!launch)
       return rewriter.notifyMatchFailure(

@@ -118,12 +118,35 @@ static mlir::Value unwrapCast(mlir::Value v) {
   return v;
 }
 
+/// Constant scales, read through float-to-float casts. Each cast rounds the
+/// values to its element type: [1, 1, 2.0001] cast through f16 is 2.
 static bool foldScales(mlir::Value scales, int64_t rank,
                        llvm::SmallVectorImpl<double> &out) {
   if (!scales || isAbsent(scales))
     return false;
-  mlir::DenseElementsAttr dense =
-      getCompileTimeConstantTensor(unwrapCast(scales));
+  llvm::SmallVector<mlir::FloatType, 4> castTypes;
+  mlir::Value source = scales;
+  for (int i = 0; i < 4; ++i) {
+    mlir::Operation *def = source.getDefiningOp();
+    if (!def)
+      break;
+    mlir::Value castInput;
+    if (def->getName().getStringRef() == "onnx.Cast")
+      castInput = def->getOperand(0);
+    else if (mlir::isa<mlir::hip::CastOp>(def))
+      castInput = def->getOperand(1);
+    else
+      break;
+    auto castType = mlir::dyn_cast<mlir::ShapedType>(source.getType());
+    auto castElem =
+        castType ? mlir::dyn_cast<mlir::FloatType>(castType.getElementType())
+                 : mlir::FloatType();
+    if (!castElem)
+      return false;
+    castTypes.push_back(castElem);
+    source = castInput;
+  }
+  mlir::DenseElementsAttr dense = getCompileTimeConstantTensor(source);
   if (!dense)
     return false;
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
@@ -132,8 +155,14 @@ static bool foldScales(mlir::Value scales, int64_t rank,
       !mlir::isa<mlir::FloatType>(tensorType.getElementType()))
     return false;
   out.clear();
-  for (mlir::APFloat entry : dense.getValues<mlir::APFloat>())
+  for (mlir::APFloat entry : dense.getValues<mlir::APFloat>()) {
+    for (mlir::FloatType castElem : llvm::reverse(castTypes)) {
+      bool losesInfo = false;
+      entry.convert(castElem.getFloatSemantics(),
+                    llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+    }
     out.push_back(entry.convertToDouble());
+  }
   return out.size() == static_cast<size_t>(rank);
 }
 
@@ -379,15 +408,7 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto modeAttr = rewriter.getI64IntegerAttr(modeId);
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
-
-    // ONNX samples with the supplied scale. Record it when the extent ratio
-    // the kernel would use differs; align_corners does not read the scale.
     mlir::ArrayAttr scalesAttr;
-    auto keepScales = [&](llvm::ArrayRef<double> scaleVec) {
-      if (coordId != 2 &&
-          resizeScalesDifferFromExtents(inputType, outputType, scaleVec))
-        scalesAttr = rewriter.getF64ArrayAttr(scaleVec);
-    };
 
     auto emitResize = [&](mlir::RankedTensorType resultType,
                           mlir::ValueRange dynSizes,
@@ -415,13 +436,32 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     // A static window already has its extents in the result type, so scales
     // may be a runtime value.  The kernel recovers scale = in_dim / out_dim,
-    // or uses a compile-time constant scale recorded by keepScales. A
-    // runtime scale is not readable here; static extents only come out of
-    // shape inference when the scales were constant.
+    // or uses the compile-time constant scales recorded below. A runtime
+    // scale is not readable here; static extents only come out of shape
+    // inference when the scales were constant.
     // A dynamic window extent is filled from a compile-time constant scale.
     bool scalesPath = false;
     llvm::SmallVector<mlir::Value> dynSizes;
     mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
+    llvm::SmallVector<double> scaleVec;
+    bool scalesFolded = foldScales(scales, rank, scaleVec);
+
+    // ONNX samples with the supplied scale. Record it when the extent ratio
+    // the kernel would use differs; align_corners does not read the scale.
+    // Lowering plans the launch from the same scales.
+    if (launch && scalesFolded && coordId != 2 &&
+        llvm::all_of(scaleVec,
+                     [](double s) { return s > 0.0 && std::isfinite(s); }) &&
+        resizeScalesDifferFromExtents(inputType, outputType, scaleVec)) {
+      launch = planHipResizeLaunch(inputType, outputType,
+                                   /*hostExtents=*/false, scaleVec);
+      if (!launch)
+        return rewriter.notifyMatchFailure(
+            op, "Resize: a non-unit scale falls outside a trailing window of "
+                "at most 3 axes");
+      scalesAttr = rewriter.getF64ArrayAttr(scaleVec);
+    }
+
     if (launch) {
       bool windowDynamic = false;
       for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
@@ -433,13 +473,9 @@ struct ResizeToHip : public mlir::RewritePattern {
             dynSizes.push_back(
                 mlir::tensor::DimOp::create(rewriter, loc, input, i));
         }
-        llvm::SmallVector<double> scaleVec;
-        if (foldScales(scales, rank, scaleVec))
-          keepScales(scaleVec);
         scalesPath = true;
       } else {
-        llvm::SmallVector<double> scaleVec;
-        if (foldScales(scales, rank, scaleVec)) {
+        if (scalesFolded) {
           for (int64_t axis : llvm::seq<int64_t>(launch->prefixCount)) {
             if (scaleVec[axis] != 1.0)
               return rewriter.notifyMatchFailure(
@@ -481,7 +517,6 @@ struct ResizeToHip : public mlir::RewritePattern {
                   op, "Resize: output extent is not host-computable");
             dynSizes.push_back(extent);
           }
-          keepScales(scaleVec);
           scalesPath = true;
         }
       }

@@ -37,14 +37,19 @@ struct HipResizeLaunch {
 // extent and lowering reads it from the memref descriptor. When nothing is
 // statically resized, a trailing static channel after a dynamic axis is
 // channels-last (prefix is N). Otherwise the copied prefix is the leading
-// two axes.
+// two axes. `scales` are the ONNX scales kept on hip.resize: an axis whose
+// scale is not 1 is resampled even when its extent is unchanged
+// (floor(3 * 1.1) = 3), so it cannot be in the copied prefix.
 inline std::optional<HipResizeLaunch>
 planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
-                    bool hostExtents = false) {
+                    bool hostExtents = false,
+                    llvm::ArrayRef<double> scales = {}) {
   if (!inputType.hasRank() || !outputType.hasRank())
     return std::nullopt;
   const int64_t rank = inputType.getRank();
   if (rank < 3 || rank > 5 || outputType.getRank() != rank)
+    return std::nullopt;
+  if (!scales.empty() && static_cast<int64_t>(scales.size()) != rank)
     return std::nullopt;
 
   enum class AxisKind { Copied, Resized, Dynamic };
@@ -69,6 +74,8 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
     std::optional<AxisKind> kind = axis(i);
     if (!kind)
       return std::nullopt;
+    if (!scales.empty() && scales[i] != 1.0)
+      kind = AxisKind::Resized;
     kinds[i] = *kind;
     if (*kind == AxisKind::Resized && firstResized == rank)
       firstResized = i;

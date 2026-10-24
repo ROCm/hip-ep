@@ -383,4 +383,45 @@ module {
     // CHECK: return
     return %y0, %y1 : tensor<1x1x6xf32>, tensor<1x1x4xf32>
   }
+
+  // Test 19: floor(3 * 1.1) = 3 leaves axis 1's extent unchanged, but it is
+  // still resampled, so the kept scales include it.
+  func.func @test_resize_scales_unchanged_extent(%arg0: tensor<1x3x3x1xf32>)
+      -> tensor<1x3x4x1xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_unchanged_extent
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.1, 1.5, 1.0]> : tensor<4xf32>}
+        : () -> tensor<4xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "nearest", coordinate_transformation_mode = "pytorch_half_pixel",
+         nearest_mode = "floor"}
+        : (tensor<1x3x3x1xf32>, none, tensor<4xf32>) -> tensor<1x3x4x1xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: scales = [1.000000e+00, 1.100{{[0-9]*}}, 1.500000e+00, 1.000000e+00]
+    return %y : tensor<1x3x4x1xf32>
+  }
+
+  // Test 20: casts round the folded scales. 2.0001 through f16 is 2, which
+  // matches out / in, so no scales are kept.
+  func.func @test_resize_scales_through_cast(%arg0: tensor<1x1x4xf32>)
+      -> tensor<1x1x8xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_through_cast
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %s = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0001]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %h = "onnx.Cast"(%s) {saturate = 1 : si64, to = f16}
+        : (tensor<3xf32>) -> tensor<3xf16>
+    %f = "onnx.Cast"(%h) {saturate = 1 : si64, to = f32}
+        : (tensor<3xf16>) -> tensor<3xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %f)
+        {mode = "nearest", coordinate_transformation_mode = "asymmetric",
+         nearest_mode = "floor"}
+        : (tensor<1x1x4xf32>, none, tensor<3xf32>) -> tensor<1x1x8xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-NOT: scales
+    // CHECK: return
+    return %y : tensor<1x1x8xf32>
+  }
 }
