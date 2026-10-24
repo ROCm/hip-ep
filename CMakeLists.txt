@@ -30,6 +30,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Experimental attention implementation; graph and runtime ABIs are unchanged.
+option(HIP_EP_ENABLE_RING_ATTENTION "Enable Ring attention on supported shapes" OFF)
+if(DEFINED HIP_EP_GQA_IMPL)
+  message(FATAL_ERROR "HIP_EP_GQA_IMPL was replaced by HIP_EP_ENABLE_RING_ATTENTION=ON/OFF")
+endif()
+if(HIP_EP_ENABLE_RING_ATTENTION)
+  set(HIP_EP_RING_ENABLED 1)
+else()
+  set(HIP_EP_RING_ENABLED 0)
+endif()
+
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
     add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fms-extensions;-fms-compatibility;-fdelayed-template-parsing>")

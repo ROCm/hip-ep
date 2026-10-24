@@ -18,6 +18,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+#if HIP_EP_RING_ENABLED != 0
+    // The runtime's element_size_bytes argument cannot distinguish BF16 from
+    // FP16. Ring builds reject ambiguous types before erasing that information.
+    Type queryElement =
+        cast<MemRefType>(op.getQuery().getType()).getElementType();
+    if (!queryElement.isF16() && !queryElement.isF32())
+      return op.emitOpError(
+          "Ring GQA builds require FP16 or FP32 query tensors");
+    for (Value operand : {op.getKey(), op.getValue(), op.getOutput()}) {
+      if (operand &&
+          cast<MemRefType>(operand.getType()).getElementType() != queryElement)
+        return op.emitOpError(
+            "Ring GQA builds require matching query/key/value/output types");
+    }
+    if (op.getKQuantType() == "NONE" && op.getVQuantType() == "NONE") {
+      for (Value operand : {op.getPastKey(), op.getPastValue(),
+                            op.getPresentKey(), op.getPresentValue()}) {
+        if (operand && cast<MemRefType>(operand.getType()).getElementType() !=
+                           queryElement)
+          return op.emitOpError(
+              "Ring GQA builds require matching unquantized cache types");
+      }
+    }
+#endif
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
