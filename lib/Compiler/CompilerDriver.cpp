@@ -428,6 +428,8 @@ bool CompilerDriver::runMLIRPasses(
           mlir::hip::createDecomposeConvTransposePass());
       headPm.addPass(mlir::createCanonicalizerPass());
       headPm.addNestedPass<mlir::func::FuncOp>(
+          mlir::hip::createSimplifyAlgebraPass());
+      headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createFuseROCMlirPass());
       headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
       if (mlir::failed(headPm.run(module))) {
