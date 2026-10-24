@@ -6,6 +6,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/STLExtras.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
@@ -67,7 +68,9 @@ void mergeHorizontal(OpBuilder &builder, ArrayRef<ConvOp> convs,
     fusedValues.append(weight.getValues<APFloat>().begin(),
                        weight.getValues<APFloat>().end());
 
-  builder.setInsertionPointAfter(convs.back());
+  // Before the first sibling, so the slices dominate every use of the convs
+  // they replace, including uses that sit between two siblings.
+  builder.setInsertionPoint(first);
   Location loc = first.getLoc();
   Value fusedWeight =
       ConstantOp::create(builder, loc, fusedWeightType,
@@ -96,10 +99,9 @@ void mergeHorizontal(OpBuilder &builder, ArrayRef<ConvOp> convs,
   int64_t channel = 0;
   const int64_t channels = outType.getDimSize(1);
   for (ConvOp conv : convs) {
-    SmallVector<OpFoldResult> offsets{builder.getIndexAttr(0),
-                                      builder.getIndexAttr(channel),
-                                      builder.getIndexAttr(0),
-                                      builder.getIndexAttr(0)};
+    SmallVector<OpFoldResult> offsets{
+        builder.getIndexAttr(0), builder.getIndexAttr(channel),
+        builder.getIndexAttr(0), builder.getIndexAttr(0)};
     SmallVector<OpFoldResult> sizes{
         builder.getIndexAttr(outType.getDimSize(0)),
         builder.getIndexAttr(channels),
@@ -116,19 +118,25 @@ void mergeHorizontal(OpBuilder &builder, ArrayRef<ConvOp> convs,
     Value weight = conv.getWeights();
     Value init = conv.getOutput();
     conv.erase();
-    if (weight.use_empty())
-      weight.getDefiningOp()->erase();
-    if (init.use_empty())
-      init.getDefiningOp()->erase();
+    if (auto constant = weight.getDefiningOp<ConstantOp>();
+        constant && constant->use_empty())
+      constant.erase();
+    if (auto empty = init.getDefiningOp<tensor::EmptyOp>();
+        empty && empty->use_empty())
+      empty.erase();
   }
 }
 
 struct SimplifyAlgebraPass
     : public impl::SimplifyAlgebraPassBase<SimplifyAlgebraPass> {
   void runOnOperation() override {
-    DenseMap<Value, SmallVector<ConvOp>> groups;
-    getOperation().walk(
-        [&](ConvOp conv) { groups[conv.getInput()].push_back(conv); });
+    // Siblings merge only within one block: the merged conv is placed before
+    // the first of them, which does not dominate a sibling in another region.
+    // MapVector keeps the merge order, and so the output, deterministic.
+    llvm::MapVector<std::pair<Block *, Value>, SmallVector<ConvOp>> groups;
+    getOperation().walk([&](ConvOp conv) {
+      groups[{conv->getBlock(), conv.getInput()}].push_back(conv);
+    });
 
     OpBuilder builder(&getContext());
     for (auto &entry : groups) {
