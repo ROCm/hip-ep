@@ -169,8 +169,8 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
       callee = kWrapResizeScaled;
     }
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, callee, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, callee, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

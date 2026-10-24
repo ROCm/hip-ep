@@ -91,14 +91,12 @@ static int resize_impl(RuntimeState *state, void *input, void *output,
 
   int rc =
       scales
-          ? hip_resize_scaled(stream, input, output, hip_dtype,
-                              static_cast<int>(spatial_rank), N, C, in0, in1,
-                              in2, out0, out1, out2, static_cast<int>(mode),
-                              static_cast<int>(coord_transform),
-                              static_cast<int>(nearest_mode),
-                              static_cast<float>(scales[0]),
-                              static_cast<float>(scales[1]),
-                              static_cast<float>(scales[2]))
+          ? hip_resize_scaled(
+                stream, input, output, hip_dtype,
+                static_cast<int>(spatial_rank), N, C, in0, in1, in2, out0, out1,
+                out2, static_cast<int>(mode), static_cast<int>(coord_transform),
+                static_cast<int>(nearest_mode), static_cast<float>(scales[0]),
+                static_cast<float>(scales[1]), static_cast<float>(scales[2]))
           : hip_resize(stream, input, output, hip_dtype,
                        static_cast<int>(spatial_rank), N, C, in0, in1, in2,
                        out0, out1, out2, static_cast<int>(mode),

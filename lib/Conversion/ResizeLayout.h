@@ -122,9 +122,9 @@ inline bool resizeScalesDifferFromExtents(ShapedType inputType,
       continue;
     }
     double prod = static_cast<double>(inputType.getDimSize(i)) * scale;
-    if (outputType.isDynamicDim(i) ? prod != std::floor(prod)
-                                   : prod != static_cast<double>(
-                                                 outputType.getDimSize(i)))
+    if (outputType.isDynamicDim(i)
+            ? prod != std::floor(prod)
+            : prod != static_cast<double>(outputType.getDimSize(i)))
       return true;
   }
   return false;
