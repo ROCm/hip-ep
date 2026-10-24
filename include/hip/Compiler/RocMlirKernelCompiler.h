@@ -105,9 +105,25 @@ OwningOpRef<ModuleOp> takeRocMlirKernelModule(ModuleOp kernelsModule,
 // `compileOne`, so a callback never has to.
 bool runRocMlirHighLevelPipeline(ModuleOp kernelModule);
 
+// Elementwise kernels have no tuning space: createTunableParamSpace fatals on
+// them. They compile with the default AffixTuningParameters uses when no
+// perf_config was selected (tile 256, 4 waves, 1 stage).
+inline constexpr llvm::StringLiteral
+    kRocMlirElementwisePerfConfig("elem:v1:256,1,4,1,0");
+
+// Whether `kernelModule` (in rock form) holds an elementwise kernel.
+bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
+
+// Whether `kernelModule` (in rock form) has anything for rocMLIR to tune and
+// compile: a gemm-like op or an elementwise kernel. Lowering can fold all of
+// a kernel's computation away -- an identity cast, or hip.max(%x, %x) -- and
+// createTunableParamSpace aborts on what is left.
+bool hasRocMlirComputation(ModuleOp kernelModule);
+
 // Pick the first perfConfig out of the tuning search space and compile with
-// it. Expects `kernelModule` to already be in rock form. This is what a caller
-// gets when it supplies no `compileOne`.
+// it, or kRocMlirElementwisePerfConfig for an elementwise kernel. Expects
+// `kernelModule` to already be in rock form. This is what a caller gets when
+// it supplies no `compileOne`.
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out);
 

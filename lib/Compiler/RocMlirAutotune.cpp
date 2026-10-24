@@ -747,6 +747,23 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     }
   }
 
+  // Elementwise kernels have no tuning space to search.
+  if (isRocMlirElementwiseKernelModule(module)) {
+    if (deferCacheHits) {
+      DeferredCacheHit hit;
+      hit.kernelName = kernelName.str();
+      hit.rockModule = std::move(rockModule);
+      hit.perfConfig = kRocMlirElementwisePerfConfig.str();
+      cacheHits.push_back(std::move(hit));
+      return true;
+    }
+    const auto compileStart = std::chrono::steady_clock::now();
+    bool ok =
+        compilePerfConfig(rockModule, arch, kRocMlirElementwisePerfConfig, out);
+    times.perfConfigCompileMs += millisecondsSince(compileStart);
+    return ok;
+  }
+
   std::unique_ptr<rock::TuningParamSet> space(
       rock::createTunableParamSpace(module, kind));
   if (!space || space->tuningRange.empty()) {
