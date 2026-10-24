@@ -10,6 +10,11 @@
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
 // RUN:   | hip-mlir-opt --split-input-file | FileCheck %s
 
+// Every outlined kernel has to convert: hip-to-tosa fails the whole kernel on
+// one op it marks illegal but cannot rewrite.
+// RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
+// RUN:   | hip-mlir-opt --split-input-file --convert-hip-to-tosa > /dev/null
+
 // A bare `tensor.empty` init is cloned into the kernel, as it always was.
 
 // CHECK-LABEL: func.func @rocMlir
@@ -517,4 +522,126 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<f32>) -> tensor<f32> {
   %e = tensor.empty() : tensor<f32>
   %r = hip.exp(%ctx) ins(%x : tensor<f32>) outs(%e : tensor<f32>) : tensor<f32>
   return %r : tensor<f32>
+}
+
+// -----
+
+// tosa.intdiv takes only i32 and i64, so an i16 hip.div stays on the HIP path
+// while the hip.mul before it still compiles.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.div
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4xi16>,
+                      %b: tensor<4xi16>) -> tensor<4xi16> {
+  %mulEmpty = tensor.empty() : tensor<4xi16>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<4xi16>, tensor<4xi16>)
+      outs(%mulEmpty : tensor<4xi16>) -> tensor<4xi16>
+  %divEmpty = tensor.empty() : tensor<4xi16>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK: hip.div
+  // CHECK: return
+  %r = hip.div(%ctx) ins(%m, %b : tensor<4xi16>, tensor<4xi16>)
+      outs(%divEmpty : tensor<4xi16>) : tensor<4xi16>
+  return %r : tensor<4xi16>
+}
+
+// -----
+
+// hip-to-tosa has no floating-point hip.mod, so it stays on the HIP path.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.mod
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4xf32>,
+                      %b: tensor<4xf32>) -> tensor<4xf32> {
+  %mulEmpty = tensor.empty() : tensor<4xf32>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<4xf32>, tensor<4xf32>)
+      outs(%mulEmpty : tensor<4xf32>) -> tensor<4xf32>
+  %modEmpty = tensor.empty() : tensor<4xf32>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK: hip.mod
+  // CHECK: return
+  %r = hip.mod(%ctx) ins(%m, %b : tensor<4xf32>, tensor<4xf32>)
+      outs(%modEmpty : tensor<4xf32>) {fmod = 1 : i64} : tensor<4xf32>
+  return %r : tensor<4xf32>
+}
+
+// -----
+
+// An integer hip.mod with fmod = 1 is outside its contract, which hip-to-tosa
+// rejects, so it stays on the HIP path too.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.mod
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<4xi32>,
+                      %b: tensor<4xi32>) -> tensor<4xi32> {
+  %mulEmpty = tensor.empty() : tensor<4xi32>
+  %m = hip.mul(%ctx) ins(%a, %b : tensor<4xi32>, tensor<4xi32>)
+      outs(%mulEmpty : tensor<4xi32>) -> tensor<4xi32>
+  %modEmpty = tensor.empty() : tensor<4xi32>
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.rocmlir
+  // CHECK: hip.mod
+  // CHECK: return
+  %r = hip.mod(%ctx) ins(%m, %b : tensor<4xi32>, tensor<4xi32>)
+      outs(%modEmpty : tensor<4xi32>) {fmod = 1 : i64} : tensor<4xi32>
+  return %r : tensor<4xi32>
+}
+
+// -----
+
+// A hip.mod left on the HIP path between a pointwise op and a conv epilogue
+// splits them: the hip.mul is its own kernel and the conv takes the hip.add.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.mul
+// CHECK-NOT: hip.mod
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.conv
+// CHECK-NOT: hip.mod
+// CHECK: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %x: tensor<1x16x4x4xf16>, %y: tensor<1x16x4x4xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %mulEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  %m = hip.mul(%ctx) ins(%x, %y : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%mulEmpty : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  %modEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  %mod = hip.mod(%ctx) ins(%m, %y : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%modEmpty : tensor<1x16x4x4xf16>) {fmod = 1 : i64}
+      : tensor<1x16x4x4xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %addEmpty = tensor.empty() : tensor<1x16x4x4xf16>
+  // CHECK: hip.rocmlir
+  // CHECK: hip.mod
+  // CHECK: hip.rocmlir
+  // CHECK-NOT: hip.conv
+  // CHECK-NOT: hip.add
+  // CHECK: return
+  %r = hip.add(%ctx) ins(%c, %mod : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%addEmpty : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
 }
