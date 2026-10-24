@@ -46,6 +46,11 @@ namespace {
 // scale 1 and copies `tensor.dim` when that dim is dynamic.  Any other
 // positive scale is floor(input_dim * scale) in f64, then index.
 //
+// The kernel samples with out_dim / in_dim. ONNX samples with the supplied
+// scale, which differs when floor rounds: [1,1,3] at scale 1.5 is length 4,
+// and 4/3 would map output 1 to 0.625 instead of 0.5. A constant `scales`
+// vector with any such axis is kept on hip.resize as `scales`.
+//
 // When `scales` is absent, operand `sizes` supplies the output extents.  A
 // compile-time constant vector is written into the result type.  A runtime
 // vector is not a shape record: each element is read with
@@ -375,6 +380,15 @@ struct ResizeToHip : public mlir::RewritePattern {
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
     auto nearestAttr = rewriter.getI64IntegerAttr(nearestId);
 
+    // ONNX samples with the supplied scale. Record it when the extent ratio
+    // the kernel would use differs; align_corners does not read the scale.
+    mlir::ArrayAttr scalesAttr;
+    auto keepScales = [&](llvm::ArrayRef<double> scaleVec) {
+      if (coordId != 2 &&
+          resizeScalesDifferFromExtents(inputType, outputType, scaleVec))
+        scalesAttr = rewriter.getF64ArrayAttr(scaleVec);
+    };
+
     auto emitResize = [&](mlir::RankedTensorType resultType,
                           mlir::ValueRange dynSizes,
                           const std::optional<HipResizeLaunch> &stamped)
@@ -382,9 +396,9 @@ struct ResizeToHip : public mlir::RewritePattern {
       mlir::Value init =
           mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                         resultType.getElementType(), dynSizes);
-      auto hipOp =
-          mlir::hip::ResizeOp::create(rewriter, loc, resultType, context, input,
-                                      init, modeAttr, coordAttr, nearestAttr);
+      auto hipOp = mlir::hip::ResizeOp::create(
+          rewriter, loc, resultType, context, input, init, modeAttr, coordAttr,
+          nearestAttr, scalesAttr);
       if (stamped) {
         hipOp->setAttr("prefix_count",
                        rewriter.getI64IntegerAttr(stamped->prefixCount));
@@ -400,11 +414,14 @@ struct ResizeToHip : public mlir::RewritePattern {
     };
 
     // A static window already has its extents in the result type, so scales
-    // may be a runtime value.  The kernel recovers scale = in_dim / out_dim.
+    // may be a runtime value.  The kernel recovers scale = in_dim / out_dim,
+    // or uses a compile-time constant scale recorded by keepScales. A
+    // runtime scale is not readable here; static extents only come out of
+    // shape inference when the scales were constant.
     // A dynamic window extent is filled from a compile-time constant scale.
-    // This path is unchanged for every resize the type-only plan accepts.
     bool scalesPath = false;
     llvm::SmallVector<mlir::Value> dynSizes;
+    mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
     if (launch) {
       bool windowDynamic = false;
       for (int64_t i : llvm::seq<int64_t>(launch->spatialRank))
@@ -416,9 +433,11 @@ struct ResizeToHip : public mlir::RewritePattern {
             dynSizes.push_back(
                 mlir::tensor::DimOp::create(rewriter, loc, input, i));
         }
+        llvm::SmallVector<double> scaleVec;
+        if (foldScales(scales, rank, scaleVec))
+          keepScales(scaleVec);
         scalesPath = true;
       } else {
-        mlir::Value scales = operands.size() > 2 ? operands[2] : mlir::Value();
         llvm::SmallVector<double> scaleVec;
         if (foldScales(scales, rank, scaleVec)) {
           for (int64_t axis : llvm::seq<int64_t>(launch->prefixCount)) {
@@ -462,6 +481,7 @@ struct ResizeToHip : public mlir::RewritePattern {
                   op, "Resize: output extent is not host-computable");
             dynSizes.push_back(extent);
           }
+          keepScales(scaleVec);
           scalesPath = true;
         }
       }

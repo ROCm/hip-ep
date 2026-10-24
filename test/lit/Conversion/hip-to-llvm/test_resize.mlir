@@ -5,7 +5,8 @@
 // TEST PURPOSE:
 // Verify hip.resize lowers to llvm.call @wrap_resize with signature
 // (state, input, output, data_type, spatial_rank, N, C, in0..2, out0..2,
-//  mode, coord_transform, nearest_mode) -> i32.
+//  mode, coord_transform, nearest_mode) -> i32. With a scales attribute it
+// calls @wrap_resize_scaled, which adds scale0..2 as f64.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -109,6 +110,25 @@ module {
                      outs(%y : memref<1x256x26x26xui8, 1>)
                      {mode = 0, coord_transform = 0, nearest_mode = 1}
     // CHECK: llvm.call @wrap_resize
+    // CHECK-NOT: hip.resize
+    return
+  }
+
+  // Test 8: kept ONNX scales call wrap_resize_scaled with one f64 per
+  // spatial axis. Unused slots are 0.
+  func.func @resize_scales_f32(
+      %ctx: !hip.context,
+      %x: memref<1x1x3xf32, 1>,
+      %y: memref<1x1x4xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_scales_f32
+    hip.resize(%ctx) ins(%x : memref<1x1x3xf32, 1>)
+                     outs(%y : memref<1x1x4xf32, 1>)
+                     {mode = 1, coord_transform = 0, nearest_mode = 0,
+                      scales = [1.0, 1.0, 1.5]}
+    // CHECK-DAG: llvm.mlir.constant(1.500000e+00 : f64) : f64
+    // CHECK-DAG: llvm.mlir.constant(0.000000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled
+    // CHECK-SAME: f64, f64, f64) -> i32
     // CHECK-NOT: hip.resize
     return
   }

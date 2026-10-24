@@ -8,6 +8,7 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 
+#include <cmath>
 #include <optional>
 
 namespace mlir {
@@ -102,6 +103,31 @@ planHipResizeLaunch(ShapedType inputType, ShapedType outputType,
       return std::nullopt;
   }
   return HipResizeLaunch{prefixCount, spatialRank};
+}
+
+// Whether ONNX `scales` must reach the kernel. The kernel otherwise samples
+// with out_dim / in_dim, which differs from the supplied scale when
+// in_dim * scale is not exactly the output extent (3 * 1.5 = 4.5 -> 4). A
+// dynamic input extent cannot be checked, so a fractional scale on it counts.
+inline bool resizeScalesDifferFromExtents(ShapedType inputType,
+                                          ShapedType outputType,
+                                          llvm::ArrayRef<double> scales) {
+  for (int64_t i = 0; i < static_cast<int64_t>(scales.size()); ++i) {
+    double scale = scales[i];
+    if (scale == 1.0)
+      continue;
+    if (inputType.isDynamicDim(i)) {
+      if (scale != std::floor(scale))
+        return true;
+      continue;
+    }
+    double prod = static_cast<double>(inputType.getDimSize(i)) * scale;
+    if (outputType.isDynamicDim(i) ? prod != std::floor(prod)
+                                   : prod != static_cast<double>(
+                                                 outputType.getDimSize(i)))
+      return true;
+  }
+  return false;
 }
 
 } // namespace hip

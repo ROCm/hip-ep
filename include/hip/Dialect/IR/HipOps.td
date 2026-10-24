@@ -5776,7 +5776,11 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
 
     Per-axis scale is recovered at runtime from the window's input and output
     extents (`scale = in_dim / out_dim`).  `scales` and `sizes` do not appear
-    as operands.  A dynamic window extent is filled in at conversion from a
+    as operands.  The optional `scales` attribute (one f64 per tensor axis,
+    ONNX `scales` order) overrides that ratio: when floor(in_dim * scale)
+    rounds, e.g. 3 * 1.5 -> 4, ONNX samples with the supplied scale and the
+    extent ratio would shift every coordinate.  align_corners ignores it.
+    A dynamic window extent is filled in at conversion from a
     compile-time constant `scales` vector (scale 1 copies the input dim;
     any other scale is floor(input_dim * scale)).  When `scales` is absent, a
     rank-1 integer `sizes` vector supplies the extents: a constant vector is
@@ -5801,7 +5805,8 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     Hip_TensorOrMemRef:$output,
     I64Attr:$mode,
     I64Attr:$coord_transform,
-    I64Attr:$nearest_mode
+    I64Attr:$nearest_mode,
+    OptionalAttr<F64ArrayAttr>:$scales
   );
 
   let assemblyFormat = [{

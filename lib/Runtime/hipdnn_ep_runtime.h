@@ -1418,6 +1418,15 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
+// wrap_resize, but window axis i samples with ONNX scale `scale<i>` (output /
+// input) when it is > 0 instead of out<i> / in<i>. Emitted when hip.resize
+// carries `scales`.
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2);
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;

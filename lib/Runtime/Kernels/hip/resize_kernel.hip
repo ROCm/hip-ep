@@ -22,8 +22,9 @@
 // thread maps its (o_i) coords back to the input domain via the configured
 // coordinate_transformation_mode, then either picks the nearest input
 // sample (mode=0) or N-linearly interpolates over the surrounding 2^k
-// samples (mode=1).  (N, C) prefix is pass-through, scale is recovered as
-// `in_dim / out_dim` per axis.
+// samples (mode=1).  (N, C) prefix is pass-through.  An axis samples with
+// its ONNX scale when hip_resize_scaled supplies one (> 0), else with
+// `out_dim / in_dim`.
 
 namespace {
 
@@ -52,19 +53,19 @@ template <> __device__ inline double from_float<double>(float v) {
 }
 
 // Map output coord -> continuous input coord per the chosen mode.
+// `onnx_scale` is the supplied ONNX scale (output / input), or 0 to use
+// out_dim / in_dim.
 __device__ inline float coord_to_input(int o, int out_dim, int in_dim,
-                                       int coord_transform) {
-  // scale_along_axis = in_dim / out_dim  (= length_original / length_resized)
-  // We compute x_original directly from `o`, `in_dim`, `out_dim`.
+                                       int coord_transform, float onnx_scale) {
+  float scale = onnx_scale > 0.0f
+                    ? onnx_scale
+                    : static_cast<float>(out_dim) / static_cast<float>(in_dim);
   switch (coord_transform) {
     case 0: { // half_pixel
-      // x_original = (x_resized + 0.5) / scale_resized - 0.5
-      // where scale_resized = out_dim / in_dim
-      float scale = static_cast<float>(out_dim) / static_cast<float>(in_dim);
+      // x_original = (x_resized + 0.5) / scale - 0.5
       return (static_cast<float>(o) + 0.5f) / scale - 0.5f;
     }
     case 1: { // asymmetric
-      float scale = static_cast<float>(out_dim) / static_cast<float>(in_dim);
       return static_cast<float>(o) / scale;
     }
     case 2: { // align_corners
@@ -78,7 +79,6 @@ __device__ inline float coord_to_input(int o, int out_dim, int in_dim,
       // input coordinate 0.
       if (out_dim == 1)
         return 0.0f;
-      float scale = static_cast<float>(out_dim) / static_cast<float>(in_dim);
       return (static_cast<float>(o) + 0.5f) / scale - 0.5f;
     }
     default:
@@ -110,6 +110,7 @@ __global__ void resize_nearest_kernel(const T* __restrict__ input,
                                       int64_t out0, int64_t out1, int64_t out2,
                                       int coord_transform,
                                       int nearest_mode,
+                                      float s0, float s1, float s2,
                                       int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
@@ -129,11 +130,11 @@ __global__ void resize_nearest_kernel(const T* __restrict__ input,
   // Map each axis (skipping unused) — for spatial_rank<3 the unused axis
   // has out_dim=in_dim=1 and o_i=0, so the coord trivially resolves to 0.
   float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
-                            static_cast<int>(in0), coord_transform);
+                            static_cast<int>(in0), coord_transform, s0);
   float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
-                            static_cast<int>(in1), coord_transform);
+                            static_cast<int>(in1), coord_transform, s1);
   float x2 = coord_to_input(static_cast<int>(o2), static_cast<int>(out2),
-                            static_cast<int>(in2), coord_transform);
+                            static_cast<int>(in2), coord_transform, s2);
 
   int i0 = nearest_round(x0, nearest_mode);
   int i1 = nearest_round(x1, nearest_mode);
@@ -171,6 +172,7 @@ __global__ void resize_linear_kernel(const T* __restrict__ input,
                                      int64_t in0, int64_t in1, int64_t in2,
                                      int64_t out0, int64_t out1, int64_t out2,
                                      int coord_transform,
+                                     float s0, float s1, float s2,
                                      int64_t total_outputs) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (tid >= total_outputs) return;
@@ -188,11 +190,11 @@ __global__ void resize_linear_kernel(const T* __restrict__ input,
   int64_t o2 = r1 - o1 * out2;
 
   float x0 = coord_to_input(static_cast<int>(o0), static_cast<int>(out0),
-                            static_cast<int>(in0), coord_transform);
+                            static_cast<int>(in0), coord_transform, s0);
   float x1 = coord_to_input(static_cast<int>(o1), static_cast<int>(out1),
-                            static_cast<int>(in1), coord_transform);
+                            static_cast<int>(in1), coord_transform, s1);
   float x2 = coord_to_input(static_cast<int>(o2), static_cast<int>(out2),
-                            static_cast<int>(in2), coord_transform);
+                            static_cast<int>(in2), coord_transform, s2);
 
   int64_t lo0 = static_cast<int64_t>(floorf(x0));
   int64_t lo1 = static_cast<int64_t>(floorf(x1));
@@ -237,7 +239,8 @@ static int launch_nearest(hipStream_t stream, const void* input, void* output,
                           int spatial_rank, int64_t N, int64_t C,
                           int64_t in0, int64_t in1, int64_t in2,
                           int64_t out0, int64_t out1, int64_t out2,
-                          int coord_transform, int nearest_mode) {
+                          int coord_transform, int nearest_mode,
+                          float s0, float s1, float s2) {
   int64_t total = N * C * out0 * out1 * out2;
   if (total <= 0) return 0;
   int block = 256;
@@ -248,7 +251,7 @@ static int launch_nearest(hipStream_t stream, const void* input, void* output,
                      static_cast<const T*>(input), static_cast<T*>(output),
                      spatial_rank, N, C, in0, in1, in2,
                      out0, out1, out2,
-                     coord_transform, nearest_mode, total);
+                     coord_transform, nearest_mode, s0, s1, s2, total);
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_resize launch failed: %s\n",
@@ -262,7 +265,8 @@ static int launch(hipStream_t stream, const void* input, void* output,
                   int spatial_rank, int64_t N, int64_t C,
                   int64_t in0, int64_t in1, int64_t in2,
                   int64_t out0, int64_t out1, int64_t out2,
-                  int mode, int coord_transform, int nearest_mode) {
+                  int mode, int coord_transform, int nearest_mode,
+                  float s0, float s1, float s2) {
   int64_t total = N * C * out0 * out1 * out2;
   if (total <= 0) return 0;
   int block = 256;
@@ -275,7 +279,7 @@ static int launch(hipStream_t stream, const void* input, void* output,
                        static_cast<const T*>(input), static_cast<T*>(output),
                        spatial_rank, N, C, in0, in1, in2,
                        out0, out1, out2,
-                       coord_transform, nearest_mode, total);
+                       coord_transform, nearest_mode, s0, s1, s2, total);
   } else {
     hipLaunchKernelGGL(resize_linear_kernel<T>,
                        dim3(static_cast<unsigned>(grid)), dim3(block),
@@ -283,7 +287,7 @@ static int launch(hipStream_t stream, const void* input, void* output,
                        static_cast<const T*>(input), static_cast<T*>(output),
                        spatial_rank, N, C, in0, in1, in2,
                        out0, out1, out2,
-                       coord_transform, total);
+                       coord_transform, s0, s1, s2, total);
   }
 
   hipError_t err = hipGetLastError();
@@ -294,19 +298,12 @@ static int launch(hipStream_t stream, const void* input, void* output,
   return static_cast<int>(err);
 }
 
-} // namespace
-
-extern "C" int hip_resize(void* stream,
-                          const void* input,
-                          void* output,
-                          int hip_dtype,
-                          int spatial_rank,
-                          int64_t N, int64_t C,
-                          int64_t in_d0, int64_t in_d1, int64_t in_d2,
-                          int64_t out_d0, int64_t out_d1, int64_t out_d2,
-                          int mode,
-                          int coord_transform,
-                          int nearest_mode) {
+static int resize_dispatch(void* stream, const void* input, void* output,
+                           int hip_dtype, int spatial_rank, int64_t N,
+                           int64_t C, int64_t in_d0, int64_t in_d1,
+                           int64_t in_d2, int64_t out_d0, int64_t out_d1,
+                           int64_t out_d2, int mode, int coord_transform,
+                           int nearest_mode, float s0, float s1, float s2) {
   if (spatial_rank < 1 || spatial_rank > 3) {
     fprintf(stderr,
             "[custom_kernels] hip_resize: unsupported spatial_rank=%d\n",
@@ -322,30 +319,32 @@ extern "C" int hip_resize(void* stream,
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_resize: dtype=%d spatial_rank=%d N=%lld C=%lld "
-      "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] mode=%d ct=%d nearest=%d\n",
+      "in=[%lld,%lld,%lld] out=[%lld,%lld,%lld] mode=%d ct=%d nearest=%d "
+      "scales=[%g,%g,%g]\n",
       hip_dtype, spatial_rank, (long long)N, (long long)C,
       (long long)in_d0, (long long)in_d1, (long long)in_d2,
       (long long)out_d0, (long long)out_d1, (long long)out_d2,
-      mode, coord_transform, nearest_mode);
+      mode, coord_transform, nearest_mode, s0, s1, s2);
 
   switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
       return launch<float>(hip_stream, input, output, spatial_rank, N, C,
                            in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
-                           mode, coord_transform, nearest_mode);
+                           mode, coord_transform, nearest_mode, s0, s1, s2);
     case HIP_DTYPE_FLOAT16:
       return launch<__half>(hip_stream, input, output, spatial_rank, N, C,
                             in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
-                            mode, coord_transform, nearest_mode);
+                            mode, coord_transform, nearest_mode, s0, s1, s2);
     case HIP_DTYPE_BFLOAT16:
       return launch<hip_bfloat16>(hip_stream, input, output, spatial_rank,
                                   N, C, in_d0, in_d1, in_d2,
                                   out_d0, out_d1, out_d2,
-                                  mode, coord_transform, nearest_mode);
+                                  mode, coord_transform, nearest_mode,
+                                  s0, s1, s2);
     case HIP_DTYPE_FLOAT64:
       return launch<double>(hip_stream, input, output, spatial_rank, N, C,
                             in_d0, in_d1, in_d2, out_d0, out_d1, out_d2,
-                            mode, coord_transform, nearest_mode);
+                            mode, coord_transform, nearest_mode, s0, s1, s2);
     case HIP_DTYPE_INT8:
     case HIP_DTYPE_UINT8:
       if (mode != 0) {
@@ -358,15 +357,53 @@ extern "C" int hip_resize(void* stream,
       if (hip_dtype == HIP_DTYPE_UINT8) {
         return launch_nearest<uint8_t>(
             hip_stream, input, output, spatial_rank, N, C, in_d0, in_d1,
-            in_d2, out_d0, out_d1, out_d2, coord_transform, nearest_mode);
+            in_d2, out_d0, out_d1, out_d2, coord_transform, nearest_mode,
+            s0, s1, s2);
       }
       return launch_nearest<int8_t>(
           hip_stream, input, output, spatial_rank, N, C, in_d0, in_d1, in_d2,
-          out_d0, out_d1, out_d2, coord_transform, nearest_mode);
+          out_d0, out_d1, out_d2, coord_transform, nearest_mode, s0, s1, s2);
     default:
       fprintf(stderr,
               "[custom_kernels] hip_resize: unsupported dtype=%d\n",
               hip_dtype);
       return -1;
   }
+}
+
+} // namespace
+
+extern "C" int hip_resize(void* stream,
+                          const void* input,
+                          void* output,
+                          int hip_dtype,
+                          int spatial_rank,
+                          int64_t N, int64_t C,
+                          int64_t in_d0, int64_t in_d1, int64_t in_d2,
+                          int64_t out_d0, int64_t out_d1, int64_t out_d2,
+                          int mode,
+                          int coord_transform,
+                          int nearest_mode) {
+  return resize_dispatch(stream, input, output, hip_dtype, spatial_rank, N, C,
+                         in_d0, in_d1, in_d2, out_d0, out_d1, out_d2, mode,
+                         coord_transform, nearest_mode, 0.0f, 0.0f, 0.0f);
+}
+
+extern "C" int hip_resize_scaled(void* stream,
+                                 const void* input,
+                                 void* output,
+                                 int hip_dtype,
+                                 int spatial_rank,
+                                 int64_t N, int64_t C,
+                                 int64_t in_d0, int64_t in_d1, int64_t in_d2,
+                                 int64_t out_d0, int64_t out_d1,
+                                 int64_t out_d2,
+                                 int mode,
+                                 int coord_transform,
+                                 int nearest_mode,
+                                 float scale0, float scale1, float scale2) {
+  return resize_dispatch(stream, input, output, hip_dtype, spatial_rank, N, C,
+                         in_d0, in_d1, in_d2, out_d0, out_d1, out_d2, mode,
+                         coord_transform, nearest_mode, scale0, scale1,
+                         scale2);
 }

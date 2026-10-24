@@ -341,4 +341,46 @@ module {
     // CHECK-SAME: mode = 1
     return %y : tensor<1x3x32x32xf16>
   }
+
+  // Test 17: floor(3 * 1.5) = 4, so out/in is 4/3, not 1.5. The ONNX
+  // scales are kept on the op for the coordinate transform.
+  func.func @test_resize_scales_kept(%arg0: tensor<1x1x3xf32>)
+      -> tensor<1x1x4xf32> {
+    // CHECK-LABEL: func.func @test_resize_scales_kept
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %scales = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.5]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %y = "onnx.Resize"(%arg0, %roi, %scales)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x4xf32>
+    // CHECK-NOT: onnx.Resize
+    // CHECK: hip.resize
+    // CHECK-SAME: scales = [1.000000e+00, 1.000000e+00, 1.500000e+00]
+    return %y : tensor<1x1x4xf32>
+  }
+
+  // Test 18: scales that match out/in, and align_corners, need no scales.
+  func.func @test_resize_scales_dropped(%arg0: tensor<1x1x3xf32>,
+                                        %arg1: tensor<1x1x3xf32>)
+      -> (tensor<1x1x6xf32>, tensor<1x1x4xf32>) {
+    // CHECK-LABEL: func.func @test_resize_scales_dropped
+    %roi = "onnx.NoValue"() {value} : () -> none
+    %s2 = "onnx.Constant"() {value = dense<[1.0, 1.0, 2.0]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %s15 = "onnx.Constant"() {value = dense<[1.0, 1.0, 1.5]> : tensor<3xf32>}
+        : () -> tensor<3xf32>
+    %y0 = "onnx.Resize"(%arg0, %roi, %s2)
+        {mode = "linear", coordinate_transformation_mode = "half_pixel"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x6xf32>
+    %y1 = "onnx.Resize"(%arg1, %roi, %s15)
+        {mode = "linear", coordinate_transformation_mode = "align_corners"}
+        : (tensor<1x1x3xf32>, none, tensor<3xf32>) -> tensor<1x1x4xf32>
+    // CHECK: hip.resize
+    // CHECK-NOT: scales
+    // CHECK: hip.resize
+    // CHECK-SAME: coord_transform = 2
+    // CHECK-NOT: scales
+    // CHECK: return
+    return %y0, %y1 : tensor<1x1x6xf32>, tensor<1x1x4xf32>
+  }
 }

@@ -24,7 +24,9 @@ namespace {
 // An empty prefix slot is the constant 1, so it does not add a tensor axis.
 // A window axis whose extents match is copied.  Dynamic prefix dims and
 // dynamic window dims are read from the memref descriptor.  The kernel
-// recovers per-axis scale from those extents.
+// recovers per-axis scale from those extents, unless the op carries
+// `scales`; then the window's scales go to wrap_resize_scaled (0 for an
+// unused window slot, which keeps the extent ratio).
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
@@ -34,6 +36,7 @@ namespace {
 //               in0..2, out0..2,
 //               mode, coord_transform, nearest_mode)
 //   -> i32
+//   wrap_resize_scaled(<same arguments>, scale0..2 : f64) -> i32
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -149,8 +152,25 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     addI64(coord);
     addI64(nearest);
 
+    const char *callee = kWrapResize;
+    if (ArrayAttr scales = op.getScalesAttr()) {
+      if (static_cast<int64_t>(scales.size()) != outputType.getRank())
+        return rewriter.notifyMatchFailure(op, "scales length != rank");
+      Type f64Type = rewriter.getF64Type();
+      for (int64_t i : llvm::seq<int64_t>(3)) {
+        double scale = 0.0;
+        if (i < launch->spatialRank)
+          scale = cast<FloatAttr>(scales[launch->prefixCount + i])
+                      .getValueAsDouble();
+        paramTypes.push_back(f64Type);
+        args.push_back(LLVM::ConstantOp::create(
+            rewriter, loc, f64Type, rewriter.getF64FloatAttr(scale)));
+      }
+      callee = kWrapResizeScaled;
+    }
+
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapResize, paramTypes, i32Type);
+        rewriter, module, callee, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
