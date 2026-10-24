@@ -111,6 +111,6 @@ target_link_libraries(HipToLLVM PUBLIC
 )
 
 # Guard dtype before the unchanged runtime ABI reduces it to byte width.
-if(HIP_EP_GQA_IMPL_ID)
-    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID})
+if(HIP_EP_RING_ENABLED)
+    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED})
 endif()

@@ -49,6 +49,9 @@ extern "C" {
 
 /* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
  * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
+// Validated attention-core bounds; full-model capacity depends on available memory.
+#define HIP_EP_RING_MAX_QUERY_LENGTH 262144
+#define HIP_EP_RING_MAX_KV_LENGTH 262272
 HIP_KERNEL_API int hip_gqa_ring_device_supported(void);
 HIP_KERNEL_API size_t hip_gqa_ring_workspace(int query_length,
                                              int total_length);

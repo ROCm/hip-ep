@@ -832,7 +832,7 @@ def _ring_fp32_reference(query, key_cache, value_cache, past):
     "query_length,past_length", [(1, 0), (1, 257), (17, 0), (33, 129)]
 )
 def test_gqa_ring_geometry(model_runner, tmp_path, dynamic, query_length, past_length):
-    """Verify the common ONNX contract for existing and both Ring builds.
+    """Verify the common ONNX contract for default and Ring-enabled builds.
 
     The backend disables CPU fallback. Compare against FP32 attention computed
     from the same FP16-rounded inputs; check the entire valid present cache too.
@@ -944,6 +944,9 @@ def test_gqa_ring_shared_cache_transitions(model_runner, tmp_path):
         (65536, 0),
         (4096, 61568),
         (1, 65663),
+        (1, 131071),
+        (1, 262143),
+        (17, 262255),
     ],
 )
 def test_gqa_ring_long_context(model_runner, tmp_path, query_length, past_length):
@@ -1017,14 +1020,39 @@ def test_gqa_ring_long_context(model_runner, tmp_path, query_length, past_length
 
 
 @pytest.mark.parametrize(
-    "total", [15, 16, 17, 31, 32, 33, 127, 128, 129, 1023, 1024, 1025]
+    "total",
+    [
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        127,
+        128,
+        129,
+        1023,
+        1024,
+        1025,
+        8191,
+        8192,
+        8193,
+        65663,
+        65664,
+        65665,
+        131072,
+        262143,
+        262144,
+        262272,
+    ],
 )
 def test_gqa_ring_decode_regimes(model_runner, tmp_path, total):
     """Exercise partial tiles and both sides of partition dispatch boundaries."""
     test_gqa_ring_geometry(model_runner, tmp_path, True, 1, total - 1)
 
 
-def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
+@pytest.mark.parametrize("total", [2, 17, 65, 8193, 65665, 262144])
+def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path, total):
     """A tiny probability times a large FP16 value must survive decode.
 
     exp(-18) rounds to zero in FP16, but its FP32 product with 60000 is
@@ -1032,7 +1060,7 @@ def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
     """
     import onnx
 
-    capacity = 19
+    capacity = total + 17
     model = _make_gqa_fixed_cache_model(1, 1, capacity, 6144, 1024, 24, 4)
     query = np.zeros((1, 1, 6144), dtype=np.float16)
     query.reshape(24, 256)[:, 0] = 16
@@ -1040,6 +1068,7 @@ def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
     key.reshape(4, 256)[:, 0] = -18
     value = np.full((1, 1, 1024), 60000, dtype=np.float16)
     old_k = np.zeros((1, 4, capacity, 256), dtype=np.float16)
+    old_k[:, :, 1 : total - 1, 0] = -18
     old_v = np.zeros_like(old_k)
     path = tmp_path / "ring_decode_probability_precision.onnx"
     onnx.save(model, path)
@@ -1051,9 +1080,74 @@ def test_gqa_ring_decode_regimes_probability_precision(model_runner, tmp_path):
             value,
             old_k,
             old_v,
-            np.array([1], dtype=np.int32),
+            np.array([total - 1], dtype=np.int32),
             np.array(capacity, dtype=np.int32),
         ],
     )
-    expected = 60000 * np.exp(-18.0) / (1 + np.exp(-18.0))
+    expected = 60000 * np.exp(-18.0) / (1 + (total - 1) * np.exp(-18.0))
+    np.testing.assert_allclose(actual[0], expected, atol=0.000002, rtol=0.001)
+
+
+@pytest.mark.parametrize("past,delta", [(0, 18), (0, 24), (65536, 32), (262255, 32)])
+def test_gqa_ring_prefill_probability_precision(model_runner, tmp_path, past, delta):
+    """Tiny prefill probabilities must contribute when multiplied by large V."""
+    import ctypes
+
+    import onnx
+
+    # This regression tests Ring's precision contract. The unchanged default
+    # prefill narrows probabilities to FP16 and does not implement this fix.
+    ep_path = getattr(model_runner.backend, "_ep_dll", None)
+    if ep_path is None:
+        pytest.skip("requires the Ring-enabled gfx1151 EP")
+    libraries = [
+        ep_path.parent / "custom_kernels_gfx1151.dll",
+        ep_path.parent / "libcustom_kernels_gfx1151.so",
+    ]
+    library = next((path for path in libraries if path.exists()), None)
+    if library is None:
+        pytest.skip("requires the gfx1151 native kernel library")
+    native = ctypes.CDLL(str(library))
+    supported = getattr(native, "hip_gqa_ring_device_supported", None)
+    if supported is None:
+        pytest.skip("Ring attention is disabled in this build")
+    supported.argtypes = []
+    supported.restype = ctypes.c_int
+    if not supported():
+        pytest.skip("requires a Ring-supported device")
+
+    qlen = 17
+    total = past + qlen
+    capacity = total + 19
+    model = _make_gqa_fixed_cache_model(1, "query_length", capacity, 6144, 1024, 24, 4)
+    query = np.zeros((1, qlen, 6144), dtype=np.float16)
+    query.reshape(qlen, 24, 256)[:, :, 0] = 16
+    key = np.zeros((1, qlen, 1024), dtype=np.float16)
+    key.reshape(qlen, 4, 256)[:, :, 0] = -delta
+    value = np.full((1, qlen, 1024), 60000, dtype=np.float16)
+    old_k = np.zeros((1, 4, capacity, 256), dtype=np.float16)
+    old_k[:, :, :past, 0] = -delta
+    old_v = np.full_like(old_k, 60000)
+    if past:
+        old_k[:, :, 0] = 0
+        old_v[:, :, 0] = 0
+    else:
+        key[:, 0] = 0
+        value[:, 0] = 0
+    path = tmp_path / "ring_prefill_probability_precision.onnx"
+    onnx.save(model, path)
+    actual = model_runner.backend.run(
+        str(path),
+        [
+            query,
+            key,
+            value,
+            old_k,
+            old_v,
+            np.array([total - 1], dtype=np.int32),
+            np.array(capacity, dtype=np.int32),
+        ],
+    )
+    mass = (past + np.arange(qlen)) * np.exp(-float(delta))
+    expected = np.broadcast_to((60000 * mass / (1 + mass))[None, :, None], query.shape)
     np.testing.assert_allclose(actual[0], expected, atol=0.000002, rtol=0.001)

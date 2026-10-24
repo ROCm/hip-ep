@@ -240,7 +240,7 @@ endfunction()
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
-if(HIP_EP_GQA_IMPL_ID)
+if(HIP_EP_RING_ENABLED)
     list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
 endif()
 
@@ -250,9 +250,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         set(_ring_device_enabled 1)
     endif()
     set(_ring_compile_options "")
-    if(HIP_EP_GQA_IMPL_ID)
+    if(HIP_EP_RING_ENABLED)
         list(APPEND _ring_compile_options
-            -DHIP_EP_GQA_IMPL_ID=${HIP_EP_GQA_IMPL_ID}
+            -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
             -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
     endif()
     set(_target custom_kernels_${_arch})
@@ -275,7 +275,7 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         DEPENDS
             HipSchemas
     )
-    if(HIP_EP_GQA_IMPL_ID AND NOT WIN32)
+    if(HIP_EP_RING_ENABLED AND NOT WIN32)
         target_compile_options(${_target} PRIVATE ${_ring_compile_options})
     endif()
     set_target_properties(${_target} PROPERTIES

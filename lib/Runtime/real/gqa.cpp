@@ -339,7 +339,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
 
-#if HIP_EP_GQA_IMPL_ID != 0
+#if HIP_EP_RING_ENABLED != 0
 // Return 1 for a valid call outside Ring's context bound, 0 on success, and
 // -1 on failure. Validate every writable range before updating either cache.
 static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
@@ -365,7 +365,7 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
             "Ring GQA: invalid cache lengths or inconsistent cache aliases\n");
     return -1;
   }
-  if (total > 65664)
+  if (total > HIP_EP_RING_MAX_KV_LENGTH)
     return 1;
 
   struct Range {
@@ -418,9 +418,8 @@ static int gqa_forward_ring(RuntimeState *state, hipStream_t stream,
                       present_value, 1, int(past), int(sq), 4, 256,
                       int(past_capacity), int(capacity), nullptr, 2, 0) != 0)
     return -1;
-  RUNTIME_DEBUG_LOG("[REAL] Ring GQA impl=%d q=%lld past=%lld capacity=%lld\n",
-                    HIP_EP_GQA_IMPL_ID, (long long)sq, (long long)past,
-                    (long long)capacity);
+  RUNTIME_DEBUG_LOG("[REAL] Ring GQA q=%lld past=%lld capacity=%lld\n",
+                    (long long)sq, (long long)past, (long long)capacity);
   return hip_gqa_ring_attention(stream, query, present_key, present_value,
                                 output, int(sq), int(past), int(capacity),
                                 workspace, bytes) == 0
@@ -3050,7 +3049,7 @@ int wrap_group_query_attention(
   // decomposed hipBLASLt fallback.
   //===------------------------------------------------------------------===//
 
-#if HIP_EP_GQA_IMPL_ID != 0
+#if HIP_EP_RING_ENABLED != 0
   // No existing route implements softcap; do not silently drop it in a Ring
   // build. Other unsupported Ring features retain their existing GQA route.
   if (softcap != 0.0f) {
@@ -3059,10 +3058,11 @@ int wrap_group_query_attention(
   }
   if (element_size_bytes == 2 && batch_size == 1 && num_heads == 24 &&
       kv_num_heads == 4 && head_dim == 256 && seq_len_q >= 1 &&
-      seq_len_q <= 65536 && seq_len_new_kv == seq_len_q && key && value &&
-      seqlens_k && !kv_bnsd && !reuse_past_kv && !kv_quantized && !do_rotary &&
-      no_causal == 0 && scale == 0.0625f && local_window_size <= 0 &&
-      !head_sink && smooth_softmax <= 0 && !attention_bias &&
+      seq_len_q <= HIP_EP_RING_MAX_QUERY_LENGTH &&
+      seq_len_new_kv == seq_len_q && key && value && seqlens_k && !kv_bnsd &&
+      !reuse_past_kv && !kv_quantized && !do_rotary && no_causal == 0 &&
+      scale == 0.0625f && local_window_size <= 0 && !head_sink &&
+      smooth_softmax <= 0 && !attention_bias &&
       hip_gqa_ring_device_supported()) {
     int ring_rc =
         gqa_forward_ring(state, stream, query, key, value, past_key, past_value,

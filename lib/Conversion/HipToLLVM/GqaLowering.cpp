@@ -18,7 +18,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-#if HIP_EP_GQA_IMPL_ID != 0
+#if HIP_EP_RING_ENABLED != 0
     // The runtime's element_size_bytes argument cannot distinguish BF16 from
     // FP16. Ring builds reject ambiguous types before erasing that information.
     Type queryElement =

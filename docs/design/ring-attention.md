@@ -4,117 +4,53 @@ Licensed under the MIT License.
 -->
 # Experimental Ring attention
 
-Configure `HIP_EP_GQA_IMPL` as `existing` (default), `ring_q_resident`, or
-`ring_kv_outer`. The latter two select different prefill schedules and share a
-partitioned Ring decode kernel. For example, pass
-`--cmake_extra_defines HIP_EP_GQA_IMPL=ring_q_resident` to `build.py`.
+`HIP_EP_ENABLE_RING_ATTENTION=ON` enables one Ring implementation with KV-sharing prefill and partitioned decode. The default is `OFF`, preserving existing GQA. The former three-way `HIP_EP_GQA_IMPL` option is removed; configuration rejects it rather than silently building the default.
 
-The ONNX GroupQueryAttention interface, HIP dialect, runtime entry signature,
-and cache-update helper are unchanged. Selection happens before cache mutation.
-The Ring kernels only compute attention over the prepared present cache. There
-is no Page attention, distributed transport, new ONNX operator, or runtime
-selector in this implementation.
+```bash
+python3 build.py --config Release --hip_arch gfx1151 \
+  --build_dir ../build/hip-ep-ring --install_dir ../install/hip-ep-ring \
+  --cmake_extra_defines HIP_EP_ENABLE_RING_ATTENTION=ON
+```
 
-Ring accepts FP16 separate Q/K/V with external RoPE, B=1, 24 query heads,
-4 KV heads, head dimension 256, scale 1/16, causal attention, 1..65536 new tokens,
-and at most 65664 valid cache tokens (a 64K prompt plus 128 output tokens).
-It targets a concrete gfx1151 build and checks the active device. Unquantized caches use BNSD layout; Q/output use BSHD.
-Both prefill variants accumulate in FP32. Decode uses up to 396288 bytes of
-runtime-owned scratch; prefill uses none. Calls use the existing runtime stream.
+Rebuild/install the compiler, runtime and native kernels together. Point the application at that installation's EP library and configuration, and use a fresh model compilation cache when switching builds. The ONNX GroupQueryAttention interface, runtime signature, cache layout and cache-update helper are unchanged. This is a build-time option, not an environment-variable selector.
 
-Decode shares each 16-token KV tile across six query heads, uses four waves
-per workgroup and WMMA for QK, and merges FP32 partition summaries. Scores,
-softmax probabilities and weighted V accumulation remain FP32; only final
-outputs are rounded to FP16. Every wave reduces QK partials in the same order,
-so all output slices share the same softmax denominator. The prefill schedules
-are unchanged.
+## Supported contract
 
-| Valid KV tokens | Partitions | Scratch bytes |
-| --- | --- | --- |
-| 1..32 | 1 | 0 |
-| 33..128 | 4 | 99072 |
-| 129..1024 | 8 | 198144 |
-| 1025..65664 | 16 | 396288 |
+Ring targets gfx1151 with FP16 separate Q/K/V, batch 1, 24 query heads, four KV heads, head dimension 256, scale 1/16, external RoPE and causal attention. It accepts 1..262144 new tokens and at most 262272 valid KV tokens (256K plus 128 outputs). Cache capacity may exceed the valid length. Q/output use BSHD and the prepared present cache uses BNSD. Selection and writable-range validation occur before cache mutation; the existing runtime stream is retained.
 
-The workspace query and launch use the same partition helper. This policy is
-specific to gfx1151 and this geometry. A trial using FP16 probabilities for
-WMMA PV failed the 64K full-model numerical check and is not included.
+Other supported geometries, architectures, packed inputs, in-op RoPE, quantized caches, bias, windows and sinks retain existing GQA routing. Ring builds reject softcap because neither route implements it. They also reject BF16 and mismatched unquantized cache types: the existing runtime ABI conveys element width, which cannot distinguish BF16 from FP16. FP32 retains its existing route. No cache compression or model changes are introduced.
 
-Other geometries, architectures, quantized caches, packed inputs, in-op RoPE,
-bias, windows, and sinks retain existing GQA routing. Ring builds reject softcap
-because neither existing route implements it. The compiler rejects BF16 and
-mismatched unquantized cache element types in Ring builds: the unchanged runtime
-ABI conveys element width, which cannot distinguish BF16 from FP16. FP32 keeps
-its existing route. The `existing` build retains its previous behavior.
+## Algorithms
 
-Invalidate model caches after changing the selection. Validate with
-`HIPDNN_EP_STRICT=1`, CPU fallback disabled, and temporary `HIPDNN_EP_DEBUG=1`;
-Ring dispatch reports the selection and lengths. Disable debug for timing.
-Run `test_gqa_ring_geometry`, `test_gqa_ring_shared_cache_transitions`, and
-`test_gqa_ring_long_context`, and `test_gqa_ring_decode_regimes` in the numeric suite against all three builds,
-and the Ring-only dtype rejection LIT tests. Direct kernel checks do not
-establish ONNX integration or a performance improvement.
-
-The kernel is adapted from the METIS Ring exports, contributed under the MIT
-license. WMMA score ownership and V swizzle also derive from hip-ep v8x (MIT).
-
-## Algorithms and enablement
-
-### Algorithms and regime selection
-
-- **Existing:** preserve the current GQA dispatch and make it the default. The reported baseline is the actual ONNX/EP path for this model, including its existing fallback choices.
-- **Ring-Q prefill:** each workgroup keeps one 16-query tile for six query heads resident, streams 16-token KV tiles through shared memory, and updates online softmax and output accumulators. QK/PV use WMMA with FP32 accumulation.
-- **Ring-KV prefill:** two parallel 16-query consumers (32 queries per workgroup) and six query heads share each staged 16-token KV tile. Each consumer maintains its own online softmax/output state. This increases KV reuse across query tiles.
-- **Shared decode, query length = 1:** stage each KV tile once for six query heads; four waves divide the 256-wide head dimension. Use WMMA QK with FP32 accumulation, FP32 softmax probabilities and FP32 weighted-V accumulation. Every wave reduces QK partials in the same order. Partition long histories and merge the FP32 summaries with stable softmax rescaling; round only the final output to FP16.
-- These are single-GPU tiled schedules. There is no distributed ring transport. Neither prefill schedule materializes a global attention-score matrix or requests explicit global scratch.
+- **Prefill (`query_length > 1`):** two 16-query consumers and six query heads share each staged 16-token KV tile. QK and ordinary PV use FP16 WMMA with FP32 accumulation and online softmax. Numerator probabilities are scaled by 32768 before FP16 conversion; smaller-than-normal scaled probabilities use FP32 PV residuals so a tiny probability times a large value is not lost. Final normalization removes the scale. No global score matrix or explicit global scratch is allocated.
+- **Decode (`query_length = 1`):** one wave per query head, six waves per workgroup, share each KV tile. QK, natural-exponential softmax probabilities and weighted V stay FP32. Online rescaling is skipped when the running maximum does not change. Independent history partitions produce FP32 summaries; a stable merge writes FP16 output.
+- Both paths use natural `expf`. The probability scale is an exact numerator scale, not a base-2 softmax reformulation. KV and output storage remain FP16.
 
 ```mermaid
 flowchart TD
-    A[ONNX GroupQueryAttention] --> B{Compile-time selection}
-    B -->|existing| E[Existing GQA dispatch]
-    B -->|ring_q_resident or ring_kv_outer| C{Eligible Ring call?}
-    C -->|no| E
-    C -->|yes| Q{Query length = 1?}
-    Q -->|yes| D[Shared partitioned decode]
-    Q -->|no: ring_q_resident| R[16-query resident prefill]
-    Q -->|no: ring_kv_outer| K[Two shared-KV query consumers]
+    A[ONNX GroupQueryAttention] --> B{Ring enabled and eligible?}
+    B -->|No| E[Existing GQA dispatch]
+    B -->|Yes| Q{Query length = 1?}
+    Q -->|No| P[KV-sharing WMMA prefill]
+    Q -->|Yes| D[Partitioned FP32 decode]
+    D --> M[Stable merge to FP16 output]
 ```
 
-The fallback in the figure applies to supported existing contracts. Ring builds explicitly reject softcap, BF16 and mismatched unquantized cache element types as described below.
+| Valid KV tokens | KV tile | Decode partitions | Explicit global scratch |
+| --- | ---: | ---: | ---: |
+| 1..32 | 16 | 1 | 0 B |
+| 33..128 | 16 | 4 | 99,072 B |
+| 129..1,024 | 16 | 8 | 198,144 B |
+| 1,025..8,192 | 16 | 24 | 594,432 B |
+| 8,193..65,664 | 8 | 48 | 1,188,864 B |
+| 65,665..262,272 | 8 | 96 | 2,377,728 B |
 
-```mermaid
-flowchart LR
-    H[Valid KV history] --> P[Choose partitions]
-    P --> T[Stage 16-token KV tile]
-    T --> S[Six heads: QK and online softmax]
-    S --> V[FP32 weighted V]
-    V --> M[Merge partition summaries if needed]
-    M --> O[FP16 output]
-```
+Workspace sizing and launch dispatch use the same helper. Scratch is runtime-owned and reused. This policy is specific to this GPU and geometry; these are single-GPU tiled kernels without distributed transport.
 
-| Valid KV tokens | Waves per scan workgroup | Partitions | Explicit global decode scratch |
-| --- | --- | --- | --- |
-| 1..32 | 4 | 1 | 0 |
-| 33..128 | 4 | 4 | 99,072 B (96.75 KiB) |
-| 129..1,024 | 4 | 8 | 198,144 B (193.5 KiB) |
-| 1,025..65,664 | 4 | 16 | 396,288 B (387 KiB) |
+## Validation
 
-Workspace sizing and launch dispatch use the same helper. Scratch is runtime-owned and reused; scan/merge run on the caller's stream without an added host allocation or synchronization.
+Use `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback, and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm `Ring GQA q=... past=... capacity=...` dispatch. Disable debug for timing. Numeric tests cover geometry, cache aliasing, prefill/decode transitions, partition boundaries, long contexts and probability underflow. LIT tests check Ring-only type restrictions. Kernel checks alone do not establish full-model accuracy or performance.
 
-## How to enable
+See [validation results](ring-attention-unified-results.md) for hardware, model, accuracy, timing and memory scope. Historical measurements in [the earlier main refresh](ring-attention-main-refresh.md) retain their original build options and are not results for the unified implementation.
 
-Follow the repository Linux quick start for dependencies. From the hip-ep source directory, choose exactly one implementation and use a separate build/install directory for each comparison:
-
-```bash
-IMPL=ring_kv_outer  # existing | ring_q_resident | ring_kv_outer
-python3 build.py --config Release --hip_arch gfx1151 \
-  --build_dir "../build/hip-ep-${IMPL}" \
-  --install_dir "../install/hip-ep-${IMPL}" \
-  --cmake_extra_defines "HIP_EP_GQA_IMPL=${IMPL}"
-```
-
-The CMake equivalent is `-DHIP_EP_GQA_IMPL=ring_kv_outer`; invalid values fail configuration. Omitting the option retains `existing`. This is a build-time option, not an environment-variable selector.
-
-Point the application at the matching installation's EP library and MorphiZen configuration. Rebuild/reinstall the compiler, runtime and custom kernels together, and use a fresh model compilation cache after switching. Keep the original ONNX model and its GroupQueryAttention nodes unchanged. For validation, enable `HIPDNN_EP_STRICT=1`, disable ORT CPU fallback (`session.disable_cpu_ep_fallback=1`) and temporarily enable `HIPDNN_EP_DEBUG=1` to confirm Ring dispatch. Disable debug for performance measurements.
-
-See [Ring validation results](ring-attention-validation.md) for phase-specific performance, memory, accuracy and tested model scope.
+The kernels derive from contributor-supplied METIS exports, authorized for MIT contribution. WMMA score ownership and V swizzle also derive from hip-ep v8x (MIT).
