@@ -130,25 +130,6 @@ Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generall
 
 ## Static result typing
 
-MatMul, Gemm, and MatMulNBits use the same shape helpers for destination
-allocation and result-dimension queries:
-
-- MatMul broadcasts its leading dimensions, then appends M from A and N from B.
-  The transpose flags select M and N. Dynamic batch extents use
-  `select(a == 1, b, a)`.
-- Gemm returns M from A and N from B. Its optional C operand must broadcast
-  onto that shape; it cannot enlarge the result.
-- MatMulNBits keeps A's leading dimensions and takes its output width from N.
-
-The destination builder preserves the imported type and encoding. It rejects
-known shape conflicts before it inserts new operations. This includes conflicts
-that appear only when dynamic dimensions fold to constants.
-
-SwiGLU fusion needs a proof of equal extents, not new shape operations. It
-follows a MatMul batch axis only when the other operand's extent is absent or
-statically 1. If neither source is proven, it keeps the projection result as
-the extent. Two unrelated dynamic batch extents do not permit fusion.
-
 For a single-result operation in `Hip_DpsOp_WithInfer` (directly or through a
 more specific family), ODS provides an inferred-type `Op::create` overload. The
 generated `inferReturnTypes` reads the typed DPS init and emits:
@@ -201,6 +182,31 @@ Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
 checks ranked tensor/memref uniformity, destination count, result count, and
 tensor result/init type equality before a category-specific verifier examines
 shape semantics.
+
+MatMul, Gemm, and MatMulNBits use the same shape helpers for destination
+allocation, verification, and result-dimension queries:
+
+- MatMul broadcasts its leading dimensions, then appends M from A and N from B.
+  The transpose flags select M and N. When both batch extents are dynamic,
+  the result extent is `select(a == 1, b, a)`.
+- Gemm returns M from A and N from B. Its optional C operand must broadcast
+  onto that shape; it cannot enlarge the result.
+- MatMulNBits keeps A's leading dimensions and takes its output width from N.
+
+QMatMul and QGemm use the MatMul and Gemm rules. All four operations require
+transpose flags of 0 or 1. MatMulNBits requires non-negative K and N, a positive
+block size, and an output element type that matches A. If A's trailing extent
+is static, it must equal K. The verifier reads these attributes as signed
+values so that it can reject negative values.
+
+The destination builder preserves the imported type and encoding. It rejects
+known shape conflicts before it inserts new operations. This includes conflicts
+that appear only when dynamic dimensions fold to constants.
+
+SwiGLU fusion needs a proof of equal extents, not new shape operations. It
+follows a MatMul batch axis only when the other operand's extent is absent or
+statically 1. If neither source is proven, it keeps the projection result as
+the extent. Two unrelated dynamic batch extents do not permit fusion.
 
 ## `--hip-infer-shapes`
 
@@ -352,7 +358,9 @@ Complex operations may use dedicated files; common shape categories should exten
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
 - The MatMul runtime uses A's batch count. It supports a single B matrix or
   one B matrix per batch. General per-axis broadcasting and broadcasting A
-  across B's batches are not supported. Compiler shape tests do not establish
+  across B's batches are not supported. The compiler does not reject these
+  layouts. If the result needs more batches than A supplies, the runtime leaves
+  the extra output batches unwritten. Compiler shape tests do not establish
   runtime support for these layouts.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.

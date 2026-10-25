@@ -3,34 +3,41 @@
 
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
 
-// What this file tests
-// --------------------
-// `MatmulOp::reifyResultShapes` (in lib/Dialect/IR/HipReifyResultShapesImpl.cpp)
-// — i.e. the PRODUCER side of `ReifyRankedShapedTypeOpInterface` for
-// `hip.matmul`. Validates that for any operand-shape combination (static,
-// dynamic batch, dynamic M, dynamic N, broadcast) it returns a correct
-// per-dim `OpFoldResult`: an `IntegerAttr` for static dims, and a
-// `tensor.dim` of the right operand at the right local index for dynamic dims.
-//
-// What this file does NOT test
-// ----------------------------
-// `--hip-infer-shapes` — the production pass that consumes these
-// `OpFoldResult`s to refine result types and rebuild `tensor.empty`
-// producers. Pass-level behavior (composeRefinedShape, cast barriers,
-// DPS-init exemption) is covered by `hip-infer-shapes.mlir`.
-//
-// Why this test exists in addition to the pass test
-// -------------------------------------------------
-// `--hip-infer-shapes` only consumes the *constant* branch of each
-// `OpFoldResult` (via `getConstantIntValue`); it silently discards
-// dynamic ones. A bug in reify's dynamic-dim source-picking (wrong
-// operand chosen, wrong local dim index, or a malformed `tensor.dim`
-// emitted) is therefore invisible to the pass test. Upstream's
-// `--resolve-shaped-type-result-dims` materializes every `OpFoldResult`
-// — static and dynamic — into IR that FileCheck can inspect, exposing
-// those bugs. The upstream pass is used here purely as a generic
-// producer-contract validator; it is not part of the production
-// pipeline.
+// Check MatMul and QMatMul result-dimension reification with the upstream
+// resolver. Check the operand axes and broadcast selects, not only constants.
+// `hip-infer-shapes.mlir` tests the consumer pass separately. That pass uses
+// constant extents to refine types; these checks also cover dynamic extents.
+
+// QMatMul uses the same dynamic batch rule, including with transposed inputs.
+// CHECK-LABEL: func.func @qmatmul_dynamic_batch
+// CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x8x4xi8>, %[[B:[A-Za-z0-9_]+]]: tensor<?x16x8xi8>
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-DAG: %[[C4:.*]] = arith.constant 4 : index
+// CHECK-DAG: %[[C16:.*]] = arith.constant 16 : index
+// CHECK-DAG: %[[AB:.*]] = tensor.dim %[[A]], %[[C0]]
+// CHECK-DAG: %[[BB:.*]] = tensor.dim %[[B]], %[[C0]]
+// CHECK: %[[IS_ONE:.*]] = arith.cmpi eq, %[[AB]], %[[C1]] : index
+// CHECK: %[[BATCH:.*]] = arith.select %[[IS_ONE]], %[[BB]], %[[AB]] : index
+// CHECK: return %[[BATCH]], %[[C4]], %[[C16]]
+func.func @qmatmul_dynamic_batch(
+    %ctx: !hip.context, %a: tensor<?x8x4xi8>, %b: tensor<?x16x8xi8>,
+    %out: tensor<?x4x16xi8>) -> (index, index, index) {
+  %r = hip.qmatmul(%ctx)
+    ins(%a, %b : tensor<?x8x4xi8>, tensor<?x16x8xi8>)
+    outs(%out : tensor<?x4x16xi8>)
+    {A_scale = 1.0 : f32, A_zero_point = 0 : i64,
+     B_scale = 1.0 : f32, B_zero_point = 0 : i64,
+     Y_scale = 1.0 : f32, Y_zero_point = 0 : i64,
+     transA = 1 : i64, transB = 1 : i64} : tensor<?x4x16xi8>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %batch = tensor.dim %r, %c0 : tensor<?x4x16xi8>
+  %m = tensor.dim %r, %c1 : tensor<?x4x16xi8>
+  %n = tensor.dim %r, %c2 : tensor<?x4x16xi8>
+  return %batch, %m, %n : index, index, index
+}
 
 // CHECK-LABEL: func.func @reify_2d_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index

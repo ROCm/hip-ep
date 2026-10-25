@@ -3,6 +3,20 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
+func.func @qgemm_invalid_c(%ctx: !hip.context, %a: tensor<2x4xi8>,
+                          %b: tensor<4x8xi8>, %c: tensor<3x8xi32>,
+                          %out: tensor<2x8xi8>) -> tensor<2x8xi8> {
+  // expected-error @+1 {{gemm C dimension 3 is not broadcastable to output dimension 2}}
+  %r = hip.qgemm(%ctx)
+    ins(%a, %b, %c : tensor<2x4xi8>, tensor<4x8xi8>, tensor<3x8xi32>)
+    outs(%out : tensor<2x8xi8>)
+    {A_scale = 1.0 : f32, A_zero_point = 0 : i64,
+     Y_scale = 1.0 : f32, Y_zero_point = 0 : i64} : tensor<2x8xi8>
+  return %r : tensor<2x8xi8>
+}
+
+// -----
+
 func.func @invalid_c(%ctx: !hip.context, %a: tensor<2x4xf32>,
                      %b: tensor<4x8xf32>, %c: tensor<3x8xf32>,
                      %out: tensor<2x8xf32>) -> tensor<2x8xf32> {

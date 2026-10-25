@@ -15,7 +15,7 @@
 // - Proper !hip.context threading through operations
 // ============================================================================
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --implicit-check-not=hip.alloc --implicit-check-not=hip.copy --implicit-check-not=onnx.MatMul
 
 module {
   // ===== Test 1: From PR-17 (renamed function) =====
@@ -29,9 +29,6 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x128x4096xf16>, %[[WEIGHT:.*]]: tensor<4096x1024xf16>) -> tensor<1x128x1024xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x1024xf16>
   // CHECK: hip.matmul(%[[CTX]]) ins(%[[INPUT]], %[[WEIGHT]] : tensor<1x128x4096xf16>, tensor<4096x1024xf16>) outs(%[[INIT]] : tensor<1x128x1024xf16>)
-  // CHECK-NOT: onnx.MatMul
-  // CHECK-NOT: hip.alloc
-  // CHECK-NOT: hip.copy
 
   // ===== Test 2: 3D Batched MatMul =====
 
@@ -44,8 +41,6 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<2x128x4096xf16>, %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<2x128x1024xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<2x128x1024xf16>
   // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<2x128x4096xf16>, tensor<4096x1024xf16>) outs(%[[INIT]] : tensor<2x128x1024xf16>)
-  // CHECK-NOT: hip.alloc
-  // CHECK-NOT: hip.copy
 
   // Dynamic contraction extents do not determine the result shape.
   func.func @dynamic_matmul(%A: tensor<?x?x?xf16>, %B: tensor<?x?xf16>) -> tensor<?x?x?xf16> {
@@ -53,7 +48,14 @@ module {
     return %result : tensor<?x?x?xf16>
   }
   // CHECK-LABEL: func.func @dynamic_matmul
-  // CHECK: hip.matmul
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?x?xf16>, %[[B:.*]]: tensor<?x?xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C1]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]], %[[M]], %[[N]]) : tensor<?x?x?xf16>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>)
 
   // ===== Test 3: Single-axis dynamic batch on both operands =====
 
@@ -66,7 +68,15 @@ module {
   }
 
   // CHECK-LABEL: func.func @dynamic_single_axis_batch
-  // CHECK: hip.matmul
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x4x8xf16>, %[[B:.*]]: tensor<?x8x16xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[AB:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[BB:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK: %[[IS_ONE:.*]] = arith.cmpi eq, %[[AB]], %[[C1]] : index
+  // CHECK: %[[BATCH:.*]] = arith.select %[[IS_ONE]], %[[BB]], %[[AB]] : index
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]]) : tensor<?x4x16xf16>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4x8xf16>, tensor<?x8x16xf16>) outs(%[[INIT]] : tensor<?x4x16xf16>)
 
   // ===== Test 4: 2D x 3D -- batch comes from B, M comes from A =====
   func.func @matmul_2d_3d(%A: tensor<?x4xf16>, %B: tensor<?x4x?xf16>) -> tensor<?x?x?xf16> {
@@ -113,7 +123,13 @@ module {
   }
 
   // CHECK-LABEL: func.func @matmul_4d_2d
-  // CHECK: hip.matmul
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?x4x8xf16>, %[[B:.*]]: tensor<8x16xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[A]], %[[C1]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[B0]], %[[B1]]) : tensor<?x?x4x16xf16>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x4x8xf16>, tensor<8x16xf16>) outs(%[[INIT]] : tensor<?x?x4x16xf16>)
 
   // ===== Test 7: explicit single B matrix with multi-axis dynamic A =====
   func.func @matmul_dynamic_broadcast_b(
@@ -126,7 +142,13 @@ module {
   }
 
   // CHECK-LABEL: func.func @matmul_dynamic_broadcast_b
-  // CHECK: hip.matmul
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?x4x8xf16>, %[[B:.*]]: tensor<1x1x8x16xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[A]], %[[C1]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[B0]], %[[B1]]) : tensor<?x?x4x16xf16>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x4x8xf16>, tensor<1x1x8x16xf16>) outs(%[[INIT]] : tensor<?x?x4x16xf16>)
 
   // ===== Test 8: explicit single A matrix with multi-axis dynamic B =====
   func.func @matmul_dynamic_broadcast_a(
@@ -139,5 +161,11 @@ module {
   }
 
   // CHECK-LABEL: func.func @matmul_dynamic_broadcast_a
-  // CHECK: hip.matmul
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<1x1x4x8xf16>, %[[B:.*]]: tensor<?x?x8x16xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[B0]], %[[B1]]) : tensor<?x?x4x16xf16>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<1x1x4x8xf16>, tensor<?x?x8x16xf16>) outs(%[[INIT]] : tensor<?x?x4x16xf16>)
 }

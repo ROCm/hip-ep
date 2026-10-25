@@ -2609,17 +2609,20 @@ LogicalResult MatMulNBitsOp::verify() {
   auto outputType = cast<ShapedType>(getOutput().getType());
   if (outputType.getElementType() != aType.getElementType())
     return emitOpError("output element type must match A");
-  if (getK() < 0 || getN() < 0 || getBlockSize() <= 0)
+  int64_t k = getKAttr().getInt();
+  int64_t n = getNAttr().getInt();
+  int64_t blockSize = getBlockSizeAttr().getInt();
+  if (k < 0 || n < 0 || blockSize <= 0)
     return emitOpError(
         "K and N must be non-negative and block_size must be positive");
   if (aType.getRank() < 1)
     return emitOpError("A must have rank at least 1");
   int64_t contraction = aType.getDimSize(aType.getRank() - 1);
-  if (!ShapedType::isDynamic(contraction) && contraction != getK())
+  if (!ShapedType::isDynamic(contraction) && contraction != k)
     return emitOpError("A's trailing extent must equal K");
 
   FailureOr<SmallVector<int64_t>> expected =
-      inferMatMulNBitsShape(aType.getShape(), getN());
+      inferMatMulNBitsShape(aType.getShape(), n);
   if (failed(expected))
     return emitOpError("could not infer MatMulNBits output shape");
   return verifyHipOpShape(
