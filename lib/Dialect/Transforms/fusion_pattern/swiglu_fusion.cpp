@@ -29,11 +29,11 @@
 // tensor<?x?x14336xf16> matches tensor<?x?x14336xf16> when one side is
 // [4, S, 14336] and the other is [1, S, 14336], and hip.mul would
 // broadcast. Each dynamic axis must trace to the same extent. A block
-// argument is its own extent. hip.matmul and hip.qmatmul contribute batch
-// and M from the activation (N from the weight); hip.matmul_nbits
-// contributes every axis but the last from the activation and the last
-// from its N attribute. That is the same source choice as
-// reifyMatmulLikeShape and MatMulNBitsOp::reifyResultShapes.
+// argument is its own extent. For hip.matmul and hip.qmatmul, M and N follow
+// the transpose flags. A batch axis follows one operand only when the other
+// extent is absent or statically 1. Otherwise, keep the projection result
+// as the extent. hip.matmul_nbits contributes every axis but the last from
+// the activation and the last from its N attribute.
 //
 //===----------------------------------------------------------------------===//
 
@@ -124,12 +124,12 @@ std::optional<Extent> stepProjection(mlir::Operation *op, int64_t outDim) {
     int64_t bExtent =
         outDim < bPad ? 1
                       : bType.getDimSize(static_cast<unsigned>(outDim - bPad));
-    bool aCanonical = outDim >= aPad && aExtent != 1;
-    bool bCanonical = outDim >= bPad && bExtent != 1;
-    bool pickA = aCanonical || (!bCanonical && outDim >= aPad);
-    if (pickA && outDim >= aPad)
+    // This is a partial equality proof, not broadcast shape reification.
+    // A dynamic extent can be 1 at runtime. Follow a source only when the
+    // other extent is known to be 1; otherwise keep the result's identity.
+    if (bExtent == 1 && outDim >= aPad)
       return Extent{false, 0, a, outDim - aPad};
-    if (!pickA && outDim >= bPad)
+    if (aExtent == 1 && outDim >= bPad)
       return Extent{false, 0, b, outDim - bPad};
     return std::nullopt;
   };

@@ -144,6 +144,11 @@ The destination builder preserves the imported type and encoding. It rejects
 known shape conflicts before it inserts new operations. This includes conflicts
 that appear only when dynamic dimensions fold to constants.
 
+SwiGLU fusion needs a proof of equal extents, not new shape operations. It
+follows a MatMul batch axis only when the other operand's extent is absent or
+statically 1. If neither source is proven, it keeps the projection result as
+the extent. Two unrelated dynamic batch extents do not permit fusion.
+
 For a single-result operation in `Hip_DpsOp_WithInfer` (directly or through a
 more specific family), ODS provides an inferred-type `Op::create` overload. The
 generated `inferReturnTypes` reads the typed DPS init and emits:
