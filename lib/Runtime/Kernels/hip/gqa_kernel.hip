@@ -4670,3 +4670,525 @@ extern "C" int hip_gqa_fused_decode(
   }
   GQA_RETURN_LAUNCH_STATUS();
 }
+
+// -------------------------------------------------------------------------
+// fp32 single-query decode attention over an fp32 BNSD cache, split along the
+// key axis (flash-decode). Replaces score GEMM + softmax + value GEMM of the
+// decomposed pipeline at sq == 1.
+//
+// Block (split, b*G + g) scores keys [split*kps, min(kv_len, (split+1)*kps))
+// for all HPG query heads of KV group g, so each K/V row is read once. Each
+// wave walks keys strided by the wave count, loading KU rows before using any
+// of them: with only a few waves per SIMD the loop is DRAM-latency bound, so
+// the loads of one batch must be in flight together. Waves are merged by a
+// fixed-order tree, so results are run-to-run deterministic.
+//
+// With several splits, the last block of a KV group to finish (counted on a
+// self-resetting per-group counter) merges the partials, so no separate
+// combine launch is needed. Optional non-interleaved RoPE is applied to q as
+// it is loaded: the rotation partner of float4 i of a lane is float4
+// i + VPL/2 of the same lane.
+// -------------------------------------------------------------------------
+namespace {
+
+constexpr int kDecF32Waves = 8;
+constexpr int kDecF32Threads = kDecF32Waves * 32;
+constexpr int kDecF32KeysPerSplit = 64;
+constexpr int kDecF32MaxSplits = 256;
+constexpr int kDecF32MaxGroups = 4096;
+
+__device__ inline float dec_f32_wave_sum(float v) {
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    v += __shfl_xor(v, off, 32);
+  return v;
+}
+
+__device__ inline float dec_f32_dot(float4 a, float4 b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+// Arguments are always <= 0 (score minus running max), so the result is in
+// [0, 1] and the denormal range fix-up of exp2f is dead weight.
+__device__ inline float dec_f32_exp2(float x) {
+  return __builtin_amdgcn_exp2f(x);
+}
+
+__device__ inline float4 dec_f32_axpby(float4 a, float sa, float4 b, float sb) {
+  return make_float4(a.x * sa + b.x * sb, a.y * sa + b.y * sb,
+                     a.z * sa + b.z * sb, a.w * sa + b.w * sb);
+}
+
+// Four consecutive elements as float4, from fp32 or fp16 storage.
+template <bool F16>
+__device__ inline float4 dec_load4(const void* __restrict__ base, size_t idx4) {
+  if constexpr (F16) {
+    const uint2 h = reinterpret_cast<const uint2*>(base)[idx4];
+    const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&h.x));
+    const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&h.y));
+    return make_float4(lo.x, lo.y, hi.x, hi.y);
+  } else {
+    return reinterpret_cast<const float4*>(base)[idx4];
+  }
+}
+
+template <bool F16>
+__device__ inline void dec_store4(void* __restrict__ base, size_t idx4, float4 v) {
+  if constexpr (F16) {
+    const __half2 lo = __floats2half2_rn(v.x, v.y);
+    const __half2 hi = __floats2half2_rn(v.z, v.w);
+    uint2 o;
+    o.x = *reinterpret_cast<const unsigned*>(&lo);
+    o.y = *reinterpret_cast<const unsigned*>(&hi);
+    reinterpret_cast<uint2*>(base)[idx4] = o;
+  } else {
+    reinterpret_cast<float4*>(base)[idx4] = v;
+  }
+}
+
+// F16: q, the KV cache, the RoPE tables and out are fp16 rather than fp32.
+// The math stays fp32 either way.
+//
+// With seqlens_k null, kv_len keys from row 0 are scored and q is rotated at
+// rope_pos. Otherwise each batch reads its length on the device:
+// total = seqlens_k[b] + 1, keys [max(0, total - window), total) when window
+// > 0 (all of [0, total) otherwise), and q is rotated at total - 1; kv_len and
+// rope_pos are ignored. The last split always runs to the end of the key
+// range, so a grid planned from an under-estimate stays correct.
+template <int D, int HPG, int KU, bool F16>
+__global__ __launch_bounds__(kDecF32Threads) void gqa_decode_f32_split_kernel(
+    const void* __restrict__ q, const void* __restrict__ kc,
+    const void* __restrict__ vc, float* __restrict__ part_acc,
+    float* __restrict__ part_ml, void* __restrict__ out, int G,
+    long long cache_seq, int kv_len, int keys_per_split, float scale_log2,
+    const void* __restrict__ rope_cos, const void* __restrict__ rope_sin,
+    int rope_pos, const int* __restrict__ seqlens_k, int window,
+    unsigned* __restrict__ counters) {
+  constexpr int VPL = D / 128;  // float4 per lane per row
+  constexpr int D4 = D / 4;
+  const int split = blockIdx.x;
+  const int nsplit = gridDim.x;
+  const int bg = blockIdx.y;
+  const int b = bg / G;
+  const int g = bg - b * G;
+  const int H = G * HPG;
+  const int lane = threadIdx.x & 31;
+  const int wave = threadIdx.x >> 5;
+  int kv_lo = 0;
+  int len = kv_len;
+  int pos = rope_pos;
+  if (seqlens_k) {
+    const int total = min(seqlens_k[b] + 1, static_cast<int>(cache_seq));
+    kv_lo = window > 0 ? max(0, total - window) : 0;
+    len = total - kv_lo;
+    pos = total - 1;
+  }
+  const int s0 = split * keys_per_split;
+  const int s1 = split == nsplit - 1 ? len : min(len, s0 + keys_per_split);
+
+  // An empty split (past the end of its batch's keys) skips the q setup; it
+  // still writes an empty partial and arrives at the merge counter below.
+  float4 qr[HPG][VPL];
+  const size_t q4 = ((size_t)b * H + (size_t)g * HPG) * D4;
+  if (s0 < s1) {
+#pragma unroll
+    for (int h = 0; h < HPG; ++h)
+#pragma unroll
+      for (int i = 0; i < VPL; ++i)
+        qr[h][i] = dec_load4<F16>(q, q4 + h * D4 + lane + i * 32);
+    if constexpr (VPL % 2 == 0) {
+      if (rope_cos) {
+        constexpr int HALF = VPL / 2;
+        const size_t r4 = (size_t)pos * (D / 8);
+#pragma unroll
+        for (int i = 0; i < HALF; ++i) {
+          const float4 c = dec_load4<F16>(rope_cos, r4 + lane + i * 32);
+          const float4 sn = dec_load4<F16>(rope_sin, r4 + lane + i * 32);
+#pragma unroll
+          for (int h = 0; h < HPG; ++h) {
+            const float4 x1 = qr[h][i];
+            const float4 x2 = qr[h][i + HALF];
+            qr[h][i] =
+                make_float4(x1.x * c.x - x2.x * sn.x, x1.y * c.y - x2.y * sn.y,
+                            x1.z * c.z - x2.z * sn.z, x1.w * c.w - x2.w * sn.w);
+            qr[h][i + HALF] =
+                make_float4(x2.x * c.x + x1.x * sn.x, x2.y * c.y + x1.y * sn.y,
+                            x2.z * c.z + x1.z * sn.z, x2.w * c.w + x1.w * sn.w);
+          }
+        }
+      }
+    }
+#pragma unroll
+    for (int h = 0; h < HPG; ++h)
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) {
+        const float4 t = qr[h][i];
+        qr[h][i] = make_float4(t.x * scale_log2, t.y * scale_log2,
+                               t.z * scale_log2, t.w * scale_log2);
+      }
+  }
+
+  float m[HPG], l[HPG];
+  float4 acc[HPG][VPL];
+#pragma unroll
+  for (int h = 0; h < HPG; ++h) {
+    m[h] = -INFINITY;
+    l[h] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < VPL; ++i)
+      acc[h][i] = make_float4(0.f, 0.f, 0.f, 0.f);
+  }
+
+  constexpr size_t kElem = F16 ? sizeof(__half) : sizeof(float);
+  const size_t row0 = (size_t)bg * cache_seq + kv_lo;
+  const void* kb = static_cast<const char*>(kc) + row0 * D * kElem;
+  const void* vb = static_cast<const char*>(vc) + row0 * D * kElem;
+  for (int j0 = s0 + wave; j0 < s1; j0 += kDecF32Waves * KU) {
+    float4 kr[KU][VPL], vr[KU][VPL];
+    bool valid[KU];
+#pragma unroll
+    for (int u = 0; u < KU; ++u) {
+      const int j = j0 + u * kDecF32Waves;
+      valid[u] = j < s1;
+      const size_t row = (size_t)(valid[u] ? j : j0) * D4;
+#pragma unroll
+      for (int i = 0; i < VPL; ++i) {
+        kr[u][i] = dec_load4<F16>(kb, row + lane + i * 32);
+        vr[u][i] = dec_load4<F16>(vb, row + lane + i * 32);
+      }
+    }
+#pragma unroll
+    for (int h = 0; h < HPG; ++h) {
+      float s[KU];
+      float mx = m[h];
+#pragma unroll
+      for (int u = 0; u < KU; ++u) {
+        float t = 0.0f;
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          t += dec_f32_dot(qr[h][i], kr[u][i]);
+        s[u] = valid[u] ? dec_f32_wave_sum(t) : -INFINITY;
+        mx = fmaxf(mx, s[u]);
+      }
+      const float c = dec_f32_exp2(m[h] - mx);
+      float lsum = l[h] * c;
+#pragma unroll
+      for (int i = 0; i < VPL; ++i)
+        acc[h][i] = make_float4(acc[h][i].x * c, acc[h][i].y * c,
+                                acc[h][i].z * c, acc[h][i].w * c);
+#pragma unroll
+      for (int u = 0; u < KU; ++u) {
+        const float p = dec_f32_exp2(s[u] - mx);
+        lsum += p;
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          acc[h][i] = dec_f32_axpby(acc[h][i], 1.0f, vr[u][i], p);
+      }
+      l[h] = lsum;
+      m[h] = mx;
+    }
+  }
+
+  // Merge the waves: rescale every wave to the block max, then tree-add.
+  __shared__ float s_m[kDecF32Waves][HPG];
+  __shared__ float s_l[kDecF32Waves][HPG];
+  __shared__ float4 s_acc[kDecF32Waves / 2][HPG * D4];
+  __shared__ unsigned s_last;
+  if (lane == 0) {
+#pragma unroll
+    for (int h = 0; h < HPG; ++h) {
+      s_m[wave][h] = m[h];
+      s_l[wave][h] = l[h];
+    }
+  }
+  __syncthreads();
+  float M[HPG], L[HPG];
+#pragma unroll
+  for (int h = 0; h < HPG; ++h) {
+    M[h] = -INFINITY;
+#pragma unroll
+    for (int w = 0; w < kDecF32Waves; ++w)
+      M[h] = fmaxf(M[h], s_m[w][h]);
+    L[h] = 0.0f;
+    if (M[h] != -INFINITY) {
+#pragma unroll
+      for (int w = 0; w < kDecF32Waves; ++w)
+        L[h] += s_l[w][h] * dec_f32_exp2(s_m[w][h] - M[h]);
+    }
+    const float f = (M[h] == -INFINITY) ? 0.0f : dec_f32_exp2(m[h] - M[h]);
+#pragma unroll
+    for (int i = 0; i < VPL; ++i)
+      acc[h][i] = make_float4(acc[h][i].x * f, acc[h][i].y * f,
+                              acc[h][i].z * f, acc[h][i].w * f);
+  }
+#pragma unroll
+  for (int half = kDecF32Waves / 2; half >= 1; half >>= 1) {
+    if (wave >= half && wave < 2 * half) {
+#pragma unroll
+      for (int h = 0; h < HPG; ++h)
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          s_acc[wave - half][h * D4 + lane + i * 32] = acc[h][i];
+    }
+    __syncthreads();
+    if (wave < half) {
+#pragma unroll
+      for (int h = 0; h < HPG; ++h)
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          acc[h][i] = dec_f32_axpby(acc[h][i], 1.0f,
+                                    s_acc[wave][h * D4 + lane + i * 32], 1.0f);
+    }
+    __syncthreads();
+  }
+
+  const size_t bh0 = (size_t)bg * HPG;
+  if (nsplit == 1) {
+    if (wave == 0) {
+#pragma unroll
+      for (int h = 0; h < HPG; ++h) {
+        const float inv = L[h] > 0.0f ? 1.0f / L[h] : 0.0f;
+#pragma unroll
+        for (int i = 0; i < VPL; ++i)
+          dec_store4<F16>(out, (bh0 + h) * D4 + lane + i * 32,
+                           make_float4(acc[h][i].x * inv, acc[h][i].y * inv,
+                                       acc[h][i].z * inv, acc[h][i].w * inv));
+      }
+    }
+    return;
+  }
+
+  if (wave == 0) {
+#pragma unroll
+    for (int h = 0; h < HPG; ++h) {
+#pragma unroll
+      for (int i = 0; i < VPL; ++i)
+        reinterpret_cast<float4*>(part_acc)[((bh0 + h) * nsplit + split) * D4 +
+                                            lane + i * 32] = acc[h][i];
+      if (lane == 0) {
+        const size_t o = ((bh0 + h) * nsplit + split) * 2;
+        part_ml[o] = M[h];
+        part_ml[o + 1] = L[h];
+      }
+    }
+  }
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const unsigned prev = __hip_atomic_fetch_add(
+        counters + bg, 1u, __ATOMIC_ACQ_REL, __HIP_MEMORY_SCOPE_AGENT);
+    s_last = (prev == static_cast<unsigned>(nsplit - 1)) ? 1u : 0u;
+    if (s_last)
+      __hip_atomic_store(counters + bg, 0u, __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_AGENT);
+  }
+  __syncthreads();
+  if (!s_last)
+    return;
+  __threadfence();
+
+  for (int idx = threadIdx.x; idx < HPG * D4; idx += kDecF32Threads) {
+    const int h = idx / D4;
+    const int e = idx - h * D4;
+    const size_t bh = bh0 + h;
+    const float* ml = part_ml + bh * nsplit * 2;
+    float Mx = -INFINITY;
+    for (int sp = 0; sp < nsplit; ++sp)
+      Mx = fmaxf(Mx, ml[2 * sp]);
+    float Ls = 0.0f;
+    float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+    const float4* pa = reinterpret_cast<const float4*>(part_acc) + bh * nsplit * D4;
+    if (Mx != -INFINITY) {
+      for (int sp = 0; sp < nsplit; ++sp) {
+        const float w = dec_f32_exp2(ml[2 * sp] - Mx);
+        Ls += ml[2 * sp + 1] * w;
+        a = dec_f32_axpby(a, 1.0f, pa[(size_t)sp * D4 + e], w);
+      }
+    }
+    const float inv = Ls > 0.0f ? 1.0f / Ls : 0.0f;
+    dec_store4<F16>(out, bh * D4 + e,
+                     make_float4(a.x * inv, a.y * inv, a.z * inv, a.w * inv));
+  }
+}
+
+inline int gqa_decode_f32_keys_per_split() {
+  static const int kps = [] {
+    const char* v = std::getenv("HIPDNN_EXP_GQA_F32_KPS");
+    const int n = v ? std::atoi(v) : 0;
+    return n > 0 ? n : kDecF32KeysPerSplit;
+  }();
+  return kps;
+}
+
+inline void gqa_decode_f32_plan(int kv_len, int* nsplit, int* kps) {
+  int k = gqa_decode_f32_keys_per_split();
+  int n = (kv_len + k - 1) / k;
+  if (n > kDecF32MaxSplits) {
+    k = (kv_len + kDecF32MaxSplits - 1) / kDecF32MaxSplits;
+    n = (kv_len + k - 1) / k;
+  }
+  *nsplit = n < 1 ? 1 : n;
+  *kps = k;
+}
+
+// Per-(b, g) arrival counters for the last-block merge. Each block that
+// finishes last resets its counter, so the buffer stays zero between launches
+// and only needs clearing once.
+unsigned* gqa_decode_f32_counters(hipStream_t stream) {
+  static unsigned* counters = nullptr;
+  if (!counters) {
+    if (hipMalloc(&counters, kDecF32MaxGroups * sizeof(unsigned)) != hipSuccess) {
+      counters = nullptr;
+      return nullptr;
+    }
+    if (hipMemsetAsync(counters, 0, kDecF32MaxGroups * sizeof(unsigned),
+                       stream) != hipSuccess)
+      return nullptr;
+  }
+  return counters;
+}
+
+struct DecF32Args {
+  hipStream_t stream;
+  // q, k, v, out and the RoPE tables are fp32, or all fp16 when fp16.
+  const void* q;
+  const void *k, *v;
+  void* out;
+  float* part;
+  int B, G;
+  long long cache_seq;
+  int kv_len;
+  float scale;
+  const void *rope_cos, *rope_sin;
+  int rope_pos;
+  const int* seqlens_k;  // device lengths; kv_len is then a planning hint
+  int window;
+  bool fp16;
+};
+
+template <int D, int HPG>
+int launch_gqa_decode_f32(const DecF32Args& a) {
+  constexpr int KU = (D >= 512) ? 2 : 4;
+  int nsplit = 1, kps = a.kv_len;
+  gqa_decode_f32_plan(a.kv_len, &nsplit, &kps);
+  unsigned* counters = nullptr;
+  if (nsplit > 1) {
+    if (a.B * a.G > kDecF32MaxGroups)
+      return -2;
+    counters = gqa_decode_f32_counters(a.stream);
+    if (!counters)
+      return -1;
+  }
+  const int H = a.G * HPG;
+  float* part_acc = a.part;
+  float* part_ml = a.part + (size_t)a.B * H * nsplit * D;
+  const float scale_log2 = a.scale * 1.4426950408889634f;
+  const dim3 grid(nsplit, a.B * a.G);
+#define GQA_DEC_LAUNCH(F16)                                                   \
+  gqa_decode_f32_split_kernel<D, HPG, KU, F16>                                \
+      <<<grid, kDecF32Threads, 0, a.stream>>>(                                \
+          a.q, a.k, a.v, part_acc, part_ml, a.out, a.G, a.cache_seq,          \
+          a.kv_len, kps, scale_log2, a.rope_cos, a.rope_sin, a.rope_pos,      \
+          a.seqlens_k, a.window, counters)
+  if (a.fp16)
+    GQA_DEC_LAUNCH(true);
+  else
+    GQA_DEC_LAUNCH(false);
+#undef GQA_DEC_LAUNCH
+  return 0;
+}
+
+// q + acc registers scale with HPG * D; past 16 float4 per lane each the
+// kernel spills, so those geometries stay on the decomposed path.
+bool gqa_decode_f32_geometry_ok(int H, int G, int D) {
+  if (G <= 0 || H % G != 0 || (D != 128 && D != 256 && D != 512))
+    return false;
+  const int hpg = H / G;
+  if (hpg * (D / 128) > 16)
+    return false;
+  return hpg == 1 || hpg == 2 || hpg == 4 || (hpg == 8 && D <= 256);
+}
+
+template <int D>
+int dispatch_gqa_decode_f32_hpg(const DecF32Args& a, int HPG) {
+  if (!gqa_decode_f32_geometry_ok(a.G * HPG, a.G, D))
+    return -2;
+  switch (HPG) {
+    case 1: return launch_gqa_decode_f32<D, 1>(a);
+    case 2: return launch_gqa_decode_f32<D, 2>(a);
+    case 4: return launch_gqa_decode_f32<D, 4>(a);
+    case 8:
+      if constexpr (D <= 256)
+        return launch_gqa_decode_f32<D, 8>(a);
+      return -2;
+    default: return -2;
+  }
+}
+
+}  // namespace
+
+extern "C" size_t hip_gqa_decode_f32_partial_bytes(int B, int H, int D,
+                                                   int kv_len) {
+  int nsplit = 1, kps = kv_len;
+  gqa_decode_f32_plan(kv_len, &nsplit, &kps);
+  if (nsplit <= 1)
+    return 0;
+  return (size_t)B * H * nsplit * ((size_t)D + 2) * sizeof(float);
+}
+
+extern "C" int hip_gqa_decode_f32_supported(int H, int G, int D, int rope) {
+  return hipdnn_device_wave_size() == 32 &&
+         gqa_decode_f32_geometry_ok(H, G, D) && (!rope || D >= 256);
+}
+
+extern "C" int hip_gqa_decode_f32(void* stream_ptr, const void* q,
+                                  const void* k_cache, const void* v_cache,
+                                  void* out, void* partial, int B, int H,
+                                  int G, int D, long long cache_seq,
+                                  int kv_len, float scale,
+                                  const void* rope_cos, const void* rope_sin,
+                                  int rope_pos, const void* seqlens_k,
+                                  int window, int fp16) {
+  if (!hip_gqa_decode_f32_supported(H, G, D, rope_cos != nullptr) || B <= 0 ||
+      kv_len <= 0 || (rope_cos && !rope_sin))
+    return -2;
+  const uintptr_t align = reinterpret_cast<uintptr_t>(q) |
+                          reinterpret_cast<uintptr_t>(k_cache) |
+                          reinterpret_cast<uintptr_t>(v_cache) |
+                          reinterpret_cast<uintptr_t>(out) |
+                          reinterpret_cast<uintptr_t>(partial) |
+                          reinterpret_cast<uintptr_t>(rope_cos) |
+                          reinterpret_cast<uintptr_t>(rope_sin);
+  if (align % 16 != 0)
+    return -2;
+  DecF32Args a;
+  a.stream = static_cast<hipStream_t>(stream_ptr);
+  a.q = q;
+  a.k = k_cache;
+  a.v = v_cache;
+  a.fp16 = fp16 != 0;
+  a.out = out;
+  a.part = static_cast<float*>(partial);
+  a.B = B;
+  a.G = G;
+  a.cache_seq = cache_seq;
+  a.kv_len = kv_len;
+  a.scale = scale;
+  a.rope_cos = rope_cos;
+  a.rope_sin = rope_sin;
+  a.rope_pos = rope_pos;
+  a.seqlens_k = static_cast<const int*>(seqlens_k);
+  a.window = window;
+  const int HPG = H / G;
+  (void)hipGetLastError();
+  int rc;
+  switch (D) {
+    case 128: rc = dispatch_gqa_decode_f32_hpg<128>(a, HPG); break;
+    case 256: rc = dispatch_gqa_decode_f32_hpg<256>(a, HPG); break;
+    case 512: rc = dispatch_gqa_decode_f32_hpg<512>(a, HPG); break;
+    default: return -2;
+  }
+  if (rc != 0)
+    return rc;
+  GQA_RETURN_LAUNCH_STATUS();
+}
