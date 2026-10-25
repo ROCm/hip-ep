@@ -34,59 +34,11 @@ LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
   if (op->getNumResults() == 0)
     return failure();
 
-  ArrayRef<int64_t> aShape = mlir::hip::detail::getShapeOf(A);
-  ArrayRef<int64_t> bShape = mlir::hip::detail::getShapeOf(B);
-  if (aShape.empty() || bShape.empty())
+  auto dims = reifyMatmulResultShape(
+      b, op->getLoc(), A, B, [&] { return op->emitOpError(); }, transA, transB);
+  if (failed(dims))
     return failure();
-
-  // Validate before emitting dimension queries, including pre-verification
-  // calls.
-  FailureOr<SmallVector<int64_t>> inferredShape = mlir::hip::inferMatmulShape(
-      aShape, bShape, [&]() { return op->emitOpError(); }, transA, transB);
-  if (failed(inferredShape))
-    return failure();
-  ArrayRef<int64_t> outShape = *inferredShape;
-
-  Location loc = op->getLoc();
-  size_t outRank = outShape.size();
-  size_t aRank = aShape.size();
-  size_t bRank = bShape.size();
-
-  // Loop-invariant: right-alignment padding for A's and B's batch dims.
-  size_t batchRank = outRank - 2;
-  size_t aPad = batchRank - (aRank >= 2 ? aRank - 2 : 0);
-  size_t bPad = batchRank - (bRank >= 2 ? bRank - 2 : 0);
-
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(outRank);
-  for (size_t i : llvm::seq<size_t>(0, outRank)) {
-    // M dim: A[-2], or A[-1] when transA.
-    if (i + 2 == outRank) {
-      size_t aDim = transA ? aRank - 1 : aRank - 2;
-      dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aDim));
-      continue;
-    }
-    // N dim: B[-1], or B[-2] when transB.
-    if (i + 1 == outRank) {
-      size_t bDim = transB ? bRank - 2 : bRank - 1;
-      dims.push_back(
-          mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bDim));
-      continue;
-    }
-    // Batch dim: prefer the side that contributes the size (in range, not 1).
-    // When neither contributes, prefer A in range so folds see a stable source.
-    int64_t aDim = i < aPad ? 1 : aShape[i - aPad];
-    int64_t bDim = i < bPad ? 1 : bShape[i - bPad];
-    bool aCanonical = i >= aPad && aDim != 1;
-    bool bCanonical = i >= bPad && bDim != 1;
-    bool pickA = aCanonical || (!bCanonical && i >= aPad);
-    Value src = pickA ? A : B;
-    size_t srcDim = pickA ? i - aPad : i - bPad;
-    dims.push_back(
-        mlir::hip::reifyDimOrConstant(b, loc, outShape[i], src, srcDim));
-  }
-  reified.assign({std::move(dims)});
+  reified.assign({std::move(*dims)});
   return success();
 }
 
@@ -232,20 +184,10 @@ LogicalResult MatMulNBitsOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
-  if (aShape.empty())
+  auto dims = reifyMatMulNBitsResultShape(b, getLoc(), getA(), getN());
+  if (failed(dims))
     return failure();
-
-  Location loc = getLoc();
-  Value A = getA();
-  size_t aRank = aShape.size();
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(aRank);
-  // Leading dims (rank-1 of them) from A; final dim is the static N attr.
-  for (size_t i : llvm::seq<size_t>(0, aRank - 1))
-    dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[i], A, i));
-  dims.push_back(b.getIndexAttr(getN()));
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -272,24 +214,12 @@ GemmOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = detail::getShapeOf(getInputA());
-  ArrayRef<int64_t> bShape = detail::getShapeOf(getInputB());
-  if (aShape.size() != 2 || bShape.size() != 2)
+  auto dims = reifyGemmResultShape(b, getLoc(), getInputA(), getInputB(),
+                                   getInputC(), getTransA(), getTransB(),
+                                   [&] { return emitOpError(); });
+  if (failed(dims))
     return failure();
-
-  Location loc = getLoc();
-  Value A = getInputA();
-  Value B = getInputB();
-  bool transA = getTransA() != 0;
-  bool transB = getTransB() != 0;
-
-  size_t mDim = transA ? 1 : 0;
-  size_t nDim = transB ? 0 : 1;
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(2);
-  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[mDim], A, mDim));
-  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, bShape[nDim], B, nDim));
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -316,24 +246,12 @@ QGemmOp::reifyResultShapes(OpBuilder &b,
                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
-  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
-  if (aShape.size() != 2 || bShape.size() != 2)
+  auto dims =
+      reifyGemmResultShape(b, getLoc(), getA(), getB(), getC(), getTransA(),
+                           getTransB(), [&] { return emitOpError(); });
+  if (failed(dims))
     return failure();
-
-  Location loc = getLoc();
-  Value A = getA();
-  Value B = getB();
-  bool transA = getTransA() != 0;
-  bool transB = getTransB() != 0;
-
-  size_t mDim = transA ? 1 : 0;
-  size_t nDim = transB ? 0 : 1;
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(2);
-  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[mDim], A, mDim));
-  dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, bShape[nDim], B, nDim));
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 

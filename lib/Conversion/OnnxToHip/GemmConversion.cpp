@@ -44,7 +44,16 @@ struct GemmToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, inputA);
+    // Before: copy both destination dimensions from A.
+    // After: use M from A and N from B, with the transpose flags.
+    auto init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, [&](OpBuilder &builder) {
+          return reifyGemmResultShape(builder, loc, inputA, inputB, inputC,
+                                      transA, transB,
+                                      [&] { return op->emitOpError(); });
+        });
+    if (failed(init))
+      return rewriter.notifyMatchFailure(op, "incompatible Gemm result shape");
 
     // hip.gemm
     llvm::SmallVector<mlir::NamedAttribute> attrs;
@@ -61,7 +70,7 @@ struct GemmToHip : public mlir::RewritePattern {
     if (hasInputC) {
       operands.push_back(inputC);
     }
-    operands.push_back(init);
+    operands.push_back(*init);
     // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
     // result type == outs operand type.
     auto hipOp = mlir::hip::GemmOp::create(rewriter, loc, operands, attrs);

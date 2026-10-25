@@ -1095,11 +1095,13 @@ LogicalResult QGemmOp::verify() {
     }
   }
 
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> FailureOr<SmallVector<int64_t>> {
-        return SmallVector<int64_t>{aShape[getTransA() ? 1 : 0],
-                                    bShape[getTransB() ? 0 : 1]};
-      });
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (getC())
+    cShape = detail::getShapeOf(getC());
+  return verifyHipOpShape(*this, [&] {
+    return inferGemmShape(aShape, bShape, cShape, getTransA(), getTransB(),
+                          [&] { return emitOpError(); });
+  });
 }
 
 // `QGemmOp::reifyResultShapes` lives in
@@ -2591,6 +2593,39 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  SmallVector<Value> operands = {getA(), getB(), getScales()};
+  if (Value zeroPoints = getZeroPoints())
+    operands.push_back(zeroPoints);
+  if (Value gIdx = getGIdx())
+    operands.push_back(gIdx);
+  if (Value bias = getBias())
+    operands.push_back(bias);
+  operands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+    return failure();
+
+  auto aType = cast<ShapedType>(getA().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != aType.getElementType())
+    return emitOpError("output element type must match A");
+  if (getK() < 0 || getN() < 0 || getBlockSize() <= 0)
+    return emitOpError(
+        "K and N must be non-negative and block_size must be positive");
+  if (aType.getRank() < 1)
+    return emitOpError("A must have rank at least 1");
+  int64_t contraction = aType.getDimSize(aType.getRank() - 1);
+  if (!ShapedType::isDynamic(contraction) && contraction != getK())
+    return emitOpError("A's trailing extent must equal K");
+
+  FailureOr<SmallVector<int64_t>> expected =
+      inferMatMulNBitsShape(aType.getShape(), getN());
+  if (failed(expected))
+    return emitOpError("could not infer MatMulNBits output shape");
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
   return getOutputMutable();
 }
@@ -2891,6 +2926,24 @@ void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> dataOperands = {getInputA(), getInputB()};
+  if (getInputC())
+    dataOperands.push_back(getInputC());
+  dataOperands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (getInputC())
+    cShape = detail::getShapeOf(getInputC());
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGemmShape(
+        detail::getShapeOf(getInputA()), detail::getShapeOf(getInputB()),
+        cShape, getTransA(), getTransB(), [&] { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//

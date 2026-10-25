@@ -121,14 +121,28 @@ a manual-reification family define their member functions in
 `HipReifyResultShapesImpl.cpp`.
 
 Frontend-neutral destination construction lives in
-`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, broadcast
-destination construction, and HIP context
+`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, reified
+destination construction, broadcast destination construction, and HIP context
 lookup. `OnnxToHipUtils` retains only ONNX import semantics and wrappers, so a
 future frontend can target HIP without depending on the ONNX conversion layer.
 
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
 
 ## Static result typing
+
+MatMul, Gemm, and MatMulNBits use the same shape helpers for destination
+allocation and result-dimension queries:
+
+- MatMul broadcasts its leading dimensions, then appends M from A and N from B.
+  The transpose flags select M and N. Dynamic batch extents use
+  `select(a == 1, b, a)`.
+- Gemm returns M from A and N from B. Its optional C operand must broadcast
+  onto that shape; it cannot enlarge the result.
+- MatMulNBits keeps A's leading dimensions and takes its output width from N.
+
+The destination builder preserves the imported type and encoding. It rejects
+known shape conflicts before it inserts new operations. This includes conflicts
+that appear only when dynamic dimensions fold to constants.
 
 For a single-result operation in `Hip_DpsOp_WithInfer` (directly or through a
 more specific family), ODS provides an inferred-type `Op::create` overload. The
@@ -331,6 +345,10 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
+- The MatMul runtime uses A's batch count. It supports a single B matrix or
+  one B matrix per batch. General per-axis broadcasting and broadcasting A
+  across B's batches are not supported. Compiler shape tests do not establish
+  runtime support for these layouts.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.
 - Runtime-dependent extents without pre-execution SSA remain dynamic.

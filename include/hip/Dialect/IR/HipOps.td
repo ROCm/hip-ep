@@ -880,6 +880,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp_WithInfer<"matmul_nbits", "Output", [AttrSized
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 // Bitsandbytes FP4/NF4 weight dequant. Output is row-major [N, K], the layout
@@ -4832,6 +4833,7 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
           {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_CumSumOp : Hip_DpsOp_AutoReifyInfer<"cumsum", "Y"> {

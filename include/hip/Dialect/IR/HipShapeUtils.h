@@ -42,6 +42,34 @@ inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError,
                  int64_t transA = 0, int64_t transB = 0);
 
+/// Infer the rank-2 Gemm result. C must broadcast onto the result.
+/// Transpose flags must be 0 or 1. Known contraction extents must match.
+FailureOr<SmallVector<int64_t>>
+inferGemmShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
+               std::optional<ArrayRef<int64_t>> cShape, int64_t transA,
+               int64_t transB, function_ref<InFlightDiagnostic()> emitError);
+
+/// Reify the MatMul batch broadcast, M, and N. Leave IR unchanged on failure.
+FailureOr<SmallVector<OpFoldResult>>
+reifyMatmulResultShape(OpBuilder &b, Location loc, Value A, Value B,
+                       function_ref<InFlightDiagnostic()> emitError,
+                       int64_t transA = 0, int64_t transB = 0);
+
+/// Infer A's leading dimensions followed by the output width N.
+FailureOr<SmallVector<int64_t>> inferMatMulNBitsShape(ArrayRef<int64_t> aShape,
+                                                      int64_t N);
+
+/// Reify A's leading dimensions followed by N. Leave IR unchanged on failure.
+FailureOr<SmallVector<OpFoldResult>>
+reifyMatMulNBitsResultShape(OpBuilder &b, Location loc, Value A, int64_t N);
+
+/// Reify Gemm's M and N from A and B. C cannot change the result extents.
+/// Leave IR unchanged on failure.
+FailureOr<SmallVector<OpFoldResult>>
+reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
+                     Value optionalC, int64_t transA, int64_t transB,
+                     function_ref<InFlightDiagnostic()> emitError);
+
 /// Verify one DPS destination against the shape returned by inferShape.
 /// The operation must implement DestinationStyleOpInterface.
 /// Propagate inference failure without a second diagnostic.

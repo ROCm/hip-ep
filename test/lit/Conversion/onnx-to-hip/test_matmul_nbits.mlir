@@ -43,6 +43,23 @@ module {
   // CHECK-SAME: block_size = 32
   // CHECK-NOT: onnx.Custom
 
+  // A dynamic output width comes from N, not A's trailing extent K.
+  // CHECK-LABEL: func.func @dynamic_width
+  // CHECK-SAME: %[[A:[A-Za-z0-9_]+]]: tensor<?x16xf16>
+  // CHECK-DAG: %[[N:.*]] = arith.constant 8 : index
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]]
+  // CHECK: tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf16>
+  func.func @dynamic_width(%A: tensor<?x16xf16>,
+                            %B: tensor<8x1x8xui8>,
+                            %scales: tensor<8x1xf16>) -> tensor<?x?xf16> {
+    %Y = "onnx.Custom"(%A, %B, %scales) {
+      function_name = "MatMulNBits", domain_name = "com.microsoft",
+      K = 16 : si64, N = 8 : si64,
+      bits = 4 : si64, block_size = 16 : si64
+    } : (tensor<?x16xf16>, tensor<8x1x8xui8>, tensor<8x1xf16>) -> tensor<?x?xf16>
+    return %Y : tensor<?x?xf16>
+  }
+
   // ===== Test 2: MatMulNBits with zero_points =====
 
   func.func @test_matmul_nbits_with_zp(%A: tensor<1x128x2880xf16>) -> tensor<1x128x5120xf16> {
