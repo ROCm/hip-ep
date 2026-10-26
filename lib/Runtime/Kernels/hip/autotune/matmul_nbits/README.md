@@ -98,8 +98,9 @@ clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w `
     tools/matmul_nbits_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
     ../../matmul_nbits_kernel.hip -o mn_sweep.exe
 
-# 3. measure -> build -> compile
-python scripts/update_lut.py all --sweep mn_sweep.exe --flatc <flatc>
+# 3. measure -> build -> compile. --arch is the chip the sweep runs on (the
+#    table is per chip even though the binary is generic).
+python scripts/update_lut.py all --arch gfx1151 --sweep mn_sweep.exe --flatc <flatc>
 ```
 
 Each sweep process starts with an empty in-process tune map (the tuners no

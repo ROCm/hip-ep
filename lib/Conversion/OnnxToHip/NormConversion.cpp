@@ -214,6 +214,25 @@ BranchwiseRMSNormToHip::matchAndRewrite(mlir::Operation *op,
   }
 
   mlir::Value input = op->getOperand(0);
+  // Post-order visits this norm before HyperConnectionPostMix. Leave the
+  // single-user case for that fusion; any other producer still lowers here.
+  if (mlir::Operation *producer = input.getDefiningOp()) {
+    auto producerName =
+        producer->getAttrOfType<mlir::StringAttr>("function_name");
+    auto producerDomain =
+        producer->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (producerName && producerDomain &&
+        producerName.getValue() == "HyperConnectionPostMix" &&
+        producerDomain.getValue() == "com.microsoft" &&
+        llvm::count_if(producer->getUsers(), [](mlir::Operation *user) {
+          auto name = user->getAttrOfType<mlir::StringAttr>("function_name");
+          return name && name.getValue() == "BranchwiseRMSNorm";
+        }) == 1) {
+      return rewriter.notifyMatchFailure(
+          op, "a single BranchwiseRMSNorm after HyperConnectionPostMix is "
+              "fused into the post-mix");
+    }
+  }
   mlir::Value scale = getOptionalOperand(op, 1);
   if (!scale || op->getNumOperands() > 2) {
     return rewriter.notifyMatchFailure(

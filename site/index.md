@@ -8,90 +8,127 @@ description: >-
   kernels.
 ---
 
-<section class="hero">
-  <div class="section__inner hero__grid">
-    <div class="hero__main">
-      <p class="kicker">ONNX Runtime Execution Provider</p>
-      <h1 class="headline-lg">The fastest, most efficient LLM inference backend on AMD iGPU</h1>
-      {%- comment -%}
-      The lede used to name the three MLIR stages in an em-dash aside -- ONNX
-      dialect, to a HIP dialect, to LLVM IR -- and that aside, and only that
-      aside, is gone: a hip-ep developer's review called it too technical for
-      a first screen and said it makes the design look complicated rather than
-      capable. The stages are still on /docs/, where a reader who wants them is
-      already looking.
+{%- comment -%}
+The hero is one left-aligned column. It used to be a two-column split with a
+stat carousel on the right, which is the layout, the control cluster and very
+nearly the headline sentence of a competing project's landing page; being
+mistaken for someone else's site is worse than any amount of empty space on
+the right. Everything the carousel carried is still here -- it is the spec
+strip at the bottom of the section, where four claims are readable at once
+instead of one every seven seconds.
 
-      The rest of the sentence is the original and should stay that way. "an
-      MLIR pipeline" is the claim the aside was decorating, not part of the
-      decoration. "custom HIP kernels" is the project's own term -- it is what
-      _config.yml's description says, what this page's own front matter says,
-      and what the shipped artifact is called (custom_kernels_gfx*, from
-      docs/design/custom_kernel_design.md). Do not paraphrase it.
-      {%- endcomment -%}
-      <p class="lede">
-        HIP EP compiles your ONNX graph through an MLIR pipeline and executes
-        it on AMD GPUs with hipBLASLt and custom HIP kernels.
-      </p>
-      <div class="btn-row">
-        <a class="btn btn--primary" href="{{ '/docs/get-started/' | relative_url }}">Get started</a>
-        <a class="btn btn--ghost" href="{{ '/docs/models/' | relative_url }}">Models</a>
-        <a class="btn btn--ghost" href="{{ '/docs/benchmarks/' | relative_url }}">Benchmarks</a>
-        <a class="btn btn--ghost" href="{{ site.repo_url }}/releases/tag/{{ site.hip_ep_version }}">Download {{ site.hip_ep_version }}</a>
-      </div>
+Nothing replaced the right-hand column and nothing should. The section is
+four things -- headline, lede, buttons, strip -- on the background field that
+_includes/backdrop.html draws, and the field running full-bleed behind them
+is what makes the empty right read as a surface rather than as a track that
+failed to fill. A drawing lived here for a while and was removed; it is in
+the history if it is wanted back, but it is not a hole waiting for something.
+
+There is no eyebrow above the headline either. "ONNX Runtime Execution
+Provider" is what the lede's first clause says in a sentence, and a chip of
+small caps was the first thing between the header and the words that matter.
+{%- endcomment -%}
+<section class="hero">
+  <div class="section__inner">
+    {%- comment -%}
+    This used to read "The fastest, most efficient ...", which was the competing
+    site's headline with the hardware word swapped. The superlatives are gone on
+    instruction, and dropping them fixes both of that sentence's problems at
+    once: the phrasing is no longer borrowed, and the page no longer makes the
+    one claim above the fold that nothing behind it supports --
+    /docs/benchmarks/ publishes throughput for this backend, not a ranking
+    against other backends.
+
+    "fast and efficient" is a description and can stand on measurements that
+    exist. A superlative is a comparison, and restoring one here puts the page
+    back in the position of asserting a result the site does not publish. If a
+    ranking is ever wanted, it needs numbers against named alternatives on
+    /docs/benchmarks/ first, and the headline follows from those -- not the
+    other way round.
+
+    "A", not "The", and the article is doing the same work as the rest of the
+    edit. "The fast and efficient backend" is a definite description of an
+    indefinite quality: it reads as a claim to be the only one, which is the
+    superlative coming back in through the article. "A" says this is one such
+    backend and lets the benchmarks say how good.
+    {%- endcomment -%}
+    <h1 class="headline-lg hero__headline">A fast and efficient LLM inference backend on AMD iGPU</h1>
+    {%- comment -%}
+    The lede used to name the three MLIR stages in an em-dash aside -- ONNX
+    dialect, to a HIP dialect, to LLVM IR -- and that aside, and only that
+    aside, is gone: a hip-ep developer's review called it too technical for
+    a first screen and said it makes the design look complicated rather than
+    capable. The stages are still on /docs/, where a reader who wants them is
+    already looking. Nothing on this screen names them now, and that is the
+    intended state: the first sentence a visitor reads should say what the
+    thing does, not how it is staged internally.
+
+    The rest of the sentence is the original and should stay that way. "an
+    MLIR pipeline" is the claim the aside was decorating, not part of the
+    decoration. "custom HIP kernels" is the project's own term -- it is what
+    _config.yml's description says, what this page's own front matter says,
+    and what the shipped artifact is called (custom_kernels_gfx*, from
+    docs/design/custom_kernel_design.md). Do not paraphrase it.
+    {%- endcomment -%}
+    <p class="lede">
+      HIP EP compiles your ONNX graph through an MLIR pipeline and executes
+      it on AMD GPUs with hipBLASLt and custom HIP kernels.
+    </p>
+    <div class="btn-row">
+      <a class="btn btn--primary" href="{{ '/docs/get-started/' | relative_url }}">Get started</a>
+      <a class="btn btn--ghost" href="{{ '/docs/models/' | relative_url }}">Models</a>
+      <a class="btn btn--ghost" href="{{ '/docs/benchmarks/' | relative_url }}">Benchmarks</a>
+      <a class="btn btn--ghost" href="{{ site.repo_url }}/releases/tag/{{ site.hip_ep_version }}">Download {{ site.hip_ep_version }}</a>
     </div>
 
     {%- comment -%}
-    The feature deck. Without JavaScript every panel is simply stacked and the
-    controls stay hidden, which is why the slides are ordinary sections rather
-    than an off-screen track: the fallback has to be readable, not merely
-    present. initDeck() in script.js takes over from there.
-    {%- endcomment -%}
-    <aside class="deck" data-deck aria-label="What HIP EP does">
-      <div class="deck__viewport" data-deck-viewport>
-        {%- comment -%}
-        Five claims, each led by the one figure that carries it. This panel used
-        to step through the README Highlights, which describe how the thing is
-        built; a visitor deciding whether to spend an afternoon on it is asking
-        what it covers and what it costs them. The Highlights are in the README
-        and in the design docs, where a reader who has decided to care will go
-        looking for them.
-        {%- endcomment -%}
-        <article class="deck__slide" data-deck-slide>
-          <p class="deck__kicker">Models</p>
-          <p class="deck__stat">20+</p>
-          <p class="deck__title">Model architectures supported</p>
-        </article>
-        <article class="deck__slide" data-deck-slide>
-          <p class="deck__kicker">Context</p>
-          <p class="deck__stat">128K</p>
-          <p class="deck__title">Maximum supported context, in tokens</p>
-        </article>
-        <article class="deck__slide" data-deck-slide>
-          <p class="deck__kicker">Hardware</p>
-          <p class="deck__stat">3</p>
-          <p class="deck__title">Ryzen AI processor series</p>
-          <dl class="deck__spec">
-            <dt>Ryzen AI Max series</dt>
-            <dd><span class="deck__spec-hint">incl.</span> Strix Halo</dd>
-            <dt>Ryzen AI 400 series</dt>
-            <dd><span class="deck__spec-hint">incl.</span> Gorgon Point</dd>
-            <dt>Ryzen AI 300 series</dt>
-            <dd><span class="deck__spec-hint">incl.</span> Strix Point, Krackan Point</dd>
-          </dl>
-        </article>
-        <article class="deck__slide" data-deck-slide>
-          <p class="deck__kicker">License</p>
-          <p class="deck__stat deck__stat--word">Open source</p>
-          <p class="deck__title">Compiler, runtime and kernels in one repository</p>
-        </article>
-      </div>
+    The four claims the stat carousel used to step through, with its own
+    labels and its own wording -- all four readable at once, with the accent
+    moving between them on its own. A carousel hides three of four behind a
+    control a visitor has no reason to press; this hides nothing and has no
+    control, so there is no state a reader can lose by ignoring it.
 
-      <div class="deck__controls" data-deck-controls hidden>
-        <button class="deck__nav" type="button" data-deck-prev aria-label="Previous feature">&#8249;</button>
-        <div class="deck__dots" data-deck-dots></div>
-        <button class="deck__nav" type="button" data-deck-next aria-label="Next feature">&#8250;</button>
+    `data-specs` and `data-spec` are initSpecStrip()'s hooks. Without them, or
+    without script.js, the strip is a static four-column list with every
+    figure at full accent -- see the note on .specs in styles.css, which is
+    where that fallback is actually enforced.
+
+    The hardware entry lost the codename list that fitted inside a 400px
+    slide and does not fit inside a quarter-width cell. The full mapping --
+    series, marketing name and gfx target -- is the table on /docs/ and on
+    /docs/get-started/, which is where someone checking whether their own
+    machine qualifies is going anyway.
+    {%- endcomment -%}
+    <dl class="specs" data-specs>
+      <div class="specs__item" data-spec>
+        <dt class="specs__label">Models</dt>
+        <dd class="specs__value">20+</dd>
+        <dd class="specs__note">model architectures supported</dd>
       </div>
-    </aside>
+      <div class="specs__item" data-spec>
+        <dt class="specs__label">Context</dt>
+        <dd class="specs__value">128K</dd>
+        <dd class="specs__note">maximum supported context, in tokens</dd>
+      </div>
+      <div class="specs__item" data-spec>
+        <dt class="specs__label">Hardware</dt>
+        <dd class="specs__value">3</dd>
+        <dd class="specs__note">Ryzen AI processor series: Max, 400, 300</dd>
+      </div>
+      <div class="specs__item" data-spec>
+        <dt class="specs__label">License</dt>
+        {%- comment -%}
+        "Open source", not "MIT". It was briefly the licence name and was put
+        back on instruction: the other three figures answer "how much do I
+        get", and at a glance "MIT" reads as a fourth specification rather than
+        as the reassurance it is meant to be. A visitor who wants the licence
+        identifier finds it in the repository. This is the one value in the
+        strip that is a word rather than a figure -- see .specs__value--word.
+        {%- endcomment -%}
+        <dd class="specs__value specs__value--word">Open source</dd>
+        <dd class="specs__note">compiler, runtime and kernels in one repository</dd>
+      </div>
+    </dl>
   </div>
 </section>
 
@@ -104,8 +141,9 @@ Every family's cards are in the HTML. Without JavaScript the pills are jump
 links and the seven groups are simply stacked under their own headings, which
 is long but complete; initModelTabs() collapses that to one family at a time
 and takes the headings off, because at that point the selected pill is the
-heading. Same arrangement as the deck above: ship the readable fallback, then
-upgrade it.
+heading. Same arrangement as the model matrix on /docs/models/: ship the
+readable fallback, then upgrade it. The hero above no longer needs the
+arrangement at all -- it is markup and a stylesheet now.
 
 The prose that used to sit under the heading is gone on instruction. What it
 said -- that this is a validation suite rather than a compatibility list -- is

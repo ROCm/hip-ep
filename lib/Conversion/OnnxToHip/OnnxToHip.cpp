@@ -280,6 +280,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateNhwcConvConversionPatterns(patterns, ctx);
   populateConvTransposeConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
+  populateHyperConnectionConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateOnnxRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateGqaConversionPatterns(patterns, ctx);
@@ -298,6 +299,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateWhereConversionPatterns(patterns, ctx);
   populateLinearAttentionConversionPatterns(patterns, ctx);
   populateGatedDeltaNetConversionPatterns(patterns, ctx);
+  populateDynamicSparseAttentionConversionPatterns(patterns, ctx);
+  populateSparseAttentionIndexerConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);
@@ -690,6 +693,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // exactly like every imported constant.
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
+    // Compute conversion can visit Reshape before its shape producers.
+    // Resolve the resulting host shape chains once all producers are ready.
+    simplifyReshapeShapeComputations(funcOp);
   }
 
   logSubpass("constant carriers + compute ops");
