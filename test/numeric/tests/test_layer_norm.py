@@ -28,6 +28,10 @@ HIDDEN = 4096
 # when the row is even, so these pin down the scalar fp16 fallback. 33 also
 # lands mid-block (block size 256), exercising the strided loop tail.
 ODD_HIDDENS = [33, 4095]
+# fp32 RMS-norm row widths by block size: below 512 a 32-thread block, below
+# 2048 a 256-thread block, from 2048 a 1024-thread block. Multiples of 4 take
+# the float4 body, the rest the scalar one.
+F32_ROW_WIDTHS = [64, 511, 512, 1030, 2047, 2048, 4099, 5120]
 
 
 _TENSOR_PROTO = {
@@ -292,6 +296,25 @@ class TestSimplifiedLayerNorm:
         model = _make_simplified_layer_norm_model(input_shape, np.float32)
 
         rng = np.random.default_rng(44)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5)
+
+    @pytest.mark.parametrize("rows", [[1, 1], [2, 3]])
+    @pytest.mark.parametrize("hidden", F32_ROW_WIDTHS)
+    def test_simplified_layer_norm_fp32_row_widths(self, model_runner, rows, hidden):
+        """fp32 rows on every block size the kernel picks by row width.
+
+        Each width class is taken once with a row of whole float4s and once
+        without, so both the vectorized and the scalar body run; 511/512 and
+        2047/2048 sit on the class boundaries. [1, 1] is a decode step: one
+        row is the whole grid.
+        """
+        input_shape = [*rows, hidden]
+        model = _make_simplified_layer_norm_model(input_shape, np.float32)
+
+        rng = np.random.default_rng(45)
         x = rng.uniform(-2, 2, input_shape).astype(np.float32)
 
         actual, expected = model_runner.run_sample(model, [x])
