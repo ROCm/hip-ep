@@ -722,7 +722,7 @@ def cmd_merge(args) -> int:
     doc = {k: v for k, v in old.items()
            if k not in ("configs", "fallbacks", "points", "extended_configs")
            + CARRIED}
-    out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
+    out = args.json_out
     write_lut_json(out, doc, new_pool, fallback_rows, point_rows,
                    {k: old[k] for k in CARRIED if k in old})
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
@@ -822,9 +822,9 @@ def cmd_build(args) -> int:
         "weight_k": weights[2],
     }
     LUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = Path(args.out) if args.out else LUT_DIR / f"{args.arch}.json"
+    out = args.json_out
     write_lut_json(out, doc, pool, fallback_rows, point_rows,
-                   existing_carried(out))
+                   existing_carried(args.carry_from))
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
                    r["row_stride"]) for r in point_rows})
@@ -841,7 +841,7 @@ def cmd_build(args) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_compile(args) -> int:
-    lut_json = LUT_DIR / f"{args.arch}.json"
+    lut_json = args.json_out
     if not lut_json.exists():
         print(f"[compile] no {lut_json}; run build first", file=sys.stderr)
         return 1
@@ -856,7 +856,8 @@ def cmd_compile(args) -> int:
         if not produced:
             print("[compile] flatc produced nothing", file=sys.stderr)
             return 1
-        dst = LUT_DIR / f"{args.arch}.fb"
+        dst = args.fb_out
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(produced[0], dst)
     # Only the .fb is checked in; the build turns it into the linkable
     # kMatmulNbitsLutBlobs[] symbol at compile time via cmake/embed_fb.cmake
@@ -881,7 +882,15 @@ def main() -> int:
                          "one; build reads every <arch>*_sweep.log")
     ap.add_argument("--sweep-args", nargs=argparse.REMAINDER, default=[],
                     help="everything after this is passed to the sweep binary")
-    ap.add_argument("--out", default=None, help="override the output json path")
+    ap.add_argument("--out", "--json-out", dest="out", default=None,
+                    help="JSON that build/merge write and compile reads "
+                         "(default lut/<arch>.json)")
+    ap.add_argument("--fb-out", default=None,
+                    help="FlatBuffer that compile writes (default lut/<arch>.fb "
+                         "for the default JSON, else the JSON's path with .fb)")
+    ap.add_argument("--carry-from", default=None,
+                    help="build: table whose carried fields (row pads) the new "
+                         "table keeps (default lut/<arch>.json)")
     ap.add_argument("--flatc", default="flatc")
     ap.add_argument("--rocm-version", type=int, default=70100)
     ap.add_argument("--model-key", default="oga_models bits=4")
@@ -914,6 +923,13 @@ def main() -> int:
                          "in-model first")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    # One set of paths for every step, so `all --out X` compiles X.
+    canonical = LUT_DIR / f"{args.arch}.json"
+    args.json_out = Path(args.out) if args.out else canonical
+    args.fb_out = (Path(args.fb_out) if args.fb_out
+                   else LUT_DIR / f"{args.arch}.fb" if args.json_out == canonical
+                   else args.json_out.with_suffix(".fb"))
+    args.carry_from = Path(args.carry_from) if args.carry_from else canonical
 
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)

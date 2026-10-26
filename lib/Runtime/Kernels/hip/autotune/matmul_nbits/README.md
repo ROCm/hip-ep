@@ -84,11 +84,16 @@ A table may opt its device into storing int4 weights row-padded at load
 Both come from measurement: the pad from {0, 16, 128, 256} bytes with the
 lowest prefill (prompt 1024) plus 128-token decode time, in the pad sweep and
 two re-measurements, taking the smaller pad when it is within noise of the
-fastest. The Padded rows above are measured at each weight's stored pad, so
-layout and rows come from the same data. The compiler reads both through
+fastest. For the shapes of the measured models, gfx1151's padded rows are
+measured at each weight's stored pad (`Padded256`, or `Padded` for a 128-byte
+entry), so layout and rows come from the same data; its other `Padded` rows are
+the per-call repack sweep's (arrival + 128 B). The compiler reads both through
 `hip_matmul_nbits_u4_default_row_pad()` and `hip_matmul_nbits_u4_row_pad_table()`.
-`update_lut.py build` and `merge` carry them over unchanged. Only gfx1151 sets
-them today.
+`update_lut.py build` and `merge` carry them over unchanged from
+`lut/<arch>.json` (`--carry-from` names another table). `--out` names the JSON
+those steps write and `compile` reads; `--fb-out` the binary, which defaults to
+`lut/<arch>.fb` only for the default JSON, so a scratch build never overwrites
+the shipped table. Only gfx1151 sets them today.
 
 ## Why the row stores geometry, not a config index
 
