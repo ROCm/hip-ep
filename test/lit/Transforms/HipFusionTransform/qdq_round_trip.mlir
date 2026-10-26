@@ -262,3 +262,50 @@ func.func @different_zp_stays_unfused(%ctx: !hip.context,
 
   return %q : tensor<2x3xui16>
 }
+
+// -----
+
+// An embedding lookup: Gather only picks rows, so the table stays quantized
+// and only the gathered rows are produced. The quantize's init is sized from
+// tensor.dim of the gather result, a shape-only read that must not count as a
+// second consumer.
+// CHECK-LABEL: func.func @qdq_gather_dynamic
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[IDX:.*]]: tensor<?x?xi64>) -> tensor<?x?x8xui16> {
+// CHECK:         %[[TABLE:.*]] = hip.constant {location = "w.bin", offset = 0 : i64, size = 256 : i64} : tensor<16x8xui16>
+// CHECK-NOT:     hip.dequantize_linear
+// CHECK:         %[[G:.*]] = hip.gather(%[[CTX]]) ins(%[[TABLE]], %[[IDX]] : tensor<16x8xui16>, tensor<?x?xi64>) outs(%{{.*}} : tensor<?x?x8xui16>) : tensor<?x?x8xui16>
+// CHECK-NOT:     hip.quantize_linear
+// CHECK:         return %[[G]] : tensor<?x?x8xui16>
+func.func @qdq_gather_dynamic(%ctx: !hip.context,
+                              %idx: tensor<?x?xi64>) -> tensor<?x?x8xui16> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %table = hip.constant {location = "w.bin", offset = 0 : i64, size = 256 : i64} : tensor<16x8xui16>
+  %scale = hip.constant {value = dense<1.250000e-01> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+
+  %e0 = tensor.empty() : tensor<16x8xf32>
+  %dq = hip.dequantize_linear(%ctx)
+      ins(%table, %scale : tensor<16x8xui16>, tensor<f32>)
+      zero_point(%zp : tensor<ui16>)
+      outs(%e0 : tensor<16x8xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<16x8xf32>
+
+  %b = tensor.dim %idx, %c0 : tensor<?x?xi64>
+  %s = tensor.dim %idx, %c1 : tensor<?x?xi64>
+  %e1 = tensor.empty(%b, %s) : tensor<?x?x8xf32>
+  %g = hip.gather(%ctx) ins(%dq, %idx : tensor<16x8xf32>, tensor<?x?xi64>)
+      outs(%e1 : tensor<?x?x8xf32>) : tensor<?x?x8xf32>
+
+  %gb = tensor.dim %g, %c0 : tensor<?x?x8xf32>
+  %gs = tensor.dim %g, %c1 : tensor<?x?x8xf32>
+  %e2 = tensor.empty(%gb, %gs) : tensor<?x?x8xui16>
+  %q = hip.quantize_linear(%ctx)
+      ins(%g, %scale : tensor<?x?x8xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui16>)
+      outs(%e2 : tensor<?x?x8xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 16 : i64,
+       saturate = 1 : i64} : tensor<?x?x8xui16>
+
+  return %q : tensor<?x?x8xui16>
+}
