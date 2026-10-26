@@ -37,7 +37,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712 2763"
+  OGA_PR_PATCHES: "2685 2691 2712 2763 2600 2473 2524 2624 2627 2634 2642 2644 2584 2605 2631 2643 2645 2656 2660 2657 2654 2678 2677 2679 2686 2696 2672 2664 2594 2745 2746 2545 2503 2742 2606 2724 2648 2582 2700 2713 2714 2782"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -605,15 +605,17 @@ jobs:
           # and fails the step. Tests are excluded because OGA does not build
           # them and their fixtures do conflict; OGA's own CI workflows are
           # excluded because the build does not use them and some no longer
-          # exist at the pinned tag.
+          # exist at the pinned tag. Markdown is excluded because the build
+          # does not read it and doc edits across the listed PRs conflict.
           foreach ($pr in $prs -split '\s+') {
             if (-not $pr) { continue }
             $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.diff"
             $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.diff"
             Write-Host "Fetching $url"
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            # github.com throttles raw .diff fetches with HTTP 429.
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -MaximumRetryCount 6 -RetryIntervalSec 10
             Write-Host "Applying PR #$pr"
-            git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' $tmp
+            git apply --whitespace=nowarn --3way --exclude='test/*' --exclude='.github/*' --exclude='*.md' $tmp
             if ($LASTEXITCODE -ne 0) {
               throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
             }
