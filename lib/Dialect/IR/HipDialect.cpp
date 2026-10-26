@@ -1128,8 +1128,45 @@ LogicalResult RmsNormOp::verify() {
 // SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 
+/// Checks the per-block int8 activation contract shared by hip.quantize_act
+/// and hip.skip_rms_norm quant_outs: `a` is f16 [..., K], `q` is i8 [..., K]
+/// and `s` is f32 [..., K / blockSize], with a static K that is a multiple of
+/// 32 and of a power-of-two blockSize >= 32.
+static LogicalResult verifyInt8Activation(Operation *op, Value a, Value q,
+                                          Value s, int64_t blockSize) {
+  if (blockSize < 32 || (blockSize & (blockSize - 1)) != 0)
+    return op->emitOpError("block size must be a power of two >= 32, got ")
+           << blockSize;
+  auto aType = cast<ShapedType>(a.getType());
+  auto qType = cast<ShapedType>(q.getType());
+  auto sType = cast<ShapedType>(s.getType());
+  if (!aType.getElementType().isF16())
+    return op->emitOpError("quantized activation source must be f16");
+  if (!qType.getElementType().isInteger(8))
+    return op->emitOpError("a_quant must be 8-bit integers");
+  if (!sType.getElementType().isF32())
+    return op->emitOpError("a_scale must be f32");
+  int64_t rank = aType.getRank();
+  if (rank < 1 || qType.getRank() != rank || sType.getRank() != rank)
+    return op->emitOpError(
+        "activation, a_quant and a_scale must have the same rank >= 1");
+  int64_t k = aType.getShape().back();
+  if (ShapedType::isDynamic(k) || k % 32 != 0 || k % blockSize != 0)
+    return op->emitOpError(
+        "K must be static, a multiple of 32 and of the block size");
+  if (qType.getShape().back() != k)
+    return op->emitOpError("a_quant trailing dim must be K");
+  if (sType.getShape().back() != k / blockSize)
+    return op->emitOpError("a_scale trailing dim must be K / block size");
+  return success();
+}
+
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent segments; together they are the
+  // inits, tied to results in that order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void SkipRmsNormOp::getEffects(
@@ -1138,7 +1175,19 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+LogicalResult SkipRmsNormOp::verify() {
+  auto quantOutputs = getQuantOutputs();
+  if (quantOutputs.empty())
+    return success();
+  if (getOutputs().empty())
+    return emitOpError("quant_outs require an output buffer");
+  if (quantOutputs.size() != 2)
+    return emitOpError("expected 0 or 2 quant_outs (a_quant, a_scale), got ")
+           << quantOutputs.size();
+  return verifyInt8Activation(getOperation(), getOutputs().front(),
+                              quantOutputs[0], quantOutputs[1],
+                              getQuantBlockSize());
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -2591,6 +2640,14 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MatMulNBitsOp::verify() {
+  if (static_cast<bool>(getAQuant()) != static_cast<bool>(getAScale()))
+    return emitOpError("a_quant and a_scale must be given together");
+  if (getAQuant() && getBits() != 4)
+    return emitOpError("a quantized activation requires bits = 4");
+  return success();
+}
+
 MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
   return getOutputMutable();
 }
@@ -2644,6 +2701,105 @@ LogicalResult DequantBnb4Op::verify() {
   if (absmaxType.getNumElements() != numel / blockSize)
     return emitOpError("absmax length must be N * K / block_size");
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeActOp: ins(A) outs(a_quant, a_scale)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeActOp::getDpsInitsMutable() {
+  // a_quant and a_scale are the last two operands, tied to results 0 and 1.
+  return MutableOperandRange(getOperation(),
+                             getAQuantMutable().getOperandNumber(), 2);
+}
+
+void QuantizeActOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantizeActOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getAQuant(), getAScale()},
+                                /*numInits=*/2)))
+    return failure();
+  return verifyInt8Activation(getOperation(), getA(), getAQuant(), getAScale(),
+                              getBlockSize());
+}
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp: ins(A, a_quant, a_scale, weights..., scales...,
+//                         [zero_points...]) outs(outputs..., [up_tmp])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  // outputs and up_tmp are the trailing segments, tied to results in order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + (getUpTmp() ? 1 : 0));
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  size_t numSegments = getWeights().size();
+  if (numSegments < 1 || numSegments > 3)
+    return emitOpError("expected 1 to 3 weights, got ") << numSegments;
+  if (getScales().size() != numSegments)
+    return emitOpError("expected one scales operand per weight");
+  if (!getZeroPoints().empty() && getZeroPoints().size() != numSegments)
+    return emitOpError("expected no zero_points or one per weight");
+  ArrayAttr nAttr = getN();
+  if (nAttr.size() != numSegments)
+    return emitOpError("expected one N entry per weight");
+  SmallVector<int64_t> ns;
+  for (Attribute a : nAttr) {
+    auto n = dyn_cast<IntegerAttr>(a);
+    if (!n || n.getInt() <= 0)
+      return emitOpError("N entries must be positive integers");
+    ns.push_back(n.getInt());
+  }
+  for (Value scales : getScales())
+    if (!cast<ShapedType>(scales.getType()).getElementType().isF16())
+      return emitOpError("scales must be f16");
+  if (getBits() != 4)
+    return emitOpError("bits must be 4, got ") << getBits();
+
+  switch (getEpilogue()) {
+  case 0:
+    if (getOutputs().size() != numSegments || getUpTmp())
+      return emitOpError("epilogue 0 expects one output per weight and no "
+                         "up_tmp");
+    break;
+  case 1:
+    if (numSegments != 2 || getOutputs().size() != 1 || !getUpTmp())
+      return emitOpError("silu_mul epilogue expects 2 weights, 1 output and "
+                         "up_tmp");
+    if (ns[0] != ns[1])
+      return emitOpError("silu_mul epilogue expects equal N");
+    break;
+  default:
+    return emitOpError("unknown epilogue ") << getEpilogue();
+  }
+
+  SmallVector<Value> dataOperands{getA(), getAQuant(), getAScale()};
+  llvm::append_range(dataOperands, getWeights());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getZeroPoints());
+  llvm::append_range(dataOperands, getOutputs());
+  if (Value upTmp = getUpTmp())
+    dataOperands.push_back(upTmp);
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/getDpsInitsMutable().size())))
+    return failure();
+  if (cast<ShapedType>(getA().getType()).getShape().back() != getK())
+    return emitOpError("A trailing dim must be K");
+  return verifyInt8Activation(getOperation(), getA(), getAQuant(), getAScale(),
+                              getBlockSize());
 }
 
 //===----------------------------------------------------------------------===//

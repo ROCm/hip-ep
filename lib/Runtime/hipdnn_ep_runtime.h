@@ -1575,18 +1575,22 @@ int wrap_hyper_connection_post_mix_norm(
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma
 // bias and input_skip_bias_sum may be nullptr (optional per MS spec)
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon);
+// a_quant/a_scale (nullable, together; fp16 only): output quantized exactly as
+// wrap_quantize_act would with quant_block_size, for every row.
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
 // scales: [N x k_blocks], output: [batch_count x M x N]
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+// a_quant/a_scale (nullable, together): A quantized by wrap_quantize_act with
+// this block_size, valid for every row; read instead of A on the W4A8 dp4a
+// path.
 int wrap_matmul_nbits(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (zp-cache home)
@@ -1596,6 +1600,8 @@ int wrap_matmul_nbits(
     const void *zero_points, // per-block zero points (nullable)
     const void *g_idx,       // GPTQ group indices (nullable, deprecated)
     const void *bias,        // output bias [N] (nullable)
+    const void *a_quant,     // int8 copy of A (nullable)
+    const void *a_scale,     // its per-block scales (nullable)
     void *output,            // result tensor
     int64_t M,               // rows per batch
     int64_t N,               // output columns
@@ -1612,6 +1618,32 @@ int wrap_matmul_nbits(
 int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
                       void *output, int64_t n, int64_t k, int64_t block_size,
                       int64_t quant_type);
+
+// hip.quantize_act: quantizes `rows` fp16 rows of K elements per block of
+// block_size into a_quant (int8 [rows x K], dp4a deinterleaved layout) and
+// a_scale (f32 [rows x K/block_size]). K % 32 == 0; block_size is a power of
+// two >= 32 that divides K.
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size);
+
+// hip.matmul_nbits_group: nseg (1-3) int4 projections, fp16 activation and
+// scales, no bias, that read A [batch_count x M x K] and its quantized copy
+// a_quant/a_scale (wrap_quantize_act layout, required). zp0..zp2 are packed
+// uint8 zero points, all null for symmetric weights. Segment s writes
+// A @ dequant(B_s)^T [batch_count x M x N_s] to out_s. With epilogue 1
+// (silu_mul, nseg 2, N0 == N1) out0 receives silu(segment 0) * segment 1 and
+// out1 is scratch for segment 1. Unused slots are null / 0.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_quant,
+                            const void *a_scale, int64_t nseg, const void *B0,
+                            const void *B1, const void *B2, const void *scales0,
+                            const void *scales1, const void *scales2,
+                            const void *zp0, const void *zp1, const void *zp2,
+                            void *out0, void *out1, void *out2, int64_t N0,
+                            int64_t N1, int64_t N2, int64_t M, int64_t K,
+                            int64_t batch_count, int64_t block_size,
+                            int64_t epilogue);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along

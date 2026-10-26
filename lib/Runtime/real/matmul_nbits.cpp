@@ -568,24 +568,15 @@ cleanup:
   return result;
 }
 
-} // namespace
-
-int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
-                      const void *B, const void *scales,
-                      const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
-                      int64_t K, int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size) {
-  OP_PROFILE(
-      "matmul_nbits",
-      [&] {
-        char b[64];
-        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
-                 (long long)N, (long long)K);
-        return std::string(b);
-      },
-      state);
+// wrap_matmul_nbits without its profiling scope, so hip.matmul_nbits_group can
+// run a segment through it.
+int run_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
+                     const void *B, const void *scales, const void *zero_points,
+                     const void *g_idx, const void *bias, const void *a_quant,
+                     const void *a_scale, void *output, int64_t M, int64_t N,
+                     int64_t K, int64_t batch_count, int64_t bits,
+                     int64_t block_size, int64_t elem_size,
+                     int64_t zp_elem_size, int64_t scale_elem_size) {
   if (!state || !A || !B || !scales || !output) {
     fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;
@@ -725,10 +716,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // ALU-bound at ~2.5x the per-byte cost of the single-row kernel. Here the
   // nibble split is two mask instructions shared by every row in the tile.
   // All other shapes fall through to hip_matmul_nbits.
-  if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
-      M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
-      block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
-      (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
+  //
+  // With a_quant/a_scale the activation was quantized once for every
+  // projection that reads it (hip.quantize_act), so only the GEMV runs here.
+  const bool dp4a_path = hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
+                         M <= hipdnn_ep_matmul_dp4a_max_m() &&
+                         batch_count == 1 && bits == 4 && block_size > 0 &&
+                         (K % 32 == 0) && elem_size == 2 &&
+                         (!zero_points || (zp_elem_size == 1 && pre_zp_u8));
+  if (dp4a_path && a_quant && a_scale) {
+    int rc = hip_matmul_nbits_dp4a_prequant(stream, a_quant, a_scale, B, scales,
+                                            pre_zp_u8, bias, output, M, N, K,
+                                            block_size);
+    if (rc == 0)
+      goto cleanup;
+    RUNTIME_DEBUG_LOG(
+        "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
+  } else if (dp4a_path) {
     const size_t k_blocks =
         static_cast<size_t>((K + block_size - 1) / block_size);
     // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
@@ -741,11 +745,9 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       char *base =
           static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
       if (base) {
-        void *a_qb = base;
-        void *a_scale = base + scale_off;
         int rc =
             hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+                                  M, N, K, block_size, base, base + scale_off);
         if (rc == 0) {
           result = 0;
           goto cleanup;
@@ -845,4 +847,160 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
 cleanup:
   return result;
+}
+
+} // namespace
+
+int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, const void *scales,
+                      const void *zero_points, const void *g_idx,
+                      const void *bias, const void *a_quant,
+                      const void *a_scale, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t bits,
+                      int64_t block_size, int64_t elem_size,
+                      int64_t zp_elem_size, int64_t scale_elem_size) {
+  OP_PROFILE(
+      "matmul_nbits",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)N, (long long)K);
+        return std::string(b);
+      },
+      state);
+  return run_matmul_nbits(state, op_state_slot, A, B, scales, zero_points,
+                          g_idx, bias, a_quant, a_scale, output, M, N, K,
+                          batch_count, bits, block_size, elem_size,
+                          zp_elem_size, scale_elem_size);
+}
+
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size) {
+  OP_PROFILE(
+      "quantize_act",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "rows=%lld,k=%lld,bs=%lld", (long long)rows,
+                 (long long)K, (long long)block_size);
+        return std::string(b);
+      },
+      state);
+  if (!state || (rows > 0 && (!A || !a_quant || !a_scale))) {
+    fprintf(stderr, "wrap_quantize_act: null argument\n");
+    return -1;
+  }
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_quantize_act: null stream\n");
+    return -1;
+  }
+  int rc = hip_matmul_nbits_quant_act_i8(stream, A, rows, K, block_size,
+                                         a_quant, a_scale);
+  if (rc != 0) {
+    fprintf(stderr, "wrap_quantize_act: launch failed (%d)\n", rc);
+    return -1;
+  }
+  return 0;
+}
+
+// One decode row takes the grouped dp4a kernel: every segment (and the SiLU
+// epilogue) in one launch on the prequantized row. Any other shape, or a group
+// that kernel declines, runs each segment through run_matmul_nbits, which
+// picks its kernel by row count exactly as a standalone hip.matmul_nbits does.
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_quant,
+                            const void *a_scale, int64_t nseg, const void *B0,
+                            const void *B1, const void *B2, const void *scales0,
+                            const void *scales1, const void *scales2,
+                            const void *zp0, const void *zp1, const void *zp2,
+                            void *out0, void *out1, void *out2, int64_t N0,
+                            int64_t N1, int64_t N2, int64_t M, int64_t K,
+                            int64_t batch_count, int64_t block_size,
+                            int64_t epilogue) {
+  OP_PROFILE(
+      "matmul_nbits_group",
+      [&] {
+        char b[96];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld+%lld+%lld,k=%lld,epi=%lld",
+                 (long long)M, (long long)N0, (long long)N1, (long long)N2,
+                 (long long)K, (long long)epilogue);
+        return std::string(b);
+      },
+      state);
+
+  const bool silu = (epilogue == HIP_MATMUL_GROUP_EPI_SILU_MUL);
+  if (!state || !A || !a_quant || !a_scale || nseg < 1 ||
+      nseg > HIP_MATMUL_GROUP_MAX_SEGMENTS ||
+      (!silu && epilogue != HIP_MATMUL_GROUP_EPI_NONE) ||
+      (silu && (nseg != 2 || N0 != N1))) {
+    fprintf(stderr,
+            "wrap_matmul_nbits_group: unsupported group (nseg=%lld "
+            "epilogue=%lld)\n",
+            (long long)nseg, (long long)epilogue);
+    return -1;
+  }
+  const void *Bs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {B0, B1, B2};
+  const void *Ss[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {scales0, scales1, scales2};
+  const void *Zs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {zp0, zp1, zp2};
+  void *Os[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {out0, out1, out2};
+  const int64_t Ns[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {N0, N1, N2};
+  const bool has_zp = zp0 != nullptr;
+  for (int64_t s = 0; s < nseg; ++s) {
+    if (!Bs[s] || !Ss[s] || !Os[s] || (Zs[s] != nullptr) != has_zp) {
+      fprintf(stderr, "wrap_matmul_nbits_group: bad segment %lld\n",
+              (long long)s);
+      return -1;
+    }
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_matmul_nbits_group: null stream\n");
+    return -1;
+  }
+
+  if (M == 1 && batch_count == 1 && hipdnn_ep_matmul_dp4a_enabled()) {
+    const void *zp_u8[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {};
+    bool zp_ready = true;
+    if (has_zp) {
+      MatmulNbitsState *mst =
+          MatmulNbitsState::get_op_state(state, op_state_slot);
+      const int ngk = static_cast<int>((K + block_size - 1) / block_size);
+      zp_ready = mst != nullptr;
+      for (int64_t s = 0; zp_ready && s < nseg; ++s) {
+        zp_u8[s] = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+            mst->zp, stream, Zs[s], static_cast<int>(Ns[s]), ngk);
+        zp_ready = zp_u8[s] != nullptr;
+      }
+    }
+    if (zp_ready) {
+      int rc = hip_matmul_nbits_dp4a_group(
+          stream, a_quant, a_scale, static_cast<int>(nseg), Bs, Ss,
+          has_zp ? zp_u8 : nullptr, Os, Ns, K, block_size,
+          static_cast<int>(epilogue));
+      if (rc == 0)
+        return 0;
+      RUNTIME_DEBUG_LOG(
+          "[REAL] matmul_nbits_group dp4a rc=%d, running per segment\n", rc);
+    }
+  }
+
+  for (int64_t s = 0; s < nseg; ++s) {
+    int rc = run_matmul_nbits(state, op_state_slot, A, Bs[s], Ss[s], Zs[s],
+                              /*g_idx=*/nullptr, /*bias=*/nullptr, a_quant,
+                              a_scale, Os[s], M, Ns[s], K, batch_count,
+                              /*bits=*/4, block_size, /*elem_size=*/2,
+                              /*zp_elem_size=*/1, /*scale_elem_size=*/2);
+    if (rc != 0)
+      return rc;
+  }
+  if (!silu)
+    return 0;
+  if (hip_matmul_nbits_silu_mul(stream, out0, out1, out0,
+                                batch_count * M * N0) != 0) {
+    fprintf(stderr, "wrap_matmul_nbits_group: silu_mul launch failed\n");
+    return -1;
+  }
+  return 0;
 }

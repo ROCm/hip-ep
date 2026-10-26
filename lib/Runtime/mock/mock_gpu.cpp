@@ -1678,12 +1678,12 @@ int wrap_hyper_connection_post_mix_norm(
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size) {
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -1691,10 +1691,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm(input_num_elements=%lld, "
              "gamma_num_elements=%lld, element_size=%lld, epsilon=%f, "
-             "bias=%s, input_skip_bias_sum=%s)\n",
+             "bias=%s, input_skip_bias_sum=%s, quant_block_size=%lld)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
-             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no",
+             (long long)(a_quant ? quant_block_size : 0));
 
   return 0;
 }
@@ -1702,12 +1703,14 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *B, const void *scales,
                       const void *zero_points, const void *g_idx,
-                      const void *bias, void *output, int64_t M, int64_t N,
+                      const void *bias, const void *a_quant,
+                      const void *a_scale, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size, int64_t scale_elem_size) {
   (void)op_state_slot;
   (void)scale_elem_size;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -1715,11 +1718,28 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   MOCK_PRINT("[MOCK] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
-             "zero_points=%s, g_idx=%s, bias=%s)\n",
+             "zero_points=%s, g_idx=%s, bias=%s, quantized=%s)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,
              (long long)bits, (long long)block_size, (long long)elem_size,
              zero_points ? "yes" : "null", g_idx ? "yes" : "null",
-             bias ? "yes" : "null");
+             bias ? "yes" : "null", a_quant ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_quantize_act(RuntimeState *state, const void *A, void *a_quant,
+                      void *a_scale, int64_t rows, int64_t K,
+                      int64_t block_size) {
+  (void)A;
+  (void)a_quant;
+  (void)a_scale;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_quantize_act\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_quantize_act(rows=%lld, K=%lld, block_size=%lld)\n",
+             (long long)rows, (long long)K, (long long)block_size);
 
   return 0;
 }
@@ -1738,6 +1758,46 @@ int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
              "quant_type=%lld)\n",
              (long long)n, (long long)k, (long long)block_size,
              (long long)quant_type);
+  return 0;
+}
+
+int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *a_quant,
+                            const void *a_scale, int64_t nseg, const void *B0,
+                            const void *B1, const void *B2, const void *scales0,
+                            const void *scales1, const void *scales2,
+                            const void *zp0, const void *zp1, const void *zp2,
+                            void *out0, void *out1, void *out2, int64_t N0,
+                            int64_t N1, int64_t N2, int64_t M, int64_t K,
+                            int64_t batch_count, int64_t block_size,
+                            int64_t epilogue) {
+  (void)op_state_slot;
+  (void)A;
+  (void)a_quant;
+  (void)a_scale;
+  (void)B0;
+  (void)B1;
+  (void)B2;
+  (void)scales0;
+  (void)scales1;
+  (void)scales2;
+  (void)zp1;
+  (void)zp2;
+  (void)out0;
+  (void)out1;
+  (void)out2;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_nbits_group\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_matmul_nbits_group(nseg=%lld, N=%lld+%lld+%lld, "
+             "M=%lld, K=%lld, batch=%lld, block_size=%lld, epilogue=%lld, "
+             "zero_points=%s)\n",
+             (long long)nseg, (long long)N0, (long long)N1, (long long)N2,
+             (long long)M, (long long)K, (long long)batch_count,
+             (long long)block_size, (long long)epilogue, zp0 ? "yes" : "null");
+
   return 0;
 }
 
