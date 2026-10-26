@@ -76,6 +76,19 @@
 // use: some shape-staging chains end in a copy into another buffer, and the
 // host-mapped scratch is a valid copy source/destination.
 //
+// Inline constant globals read by hip ops
+// ---------------------------------------
+// `hip-externalize-constants` moves every `hip.constant` to runtime-uploaded
+// device storage, but the canonicalization after it can still fold shape
+// arithmetic into a new tensor constant -- Whisper decoder_with_past's
+// `Shape(input_ids)[1]` on a `[?, 1]` input becomes `dense<1> : tensor<i64>`.
+// Bufferization turns that into a `memref.global` with an initial value, which
+// lowers to storage in the host JIT module: a GPU kernel reading it (there, the
+// i64 `hip.add` computing the position-embedding slice end) page-faults. A tiny
+// such global read by a hip op gets a scratch slot like an alloc candidate, and
+// its `memref.get_global` is replaced by a view the host fills with
+// `memref.store`s of the initial value.
+//
 // Hip-dialect users are accepted, not rejected
 // --------------------------------------------
 // `hipHostMalloc(hipHostMallocMapped)` returns a host pointer that is also
@@ -118,6 +131,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/Statistic.h"
@@ -127,6 +141,8 @@
 
 STATISTIC(NumAllocsMaterialized,
           "Number of memref.alloc redirected to host-mapped scratch");
+STATISTIC(NumConstantsMaterialized,
+          "Number of constant memref.get_global redirected to host scratch");
 
 namespace mlir {
 namespace hip {
@@ -220,6 +236,43 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   return hasHostIO && (!isFloat || hasHipUser);
 }
 
+/// Return the initial value of the global \p getGlobal reads if it is a tiny
+/// inline constant (an initial value, no `hip.external_data`) read by a hip op,
+/// or null. Such a global lowers to storage in the host JIT module, which a GPU
+/// kernel cannot dereference; see the file header.
+static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
+  MemRefType type = op.getType();
+  if (!type.hasStaticShape() || !type.getLayout().isIdentity() ||
+      type.getNumElements() > 16)
+    return {};
+  // The host fill is `arith.constant` + `memref.store`, and `arith.constant`
+  // only produces signless integers.
+  Type elem = type.getElementType();
+  if (!elem.isSignlessIntOrIndex() && !isa<FloatType>(elem))
+    return {};
+  auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+      op, op.getNameAttr());
+  if (!global || global->hasAttr("hip.external_data"))
+    return {};
+  auto init =
+      dyn_cast_or_null<DenseElementsAttr>(global.getInitialValueAttr());
+  if (!init)
+    return {};
+  bool hasHostIO = false;
+  bool hasHipUser = false;
+  if (!classifyHostScalarUsers(op.getResult(), hasHostIO, hasHipUser) ||
+      !hasHipUser)
+    return {};
+  return init;
+}
+
+static int64_t scratchBytes(MemRefType type) {
+  Type elemTy = type.getElementType();
+  unsigned bits = elemTy.isIndex() ? 64 : elemTy.getIntOrFloatBitWidth();
+  int64_t bytes = type.getNumElements() * static_cast<int64_t>((bits + 7) / 8);
+  return bytes == 0 ? 1 : bytes; // rank-0 with i1 etc. — never zero-sized
+}
+
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
 
@@ -249,7 +302,14 @@ void MaterializeHostScalarsPass::runOnOperation() {
     if (isHostScalarCandidate(op))
       candidates.push_back(op);
   });
-  if (candidates.empty())
+  // Constant globals are laid out after the allocs so that adding them left
+  // the alloc offsets unchanged.
+  SmallVector<std::pair<memref::GetGlobalOp, DenseElementsAttr>> constants;
+  funcOp.walk([&](memref::GetGlobalOp op) {
+    if (DenseElementsAttr init = getHostConstantCandidate(op))
+      constants.emplace_back(op, init);
+  });
+  if (candidates.empty() && constants.empty())
     return;
 
   // Compute byte size per candidate and aligned offsets. 64-byte alignment
@@ -258,19 +318,18 @@ void MaterializeHostScalarsPass::runOnOperation() {
   constexpr int64_t kAlign = 64;
   SmallVector<int64_t> offsets;
   offsets.reserve(candidates.size());
+  SmallVector<int64_t> constantOffsets;
+  constantOffsets.reserve(constants.size());
   int64_t total = 0;
-  for (memref::AllocOp allocOp : candidates) {
-    MemRefType ty = allocOp.getType();
-    Type elemTy = ty.getElementType();
-    unsigned bits = elemTy.isIndex() ? 64 : elemTy.getIntOrFloatBitWidth();
-    int64_t elemBytes = static_cast<int64_t>((bits + 7) / 8);
-    int64_t bytes = ty.getNumElements() * elemBytes;
-    if (bytes == 0)
-      bytes = 1; // rank-0 with i1 etc. — never zero-sized
+  auto place = [&](MemRefType ty) {
     int64_t off = roundUp(total, kAlign);
-    offsets.push_back(off);
-    total = off + bytes;
-  }
+    total = off + scratchBytes(ty);
+    return off;
+  };
+  for (memref::AllocOp allocOp : candidates)
+    offsets.push_back(place(allocOp.getType()));
+  for (auto &entry : constants)
+    constantOffsets.push_back(place(entry.first.getType()));
   total = roundUp(total, kAlign);
 
   // Emit hip.get_host_scratch(%ctx, %total) at function entry.
@@ -308,6 +367,39 @@ void MaterializeHostScalarsPass::runOnOperation() {
     ++NumAllocsMaterialized;
     LLVM_DEBUG(llvm::dbgs()
                << "  Materialized " << view << " at offset " << offset << "\n");
+  }
+
+  // Replace each constant global read with a scratch view the host fills at
+  // the same point.
+  for (auto [entry, offset] : llvm::zip(constants, constantOffsets)) {
+    auto [getGlobal, init] = entry;
+    Location opLoc = getGlobal.getLoc();
+    MemRefType type = getGlobal.getType();
+    builder.setInsertionPoint(getGlobal);
+    Value offsetVal = arith::ConstantIndexOp::create(builder, opLoc, offset);
+    auto view = memref::ViewOp::create(builder, opLoc, type, scratch,
+                                       offsetVal, /*sizes=*/ValueRange{});
+    ArrayRef<int64_t> shape = type.getShape();
+    auto values = init.getValues<Attribute>();
+    for (int64_t linear = 0; linear < type.getNumElements(); ++linear) {
+      Attribute elem = init.isSplat() ? init.getSplatValue<Attribute>()
+                                      : *(values.begin() + linear);
+      Value value =
+          arith::ConstantOp::create(builder, opLoc, cast<TypedAttr>(elem));
+      SmallVector<Value> indices(shape.size());
+      int64_t rest = linear;
+      for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {
+        indices[d] =
+            arith::ConstantIndexOp::create(builder, opLoc, rest % shape[d]);
+        rest /= shape[d];
+      }
+      memref::StoreOp::create(builder, opLoc, value, view, indices);
+    }
+    getGlobal.replaceAllUsesWith(view.getResult());
+    getGlobal.erase();
+    ++NumConstantsMaterialized;
+    LLVM_DEBUG(llvm::dbgs() << "  Materialized constant " << view
+                            << " at offset " << offset << "\n");
   }
 }
 
