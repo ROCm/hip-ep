@@ -173,4 +173,29 @@ module {
                              {perm = [0, 2, 1, 3]} : tensor<1x4x2x3xf16>
     return %0 : tensor<1x4x2x3xf16>
   }
+  // --------------------------------------------------------------------------
+  // Negative: the composed permutation must agree with the types. This
+  // malformed chain declares a first result type that ignores its permutation:
+  // 2x3x4 under [1, 0, 2] is 3x2x4. Composing would give [1, 2, 0], which turns
+  // 2x3x4 into 3x4x2, not the 2x4x3 the second op declares; the chain is left
+  // alone rather than rewritten into an operation whose types disagree.
+  // --------------------------------------------------------------------------
+  // CHECK-LABEL: func.func @keep_chain_with_disagreeing_types
+  // CHECK:         hip.transpose
+  // CHECK-SAME:      perm = [1, 0, 2]
+  // CHECK:         hip.transpose
+  // CHECK-SAME:      perm = [0, 2, 1]
+  func.func @keep_chain_with_disagreeing_types(
+      %ctx: !hip.context,
+      %x: tensor<2x3x4xf32>) -> tensor<2x4x3xf32> {
+    %a = tensor.empty() : tensor<2x3x4xf32>
+    %0 = hip.transpose(%ctx) ins(%x : tensor<2x3x4xf32>)
+                             outs(%a : tensor<2x3x4xf32>)
+                             {perm = [1, 0, 2]} : tensor<2x3x4xf32>
+    %b = tensor.empty() : tensor<2x4x3xf32>
+    %1 = hip.transpose(%ctx) ins(%0 : tensor<2x3x4xf32>)
+                             outs(%b : tensor<2x4x3xf32>)
+                             {perm = [0, 2, 1]} : tensor<2x4x3xf32>
+    return %1 : tensor<2x4x3xf32>
+  }
 }
