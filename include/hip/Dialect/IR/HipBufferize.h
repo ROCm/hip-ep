@@ -118,6 +118,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
+    MRotaryEmbeddingOp::attachInterface<
+        HipDstBufferizableModel<MRotaryEmbeddingOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
     AddOp::attachInterface<HipDstBufferizableModel<AddOp>>(*ctx);
     MulOp::attachInterface<HipDstBufferizableModel<MulOp>>(*ctx);
@@ -186,6 +188,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     GatedDeltaNetOp::attachInterface<HipDstBufferizableModel<GatedDeltaNetOp>>(
         *ctx);
+    DynamicSparseAttentionOp::attachInterface<
+        HipDstBufferizableModel<DynamicSparseAttentionOp>>(*ctx);
+    SparseAttentionIndexerOp::attachInterface<
+        HipDstBufferizableModel<SparseAttentionIndexerOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);
@@ -194,6 +200,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatedRmsNormOp::attachInterface<HipDstBufferizableModel<GatedRmsNormOp>>(
         *ctx);
     EngramGateOp::attachInterface<HipDstBufferizableModel<EngramGateOp>>(*ctx);
+    HyperConnectionPreMixOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPreMixOp>>(*ctx);
+    HyperConnectionPostMixOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPostMixOp>>(*ctx);
+    HyperConnectionPostMixNormOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPostMixNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);

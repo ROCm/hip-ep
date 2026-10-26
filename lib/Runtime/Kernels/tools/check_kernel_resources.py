@@ -25,10 +25,19 @@ for no more bytes). Occupancy drops and instruction-count growth are warnings
 kernel_resources_<arch>.json = {"compiler": ..., "fields": [...],
 "allow": {kernel: reason}, "kernels": {source: {kernel: [values]}}}.
 
+The default archs are the two of the product build (gfx11-generic, gfx1170)
+and gfx1151. Register budgets follow the compile target (HIPDNN_VGPRS_PER_SIMD
+in include/hip_arch_compat.h): gfx1151 has a 1536-VGPR file where
+gfx11-generic, the binary gfx1150 / 1151 / 1152 run, has 1024. A kernel can be
+fine in the product binary and regress in a gfx1151-target build (the LUT
+sweeps' historical target and the usual developer build), or the other way
+round, so both are checked.
+
 --squeeze N recompiles with -mllvm -amdgpu-stress-vgpr=N (clang 24 / ROCm 7.16
 and later) and lists the spill-free kernels using between N and --squeeze-max
-VGPRs (default 128) that spill once only N are available, i.e. have less than
-(budget - N) registers of headroom. See README.md next to this script.
+VGPRs (default: an eighth of the arch's register file, 128 or 192) that spill
+once only N are available, i.e. have less than (budget - N) registers of
+headroom. See README.md next to this script.
 """
 import argparse
 import collections
@@ -43,6 +52,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 KERNELS = HERE.parent  # lib/Runtime/Kernels
+# Wave32 VGPRs per SIMD, as HIPDNN_VGPRS_PER_SIMD in include/hip_arch_compat.h;
+# every other arch (and gfx11-generic) has 1024.
+VGPRS_PER_SIMD = {"gfx1100": 1536, "gfx1101": 1536, "gfx1151": 1536}
 REMARKS = {"VGPRs": 0, "ScratchSize [bytes/lane]": 1, "VGPRs Spill": 2, "Occupancy [waves/SIMD]": 3}
 NAMES = ("vgpr", "scratch", "vgpr_spill", "occupancy", "insns", "lds_loads", "lds_load_bytes")
 LABEL = re.compile(r"^(_Z\w+):")
@@ -231,7 +243,8 @@ def write_baseline(arch, cur, rocm):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rocm", default=os.environ.get("HIP_PATH", ""), help="HIP SDK root (default: $HIP_PATH)")
-    ap.add_argument("--archs", default="gfx11-generic,gfx1170", help="offload archs of the product build")
+    ap.add_argument("--archs", default="gfx11-generic,gfx1170,gfx1151",
+                    help="offload archs: the product build's two and the 1536-VGPR gfx1151 target")
     ap.add_argument("--sources", default="", help="comma list of source stems (default: all custom kernels)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--update", action="store_true", help="write the current results as the baseline")
@@ -239,10 +252,10 @@ def main():
     ap.add_argument("--insn-growth", type=float, default=0.10,
                     help="warn when a kernel has this many more instructions (default 0.10 = 10%%)")
     ap.add_argument("--squeeze", type=int, default=0, help="also list kernels without N-VGPR headroom")
-    ap.add_argument("--squeeze-max", type=int, default=128,
+    ap.add_argument("--squeeze-max", type=int, default=0,
                     help="with --squeeze: only kernels using more than N and at most this many VGPRs "
-                         "(default 128, the budget of a 1024-thread block or waves_per_eu(8) on a "
-                         "1024-VGPR target; 256 for the architectural limit)")
+                         "(default: the budget of a 1024-thread block or waves_per_eu(8), i.e. 128 on a "
+                         "1024-VGPR target and 192 on gfx1151; 256 for the architectural limit)")
     ap.add_argument("--json-out", default="", help="write the raw results here")
     a = ap.parse_args()
     if not a.rocm:
@@ -294,6 +307,7 @@ def main():
         for e in serr:
             print("COMPILE ERROR (squeeze)", e)
         for arch in archs:
+            band = a.squeeze_max or VGPRS_PER_SIMD.get(arch, 1024) // 8
             tight = collections.defaultdict(list)
             for src, kern in cur[arch].items():
                 for k, v in kern.items():
@@ -303,10 +317,10 @@ def main():
                     # not report the budget itself, so a kernel with a larger one
                     # that happens to sit in the band is listed too; read TIGHT
                     # as "review", not "fail".
-                    if s and v[1] == 0 and a.squeeze < v[0] <= a.squeeze_max and s[1] > 0:
+                    if s and v[1] == 0 and a.squeeze < v[0] <= band and s[1] > 0:
                         tight[src].append(f"{k} vgpr={v[0]} -> scratch {s[1]} B at {a.squeeze} VGPRs")
             n = sum(len(v) for v in tight.values())
-            print(f"== {arch}: {n} spill-free kernels with {a.squeeze}-{a.squeeze_max} VGPRs "
+            print(f"== {arch}: {n} spill-free kernels with {a.squeeze}-{band} VGPRs "
                   f"that spill with {a.squeeze}")
             for src in sorted(tight):
                 for line in sorted(tight[src]):

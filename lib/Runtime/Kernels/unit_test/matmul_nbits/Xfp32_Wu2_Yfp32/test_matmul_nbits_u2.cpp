@@ -281,6 +281,19 @@ double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
 }
 }  // namespace hipdnn_ep_test
 
+// `name` in this executable's directory. The capture file must not follow the
+// working directory: started anywhere but the leaf directory, a relative
+// "out/..." names a folder that is not there, freopen() fails and leaves
+// stderr closed, and the next diagnostic ends the process with 0xC0000409
+// before it prints anything.
+static std::string beside_exe(const char* name) {
+  char* exe = nullptr;
+  if (_get_pgmptr(&exe) != 0 || !exe) return name;
+  const std::string path(exe);
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? name : path.substr(0, slash + 1) + name;
+}
+
 // Runs `fn` and returns the stderr lines it produced. The kernels log from
 // custom_kernels_<arch>.dll, which links its own static CRT: its stderr is the
 // handle this process started with, so freopen() here would not move it.
@@ -290,7 +303,8 @@ double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
 // when they are linked into this executable (the local make build).
 template <typename Fn>
 static std::vector<std::string> capture_stderr(Fn&& fn) {
-  static const char* const kCapture = "out/_config_capture.tmp";
+  static const std::string capture = beside_exe("_config_capture.tmp");
+  const char* const kCapture = capture.c_str();
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const char* path = redirect ? kCapture : leaf_stderr;
@@ -298,6 +312,7 @@ static std::vector<std::string> capture_stderr(Fn&& fn) {
   std::fflush(stderr);
   if (redirect) {
     if (!std::freopen(kCapture, "w", stderr)) {
+      std::freopen("CON", "w", stderr);  // the failed freopen closed it
       fn();
       return {};
     }

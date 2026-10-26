@@ -13,28 +13,10 @@
 //   1. `Pow(x, c)` for small integer constants c -> chain of `Mul`s
 //      (c==2 -> Mul(x,x); c==3 -> Mul(x, Mul(x,x)); etc.). Sqrt special-cased
 //      for c==0.5.
-//   2. `AveragePool(NCHW, kernel=K, stride=K, no pad)` -> Reshape ->
-//      Transpose -> ReduceMean. The 4-D NCHW input is first reshaped to
-//      6-D `[B, C, H/K, K, W/K, K]`, then transposed with perm
-//      `[0, 1, 2, 4, 3, 5]` to `[B, C, H/K, W/K, K, K]` so the K-K patch
-//      axes end up TRAILING, then ReduceMean over the two trailing K dims
-//      collapses them with `keepdims=0`. The transpose is required because
-//      `hip_reduce_sum` only handles reductions over a contiguous suffix
-//      of the input (it sums consecutive `reduce_size`-blocks); skipping
-//      it silently misroutes the reduction to dims [4,5] (the K-stride
-//      and innermost-K dims), producing wrong AvgPool output values that
-//      cascade into NaN downstream. This is mathematically equivalent to
-//      non-overlapping AveragePool with `K == stride`. Coverage is
-//      intentionally narrow — typical site is a Gemma-3-style projector
-//      (`kernel=4, stride=4` on a `[B, 1152, 64, 64]` tensor).
-//
-//      Overlap, padding, dynamic spatial dims, and other shapes outside
-//      this narrow case are NOT handled here — `notifyMatchFailure` leaves
-//      the original `onnx.AveragePool` alive for `PoolConversion.cpp`
-//      (`hip.pool`, pool_mode = AVERAGE) in the subsequent compute-op
-//      conversion round. Benefit = 2 here vs benefit = 1 on `PoolToHip`
-//      ensures the fast decomposition wins only when its preconditions
-//      are satisfied.
+//   2. AveragePool is not rewritten here. `AveragePoolToReshapeMean` still
+//      exists, but it is not registered: every AveragePool goes to
+//      `PoolConversion.cpp` (`hip.pool`, pool_mode = AVERAGE). The reshape
+//      + transpose + ReduceMean form was slower than `hip.pool` on dnt.
 //
 // These rewrites run in the pre-lowering block of `ConvertOnnxToHipPass`,
 // alongside `FastGeluFusionPatterns` in a fixed-point round loop (an emitted
@@ -479,8 +461,9 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 
 void populateProjectorOpsRewritePatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx) {
-  patterns.add<PowToMul, AveragePoolToReshapeMean, BroadcastDivToMulReciprocal>(
-      ctx);
+  // AveragePoolToReshapeMean is intentionally not registered. onnx.AveragePool
+  // lowers through PoolToHip to hip.pool.
+  patterns.add<PowToMul, BroadcastDivToMulReciprocal>(ctx);
 }
 
 } // namespace hip
