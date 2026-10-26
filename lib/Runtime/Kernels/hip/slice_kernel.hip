@@ -156,6 +156,7 @@ extern "C" int hip_slice(void *stream, const void *input, void *output,
   // (u8 / bool masks included).
   auto launch = [&](auto zero) {
     using T = decltype(zero);
+    (void)hipGetLastError();
     hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_slice_kernel<T>), dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
                        static_cast<const T *>(input), static_cast<T *>(output),
