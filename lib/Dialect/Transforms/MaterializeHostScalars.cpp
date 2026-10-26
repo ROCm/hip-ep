@@ -23,6 +23,18 @@
 // Float buffers need a HIP consumer. This bounded rule does not make all host
 // accesses safe. Larger and unsupported allocations need separate handling.
 //
+// Tiny inline constant globals read by HIP ops are placed the same way. An
+// initialized `memref.global` lowers to storage in the host JIT module, which
+// a HIP kernel cannot dereference. Each read gets its own region after the
+// allocations, filled by host stores of the initial value. Globals with
+// `hip.external_data` are runtime-uploaded and are left alone.
+//
+// Before: %g = memref.get_global @c : memref<i64>   // dense<1>
+//         hip.add(%ctx) ins(%a, %g : ...)
+// After:  %g = memref.view %scratch[%offset][] : memref<?xi8> to memref<i64>
+//         memref.store %c1, %g[] : memref<i64>
+//         hip.add(%ctx) ins(%a, %g : ...)
+//
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/IR/HipDialect.h"
@@ -33,6 +45,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -45,6 +58,8 @@
 
 STATISTIC(NumAllocsMaterialized,
           "Number of memref.alloc redirected to host-mapped scratch");
+STATISTIC(NumConstantsMaterialized,
+          "Number of constant memref.get_global redirected to host scratch");
 
 namespace mlir {
 namespace hip {
@@ -192,6 +207,44 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
          isCopyReadbackCandidate(allocOp);
 }
 
+/// Return the initial value of the global \p op reads if it is a tiny inline
+/// constant read by a HIP op, or null.
+static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
+  MemRefType type = op.getType();
+  if (!type.hasStaticShape() || !type.getLayout().isIdentity() ||
+      type.getNumElements() > 16)
+    return {};
+  // The host fill is `arith.constant` + `memref.store`, and `arith.constant`
+  // only produces signless integers.
+  Type elem = type.getElementType();
+  if (!elem.isSignlessIntOrIndex() && !isa<FloatType>(elem))
+    return {};
+  auto global = SymbolTable::lookupNearestSymbolFrom<memref::GlobalOp>(
+      op, op.getNameAttr());
+  if (!global || global->hasAttr("hip.external_data"))
+    return {};
+  auto init = dyn_cast_or_null<DenseElementsAttr>(global.getInitialValueAttr());
+  if (!init)
+    return {};
+  bool hasHostIO = false;
+  bool hasHipUser = false;
+  if (!classifyHostScalarUsers(op.getResult(), hasHostIO, hasHipUser) ||
+      !hasHipUser)
+    return {};
+  return init;
+}
+
+/// Bytes \p type occupies in scratch, matching the default layout used by
+/// HIP-to-LLVM, including element padding.
+static int64_t scratchBytes(MemRefType type) {
+  const DataLayout dataLayout;
+  Type elemTy = type.getElementType();
+  int64_t elemBytes =
+      llvm::alignTo(dataLayout.getTypeSize(elemTy).getFixedValue(),
+                    dataLayout.getTypeABIAlignment(elemTy));
+  return std::max(int64_t{1}, type.getNumElements() * elemBytes);
+}
+
 namespace {
 struct MaterializeHostScalarsPass
     : public impl::MaterializeHostScalarsPassBase<MaterializeHostScalarsPass> {
@@ -215,26 +268,31 @@ void MaterializeHostScalarsPass::runOnOperation() {
     if (isHostScalarCandidate(op))
       candidates.push_back(op);
   });
-  if (candidates.empty())
+  // Constant globals go after the allocations, so alloc offsets do not
+  // depend on them.
+  SmallVector<std::pair<memref::GetGlobalOp, DenseElementsAttr>> constants;
+  funcOp.walk([&](memref::GetGlobalOp op) {
+    if (DenseElementsAttr init = getHostConstantCandidate(op))
+      constants.emplace_back(op, init);
+  });
+  if (candidates.empty() && constants.empty())
     return;
 
   constexpr int64_t kAlign = 64;
   SmallVector<int64_t> offsets;
   offsets.reserve(candidates.size());
+  SmallVector<int64_t> constantOffsets;
+  constantOffsets.reserve(constants.size());
   int64_t total = 0;
-  // Match the default layout used by HIP-to-LLVM, including element padding.
-  const DataLayout dataLayout;
-  for (memref::AllocOp allocOp : candidates) {
-    MemRefType ty = allocOp.getType();
-    Type elemTy = ty.getElementType();
-    int64_t elemBytes =
-        llvm::alignTo(dataLayout.getTypeSize(elemTy).getFixedValue(),
-                      dataLayout.getTypeABIAlignment(elemTy));
-    int64_t bytes = std::max(int64_t{1}, ty.getNumElements() * elemBytes);
+  auto place = [&](MemRefType ty) {
     int64_t off = llvm::alignTo(total, kAlign);
-    offsets.push_back(off);
-    total = off + bytes;
-  }
+    total = off + scratchBytes(ty);
+    return off;
+  };
+  for (memref::AllocOp allocOp : candidates)
+    offsets.push_back(place(allocOp.getType()));
+  for (auto &entry : constants)
+    constantOffsets.push_back(place(entry.first.getType()));
   total = llvm::alignTo(total, kAlign);
 
   Block &entry = funcOp.getBody().front();
@@ -268,6 +326,39 @@ void MaterializeHostScalarsPass::runOnOperation() {
     ++NumAllocsMaterialized;
     LLVM_DEBUG(llvm::dbgs()
                << "  Materialized " << view << " at offset " << offset << "\n");
+  }
+
+  // Replace each constant global read with a scratch view the host fills at
+  // the same point.
+  for (auto [entry, offset] : llvm::zip(constants, constantOffsets)) {
+    auto [getGlobal, init] = entry;
+    Location opLoc = getGlobal.getLoc();
+    MemRefType type = getGlobal.getType();
+    builder.setInsertionPoint(getGlobal);
+    Value offsetVal = arith::ConstantIndexOp::create(builder, opLoc, offset);
+    auto view = memref::ViewOp::create(builder, opLoc, type, scratch, offsetVal,
+                                       /*sizes=*/ValueRange{});
+    ArrayRef<int64_t> shape = type.getShape();
+    auto values = init.getValues<Attribute>();
+    for (int64_t linear = 0; linear < type.getNumElements(); ++linear) {
+      Attribute elem = init.isSplat() ? init.getSplatValue<Attribute>()
+                                      : *(values.begin() + linear);
+      Value value =
+          arith::ConstantOp::create(builder, opLoc, cast<TypedAttr>(elem));
+      SmallVector<Value> indices(shape.size());
+      int64_t rest = linear;
+      for (int64_t d = static_cast<int64_t>(shape.size()) - 1; d >= 0; --d) {
+        indices[d] =
+            arith::ConstantIndexOp::create(builder, opLoc, rest % shape[d]);
+        rest /= shape[d];
+      }
+      memref::StoreOp::create(builder, opLoc, value, view, indices);
+    }
+    getGlobal.replaceAllUsesWith(view.getResult());
+    getGlobal.erase();
+    ++NumConstantsMaterialized;
+    LLVM_DEBUG(llvm::dbgs() << "  Materialized constant " << view
+                            << " at offset " << offset << "\n");
   }
 }
 
