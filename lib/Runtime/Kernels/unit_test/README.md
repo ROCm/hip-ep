@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -617,3 +617,38 @@ overall `PASS`/`FAIL`.
 
 Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
 see the top of any `test_<op>.cpp`.
+
+## QGEMM integer leaf
+
+`qgemm/Xint_Wint_Yint` builds
+`hipdnn-kernel-ut-qgemm-xint-wint-yint.exe`, included in the controller and
+packaging CMake build. It calls the production `hip_qgemm` and
+`hip_qgemm_live_rows` entry points. No model, Python or input files are needed.
+
+Every coverage tier includes 34 INT8-activation / INT16-output cases covering
+W4/W8 signed/unsigned weights, tensor/channel quantization, transposes, biases,
+odd dimensions and large K. Four additional shapes exercise tiled, split-K and
+UINT16/W4/UINT16 WMMA-eligible dispatch, with null, short, 64/128-row boundary,
+full-window and invalid-count fallback inputs. Tier 2 adds a larger split-K
+shape; tier 3 adds a larger WMMA-eligible shape. Padding rows are unspecified
+and excluded from comparisons. Valid rows must match the CPU reference exactly,
+both before and after repeated launches/workspace reuse.
+
+`config` records weight packing, transposes, quantization, bias, live count and
+whether timing used cold rotation or warm buffers. Counts of zero use the
+original ABI; compare `live0`, `live5` and full counts for the same shape/config.
+Inputs are identical across counts. Timing is 100 HIP-event launches after
+warm-up, rotating weight/scale/zero buffers by default like MatMulNBits.
+`HIPDNN_KERNEL_UT_WARM=1` selects warm-cache measurements. Allocation failure
+falls back to warm timing and is labelled accordingly. These are kernel
+latencies, not end-to-end model performance. WMMA eligibility and benefits
+depend on GPU architecture, dtype, shape and kernel environment settings.
+
+Standalone Windows/WSL build and run:
+
+```
+make -C qgemm/Xint_Wint_Yint test OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> COVERAGE=1
+```
+
+For packaging builds, run the controller normally, or the leaf directly with
+`--coverage 1`. Set `HIPDNN_RESULTS_CSV` to save its standard per-case CSV.

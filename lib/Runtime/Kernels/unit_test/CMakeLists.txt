@@ -103,6 +103,9 @@ endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qgemm-xint-wint-yint
+    qgemm/Xint_Wint_Yint/test_qgemm.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16
     matmul_nbits/Xfp16_Wu2_Yfp16/test_matmul_nbits_u2.cpp)
   add_kernel_package_ut(${_arch}
