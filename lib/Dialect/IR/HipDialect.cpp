@@ -872,6 +872,34 @@ void QSigmoidOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// QSwigluOp: ins(gate, up), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QSwigluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QSwigluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// FakeQuantizeOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FakeQuantizeOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void FakeQuantizeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 

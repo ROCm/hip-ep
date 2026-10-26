@@ -32,6 +32,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ScaledSiLU (`com.microsoft`) | Decomposed to Mul + Swish (alpha 1). f16/f32 |
 | GatedAdd (`com.microsoft`) | Decomposed to Mul + Add. f16/f32, rank 1-4 |
 | SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64, each dynamic axis traces to the same runtime extent, and the intermediates have no other value uses |
+| Quantized SwiGLU (Q(gate), `hip.qsigmoid`, two `hip.qmul`, Q(up), trailing DQ) | Fused by the second `hip-fusion-transform` phase into `hip.qswiglu`, one custom HIP kernel over the f32 gate/up. UINT16 per-tensor parameters only, and each consumer must read an intermediate with the scale and zero point its producer wrote, so the result is bit-identical to the chain |
+| QuantizeLinear → DequantizeLinear round trip | A per-tensor f32 Q read only by DQs with the same scale and zero point (8/16-bit storage) becomes one `hip.fake_quantize` kernel; the integer codes are never stored |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |

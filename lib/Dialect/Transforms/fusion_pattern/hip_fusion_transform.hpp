@@ -31,6 +31,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "patch_embed_conv_to_gemm.hpp"
+#include "qdq_chain_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -881,11 +882,19 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   // per function.
   mlir::FrozenRewritePatternSet frozen(std::move(patterns));
 
+  // Second phase: chains built from the ops the first phase fused, and Q/DQ
+  // round trips that must not preempt a first-phase fusion consuming the DQ.
+  mlir::RewritePatternSet chainPatterns(ctx);
+  populateQdqChainFusionPatterns(chainPatterns);
+  mlir::tensor::DimOp::getCanonicalizationPatterns(chainPatterns, ctx);
+  mlir::FrozenRewritePatternSet frozenChains(std::move(chainPatterns));
+
   mlir::LogicalResult result = mlir::success();
   module.walk([&](mlir::func::FuncOp funcOp) {
     if (funcOp.isDeclaration())
       return;
-    if (mlir::failed(mlir::applyPatternsGreedily(funcOp, frozen)))
+    if (mlir::failed(mlir::applyPatternsGreedily(funcOp, frozen)) ||
+        mlir::failed(mlir::applyPatternsGreedily(funcOp, frozenChains)))
       result = mlir::failure();
   });
   return result;

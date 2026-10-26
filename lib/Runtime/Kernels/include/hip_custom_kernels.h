@@ -2882,6 +2882,20 @@ HIP_KERNEL_API int hip_qsigmoid_prepare_params(
     void* output_zp_device,
     uint16_t output_zp);
 
+// f32 SwiGLU with UINT16 per-tensor requantization of every intermediate;
+// see wrap_qswiglu in hipdnn_ep_runtime.h for the parameter meaning.
+HIP_KERNEL_API int hip_qswiglu(
+    void* stream, const float* gate, const float* up, float* output,
+    int64_t num_elements, float gate_scale, int32_t gate_zp,
+    float sigmoid_scale, int32_t sigmoid_zp, float m_silu, int32_t silu_zp,
+    float up_scale, int32_t up_zp, float m_mul, int32_t mul_zp,
+    float dq_scale, int32_t dq_zp);
+
+// f32 -> per-tensor Q -> DQ -> f32 without storing the codes.
+HIP_KERNEL_API int hip_fake_quantize(
+    void* stream, const float* input, float* output, int64_t num_elements,
+    float scale, int32_t zero_point, int32_t qmin, int32_t qmax);
+
 HIP_KERNEL_API int hip_quantize_linear(
     void* stream,
     const void* input,           // high precision

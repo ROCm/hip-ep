@@ -6236,4 +6236,77 @@ def Hip_QSigmoidOp : Hip_DpsOp_AutoReifyInfer<"qsigmoid"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+def Hip_QSwigluOp : Hip_DpsOp_AutoReifyInfer<"qswiglu"> {
+  let summary = "SwiGLU with exact UINT16 per-tensor requantization";
+  let description = [{
+    Replaces a quantized SwiGLU chain whose every intermediate is a UINT16
+    per-tensor code:
+
+      qg  = Q(gate; gate_scale, gate_zp)
+      qs  = Q(sigmoid(DQ(qg)); sigmoid_scale, sigmoid_zp)
+      qa  = qmul(qg, qs -> silu_scale, silu_zp)
+      qu  = Q(up; up_scale, up_zp)
+      qo  = qmul(qa, qu -> mul_scale, mul_zp)
+      out = DQ(qo; dq_scale, dq_zp)
+
+    Each step rounds and saturates exactly as the unfused op would, so the
+    result is bit-identical to the chain; only the intermediates stay in
+    registers. `gate`, `up`, and `output` are f32 tensors of one shape.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$gate,
+    Hip_TensorOrMemRef:$up,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$gate_scale,
+    I64Attr:$gate_zp,
+    F32Attr:$sigmoid_scale,
+    I64Attr:$sigmoid_zp,
+    F32Attr:$silu_scale,
+    I64Attr:$silu_zp,
+    F32Attr:$up_scale,
+    I64Attr:$up_zp,
+    F32Attr:$mul_scale,
+    I64Attr:$mul_zp,
+    F32Attr:$dq_scale,
+    I64Attr:$dq_zp
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_FakeQuantizeOp : Hip_DpsOp_AutoReifyInfer<"fake_quantize"> {
+  let summary = "Per-tensor QuantizeLinear followed by DequantizeLinear";
+  let description = [{
+    Snaps each f32 element onto the per-tensor quantization grid in one pass:
+
+      q   = clamp(rint(x / scale) + zero_point, qmin, qmax)
+      out = (q - zero_point) * scale
+
+    Bit-identical to hip.quantize_linear feeding hip.dequantize_linear with
+    the same scale and zero point; the integer codes are never stored.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    I64Attr:$zero_point,
+    I64Attr:$qmin,
+    I64Attr:$qmax
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
