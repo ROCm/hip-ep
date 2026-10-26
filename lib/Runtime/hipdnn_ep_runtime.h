@@ -1179,6 +1179,17 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
+// Axis-0 gather whose data is disk-resident constant `constant_index`: rows
+// are read from its source file on the host and copied into `output`.
+// Synchronizes `state->stream`.
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
@@ -1630,6 +1641,18 @@ int wrap_gather_block_quantized(
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
 
+// wrap_gather_block_quantized with gather_axis 0 whose data is disk-resident
+// constant `constant_index`: the selected rows are read from its source file
+// on the host. Synchronizes `state->stream`.
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype);
+
 // QuantizeLinear / DequantizeLinear wrappers (ONNX opset 23).
 //
 //   quantize:   output = saturate((input / scale) + zero_point)
@@ -1707,8 +1730,11 @@ int wrap_dequantize_linear(
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
-// applies activation (e.g. SwiGLU), and combines results.
+// applies activation (SwiGLU, or relu2 with swiglu_fusion=0), and combines
+// results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
+#define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+
 int wrap_qmoe(
     RuntimeState *state,
     const void *input,           // [num_tokens, hidden_size]
@@ -1730,7 +1756,8 @@ int wrap_qmoe(
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
-    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
+    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
+                             // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
@@ -1738,9 +1765,8 @@ int wrap_qmoe(
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
 // correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
-// mandatory latent projection + shared-expert branch. Shares only the
-// generic int4 GEMM / gather / bucket / scatter sub-kernels, not any code
-// path in lib/Runtime/real/qmoe.cpp. Hip_QMoEAmdOp in
+// mandatory latent projection + shared-expert branch. Shares only sub-kernels
+// with lib/Runtime/real/qmoe.cpp, not any code path. Hip_QMoEAmdOp in
 // include/hip/Dialect/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers

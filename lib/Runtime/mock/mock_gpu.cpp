@@ -849,6 +849,33 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes) {
+  (void)indices;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_from_file\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gather_from_file(constant=%lld, axis=%lld, "
+             "data_num_elements=%lld, indices_num_elements=%lld, "
+             "output_num_elements=%lld, axis_size=%lld, inner_size=%lld, "
+             "element_size=%lld, indices_element_size=%lld)\n",
+             (long long)constant_index, (long long)axis,
+             (long long)data_num_elements, (long long)indices_num_elements,
+             (long long)output_num_elements, (long long)axis_size,
+             (long long)inner_size, (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
+
+  return 0;
+}
+
 int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  void *output, int64_t axis, int64_t indices_rank,
                  int64_t output_rank, const int64_t *indices_shape,
@@ -1748,6 +1775,41 @@ int wrap_gather_block_quantized(
       hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype,
       hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype,
       zero_points ? "yes" : "null");
+  return 0;
+}
+
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_block_quantized_from_file\n");
+    return -1;
+  }
+  (void)indices;
+  (void)scales;
+  (void)zero_points;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  (void)scales_shape;
+  (void)output_shape;
+  (void)data_dtype;
+  (void)indices_dtype;
+  (void)scales_dtype;
+
+  MOCK_PRINT("[MOCK] wrap_gather_block_quantized_from_file(constant=%lld, "
+             "data_rank=%lld, indices_rank=%lld, scales_rank=%lld, "
+             "output_rank=%lld, bits=%lld, block_size=%lld, gather_axis=%lld, "
+             "quantize_axis=%lld)\n",
+             (long long)constant_index, (long long)data_rank,
+             (long long)indices_rank, (long long)scales_rank,
+             (long long)output_rank, (long long)bits, (long long)block_size,
+             (long long)gather_axis, (long long)quantize_axis);
   return 0;
 }
 

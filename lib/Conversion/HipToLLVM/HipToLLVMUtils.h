@@ -75,6 +75,7 @@ inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
+inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
@@ -117,6 +118,8 @@ inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
+inline constexpr const char *kWrapGatherBlockQuantizedFromFile =
+    "wrap_gather_block_quantized_from_file";
 inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
@@ -197,6 +200,10 @@ inline constexpr int64_t kStridesIdx = 4;
 // Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
+// hip.qmoe / wrap_qmoe relu2 activation. Must match
+// HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEActivationRelu2 = 5;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
