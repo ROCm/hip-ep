@@ -21,13 +21,15 @@ data dtype set is:
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
     GatherND  : f16, f32, i32, i64       (indices: int64 only)
-    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int64 only)
+    Slice     : every 1, 2, 4 and 8 byte dtype, bool included
+                                         (starts/ends/axes/steps: int64 only)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
 """
 
 from __future__ import annotations
 
+import ml_dtypes
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
@@ -474,6 +476,16 @@ class TestSlice:
             # we feed via graph inputs).
             (np.float32, [10], [0], [10], [0], [2], [5]),
             (np.float16, [6, 8], [0, 0], [6, 8], [0, 1], [2, 2], [3, 4]),
+            # The kernel only moves elements, so every 1, 2, 4 and 8 byte dtype
+            # takes the same path. A runtime-bounded Slice of a u8 / bool
+            # [1, T] frame mask is what needs the 1-byte types.
+            (np.uint8, [1, 16], [3], [11], [1], [1], [1, 8]),
+            (np.bool_, [1, 16], [3], [11], [1], [1], [1, 8]),
+            (np.int8, [12], [2], [12], [0], [3], [4]),
+            (np.int16, [3, 4, 5], [0, 1], [2, 4], [0, 2], [1, 1], [2, 4, 3]),
+            (np.uint16, [6, 4], [1], [6], [0], [2], [3, 4]),
+            (ml_dtypes.bfloat16, [4, 6], [1], [5], [1], [1], [4, 4]),
+            (np.float64, [5, 3], [1], [4], [0], [1], [3, 3]),
         ],
     )
     def test_slice_positive_step_runtime(
@@ -491,7 +503,12 @@ class TestSlice:
             constant_indices=False,
         )
         rng = np.random.default_rng(501)
-        if np.issubdtype(dtype, np.integer):
+        if dtype == np.bool_:
+            x = rng.integers(0, 2, shape).astype(np.bool_)
+        elif np.issubdtype(dtype, np.unsignedinteger):
+            # Full range, so a value with the top bit set is moved too.
+            x = rng.integers(0, np.iinfo(dtype).max, shape, dtype=dtype, endpoint=True)
+        elif np.issubdtype(dtype, np.integer):
             x = rng.integers(-50, 50, shape, dtype=dtype)
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
