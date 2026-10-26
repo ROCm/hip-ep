@@ -60,8 +60,15 @@ they already keep separate tune caches at runtime — they need separate rows fo
 the same reason.
 
 Row stride is part of the prefill key because a padded buffer has a different
-winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so the two layouts must not
-share a row.
+winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so layouts must not share a
+row. Each pad is its own category, matched exactly: `Arrival` (dense),
+`Padded` (arrival + 128 B: the per-call repack, and the 128-byte row pads) and
+`Padded256` (arrival + 256 B: the load-time default pad). The lookup takes the
+pad from the request's row pitch (a pitch of K/2 is dense); a pad with no
+category skips the point groups and goes to the phase's fallback, so a
+lookup never uses a point measured at another pitch. The sweep driver logs the
+pad of each `prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it
+to the category.
 
 ## Row pads
 

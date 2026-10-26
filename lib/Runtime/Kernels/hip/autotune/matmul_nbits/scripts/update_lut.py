@@ -48,12 +48,18 @@ KERNEL_ABI = "matmul_nbits-v1"
 
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
+# prefill_padrow is measured at arrival + `pad=` bytes (128 when the sweep log
+# predates the field); each pad is its own row-stride category.
 PATH_TO_PHASE = {"prefill": "Prefill", "prefill_padrow": "Prefill",
+                 "prefill_padrow256": "Prefill",
                  "decode": "Decode", "dp4a": "DecodeDp4a"}
 PATH_TO_STRIDE = {"prefill": "Arrival", "prefill_padrow": "Padded",
+                  "prefill_padrow256": "Padded256",
                   "decode": "Any", "dp4a": "Any"}
 PATH_TO_KIND = {"prefill": "Wmma", "prefill_padrow": "Wmma",
+                "prefill_padrow256": "Wmma",
                 "decode": "Gemv", "dp4a": "Gemv"}
+PADROW_PATH = {128: "prefill_padrow", 256: "prefill_padrow256"}
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +101,7 @@ def cmd_measure(args) -> int:
 # ---------------------------------------------------------------------------
 
 SHAPE_RE = re.compile(
-    r"^#SHAPE path=(\w+) M=(\d+) N=(\d+) K=(\d+) gs=(\d+) zp=(\d+)")
+    r"^#SHAPE path=(\w+) M=(\d+) N=(\d+) K=(\d+) gs=(\d+) zp=(\d+)(?: pad=(\d+))?")
 WMMA_WIN_RE = re.compile(
     r"WMMA autotune:.*-> best config\[(\d+)\] (fused|dq\+gemm) "
     r"bm=(\d+) bn=(\d+) sw=(\d+) wt=(\d+)x(\d+) bk=(\d+)"
@@ -163,7 +169,16 @@ def parse_log(path: Path):
             if m:
                 if cur is not None:
                     n_orphan += 1          # marker with no winner line after
-                cur = (m.group(1), int(m.group(2)), int(m.group(3)),
+                path_kind = m.group(1)
+                if path_kind == "prefill_padrow":
+                    path_kind = PADROW_PATH.get(int(m.group(7) or 128))
+                    if path_kind is None:
+                        print(f"[build] {path.name}: no row-stride category for "
+                              f"pad={m.group(7)}, skipping: {line.strip()}",
+                              file=sys.stderr)
+                        cur, times = None, {}
+                        continue
+                cur = (path_kind, int(m.group(2)), int(m.group(3)),
                        int(m.group(4)), int(m.group(5)), int(m.group(6)))
                 times = {}
                 continue

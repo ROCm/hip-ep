@@ -17,7 +17,9 @@
 #include <utility>
 #include <vector>
 
+#if !defined(HIPDNN_EP_MATMUL_NBITS_AUTOTUNE_GPU_FREE)
 #include <hip/hip_runtime.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -141,6 +143,18 @@ struct Table {
 Table& table();
 
 std::string currentGpuArch() {
+#if defined(HIPDNN_EP_MATMUL_NBITS_AUTOTUNE_GPU_FREE)
+  // No device to ask; the arch a table is checked against comes from the
+  // environment, so a build machine can query a shipped .fb without a GPU.
+#ifdef _WIN32
+  char buf[64];
+  DWORD n = GetEnvironmentVariableA("HIPDNN_EP_MATMUL_NBITS_ARCH", buf, sizeof(buf));
+  return (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : std::string();
+#else
+  const char* v = getenv("HIPDNN_EP_MATMUL_NBITS_ARCH");
+  return v ? std::string(v) : std::string();
+#endif
+#else
   hipDeviceProp_t props;
   if (hipGetDeviceProperties(&props, 0) != hipSuccess)
     return std::string();
@@ -149,6 +163,7 @@ std::string currentGpuArch() {
   // stamped with the bare arch.
   const size_t colon = arch.find(':');
   return colon == std::string::npos ? arch : arch.substr(0, colon);
+#endif
 }
 
 /* A point must classify every field it is keyed on, carry positive dims, and
@@ -167,6 +182,7 @@ bool pointConsistent(const fbs::MatmulNbitsTunePoint& p, fbs::MatmulNbitsConfigK
   // one would land in a group no decode lookup builds.
   const bool prefill = p.phase() == fbs::MatmulNbitsPhase::Prefill;
   if (prefill != (p.row_stride() != fbs::MatmulNbitsRowStride::Any)) return false;
+  if (p.row_stride() > fbs::MatmulNbitsRowStride::MAX) return false;
 
   // The referenced config has to match the path it will be handed to.
   return kind == (prefill ? fbs::MatmulNbitsConfigKind::Wmma : fbs::MatmulNbitsConfigKind::Gemv);
@@ -407,16 +423,29 @@ Result resolve(const Request& request, WmmaValidator wmma_valid,
   const fbs::MatmulNbitsGroupSize gs = groupSizeClass(request.group_size);
   const fbs::MatmulNbitsZeroPoint zp =
       request.has_zp ? fbs::MatmulNbitsZeroPoint::Asymmetric : fbs::MatmulNbitsZeroPoint::Symmetric;
-  const fbs::MatmulNbitsRowStride stride =
-      !prefill ? fbs::MatmulNbitsRowStride::Any
-               : (request.b_row_bytes ? fbs::MatmulNbitsRowStride::Padded
-                                      : fbs::MatmulNbitsRowStride::Arrival);
+  fbs::MatmulNbitsRowStride stride = fbs::MatmulNbitsRowStride::Any;
+  bool classified = true;
+  if (prefill && request.b_row_bytes == 0) {
+    stride = fbs::MatmulNbitsRowStride::Arrival;
+  } else if (prefill) {
+    const int arrival = request.group_size > 0
+                            ? (request.k + request.group_size - 1) /
+                                  request.group_size * (request.group_size / 2)
+                            : request.k / 2;
+    switch (request.b_row_bytes - arrival) {
+    case 0:   stride = fbs::MatmulNbitsRowStride::Arrival; break;
+    case 128: stride = fbs::MatmulNbitsRowStride::Padded; break;
+    case 256: stride = fbs::MatmulNbitsRowStride::Padded256; break;
+    default:  classified = false; break;
+    }
+  }
 
   const float qm = std::log2(static_cast<float>(request.m < 1 ? 1 : request.m));
   const float qn = std::log2(static_cast<float>(request.n));
   const float qk = std::log2(static_cast<float>(request.k));
 
-  const auto git = t.groups.find(groupKey(phase, bits, gs, zp, stride));
+  const auto git = classified ? t.groups.find(groupKey(phase, bits, gs, zp, stride))
+                              : t.groups.end();
   if (git != t.groups.end()) {
     const std::vector<Point>& pts = git->second;
 

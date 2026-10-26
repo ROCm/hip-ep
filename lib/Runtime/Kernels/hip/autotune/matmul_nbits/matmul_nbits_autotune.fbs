@@ -78,11 +78,14 @@ enum MatmulNbitsZeroPoint : ubyte {
   Asymmetric = 2
 }
 
-// Prefill only; decode points carry Any.
+// Prefill only; decode points carry Any. The pad changes the winner, so each
+// pad is its own category: a lookup never uses a point measured at another
+// pitch, and a pad without a category goes to the phase's fallback.
 enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
-  Padded = 2       // arrival + one 128 B cache line
+  Padded = 2,      // arrival + 128 B (the per-call repack, a 128 B row pad)
+  Padded256 = 3    // arrival + 256 B (hip-pad-matmul-nbits-weights' default)
 }
 
 // ---------------------------------------------------------------------------
