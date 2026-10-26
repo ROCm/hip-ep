@@ -72,8 +72,8 @@ bool isIdentity(ArrayRef<int64_t> perm) {
 ///
 /// which makes the single equivalent permutation `firstPerm[secondPerm[i]]`.
 /// Getting the order backwards still yields a permutation, and still verifies,
-/// so the bounds check below is the only thing standing between a typo and
-/// silently reinterpreted data.
+/// so the rewrite also checks the result against the types
+/// (permutesIntoResultType).
 bool composePermutations(ArrayRef<int64_t> firstPerm,
                          ArrayRef<int64_t> secondPerm,
                          SmallVectorImpl<int64_t> &composed) {
@@ -85,6 +85,30 @@ bool composePermutations(ArrayRef<int64_t> firstPerm,
     composed.push_back(firstPerm[index]);
   }
   return true;
+}
+
+/// Whether permuting `source` by `perm` gives `result`'s shape and element
+/// type. TransposeOp's verifier checks only that `perm` is a permutation, not
+/// that it agrees with the types, so a composed permutation that disagrees
+/// would verify and then move data differently from what the result type
+/// describes. A dimension dynamic on either side cannot be compared and is
+/// accepted.
+bool permutesIntoResultType(Value source, Value result,
+                            ArrayRef<int64_t> perm) {
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  auto resultType = dyn_cast<RankedTensorType>(result.getType());
+  if (!sourceType || !resultType ||
+      sourceType.getElementType() != resultType.getElementType() ||
+      sourceType.getRank() != resultType.getRank() ||
+      static_cast<int64_t>(perm.size()) != resultType.getRank())
+    return false;
+  return llvm::all_of(llvm::seq<int64_t>(0, resultType.getRank()),
+                      [&](int64_t i) {
+                        int64_t from = sourceType.getDimSize(perm[i]);
+                        int64_t to = resultType.getDimSize(i);
+                        return ShapedType::isDynamic(from) ||
+                               ShapedType::isDynamic(to) || from == to;
+                      });
 }
 
 /// The Transpose that runs before `second`, only if it feeds `second` its data.
@@ -138,6 +162,11 @@ struct FoldTransposeChain : public OpRewritePattern<TransposeOp> {
     if (!first->getResult(0).hasOneUse())
       return rewriter.notifyMatchFailure(first,
                                          "intermediate has other readers");
+
+    if (!permutesIntoResultType(first.getInput(), second->getResult(0),
+                                composed))
+      return rewriter.notifyMatchFailure(
+          second, "composed permutation disagrees with the result type");
 
     // The destination this op already owns has the result type and is defined
     // ahead of it, so it dominates its new use.
