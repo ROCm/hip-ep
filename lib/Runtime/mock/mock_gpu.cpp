@@ -1678,16 +1678,29 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size, int64_t scale_elem_size,
-                      int64_t b_row_bytes) {
+                      int64_t zp_elem_size, int64_t scale_elem_size) {
+  return wrap_matmul_nbits_ex(state, op_state_slot, A, B, scales, zero_points,
+                              g_idx, bias, output, M, N, K, batch_count, bits,
+                              block_size, elem_size, zp_elem_size,
+                              scale_elem_size, /*b_row_bytes=*/0);
+}
+
+int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, const void *scales,
+                         const void *zero_points, const void *g_idx,
+                         const void *bias, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t bits,
+                         int64_t block_size, int64_t elem_size,
+                         int64_t zp_elem_size, int64_t scale_elem_size,
+                         int64_t b_row_bytes) {
   (void)op_state_slot;
   (void)scale_elem_size;
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
+    fprintf(stderr, "Invalid state in wrap_matmul_nbits_ex\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
+  MOCK_PRINT("[MOCK] wrap_matmul_nbits_ex(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
              "zero_points=%s, g_idx=%s, bias=%s, b_row_bytes=%lld)\n",
              (long long)M, (long long)N, (long long)K, (long long)batch_count,

@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.matmul_nbits is correctly lowered to an LLVM call to
-// wrap_matmul_nbits runtime function.
+// wrap_matmul_nbits_ex runtime function.
 //
 // This test validates:
-// - Runtime call generation (hip.matmul_nbits → llvm.call @wrap_matmul_nbits)
+// - Runtime call generation (hip.matmul_nbits → llvm.call @wrap_matmul_nbits_ex)
 // - Pointer extraction for required operands (A, B, scales, output)
 // - Null pointer generation for absent optional operands (zero_points, g_idx, bias)
 // - Pointer extraction for present optional operands
@@ -37,7 +37,7 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_basic
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // Verify 19 parameters:
@@ -67,7 +67,7 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_with_zp
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
@@ -89,7 +89,7 @@ module {
   }
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_2d
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
   // M=128, batch_count=1 (2D: no batch dims)
@@ -113,5 +113,5 @@ module {
 
   // CHECK-LABEL: llvm.func @test_matmul_nbits_row_padded
   // CHECK: %[[PITCH:.*]] = llvm.mlir.constant(2176 : i64) : i64
-  // CHECK: llvm.call @wrap_matmul_nbits({{.*}}, %[[PITCH]]) :
+  // CHECK: llvm.call @wrap_matmul_nbits_ex({{.*}}, %[[PITCH]]) :
 }

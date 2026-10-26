@@ -90,7 +90,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
+        rewriter, module, kWrapMatMulNBitsEx, paramTypes, i32Type);
     if (failed(funcOp)) {
       return failure();
     }

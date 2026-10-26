@@ -201,6 +201,16 @@ The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, and grow-on-demand runtime contract.
 
+The runtime functions those calls name are an ABI between artifacts and
+runtimes of different builds: the model cache identity comes from the graph,
+so a cached artifact can be loaded by a newer runtime. A runtime function
+therefore keeps its signature once generated code calls it; a new argument
+goes into a new symbol that new lowering calls, and the old symbol forwards
+with the value that reproduces its old behavior. For example,
+`wrap_matmul_nbits` forwards to `wrap_matmul_nbits_ex` with
+`b_row_bytes = 0` (the arrival layout), and `hip.matmul_nbits` lowers to
+`wrap_matmul_nbits_ex`.
+
 ---
 
 ## Consumers

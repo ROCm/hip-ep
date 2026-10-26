@@ -1576,6 +1576,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 // A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
 // scales: [N x k_blocks], output: [batch_count x M x N]
 // Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+// Model artifacts compiled before wrap_matmul_nbits_ex call this signature,
+// and the model cache key does not cover the runtime ABI, so it stays as is;
+// it forwards with b_row_bytes = 0.
 int wrap_matmul_nbits(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (zp-cache home)
@@ -1594,8 +1597,17 @@ int wrap_matmul_nbits(
     int64_t block_size,      // quantization block size
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
-    int64_t scale_elem_size, // scales element size in bytes: 2=fp16, 4=fp32
-    int64_t b_row_bytes);    // B row pitch in bytes; 0 = arrival layout
+    int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
+
+// wrap_matmul_nbits with the B row pitch the compiler laid B out with
+// (hip-pad-matmul-nbits-weights); hip.matmul_nbits lowers to this.
+int wrap_matmul_nbits_ex(
+    RuntimeState *state, int op_state_slot, const void *A, const void *B,
+    const void *scales, const void *zero_points, const void *g_idx,
+    const void *bias, void *output, int64_t M, int64_t N, int64_t K,
+    int64_t batch_count, int64_t bits, int64_t block_size, int64_t elem_size,
+    int64_t zp_elem_size, int64_t scale_elem_size,
+    int64_t b_row_bytes); // B row pitch in bytes; 0 = arrival layout
 
 // Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
