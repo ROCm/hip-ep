@@ -210,6 +210,40 @@ static mlir::Value resolveHostIndex(mlir::OpBuilder &b, mlir::Location loc,
 
   llvm::StringRef opName = def->getName().getStringRef();
 
+  // Reshape-like ops keep row-major element order, so element idx of the
+  // result is element idx of the source. Exporters wrap scalar shape
+  // arithmetic in Unsqueeze to build 1-D Slice bounds -- Whisper's
+  // `Slice(embed_positions, Unsqueeze(past_len), Unsqueeze(past_len + len))`
+  // -- which converts to `tensor.expand_shape`.
+  if (mlir::isa<mlir::tensor::ExpandShapeOp, mlir::tensor::CollapseShapeOp,
+                mlir::tensor::ReshapeOp>(def) ||
+      opName == "onnx.Unsqueeze" || opName == "onnx.Squeeze" ||
+      opName == "onnx.Reshape" || opName == "onnx.Flatten")
+    return resolveHostIndex(b, loc, def->getOperand(0), idx, depth + 1);
+
+  // `Gather(Shape(x), k)` on the 1-D shape vector with compile-time indices:
+  // element idx is element indices[idx] of the data.
+  if (opName == "onnx.Gather") {
+    mlir::Value data = def->getOperand(0);
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType || dataType.getRank() != 1 || !dataType.hasStaticShape())
+      return {};
+    if (auto axisAttr = def->getAttrOfType<mlir::IntegerAttr>("axis"))
+      if (axisAttr.getSInt() != 0 && axisAttr.getSInt() != -1)
+        return {};
+    mlir::DenseElementsAttr indices =
+        getCompileTimeConstantTensor(def->getOperand(1));
+    if (!indices || idx >= indices.getNumElements())
+      return {};
+    int64_t k =
+        (*(indices.getValues<mlir::APInt>().begin() + idx)).getSExtValue();
+    if (k < 0)
+      k += dataType.getDimSize(0);
+    if (k < 0 || k >= dataType.getDimSize(0))
+      return {};
+    return resolveHostIndex(b, loc, data, k, depth + 1);
+  }
+
   // Unconverted onnx.Shape: element idx is dim (start + idx) of the operand.
   // `start` is normalized as ShapeToTensorDims normalizes it; `end` only bounds
   // how many elements exist, which the caller-side extent check above covers.
