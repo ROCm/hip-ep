@@ -437,10 +437,9 @@ private:
 
     if (!plan.externalize)
       return materializeExternalSource(plan);
-    // A full constants file holds the stored (padded) bytes; streaming keeps
-    // the dense source and the runtime loader pads at upload.
-    if (plan.rowBytes && !skipData)
-      return readSourceBytes(plan);
+    // A full constants file holds the stored (padded) bytes, which the writer
+    // expands one row at a time from the dense source; streaming keeps the
+    // dense source and the runtime loader pads at upload.
     return success();
   }
 
@@ -657,12 +656,10 @@ private:
     entry.size = plan.size;
     entry.data = plan.data();
     entry.splat_elem_size = plan.splatElementSize;
-    // A row-padded carrier is written from its padded ownedData, never
-    // re-read from the dense source file.
-    if (!plan.rowBytes) {
-      entry.file_path = plan.filePath;
-      entry.file_offset = plan.sourceFileOffset;
-    }
+    entry.file_path = plan.filePath;
+    entry.file_offset = plan.sourceFileOffset;
+    entry.row_bytes = plan.rowBytes;
+    entry.row_pitch = plan.rowPitch;
     return entry;
   }
 
@@ -724,6 +721,8 @@ private:
       partialEntries.back().splat_elem_size = 0;
       // The partial file holds the dense source; the loader pads at upload.
       partialEntries.back().size = plan.sourceSize;
+      partialEntries.back().row_bytes = 0;
+      partialEntries.back().row_pitch = 0;
     }
 
     if (!partialEntries.empty() &&

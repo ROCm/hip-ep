@@ -274,7 +274,11 @@ The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
 `hipdnn.constant_sizes` describe the stored layout:
 
 - full constants file: the padded bytes are written, and the bulk upload copies
-  them as-is;
+  them as-is. Planning stays metadata-only: the writer
+  (`writeConstantsBinToFileSystem`, `ConstantEntry.row_bytes` / `.row_pitch`)
+  reads the dense rows from the file reference or producer memory and writes
+  each followed by its zero pad, through one buffer of at most 1 MB, so no
+  padded copy of a weight is held on the host;
 - streaming: the source stays dense (file reference, or the hybrid partial
   file), and `hipdnn.constant_row_bytes` / `hipdnn.constant_row_pitches` reach
   `ConstantInfo.row_bytes` / `.row_pitch`; the per-entry upload expands the rows

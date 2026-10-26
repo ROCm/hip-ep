@@ -41,6 +41,10 @@ namespace hip {
 ///                         lets the EP avoid mmap'ing multi-GB external
 ///                         data into the system page cache.
 ///
+/// A mem-addr or file-ref entry with `row_pitch != 0` is row-padded: `size`
+/// is its footprint in constants.bin, and the source holds only the
+/// size / row_pitch dense rows of `row_bytes`.
+///
 /// `data` lifetime (when used) is the caller's responsibility and must
 /// cover the call to `writeConstantsBinToFileSystem`.
 struct ConstantEntry {
@@ -51,6 +55,11 @@ struct ConstantEntry {
   int64_t splat_elem_size = 0; // 0 = data is already `size` bytes; >0 = splat
   std::string file_path;       // non-empty: read from disk on demand
   int64_t file_offset = 0;     // byte offset within file_path
+  // Non-zero: `data` / `file_path` hold size / row_pitch dense rows of
+  // row_bytes, each written followed by row_pitch - row_bytes zero bytes, so
+  // a row-padded constant is expanded one row at a time while it is written.
+  int64_t row_bytes = 0;
+  int64_t row_pitch = 0;
 };
 
 /// Write a constants.bin with alignment padding and tiled splat expansion
@@ -58,8 +67,9 @@ struct ConstantEntry {
 /// a 1 MB scratch tile buffer is reused across the iterated writes, so peak
 /// host memory is bounded regardless of individual constant size.
 ///
-/// Returns true on success; false if the writer could not be opened or a
-/// splat entry has invalid element size.
+/// Returns true on success; false if the writer could not be opened, a
+/// splat entry has invalid element size, a row-padded entry has inconsistent
+/// row fields, or a file-ref read fails.
 bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
                                    const std::string &filename,
                                    const std::vector<ConstantEntry> &entries,
