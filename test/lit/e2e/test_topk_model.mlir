@@ -12,7 +12,8 @@
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 2
-// CHECK: llvm.func @wrap_top_k
+// The declared 3x2 results fix K = 2, so the static entry point is used.
+// CHECK: llvm.func @wrap_top_k_static(!llvm.ptr, !llvm.ptr, i64,
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

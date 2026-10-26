@@ -5,10 +5,11 @@
 
 """Tests for the ONNX TopK op (values + indices outputs).
 
-K is supplied as a constant initializer so the ONNX shape-inference resolves
-the output extent (k) statically -- the runtime still reads k from the K
-buffer at run time (real/top_k.cpp does a D2H copy of k), so the GPU kernel is
-exercised. `largest` and `sorted` are both covered.
+K is normally supplied as a constant initializer, so the output extent (k) is
+static and the compiler passes it by value to wrap_top_k_static. One case
+instead feeds K as a graph input with a symbolic output extent, so the runtime
+reads it from the K buffer through wrap_top_k; both entry points run the same
+kernel and must agree with ORT. `largest` and `sorted` are both covered.
 
 Inputs use DISTINCT per-row values (no ties), so the selected set and its
 sorted order -- and therefore the returned indices -- are unambiguous and can
@@ -78,4 +79,28 @@ class TestTopK:
         rng = np.random.default_rng(602)
         x = _distinct_rows(rng, x_shape[0], x_shape[1])
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_topk_runtime_k(self, model_runner):
+        """K as a graph input with a symbolic output extent: the runtime reads
+        K from its buffer (wrap_top_k) instead of receiving it by value."""
+        x_shape = [3, 8]
+        k = 3
+        X = helper.make_tensor_value_info("x", np_to_onnx_type(np.float32), x_shape)
+        K = helper.make_tensor_value_info("k", np_to_onnx_type(np.int64), [1])
+        values = helper.make_tensor_value_info(
+            "values", np_to_onnx_type(np.float32), [x_shape[0], "k_out"]
+        )
+        indices = helper.make_tensor_value_info(
+            "indices", np_to_onnx_type(np.int64), [x_shape[0], "k_out"]
+        )
+        node = helper.make_node(
+            "TopK", ["x", "k"], ["values", "indices"], axis=1, largest=1, sorted=1
+        )
+        model = make_model_from_nodes([node], [X, K], [values, indices])
+        rng = np.random.default_rng(603)
+        x = _distinct_rows(rng, x_shape[0], x_shape[1])
+        actual, expected = model_runner.run_sample(
+            model, [x, np.array([k], dtype=np.int64)]
+        )
         compare_outputs(actual, expected, atol=0)
