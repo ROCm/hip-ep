@@ -255,10 +255,24 @@ static Value createExternalRankAllocationForMultiDynExpand(
   auto allocOutput = AllocOutputOp::create(
       builder, allocOp.getLoc(), externalType, ctx, externalDynamicSizes,
       builder.getI64IntegerAttr(outIdx));
+  auto collapsedType = expand.getSrcType();
   auto internalView = memref::CollapseShapeOp::create(
-      builder, allocOp.getLoc(), internalType, allocOutput.getResult(),
+      builder, allocOp.getLoc(), collapsedType, allocOutput.getResult(),
       expand.getReassociationIndices());
-  return internalView.getResult();
+  Value replacement = internalView.getResult();
+  if (collapsedType != internalType) {
+    if (!memref::CastOp::areCastCompatible(collapsedType, internalType)) {
+      allocOp.emitError() << "cannot cast collapsed graph-output view from "
+                          << collapsedType << " to allocation type "
+                          << internalType;
+      return {};
+    }
+    replacement = memref::CastOp::create(builder, allocOp.getLoc(),
+                                         internalType, replacement);
+  }
+  assert(replacement.getType() == internalType &&
+         "graph-output replacement must match the allocation type");
+  return replacement;
 }
 
 /// Walk cast / reshape / subview chains back to the buffer they view.

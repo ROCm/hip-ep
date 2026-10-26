@@ -242,6 +242,7 @@ func.func @expand_output(%ctx: !hip.context) -> memref<1x64x56x56xf32> {
 // CHECK-NOT:     memref.alloc
 // CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[B]], %[[S]]) {out_idx = 0 : i64} : memref<?x?x64xf16>
 // CHECK:         %[[INTERNAL:.*]] = memref.collapse_shape %[[OUT]] {{\[\[}}0, 1], [2]]
+// CHECK-NOT:     memref.cast
 // CHECK:         %[[RETURNED:.*]] = memref.expand_shape %[[INTERNAL]] {{\[\[}}0, 1], [2]] output_shape [%[[B]], %[[S]], 64]
 // CHECK:         return %[[RETURNED]]
 func.func @expand_output_two_dynamic(
@@ -276,6 +277,53 @@ func.func @expand_output_two_dynamic_then_cast(
   %cast = memref.cast %expanded
        : memref<?x?x64xf16> to memref<?x?x?xf16>
   return %cast : memref<?x?x?xf16>
+}
+
+// --- A cast before expand_shape may hide the allocation's static extent.
+//     Collapse to the expand source type first, then cast back to the exact
+//     allocation type required by RAUW. ---
+// CHECK-LABEL: func.func @expand_dynamic_source_from_static_alloc
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[A:.*]]: index, %[[B:.*]]: index)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[A]], %[[B]]) {out_idx = 0 : i64} : memref<?x?xf32>
+// CHECK:         %[[COLLAPSED:.*]] = memref.collapse_shape %[[OUT]] {{\[\[}}0, 1]] : memref<?x?xf32> into memref<?xf32>
+// CHECK:         %[[INTERNAL:.*]] = memref.cast %[[COLLAPSED]] : memref<?xf32> to memref<16xf32>
+// CHECK:         %[[DYNAMIC:.*]] = memref.cast %[[INTERNAL]] : memref<16xf32> to memref<?xf32>
+// CHECK:         %[[EXPANDED:.*]] = memref.expand_shape %[[DYNAMIC]] {{\[\[}}0, 1]] output_shape [%[[A]], %[[B]]]
+// CHECK:         %[[RESULT:.*]] = memref.cast %[[EXPANDED]] : memref<?x?xf32> to memref<4x4xf32>
+// CHECK:         return %[[RESULT]]
+func.func @expand_dynamic_source_from_static_alloc(
+    %ctx: !hip.context, %a: index, %b: index) -> memref<4x4xf32> {
+  %buffer = memref.alloc() : memref<16xf32>
+  %dynamic = memref.cast %buffer : memref<16xf32> to memref<?xf32>
+  %expanded = memref.expand_shape %dynamic [[0, 1]]
+      output_shape [%a, %b]
+      : memref<?xf32> into memref<?x?xf32>
+  %result = memref.cast %expanded
+      : memref<?x?xf32> to memref<4x4xf32>
+  return %result : memref<4x4xf32>
+}
+
+// --- The same cast path works when another reassociation group is preserved.
+//     Only the split group changes rank; the trailing static extent remains
+//     unchanged in the collapsed compute view. ---
+// CHECK-LABEL: func.func @expand_dynamic_source_from_static_rank_two_alloc
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[A:.*]]: index, %[[B:.*]]: index)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[A]], %[[B]]) {out_idx = 0 : i64} : memref<?x?x64xf32>
+// CHECK:         %[[COLLAPSED:.*]] = memref.collapse_shape %[[OUT]] {{\[\[}}0, 1], [2]] : memref<?x?x64xf32> into memref<?x64xf32>
+// CHECK:         %[[INTERNAL:.*]] = memref.cast %[[COLLAPSED]] : memref<?x64xf32> to memref<16x64xf32>
+// CHECK:         %[[DYNAMIC:.*]] = memref.cast %[[INTERNAL]] : memref<16x64xf32> to memref<?x64xf32>
+// CHECK:         %[[EXPANDED:.*]] = memref.expand_shape %[[DYNAMIC]] {{\[\[}}0, 1], [2]] output_shape [%[[A]], %[[B]], 64]
+// CHECK:         return %[[EXPANDED]]
+func.func @expand_dynamic_source_from_static_rank_two_alloc(
+    %ctx: !hip.context, %a: index, %b: index) -> memref<?x?x64xf32> {
+  %buffer = memref.alloc() : memref<16x64xf32>
+  %dynamic = memref.cast %buffer : memref<16x64xf32> to memref<?x64xf32>
+  %expanded = memref.expand_shape %dynamic [[0, 1], [2]]
+      output_shape [%a, %b, 64]
+      : memref<?x64xf32> into memref<?x?x64xf32>
+  return %expanded : memref<?x?x64xf32>
 }
 
 // --- A chain of view ops (collapse_shape -> cast) before the return: the alloc
