@@ -10,7 +10,8 @@
 // This header defines the internal structure of RuntimeState.
 // Only runtime implementation files should include this header.
 //
-// Public interface uses opaque pointer (see hipdnn_ep_runtime.h).
+// Public plugin interface uses an opaque pointer (see
+// hip/Runtime/PluginAPI.h).
 //
 //===----------------------------------------------------------------------===//
 
