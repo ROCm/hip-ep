@@ -628,8 +628,6 @@ jobs:
             }
           }
 
-      # Not filtered by --status success: a main run whose GPU test failed
-      # still uploads gpu-perf-results.
       - name: Download main perf baseline
         if: always()
         shell: pwsh
@@ -644,7 +642,26 @@ jobs:
             Remove-Item -LiteralPath $baselineDir -Recurse -Force
           }
 
-          $runsJson = gh run list -R $repo --workflow "Windows Build" --branch main --event push --limit 20 --json databaseId,headSha,url 2>$null
+          function Test-CompleteBaseline($path) {
+            $data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            foreach ($suite in @("oga", "vlm")) {
+              $entries = @()
+              if ($null -ne $data.$suite) {
+                $entries = @($data.$suite.PSObject.Properties | ForEach-Object { $_.Value })
+              }
+              if ($entries.Count -eq 0) {
+                return $false
+              }
+              foreach ($e in $entries) {
+                if ($null -eq $e.ttft_ms -or $null -eq $e.tps) {
+                  return $false
+                }
+              }
+            }
+            return $true
+          }
+
+          $runsJson = gh run list -R $repo --workflow "Windows Build" --branch main --event push --status success --limit 20 --json databaseId,headSha,url 2>$null
           if ($LASTEXITCODE -ne 0 -or -not $runsJson) {
             Write-Host "WARNING: gh run list failed, no main perf baseline"
             exit 0
@@ -664,6 +681,11 @@ jobs:
             New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
             gh run download $run.databaseId -R $repo -n gpu-perf-results -D $baselineDir 2>$null
             if (Test-Path -LiteralPath "$baselineDir/perf-results.json") {
+              if (-not (Test-CompleteBaseline "$baselineDir/perf-results.json")) {
+                Write-Host "Skipping run $($run.databaseId): incomplete perf-results.json"
+                Remove-Item -LiteralPath $baselineDir -Recurse -Force -ErrorAction SilentlyContinue
+                continue
+              }
               $sha7 = $run.headSha.Substring(0, 7)
               Set-Content -LiteralPath "$baselineDir/source.md" -Value "run [$($run.databaseId)]($($run.url)) - ``$sha7``"
               Write-Host "Main perf baseline: run $($run.databaseId) ($sha7)"
