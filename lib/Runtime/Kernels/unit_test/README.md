@@ -66,6 +66,9 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gqa-decode-xfp16-wi8-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -87,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 13 leaves serially, with `bin` as the working
+The controller runs the 16 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -190,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 12-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -212,9 +215,9 @@ X<xdtype>_W<wdtype>_Y<ydtype>[_ZP<zpdtype>][_other]
 
 | Token | Meaning |
 |---|---|
-| `X` | activation / input (MatMulNBits A, GQA Q) |
-| `W` | weight / KV (MatMulNBits packed B, GQA K/V cache) |
-| `Y` | output (MatMulNBits C, GQA O) |
+| `X` | activation / input (MatMulNBits A, GQA Q, GatherBlockQuantized indices) |
+| `W` | weight / KV (MatMulNBits packed B, GQA K/V cache, GatherBlockQuantized data) |
+| `Y` | output (MatMulNBits C, GQA O, GatherBlockQuantized output) |
 | `_ZP…` | only if zero-point storage is a distinguishing feature of this leaf (`_ZPu8`, `_ZPfp16`, …) |
 
 Examples:
@@ -254,6 +257,7 @@ unit_test/
   gqa/prefill/Xfp16_Wfp16_Yfp16/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
+  gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -365,6 +369,15 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   counts on both sides of each GEMV / WMMA16 / WMMA64 boundary, the bucket
   descriptors, the task-policy and launch-grid selectors, and one
   FC1 -> SwiGLU -> FC2 pipeline.
+- **gather_block_quantized** (u4, u8 and fp8 weights as separate leaves):
+  compact rows `{off,on}` x indices rank `{1,2}`, crossed for u4 / u8 with
+  zero points `{off,on}` x signedness `{unsigned,signed}` (16 combos) and for
+  fp8 with scale granularity `{per-tensor [1,1], per-row, blockwise}` (12
+  combos), on a shape list COVERAGE thins (tier1 = 2 shapes, tier2 = 4,
+  tier3 = 6; rows `1024..8192`, row length `64..3840`, block size
+  `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
+  and last rows, negative and out-of-range indices. Outputs are compared
+  bit-exactly with the CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -536,6 +549,10 @@ decode `B1_H64_G8_D64_len2048` and prefill `B1_H64_G8_D64_sq512_past0`, with
 input layout) with `_bias` and `_zp` when set, and names its selector,
 descriptor and pipeline cases (`task_policy_fc1`, `launcher_grid`,
 `descriptors_E11_P304_k1`, `pipeline_T20_E5_k2_H32_I16_bs32`).
+gather_block_quantized writes `R1024_C160_bs16_I2x8` (table rows, row length,
+block size, indices shape) with `_compact`, `_zp` and `_signed` when set, or
+the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
+`fixed:elementwise` and its `time_ms` 0.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
 leaf's fixed count of launches between two HIP events), not a total, and it is

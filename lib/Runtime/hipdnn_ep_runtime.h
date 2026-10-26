@@ -1179,6 +1179,17 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
+// Axis-0 gather whose data is disk-resident constant `constant_index`: rows
+// are read from its source file on the host and copied into `output`.
+// Synchronizes `state->stream`.
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
@@ -1629,6 +1640,18 @@ int wrap_gather_block_quantized(
     int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
+
+// wrap_gather_block_quantized with gather_axis 0 whose data is disk-resident
+// constant `constant_index`: the selected rows are read from its source file
+// on the host. Synchronizes `state->stream`.
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype);
 
 // QuantizeLinear / DequantizeLinear wrappers (ONNX opset 23).
 //
