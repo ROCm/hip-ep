@@ -7,6 +7,8 @@
 
 #include <cstdint>
 
+#include "matmul_nbits_row_pad_abi.h"
+
 /* MatMulNBits offline autotune lookup.
  *
  * Sits between the in-process tune map and the runtime sweep:
@@ -116,16 +118,14 @@ using GemvValidator = bool (*)(void* ctx, const GemvAnswer&);
 Result resolve(const Request& request, WmmaValidator wmma_valid,
                GemvValidator gemv_valid, void* ctx);
 
-/* The table's per-weight row pads for this device, as comma-separated
- * `N:K:block_size:zero_points=pad_bytes` entries (the hip-pad-matmul-nbits-
- * weights `row-pads` format). Empty when the table is absent, incompatible or
- * has none. The string lives for the process. */
-const char* rowPadTable();
-
-/* The table's pad, in bytes, for an aliasing weight the row-pad list does not
- * name. 0 when the table is absent, incompatible or sets none: such weights
- * then stay dense and the runtime repacks them per call. */
-int defaultRowPad();
+/* The row-pad policy of the table for `arch` (NULL or "": this device), as
+ * hip_matmul_nbits_u4_row_pads exports it (matmul_nbits_row_pad_abi.h):
+ * *default_pad is the pad for an aliasing weight no entry names (0: weights
+ * stay dense and the runtime repacks them per call), the first
+ * min(count, capacity) entries are copied, and the entry count is returned;
+ * -1 when no embedded table was measured on `arch`. */
+int rowPads(const char* arch, int32_t* default_pad, HipMatmulNBitsRowPad* entries,
+            int32_t capacity);
 
 /* Whether the table names an extended WMMA entry, i.e. the device was measured
  * with them. Only then does the runtime sweep time them too. */

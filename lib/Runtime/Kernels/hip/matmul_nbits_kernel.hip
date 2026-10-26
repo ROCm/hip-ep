@@ -6083,12 +6083,10 @@ extern "C" size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K) {
     return static_cast<size_t>(N) * ((K / 2) + kU4PadRowBytes);
 }
 
-extern "C" const char* hip_matmul_nbits_u4_row_pad_table() {
-    return matmul_lut::rowPadTable();
-}
-
-extern "C" int hip_matmul_nbits_u4_default_row_pad() {
-    return matmul_lut::defaultRowPad();
+extern "C" int hip_matmul_nbits_u4_row_pads(const char* arch, int32_t* default_pad,
+                                            HipMatmulNBitsRowPad* entries,
+                                            int32_t capacity) {
+    return matmul_lut::rowPads(arch, default_pad, entries, capacity);
 }
 
 /* Callers are gated on group_size dividing K (see the host wrapper), so the

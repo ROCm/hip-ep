@@ -35,6 +35,7 @@
 // pluginLibraryPaths). Provided by LibHipCompiler, which every host linking
 // this lib also links (see this dir's CMakeLists).
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Support/GenericTarget.h"
 #include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 
 #include <glog/logging.h>
@@ -361,21 +362,6 @@ std::string detectCustomKernelArch() {
   return arch;
 }
 
-std::string genericTargetFor(llvm::StringRef arch) {
-  return llvm::StringSwitch<std::string>(arch)
-      .Cases({"gfx900", "gfx902", "gfx904", "gfx906", "gfx909", "gfx90c"},
-             "gfx9-generic")
-      .Cases({"gfx942", "gfx950"}, "gfx9-4-generic")
-      .Cases({"gfx1010", "gfx1011", "gfx1012", "gfx1013"}, "gfx10-1-generic")
-      .Cases({"gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035",
-              "gfx1036"},
-             "gfx10-3-generic")
-      .Cases({"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
-              "gfx1152", "gfx1153"},
-             "gfx11-generic")
-      .Cases({"gfx1200", "gfx1201"}, "gfx12-generic")
-      .Default("");
-}
 #endif // HIPDNN_EP_LINK_HIP_HOST
 
 // Resolve a plugin's addLibrary() argument to a file on disk. Accepts a path
@@ -482,7 +468,7 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   {
     const std::string arch = detectCustomKernelArch();
     std::vector<std::string> archs{arch};
-    if (std::string generic = genericTargetFor(arch); !generic.empty()) {
+    if (std::string generic = hip::genericTargetFor(arch); !generic.empty()) {
       archs.push_back(std::move(generic));
     }
 

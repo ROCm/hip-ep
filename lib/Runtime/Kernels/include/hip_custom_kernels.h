@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "matmul_nbits_row_pad_abi.h"
+
 // Exports each launcher from the per-arch kernel shared library
 // (custom_kernels_<arch>.{dll,so}), which the model artifact resolves at load
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
@@ -2715,21 +2717,19 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16_ex(
  *   winner reflects the layout actually in use. Returns -1 when no fused
  *   config is eligible, leaving the caller to use the arrival-layout path.
  *
- * hip_matmul_nbits_u4_row_pad_table: the autotune table's per-weight row pads
- *   for the running device, as comma-separated
- *   `N:K:block_size:zero_points=pad_bytes` entries, read by the compiler for
- *   hip-pad-matmul-nbits-weights. Empty when the device has no table or the
- *   table has no row pads. The string lives for the process.
- *
- * hip_matmul_nbits_u4_default_row_pad: the table's pad, in bytes, for an
- *   aliasing int4 weight the row-pad list does not name. 0 (the device has no
- *   table, or its table was not measured with weights padded at load) keeps
- *   such weights dense, and the runtime repacks them per call as before.
+ * hip_matmul_nbits_u4_row_pads: the autotune table's row-pad policy for an
+ *   arch (NULL: the running device), read by the compiler for
+ *   hip-pad-matmul-nbits-weights; see HipMatmulNBitsRowPadsFn in
+ *   matmul_nbits_row_pad_abi.h. A default pad of 0 (the arch has no table, or
+ *   its table was not measured with weights padded at load) keeps aliasing
+ *   weights dense, and the runtime repacks them per call as before.
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
 
-HIP_KERNEL_API const char* hip_matmul_nbits_u4_row_pad_table();
-HIP_KERNEL_API int hip_matmul_nbits_u4_default_row_pad();
+HIP_KERNEL_API int hip_matmul_nbits_u4_row_pads(const char* arch,
+                                                int32_t* default_pad,
+                                                HipMatmulNBitsRowPad* entries,
+                                                int32_t capacity);
 
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);

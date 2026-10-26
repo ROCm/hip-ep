@@ -150,6 +150,7 @@ target_compile_definitions(test-matmul-nbits-autotune PRIVATE
 )
 target_include_directories(test-matmul-nbits-autotune PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
 )
 target_link_libraries(test-matmul-nbits-autotune PRIVATE HipSchemasLib)
 add_test(NAME MatMulNBitsAutotuneUnitTest COMMAND test-matmul-nbits-autotune)

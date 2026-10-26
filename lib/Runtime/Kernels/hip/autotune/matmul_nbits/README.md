@@ -88,7 +88,7 @@ fastest. For the shapes of the measured models, gfx1151's padded rows are
 measured at each weight's stored pad (`Padded256`, or `Padded` for a 128-byte
 entry), so layout and rows come from the same data; its other `Padded` rows are
 the per-call repack sweep's (arrival + 128 B). The compiler reads both through
-`hip_matmul_nbits_u4_default_row_pad()` and `hip_matmul_nbits_u4_row_pad_table()`.
+`hip_matmul_nbits_u4_row_pads(arch, ...)` (`matmul_nbits_row_pad_abi.h`).
 `update_lut.py build` and `merge` carry them over unchanged from
 `lut/<arch>.json` (`--carry-from` names another table). `--out` names the JSON
 those steps write and `compile` reads; `--fb-out` the binary, which defaults to

@@ -22,6 +22,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <vector>
 
 extern "C" const unsigned char *const kMatmulNbitsLutBlobs[];
 extern "C" const size_t kMatmulNbitsLutBlobSizes[];
@@ -128,6 +129,32 @@ int main() {
           "M=%d N=%d K=%d gs=%d pad=192: source %d, expected Fallback", m, n, k,
           gs, static_cast<int>(r.source));
   }
+
+  // The row-pad export by arch (what the compiler reads): an explicit arch and
+  // this device (the table's own arch here) agree; an arch with no embedded
+  // table has none; the count does not depend on the caller's capacity.
+  int32_t pad_dev = -1, pad_arch = -1, pad_small = -1;
+  const int n_dev = mna::rowPads(nullptr, &pad_dev, nullptr, 0);
+  std::vector<HipMatmulNBitsRowPad> got(n_dev > 0 ? n_dev : 0);
+  const int n_arch = mna::rowPads(lut->gpu_arch()->c_str(), &pad_arch,
+                                  got.data(), static_cast<int32_t>(got.size()));
+  HipMatmulNBitsRowPad one{};
+  const int n_small =
+      mna::rowPads(lut->gpu_arch()->c_str(), &pad_small, &one, 1);
+  CHECK(n_dev >= 0 && n_dev == n_arch && n_small == n_arch,
+        "row pads: %d for this device, %d by arch, %d with capacity 1", n_dev,
+        n_arch, n_small);
+  CHECK(pad_dev == pad_arch && pad_small == pad_arch,
+        "default row pad differs: %d / %d / %d", pad_dev, pad_arch, pad_small);
+  const size_t listed = lut->row_pads() ? lut->row_pads()->size() : 0;
+  CHECK(static_cast<size_t>(n_arch) == listed,
+        "row pads: %d returned, %zu in the table", n_arch, listed);
+  for (const HipMatmulNBitsRowPad &r : got)
+    CHECK(r.pad_bytes % 16 == 0 && (r.zero_points == 0 || r.zero_points == 1),
+          "row pad N=%d K=%d: pad %d zp %d", r.n, r.k, r.pad_bytes,
+          r.zero_points);
+  CHECK(mna::rowPads("gfx0000", &pad_small, nullptr, 0) == -1,
+        "an arch without an embedded table reports row pads");
 
   const mna::Stats s = mna::stats();
   CHECK(s.table_loaded, "table not loaded");
