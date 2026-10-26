@@ -1420,6 +1420,9 @@ extern "C" int hip_qmoe_decode_fused(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
+  // Each launch below reports hipGetLastError(); clear an error left by an
+  // earlier call so it is not taken for theirs, including the tiling timing.
+  (void)hipGetLastError();
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
@@ -1998,6 +2001,9 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
+  // Each launch below reports hipGetLastError(); clear an error left by an
+  // earlier call so it is not taken for theirs, including the tiling timing.
+  (void)hipGetLastError();
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
