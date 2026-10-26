@@ -640,8 +640,10 @@ def check_table(t: dict) -> None:
         key = (r.get("n"), r.get("k"), r.get("group_size"), r.get("zero_point"))
         if r.get("group_size") not in GROUP_SIZES.values() or \
                 r.get("zero_point") not in ZERO_POINTS or \
-                not r.get("n") or not r.get("k") or r.get("pad_bytes", 1) % 16:
-            errors.append(f"row_pads: invalid entry {r}")
+                not r.get("n") or not r.get("k") or r.get("pad_bytes", 1) % 16 or \
+                (r["pad_bytes"] and (r["k"] // 2 + r["pad_bytes"]) % 16):
+            errors.append(f"row_pads: invalid entry {r} (pad and K/2 + pad must "
+                          f"be multiples of 16)")
         if key in keys:
             errors.append(f"row_pads: weight {key} listed twice")
         keys.add(key)

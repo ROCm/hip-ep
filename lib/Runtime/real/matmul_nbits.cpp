@@ -627,8 +627,10 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
 
   // The compiler lays out a weight's rows only for bits=4 with whole quant
   // groups (hip-pad-matmul-nbits-weights); anything else is a malformed module.
-  if (b_row_bytes != 0 && (bits != 4 || block_size <= 0 ||
-                           K % block_size != 0 || b_row_bytes < K / 2)) {
+  // Every kernel API takes the pitch as int.
+  if (b_row_bytes != 0 &&
+      (bits != 4 || block_size <= 0 || K % block_size != 0 ||
+       b_row_bytes < K / 2 || b_row_bytes > INT32_MAX)) {
     fprintf(stderr,
             "wrap_matmul_nbits: unsupported b_row_bytes=%lld (bits=%lld "
             "K=%lld block_size=%lld)\n",

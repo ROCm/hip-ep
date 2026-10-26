@@ -18,6 +18,7 @@
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256 row-pads=2:4096:128:0=0' %t/pad.mlir | FileCheck %s --check-prefix=TABLE0
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:2880:64:0=32' %t/skip.mlir | FileCheck %s --check-prefix=LISTED
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BAD
+// RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:48:16:0=16' %t/skip.mlir | FileCheck %s --check-prefix=MISALIGNED
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BADDEFAULT
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
@@ -106,4 +107,22 @@ func.func @shared_weight(%ctx: !hip.context, %a: tensor<4x4096xf16>,
       {K = 4096 : i64, N = 2 : i64, bits = 4 : i64, block_size = 128 : i64,
        accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<4x2xf16>
   return %y, %w : tensor<4x2xf16>, tensor<2x32x64xui8>
+}
+
+// A listed pad that would leave the pitch off the 16-byte B loads (K/2 = 24
+// plus 16 is 40) keeps the weight dense.
+// MISALIGNED-LABEL: func.func @misaligned_pitch
+// MISALIGNED:         hip.constant {location = "w.bin", offset = 0 : i64, size = 48 : i64} : tensor<2x3x8xui8>
+// MISALIGNED-NOT:     b_row_bytes
+func.func @misaligned_pitch(%ctx: !hip.context, %a: tensor<4x48xf16>,
+                            %s: tensor<2x3xf16>) -> tensor<4x2xf16> {
+  %w = hip.constant {location = "w.bin", offset = 0 : i64, size = 48 : i64}
+      : tensor<2x3x8xui8>
+  %e = tensor.empty() : tensor<4x2xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%a, %w, %s :
+      tensor<4x48xf16>, tensor<2x3x8xui8>, tensor<2x3xf16>)
+      outs(%e : tensor<4x2xf16>)
+      {K = 48 : i64, N = 2 : i64, bits = 4 : i64, block_size = 16 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<4x2xf16>
+  return %y : tensor<4x2xf16>
 }

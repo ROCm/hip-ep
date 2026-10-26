@@ -45,8 +45,11 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MathExtras.h"
 
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <tuple>
@@ -159,26 +162,33 @@ struct PadMatMulNBitsWeightsPass
     RankedTensorType type = c.getResult().getType();
     if (!type.getElementType().isInteger(8) || !type.hasStaticShape())
       return;
+    // The pitch must stay a multiple of the 16-byte B loads and fit the `int`
+    // row pitch of the kernel ABI; otherwise the weight keeps its layout.
     const int64_t rowBytes = k / 2;
-    if (type.getNumElements() != n * rowBytes)
+    int64_t pitch = 0, denseBytes = 0, paddedBytes = 0;
+    if (llvm::AddOverflow(rowBytes, pad, pitch) || pitch % 16 != 0 ||
+        pitch > std::numeric_limits<int32_t>::max() ||
+        llvm::MulOverflow(n, rowBytes, denseBytes) ||
+        llvm::MulOverflow(n, pitch, paddedBytes))
+      return;
+    if (type.getNumElements() != denseBytes)
       return;
     if (c.getRowBytesAttr())
       return;
     // A packed-4-bit carrier holds half as many bytes as its element count;
     // only a plain byte-per-element source is padded.
     if (IntegerAttr size = c.getSizeAttr())
-      if (size.getInt() != n * rowBytes)
+      if (size.getInt() != denseBytes)
         return;
 
-    const int64_t pitch = rowBytes + pad;
     auto paddedType = RankedTensorType::get({n, pitch}, type.getElementType());
     OpBuilder b(c);
     ConstantOp padded;
     if (auto value = dyn_cast_or_null<DenseElementsAttr>(c.getValueAttr())) {
       ArrayRef<char> src = value.getRawData();
-      if (value.isSplat() || static_cast<int64_t>(src.size()) != n * rowBytes)
+      if (value.isSplat() || static_cast<int64_t>(src.size()) != denseBytes)
         return;
-      std::vector<char> bytes(static_cast<size_t>(n * pitch), 0);
+      std::vector<char> bytes(static_cast<size_t>(paddedBytes), 0);
       for (int64_t r = 0; r < n; ++r)
         std::memcpy(bytes.data() + r * pitch, src.data() + r * rowBytes,
                     static_cast<size_t>(rowBytes));

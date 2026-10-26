@@ -330,8 +330,10 @@ void loadBuffer(Table& t, const unsigned char* data, size_t size,
       const int gs = groupSizeValue(r->group_size());
       const bool known_zp = r->zero_point() == fbs::MatmulNbitsZeroPoint::Symmetric ||
                             r->zero_point() == fbs::MatmulNbitsZeroPoint::Asymmetric;
+      // A padded row must stay a multiple of the 16-byte B loads.
       if (gs == 0 || !known_zp || r->n() == 0 || r->k() == 0 ||
-          r->n() > INT32_MAX || r->k() > INT32_MAX || r->pad_bytes() % 16 != 0) {
+          r->n() > INT32_MAX || r->k() > INT32_MAX || r->pad_bytes() % 16 != 0 ||
+          (r->pad_bytes() != 0 && (r->k() / 2 + r->pad_bytes()) % 16 != 0)) {
         ++t.invalid_row_pads;
         continue;
       }
