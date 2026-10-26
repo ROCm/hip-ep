@@ -16,9 +16,8 @@
 // %y is %x. Exporters emit this when an internal layout normalization brackets
 // a region whose ops turn out to need no permutation at all; a backend that
 // folds layout attributes into its kernels never pays for it, so it can reach a
-// consumer that does. On a 32-layer decoder carrying a [1,32,4096,96] f16 KV
-// cache it is 64 such pairs, and each one reads and writes 25 MB per token to
-// reproduce its input exactly.
+// consumer that does, where each Transpose of the pair reads and writes the
+// whole tensor to reproduce its input exactly.
 //
 // Two patterns, because the general rewrite cannot always fire:
 //
