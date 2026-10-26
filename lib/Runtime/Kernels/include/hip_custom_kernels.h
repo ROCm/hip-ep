@@ -2739,6 +2739,28 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
 
+/* The WMMA config table (kWmmaConfigs) as forced-config tests and offline
+ * measurements see it. hip_matmul_nbits_u4_wmma_config_desc fills `out` for
+ * config `cfg` (0 <= cfg < hip_matmul_nbits_u4_wmma_config_count()) and
+ * returns 0, else -1. hip_matmul_nbits_u4_wmma_run_config is
+ * hip_matmul_nbits_u4_wmma_stride with config `cfg` and no other: it returns
+ * -2 and launches nothing when `cfg` is not a fused config that serves this
+ * N, K and group_size, instead of substituting the tuned one. */
+typedef struct HipMatmulNBitsWmmaConfigDesc {
+    int bm, bn, wt_m, wt_n, bk, swizzle_n;
+    int fused;   /* 1: dequant fused into the WMMA kernel */
+    int ext;     /* 1: a WMMA_EXT_CONFIGS entry */
+    int variant; /* its pipeline options (WmmaConfig::variant) */
+} HipMatmulNBitsWmmaConfigDesc;
+
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_count(void);
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_desc(
+    int cfg, HipMatmulNBitsWmmaConfigDesc* out);
+HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes);
+
 /* hip_matmul_nbits_u4_wmma_padrow: fused int4 WMMA prefill against a row-padded
  *   B, repacking B into a single shared scratch on each call. Bounds padded-B
  *   memory to the largest single layer instead of a persistent per-weight copy.

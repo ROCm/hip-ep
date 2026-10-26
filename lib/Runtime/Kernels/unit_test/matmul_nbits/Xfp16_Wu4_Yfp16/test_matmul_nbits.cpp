@@ -736,6 +736,112 @@ static int run(int coverage_tier) {
 }  // namespace sweep
 
 // ============================================================
+// Forced extended entries. Every WMMA_EXT_CONFIGS entry is run by index
+// through hip_matmul_nbits_u4_wmma_run_config, which refuses a config that
+// does not serve the shape instead of substituting another, so a pass here
+// means that entry's kernel produced the result. Each runs on a tile-exact and
+// a ragged M x N, group sizes 32 and 128, with and without zero points, at the
+// arrival pitch and with 128- and 256-byte row pads, against the CPU
+// reference. The LUT may stop selecting an entry; this keeps all of them
+// checked. An entry that serves none of the cases fails.
+// ============================================================
+namespace forced {
+
+static int run() {
+  const int count = hip_matmul_nbits_u4_wmma_config_count();
+  constexpr int K = 512;
+  const int pads[] = {0, 128, 256};
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  int entries = 0, fail = 0;
+  std::string never_ran;
+  for (int cfg = 0; cfg < count; ++cfg) {
+    HipMatmulNBitsWmmaConfigDesc t{};
+    if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &t) != 0 || !t.ext) continue;
+    ++entries;
+    int ran = 0;
+    const int shapes[2][2] = {{2 * t.bm, 2 * t.bn}, {2 * t.bm - 5, 2 * t.bn - 16}};
+    for (const auto& mn : shapes) {
+      const int M = mn[0], N = mn[1];
+      for (int gs : {32, 128}) {
+        for (bool zero : {true, false}) {
+          CaseData d;
+          genCase(M, K, N, gs, zero, /*fp32=*/false,
+                  /*seed=*/7000u + static_cast<unsigned>(cfg * 8 + ran), d);
+          const int row_bytes = K / 2;
+          void *dA = nullptr, *dB = nullptr, *dS = nullptr, *dZ = nullptr, *dC = nullptr;
+          HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dB, static_cast<size_t>(N) * (row_bytes + 256)));
+          HIP_CHECK(hipMalloc(&dC, static_cast<size_t>(M) * N * sizeof(__half)));
+          if (zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+          HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          if (zero)
+            HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half),
+                                hipMemcpyHostToDevice));
+          for (int pad : pads) {
+            const int pitch = row_bytes + pad;
+            std::vector<uint8_t> b(static_cast<size_t>(N) * pitch, 0xAB);
+            for (int n = 0; n < N; ++n)
+              std::memcpy(&b[static_cast<size_t>(n) * pitch],
+                          &d.Bpacked[static_cast<size_t>(n) * row_bytes], row_bytes);
+            HIP_CHECK(hipMemcpy(dB, b.data(), b.size(), hipMemcpyHostToDevice));
+            // 0xFFFF is an fp16 NaN: an output the kernel never writes fails.
+            HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+            const int rc = hip_matmul_nbits_u4_wmma_run_config(
+                stream, cfg, M, N, K, gs, dA, K, dB, dS, zero ? dZ : nullptr, dC, N,
+                pad ? pitch : 0);
+            if (rc == -2) continue;  // this entry does not serve the shape
+            HIP_CHECK(hipStreamSynchronize(stream));
+            int errors = 0;
+            double ssd = 0.0, ssr = 0.0;
+            std::vector<__half> out(static_cast<size_t>(M) * N);
+            if (rc == 0) {
+              HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half),
+                                  hipMemcpyDeviceToHost));
+              for (size_t i = 0; i < out.size(); ++i) {
+                const float g = half_to_float(out[i]);
+                const float r = half_to_float(d.Cref16[i]);
+                const float diff = std::fabs(g - r);
+                if (!(diff <= std::fabs(r) * 0.05f + 0.1f)) ++errors;
+                ssd += static_cast<double>(diff) * diff;
+                ssr += static_cast<double>(r) * r;
+              }
+            }
+            const bool pass = rc == 0 && errors == 0;
+            ++ran;
+            if (!pass) ++fail;
+            std::printf("  forced cfg[%d] %dx%d WT%dx%d BK%d var=%d  M=%d N=%d K=%d gs=%d "
+                        "zero=%d pad=%d  rc=%d  relL2=%.3e  %s\n",
+                        cfg, t.bm, t.bn, t.wt_m, t.wt_n, t.bk, t.variant, M, N, K, gs,
+                        zero, pad, rc, ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
+                        pass ? "PASS" : "*** FAIL ***");
+          }
+          hipFree(dA);
+          hipFree(dB);
+          hipFree(dS);
+          if (dZ) hipFree(dZ);
+          hipFree(dC);
+        }
+      }
+    }
+    if (ran == 0) {
+      ++fail;
+      never_ran += " " + std::to_string(cfg);
+    }
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+  std::printf("\nForced extended entries: %d entries, %d failed%s%s\n", entries, fail,
+              never_ran.empty() ? "" : "; served no case:", never_ran.c_str());
+  return entries > 0 && fail == 0 ? 0 : 1;
+}
+
+}  // namespace forced
+
+// ============================================================
 // Single-shape convenience path (make test_custom): in-process rng, no data
 // files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
@@ -766,5 +872,7 @@ int main(int argc, char* argv[]) {
     return runCustom(M, N, K, gs, !no_zeros);
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
-  return sweep::run(tier);
+  const int sweep_rc = sweep::run(tier);
+  const int forced_rc = forced::run();
+  return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
 }

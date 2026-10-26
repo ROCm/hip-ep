@@ -6143,6 +6143,46 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     return static_cast<int>(hipGetLastError());
 }
 
+extern "C" int hip_matmul_nbits_u4_wmma_config_count() {
+    return kNumWmmaConfigs;
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_config_desc(
+    int cfg, HipMatmulNBitsWmmaConfigDesc* out)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || !out) return -1;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    out->bm = c.bm;
+    out->bn = c.bn;
+    out->wt_m = c.wt_m;
+    out->wt_n = c.wt_n;
+    out->bk = wmmaBk(c);
+    out->swizzle_n = c.swizzle_n;
+    out->fused = c.fused ? 1 : 0;
+    out->ext = c.ext ? 1 : 0;
+    out->variant = c.variant;
+    return 0;
+}
+
+extern "C" int hip_matmul_nbits_u4_wmma_run_config(
+    void* stream, int cfg, int M, int N, int K, int group_size,
+    const void* A, int lda, const void* B, const void* scales,
+    const void* zeros, void* C, int ldc, int b_row_bytes)
+{
+    if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
+    const WmmaConfig& c = kWmmaConfigs[cfg];
+    if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
+    (void)hipGetLastError();
+    launchWmmaConfig(cfg, static_cast<hipStream_t>(stream), M, N, K,
+                     static_cast<const _Float16*>(A), lda,
+                     static_cast<const unsigned char*>(B),
+                     static_cast<const _Float16*>(scales),
+                     static_cast<const _Float16*>(zeros), group_size,
+                     (K + group_size - 1) / group_size, static_cast<_Float16*>(C),
+                     ldc, zeros != nullptr, nullptr, b_row_bytes);
+    return static_cast<int>(hipGetLastError());
+}
+
 // One reusable scratch for the padded-row-stride B copy, shared across every
 // MatMulNBits layer. The padded buffer is only live for the duration of one
 // layer's prefill -- it is a WMMA input, not persistent state -- and layers run
