@@ -2536,6 +2536,37 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* hip_matmul_nbits with a uniform zero point.
+ *
+ * A finite `uniform_zp` asserts that every group's zero point equals it (see
+ * hip_matmul_nbits_fp16_uniform_value). bits=2 then passes it to the kernels
+ * as a scalar and never reads `zero_points`, saving one fp16 per group per
+ * output row -- as many bytes as the fp16 scales. NaN means no such guarantee
+ * and behaves exactly like hip_matmul_nbits; other bit widths ignore it. */
+HIP_KERNEL_API int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    float uniform_zp);
+
+/* Checks whether all `n` fp16 values at device pointer `values` are equal.
+ * Synchronizes `stream`. Returns 1 and stores the common value in *value when
+ * they are, 0 when they are not (or n <= 0), and a negative value on error. */
+HIP_KERNEL_API int hip_matmul_nbits_fp16_uniform_value(
+    void* stream, const void* values, int64_t n, float* value);
+
 // Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
 HIP_KERNEL_API int hip_dequant_bnb4(
