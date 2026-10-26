@@ -3362,6 +3362,10 @@ extern "C" int hip_gqa_flash_decode_configured(
 // The unified entries tune the block layout per shape on first use, or take it
 // from the offline LUT (hip_gqa_flash_prefill_v3_configured).
 //===----------------------------------------------------------------------===//
+
+// 1 in a code object whose WMMA fragments are 8 halves (codeObjectHasWmmaFrag8).
+__device__ int g_gqa_prefill_wmma_frag8 = HIPDNN_WMMA_FRAG_ELEMS == 8;
+
 namespace {
 // half16_t is a WMMA A/B fragment; width matches HIPDNN_WMMA_FRAG_ELEMS (see
 // the shared WMMA block above). half8_t is unrelated: a genuinely fixed
@@ -3398,7 +3402,25 @@ typedef _Float16 half16_raw_t __attribute__((ext_vector_type(16)));
 // ds_bpermute and the LDS queue). Archs without WMMA only need this to
 // compile, since the kernel traps there.
 __device__ __forceinline__ int v6_swap_halves(int x) {
-#if HIPDNN_HAS_WMMA
+#if HIPDNN_HAS_WMMA && HIPDNN_WMMA_FRAG_ELEMS != 8
+    // The "old" operand is never read (every lane is active), but it is tied
+    // to the result, so the compiler copies x into the result register first
+    // and the swap then reads that copy. On gfx11 / gfx11.5 the copy can be
+    // dual-issued (VOPD) with an unrelated move, and a VOPD pair whose two
+    // sources in the same slot are distinct VGPRs of the same parity can lose
+    // the interlock on a source written by the instruction before it (LLVM
+    // #220348, not fixed in the SDKs we use). The swap then exchanges a stale
+    // value: the previous SDK paired `v4 = v3` with `v105 = v101` right after
+    // `v3 = v4 + v3` in the v8x d256 ND=4 row-sum swap, and that kernel wrote
+    // inf / NaN rows, different ones on every run, at a 4K-query x 64K-key
+    // prefill; with the current SDK the d64 block of 8 heads did the same from 128
+    // tokens up. An inline-asm copy is never paired and fixes both. (Passing
+    // 0 as "old" avoids it too, but the zeros all get hoisted ahead of the
+    // swaps.) gfx1170 does not have the hazard.
+    int old;
+    asm("v_mov_b32 %0, %1" : "=v"(old) : "v"(x));
+    return __builtin_amdgcn_permlanex16(old, x, 0x76543210u, 0xfedcba98u, false, false);
+#elif HIPDNN_HAS_WMMA
     return __builtin_amdgcn_permlanex16(x, x, 0x76543210u, 0xfedcba98u, false, false);
 #else
     return __shfl_xor(x, 16);
@@ -3416,6 +3438,176 @@ __device__ __forceinline__ bool v6_wave_any(bool p) {
 }
 
 // ---------------------------------------------------------------------
+// K/V tile staging for the blocks of more than one wave.
+//
+// A tile is BKV * D / 16 16-element chunks of K and as many of V, each set
+// spread over the block's NT threads: chunk r of thread tid is element
+// i = tid + r * NT. K is row-major in the cache, so K chunk i is simply the
+// tile's i-th 32 bytes; it lands in K_lds row i / D_TILES. V chunk j is key
+// j % BKV of head-dim chunk j / BKV, so the lanes of a wave stage consecutive
+// keys of one V^T row and their scalar LDS writes stay on distinct banks.
+//
+// Every address is a per-lane base computed once plus a compile-time offset
+// per chunk, and whether a thread has chunk r is a compile-time fact (or a
+// wave-uniform one when NT does not divide the chunk count, which is a
+// multiple of 32). Written per element instead (row = i / D_TILES, a K-or-V
+// test on i), the compiler hoisted each chunk's addresses out of the KV loop
+// -- up to 16 V^T addresses per chunk, about 50 VGPRs at d128 -- and, not
+// bounding tid by the launch bounds, kept a dead K or V path for every chunk.
+//
+// K and V are loaded and committed separately so that the kernels can keep
+// only one of them in flight at a time where the registers require it
+// (kGqaSplitKv below).
+// ---------------------------------------------------------------------
+template <int BKV, int D, int NT, int VT_STR, int K_STR>
+struct KvStage {
+    static constexpr int D_TILES = D / 16;
+    static constexpr int kChunks = BKV * D_TILES;              // per K or V tile
+    static constexpr int kPerThr = (kChunks + NT - 1) / NT;    // per thread
+    static_assert(kChunks % 32 == 0 && NT % 32 == 0 && NT % BKV == 0,
+                  "chunk ownership must be wave-uniform");
+    static_assert(K_STR == D + 8, "K_lds rows are the head dim plus 8 halves");
+    // A block with at least twice as many threads as chunks per tile (8 waves
+    // at d64 / BKV=32) hands the K chunks to its first waves and the V chunks
+    // to the next ones, so no wave stages both while others stage nothing.
+    static constexpr int kVThread0 = NT >= 2 * kChunks ? kChunks : 0;
+
+    int tid;
+    int vtid;            // tid - kVThread0: this thread's position among the V stagers
+    int wave_lo;         // 32 * wave id (uniform)
+    unsigned v_off;      // this lane's element offset in a V tile (chunk 0)
+    int vt0, vt1;        // V_lds offsets of its even / odd head-dim rows
+
+    __device__ KvStage(int tid_, int wave_id) : tid(tid_), wave_lo(32 * wave_id) {
+        vtid = tid >= kVThread0 ? tid - kVThread0 : tid;
+        const int key = vtid % BKV;
+        v_off = static_cast<unsigned>(key * D + (vtid / BKV) * 16);
+        const int row0 = (vtid / BKV) * 16 * VT_STR;
+#if HIPDNN_WMMA_FRAG_ELEMS != 8
+        // V_lds is V^T, head-dim row dd at dd * VT_STR. On gfx11 each 16-key
+        // block of a row holds the 8 keys of parity dd & 1 first, then the
+        // other 8, which is the K order the P^T operand uses for that row; dd
+        // and the element index c have the same parity, so a lane has one
+        // offset per parity.
+        const int kb = (key & ~15) | ((key & 15) >> 1);
+        vt0 = row0 + kb + ((key & 1) << 3);
+        vt1 = row0 + kb + (((key & 1) ^ 1) << 3);
+#else
+        vt0 = vt1 = row0 + key;
+#endif
+    }
+
+    // Whether this thread owns K chunk r / V chunk r (wave-uniform).
+    __device__ bool has(int r) const {
+        if ((r + 1) * NT <= kChunks) return true;
+        return r * NT + wave_lo < kChunks;
+    }
+    __device__ bool hasV(int r) const {
+        if constexpr (kVThread0 > 0) return r == 0 && wave_lo >= kVThread0;
+        else return has(r);
+    }
+
+    // Chunk r of the tiles whose rows start at Kt / Vt. A tail tile (one
+    // reaching past skv) reads its rows past the end from the last valid key,
+    // so no lane needs a predicated load. K needs nothing more (those keys are
+    // masked to -inf); V is zeroed there as before: a finite V times the exact
+    // zero probability still moved the WMMA result by an ulp now and then.
+    template <bool TAIL>
+    __device__ half16_raw_t loadK(const _Float16* Kt, int r, int k_last) const {
+        if (!has(r)) return half16_raw_t{};
+        // min(tid + r * NT, k_last), written so that only tid is per lane.
+        if constexpr (TAIL)
+            return HALF16_RAW_LOAD(Kt + static_cast<unsigned>(min(tid, k_last - r * NT) + r * NT) * 16u);
+        return HALF16_RAW_LOAD(Kt + r * NT * 16 + static_cast<unsigned>(tid) * 16u);
+    }
+    template <bool TAIL>
+    __device__ half16_raw_t loadV(const _Float16* Vt, int r, int v_last) const {
+        if (!hasV(r)) return half16_raw_t{};
+        if constexpr (TAIL) {
+            const int key = vtid % BKV;
+            const half16_raw_t v = HALF16_RAW_LOAD(
+                Vt + r * (NT / BKV) * 16 +
+                static_cast<unsigned>(min(key, v_last) * D + (vtid / BKV) * 16));
+            return key <= v_last ? v : half16_raw_t{};
+        }
+        return HALF16_RAW_LOAD(Vt + r * (NT / BKV) * 16 + v_off);
+    }
+
+    __device__ void storeK(_Float16* K_lds, int r, const half16_raw_t& v) const {
+        if (!has(r)) return;
+        int off;
+        if constexpr (NT % D_TILES == 0) {
+            off = tid * 16 + (tid / D_TILES) * 8 + r * NT * 16 + r * (NT / D_TILES) * 8;
+        } else {
+            const int i = tid + r * NT;
+            off = i * 16 + (i / D_TILES) * 8;
+        }
+        *reinterpret_cast<half16_raw_t*>(&K_lds[off]) = v;
+    }
+    __device__ void storeV(_Float16* V_lds, int r, const half16_raw_t& v) const {
+        if (!hasV(r)) return;
+        const int o = r * (NT / BKV) * 16 * VT_STR;
+        #pragma unroll
+        for (int c = 0; c < 16; ++c)
+            V_lds[((c & 1) ? vt1 : vt0) + o + c * VT_STR] = v[c];
+    }
+};
+
+// Feeds NF WMMA operand fragments to use(f, frag) in order, with at most RING
+// reads issued ahead of the WMMA consuming them. Left to itself the scheduler
+// issues every LDS read of a GEMM step up front -- up to 16 fragments, 128
+// VGPRs -- and fills whatever register budget the kernel has; the
+// sched_barrier after each step keeps the next reads from moving above it.
+// RING = 0 leaves the order to the compiler.
+// The ring holds the fragments as dwords (see the P^T operand in v6x below:
+// a half vector carried across a join makes the current compiler rebuild every odd
+// element with a no-op v_lshrrev_b32 / v_mov_b16 pair).
+template <int NF, typename Frag, int RING, typename Load, typename Use>
+__device__ __forceinline__ void v6_frag_stream(Load&& load, Use&& use) {
+    if constexpr (RING == 0) {
+        #pragma unroll
+        for (int f = 0; f < NF; ++f) use(f, load(f));
+    } else {
+        constexpr int R = RING < NF ? RING : NF;
+        typedef int dw_t __attribute__((ext_vector_type(sizeof(Frag) / 4)));
+        dw_t ring[R];
+        #pragma unroll
+        for (int f = 0; f < R; ++f) ring[f] = __builtin_bit_cast(dw_t, load(f));
+        #pragma unroll
+        for (int f = 0; f < NF; ++f) {
+            dw_t x = ring[f % R];
+            if (f + R < NF) ring[f % R] = __builtin_bit_cast(dw_t, load(f + R));
+            asm("" : "+v"(x));
+            use(f, __builtin_bit_cast(Frag, x));
+#if HIPDNN_HAS_WMMA
+            __builtin_amdgcn_sched_barrier(0);
+#endif
+        }
+    }
+}
+
+// How the v6x and v8x prefill blocks of more than one wave stage K/V and
+// stream their LDS fragments: one rule per WMMA encoding, the same for every
+// tile (the tiles sit close to the 256-VGPR limit of a wave: GQA asks for at
+// most 2 waves per SIMD, so the register file size does not help).
+// - gfx11 encoding (gfx11-generic, gfx1150 / 1151 / 1152): a fragment is 16
+//   halves, twice the gfx1170 one. The tiles fit without scratch only
+//   when the next tile's K and V are prefetched one after the other, not both
+//   across the whole tile (both in flight, 3 to 14 of them spill with the
+//   current SDK), with at most 2 fragment reads ahead of the WMMA using them.
+// - gfx1170 encoding (8-half fragments): the registers are there,
+//   so the next K and V are both in flight across the tile (staging them one
+//   at a time only gives up prefetch: 7-10% slower on gfx1170), with 3
+//   fragment reads ahead.
+#if HIPDNN_WMMA_FRAG_ELEMS == 8
+constexpr bool kGqaSplitKv  = false;
+constexpr int  kGqaFragRing = 3;
+#else
+constexpr bool kGqaSplitKv  = true;
+constexpr int  kGqaFragRing = 2;
+#endif
+
+// ---------------------------------------------------------------------
 // v6x, d <= 128. A block is HB query heads of one KV group x QW consecutive
 // 16*M_TILES-row Q subtiles, one wave each; all HB*QW waves share every staged
 // K/V tile, so a group of 1 or 2 heads (MHA, Gemma-3) still fills a 4-wave
@@ -3426,8 +3618,7 @@ __device__ __forceinline__ bool v6_wave_any(bool p) {
 // from global and stages only V.
 // ---------------------------------------------------------------------
 template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW>
-__global__ void __launch_bounds__(32 * HB * QW)
-gqa_flash_prefill_v6x_kernel(
+__device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
     const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
@@ -3497,16 +3688,6 @@ gqa_flash_prefill_v6x_kernel(
     const size_t kv_base =
         (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
 
-    // V_lds offset of key kv_local in head-dim row dd. On gfx11 each 16-key
-    // block of a row holds the 8 keys of parity dd & 1 first, then the other
-    // 8, which is the K order the P^T operand below uses for that row.
-    auto vt_idx = [&](int dd, int kv_local) {
-#if !HIPDNN_WMMA_GFX12
-        kv_local = (kv_local & ~15) | (((kv_local ^ dd) & 1) << 3) | ((kv_local & 15) >> 1);
-#endif
-        return dd * VT_STR + kv_local;
-    };
-
     half16_t Q_reg[M_TILES][D_TILES];
     #pragma unroll
     for (int mi = 0; mi < M_TILES; ++mi) {
@@ -3547,69 +3728,91 @@ gqa_flash_prefill_v6x_kernel(
         wave_kv_lo = past_len + q_start - local_window_size + 1;
     }
 
-    // Group staging: the K tile (row-major) and V tile are copied in kKvChunks
-    // 16-element chunks spread over the block, prefetched into registers one
-    // tile ahead so the global latency overlaps the compute.
-    constexpr int kKChunks  = BKV * D_TILES;
-    constexpr int kKvChunks = 2 * kKChunks;
-    constexpr int kPerThr   = (kKvChunks + 32 * NW - 1) / (32 * NW);
-    half16_raw_t pf[kPerThr];
-    auto prefetch = [&](int kv0) {
-        #pragma unroll
-        for (int r = 0; r < kPerThr; ++r) {
-            const int i = tid + r * 32 * NW;
-            const bool is_k = i < kKChunks;
-            const int j = is_k ? i : i - kKChunks;
-            const int kv_local = is_k ? j / D_TILES : j % BKV;
-            const int dt       = is_k ? j % D_TILES : j / BKV;
-            const int kv_pos   = kv0 + kv_local;
-            const _Float16* src = is_k ? Kcache : Vcache;
-            pf[r] = (i < kKvChunks && kv_pos < skv)
-                ? HALF16_RAW_LOAD(&src[kv_base + (size_t)kv_pos * D + dt * 16])
-                : half16_raw_t{};
+    // Group staging (KvStage): the K and V tiles are copied in 16-element
+    // chunks spread over the block and prefetched into registers. With
+    // kGqaSplitKv one of them is in flight at a time: the next tile's K while
+    // this tile's scores are computed, into K_lds once every wave is past
+    // them; its V then through the softmax and the value GEMM, into V_lds
+    // after the closing barrier (holding both costs 16 * kPerThr VGPRs, 32 at
+    // d128 with four waves). Otherwise both are in flight across the tile and
+    // go in after the closing barrier. A single-wave block does not stage (the
+    // NT it is instantiated with there is a placeholder).
+    using Stage = KvStage<BKV, D, (NW > 1 ? 32 * NW : 64), VT_STR, K_STR>;
+    constexpr int kPerThr = Stage::kPerThr;
+    const Stage st(tid, wave_id);
+    typedef half16_raw_t Chunks[kPerThr];
+    auto load_k = [&](Chunks& dst, int kv0) {
+        const _Float16* Kt = Kcache + kv_base + static_cast<size_t>(kv0) * D;
+        if (kv0 + BKV <= skv) {
+            #pragma unroll
+            for (int r = 0; r < kPerThr; ++r) dst[r] = st.template loadK<false>(Kt, r, 0);
+        } else {
+            const int k_last = (skv - kv0) * D_TILES - 1;
+            #pragma unroll
+            for (int r = 0; r < kPerThr; ++r) dst[r] = st.template loadK<true>(Kt, r, k_last);
         }
     };
-    auto commit = [&]() {
-        #pragma unroll
-        for (int r = 0; r < kPerThr; ++r) {
-            const int i = tid + r * 32 * NW;
-            if (i >= kKvChunks) continue;
-            if (i < kKChunks) {
-                *reinterpret_cast<half16_raw_t*>(
-                    &K_lds[(i / D_TILES) * K_STR + (i % D_TILES) * 16]) = pf[r];
-            } else {
-                const int j = i - kKChunks;
-                #pragma unroll
-                for (int c = 0; c < 16; ++c)
-                    V_lds[vt_idx((j / BKV) * 16 + c, j % BKV)] = pf[r][c];
-            }
+    auto load_v = [&](Chunks& dst, int kv0) {
+        const _Float16* Vt = Vcache + kv_base + static_cast<size_t>(kv0) * D;
+        if (kv0 + BKV <= skv) {
+            #pragma unroll
+            for (int r = 0; r < kPerThr; ++r) dst[r] = st.template loadV<false>(Vt, r, 0);
+        } else {
+            #pragma unroll
+            for (int r = 0; r < kPerThr; ++r)
+                dst[r] = st.template loadV<true>(Vt, r, skv - kv0 - 1);
         }
     };
-    if constexpr (NW > 1) prefetch(t_start * BKV);
+    auto commit_k = [&](const Chunks& src) {
+        #pragma unroll
+        for (int r = 0; r < kPerThr; ++r) st.storeK(K_lds, r, src[r]);
+    };
+    auto commit_v = [&](const Chunks& src) {
+        #pragma unroll
+        for (int r = 0; r < kPerThr; ++r) st.storeV(V_lds, r, src[r]);
+    };
+    constexpr bool kSplitKv = kGqaSplitKv;
+    Chunks pf, pv;
+    if constexpr (NW > 1) {
+        load_k(pf, t_start * BKV);
+        load_v(pv, t_start * BKV);
+        commit_k(pf);
+        commit_v(pv);
+        __syncthreads();
+        if (t_start + 1 < num_tiles) {
+            load_k(pf, (t_start + 1) * BKV);
+            if constexpr (!kSplitKv) load_v(pv, (t_start + 1) * BKV);
+        }
+    }
 
     for (int t = t_start; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
-        if constexpr (NW > 1) {
-            commit();
-            __syncthreads();
-            if (t + 1 < num_tiles) prefetch(kv0 + BKV);
-        } else {
+        if constexpr (NW == 1) {
             // Stage V transposed (Vt[d][kv]) so each V^T A-fragment is one
-            // contiguous run of keys. Lanes take consecutive keys of one
-            // D-chunk, which keeps the scalar LDS writes on distinct banks.
+            // contiguous run of keys. Lane l takes key l + 32 * (m % KB) of
+            // head-dim chunk m / KB, which keeps the scalar LDS writes on
+            // distinct banks; keys past skv read the last one and are zeroed,
+            // as in KvStage.
+            constexpr int KB = BKV / 32;
+            const _Float16* Vt = Vcache + kv_base + static_cast<size_t>(kv0) * D;
+            const int v_last = skv - kv0 - 1;
             #pragma unroll
-            for (int i = lane_id; i < BKV * D_TILES; i += 32) {
-                const int kv_local = i % BKV;
-                const int dt       = i / BKV;
-                const int kv_pos   = kv0 + kv_local;
-                half16_raw_t vv = (kv_pos < skv)
-                    ? HALF16_RAW_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
-                    : half16_raw_t{};
+            for (int m = 0; m < BKV * D_TILES / 32; ++m) {
+                const int key = min(lane_id, v_last - 32 * (m % KB)) + 32 * (m % KB);
+                half16_raw_t vv = HALF16_RAW_LOAD(
+                    Vt + static_cast<unsigned>(key) * static_cast<unsigned>(D) + (m / KB) * 16);
+                if (lane_id + 32 * (m % KB) > v_last) vv = half16_raw_t{};
+                const int o = (m / KB) * 16 * VT_STR + 32 * (m % KB);
                 #pragma unroll
                 for (int c = 0; c < 16; ++c)
-                    V_lds[vt_idx(dt * 16 + c, kv_local)] = vv[c];
+                    V_lds[((c & 1) ? st.vt1 : st.vt0) + o + c * VT_STR] = vv[c];
             }
+#if HIPDNN_HAS_WMMA
+            // Keeps the score GEMM's K reads below the V tile's: hoisted above
+            // it they doubled the reads in flight (255 VGPRs at d128).
+            __builtin_amdgcn_sched_barrier(0);
+#endif
         }
 
         // With one Q subtile per block every walked tile is active for every
@@ -3619,33 +3822,61 @@ gqa_flash_prefill_v6x_kernel(
             active = wave_rows && kv0 <= wave_kv_max;
             if constexpr (HAS_WINDOW) active = active && (kv0 + BKV - 1 >= wave_kv_lo);
         }
+        // S^T[mi][sj]: rows are keys kv0+sj*16+acc_row(pair,e), column query.
+        // Zeroed outside the branch: left undefined on the inactive path, the
+        // scores crossing the barrier below became an undef value that the
+        // previous SDK kept in registers around the whole loop (36 more VGPRs at MT2).
+        float8_t S_reg[M_TILES][S_TILES_J];
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mi][sj] = float8_t{};
         if (active) {
-            // S^T[mi][sj]: rows are keys kv0+sj*16+acc_row(pair,e), column query.
-            float8_t S_reg[M_TILES][S_TILES_J];
-            #pragma unroll
-            for (int mi = 0; mi < M_TILES; ++mi)
-                #pragma unroll
-                for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mi][sj] = float8_t{};
-            #pragma unroll
-            for (int sj = 0; sj < S_TILES_J; ++sj) {
-                const int key = kv0 + sj * 16 + wmma_lane;
-                const bool kvalid = key < skv;
-                const size_t k_row = kv_base + static_cast<size_t>(kvalid ? key : 0) * D;
-                #pragma unroll
-                for (int tk = 0; tk < D_TILES; ++tk) {
-                    half16_t k_frag;
-                    if constexpr (NW > 1)
-                        k_frag = HALF16_LOAD(&K_lds[(sj * 16 + wmma_lane) * K_STR + tk * 16], pair);
-                    else
-                        k_frag = kvalid ? HALF16_LOAD(&Kcache[k_row + tk * 16], pair)
-                                        : half16_t{};
-                    #pragma unroll
-                    for (int mi = 0; mi < M_TILES; ++mi)
-                        S_reg[mi][sj] = HIPDNN_WMMA_F32_16X16X16_F16(
-                            k_frag, Q_reg[mi][tk], S_reg[mi][sj]);
-                }
+            if constexpr (NW > 1) {
+                // Head-dim chunk outer, key block inner: consecutive WMMAs
+                // accumulate into different S tiles (the stream fixes the order).
+                v6_frag_stream<S_TILES_J * D_TILES, half16_t, kGqaFragRing>(
+                    [&](int f) {
+                        return HALF16_LOAD(&K_lds[((f % S_TILES_J) * 16 + wmma_lane) * K_STR +
+                                                  (f / S_TILES_J) * 16], pair);
+                    },
+                    [&](int f, const half16_t& k_frag) {
+                        #pragma unroll
+                        for (int mi = 0; mi < M_TILES; ++mi)
+                            S_reg[mi][f % S_TILES_J] = HIPDNN_WMMA_F32_16X16X16_F16(
+                                k_frag, Q_reg[mi][f / S_TILES_J], S_reg[mi][f % S_TILES_J]);
+                    });
+            } else {
+                // Single wave: K straight from global, keys past skv clamped to
+                // the last one (masked below); more reads in flight than from
+                // LDS for the longer latency.
+                const _Float16* Kt = Kcache + kv_base + static_cast<size_t>(kv0) * D;
+                v6_frag_stream<S_TILES_J * D_TILES, half16_t, 4>(
+                    [&](int f) {
+                        const int sj = f % S_TILES_J;
+                        const int key = min(wmma_lane, skv - 1 - kv0 - sj * 16) + sj * 16;
+                        return HALF16_LOAD(&Kt[static_cast<unsigned>(key) * static_cast<unsigned>(D) +
+                                               (f / S_TILES_J) * 16], pair);
+                    },
+                    [&](int f, const half16_t& k_frag) {
+                        #pragma unroll
+                        for (int mi = 0; mi < M_TILES; ++mi)
+                            S_reg[mi][f % S_TILES_J] = HIPDNN_WMMA_F32_16X16X16_F16(
+                                k_frag, Q_reg[mi][f / S_TILES_J], S_reg[mi][f % S_TILES_J]);
+                    });
             }
 
+        }
+        if constexpr (NW > 1 && kSplitKv) {
+            // Every wave is past this tile's K: the next K goes in, and the
+            // next V is fetched while this tile finishes.
+            __syncthreads();
+            if (t + 1 < num_tiles) {
+                commit_k(pf);
+                load_v(pf, kv0 + BKV);
+            }
+        }
+        if (active) {
             // Only tiles crossing the causal diagonal, the window's lower edge
             // or skv need a mask; every key of an interior tile is visible to
             // every query of this wave's rows.
@@ -3726,7 +3957,7 @@ gqa_flash_prefill_v6x_kernel(
                     // The gfx11 WMMA computes each half's accumulator rows
                     // (parity pair) from that half's own B lanes and A rows
                     // only, so the halves may order K differently: each takes
-                    // its own 8 keys first, and vt_idx stages the V^T rows to
+                    // its own 8 keys first, and KvStage stages the V^T rows to
                     // match. That leaves one swap per packed pair and no
                     // per-half select.
                     typedef _Float16 half2v_t __attribute__((ext_vector_type(2)));
@@ -3760,13 +3991,16 @@ gqa_flash_prefill_v6x_kernel(
             }
 
             if constexpr (NW == 1) __syncthreads();   // single wave: V_lds visible
-            #pragma unroll
-            for (int tj = 0; tj < D_TILES; ++tj) {
-                #pragma unroll
-                for (int tk = 0; tk < S_TILES_J; ++tk) {
-                    // A operand V^T: row d = tj*16+wmma_lane, K = keys.
-                    const half16_t v_frag = HALF16_LOAD(
-                        &V_lds[(tj * 16 + wmma_lane) * VT_STR + tk * 16], pair);
+            // A operand V^T: row d = tj*16+wmma_lane, K = keys. Key block
+            // outer, head-dim tile inner, so consecutive WMMAs accumulate into
+            // different O tiles.
+            v6_frag_stream<D_TILES * S_TILES_J, half16_t, kGqaFragRing>(
+                [&](int f) {
+                    return HALF16_LOAD(&V_lds[((f % D_TILES) * 16 + wmma_lane) * VT_STR +
+                                              (f / D_TILES) * 16], pair);
+                },
+                [&](int f, const half16_t& v_frag) {
+                    const int tj = f % D_TILES, tk = f / D_TILES;
                     #pragma unroll
                     for (int mi = 0; mi < M_TILES; ++mi) {
 #if HIPDNN_WMMA_GFX12
@@ -3781,10 +4015,25 @@ gqa_flash_prefill_v6x_kernel(
                         O_frag[mi][tj] = HIPDNN_WMMA_F32_16X16X16_F16(
                             v_frag, p_frag, O_frag[mi][tj]);
                     }
+                });
+        }
+        __syncthreads();   // WAR: V_lds reused by the next tile
+        if constexpr (NW > 1 && kSplitKv) {
+            if (t + 1 < num_tiles) {
+                commit_v(pf);
+                if (t + 2 < num_tiles) load_k(pf, kv0 + 2 * BKV);
+            }
+        } else if constexpr (NW > 1) {
+            if (t + 1 < num_tiles) {
+                commit_k(pf);
+                commit_v(pv);
+                __syncthreads();   // RAW: the next tile's K and V
+                if (t + 2 < num_tiles) {
+                    load_k(pf, kv0 + 2 * BKV);
+                    load_v(pv, kv0 + 2 * BKV);
                 }
             }
         }
-        __syncthreads();   // WAR: K/V LDS reused by the next tile
     }
 
     const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
@@ -3809,6 +4058,26 @@ gqa_flash_prefill_v6x_kernel(
                         static_cast<_Float16>(O_frag[mi][tj][e] * inv_l);
         }
     }
+}
+
+// M_TILES=2 with BKV=64 is built only for the gfx1170 WMMA encoding and not
+// as a 2-wave block (prefillV6xMt2Bkv64Built). Elsewhere no launcher picks it,
+// and the stub keeps its spilling body out of the code object.
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW>
+__global__ void __launch_bounds__(32 * HB * QW)
+gqa_flash_prefill_v6x_kernel(
+    const _Float16* __restrict__ Q, const _Float16* __restrict__ Kcache,
+    const _Float16* __restrict__ Vcache, _Float16* __restrict__ O,
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale, const _Float16* __restrict__ head_sink, int num_heads,
+    int smooth_softmax, int local_window_size)
+{
+    if constexpr (M_TILES == 2 && BKV == 64 && (HIPDNN_WMMA_FRAG_ELEMS != 8 || HB * QW == 2))
+        __builtin_trap();
+    else
+        gqa_flash_prefill_v6x_body<M_TILES, BKV, D, HAS_WINDOW, HB, QW>(
+            Q, Kcache, Vcache, O, B_count, Hq, G, sq, skv, max_seq, past_len,
+            scale, head_sink, num_heads, smooth_softmax, local_window_size);
 }
 
 // ---------------------------------------------------------------------
@@ -3876,14 +4145,6 @@ gqa_flash_prefill_v8x_kernel(
     const size_t kv_base =
         (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
 
-    // Same V^T staging as v6x.
-    auto vt_idx = [&](int dd, int kv_local) {
-#if !HIPDNN_WMMA_GFX12
-        kv_local = (kv_local & ~15) | (((kv_local ^ dd) & 1) << 3) | ((kv_local & 15) >> 1);
-#endif
-        return dd * VT_STR + kv_local;
-    };
-
     half16_t Q_reg[DT];
     {
         const int q_pos = q_start + wmma_lane;
@@ -3903,80 +4164,113 @@ gqa_flash_prefill_v8x_kernel(
                               ? (skv - 1) : (past_len + q_start + ROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
 
-    // K/V staging as in v6x, except that at most 4 chunks per thread are
-    // prefetched a tile ahead and the rest load at commit: with BKV=32 and
-    // two waves a thread would otherwise hold 16 chunks in flight.
-    constexpr int kKChunks  = BKV * D_TILES;
-    constexpr int kKvChunks = 2 * kKChunks;
-    constexpr int kPerThr   = (kKvChunks + 32 * NW - 1) / (32 * NW);
-    constexpr int kPf       = kPerThr > 4 ? 4 : kPerThr;
-    half16_raw_t pf[kPf];
-    auto prefetch = [&](int kv0, int r0, int n) {
-        #pragma unroll
-        for (int r = 0; r < n; ++r) {
-            const int i = tid + (r0 + r) * 32 * NW;
-            const bool is_k = i < kKChunks;
-            const int j = is_k ? i : i - kKChunks;
-            const int kv_local = is_k ? j / D_TILES : j % BKV;
-            const int dt       = is_k ? j % D_TILES : j / BKV;
-            const int kv_pos   = kv0 + kv_local;
-            const _Float16* src = is_k ? Kcache : Vcache;
-            pf[r] = (i < kKvChunks && kv_pos < skv)
-                ? HALF16_RAW_LOAD(&src[kv_base + (size_t)kv_pos * D + dt * 16])
-                : half16_raw_t{};
+    // K/V staging (KvStage) as in v6x (kGqaSplitKv: the next tile's K in
+    // flight through the scores, its V through the softmax and the value
+    // GEMM; otherwise both across the tile), except that at most 4 chunks per
+    // thread are prefetched and the rest load at commit: with BKV=32 and two
+    // waves a thread would otherwise hold 8 chunks of K in flight.
+    using Stage = KvStage<BKV, D, 32 * NW, VT_STR, K_STR>;
+    constexpr int kPerThr = Stage::kPerThr;
+    constexpr int kPf     = kPerThr > 4 ? 4 : kPerThr;
+    const Stage st(tid, wave_id);
+    typedef half16_raw_t Chunks[kPf];
+    auto tile_k = [&](int kv0) { return Kcache + kv_base + static_cast<size_t>(kv0) * D; };
+    auto tile_v = [&](int kv0) { return Vcache + kv_base + static_cast<size_t>(kv0) * D; };
+    auto load_k = [&](Chunks& dst, int kv0) {
+        if (kv0 + BKV <= skv) {
+            #pragma unroll
+            for (int r = 0; r < kPf; ++r) dst[r] = st.template loadK<false>(tile_k(kv0), r, 0);
+        } else {
+            const int k_last = (skv - kv0) * D_TILES - 1;
+            #pragma unroll
+            for (int r = 0; r < kPf; ++r) dst[r] = st.template loadK<true>(tile_k(kv0), r, k_last);
         }
     };
-    auto commit = [&](int r0, int n) {
-        #pragma unroll
-        for (int r = 0; r < n; ++r) {
-            const int i = tid + (r0 + r) * 32 * NW;
-            if (i >= kKvChunks) continue;
-            if (i < kKChunks) {
-                *reinterpret_cast<half16_raw_t*>(
-                    &K_lds[(i / D_TILES) * K_STR + (i % D_TILES) * 16]) = pf[r];
-            } else {
-                const int j = i - kKChunks;
-                #pragma unroll
-                for (int c = 0; c < 16; ++c)
-                    V_lds[vt_idx((j / BKV) * 16 + c, j % BKV)] = pf[r][c];
-            }
+    auto load_v = [&](Chunks& dst, int kv0) {
+        if (kv0 + BKV <= skv) {
+            #pragma unroll
+            for (int r = 0; r < kPf; ++r) dst[r] = st.template loadV<false>(tile_v(kv0), r, 0);
+        } else {
+            #pragma unroll
+            for (int r = 0; r < kPf; ++r)
+                dst[r] = st.template loadV<true>(tile_v(kv0), r, skv - kv0 - 1);
         }
     };
-    prefetch(0, 0, kPf);
+    auto commit_k = [&](const Chunks& src, int kv0) {
+        #pragma unroll
+        for (int r = 0; r < kPf; ++r) st.storeK(K_lds, r, src[r]);
+        if constexpr (kPerThr > kPf) {
+            const bool tail = kv0 + BKV > skv;
+            const int k_last = (skv - kv0) * D_TILES - 1;
+            #pragma unroll
+            for (int r = kPf; r < kPerThr; ++r)
+                st.storeK(K_lds, r, tail ? st.template loadK<true>(tile_k(kv0), r, k_last)
+                                         : st.template loadK<false>(tile_k(kv0), r, 0));
+        }
+    };
+    auto commit_v = [&](const Chunks& src, int kv0) {
+        #pragma unroll
+        for (int r = 0; r < kPf; ++r) st.storeV(V_lds, r, src[r]);
+        if constexpr (kPerThr > kPf) {
+            const bool tail = kv0 + BKV > skv;
+            #pragma unroll
+            for (int r = kPf; r < kPerThr; ++r)
+                st.storeV(V_lds, r, tail ? st.template loadV<true>(tile_v(kv0), r, skv - kv0 - 1)
+                                         : st.template loadV<false>(tile_v(kv0), r, 0));
+        }
+    };
+    // This wave's fragment rows start at a runtime column (dt0); taking its
+    // base once leaves every fragment a compile-time offset from it. Indexed
+    // as V_lds[((dt0 + tj) * 16 + lane) * VT_STR + ...] the per-fragment
+    // address kept its own register (8 of them at BKV16).
+    const _Float16* K_frag_base = &K_lds[wmma_lane * K_STR + dt0 * 16];
+    const _Float16* V_frag_base = &V_lds[(dt0 * 16 + wmma_lane) * VT_STR];
+    Chunks pf, pv;
+    load_k(pf, 0);
+    load_v(pv, 0);
+    commit_k(pf, 0);
+    commit_v(pv, 0);
+    __syncthreads();
+    if (num_tiles > 1) {
+        load_k(pf, BKV);
+        if constexpr (!kGqaSplitKv) load_v(pv, BKV);
+    }
 
     for (int t = 0; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
-        commit(0, kPf);
-        #pragma unroll 1
-        for (int r0 = kPf; r0 < kPerThr; ++r0) {
-            prefetch(kv0, r0, 1);
-            commit(r0, 1);
-        }
-        __syncthreads();
-        if (t + 1 < num_tiles) prefetch(kv0 + BKV, 0, kPf);
-
         float8_t S_reg[S_TILES_J];
         #pragma unroll
         for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[sj] = float8_t{};
-        #pragma unroll
-        for (int sj = 0; sj < S_TILES_J; ++sj) {
-            #pragma unroll
-            for (int tk = 0; tk < DT; ++tk) {
-                const half16_t k_frag =
-                    HALF16_LOAD(&K_lds[(sj * 16 + wmma_lane) * K_STR + (dt0 + tk) * 16], pair);
-                S_reg[sj] = HIPDNN_WMMA_F32_16X16X16_F16(k_frag, Q_reg[tk], S_reg[sj]);
-            }
-        }
+        v6_frag_stream<S_TILES_J * DT, half16_t, kGqaFragRing>(
+            [&](int f) {
+                return HALF16_LOAD(&K_frag_base[(f % S_TILES_J) * 16 * K_STR + (f / S_TILES_J) * 16],
+                                   pair);
+            },
+            [&](int f, const half16_t& k_frag) {
+                S_reg[f % S_TILES_J] = HIPDNN_WMMA_F32_16X16X16_F16(
+                    k_frag, Q_reg[f / S_TILES_J], S_reg[f % S_TILES_J]);
+            });
 
         // Sum the ND partial scores of this head (same accumulator layout in
-        // every wave, so the sum is element-wise).
+        // every wave, so the sum is element-wise). The barrier that publishes
+        // them also means every wave is past this tile's K: with kGqaSplitKv
+        // the next K goes in, and the next V is fetched while this tile
+        // finishes.
         if constexpr (ND > 1) {
             #pragma unroll
             for (int sj = 0; sj < S_TILES_J; ++sj)
                 *reinterpret_cast<float8_t*>(
                     &Sp[(((hb * ND + g) * S_TILES_J + sj) * 32 + lane_id) * kAcc]) = S_reg[sj];
-            __syncthreads();
+        }
+        __syncthreads();
+        if constexpr (kGqaSplitKv) {
+            if (t + 1 < num_tiles) {
+                commit_k(pf, kv0 + BKV);
+                load_v(pf, kv0 + BKV);
+            }
+        }
+        if constexpr (ND > 1) {
             #pragma unroll
             for (int g2 = 0; g2 < ND; ++g2) {
                 if (g2 == g) continue;
@@ -4047,16 +4341,30 @@ gqa_flash_prefill_v8x_kernel(
                 for (int e = 0; e < kAcc; ++e) O_frag[tj][e] *= corr;
         }
 
-        #pragma unroll
-        for (int tj = 0; tj < DT; ++tj) {
-            #pragma unroll
-            for (int tk = 0; tk < S_TILES_J; ++tk) {
-                const half16_t v_frag = HALF16_LOAD(
-                    &V_lds[((dt0 + tj) * 16 + wmma_lane) * VT_STR + tk * 16], pair);
-                O_frag[tj] = HIPDNN_WMMA_F32_16X16X16_F16(v_frag, Pb[tk], O_frag[tj]);
+        v6_frag_stream<DT * S_TILES_J, half16_t, kGqaFragRing>(
+            [&](int f) {
+                return HALF16_LOAD(&V_frag_base[(f % DT) * 16 * VT_STR + (f / DT) * 16], pair);
+            },
+            [&](int f, const half16_t& v_frag) {
+                O_frag[f % DT] = HIPDNN_WMMA_F32_16X16X16_F16(v_frag, Pb[f / DT], O_frag[f % DT]);
+            });
+        __syncthreads();   // WAR: V_lds and Sp reused by the next tile
+        if constexpr (kGqaSplitKv) {
+            if (t + 1 < num_tiles) {
+                commit_v(pf, kv0 + BKV);
+                if (t + 2 < num_tiles) load_k(pf, kv0 + 2 * BKV);
+            }
+        } else {
+            if (t + 1 < num_tiles) {
+                commit_k(pf, kv0 + BKV);
+                commit_v(pv, kv0 + BKV);
+                __syncthreads();   // RAW: the next tile's K and V
+                if (t + 2 < num_tiles) {
+                    load_k(pf, kv0 + 2 * BKV);
+                    load_v(pv, kv0 + 2 * BKV);
+                }
             }
         }
-        __syncthreads();   // WAR: K/V/Sp LDS reused by the next tile
     }
 
     const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
@@ -4091,10 +4399,36 @@ struct PrefillV6xCfg { int hb; int qw; int mt; int bkv; };
 // The v6x configs built for a shape (hb must divide the group): 1-wave and
 // 2-wave blocks (hb x qw = 1x1, 2x1), 4-wave blocks (1x4, 2x2, 4x1) and,
 // without a window, 8-wave blocks (1x8, 2x4, 4x2, 8x1). At d64 M_TILES 1/2 x
-// BKV 32/64. At d96 and d128 M_TILES=2 spills. d96 builds 4- and 8-wave blocks
-// only, at BKV 32/64. At d128 2 heads per block (2x1) spill, and so does BKV=64
-// with 4 waves (592 bytes/lane); 8 waves halve the per-thread staging and do
-// run BKV=64.
+// BKV 32/64, except M_TILES=2 with BKV=64 where it does not fit
+// (prefillV6xMt2Bkv64Built). At d96 and d128 M_TILES=2 spills. d96 builds 4- and 8-wave
+// blocks only, at BKV 32/64. At d128 2 heads per block (2x1) spill, and so does
+// BKV=64 with 4 waves (592 bytes/lane); 8 waves halve the per-thread staging
+// and do run BKV=64.
+// Whether the code object this process runs has 8-half WMMA fragments (the
+// gfx1170 encoding). Read once from the device, like the tile shapes it
+// decides, so it follows the compile target.
+static bool codeObjectHasWmmaFrag8() {
+    static const bool v = [] {
+        int x = 0;
+        if (hipMemcpyFromSymbol(&x, HIP_SYMBOL(g_gqa_prefill_wmma_frag8), sizeof(x)) != hipSuccess) {
+            (void)hipGetLastError();
+            x = 0;
+        }
+        return x != 0;
+    }();
+    return v;
+}
+
+// M_TILES=2 with BKV=64 holds Q, S and O of 32 rows (192 VGPRs) next to a
+// 64-key tile. With the gfx11 encoding's 16-half fragments it needs 251-256
+// VGPRs and spills 8-132 bytes/lane; with the gfx1170 encoding it fits as
+// a 4- or 8-wave block (243-246 and 226 VGPRs, no scratch), is not built as a
+// 2-wave block, and the gfx1170 table picks it for long-KV points at 4 and 8
+// waves.
+static inline bool prefillV6xMt2Bkv64Built(int nw) {
+    return nw != 2 && codeObjectHasWmmaFrag8();
+}
+
 static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_size,
                                        PrefillV6xCfg* out) {
     if ((d != 64 && d != 96 && d != 128) || G <= 0 || Hq % G != 0) return 0;
@@ -4109,6 +4443,7 @@ static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_si
         for (int mt = 1; mt <= (d == 64 ? 2 : 1); ++mt)
             for (int bkv : {32, 64}) {
                 if (d == 128 && bkv == 64 && nw != 8) continue;
+                if (mt == 2 && bkv == 64 && !prefillV6xMt2Bkv64Built(nw)) continue;
                 out[n++] = {hb, qw, mt, bkv};
             }
     }
@@ -4515,7 +4850,10 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     _Float16* O_ptr = static_cast<_Float16*>(O);
 
     if (d == 64 || d == 96 || d == 128) {
-        const PrefillV6xCfg cfg{hb, qw, mt, bkv};
+        // Tables measured before M_TILES=2 BKV=64 stopped being built on gfx11
+        // name it; the same blocks at BKV=32 are the nearest config that is.
+        const bool mt2_bkv64_gone = mt == 2 && bkv == 64 && !prefillV6xMt2Bkv64Built(hb * qw);
+        const PrefillV6xCfg cfg{hb, qw, mt, mt2_bkv64_gone ? 32 : bkv};
         if (!prefillV6xBuilt(d, Hq, G, local_window_size, cfg)) return -1;
         dispatchPrefillV6x(cfg, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr, B, Hq, G, sq,
                            skv, max_seq, past_len, scale,
