@@ -569,6 +569,88 @@ def _geomean_slowdown(ans, pts):
 CARRIED = ("row_pads", "default_row_pad")
 
 
+class LutError(ValueError):
+    """A table the loader would read differently from what was meant."""
+
+
+KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
+PHASES = ("Prefill", "Decode", "DecodeDp4a")
+STRIDES = ("Arrival", "Padded", "Padded256")
+ZERO_POINTS = ("Symmetric", "Asymmetric")
+
+
+def compiled_extended_entries():
+    """(bm, bn, wt_m, wt_n, bk, variant, swizzle) of every WMMA_EXT_CONFIGS
+    entry the kernel library is built with."""
+    src = KERNEL_SRC.read_text(encoding="utf-8")
+    block = src[src.index("#define WMMA_EXT_CONFIGS(X)"):]
+    block = block[:block.index("\n\n")]
+    return {tuple(int(v) for v in m.groups())
+            for m in re.finditer(r"X\(\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),"
+                                 r"\s*(\d+),\s*(\d+),\s*(\d+)\)", block)}
+
+
+def check_table(t: dict) -> None:
+    """Raises LutError unless every reference and key in table `t` (the JSON
+    form) means one thing to the C++ loader, which drops what it cannot read
+    rather than failing; build, merge and compile all run it, so a table cannot
+    be written or shipped with entries the loader would silently skip."""
+    errors = []
+    configs = t.get("configs", [])
+    if len(configs) > 256:
+        errors.append(f"{len(configs)} configs exceed the ubyte config index")
+
+    def kind_of(i):
+        return configs[i].get("kind") if 0 <= i < len(configs) else None
+
+    for name in ("points", "fallbacks"):
+        for r in t.get(name, []):
+            phase, i = r.get("phase"), r.get("config", -1)
+            if phase not in PHASES:
+                errors.append(f"{name}: unknown phase {phase!r}: {r}")
+                continue
+            want = "Wmma" if phase == "Prefill" else "Gemv"
+            if kind_of(i) != want:
+                errors.append(f"{name}: config {i} is not a {want} config: {r}")
+            if name == "points":
+                stride = r.get("row_stride")
+                if (phase == "Prefill") != (stride in STRIDES) or \
+                        (phase != "Prefill" and stride != "Any"):
+                    errors.append(f"points: row_stride {stride!r} for {phase}: {r}")
+                if r.get("group_size") not in GROUP_SIZES.values() or \
+                        r.get("zero_point") not in ZERO_POINTS:
+                    errors.append(f"points: unknown group size or zero point: {r}")
+    compiled = compiled_extended_entries()
+    seen = set()
+    for e in t.get("extended_configs", []):
+        i = e.get("config", -1)
+        if kind_of(i) != "Wmma":
+            errors.append(f"extended_configs: config {i} is not a Wmma config: {e}")
+            continue
+        if i in seen:
+            errors.append(f"extended_configs: config {i} listed twice")
+        seen.add(i)
+        c = configs[i]
+        entry = (c["bm16"] * 16, c["bn16"] * 16, c["wt_m"], c["wt_n"], c["bk"],
+                 e.get("variant"), c["swizzle"])
+        if entry not in compiled:
+            errors.append(f"extended_configs: no WMMA_EXT_CONFIGS entry {entry}")
+    keys = set()
+    for r in t.get("row_pads", []):
+        key = (r.get("n"), r.get("k"), r.get("group_size"), r.get("zero_point"))
+        if r.get("group_size") not in GROUP_SIZES.values() or \
+                r.get("zero_point") not in ZERO_POINTS or \
+                not r.get("n") or not r.get("k") or r.get("pad_bytes", 1) % 16:
+            errors.append(f"row_pads: invalid entry {r}")
+        if key in keys:
+            errors.append(f"row_pads: weight {key} listed twice")
+        keys.add(key)
+    if t.get("default_row_pad", 0) % 16:
+        errors.append(f"default_row_pad {t['default_row_pad']} is not a multiple of 16")
+    if errors:
+        raise LutError("\n".join(errors))
+
+
 def with_extended(configs, extended):
     """The table's configs with "ext"/"variant" put back on the ones its
     extended_configs list names (the in-memory form config_entry() makes)."""
@@ -590,6 +672,8 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points,
         c.pop("variant", None)
         plain.append(c)
     carried = carried or {}
+    check_table({**doc, **carried, "configs": plain, "fallbacks": fallbacks,
+                 "points": points, "extended_configs": extended})
     with open(out, "w", encoding="utf-8") as f:
         f.write("{\n")
         for k in doc:
@@ -648,6 +732,7 @@ def cmd_merge(args) -> int:
     print(f"[merge] {len(measured)} measured {phase} points")
     src = LUT_DIR / f"{args.arch}.json"
     old = json.loads(src.read_text(encoding="utf-8"))
+    check_table(old)
     pool = with_extended(old["configs"], old.get("extended_configs"))
     gain = 1.0 + args.min_gain
 
@@ -845,6 +930,7 @@ def cmd_compile(args) -> int:
     if not lut_json.exists():
         print(f"[compile] no {lut_json}; run build first", file=sys.stderr)
         return 1
+    check_table(json.loads(lut_json.read_text(encoding="utf-8")))
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [args.flatc, "--binary", "--strict-json", "-o", tmp, str(FBS),
                str(lut_json)]
@@ -930,7 +1016,14 @@ def main() -> int:
                    else LUT_DIR / f"{args.arch}.fb" if args.json_out == canonical
                    else args.json_out.with_suffix(".fb"))
     args.carry_from = Path(args.carry_from) if args.carry_from else canonical
+    try:
+        return run(args)
+    except LutError as e:
+        print(f"[{args.command}] table rejected:\n{e}", file=sys.stderr)
+        return 1
 
+
+def run(args) -> int:
     if args.command in ("measure", "all"):
         rc = cmd_measure(args)
         if rc:
