@@ -948,10 +948,18 @@ void GemmFp16U4ImplX(
         for(int wn = 0; wn < WT_N; wn++)
         {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // One row pointer per 16x16 tile, then a compile-time row offset
+            // times ldc per element, as in GemmFp16U4Impl: written as
+            // C[(mbase + r) * ldc + ...], the compiler recomputes the whole
+            // 32-bit index and does a 64-bit sign-extend, shift and add for
+            // every stored element.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 const int tile_r =
                     (wrow * WT_M + wm) * WMMA_TILE + r;
                 if constexpr (BOUNDS_CHECK) {
@@ -966,10 +974,7 @@ void GemmFp16U4ImplX(
                                 value += static_cast<float>(output_bias[nbase + lane]);
                             }
                         }
-                        if constexpr (1 > 1)
-                            reinterpret_cast<float*>(C)[(mbase + r) * ldc + nbase + lane] = value;
-                        else
-                            C[(mbase + r) * ldc + nbase + lane] = (_Float16)value;
+                        *cp = (_Float16)value;
                     }
                 } else {
                     float value = acc[wm][wn][e];
@@ -981,10 +986,7 @@ void GemmFp16U4ImplX(
                             value += static_cast<float>(output_bias[nbase + lane]);
                         }
                     }
-                    if constexpr (1 > 1)
-                        reinterpret_cast<float*>(C)[(mbase + r) * ldc + nbase + lane] = value;
-                    else
-                        C[(mbase + r) * ldc + nbase + lane] = (_Float16)value;
+                    *cp = (_Float16)value;
                 }
             }
         }
