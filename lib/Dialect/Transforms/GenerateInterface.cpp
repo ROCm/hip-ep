@@ -100,7 +100,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_row_pitches");
 
   mlir::hip::HipModelMetaInfoT meta;
-  meta.version = 1;
+  meta.version = static_cast<int32_t>(mlir::hip::ModelMetaVersion::Dense);
   meta.constants_filename = constantsFile;
 
   if (constantSizesAttr) {
@@ -127,6 +127,9 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
       ci->row_bytes = (i < rowBytes.size()) ? rowBytes[i] : 0;
       ci->row_pitch = (i < rowPitches.size()) ? rowPitches[i] : 0;
+      if (ci->row_pitch != 0)
+        meta.version =
+            static_cast<int32_t>(mlir::hip::ModelMetaVersion::RowPadded);
       auto kind = static_cast<mlir::hip::ConstantMetadataSourceKind>(
           (i < kinds.size())
               ? kinds[i]

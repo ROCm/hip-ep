@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "constant_layout.h"
 #include "debug_log.h"
 #include "hip/init_config_abi.h"
 #include "hip/timing.h"
@@ -30,6 +31,8 @@ using ProviderOptions = std::unordered_map<std::string, std::string>;
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
+static const mlir::hip::HipModelMetaInfo *
+verify_model_metadata(const void *metadata_blob, size_t blob_size);
 static int prepare_constants_array(RuntimeState *state,
                                    const mlir::hip::HipModelMetaInfo *meta);
 static size_t
@@ -100,7 +103,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 0;
   }
 
-  auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
+  auto *meta = verify_model_metadata(metadata_blob, blob_size);
+  if (!meta) {
+    hipdnn_ep_state_cleanup(*out_state);
+    *out_state = nullptr;
+    return 12;
+  }
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
   if (count <= 0) {
@@ -165,6 +173,57 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
              elapsed_since(t0));
   return 0;
+}
+
+// The artifact is serialized input: verify the FlatBuffer before reading any
+// field, refuse a version this runtime does not know, and check every
+// constant's placement once so the loaders below can trust it.
+static const mlir::hip::HipModelMetaInfo *
+verify_model_metadata(const void *metadata_blob, size_t blob_size) {
+  flatbuffers::Verifier verifier(static_cast<const uint8_t *>(metadata_blob),
+                                 blob_size);
+  if (!mlir::hip::VerifyHipModelMetaInfoBuffer(verifier)) {
+    fprintf(stderr,
+            "__metadata_blob (%zu bytes) is not a valid "
+            "HipModelMetaInfo FlatBuffer\n",
+            blob_size);
+    return nullptr;
+  }
+  auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
+  using mlir::hip::ModelMetaVersion;
+  constexpr int32_t kMinVersion = static_cast<int32_t>(ModelMetaVersion::MIN);
+  constexpr int32_t kMaxVersion = static_cast<int32_t>(ModelMetaVersion::MAX);
+  if (meta->version() < kMinVersion || meta->version() > kMaxVersion) {
+    fprintf(stderr,
+            "__metadata_blob version %d is not supported by this runtime "
+            "(versions %d-%d); recompile the model with this EP\n",
+            meta->version(), kMinVersion, kMaxVersion);
+    return nullptr;
+  }
+  auto *constants = meta->constants();
+  for (int64_t i = 0, n = constants ? (int64_t)constants->size() : 0; i < n;
+       ++i) {
+    auto *c = constants->Get(i);
+    hipdnn_ep::ConstantLayout layout;
+    if (const char *err = hipdnn_ep::planConstantLayout(
+            c->offset(), c->size(), c->row_bytes(), c->row_pitch(), &layout)) {
+      fprintf(stderr,
+              "__metadata_blob constant %lld: %s (offset=%lld size=%lld "
+              "row_bytes=%lld row_pitch=%lld)\n",
+              (long long)i, err, (long long)c->offset(), (long long)c->size(),
+              (long long)c->row_bytes(), (long long)c->row_pitch());
+      return nullptr;
+    }
+    if (layout.row_pitch != 0 &&
+        meta->version() < static_cast<int32_t>(ModelMetaVersion::RowPadded)) {
+      fprintf(stderr,
+              "__metadata_blob constant %lld is row-padded but the metadata "
+              "version is %d\n",
+              (long long)i, meta->version());
+      return nullptr;
+    }
+  }
+  return meta;
 }
 
 // Shared initialization that brings up HIP device, stream, and hipBLASLt
@@ -627,25 +686,19 @@ static int per_entry_load_constants(RuntimeState *state,
 
   for (int64_t i = 0; i < count; ++i) {
     auto *c = constants->Get(i);
-    size_t sz = (size_t)c->size();
-    void *dst = static_cast<char *>(state->gpu_constants_blob) + c->offset();
-    // Row-padded constant: fetch the dense source rows, then place each at
-    // row_pitch in the blob (size is the padded footprint).
-    const size_t row_bytes = (size_t)c->row_bytes();
-    const size_t row_pitch = (size_t)c->row_pitch();
-    const bool padded = row_bytes != 0 && row_pitch >= row_bytes;
-    const size_t rows = padded ? sz / row_pitch : 0;
-    const size_t src_sz = padded ? rows * row_bytes : sz;
-    // Expands the fetched dense rows to row_pitch in place (last row first, so
-    // no row is overwritten before it moves) and uploads the footprint in one
-    // copy. staging holds sz bytes: the pre-scan sized it by footprint.
+    // Valid by verify_model_metadata. A row-padded constant fetches its dense
+    // source rows (src_sz) and places each at row_pitch in the blob (size is
+    // the padded footprint).
+    hipdnn_ep::ConstantLayout layout;
+    hipdnn_ep::planConstantLayout(c->offset(), c->size(), c->row_bytes(),
+                                  c->row_pitch(), &layout);
+    const size_t sz = (size_t)layout.size;
+    const size_t src_sz = (size_t)layout.src_size;
+    void *dst = static_cast<char *>(state->gpu_constants_blob) + layout.offset;
+    // Uploads the footprint in one copy; staging holds sz bytes (the pre-scan
+    // sized it by footprint).
     auto upload = [&]() -> bool {
-      if (padded) {
-        for (size_t r = rows; r-- > 0;) {
-          memmove(staging + r * row_pitch, staging + r * row_bytes, row_bytes);
-          memset(staging + r * row_pitch + row_bytes, 0, row_pitch - row_bytes);
-        }
-      }
+      hipdnn_ep::expandRowsInPlace(staging, layout);
       return hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) == hipSuccess;
     };
 

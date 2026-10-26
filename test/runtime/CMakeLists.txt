@@ -57,6 +57,14 @@ set_tests_properties(MatMulNBitsAbiUnitTest PROPERTIES
     FAIL_REGULAR_EXPRESSION "rc=[^0]")
 set_target_properties(test-matmul-nbits-abi PROPERTIES FOLDER "runtime-tests")
 
+# Checks applied to every ConstantInfo before upload, and the row expansion of
+# row-padded constants (lib/Runtime/constant_layout.h, header-only).
+add_executable(test-constant-layout test_constant_layout.cpp)
+target_compile_features(test-constant-layout PRIVATE cxx_std_17)
+target_include_directories(test-constant-layout PRIVATE ${CMAKE_SOURCE_DIR}/lib/Runtime)
+add_test(NAME ConstantLayoutUnitTest COMMAND test-constant-layout)
+set_target_properties(test-constant-layout PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's

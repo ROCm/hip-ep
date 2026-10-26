@@ -164,7 +164,7 @@ Dynamic dimensions are encoded as `-1`.
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `version` | `int32` | Schema version |
+| `version` | `int32` | `ModelMetaVersion`: 1 (`Dense`), or 2 (`RowPadded`) when some constant has `row_pitch != 0`, because that changes what `size` means. The runtime verifies the FlatBuffer, rejects a version outside the range it was built with, and checks every constant (non-negative `offset` and `size` without overflow; `row_bytes` and `row_pitch` both zero or `0 < row_bytes <= row_pitch` with `size % row_pitch == 0`) before allocating; `hipdnn_ep_state_init_with_fs` returns 12 otherwise |
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` (its footprint in the GPU blob) |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |

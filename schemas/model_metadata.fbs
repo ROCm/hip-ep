@@ -42,8 +42,17 @@ table ConstantInfo {
   row_pitch: int64 = 0;
 }
 
+// HipModelMetaInfo.version. RowPadded adds row-padded constants, whose
+// ConstantInfo.size is the padded footprint rather than the source byte count;
+// the writer uses it only when some constant is row-padded, and a runtime
+// rejects a version above the MAX it was built with.
+enum ModelMetaVersion : int32 {
+  Dense = 1,
+  RowPadded = 2,
+}
+
 table HipModelMetaInfo {
-  version: int32 = 1;
+  version: int32 = 1;  // a ModelMetaVersion
   constants_filename: string;
   constants: [ConstantInfo];
   input_count: int64;
