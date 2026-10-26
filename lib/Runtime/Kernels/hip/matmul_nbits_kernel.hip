@@ -5047,7 +5047,8 @@ static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
     X( 64,  64, 2, 2, 32, 129,  4)              \
     X(128, 128, 4, 4, 32, 102,  4)              \
     X(128,  64, 2, 4, 64, 131,  4)              \
-    X(128, 128, 4, 4, 32,  92,  4)
+    X(128, 128, 4, 4, 32,  92,  4)              \
+    X(128, 128, 2, 4, 64, 193,  4)
 
 static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- fused dequant + GEMM ---
