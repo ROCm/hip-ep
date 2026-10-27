@@ -74,6 +74,11 @@ struct Storage {
   // into the plugin's code (linked into the host binary), which is mapped for
   // the process lifetime.
   std::vector<void (*)(mlir::DialectRegistry &)> dialectRegistrations;
+
+  // Named source-specific tensor-lowering prefixes. Identifiers are owned so
+  // plugin registration may pass transient StringRefs. Duplicate identifiers
+  // remain visible and are rejected deterministically when selected.
+  std::vector<PluginSourcePipeline> sourcePipelines;
 };
 
 Storage &storage() {
@@ -150,12 +155,24 @@ void addDialectRegistrationImpl(void * /*self*/,
   storage().dialectRegistrations.push_back(registerFn);
 }
 
+void addSourcePipelineImpl(void * /*self*/, const char *id, std::size_t idLen,
+                           SourcePipelineBuilder builder) {
+  if (id == nullptr || idLen == 0 || builder == nullptr) {
+    llvm::errs() << "[plugin] WARNING: addSourcePipeline requires a nonempty "
+                    "identifier and non-null callback; skipping.\n";
+    return;
+  }
+  storage().sourcePipelines.push_back(
+      PluginSourcePipeline{std::string(id, idLen), builder});
+}
+
 const HipEpPluginRegistry::VTable g_vtable = {
     /* requestPipelineSlot     = */ &requestPipelineSlotImpl,
     /* addRuntimeBitcode       = */ &addRuntimeBitcodeImpl,
     /* addLibraryPath          = */ &addLibraryPathImpl,
     /* addLibrary              = */ &addLibraryImpl,
     /* addDialectRegistration  = */ &addDialectRegistrationImpl,
+    /* addSourcePipeline       = */ &addSourcePipelineImpl,
 };
 
 } // namespace
@@ -199,6 +216,11 @@ llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations() {
   dispatchPluginRegistrationsOnce();
   return llvm::to_vector(storage().dialectRegistrations);
+}
+
+llvm::SmallVector<PluginSourcePipeline> pluginSourcePipelines() {
+  dispatchPluginRegistrationsOnce();
+  return llvm::to_vector(storage().sourcePipelines);
 }
 
 } // namespace hip::compiler

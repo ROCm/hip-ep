@@ -15,7 +15,16 @@
 
 namespace mlir {
 class DialectRegistry;
+class ModuleOp;
+class OpPassManager;
+namespace hip {
+struct CompilationOptionsT;
+} // namespace hip
 } // namespace mlir
+
+namespace morphizen {
+class FileSystem;
+} // namespace morphizen
 
 // Public registry passed to a plugin's registration entry
 // (`hipEpRegisterPlugin_<id>`). It exposes the contributions a plugin can make:
@@ -34,6 +43,8 @@ class DialectRegistry;
 //                                 as registerPass.
 //   * requestPipelineSlot(...) -- run a registered pass at a named slot; read
 //                                 by lib/Dialect/Transforms/Pipelines.cpp.
+//   * addSourcePipeline(...)    -- register a source-to-tensor-HIP prefix;
+//                                 CompilerDriver appends the common tails.
 //   * addRuntimeBitcode(...)   -- contribute LLVM bitcode linked into the
 //                                 model module by
 //                                 lib/Target/LLVM/LLVMBackend.cpp (see the
@@ -63,6 +74,27 @@ class DialectRegistry;
 // See docs/design/plugin-interface.md.
 
 namespace hip::compiler {
+
+/// Context passed to a plugin-owned source-to-HIP pipeline builder.
+///
+/// The callback may add only its source-specific tensor-form lowering prefix
+/// to `passManager`. The host appends the common HIP tensor/bufferization and
+/// HIP-to-LLVM tails after the callback returns. References are valid only for
+/// the duration of the callback and must not be retained.
+struct SourcePipelineContext {
+  mlir::ModuleOp &module;
+  mlir::OpPassManager &passManager;
+  const mlir::hip::CompilationOptionsT &compilationOptions;
+  morphizen::FileSystem *fileSystem;
+  std::string &errorMessage;
+};
+
+using SourcePipelineBuilder = bool (*)(SourcePipelineContext &context);
+
+struct PluginSourcePipeline {
+  std::string id;
+  SourcePipelineBuilder builder;
+};
 
 /// Well-defined slots in the public pipeline at which plugin passes
 /// can be inserted.
@@ -126,13 +158,17 @@ public:
     // it -- a bitcode/library-only plugin never touches this entry.
     void (*addDialectRegistration)(void *self,
                                    void (*registerFn)(mlir::DialectRegistry &));
+    // V4: register a named source-specific tensor-lowering prefix. The host
+    // owns common bufferization and LLVM lowering after this callback.
+    void (*addSourcePipeline)(void *self, const char *id, std::size_t idLen,
+                              SourcePipelineBuilder builder);
   };
 
-  /// Tripwire: the current vtable layout has exactly five function pointers.
+  /// Tripwire: the current vtable layout has exactly six function pointers.
   /// Any change to `VTable` makes this assertion fire; the compiler
   /// error is your reminder to bump `HIP_EP_PLUGIN_API_VERSION` in
   /// PluginAPI.h before the new layout ships.
-  static_assert(sizeof(VTable) == 5 * sizeof(void (*)()),
+  static_assert(sizeof(VTable) == 6 * sizeof(void (*)()),
                 "VTable layout changed -- bump HIP_EP_PLUGIN_API_VERSION "
                 "and update this assertion to match the new entry count.");
 
@@ -195,6 +231,14 @@ public:
   void requestPipelineSlot(PipelineSlot slot, llvm::StringRef passName) {
     vtable_->requestPipelineSlot(self_, static_cast<int>(slot), passName.data(),
                                  passName.size());
+  }
+
+  /// Register a named source-specific pipeline prefix. A module selects it via
+  /// the `hip.compiler.source_pipeline` string attribute. The callback adds
+  /// only passes that translate its source dialect to tensor-form HIP IR; the
+  /// host retains ownership of the common bufferization and LLVM tails.
+  void addSourcePipeline(llvm::StringRef id, SourcePipelineBuilder builder) {
+    vtable_->addSourcePipeline(self_, id.data(), id.size(), builder);
   }
 
   // ---------- Runtime bitcode and link libraries ----------------------
@@ -272,6 +316,10 @@ llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 /// HIP->LLVM-lowering interface models are present in the pipeline's context.
 llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations();
+
+/// Return owning copies of all named source-pipeline registrations. Duplicate
+/// identifiers are retained so the compiler can reject ambiguous selection.
+llvm::SmallVector<PluginSourcePipeline> pluginSourcePipelines();
 
 /// One bitcode buffer contributed by a plugin's `addRuntimeBitcode` call. The
 /// bytes are host-owned (copied during the call) and stable for the process
