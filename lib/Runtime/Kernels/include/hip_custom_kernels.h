@@ -1832,8 +1832,8 @@ HIP_KERNEL_API int hip_global_pool(
  *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
- * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
- * (FP16 accumulates in float, narrows on write).
+ * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT32,
+ * HIP_DTYPE_FLOAT16 (FP16 accumulates in float, narrows on write).
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
@@ -3703,6 +3703,21 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float scale,
     int element_size_bytes);
 
+/* Exact int32 matmul. A is [batch, M, K]. b_batch_stride is 0 when every
+ * batch reuses one [K, N] matrix and K*N when B is batch-contiguous.
+ * Accumulates in int64 and stores a wrapping int32. transA/transB are not
+ * supported. Returns 0 on success. */
+HIP_KERNEL_API int hip_matmul_i32(
+    void* stream,
+    const void* a,
+    const void* b,
+    void* c,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch,
+    int64_t b_batch_stride);
+
 // com.microsoft DynamicSparseAttention, attention_mode=selected_only over the
 // main cache, fp16, no rotary / qk-norm / sink.
 //   query            [B, S, N*D]
@@ -3812,11 +3827,15 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
  * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `k`, `s` and `dil`
  * must be 1 and those in `p` must be 0 (the lowering does this).
  *
- * Accumulation is in float for every dtype, so a fp16 convolution with a
- * contraction extent in the thousands does not lose the reduction to rounding.
+ * Float dtypes accumulate in float, so a fp16 convolution with a contraction
+ * extent in the thousands does not lose the reduction to rounding.
+ * HIP_DTYPE_INT32 is a spatial-rank-2 convolution that accumulates in int64
+ * and stores a wrapping int32. Its trailing spatial slots must be the identity
+ * (extent / kernel / stride / dilation 1, pad 0).
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
- * HIP_DTYPE_BFLOAT16. All of input / weights / bias / output share the dtype.
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
+ * share the dtype.
  * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_conv(

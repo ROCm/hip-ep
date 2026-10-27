@@ -136,8 +136,8 @@ jobs:
       # concern, so the prefix build lives here (not in build.py). Source is the
       # llvm-project subtree vendored inside rocmlirTriton (external/llvm-project);
       # repo + pinned commit come from cmake/deps.txt. Recipe matches
-      # cmake/deps.cmake's from-source fallback: clang;mlir;lld, X86 only,
-      # RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # cmake/deps.cmake's from-source fallback with ENABLE_ROCMLIRTRITON on:
+      # clang;mlir;lld, X86 and AMDGPU, RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
       - name: Resolve rocmlirTriton pin
         id: rocmlir
@@ -154,7 +154,7 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed only on the rocmlirTriton commit: a protobuf/ORT bump must not
           # evict the multi-hour LLVM cache.
-          key: linux-llvm-rocmlirtriton-${{ steps.rocmlir.outputs.commit }}
+          key: linux-llvm-rocmlirtriton-amdgpu-${{ steps.rocmlir.outputs.commit }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -170,7 +170,7 @@ jobs:
           cmake -G Ninja -S "$SRC/external/llvm-project/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
             -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
             -DLLVM_ENABLE_RTTI=ON \
             -DLLVM_ENABLE_ZLIB=OFF \

@@ -96,7 +96,8 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --build_dir "${{ runner.workspace }}/build/mock" \
-            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install"
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines ENABLE_ROCMLIRTRITON=OFF
 
       # -----------------------------------------------------------------------
       # Exercise the sample plugin's registrar unit test in ISOLATION. This is a
