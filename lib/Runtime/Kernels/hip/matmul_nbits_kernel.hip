@@ -5030,9 +5030,10 @@ struct WmmaConfig {
 static constexpr bool wmmaConfigIsExt(const WmmaConfig& c) { return c.ext; }
 
 // Extended fused int4 entries: (bm, bn, wt_m, wt_n, bk, variant, swizzle).
-// Prefill winners from the docs/experiments/matmul-nbits-prefill-2026-10
-// search. (geometry, swizzle, variant) must be unique among them so the LUT
-// can name each one (checked below).
+// Measured prefill winners, reachable only through a LUT that names them; see
+// "Extended WMMA entries" in docs/design/custom_kernel_design.md. (geometry,
+// swizzle, variant) must be unique among them so the LUT can name each one
+// (checked below).
 #define WMMA_EXT_CONFIGS(X)                     \
     X( 32,  32, 1, 2, 64,   0,  4)              \
     X(128,  64, 2, 4, 64,   3,  4)              \

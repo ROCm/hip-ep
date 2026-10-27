@@ -277,6 +277,33 @@ Four execution paths, auto-dispatched by shape:
 
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
 
+**Row-padded int4 weights.** A K-step reads B rows K/2 bytes apart. When K/2 is a whole number of 128-byte lines whose count shares a factor of at least 8 with the 64 cache sets (K = 4096, 8192, ...), those rows map to at most 8 sets and evict each other although the working set fits in cache. `hip::matmulNBitsRowStrideAliases` (`include/hip/matmul_nbits_row_alias.h`) is the one definition of that test, used by the compiler, the runtime and the autotune sweep driver. Such weights are read with a padded row pitch, set up in one of two ways:
+
+- At load, by `hip-pad-matmul-nbits-weights`: the pad comes from the device LUT (`row_pads` per weight shape, else `default_row_pad` for an aliasing weight). The constant is stored with `row_bytes`/`row_pitch` (see [constant-handling-design.md](constant-handling-design.md)), and the op passes the pitch to `wrap_matmul_nbits_ex` as `b_row_bytes`.
+- Per call, by the runtime, when the compiler did not lay the weight out: the weight is repacked at arrival + 128 B into one shared scratch, then multiplied.
+
+The LUT keys prefill rows by stride category (`Arrival`, `Padded` = +128 B, `Padded256` = +256 B) because the best tile differs between layouts. See `lib/Runtime/Kernels/hip/autotune/matmul_nbits/README.md` for the table workflow.
+
+**Extended WMMA entries.** `WMMA_EXT_CONFIGS` lists fused int4 entries that run `GemmFp16U4ImplX` (`matmul_nbits_wmma_core_x.h`) instead of the shipped `GemmFp16U4Impl`. The extended core is a separate copy so that no existing `kWmmaConfigs` entry changes. It is specialized to the fused-dequant, FP16-zero-point, no-bias contract its kernels use. Extended entries are chosen only through a LUT that names them (or by the sweep on such a device), never by the online autotuner. `WmmaConfig::variant` selects pipeline options per entry:
+
+| Bit | Option |
+|---|---|
+| 1 | Two-deep global prefetch: two register sets of A/B in flight, with quant-group constants carried per tile |
+| 2 | Wave-uniform source base plus 32-bit per-thread offsets |
+| 4 | Store-first step: write tile i+1 to LDS, issue loads for i+2, then run tile i's WMMAs |
+| 8/16/24 | `sched_group_barrier` pattern on the store-first step (full / LDS reads + global loads / dequant VALU) |
+| 32 | Stage C through LDS and write 16-byte rows (interior tiles only) |
+| 64 | XOR-swizzle 16-byte LDS chunks instead of padding rows |
+| 128 | CU mode: the kernel's waves share one CU and its half of the LDS instead of spreading over the WGP |
+
+What the measurements behind these options showed (gfx1151, int4 prefill shapes of the models used to build its table):
+
+- Once rows are padded, the fused dequant VALU work limits int4 at large M. Options that let the next tile's dequant overlap the current WMMAs (store-first, two-deep prefetch) help most. Moving dequant later, by keeping int4 B in LDS and dequantizing at fragment load, did not help.
+- No single option set wins everywhere, so each entry is a measured winner for some shapes and the LUT picks per shape.
+- `sched_group_barrier` patterns constrain the compiler's schedule, so whether one helps depends on the compiler version. That is one reason LUT rows must be measured on the product kernel binary (see the autotune README).
+
+Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
+
 ## Key Design Decisions
 
 - **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.
