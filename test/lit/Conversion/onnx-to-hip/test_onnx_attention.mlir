@@ -9,9 +9,9 @@
 //   - is_causal=1 WITH an external attn_mask -> no_causal=false AND the mask
 //     threaded as attention_bias (runtime adds the mask, then the built-in
 //     causal triangle applies on top -- both, mirroring the ONNX reference)
-//   - present KV seq extent = past_seq + current_seq (concat semantics),
-//     and seqlens_k = total_seq - 1 (ORT convention total_seq = seqlens_k + 1)
-//   - present_key/value DPS inits sized to the past+current total
+//   - the mask key extent supplies the logical KV length and seqlens_k
+//   - present KV capacity preserves a preallocated past buffer while growing
+//     normally when the logical length is larger
 //
 //   - a sliding window baked into the additive mask recovered from the mask's
 //     producing subgraph and stamped as local_window_size, since
@@ -64,9 +64,8 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // present KV seq = past_seq (127) + current_seq (1); seqlens_k = total - 1.
-    // CHECK: tensor.dim %{{.*}}, %c2
-    // CHECK: arith.addi
+    // The mask key extent is the logical total; capacity remains 128.
+    // CHECK: tensor.dim %{{.*}}, %c3
     // CHECK: arith.subi
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty() : tensor<1x1x2048xf16>
@@ -86,10 +85,9 @@ module {
 
 // -----
 
-// Dynamic-shape prefill with an EMPTY past: present seq is computed at
-// runtime as past_seq + current_seq (NOT dim(past_key, 2) alone), so the
-// present buffer is sized to the real KV length even when past_seq == 0.
-// Mirrors the Gemma-4 decoder self-attn (16 query heads, 8 KV heads, d=256).
+// Dynamic-shape prefill or shared-cache execution. The mask carries the
+// logical KV length while past_key may hold either the valid prefix or a larger
+// preallocated capacity.
 module {
   func.func @main_graph(
       %query: tensor<?x?x4096xf16>,
@@ -117,14 +115,14 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // present seq extent = past + current, materialised as arith.addi and fed
-    // into the present tensor.empty (dynamic seq dim), NOT dim(past_key, 2).
-    // CHECK: %[[CUR:.*]] = tensor.dim %{{.*}}, %c1
+    // seqlens_k uses the logical mask extent. Present capacity is the larger
+    // of that extent and the past buffer extent.
     // CHECK: %[[PAST:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOT:.*]] = arith.addi %[[PAST]], %[[CUR]]
-    // CHECK: arith.subi %[[TOT]], %{{.*}}
+    // CHECK: %[[LOGICAL:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAPACITY:.*]] = arith.maxsi %[[PAST]], %[[LOGICAL]]
+    // CHECK: arith.subi %[[LOGICAL]], %{{.*}}
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOT]]) : tensor<?x8x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAPACITY]]) : tensor<?x8x?x256xf16>
     // CHECK: hip.gqa(%[[CTX2]])
     // CHECK-SAME: no_causal = true
     // CHECK-NOT: onnx.Attention
@@ -170,13 +168,13 @@ module {
         -> (tensor<?x?x2048xf16>, tensor<?x1x?x256xf16>,
             tensor<?x1x?x256xf16>)
 
-    // present seq extent = past + current; mask threaded as attention_bias (8
-    // hip.gqa ins: q, k, v, past_k, past_v, seqlens_k, total_seq, mask).
-    // CHECK: %[[CURG:.*]] = tensor.dim %{{.*}}, %c1
+    // The mask key extent drives the logical length while present capacity
+    // preserves a larger shared past buffer.
     // CHECK: %[[PASTG:.*]] = tensor.dim %{{.*}}, %c2
-    // CHECK: %[[TOTG:.*]] = arith.addi %[[PASTG]], %[[CURG]]
+    // CHECK: %[[LOGICALG:.*]] = tensor.dim %{{.*}}, %c3
+    // CHECK: %[[CAPACITYG:.*]] = arith.maxsi %[[PASTG]], %[[LOGICALG]]
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
-    // CHECK: tensor.empty(%{{.*}}, %[[TOTG]]) : tensor<?x1x?x256xf16>
+    // CHECK: tensor.empty(%{{.*}}, %[[CAPACITYG]]) : tensor<?x1x?x256xf16>
     // CHECK: hip.gqa(%[[CTXG]])
     // Mask is threaded as the final hip.gqa input (attention_bias).
     // CHECK-SAME: ins({{.*}}tensor<?x1x?x?xf16>) outs
@@ -311,9 +309,10 @@ module {
 // history length while the query is a single decode token. is_causal=0 with the
 // external mask carrying causality.
 //
-// The KV extent must come from K (dim 1), not the query: sizing present from the
-// query collapsed it to 1 token, so the runtime saw total_seq (the full history,
-// from seqlens_k) exceed present_seq and rejected the call outright
+// The KV extent must come from the mask key dimension, not the query: sizing
+// present from the query collapsed it to 1 token, so the runtime saw total_seq
+// (the full history, from seqlens_k) exceed present_seq and rejected the call
+// outright
 // ("invalid seqlens_k[0]+1=N ... present_seq=1"), zeroing the layer's output.
 module {
   func.func @main_graph(
@@ -336,11 +335,9 @@ module {
            tensor<1x1x1x?xf16>)
         -> tensor<1x1x2048xf16>
 
-    // The synthesized present buffers are sized from K's seq extent (dynamic),
-    // NOT the query's static 1. past is the 0 constant (no past operand), so
-    // the total is 0 + dim(K, 1) and seqlens_k = total - 1.
-    // CHECK: %[[KVLEN:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
-    // CHECK: %[[TOT:.*]] = arith.addi %c0, %[[KVLEN]]
+    // The synthesized present buffers are sized from the mask key extent,
+    // which carries the full logical history.
+    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c3 : tensor<1x1x1x?xf16>
     // CHECK: arith.subi %[[TOT]], %c1
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
