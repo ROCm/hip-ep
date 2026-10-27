@@ -70,6 +70,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/Support/LogicalResult.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -211,19 +212,19 @@ static memref::ExpandShapeOp findSingleExpandShape(Value root, Value retVal) {
 ///   alloc_output [B, S, H] -> collapse [B*S, H] -> compute -> expand [B,S,H]
 ///
 /// Returns null when the ordinary internal-rank allocation + abi_groups path
-/// remains sufficient.
-static Value createExternalRankAllocationForMultiDynExpand(
+/// remains sufficient, or failure when the matched rewrite is invalid.
+static FailureOr<Value> createExternalRankAllocationForMultiDynExpand(
     memref::AllocOp allocOp, Value retVal, Value ctx, int64_t outIdx,
     DominanceInfo &dominance, OpBuilder &builder) {
   memref::ExpandShapeOp expand =
       findSingleExpandShape(allocOp.getResult(), retVal);
   if (!expand)
-    return {};
+    return Value{};
 
   auto internalType = allocOp.getType();
   auto externalType = expand.getResultType();
   if (externalType.getRank() <= internalType.getRank())
-    return {};
+    return Value{};
 
   bool hasMultiDynamicGroup = llvm::any_of(
       expand.getReassociationIndices(), [&](ArrayRef<int64_t> group) {
@@ -232,7 +233,7 @@ static Value createExternalRankAllocationForMultiDynExpand(
                }) > 1;
       });
   if (!hasMultiDynamicGroup)
-    return {};
+    return Value{};
 
   ValueRange externalDynamicSizes = expand.getOutputShape();
   if (static_cast<int64_t>(externalDynamicSizes.size()) !=
@@ -241,35 +242,36 @@ static Value createExternalRankAllocationForMultiDynExpand(
                         << externalType.getNumDynamicDims()
                         << " dynamic dimensions but expand_shape carries "
                         << externalDynamicSizes.size() << " runtime sizes";
-    return {};
+    return failure();
   }
   for (Value size : externalDynamicSizes) {
     if (!dominance.dominates(size, allocOp)) {
       allocOp.emitError()
           << "external graph-output dimension does not dominate allocation";
-      return {};
+      return failure();
     }
+  }
+
+  auto collapsedType = expand.getSrcType();
+  if (collapsedType != internalType &&
+      !memref::CastOp::areCastCompatible(collapsedType, internalType)) {
+    allocOp.emitError() << "cannot cast collapsed graph-output view from "
+                        << collapsedType << " to allocation type "
+                        << internalType;
+    return failure();
   }
 
   builder.setInsertionPoint(allocOp);
   auto allocOutput = AllocOutputOp::create(
       builder, allocOp.getLoc(), externalType, ctx, externalDynamicSizes,
       builder.getI64IntegerAttr(outIdx));
-  auto collapsedType = expand.getSrcType();
   auto internalView = memref::CollapseShapeOp::create(
       builder, allocOp.getLoc(), collapsedType, allocOutput.getResult(),
       expand.getReassociationIndices());
   Value replacement = internalView.getResult();
-  if (collapsedType != internalType) {
-    if (!memref::CastOp::areCastCompatible(collapsedType, internalType)) {
-      allocOp.emitError() << "cannot cast collapsed graph-output view from "
-                          << collapsedType << " to allocation type "
-                          << internalType;
-      return {};
-    }
+  if (collapsedType != internalType)
     replacement = memref::CastOp::create(builder, allocOp.getLoc(),
                                          internalType, replacement);
-  }
   assert(replacement.getType() == internalType &&
          "graph-output replacement must match the allocation type");
   return replacement;
@@ -381,22 +383,21 @@ struct UseOutputAllocatorPass
     OpBuilder builder(funcOp.getContext());
     DominanceInfo dominance(funcOp);
     for (auto [allocOp, outIdx] : outputs) {
-      // The EP owns this buffer now, so drop any dealloc of it. A returned
-      // buffer normally has none, but remove one if present -- the EP-owned
-      // output must never be freed by the graph.
-      for (Operation *user : llvm::make_early_inc_range(allocOp->getUsers()))
-        if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
-          dealloc.erase();
-
       Value retVal =
           returnOp && outIdx >= 0 &&
                   outIdx < static_cast<int64_t>(returnOp.getNumOperands())
               ? returnOp.getOperand(outIdx)
               : Value{};
       Value replacement;
-      if (retVal)
-        replacement = createExternalRankAllocationForMultiDynExpand(
+      if (retVal) {
+        FailureOr<Value> result = createExternalRankAllocationForMultiDynExpand(
             allocOp, retVal, ctx, outIdx, dominance, builder);
+        if (failed(result)) {
+          signalPassFailure();
+          return;
+        }
+        replacement = *result;
+      }
 
       AllocOutputOp allocOutput;
       if (!replacement) {
@@ -406,6 +407,13 @@ struct UseOutputAllocatorPass
             allocOp.getDynamicSizes(), builder.getI64IntegerAttr(outIdx));
         replacement = allocOutput.getResult();
       }
+
+      // The EP owns this buffer now, so drop any dealloc of it. A returned
+      // buffer normally has none, but remove one if present -- the EP-owned
+      // output must never be freed by the graph.
+      for (Operation *user : llvm::make_early_inc_range(allocOp->getUsers()))
+        if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+          dealloc.erase();
 
       allocOp.getResult().replaceAllUsesWith(replacement);
 
