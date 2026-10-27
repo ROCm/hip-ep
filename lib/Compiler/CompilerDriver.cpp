@@ -428,10 +428,13 @@ bool CompilerDriver::runMLIRPasses(
           mlir::hip::createDecomposeConvTransposePass());
       headPm.addPass(mlir::createCanonicalizerPass());
       // HIPDNN_EP_ROCMLIR_FUSE_VIEWS=0 restores the forward-only kernel
-      // boundaries, for A/B runs against the view fusion.
+      // boundaries and HIPDNN_EP_ROCMLIR_FUSE_GEG=0 keeps gemm pairs in
+      // separate kernels, for A/B runs against each fusion.
       mlir::hip::FuseROCMlirPassOptions fuseOpts;
       std::string fuseViews = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_VIEWS");
       fuseOpts.fuseViews = !(fuseViews == "0" || fuseViews == "off");
+      std::string fuseGeg = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_GEG");
+      fuseOpts.fuseGemmGemm = !(fuseGeg == "0" || fuseGeg == "off");
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createFuseROCMlirPass(fuseOpts));
       headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
