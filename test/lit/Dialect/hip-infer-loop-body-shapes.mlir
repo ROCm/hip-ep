@@ -25,6 +25,8 @@
 //     reads its scales attribute, and a Slice with runtime bounds keeps
 //     the stored shape (`average_pool_static`, `upsample_scales_attribute`,
 //     `slice_keeps_stored_shape`).
+//   - a constant Slice that feeds hip.loop updates the loop result and the
+//     body signature to the refined v_init (`loop_follows_refined_slice`).
 
 // -----------------------------------------------------------------------
 // Forward Concat rule: Concat((1x?x1152, ?x?x?), axis=1) -> 1x?x1152.
@@ -322,4 +324,38 @@ func.func @slice_constant_bounds(%x: tensor<1x?x12x64xf16>) -> tensor<1x?x12x?xf
       : (tensor<1x?x12x64xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
         -> tensor<1x?x12x?xf16>
   return %y : tensor<1x?x12x?xf16>
+}
+
+// Qwen attn_output. The Slice axis is dynamic, so constant starts = ends = 0
+// keep that axis as `?` and copy the static dims. hip.loop was outlined while
+// v_init was still tensor<?x?x?xf16>; its result and the body must follow.
+// CHECK-LABEL: func.func @loop_follows_refined_slice
+// CHECK-SAME:    -> tensor<1x?x1152xf16>
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<1x?x1152xf16>
+// CHECK:         iter_args(%{{.*}} : tensor<1x?x1152xf16>)
+// CHECK:         -> (tensor<1x?x1152xf16>)
+// CHECK:         return {{.*}} : tensor<1x?x1152xf16>
+func.func @loop_follows_refined_slice(%ctx: !hip.context, %M: index, %cond: i1,
+                                      %x: tensor<1x?x1152xf16>) -> tensor<?x?x?xf16> {
+  %starts = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %ends = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %axes = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+  %slice = "onnx.Slice"(%x, %starts, %ends, %axes)
+      : (tensor<1x?x1152xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<?x?x?xf16>
+  %r = hip.loop(%ctx, %M, %cond)
+                 iter_args(%slice : tensor<?x?x?xf16>)
+                 -> (tensor<?x?x?xf16>)
+                 body @body_slice_carry
+                 {num_loop_carried = 1 : i32, cond_is_passthrough}
+  return %r : tensor<?x?x?xf16>
+}
+
+// CHECK-LABEL: func.func private @body_slice_carry
+// CHECK-SAME:    -> tensor<1x?x1152xf16>
+// CHECK:         return %{{.*}} : tensor<1x?x1152xf16>
+func.func private @body_slice_carry(%ctx: !hip.context, %iter: tensor<i64>,
+                                    %cond_in: tensor<ui8>,
+                                    %acc: tensor<?x?x?xf16>) -> tensor<?x?x?xf16> {
+  return %acc : tensor<?x?x?xf16>
 }

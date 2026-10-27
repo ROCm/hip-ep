@@ -32,6 +32,12 @@
 //   4. Reconcile -- rebuild the body func signature from its (seeded) args
 //               and its (now ranked) terminator operands.
 //
+//   Main-graph inference can refine a value that is already a `$v_init`
+//   (a constant Slice is the Qwen case). That happens after the first body
+//   seed, so the walk repeats: copy each refined `$v_init` type onto the
+//   `hip.loop` result, then seed and reconcile that body again. The loop
+//   verifier requires those two types to be identical.
+//
 // The same forward walk also runs on every other function, not only loop
 // bodies. A main-graph `onnx.Reshape` whose shape operand is `tensor<Nxi64>`
 // has result rank N even when the importer left the result `tensor<*xT>`
@@ -1457,8 +1463,9 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
 /// a guard for any future shape in which a consumer precedes its producer in
 /// walk order. A stored number is kept. A `?` is filled only when the rule
 /// has a number, so the walk terminates within the cap.
-static void forwardInferUnrankedResults(func::FuncOp body) {
+static bool forwardInferUnrankedResults(func::FuncOp body) {
   static constexpr unsigned kMaxIters = 8;
+  bool any = false;
   for (unsigned iter = 0; iter < kMaxIters; ++iter) {
     bool changed = false;
     body.walk([&](Operation *op) {
@@ -1478,10 +1485,31 @@ static void forwardInferUnrankedResults(func::FuncOp body) {
       }
     });
     if (!changed)
-      return;
+      return any;
+    any = true;
   }
   LLVM_DEBUG(DBGS() << body.getSymName()
                     << ": forward inference hit the iteration cap\n");
+  return any;
+}
+
+/// `hip.loop` in tensor mode requires every result type to equal its `$v_init`
+/// operand type. Main-graph inference can refine that operand after the result
+/// type was declared.
+static bool syncLoopResultsToVInit(hip::LoopOp loopOp) {
+  auto vInit = loopOp.getVInit();
+  if (vInit.empty() || !isa<RankedTensorType>(vInit.front().getType()))
+    return false;
+  bool changed = false;
+  for (auto [i, v] : llvm::enumerate(vInit)) {
+    if (i >= loopOp.getNumResults() || !isa<RankedTensorType>(v.getType()))
+      break;
+    if (loopOp.getResult(i).getType() == v.getType())
+      continue;
+    loopOp.getResult(i).setType(v.getType());
+    changed = true;
+  }
+  return changed;
 }
 
 /// Establish rank inside one outlined `hip.loop` body func, then reconcile its
@@ -1509,9 +1537,9 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
   // 2. Forward-infer unranked onnx.* results from their (seeded) operands.
   forwardInferUnrankedResults(body);
 
-  // 3. Loop-contract backstop: a still-unranked loop-carried output must equal
-  //    its v_init type per the ONNX Loop spec (covers ops with no forward
-  //    rule).
+  // 3. Loop-contract backstop. A carried output with no forward rule, or one
+  //    that is still less specific than $v_init, takes the $v_init type. The
+  //    ONNX Loop spec requires those types to match.
   Operation *terminator = entry.getTerminator();
   unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 0u : 1u;
   for (auto [i, v] : llvm::enumerate(vInit)) {
@@ -1519,12 +1547,13 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
     if (slot >= terminator->getNumOperands())
       break;
     Value carried = terminator->getOperand(slot);
-    if (isa<UnrankedTensorType>(carried.getType())) {
-      LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
-                        << carried.getType() << " -> " << v.getType() << "\n");
-      carried.setType(v.getType());
-      ++NumLoopContractRanked;
-    }
+    Type merged = mergeInferredType(carried.getType(), v.getType());
+    if (carried.getType() == merged)
+      continue;
+    LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
+                      << carried.getType() << " -> " << merged << "\n");
+    carried.setType(merged);
+    ++NumLoopContractRanked;
   }
 
   // 4. Reconcile the signature so func.return matches the declared result
@@ -1549,18 +1578,42 @@ struct InferLoopBodyShapesPass
     llvm::SmallPtrSet<Operation *, 8> loopBodies;
     module.walk([&](hip::LoopOp loopOp) {
       if (auto body =
-              module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr())) {
+              module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr()))
         loopBodies.insert(body);
-        inferLoopBodyShapes(body, loopOp);
-      }
     });
-    // Main-graph (and any other non-loop) functions. Loop bodies were ranked
-    // above, after their carried args were seeded from $v_init.
+
+    // Main-graph inference can refine a $v_init after the body was seeded
+    // (constant Slice -> hip.loop). Repeat so the loop result and the body
+    // signature catch up, including a nested loop fed by the outer result.
+    static constexpr unsigned kMaxIters = 8;
+    for (unsigned iter = 0; iter < kMaxIters; ++iter) {
+      bool changed = false;
+      module.walk([&](func::FuncOp func) {
+        if (func.isDeclaration() || func.getBody().empty() ||
+            loopBodies.contains(func))
+          return;
+        if (forwardInferUnrankedResults(func))
+          changed = true;
+      });
+      module.walk([&](hip::LoopOp loopOp) {
+        if (syncLoopResultsToVInit(loopOp))
+          changed = true;
+        auto body = module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr());
+        if (!body)
+          return;
+        FunctionType before = body.getFunctionType();
+        inferLoopBodyShapes(body, loopOp);
+        if (body.getFunctionType() != before)
+          changed = true;
+      });
+      if (!changed)
+        break;
+    }
+
     module.walk([&](func::FuncOp func) {
       if (func.isDeclaration() || func.getBody().empty() ||
           loopBodies.contains(func))
         return;
-      forwardInferUnrankedResults(func);
       Block &entry = func.getBody().front();
       Operation *terminator = entry.getTerminator();
       if (!terminator || terminator->getNumOperands() != func.getNumResults())
