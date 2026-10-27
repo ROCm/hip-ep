@@ -75,6 +75,19 @@ static bool isFusablePointwise(Operation *op) {
                          SubOp, CastOp, LessOp, SignOp, ModOp, WhereOp>(op);
 }
 
+// A quantize on the way out lets the kernel write the narrow type. A
+// dequantize there would only widen the output again, so it waits to be the
+// prologue of whichever kernel reads it.
+static bool isFusableQuantizeEpilogue(Operation *op) {
+  return isa_and_present<QuantizeLinearOp>(op) && isTosaLowerableQdq(op);
+}
+
+// A dequantize on the way in lets the kernel read the narrow type, and a
+// quantize feeding it folds the round trip into the load.
+static bool isFusablePrologue(Operation *op) {
+  return isFusablePointwise(op) || isTosaLowerableQdq(op);
+}
+
 // View ops that rocMLIR folds into rock.transform maps instead of running as a
 // copy. The legality is HipToTosa's own, so an absorbed view always lowers.
 enum class ViewKind : unsigned {
@@ -107,7 +120,13 @@ struct FusionPolicy {
   unsigned forwardViewKinds = 0;
   // A unary pointwise producer of the activation.
   bool activationPrologue = false;
+  // A quantize on the forward chain.
+  bool quantizeEpilogue = false;
 
+  bool allowsEpilogue(Operation *op) const {
+    return isFusablePointwise(op) ||
+           (quantizeEpilogue && isFusableQuantizeEpilogue(op));
+  }
   bool allowsInputView(Operation *op) const {
     return hasKind(op, inputViewKinds);
   }
@@ -145,6 +164,7 @@ template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
                             static_cast<unsigned>(ViewKind::Slice) |
                             static_cast<unsigned>(ViewKind::Broadcast);
     policy.activationPrologue = true;
+    policy.quantizeEpilogue = true;
   }
   return policy;
 }
@@ -217,7 +237,7 @@ void KernelRegion::growForward() {
   SmallVector<Operation *> chain = {anchor};
   while (chain.back()->hasOneUse()) {
     Operation *user = *chain.back()->user_begin();
-    if (!isFusablePointwise(user) && !policy.allowsForwardView(user))
+    if (!policy.allowsEpilogue(user) && !policy.allowsForwardView(user))
       break;
     chain.push_back(user);
   }
@@ -358,7 +378,7 @@ void KernelRegion::absorbInputProducers(
         inputs.push_back(input);
     bool absorb = policy.allowsInputView(producer) ||
                   (allowPointwise && policy.activationPrologue &&
-                   isFusablePointwise(producer) && inputs.size() == 1);
+                   isFusablePrologue(producer) && inputs.size() == 1);
     if (!absorb || !llvm::all_of(inputs, isStaticTensor))
       continue;
 

@@ -115,8 +115,8 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | MatMulBnb4 (`com.microsoft`) | HIP dequant of FP4 (`quant_type` 0) or NF4 (`quant_type` 1) into `[N, K]`, then `hip.matmul` with `transB = 1`. The first packed value is the high nibble. Static shapes pull that dequant into the rocMLIR matmul kernel. A dynamic activation leaves the dequant on HIP and the GEMM on hipBLASLt. Block size 16, 32, 64, 128, or 256. `transB` must be 1 and `training_mode` must be 0 |
 | QMoE (`com.microsoft`) | Custom HIP kernel |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
-| QuantizeLinear | Custom HIP kernel |
-| DequantizeLinear | Custom HIP kernel |
+| QuantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis saturating quantize after a convolution becomes the conv kernel's epilogue, so the kernel writes the integer type |
+| DequantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis dequantize of a conv activation becomes the conv kernel's prologue, so the kernel reads the integer type |
 | QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
 | QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
