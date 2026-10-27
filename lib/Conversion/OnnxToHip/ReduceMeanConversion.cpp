@@ -108,9 +108,11 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
   // Create hip.reduce_mean operation (axes always provided, may be empty)
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp = mlir::hip::ReduceMeanOp::create(rewriter, loc, context, data,
-                                               axesOperand, init, keepdimsAttr,
-                                               noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceMeanOp::create(
+      rewriter, loc, context, data, axesOperand, init, keepdimsAttr,
+      noopWithEmptyAxesAttr,
+      getConstantReducedAxesAttr(rewriter, data, axesOperand,
+                                 noopWithEmptyAxes));
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
