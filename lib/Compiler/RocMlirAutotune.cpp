@@ -861,6 +861,8 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
       times.perfConfigCompileMs += millisecondsSince(compileStart);
     }
 
+    // A kernel with no winner is left out of `byKernel`, and the caller runs
+    // its hip ops instead.
     for (DeferredSearch &search : queued) {
       MLIRContext context(autotuneRegistry(), MLIRContext::Threading::DISABLED);
       context.loadAllAvailableDialects();
@@ -870,13 +872,13 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
       if (!parsed) {
         llvm::errs() << "error: failed to reparse rock module for '"
                      << search.kernelName << "'\n";
-        return false;
+        continue;
       }
       CompiledKernel winner;
       std::string bestConfig;
       if (!pickWinner(search.candidates, search.kernelName, *parsed, bestConfig,
                       winner))
-        return false;
+        continue;
       if (!search.cacheKey.empty())
         winnerCache[search.cacheKey] = bestConfig;
       byKernel[search.kernelName] = std::move(winner);
@@ -891,7 +893,7 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
     if (cached == winnerCache.end()) {
       llvm::errs() << "error: no autotune winner for repeated problem on '"
                    << item.kernelName << "'\n";
-      return false;
+      continue;
     }
     DeferredCacheHit hit;
     hit.kernelName = std::move(item.kernelName);
@@ -937,6 +939,10 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
       byKernel[hit.kernelName] = std::move(hit.kernel);
       continue;
     }
+    // An elementwise kernel has only the one config; searching would compile
+    // it again and fail the same way.
+    if (hit.perfConfig == kRocMlirElementwisePerfConfig)
+      continue;
     llvm::errs() << "warning: cached perfConfig failed to compile for '"
                  << hit.kernelName << "'; searching the "
                  << autotuneSpaceName(options.space) << " space\n";
@@ -949,7 +955,7 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
     CompiledKernel winner;
     if (!parsed || !autotuneKernel(*parsed, hit.kernelName, winner,
                                    /*deferCacheHits=*/false))
-      return false;
+      continue;
     byKernel[hit.kernelName] = std::move(winner);
   }
   return true;

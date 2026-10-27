@@ -518,9 +518,12 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
-  // Pristine HIP bodies, kept so a kernel HIP-to-TOSA rejects can be put back
-  // in main_graph. The fallback is the whole outlined function: a conv fused
-  // with a sub TOSA refuses is inlined as hip.conv and hip.sub together.
+  // Pristine HIP bodies, kept for a kernel rocMLIR cannot take: one HIP-to-TOSA
+  // rejects, one whose computation folds away in lowering, or one it fails to
+  // compile (an i64 elementwise kernel, say: rock.blockwise_load/store stop at
+  // 32-bit integers). The fallback is the whole outlined function, so a conv
+  // fused with a sub TOSA refuses is inlined as hip.conv and hip.sub together,
+  // and one such kernel does not fail the whole subgraph.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
@@ -577,10 +580,10 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // points a custom compileOne uses (createTunableParamSpace, tuningSetStr)
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
-    if (!runRocMlirHighLevelPipeline(*single))
-      return module.emitError()
-             << "rocMLIR high-level pipeline failed for kernel '" << name
-             << "'";
+    if (!runRocMlirHighLevelPipeline(*single)) {
+      fallBack(name, "high-level pipeline");
+      continue;
+    }
 
     if (!hasRocMlirComputation(*single)) {
       if (options.log)
@@ -591,17 +594,29 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
       continue;
     }
 
-    CompiledKernel &out = compiledByKernel[name];
+    CompiledKernel out;
     bool ok = options.compileOne
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
-    if (!ok)
-      return module.emitError()
-             << "rocMLIR failed to compile kernel '" << name << "'";
+    if (!ok) {
+      fallBack(name, "compile");
+      continue;
+    }
+    compiledByKernel[name] = std::move(out);
   }
 
+  // A deferred compile that fails leaves its kernel without a binary.
   if (options.finishCompiles && !options.finishCompiles(compiledByKernel))
     return module.emitError() << "rocMLIR deferred kernel compiles failed";
+  for (const std::string &name : kernelNames) {
+    if (onHipPath.contains(name))
+      continue;
+    auto it = compiledByKernel.find(name);
+    if (it == compiledByKernel.end() || it->second.binary.empty()) {
+      compiledByKernel.erase(name);
+      fallBack(name, "deferred compile");
+    }
+  }
 
   // Stamp the compiled artifact onto each `hip.rocmlir` dispatch
   // (kernel_binary + grid_size + block_size). The kernel funcs themselves are
