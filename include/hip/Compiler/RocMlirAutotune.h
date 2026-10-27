@@ -81,7 +81,7 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
-  // FlatBuffer problem cache (.mxpc). Empty skips the lookup. Consulted before
+  // rocMLIR LUT FlatBuffer (.fb). Empty skips the lookup. Consulted before
   // the search: an identical problem string is compiled as stored, and a conv
   // miss takes the nearest legal gemm/attn tile. A tile that fails to compile
   // is skipped for the next nearest row.
@@ -126,10 +126,9 @@ public:
 
   const AutotunePhaseTimes &phaseTimes() const;
 
-  // Device-keyed JSON of this compile's winners, one row per rocMLIR problem.
-  // The solution is the perfConfig that compiled, including a nearest-cache
-  // tile that was accepted. False when the device cannot be queried or the
-  // file cannot be written.
+  // LUT JSON (configs, points, fallbacks), same document shape as the
+  // MatMulNBits and GQA tables. problem_cache_to_fb.py compiles it to a .fb.
+  // False when the device cannot be queried or the file cannot be written.
   bool dumpProblemCache(StringRef path) const;
 
 private:

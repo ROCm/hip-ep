@@ -392,7 +392,7 @@ struct RocMlirAutotuner::Impl {
   // perfConfigs from the problem cache that failed to compile for this
   // problem. The next lookup skips them and takes the next nearest tile.
   llvm::StringMap<std::vector<std::string>> rejectedSolutions;
-  std::vector<ProblemCacheConvEntry> problemCacheEntries;
+  ProblemCacheLut problemCache;
   bool problemCacheLoaded = false;
   std::vector<DeferredSearch> searches;
   std::vector<DeferredCacheHit> cacheHits;
@@ -466,7 +466,7 @@ struct RocMlirAutotuner::Impl {
                       CompiledKernel &out, bool deferCacheHits);
   bool compileAndBenchmarkSearches(llvm::StringMap<CompiledKernel> &byKernel);
   bool compileDeferredCacheHits(llvm::StringMap<CompiledKernel> &byKernel);
-  const std::vector<ProblemCacheConvEntry> &loadedProblemCache();
+  const ProblemCacheLut &loadedProblemCache();
   bool dumpProblemCache(StringRef path) const;
   bool finish(llvm::StringMap<CompiledKernel> &byKernel) {
     return compileAndBenchmarkSearches(byKernel) &&
@@ -738,9 +738,11 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
       retryNearest = false;
       auto cached = winnerCache.find(cacheKey);
       if (cached == winnerCache.end() && !options.problemCachePath.empty()) {
+        const ProblemCacheLut &lut = loadedProblemCache();
         if (auto hit = findNearestConvTune(
-                std::string_view(problem.data(), problem.size()),
-                loadedProblemCache(), rejectedSolutions[cacheKey])) {
+                std::string_view(problem.data(), problem.size()), lut.entries,
+                rejectedSolutions[cacheKey], lut.weightM, lut.weightN,
+                lut.weightK)) {
           if (log())
             *log() << options.logPrefix << " nearest-tune "
                    << (hit->exact ? "exact" : "nearest") << " d="
@@ -985,24 +987,22 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
   return true;
 }
 
-const std::vector<ProblemCacheConvEntry> &
-RocMlirAutotuner::Impl::loadedProblemCache() {
+const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
   if (problemCacheLoaded)
-    return problemCacheEntries;
+    return problemCache;
   problemCacheLoaded = true;
   if (options.problemCachePath.empty())
-    return problemCacheEntries;
+    return problemCache;
   std::string error;
-  if (!loadProblemCacheConvEntries(options.problemCachePath, problemCacheEntries,
-                                   error)) {
+  if (!loadProblemCacheLut(options.problemCachePath, problemCache, error)) {
     llvm::errs() << "warning: " << error << "\n";
-    problemCacheEntries.clear();
+    problemCache = {};
   } else if (log()) {
     *log() << options.logPrefix << " nearest-tune loaded "
-           << problemCacheEntries.size() << " entries from "
+           << problemCache.entries.size() << " entries from "
            << options.problemCachePath << "\n";
   }
-  return problemCacheEntries;
+  return problemCache;
 }
 
 // The in-process winner key is "<kind>\n<problem>". The dump stores the
@@ -1040,28 +1040,46 @@ bool RocMlirAutotuner::Impl::dumpProblemCache(StringRef path) const {
   std::sort(pairs.begin(), pairs.end(),
             [](const auto &a, const auto &b) { return a.first < b.first; });
 
-  llvm::json::Array entries;
+  llvm::json::Array configs;
+  llvm::StringMap<int64_t> configIndex;
+  llvm::json::Array points;
   for (const auto &pair : pairs) {
-    llvm::json::Object key;
-    key["name"] = "hip::rocmlir";
-    key["problem"] = pair.first;
-    llvm::json::Array row;
-    row.push_back(std::move(key));
-    row.push_back(pair.second);
-    entries.push_back(std::move(row));
+    int64_t index = 0;
+    auto existing = configIndex.find(pair.second);
+    if (existing == configIndex.end()) {
+      index = static_cast<int64_t>(configs.size());
+      configIndex[pair.second] = index;
+      llvm::json::Object config;
+      config["perf_config"] = pair.second;
+      configs.push_back(std::move(config));
+    } else {
+      index = existing->second;
+    }
+    int64_t gemmM = 0, gemmN = 0, gemmK = 0;
+    implicitGemmDims(pair.first, gemmM, gemmN, gemmK);
+    llvm::json::Object point;
+    point["problem"] = pair.first;
+    point["config"] = index;
+    point["m"] = gemmM;
+    point["n"] = gemmN;
+    point["k"] = gemmK;
+    points.push_back(std::move(point));
   }
 
-  llvm::json::Object deviceObj;
-  deviceObj["device_name"] = deviceArch.str();
-  deviceObj["gfx_name"] = gfxName.str();
-  deviceObj["cu_count"] = static_cast<int64_t>(properties.multiProcessorCount);
-  deviceObj["wavefront_size"] = static_cast<int64_t>(properties.warpSize);
-
-  llvm::json::Array bucket;
-  bucket.push_back(std::move(deviceObj));
-  bucket.push_back(std::move(entries));
-  llvm::json::Array root;
-  root.push_back(std::move(bucket));
+  const size_t nConfigs = configs.size();
+  const size_t nPoints = points.size();
+  llvm::json::Object root;
+  root["schema_version"] = static_cast<int64_t>(1);
+  root["gpu_arch"] = gfxName.str();
+  root["rocm_version"] = static_cast<int64_t>(0);
+  root["kernel_abi"] = "rocmlir-conv-v1";
+  root["model_key"] = "";
+  root["weight_m"] = 1.0;
+  root["weight_n"] = 1.0;
+  root["weight_k"] = 1.0;
+  root["configs"] = std::move(configs);
+  root["points"] = std::move(points);
+  root["fallbacks"] = llvm::json::Array();
 
   std::error_code ec;
   llvm::raw_fd_ostream os(path, ec);
@@ -1079,8 +1097,8 @@ bool RocMlirAutotuner::Impl::dumpProblemCache(StringRef path) const {
     return false;
   }
   if (log())
-    *log() << options.logPrefix << " wrote " << pairs.size()
-           << " problem-cache pairs to " << path << "\n";
+    *log() << options.logPrefix << " wrote " << nPoints << " LUT points ("
+           << nConfigs << " configs) to " << path << "\n";
   return true;
 }
 

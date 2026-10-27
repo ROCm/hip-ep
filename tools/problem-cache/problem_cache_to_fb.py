@@ -5,23 +5,19 @@
 # Licensed under the MIT License.
 #
 
-"""Convert a problem-cache JSON dump to a FlatBuffer.
+"""Compile a rocMLIR LUT JSON file to a FlatBuffer.
 
-The JSON is the file written by ``MIGRAPHX_PROBLEM_CACHE`` or by
-``hip-rocmlir-compiler --dump-problem-cache``: an array of
-``[device, entries]`` buckets. A legacy flat object whose keys are JSON
-``{name, problem}`` strings is accepted too. Null solutions are skipped.
+The JSON is the document ``hip-rocmlir-compiler --dump-problem-cache`` writes.
+It has the same shape as the MatMulNBits and GQA LUTs: ``schema_version``,
+``gpu_arch``, ``kernel_abi``, distance weights, then ``configs``, ``points``,
+and ``fallbacks``. ``flatc --binary --strict-json`` turns it into a ``.fb``.
 
-``problem`` and ``solution`` are stored as text. A string value is stored as
-itself (a rocMLIR problem key or ``gemm:`` perfConfig). Any other JSON value
-is stored as canonical JSON.
+    python problem_cache_to_fb.py gfx1151.json -o gfx1151.fb
+    python problem_cache_to_fb.py more.json -o gfx1151.fb --flatbuffer gfx1151.fb
 
-Pass ``--flatbuffer`` to merge into an existing table. Rows already present,
-matched on device, operator name, and problem text, keep their place and take
-the incoming solution. New rows are appended.
-
-    python problem_cache_to_fb.py cache.json -o cache.fb
-    python problem_cache_to_fb.py more.json -o cache.fb --flatbuffer cache.fb
+``--flatbuffer`` merges by problem string. A problem already in the table keeps
+its place and takes the incoming perfConfig. New problems are appended. Configs
+are de-duplicated again after the merge.
 """
 
 from __future__ import annotations
@@ -31,174 +27,125 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+KERNEL_ABI = "rocmlir-conv-v1"
 HERE = Path(__file__).resolve().parent
 SCHEMA = HERE / "problem_cache.fbs"
 
 
-def canonical_text(value) -> str | None:
-    """Store a cache value as the text the table keeps."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def require_lut(doc: dict) -> dict:
+    if not isinstance(doc, dict) or "configs" not in doc or "points" not in doc:
+        raise ValueError(
+            "expected a rocMLIR LUT JSON object with configs and points, "
+            "not a MIGraphX problem-cache dump"
+        )
+    version = int(doc.get("schema_version") or 0)
+    if version != SCHEMA_VERSION:
+        raise ValueError(f"unsupported schema_version {version}")
+    abi = str(doc.get("kernel_abi") or "")
+    if abi != KERNEL_ABI:
+        raise ValueError(f"unsupported kernel_abi {abi!r}")
+    configs = doc["configs"]
+    points = doc["points"]
+    fallbacks = doc.get("fallbacks") or []
+    if not isinstance(configs, list) or not isinstance(points, list):
+        raise ValueError("configs and points must be arrays")
+    if not isinstance(fallbacks, list):
+        raise ValueError("fallbacks must be an array")
+    for config in configs:
+        if not isinstance(config, dict) or not isinstance(config.get("perf_config"), str):
+            raise ValueError("each config must be {perf_config: string}")
+    for point in points:
+        if not isinstance(point, dict):
+            raise ValueError("each point must be an object")
+        if not isinstance(point.get("problem"), str):
+            raise ValueError("each point needs a problem string")
+        index = int(point["config"])
+        if index < 0 or index >= len(configs):
+            raise ValueError(f"point config index {index} is out of range")
+        for dim in ("m", "n", "k"):
+            int(point[dim])
+    return doc
 
 
-def parse_entry_key(key) -> tuple[str, object]:
-    if isinstance(key, str):
-        key = json.loads(key)
-    if not isinstance(key, dict) or "name" not in key or "problem" not in key:
-        raise ValueError("problem-cache entry key must be {name, problem}")
-    return str(key["name"]), key["problem"]
+def perf_configs(doc: dict) -> list[str]:
+    return [str(config["perf_config"]) for config in doc["configs"]]
 
 
-def device_of(obj: dict) -> dict:
+def points_of(doc: dict) -> list[dict]:
+    configs = perf_configs(doc)
+    rows = []
+    for point in doc["points"]:
+        rows.append(
+            {
+                "problem": str(point["problem"]),
+                "perf_config": configs[int(point["config"])],
+                "m": int(point["m"]),
+                "n": int(point["n"]),
+                "k": int(point["k"]),
+            }
+        )
+    return rows
+
+
+def build_document(header: dict, rows: list[dict]) -> dict:
+    pool: list[str] = []
+    index: dict[str, int] = {}
+
+    def config_index(perf_config: str) -> int:
+        slot = index.get(perf_config)
+        if slot is None:
+            slot = len(pool)
+            index[perf_config] = slot
+            pool.append(perf_config)
+        return slot
+
+    point_rows = []
+    for row in rows:
+        point_rows.append(
+            {
+                "problem": row["problem"],
+                "config": config_index(row["perf_config"]),
+                "m": int(row["m"]),
+                "n": int(row["n"]),
+                "k": int(row["k"]),
+            }
+        )
     return {
-        "device_name": str(obj.get("device_name") or ""),
-        "gfx_name": str(obj.get("gfx_name") or ""),
-        "cu_count": int(obj.get("cu_count") or 0),
-        "wavefront_size": int(obj.get("wavefront_size") or 0),
+        "schema_version": SCHEMA_VERSION,
+        "gpu_arch": str(header.get("gpu_arch") or ""),
+        "rocm_version": int(header.get("rocm_version") or 0),
+        "kernel_abi": KERNEL_ABI,
+        "model_key": str(header.get("model_key") or ""),
+        "weight_m": float(header.get("weight_m") or 1.0),
+        "weight_n": float(header.get("weight_n") or 1.0),
+        "weight_k": float(header.get("weight_k") or 1.0),
+        "configs": [{"perf_config": perf} for perf in pool],
+        "points": point_rows,
+        "fallbacks": [],
     }
 
 
-def empty_device() -> dict:
-    return device_of({})
-
-
-def iter_pairs(entries):
-    if isinstance(entries, list):
-        for item in entries:
-            if not isinstance(item, list) or len(item) != 2:
-                raise ValueError("problem-cache entry must be a [key, solution] pair")
-            yield item[0], item[1]
-        return
-    if isinstance(entries, dict):
-        yield from entries.items()
-        return
-    raise ValueError("problem-cache entries must be a list of pairs or an object")
-
-
-def make_record(device: dict, key, solution) -> dict | None:
-    name, problem = parse_entry_key(key)
-    problem_text = canonical_text(problem)
-    solution_text = canonical_text(solution)
-    if not name or problem_text is None or solution_text is None:
-        return None
-    return {
-        "device_name": device["device_name"],
-        "gfx_name": device["gfx_name"],
-        "cu_count": device["cu_count"],
-        "wavefront_size": device["wavefront_size"],
-        "name": name,
-        "problem": problem_text,
-        "solution": solution_text,
-    }
-
-
-def load_problem_cache(path: Path) -> tuple[list[dict], int]:
-    root = json.loads(path.read_text(encoding="utf-8"))
-    records: list[dict] = []
-    skipped = 0
-
-    def add(device: dict, key, solution) -> None:
-        nonlocal skipped
-        record = make_record(device, key, solution)
-        if record is None:
-            skipped += 1
-            return
-        records.append(record)
-
-    if isinstance(root, list):
-        for bucket in root:
-            if not isinstance(bucket, list) or len(bucket) != 2 or not isinstance(bucket[0], dict):
-                raise ValueError(
-                    "expected a device-keyed problem cache: [[device, entries], ...]"
-                )
-            device = device_of(bucket[0])
-            for key, solution in iter_pairs(bucket[1]):
-                add(device, key, solution)
-    elif isinstance(root, dict):
-        device = empty_device()
-        for key, solution in root.items():
-            add(device, key, solution)
-    else:
-        raise ValueError("problem cache JSON must be an array or an object")
-    return records, skipped
-
-
-def record_key(record: dict) -> tuple:
-    return (
-        record["device_name"],
-        record["gfx_name"],
-        int(record["cu_count"]),
-        int(record["wavefront_size"]),
-        record["name"],
-        record["problem"],
-    )
-
-
-def merge_records(existing: list[dict], incoming: list[dict]) -> tuple[list[dict], int, int]:
-    """Keep existing order. Incoming replaces a matching row; new rows append."""
-    index = {record_key(record): i for i, record in enumerate(existing)}
+def merge_rows(existing: list[dict], incoming: list[dict]) -> tuple[list[dict], int, int]:
+    """Keep existing order. Incoming replaces a matching problem; new rows append."""
+    index = {row["problem"]: i for i, row in enumerate(existing)}
     merged = list(existing)
     replaced = 0
     added = 0
-    for record in incoming:
-        key = record_key(record)
-        slot = index.get(key)
+    for row in incoming:
+        slot = index.get(row["problem"])
         if slot is None:
-            index[key] = len(merged)
-            merged.append(record)
+            index[row["problem"]] = len(merged)
+            merged.append(row)
             added += 1
             continue
-        if merged[slot]["solution"] != record["solution"]:
+        if merged[slot]["perf_config"] != row["perf_config"]:
             replaced += 1
-        merged[slot] = record
+        merged[slot] = row
     return merged, added, replaced
-
-
-def as_table(records: list[dict]) -> dict:
-    entries = []
-    for record in records:
-        entries.append(
-            {
-                "device_name": record["device_name"],
-                "gfx_name": record["gfx_name"],
-                "cu_count": int(record["cu_count"]),
-                "wavefront_size": int(record["wavefront_size"]),
-                "name": record["name"],
-                "problem": record["problem"],
-                "solution": record["solution"],
-            }
-        )
-    return {"schema_version": SCHEMA_VERSION, "entries": entries}
-
-
-def records_from_table(table: dict) -> list[dict]:
-    if "entries" not in table and "ProblemCache" in table:
-        table = table["ProblemCache"]
-    version = int(table.get("schema_version") or SCHEMA_VERSION)
-    if version != SCHEMA_VERSION:
-        raise ValueError(f"unsupported problem-cache flatbuffer schema version {version}")
-    records = []
-    for entry in table.get("entries") or []:
-        records.append(
-            {
-                "device_name": str(entry.get("device_name") or ""),
-                "gfx_name": str(entry.get("gfx_name") or ""),
-                "cu_count": int(entry.get("cu_count") or 0),
-                "wavefront_size": int(entry.get("wavefront_size") or 0),
-                "name": str(entry.get("name") or ""),
-                "problem": str(entry.get("problem") or ""),
-                "solution": str(entry.get("solution") or ""),
-            }
-        )
-    return records
 
 
 def find_flatc(explicit: str | None) -> str:
@@ -222,7 +169,7 @@ def run_flatc(flatc: str, args: list[str]) -> None:
         raise SystemExit(f"flatc failed: {detail}")
 
 
-def decode_flatbuffer(flatc: str, path: Path) -> list[dict]:
+def decode_flatbuffer(flatc: str, path: Path) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         run_flatc(
@@ -241,17 +188,16 @@ def decode_flatbuffer(flatc: str, path: Path) -> list[dict]:
         produced = list(tmp_path.glob("*.json"))
         if len(produced) != 1:
             raise SystemExit(f"flatc did not write a JSON table for {path}")
-        table = json.loads(produced[0].read_text(encoding="utf-8"))
-    return records_from_table(table)
+        return require_lut(json.loads(produced[0].read_text(encoding="utf-8")))
 
 
-def encode_flatbuffer(flatc: str, records: list[dict], output: Path) -> None:
+def encode_flatbuffer(flatc: str, document: dict, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        table_path = tmp_path / "problem_cache.json"
+        table_path = tmp_path / "rocmlir_lut.json"
         table_path.write_text(
-            json.dumps(as_table(records), ensure_ascii=False),
+            json.dumps(document, ensure_ascii=False),
             encoding="utf-8",
         )
         run_flatc(
@@ -265,7 +211,7 @@ def encode_flatbuffer(flatc: str, records: list[dict], output: Path) -> None:
                 str(table_path),
             ],
         )
-        produced = list(tmp_path.glob("*.bin")) + list(tmp_path.glob("*.mxpc"))
+        produced = list(tmp_path.glob("*.bin")) + list(tmp_path.glob("*.fb"))
         if len(produced) != 1:
             raise SystemExit("flatc did not write a binary table")
         shutil.copyfile(produced[0], output)
@@ -276,15 +222,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "json",
         type=Path,
-        help="problem-cache JSON from MIGRAPHX_PROBLEM_CACHE or "
-        "hip-rocmlir-compiler --dump-problem-cache",
+        help="LUT JSON from hip-rocmlir-compiler --dump-problem-cache",
     )
-    parser.add_argument("-o", "--output", type=Path, required=True, help="FlatBuffer to write")
+    parser.add_argument("-o", "--output", type=Path, required=True, help=".fb to write")
     parser.add_argument(
         "--flatbuffer",
         type=Path,
         default=None,
-        help="Existing FlatBuffer to append this JSON onto",
+        help="Existing .fb to merge this JSON into",
     )
     parser.add_argument("--flatc", default=None, help="flatc executable")
     args = parser.parse_args(argv)
@@ -295,18 +240,24 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"schema not found: {SCHEMA}")
     flatc = find_flatc(args.flatc)
 
-    incoming, skipped = load_problem_cache(args.json)
-    existing: list[dict] = []
+    incoming = require_lut(json.loads(args.json.read_text(encoding="utf-8")))
+    header = incoming
+    rows = points_of(incoming)
     if args.flatbuffer is not None:
         if not args.flatbuffer.is_file():
             raise SystemExit(f"flatbuffer not found: {args.flatbuffer}")
         existing = decode_flatbuffer(flatc, args.flatbuffer)
+        header = existing
+        rows, added, replaced = merge_rows(points_of(existing), rows)
+    else:
+        added = len(rows)
+        replaced = 0
 
-    merged, added, replaced = merge_records(existing, incoming)
-    encode_flatbuffer(flatc, merged, args.output)
+    document = build_document(header, rows)
+    encode_flatbuffer(flatc, document, args.output)
     print(
-        f"wrote {args.output} entries={len(merged)} "
-        f"added={added} replaced={replaced} skipped_null={skipped}"
+        f"wrote {args.output} points={len(document['points'])} "
+        f"configs={len(document['configs'])} added={added} replaced={replaced}"
     )
     return 0
 
