@@ -330,7 +330,8 @@ int main(int argc, char** argv) {
                                                s.k) == 0) {
           HIP_OK(hipDeviceSynchronize());
           std::fprintf(stderr,
-                       "#SHAPE path=prefill_padrow M=%d N=%d K=%d gs=%d zp=%d\n",
+                       "#SHAPE path=prefill_padrow M=%d N=%d K=%d gs=%d zp=%d "
+                       "pad=128\n",
                        m, s.n, s.k, s.gs, int(s.zp));
           hip_matmul_nbits_u4_wmma_stride(nullptr, -1, m, s.n, s.k, s.gs, buf.a,
                                           s.k, buf.bpad, buf.sc, zp_f, buf.out,
