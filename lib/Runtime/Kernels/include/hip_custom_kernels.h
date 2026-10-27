@@ -1716,11 +1716,12 @@ HIP_KERNEL_API int hip_pool(
  *
  * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
  * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
- * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
- * pass-through.
+ * inside the kernel as `scale = in_dim / out_dim` (hip_resize_scaled below
+ * takes the ONNX scales instead).  The (N, C) prefix is pass-through.
  *
  *  mode:               0 = nearest, 1 = linear (N-linear)
- *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners,
+ *                      3 = pytorch_half_pixel
  *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
  *
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
@@ -1740,6 +1741,25 @@ HIP_KERNEL_API int hip_resize(
     int mode,
     int coord_transform,
     int nearest_mode);
+
+/* hip_resize, but window axis i samples with ONNX scale `scale<i>`
+ * (output / input) when it is > 0.  ONNX uses the supplied scale, which
+ * differs from out_dim / in_dim when floor(in_dim * scale) rounds.
+ * align_corners ignores the scales.
+ */
+HIP_KERNEL_API int hip_resize_scaled(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode,
+    float scale0, float scale1, float scale2);
 
 /* =========================================================================
  * GridSample (ONNX 4-D NCHW)
