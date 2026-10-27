@@ -60,8 +60,21 @@ they already keep separate tune caches at runtime — they need separate rows fo
 the same reason.
 
 Row stride is part of the prefill key because a padded buffer has a different
-winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so the two layouts must not
-share a row.
+winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so layouts must not share a
+row. Each pad is its own category, matched exactly: `Arrival` (dense) and
+`Padded` (arrival + 128 B, the per-call repack). The lookup takes the pad from
+the request's row pitch (a pitch of K/2 is dense); a pad with no category skips
+the point groups and goes to the phase's fallback, so a lookup never uses a
+point measured at another pitch. The sweep driver logs the pad of each
+`prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it to the
+category.
+
+`--out` names the JSON that `update_lut.py build` and `merge` write and
+`compile` reads; `--fb-out` names the binary, which defaults to `lut/<arch>.fb`
+only for the default JSON, so a scratch build never overwrites the shipped
+table. Every step checks the table it writes or reads (`check_table`) and
+rejects one the loader would read differently, for example a config index out
+of range or an extended entry the kernel library does not compile.
 
 ## Why the row stores geometry, not a config index
 
@@ -76,6 +89,13 @@ while probing. A geometry the table no longer contains, or that is illegal for
 this shape, makes the probe **fall through to the next tier** instead of
 returning something unlaunchable. Stale table, degraded answer, never a wrong
 one.
+
+A config that names an extended WMMA entry (`WMMA_EXT_CONFIGS`: the
+`GemmFp16U4ImplX` pipeline options, `variant` bit 7 selecting the CU-mode
+build) is listed in `extended_configs` with that entry's `variant`; it matches
+only extended entries, and an unlisted config only the original ones. A table
+that lists none also keeps the extended entries out of the runtime sweep, so a
+device without measurements searches exactly the original table.
 
 `kernel_abi` (`"matmul_nbits-v1"`) is the coarser guard: bump it when a config's *meaning*
 changes rather than its existence, and the whole table is rejected.
