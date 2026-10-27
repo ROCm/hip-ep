@@ -2142,8 +2142,14 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 // Mod operation wrapper (element-wise modulo / fmod).
 //   fmod = 0  -> integer modulo (Python %); requires integer data_type
 //   fmod = 1  -> C fmod         ; requires float data_type
+// Operand shapes are passed as 4D (N, C, H, W), left-padded with 1 by the
+// compiler; ONNX multidirectional broadcast is materialised via hip_expand
+// when an operand does not already match the output shape.
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod);
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod);
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
