@@ -388,12 +388,474 @@ struct InstanceNormOpLowering : public ConvertOpToLLVMPattern<InstanceNormOp> {
   }
 };
 
+// hip.batch_norm(%ctx) ins(%input, %scale, %bias, %mean, %variance)
+//   outs(%output)
+//   -> wrap_batch_normalization(state, input, scale, bias, mean, variance,
+//        output, n, c, spatial, data_type, epsilon)
+struct BatchNormOpLowering : public ConvertOpToLLVMPattern<BatchNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(BatchNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value biasPtr =
+        extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value meanPtr =
+        extractContiguousMemRefPtr(adaptor.getMean(), rewriter, loc);
+    Value variancePtr =
+        extractContiguousMemRefPtr(adaptor.getVariance(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    if (inputType.getRank() < 2)
+      return rewriter.notifyMatchFailure(
+          op, "hip.batch_norm requires input rank >= 2");
+
+    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value c = getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = 2, rank = inputType.getRank(); dimIdx < rank;
+         ++dimIdx) {
+      spatial = LLVM::MulOp::create(
+          rewriter, loc,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc),
+          spatial);
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    Value dataTypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(dataType));
+    Value epsilonVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType, // state
+        ptrType, ptrType, ptrType,
+        ptrType, ptrType,          // input, scale, bias, mean, var
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // n, c, spatial
+        i64Type, f32Type           // data_type, epsilon
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapBatchNormalization,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr, inputPtr,    scalePtr,    biasPtr,
+                               meanPtr,  variancePtr, outputPtr,   n,
+                               c,        spatial,     dataTypeVal, epsilonVal};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.group_norm -> wrap_group_norm(state, input, scale, bias, output,
+//   n, c, spatial, groups, channels_last, activation, data_type, epsilon)
+struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GroupNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value biasPtr =
+        extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    if (inputType.getRank() < 3)
+      return rewriter.notifyMatchFailure(
+          op, "hip.group_norm requires input rank >= 3");
+
+    int64_t channelAxis = op.getChannelsLast() ? inputType.getRank() - 1 : 1;
+    Value n = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value c = getMemRefDimSize(inputType, static_cast<unsigned>(channelAxis),
+                               adaptor.getInput(), rewriter, loc);
+    Value spatial = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                             rewriter.getI64IntegerAttr(1));
+    for (int64_t dimIdx = 1, rank = inputType.getRank(); dimIdx < rank;
+         ++dimIdx) {
+      if (dimIdx == channelAxis)
+        continue;
+      spatial = LLVM::MulOp::create(
+          rewriter, loc,
+          getMemRefDimSize(inputType, static_cast<unsigned>(dimIdx),
+                           adaptor.getInput(), rewriter, loc),
+          spatial);
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+    Value dataTypeVal = i64Const(dataType);
+    Value groupsVal = i64Const(op.getGroups());
+    Value channelsLastVal = i64Const(op.getChannelsLast());
+    Value activationVal = i64Const(op.getActivation());
+    Value epsilonVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // input, scale, bias
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // n, c, spatial
+        i64Type, i64Type, i64Type, // groups, channels_last, activation
+        i64Type, f32Type           // data_type, epsilon
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGroupNorm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr,
+                               inputPtr,
+                               scalePtr,
+                               biasPtr,
+                               outputPtr,
+                               n,
+                               c,
+                               spatial,
+                               groupsVal,
+                               channelsLastVal,
+                               activationVal,
+                               dataTypeVal,
+                               epsilonVal};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.gated_rms_norm -> wrap_gated_rms_norm(state, input, scale, gate, output,
+//   input_num_elements, norm_size, element_size_bytes, activation, epsilon)
+// activation: 0 = sigmoid, 1 = silu.
+struct GatedRmsNormOpLowering : public ConvertOpToLLVMPattern<GatedRmsNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GatedRmsNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr =
+        extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value gatePtr =
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto scaleType = cast<MemRefType>(op.getScale().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+    Value normSize =
+        computeNumElements(scaleType, adaptor.getScale(), rewriter, loc);
+
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+    Value elementSize =
+        i64Const(inputType.getElementType().getIntOrFloatBitWidth() / 8);
+    Value activation = i64Const(op.getActivation() == "silu" ? 1 : 0);
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // input, scale, gate
+        ptrType,                   // output
+        i64Type, i64Type, i64Type, // input_num_elements, norm_size, elem size
+        i64Type, f32Type           // activation, epsilon
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGatedRmsNorm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value> args = {
+        statePtr,         inputPtr, scalePtr,    gatePtr,    outputPtr,
+        inputNumElements, normSize, elementSize, activation, epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.engram_gate -> wrap_engram_gate(state, key, query, value, key_scale,
+//   query_scale, conv_scale_or_null, output, normed_or_null,
+//   key_num_elements, hc, hidden, element_size_bytes, epsilon)
+struct EngramGateOpLowering : public ConvertOpToLLVMPattern<EngramGateOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(EngramGateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto ptr = [&](Value memref) {
+      return extractContiguousMemRefPtr(memref, rewriter, loc);
+    };
+    auto outputs = adaptor.getOutputs();
+    Value normedPtr = outputs.size() > 1
+                          ? ptr(outputs[1])
+                          : LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    Value convScalePtr =
+        getNullableMemRefPtr(adaptor.getConvNormScale(), rewriter, loc);
+
+    auto keyType = cast<MemRefType>(op.getKey().getType());
+    Value keyNumElements =
+        computeNumElements(keyType, adaptor.getKey(), rewriter, loc);
+    Value hc = getMemRefDimSize(keyType, 2, adaptor.getKey(), rewriter, loc);
+    Value hidden =
+        getMemRefDimSize(keyType, 3, adaptor.getKey(), rewriter, loc);
+    Value elementSize = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(
+            keyType.getElementType().getIntOrFloatBitWidth() / 8));
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+
+    SmallVector<Type> paramTypes = {
+        ptrType,                   // state
+        ptrType, ptrType, ptrType, // key, query, value
+        ptrType, ptrType, ptrType, // key_scale, query_scale, conv_scale
+        ptrType, ptrType,          // output, normed
+        i64Type, i64Type, i64Type, // key_num_elements, hc, hidden
+        i64Type, f32Type           // element_size_bytes, epsilon
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapEngramGate, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value> args = {adaptor.getCtx(),
+                               ptr(adaptor.getKey()),
+                               ptr(adaptor.getQuery()),
+                               ptr(adaptor.getValue()),
+                               ptr(adaptor.getKeyNormScale()),
+                               ptr(adaptor.getQueryNormScale()),
+                               convScalePtr,
+                               ptr(outputs[0]),
+                               normedPtr,
+                               keyNumElements,
+                               hc,
+                               hidden,
+                               elementSize,
+                               epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.hyper_connection_pre_mix -> wrap_hyper_connection_pre_mix
+struct HyperConnectionPreMixOpLowering
+    : public ConvertOpToLLVMPattern<HyperConnectionPreMixOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(HyperConnectionPreMixOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+    auto streamsType = cast<MemRefType>(op.getStreams().getType());
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    Value elementSize =
+        i64Const(streamsType.getElementType().getIntOrFloatBitWidth() / 8);
+    Value featureGate = i64Const(op.getGateLayout() == "feature" ? 1 : 0);
+    Value gateSigmoid = i64Const(op.getGateSigmoid());
+    Value scale = LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                           op.getReductionScaleAttr());
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    i64Type, i64Type, i64Type, i64Type,
+                                    i64Type, i64Type, f32Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapHyperConnectionPreMix,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getStreams(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getPreMix(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        computeNumElements(streamsType, adaptor.getStreams(), rewriter, loc),
+        i64Const(op.getBranches()),
+        i64Const(op.getHidden()),
+        featureGate,
+        gateSigmoid,
+        elementSize,
+        scale};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.hyper_connection_post_mix -> wrap_hyper_connection_post_mix
+struct HyperConnectionPostMixOpLowering
+    : public ConvertOpToLLVMPattern<HyperConnectionPostMixOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(HyperConnectionPostMixOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    auto streamsType = cast<MemRefType>(op.getStreams().getType());
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    ptrType, ptrType, i64Type, i64Type,
+                                    i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapHyperConnectionPostMix,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getStreams(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getBlockOutput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getPostMix(), rewriter, loc),
+        getNullableMemRefPtr(adaptor.getStreamMix(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        computeNumElements(streamsType, adaptor.getStreams(), rewriter, loc),
+        i64Const(op.getBranches()),
+        i64Const(op.getHidden()),
+        i64Const(op.getGateLayout() == "feature" ? 1 : 0),
+        i64Const(streamsType.getElementType().getIntOrFloatBitWidth() / 8)};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+struct HyperConnectionPostMixNormOpLowering
+    : public ConvertOpToLLVMPattern<HyperConnectionPostMixNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(HyperConnectionPostMixNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+    auto streamsType = cast<MemRefType>(op.getStreams().getType());
+    auto outputs = adaptor.getOutputs();
+    if (outputs.size() != 2)
+      return failure();
+    auto i64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+    SmallVector<Type> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
+        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, f32Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapHyperConnectionPostMixNorm, paramTypes,
+        rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+    Value epsilon =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getStreams(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getBlockOutput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getGate(), rewriter, loc),
+        getNullableMemRefPtr(adaptor.getStreamMix(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getNormScale(), rewriter, loc),
+        extractContiguousMemRefPtr(outputs[0], rewriter, loc),
+        extractContiguousMemRefPtr(outputs[1], rewriter, loc),
+        computeNumElements(streamsType, adaptor.getStreams(), rewriter, loc),
+        i64Const(op.getBranches()),
+        i64Const(op.getHidden()),
+        i64Const(op.getGateLayout() == "feature" ? 1 : 0),
+        i64Const(op.getGateActivation()),
+        i64Const(streamsType.getElementType().getIntOrFloatBitWidth() / 8),
+        epsilon};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-               InstanceNormOpLowering>(converter);
+  patterns
+      .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
+           GatedRmsNormOpLowering, EngramGateOpLowering,
+           HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
+           HyperConnectionPostMixNormOpLowering>(converter);
 }
 
 } // namespace hip

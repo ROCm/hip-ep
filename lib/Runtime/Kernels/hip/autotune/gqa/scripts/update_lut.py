@@ -15,6 +15,18 @@ Steps, run individually or all at once:
     python update_lut.py compile          # gfx1151.json -> gfx1151.fb (needs flatc)
     python update_lut.py all              # measure + build + compile
 
+To re-measure only some head dims (or only prefill) without re-measuring the rest
+of an existing table:
+
+    python update_lut.py measure --phase prefill --head-dim 64,128,256
+    python update_lut.py build --merge-existing --head-dim 64,128,256
+    python update_lut.py compile
+
+or only some geometries (H:G:d), keeping every other geometry's points:
+
+    python update_lut.py measure --phase decode --geometry 24:4:256
+    python update_lut.py build --merge-existing --geometry 24:4:256
+
 The sweep executable must be built first:
     cmake --build <build-dir> --target gqa_autotune_sweep
 
@@ -54,78 +66,87 @@ SCHEMA_VERSION = 9
 # also drive prefill measurement.
 GEOMETRIES = [
     # ---- primary models -------------------------------------------------------
-    (64,  8,  64,  1, 'gpt-oss',           'prefill_v5'),
-    (32,  8, 128,  0, 'llama-mistral',      'prefill_v7'),   # Llama-3.1-8B, Mistral-7B
-    (40, 10, 128,  0, 'phi4',               'prefill_v7'),   # phi-4
-    (40,  8, 128,  0, 'qwen2.5-14b',        'prefill_v7'),   # Qwen2.5-14B
-    (64,  8, 128,  0, 'deepseek-70b',       'prefill_v7'),   # DeepSeek-R1-Distill-70B
-    ( 8,  4, 256,  0, 'gemma3-4b',          'prefill_v8'),   # gemma3-4b
-    (16,  4, 256,  0, 'qwen3.5-9b',         'prefill_v8'),   # Qwen3.5-9B
-    (16,  2, 256,  0, 'qwen3.5-35b',        'prefill_v8'),   # Qwen3.5/3.6-35B-A3B
-    (24,  4, 256,  0, 'qwen3.6-27b',        'prefill_v8'),   # Qwen3.6-27B, Qwen3.8-27B
-    (24,  6, 256,  0, 'qwen3.6-27b-hpg4',   'prefill_v8'),
-    (24,  3, 256,  0, 'qwen3.6-27b-alt',    'prefill_v8'),
+    (64,  8,  64,  1, 'gpt-oss',           'prefill_v6x'),
+    (32,  8, 128,  0, 'llama-mistral',      'prefill_v6x'),   # Llama-3.1-8B, Mistral-7B
+    (40, 10, 128,  0, 'phi4',               'prefill_v6x'),   # phi-4
+    (40,  8, 128,  0, 'qwen2.5-14b',        'prefill_v6x'),   # Qwen2.5-14B
+    (64,  8, 128,  0, 'deepseek-70b',       'prefill_v6x'),   # DeepSeek-R1-Distill-70B
+    ( 8,  4, 256,  0, 'gemma3-4b',          'prefill_v8x'),   # gemma3-4b
+    (16,  4, 256,  0, 'qwen3.5-9b',         'prefill_v8x'),   # Qwen3.5-9B
+    (16,  2, 256,  0, 'qwen3.5-35b',        'prefill_v8x'),   # Qwen3.5/3.6-35B-A3B
+    (24,  4, 256,  0, 'qwen3.6-27b',        'prefill_v8x'),   # Qwen3.6-27B, Qwen3.8-27B
+    (24,  6, 256,  0, 'qwen3.6-27b-hpg4',   'prefill_v8x'),
+    (24,  3, 256,  0, 'qwen3.6-27b-alt',    'prefill_v8x'),
     # ---- fill: close the (head_dim, HpG) matrix ------------------------------
-    (32, 32,  64,  0, 'mha-d64',            'prefill_v5'),
-    (16,  8,  64,  0, 'hpg2-d64',           'prefill_v5'),
-    (24,  8,  64,  0, 'hpg3-d64',           'prefill_v5'),
-    (32,  8,  64,  0, 'llama3.2-1b',        'prefill_v5'),
-    (40,  8,  64,  0, 'hpg5-d64',           'prefill_v5'),
-    (32,  2,  64,  0, 'hpg16-d64',          'prefill_v5'),
-    (32, 32, 128,  0, 'llama2-7b',          'prefill_v7'),
-    (16,  8, 128,  0, 'qwen3-1.7b',         'prefill_v7'),
-    (24,  8, 128,  0, 'llama3.2-3b',        'prefill_v7'),
-    (32,  2, 128,  0, 'glm4-9b',            'prefill_v7'),
-    (16, 16, 256,  0, 'mha-d256',           'prefill_v8'),
-    (24,  8, 256,  0, 'hpg3-d256',          'prefill_v8'),
-    (40,  8, 256,  0, 'hpg5-d256',          'prefill_v8'),
-    (32,  2, 256,  0, 'hpg16-d256',         'prefill_v8'),
+    (32, 32,  64,  0, 'mha-d64',            'prefill_v6x'),
+    (16,  8,  64,  0, 'hpg2-d64',           'prefill_v6x'),
+    (24,  8,  64,  0, 'hpg3-d64',           'prefill_v6x'),
+    (32,  8,  64,  0, 'llama3.2-1b',        'prefill_v6x'),
+    (40,  8,  64,  0, 'hpg5-d64',           'prefill_v6x'),
+    (32,  2,  64,  0, 'hpg16-d64',          'prefill_v6x'),
+    (32, 32, 128,  0, 'llama2-7b',          'prefill_v6x'),
+    (16,  8, 128,  0, 'qwen3-1.7b',         'prefill_v6x'),
+    (24,  8, 128,  0, 'llama3.2-3b',        'prefill_v6x'),
+    (32,  2, 128,  0, 'glm4-9b',            'prefill_v6x'),
+    (16, 16, 256,  0, 'mha-d256',           'prefill_v8x'),
+    (24,  8, 256,  0, 'hpg3-d256',          'prefill_v8x'),
+    (40,  8, 256,  0, 'hpg5-d256',          'prefill_v8x'),
+    (32,  2, 256,  0, 'hpg16-d256',         'prefill_v8x'),
     # ---- low-parallelism anchor (each HpG x head_dim pair) -------------------
-    ( 8,  8,  64,  0, 'hold-1-d64',         'prefill_v5'),
-    ( 8,  4,  64,  0, 'hold-2-d64',         'prefill_v5'),
-    (12,  4,  64,  0, 'hold-3-d64',         'prefill_v5'),
-    (16,  4,  64,  0, 'hold-4-d64',         'prefill_v5'),
-    (20,  4,  64,  0, 'hold-5-d64',         'prefill_v5'),
-    ( 8,  1,  64,  0, 'hold-8-d64-mqa',     'prefill_v5'),
-    (16,  1,  64,  0, 'hold-16-d64-mqa',    'prefill_v5'),
-    (16, 16, 128,  0, 'hold-1-d128',        'prefill_v7'),
-    (64, 32, 128,  0, 'hold-2-d128',        'prefill_v7'),
-    (12,  4, 128,  0, 'hold-3-d128',        'prefill_v7'),
-    ( 8,  2, 128,  0, 'hold-4-d128',        'prefill_v7'),
-    (20,  4, 128,  0, 'hold-5-d128',        'prefill_v7'),
-    (128,16, 128,  0, 'hold-8-d128',        'prefill_v7'),
-    (16,  1, 128,  0, 'hold-16-d128-mqa',   'prefill_v7'),
-    ( 8,  8, 256,  0, 'hold-1-d256',        'prefill_v8'),
-    (32, 16, 256,  0, 'hold-2-d256',        'prefill_v8'),
-    (12,  4, 256,  0, 'falcon3-7b',         'prefill_v8'),
-    ( 8,  2, 256,  0, 'hold-4-d256',        'prefill_v8'),
-    (20,  4, 256,  0, 'hold-5-d256',        'prefill_v8'),
-    (48,  6, 256,  0, 'hold-8-d256',        'prefill_v8'),
-    (64,  4, 256,  0, 'hold-16-d256',       'prefill_v8'),
+    ( 8,  8,  64,  0, 'hold-1-d64',         'prefill_v6x'),
+    ( 8,  4,  64,  0, 'hold-2-d64',         'prefill_v6x'),
+    (12,  4,  64,  0, 'hold-3-d64',         'prefill_v6x'),
+    (16,  4,  64,  0, 'hold-4-d64',         'prefill_v6x'),
+    (20,  4,  64,  0, 'hold-5-d64',         'prefill_v6x'),
+    ( 8,  1,  64,  0, 'hold-8-d64-mqa',     'prefill_v6x'),
+    (16,  1,  64,  0, 'hold-16-d64-mqa',    'prefill_v6x'),
+    (16, 16, 128,  0, 'hold-1-d128',        'prefill_v6x'),
+    (64, 32, 128,  0, 'hold-2-d128',        'prefill_v6x'),
+    (12,  4, 128,  0, 'hold-3-d128',        'prefill_v6x'),
+    ( 8,  2, 128,  0, 'hold-4-d128',        'prefill_v6x'),
+    (20,  4, 128,  0, 'hold-5-d128',        'prefill_v6x'),
+    (128,16, 128,  0, 'hold-8-d128',        'prefill_v6x'),
+    (16,  1, 128,  0, 'hold-16-d128-mqa',   'prefill_v6x'),
+    ( 8,  8, 256,  0, 'hold-1-d256',        'prefill_v8x'),
+    (32, 16, 256,  0, 'hold-2-d256',        'prefill_v8x'),
+    (12,  4, 256,  0, 'falcon3-7b',         'prefill_v8x'),
+    ( 8,  2, 256,  0, 'hold-4-d256',        'prefill_v8x'),
+    (20,  4, 256,  0, 'hold-5-d256',        'prefill_v8x'),
+    (48,  6, 256,  0, 'hold-8-d256',        'prefill_v8x'),
+    (64,  4, 256,  0, 'hold-16-d256',       'prefill_v8x'),
     # ---- floor and holdout (second head count per HpG) -----------------------
-    (16, 16,  64,  0, 'hold2-1-d64',        'prefill_v5'),
-    (32, 16,  64,  0, 'hold2-2-d64',        'prefill_v5'),
-    (32,  4,  64,  0, 'hold2-8-d64',        'prefill_v5'),
-    ( 8,  4, 128,  0, 'hold2-2-d128',       'prefill_v7'),
-    (32,  4, 128,  0, 'hold2-8-d128',       'prefill_v7'),
-    (10,  2, 128,  0, 'hold2-5-d128',       'prefill_v7'),
-    (64, 16, 128,  0, 'hold2-4-d128',       'prefill_v7'),
-    (48, 16, 256,  0, 'hold2-3-d256',       'prefill_v8'),
-    (48, 12, 256,  0, 'hold2-4-d256',       'prefill_v8'),
-    (24, 24, 256,  0, 'hold2-1-d256',       'prefill_v8'),
+    (16, 16,  64,  0, 'hold2-1-d64',        'prefill_v6x'),
+    (32, 16,  64,  0, 'hold2-2-d64',        'prefill_v6x'),
+    (32,  4,  64,  0, 'hold2-8-d64',        'prefill_v6x'),
+    ( 8,  4, 128,  0, 'hold2-2-d128',       'prefill_v6x'),
+    (32,  4, 128,  0, 'hold2-8-d128',       'prefill_v6x'),
+    (10,  2, 128,  0, 'hold2-5-d128',       'prefill_v6x'),
+    (64, 16, 128,  0, 'hold2-4-d128',       'prefill_v6x'),
+    (48, 16, 256,  0, 'hold2-3-d256',       'prefill_v8x'),
+    (48, 12, 256,  0, 'hold2-4-d256',       'prefill_v8x'),
+    (24, 24, 256,  0, 'hold2-1-d256',       'prefill_v8x'),
     # ---- second head count at already-covered (head_dim, HpG) ---------------
-    (16,  4, 128,  0, 'hpg4-lowpar-d128',   'prefill_v7'),
-    (40, 40, 128,  0, 'llama2-13b',         'prefill_v7'),
-    (32, 16, 128,  0, 'gemma2-27b',         'prefill_v7'),
-    (16,  8, 256,  0, 'gemma2-9b',          'prefill_v8'),
-    (64,  4, 128,  0, 'hpg16-highpar',      'prefill_v7'),
+    (16,  4, 128,  0, 'hpg4-lowpar-d128',   'prefill_v6x'),
+    (40, 40, 128,  0, 'llama2-13b',         'prefill_v6x'),
+    (32, 16, 128,  0, 'gemma2-27b',         'prefill_v6x'),
+    (16,  8, 256,  0, 'gemma2-9b',          'prefill_v8x'),
+    (64,  4, 128,  0, 'hpg16-highpar',      'prefill_v6x'),
+    # ---- head_dim 96: Phi-3-mini plus every templated HpG --------------------
+    (32, 32,  96,  0, 'phi3-mini',          'prefill_v6x'),  # Phi-3/3.5-mini
+    (16, 16,  96,  0, 'hold-1-d96',         'prefill_v6x'),
+    (16,  8,  96,  0, 'hpg2-d96',           'prefill_v6x'),
+    (24,  8,  96,  0, 'hpg3-d96',           'prefill_v6x'),
+    (32,  8,  96,  0, 'hpg4-d96',           'prefill_v6x'),
+    (40,  8,  96,  0, 'hpg5-d96',           'prefill_v6x'),
+    (64,  8,  96,  0, 'hpg8-d96',           'prefill_v6x'),
+    (32,  2,  96,  0, 'hpg16-d96',          'prefill_v6x'),
+    (16,  1,  96,  0, 'hold-16-d96-mqa',    'prefill_v6x'),
 ]
 
 PHASE_OF_KERNEL = {
     'flash_decode': 'Decode',
-    'prefill_v5': 'PrefillV5',
-    'prefill_v7': 'PrefillV7',
-    'prefill_v8': 'PrefillV8',
+    'prefill_v6x': 'PrefillV6x',
+    'prefill_v8x': 'PrefillV8x',
 }
 
 # ---------------------------------------------------------------------------
@@ -170,7 +191,8 @@ def run_measure(args):
         sys.path.insert(0, str(tools))
         shape_files = _gen_shapes(data_dir, args.phase)
     else:
-        shape_files = _write_builtin_shapes(data_dir, args.phase)
+        shape_files = _write_builtin_shapes(data_dir, args.phase,
+                                            args.head_dim, args.geometry)
 
     for shapes_csv in shape_files:
         tag = shapes_csv.stem
@@ -209,7 +231,8 @@ INTERIOR_FRACTIONS = [1.03, 1.25, 1.5, 1.75]
 PREFILL_SQ = [128, 256, 512, 1024, 2048, 4096]
 PREFILL_SKV = [128, 65536]
 
-VARIANT_OF_HEAD_DIM = {64: 'PrefillV5', 128: 'PrefillV7', 256: 'PrefillV8'}
+VARIANT_OF_HEAD_DIM = {64: 'PrefillV6x', 96: 'PrefillV6x', 128: 'PrefillV6x',
+                       256: 'PrefillV8x'}
 
 
 def _interior(lo, hi):
@@ -228,12 +251,24 @@ def _decode_lengths():
     return sorted(lens)
 
 
-def _grid_shapes():
+def _geometries(head_dims=None, only=None):
+    """GEOMETRIES, restricted to `head_dims` and to the (H, G, d) triples in
+    `only` when given (an incremental sweep)."""
+    out = GEOMETRIES
+    if head_dims:
+        out = [g for g in out if g[2] in head_dims]
+    if only:
+        out = [g for g in out if tuple(g[:3]) in only]
+    return out
+
+
+def _grid_shapes(head_dims=None, only=None):
     """Canonical list of shapes to measure, as sweep-CSV row dicts."""
     shapes = []
     lengths = _decode_lengths()
+    geometries = _geometries(head_dims, only)
     di = 0
-    for H, G, d, sink, group, _kernel in GEOMETRIES:
+    for H, G, d, sink, group, _kernel in geometries:
         for skv in lengths:
             di += 1
             shapes.append(dict(
@@ -243,7 +278,7 @@ def _grid_shapes():
                 grid_role='boundary' if skv in DECODE_BOUNDARIES else 'interior',
                 note=''))
     pi = 0
-    for H, G, d, sink, group, _kernel in GEOMETRIES:
+    for H, G, d, sink, group, _kernel in geometries:
         for sq in PREFILL_SQ:
             for skv in PREFILL_SKV:
                 if skv < sq:
@@ -281,7 +316,7 @@ def run_plan(args):
     """Write the shapes-to-measure manifest: every planned point with its config
     marked TBD. This is the coverage plan a sweep fills in; `build` produces the
     real table with configs resolved from the measurements."""
-    shapes = _grid_shapes()
+    shapes = _grid_shapes(args.head_dim, args.geometry)
     points = [_shape_to_tbd_point(s) for s in shapes]
     # De-dup on the point key (a geometry can repeat a length across groups).
     seen, uniq = set(), []
@@ -311,14 +346,18 @@ def run_plan(args):
         len(uniq), n_dec, len(uniq) - n_dec, out))
 
 
-def _write_builtin_shapes(data_dir, phase):
-    """Write the coverage grid (decode + prefill) to sweep CSVs."""
+def _write_builtin_shapes(data_dir, phase, head_dims=None, only=None):
+    """Write the coverage grid (decode + prefill) to sweep CSVs. A head_dim or
+    geometry subset gets its own file names, so it lands beside a full sweep's
+    results instead of overwriting them."""
     paths = []
     phases = ['decode', 'prefill'] if phase == 'both' else [phase]
-    shapes = _grid_shapes()
+    shapes = _grid_shapes(head_dims, only)
+    tag = ''.join('_d{}'.format(d) for d in sorted(head_dims or []))
+    tag += ''.join('_h{}g{}d{}'.format(*g) for g in sorted(only or []))
     for ph in phases:
         rows = [s for s in shapes if s['phase'] == ph]
-        out = data_dir / ('shapes_' + ph + '.csv')
+        out = data_dir / ('shapes_' + ph + tag + '.csv')
         with open(out, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(SHAPE_FIELDS)
@@ -346,10 +385,10 @@ def _write_builtin_shapes(data_dir, phase):
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION = 9
-KERNEL_ABI = 'gqa-v3'
+KERNEL_ABI = 'gqa-v4'
 ROCM_VERSION = 70151803
 
-HEAD_DIM_CLASS = {64: 'D64', 128: 'D128', 256: 'D256'}
+HEAD_DIM_CLASS = {64: 'D64', 96: 'D96', 128: 'D128', 256: 'D256'}
 
 
 def _int(row, key, default=0):
@@ -371,49 +410,52 @@ def _config_and_splits(row):
         cfg = {'kind': 'Decode',
                'use_wmma': 1 if 'wmma' in row.get('cfg_impl', '').lower() else 0,
                'bkv': _int(row, 'cfg_BKV', 16) or 16,
-               'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}
+               'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}
         return cfg, (_int(row, 'cfg_splits', 1) or 1)
-    if kernel == 'prefill_v5':
+    if kernel == 'prefill_v6x':
         return {'kind': 'Prefill', 'use_wmma': 0,
                 'bkv': _int(row, 'cfg_BKV', 32) or 32,
-                'm_tiles': _int(row, 'cfg_MT', 1) or 1,
-                'nw': 0, 'mt': 0, 'nd': 0}, 0
-    if kernel == 'prefill_v7':
-        return {'kind': 'Prefill', 'use_wmma': 0,
-                'bkv': _int(row, 'cfg_BKV', 32) or 32, 'm_tiles': 0,
-                'nw': _int(row, 'cfg_NW', 1) or 1,
+                'hb': _int(row, 'cfg_HB', 1) or 1,
+                'qw': _int(row, 'cfg_QW', 4) or 4,
                 'mt': _int(row, 'cfg_MT', 1) or 1, 'nd': 0}, 0
-    if kernel == 'prefill_v8':
+    if kernel == 'prefill_v8x':
         return {'kind': 'Prefill', 'use_wmma': 0,
-                'bkv': _int(row, 'cfg_BKV', 32) or 32, 'm_tiles': 0, 'nw': 0,
-                'mt': _int(row, 'cfg_MT', 1) or 1,
+                'bkv': _int(row, 'cfg_BKV', 16) or 16,
+                'hb': _int(row, 'cfg_HB', 1) or 1, 'qw': 0, 'mt': 0,
                 'nd': _int(row, 'cfg_ND', 2) or 2}, 0
     return None, 0
 
 
-# Deterministic, always-runnable last resort per (phase, head_dim); mirrors the
-# heuristic in gqa_autotune.cpp so a group with no usable point still launches.
-# Decode uses scalar (valid for every geometry) with a split count the runtime
-# clamps down; prefill uses each variant's safe default.
+# Deterministic, always-runnable last resort per (phase, head_dim). Decode uses
+# scalar (valid for every geometry) with a split count the runtime clamps down.
+# A prefill fallback serves any heads-per-group, so it runs one head per block
+# (hb=1 divides every group): v6x 1x4 at M_TILES=1/BKV=32 (also the windowed
+# instance), v8x 2 waves at BKV=16.
+# D96 decode saturates on far fewer splits (its own heuristic in
+# gqa_autotune.cpp), so its fallback starts at 8.
 def _fallback_specs():
     return [
         ('Decode', 'D64', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
-                           'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
+                           'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 32),
         ('Decode', 'D128', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
-                            'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
+                            'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 32),
         ('Decode', 'D256', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
-                            'm_tiles': 0, 'nw': 0, 'mt': 0, 'nd': 0}, 32),
-        ('PrefillV5', 'D64', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
-                             'm_tiles': 1, 'nw': 0, 'mt': 0, 'nd': 0}, 0),
-        ('PrefillV7', 'D128', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
-                              'm_tiles': 0, 'nw': 1, 'mt': 1, 'nd': 0}, 0),
-        ('PrefillV8', 'D256', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
-                              'm_tiles': 0, 'nw': 0, 'mt': 1, 'nd': 2}, 0),
+                            'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 32),
+        ('Decode', 'D96', {'kind': 'Decode', 'use_wmma': 0, 'bkv': 16,
+                           'hb': 0, 'qw': 0, 'mt': 0, 'nd': 0}, 8),
+        ('PrefillV6x', 'D64', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                               'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
+        ('PrefillV6x', 'D128', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                                'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
+        ('PrefillV6x', 'D96', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 32,
+                               'hb': 1, 'qw': 4, 'mt': 1, 'nd': 0}, 0),
+        ('PrefillV8x', 'D256', {'kind': 'Prefill', 'use_wmma': 0, 'bkv': 16,
+                                'hb': 1, 'qw': 0, 'mt': 0, 'nd': 2}, 0),
     ]
 
 
 def _cfg_key(cfg):
-    return (cfg['kind'], cfg['use_wmma'], cfg['bkv'], cfg['m_tiles'], cfg['nw'],
+    return (cfg['kind'], cfg['use_wmma'], cfg['bkv'], cfg['hb'], cfg['qw'],
             cfg['mt'], cfg['nd'])
 
 
@@ -494,7 +536,25 @@ def _prune_saturated(points):
     return kept, removed
 
 
-def _build_from_csvs(data_dir, out_json, arch):
+def _load_merge_base(out_json, arch):
+    """The existing lut/<arch>.json a --merge-existing build extends."""
+    if not Path(out_json).exists():
+        sys.exit('[build] --merge-existing: {} does not exist'.format(out_json))
+    with open(out_json, encoding='utf-8') as f:
+        base = json.load(f)
+    if (base.get('schema_version') != SCHEMA_VERSION or
+            base.get('kernel_abi') != KERNEL_ABI or
+            base.get('gpu_arch') != 'gfx' + arch):
+        sys.exit('[build] --merge-existing: {} is schema {} / {} / {}, expected '
+                 '{} / {} / gfx{}; rebuild it in full instead'.format(
+                     out_json, base.get('schema_version'),
+                     base.get('kernel_abi'), base.get('gpu_arch'),
+                     SCHEMA_VERSION, KERNEL_ABI, arch))
+    return base
+
+
+def _build_from_csvs(data_dir, out_json, arch, merge_existing=False,
+                     head_dims=None, only=None):
     """Build gfx<arch>.json (new nearest-neighbour layout) from *_best.csv.
 
     One point per measured shape, literal dims (no bucketing), configs
@@ -503,7 +563,19 @@ def _build_from_csvs(data_dir, out_json, arch):
     which is answer-preserving on every measured shape and roughly halves the
     table. Outlier repair is not done here (the sweep's *_best.csv is already the
     per-shape winner).
+
+    merge_existing adds the measured (phase, head_dim) groups to the current
+    lut/<arch>.json instead of replacing the table, for an incremental sweep
+    (`measure --head-dim` / `--phase`). Every other group, every existing config
+    index and the table scalars are kept verbatim; a group present in both is
+    replaced by the new measurements. Pruning is per geometry group, so the
+    result equals a full rebuild over the union of the measurements. head_dims
+    and `only` limit which *_best.csv rows are read, so older sweeps left in
+    data_dir cannot replace a group by accident. With `only` (the --geometry
+    (H, G, d) triples) the replaced group narrows to (phase, head_dim, H, G), so
+    re-measuring one geometry keeps every other geometry at that head_dim.
     """
+    base = _load_merge_base(out_json, arch) if merge_existing else None
     configs = []          # list of config dicts
     cfg_index = {}        # _cfg_key -> index
 
@@ -514,6 +586,11 @@ def _build_from_csvs(data_dir, out_json, arch):
             configs.append(cfg)
         return cfg_index[k]
 
+    if base is not None:
+        for cfg in base['configs']:
+            intern(cfg)
+    n_base_configs = len(configs)
+
     points = {}           # point-key -> point dict (dedup, last wins)
     n_rows = 0
     for csv_path in sorted(Path(data_dir).glob('*_best.csv')):
@@ -523,9 +600,11 @@ def _build_from_csvs(data_dir, out_json, arch):
                 if cfg is None:
                     continue
                 d = _int(row, 'd')
-                if d not in HEAD_DIM_CLASS:
+                if d not in HEAD_DIM_CLASS or (head_dims and d not in head_dims):
                     continue
                 H, G, B = _int(row, 'H'), _int(row, 'G'), _int(row, 'B', 1) or 1
+                if only and (H, G, d) not in only:
+                    continue
                 sq, skv = _int(row, 'sq', 1) or 1, _int(row, 'skv', 1) or 1
                 window = _int(row, 'window', -1)
                 phase = PHASE_OF_KERNEL.get(row.get('kernel', ''))
@@ -552,22 +631,31 @@ def _build_from_csvs(data_dir, out_json, arch):
         sys.exit('[build] no usable *_best.csv rows in ' + str(data_dir))
 
     fallbacks = []
+    if base is not None:
+        fallbacks = [dict(r) for r in base.get('fallbacks', [])]
+    have_fallback = {(r['phase'], r['head_dim']) for r in fallbacks}
     for phase, hd, cfg, splits in _fallback_specs():
+        if (phase, hd) in have_fallback:
+            continue
         fallbacks.append({'phase': phase, 'head_dim': hd,
                           'config': intern(cfg), 'splits': splits})
 
-    scalars = OrderedDict([
-        ('schema_version', SCHEMA_VERSION),
-        ('gpu_arch', 'gfx' + arch),
-        ('rocm_version', ROCM_VERSION),
-        ('kernel_abi', KERNEL_ABI),
-        ('model_key', 'update_lut/best-csv'),
-        ('weight_num_heads', 1.0),
-        ('weight_kv_num_heads', 1.0),
-        ('weight_batch', 1.0),
-        ('weight_seq_q', 1.0),
-        ('weight_seq_kv', 1.0),
-    ])
+    if base is not None:
+        scalars = OrderedDict((k, v) for k, v in base.items()
+                              if k not in ('configs', 'points', 'fallbacks'))
+    else:
+        scalars = OrderedDict([
+            ('schema_version', SCHEMA_VERSION),
+            ('gpu_arch', 'gfx' + arch),
+            ('rocm_version', ROCM_VERSION),
+            ('kernel_abi', KERNEL_ABI),
+            ('model_key', 'update_lut/best-csv'),
+            ('weight_num_heads', 1.0),
+            ('weight_kv_num_heads', 1.0),
+            ('weight_batch', 1.0),
+            ('weight_seq_q', 1.0),
+            ('weight_seq_kv', 1.0),
+        ])
     # Head counts and batch are ubyte in the schema (packs the point to 16
     # bytes); fail loudly if a geometry ever exceeds that rather than let flatc
     # truncate silently.
@@ -583,8 +671,21 @@ def _build_from_csvs(data_dir, out_json, arch):
     # and renumber the indices so `configs` stays tight.
     n_before = len(points)
     kept, n_removed = _prune_saturated(list(points.values()))
-    used = sorted({p['config'] for p in kept}
-                  | {r['config'] for r in fallbacks})
+    if base is not None:
+        # The base table is already pruned against its own measurements;
+        # pruning it again against fewer coordinates would drop more of it.
+        def group(p):
+            if only:
+                return (p['phase'], p['head_dim'], p['num_heads'],
+                        p['kv_num_heads'])
+            return (p['phase'], p['head_dim'])
+        rebuilt = {group(p) for p in kept}
+        kept = [dict(p) for p in base['points']
+                if group(p) not in rebuilt] + kept
+    used = ({p['config'] for p in kept} | {r['config'] for r in fallbacks})
+    # A merge keeps every base config where it was, so the base points read
+    # the same in the merged table; only unused new configs are dropped.
+    used = sorted(used | set(range(n_base_configs)))
     remap = {old: new for new, old in enumerate(used)}
     configs = [configs[old] for old in used]
     for p in kept:
@@ -592,7 +693,7 @@ def _build_from_csvs(data_dir, out_json, arch):
     for r in fallbacks:
         r['config'] = remap[r['config']]
     print('[build] pruned {} saturated points ({} -> {}), {} configs'.format(
-        n_removed, n_before, len(kept), len(configs)))
+        n_removed, n_before, n_before - n_removed, len(configs)))
 
     point_rows = sorted(kept, key=lambda p: (
         p['phase'], p['head_dim'], p['num_heads'], p['kv_num_heads'],
@@ -629,7 +730,9 @@ def run_build(args):
         print('[build] ' + ' '.join(cmd))
         subprocess.run(cmd, check=True, cwd=str(tools.parent))
     else:
-        _build_from_csvs(Path(args.data), lut_json, args.arch)
+        _build_from_csvs(Path(args.data), lut_json, args.arch,
+                         merge_existing=args.merge_existing,
+                         head_dims=args.head_dim, only=args.geometry)
     print('[build] wrote ' + str(lut_json))
 
 
@@ -681,6 +784,22 @@ def main():
                     help='build_lut prune tolerance (--rdpcapture mode only)')
     ap.add_argument('--flatc', default='flatc',
                     help='flatc executable (for compile step)')
+    ap.add_argument('--head-dim', type=lambda s: [int(x) for x in s.split(',')],
+                    default=None,
+                    help='plan/measure/build only these head dims, e.g. '
+                         '64,128,256 (comma list); pair with build '
+                         '--merge-existing')
+    ap.add_argument('--geometry',
+                    type=lambda s: {tuple(int(x) for x in g.split(':'))
+                                    for g in s.split(',')},
+                    default=None,
+                    help='plan/measure/build only these H:G:d geometries, e.g. '
+                         '24:4:256 (comma list); with build --merge-existing '
+                         'only those geometries are replaced')
+    ap.add_argument('--merge-existing', action='store_true',
+                    help='build: add the measured (phase, head_dim) groups to '
+                         'the current lut/gfx<arch>.json instead of replacing '
+                         'the table')
     args = ap.parse_args()
 
     cmds = ['measure', 'build', 'compile'] if args.command == 'all' else [args.command]

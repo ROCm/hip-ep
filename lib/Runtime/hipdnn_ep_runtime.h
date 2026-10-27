@@ -84,6 +84,8 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 2;
   case HIPDNN_EP_DATATYPE_UINT16:
     return 2;
+  case HIPDNN_EP_DATATYPE_FLOAT8E4M3FN:
+    return 1;
   default:
     return -1;
   }
@@ -111,6 +113,8 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "i16";
   case HIPDNN_EP_DATATYPE_UINT16:
     return "ui16";
+  case HIPDNN_EP_DATATYPE_FLOAT8E4M3FN:
+    return "f8E4M3FN";
   default:
     return "unknown";
   }
@@ -423,11 +427,14 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Device-side runtime error flag (set by kernels or host wrappers, observed
+// after the graph by inference_compute). Intended for operators that detect
+// runtime-invalid inputs (e.g. Range delta==0, ArgMax of an empty axis) and
+// need to propagate an error code back through main_graph. Generated graphs
+// discard most wrap_* statuses, so a nonzero status must also be stored here.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -901,7 +908,11 @@ int wrap_group_query_attention(
     // path, where key/value are the full Skv-length KV and must be staged into
     // the BNSD present cache: BSHD and BNSD coincide only at G == 1, so the
     // layout cannot be inferred from the shapes.
-    int64_t kv_bnsd);
+    int64_t kv_bnsd,
+    // Sequence length of the key/value operands (seq_len_q for packed QKV).
+    // 0 with a causal past cache means the call appends nothing and attends
+    // over past_key/past_value only (a layer sharing another layer's cache).
+    int64_t seq_len_new_kv);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -1090,6 +1101,39 @@ int wrap_qconv(RuntimeState *state, const void *input, const void *weights,
                int64_t weight_bits, int64_t bias_dtype, float input_scale,
                int64_t input_zp, float output_scale, int64_t output_zp);
 
+// Native onnx.QLinearConv. 8-bit NCHW convolution with optional int32 bias.
+// Input and output scales/zero-points are per-tensor (count == 1). Weight
+// scale and zero point are per-tensor or one value per output channel.
+// bias is nullable; bias_dtype is HIPDNN_EP_DATATYPE_INT32 when it is present
+// and HIPDNN_EP_DATATYPE_UNSUPPORTED otherwise. pad_* are the begin pads.
+int wrap_qlinear_conv(
+    RuntimeState *state, const void *input, const void *input_scale,
+    const void *input_zero_point, const void *weights, const void *weight_scale,
+    const void *weight_zero_point, const void *output_scale,
+    const void *output_zero_point, const void *bias, void *output,
+    int64_t batch, int64_t in_channels, int64_t out_channels, int64_t height_in,
+    int64_t width_in, int64_t height_out, int64_t width_out, int64_t kernel_h,
+    int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h,
+    int64_t pad_w, int64_t dilation_h, int64_t dilation_w, int64_t group,
+    int64_t input_dtype, int64_t weight_dtype, int64_t output_dtype,
+    int64_t bias_dtype, int64_t input_scale_count, int64_t weight_scale_count,
+    int64_t output_scale_count, int64_t input_zp_count, int64_t weight_zp_count,
+    int64_t output_zp_count);
+
+// Native onnx.QLinearMatMul. Rank-2 8-bit product, a is [M, K], b is [K, N],
+// y is [M, N]. A's and Y's scale and zero-point counts are 1. B's counts are
+// 1, or N for one value per output column. Dtypes are HIPDNN_EP_DATATYPE_INT8
+// or UINT8.
+int wrap_qlinear_matmul(RuntimeState *state, const void *a, const void *a_scale,
+                        const void *a_zero_point, const void *b,
+                        const void *b_scale, const void *b_zero_point,
+                        const void *y_scale, const void *y_zero_point, void *y,
+                        int64_t m, int64_t k, int64_t n, int64_t a_dtype,
+                        int64_t b_dtype, int64_t y_dtype, int64_t a_scale_count,
+                        int64_t b_scale_count, int64_t y_scale_count,
+                        int64_t a_zp_count, int64_t b_zp_count,
+                        int64_t y_zp_count);
+
 // Fused Q(LpNormalization(DQ(x))) for UINT16 per-tensor QDQ, p=2, last axis.
 // Inside: dequant -> RMS (scale = 1/sqrt(N), epsilon = 0) -> quant.
 int wrap_qlpnormalization(RuntimeState *state, const void *input, void *output,
@@ -1143,6 +1187,17 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
+// Axis-0 gather whose data is disk-resident constant `constant_index`: rows
+// are read from its source file on the host and copied into `output`.
+// Synchronizes `state->stream`.
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
@@ -1154,6 +1209,26 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
                int64_t element_size_bytes);
+
+// RandomNormalLike. `shape` is the output rank's sizes, including dynamic
+// dims filled in by the HIP-to-LLVM lowering. The input tensor is not
+// passed: only its shape was copied onto the output. `mean_bits` and
+// `scale_bits` are the IEEE-754 bit patterns of the f32 attributes.
+// `seed_bits` is the f32 bit pattern of the ONNX seed when `has_seed` is
+// non-zero; otherwise the runtime picks a clock seed for this call.
+// `data_type` is HIPDNN_EP_DATATYPE_* and must be a float type.
+int wrap_random_normal_like(RuntimeState *state, void *output, int64_t rank,
+                            const int64_t *shape, int64_t mean_bits,
+                            int64_t scale_bits, int64_t seed_bits,
+                            int64_t has_seed, int64_t data_type);
+
+// ArgMax. `data_shape` is the input rank's sizes, including dynamic dims
+// filled in by the HIP-to-LLVM lowering. `data_type` is HIPDNN_EP_DATATYPE_*.
+// `keepdims` does not change the index count: the output buffer is one i64
+// per reduced slice.
+int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
+                 int64_t keepdims, int64_t select_last_index, int64_t rank,
+                 const int64_t *data_shape, int64_t data_type);
 
 int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
                           void *updates, void *output, int64_t axis,
@@ -1177,6 +1252,15 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  int64_t num_output_elements, int64_t element_size_bytes,
                  int64_t indices_element_size_bytes,
                  int64_t depth_element_size_bytes);
+
+int wrap_ngram_hash_mapping(RuntimeState *state, void *input_ids,
+                            void *multipliers, void *vocab_sizes,
+                            void *past_ids, void *head_offsets,
+                            void *eos_token_id, void *segment_ids,
+                            void *hash_ids, void *present_ids, int64_t batch,
+                            int64_t seq_len, int64_t max_ngram_size,
+                            int64_t n_head_per_ngram, int64_t pad_id,
+                            int64_t reset_on_eos, int64_t element_size_bytes);
 
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
@@ -1282,11 +1366,42 @@ int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha);
 
+// PRelu: Y = X >= 0 ? X : slope * X. slope broadcasts onto X. Shape pointers
+// are host arrays of length rank (unused when rank is 0). data_type is
+// HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_prelu(RuntimeState *state, void *x, void *slope, void *output,
+               const int64_t *x_shape, int64_t x_rank,
+               const int64_t *slope_shape, int64_t slope_rank,
+               const int64_t *out_shape, int64_t out_rank, int64_t data_type);
+
+// Local response normalization across channels (axis 1). spatial is the
+// product of dimensions after the channel axis. data_type is
+// HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
+             int64_t channels, int64_t spatial, int64_t size, double alpha,
+             double beta, double bias, int64_t data_type);
+
+// Trilu: keep the upper (upper != 0) or lower triangle of each [rows, cols]
+// matrix. data_type is HIPDNN_EP_DATATYPE_* (FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_trilu(RuntimeState *state, void *input, void *output,
+               int64_t input_elements, int64_t num_elements, int64_t rows,
+               int64_t cols, int64_t k, int64_t upper, int64_t data_type);
+
 // Swish activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // alpha: sigmoid input scale (default 1.0 per ONNX spec)
 int wrap_swish(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha);
+
+// Element-wise power with a compile-time scalar exponent: y = x^exponent.
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
+int wrap_pow(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type, double exponent);
+
+// Fused SwiGLU wrapper: output = gate * sigmoid(gate) * up.
+// All buffers have identical shape and data type.
+int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
+                int64_t num_elements, int64_t data_type);
 
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
@@ -1365,6 +1480,19 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           int64_t rotary_dim, int64_t cos_cache_num_elements,
                           int64_t element_size_bytes, int64_t is_bnsh);
 
+// hip.mrotary_embedding. max_position is cos_cache dim 0; position_ids dims
+// 1..2 and sin_cache dim 0 must agree with the input / cos_cache, else -1
+// before any launch.
+int wrap_mrotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                           void *cos_cache, void *sin_cache, void *output,
+                           int64_t batch_size, int64_t seq_len,
+                           int64_t num_heads, int64_t head_dim,
+                           int64_t rotary_dim, int64_t max_position,
+                           int64_t section_t, int64_t section_h,
+                           int64_t section_w, int64_t mrope_layout, float scale,
+                           int64_t element_size_bytes, int64_t position_batch,
+                           int64_t position_seq_len, int64_t sin_rows);
+
 // SimplifiedLayerNormalization / RMSNormalization operation wrapper
 // norm_num_elements is the reduction width the lowering derived from `axis`
 // (the product of the input dims from `axis` on). It is independent of
@@ -1389,6 +1517,67 @@ int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
                                 void *bias, void *output, int64_t n, int64_t c,
                                 int64_t spatial, int64_t data_type,
                                 float epsilon);
+
+// BatchNormalization inference:
+//   y = scale * (x - mean) / sqrt(var + epsilon) + B
+// Mean and variance are supplied per-channel vectors. Input is (N, C, ...).
+int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
+                             void *bias, void *mean, void *variance,
+                             void *output, int64_t n, int64_t c,
+                             int64_t spatial, int64_t data_type, float epsilon);
+
+// com.microsoft GroupNorm. channels_last 0 is NCHW, 1 is NHWC.
+// activation 0 is none, 1 is SiLU after the affine transform.
+int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
+                    void *output, int64_t n, int64_t c, int64_t spatial,
+                    int64_t groups, int64_t channels_last, int64_t activation,
+                    int64_t data_type, float epsilon);
+
+// com.microsoft GatedRMSNorm:
+//   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
+// over groups of norm_size consecutive elements; norm_size is the scale
+// length. activation 0 is sigmoid, 1 is SiLU.
+int wrap_gated_rms_norm(RuntimeState *state, void *input, void *scale,
+                        void *gate, void *output, int64_t input_num_elements,
+                        int64_t norm_size, int64_t element_size_bytes,
+                        int64_t activation, float epsilon);
+
+// com.microsoft EngramGate. key / query / output / normed are
+// (B, S, hc, hidden), value is (B, S, hidden), scales are (hc, hidden).
+// conv_scale may be null; normed may be null and requires conv_scale.
+int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
+                     void *key_scale, void *query_scale, void *conv_scale,
+                     void *output, void *normed, int64_t key_num_elements,
+                     int64_t hc, int64_t hidden, int64_t element_size_bytes,
+                     float epsilon);
+// com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
+// elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
+int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
+                                  void *pre_mix, void *output,
+                                  int64_t stream_num_elements, int64_t branches,
+                                  int64_t hidden, int64_t feature_gate,
+                                  int64_t gate_sigmoid,
+                                  int64_t element_size_bytes,
+                                  float reduction_scale);
+
+// com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
+int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
+                                   void *block_output, void *post_mix,
+                                   void *stream_mix, void *output,
+                                   int64_t stream_num_elements,
+                                   int64_t branches, int64_t hidden,
+                                   int64_t feature_gate,
+                                   int64_t element_size_bytes);
+
+// PostMix fused with the following branchwise RMSNorm. stream_mix may be
+// null. feature_gate and gate_activation match the HIP op. residual and
+// normed are both written.
+int wrap_hyper_connection_post_mix_norm(
+    RuntimeState *state, void *streams, void *block_output, void *gate,
+    void *stream_mix, void *norm_scale, void *residual, void *normed,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
+    float epsilon);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
@@ -1426,6 +1615,12 @@ int wrap_matmul_nbits(
     int64_t zp_elem_size,    // zero_points element size: 1=uint8 packed, 2=fp16
     int64_t scale_elem_size); // scales element size in bytes: 2=fp16, 4=fp32
 
+// Bitsandbytes FP4/NF4 weight dequant. Writes row-major [N, K] f32.
+// quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
+int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
+                      void *output, int64_t n, int64_t k, int64_t block_size,
+                      int64_t quant_type);
+
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
 // `gather_axis` using `indices`, then dequantize the gathered rows using
@@ -1453,6 +1648,18 @@ int wrap_gather_block_quantized(
     int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
+
+// wrap_gather_block_quantized with gather_axis 0 whose data is disk-resident
+// constant `constant_index`: the selected rows are read from its source file
+// on the host. Synchronizes `state->stream`.
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype);
 
 // QuantizeLinear / DequantizeLinear wrappers (ONNX opset 23).
 //
@@ -1519,17 +1726,23 @@ int wrap_dequantize_linear(
     int64_t axis,       // may be negative; normalized by the wrapper
     int64_t block_size, // 0 = not blocked
     int64_t input_dtype, int64_t scale_dtype, int64_t output_dtype,
-    // Value width of `input` and `zero_point`: 8 or 16 to match input_dtype,
-    // or 4 for ONNX INT4/UINT4. At 4 the dtype supplies only the signedness
-    // and both buffers hold ceil(numel/2) bytes, two values per byte, low
-    // nibble first, over the flattened row-major sequence. `input_shape`
-    // stays logical either way.
+    // Value width of `input` and `zero_point`: 8, 16, or 32 to match
+    // input_dtype, or 4 for ONNX INT4/UINT4. 32 is signed only and has no
+    // quantize counterpart, matching ONNX giving DequantizeLinear an int32
+    // input but QuantizeLinear no int32 output; it carries a conv or gemm bias
+    // quantized at input_scale * weight_scale. At 4 the dtype supplies only
+    // the signedness and both buffers hold ceil(numel/2) bytes, two values per
+    // byte, low nibble first, over the flattened row-major sequence.
+    // `input_shape` stays logical either way.
     int64_t input_bits);
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
-// applies activation (e.g. SwiGLU), and combines results.
+// applies activation (SwiGLU, or relu2 with swiglu_fusion=0), and combines
+// results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
+#define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+
 int wrap_qmoe(
     RuntimeState *state,
     const void *input,           // [num_tokens, hidden_size]
@@ -1551,7 +1764,8 @@ int wrap_qmoe(
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
-    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
+    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
+                             // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
@@ -1559,9 +1773,8 @@ int wrap_qmoe(
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
 // correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
-// mandatory latent projection + shared-expert branch. Shares only the
-// generic int4 GEMM / gather / bucket / scatter sub-kernels, not any code
-// path in lib/Runtime/real/qmoe.cpp. Hip_QMoEAmdOp in
+// mandatory latent projection + shared-expert branch. Shares only sub-kernels
+// with lib/Runtime/real/qmoe.cpp, not any code path. Hip_QMoEAmdOp in
 // include/hip/Dialect/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers
@@ -1630,7 +1843,12 @@ int wrap_causal_conv_with_state(
     // 0=channels-first, 1=channels-last. Permutes input and output only: the
     // carry state is (batch, channels, k-1) either way. ndim=1 only, and only
     // on the custom-kernel fast paths -- the MIOpen fallback is channels-first.
-    int64_t channels_last);
+    int64_t channels_last,
+    // Tap spacing; the state then holds (kernel_size - 1) * dilation
+    // positions. Values > 1 require state_channels_last.
+    int64_t dilation,
+    // 1 = carry state is (batch, state_len, channels). Requires channels_last.
+    int64_t state_channels_last);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
@@ -1679,6 +1897,50 @@ int wrap_linear_attention(
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
+// scale == 0 means 1 / sqrt(head_size_qk).
+int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
+                         const float *decay, const float *beta,
+                         const float *initial_state, const float *a_log,
+                         const float *dt_bias, void *output, float *final_state,
+                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
+                         int64_t num_heads_v, int64_t head_size_qk,
+                         int64_t head_size_v, float scale,
+                         int64_t element_size_bytes);
+
+// fp16 only. past_* may alias present_*. head_size is query width / num_heads
+// and capacity is past_key dim 2; the remaining dims are runtime shapes that
+// must agree with them, else -1 before any launch.
+int wrap_dynamic_sparse_attention(
+    RuntimeState *state, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, const void *selected_indices,
+    const void *selected_counts, const void *seqlens_k, void *output,
+    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
+    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    int64_t capacity, int64_t max_selected, int64_t past_key_batch,
+    int64_t past_key_heads, int64_t past_key_head_size,
+    int64_t past_value_batch, int64_t past_value_heads,
+    int64_t past_value_capacity, int64_t past_value_head_size,
+    int64_t present_key_capacity, int64_t present_key_head_size,
+    int64_t present_value_capacity, int64_t present_value_head_size,
+    int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
+    int64_t key_batch, int64_t key_seq_len, int64_t key_width,
+    int64_t value_batch, int64_t value_seq_len, int64_t value_width,
+    float scale);
+
+// past_key may be null when past_len == 0; mask may be null (all visible).
+// mask_* are ignored without a mask and cos_batch / sin_batch unless
+// rotary_batched; shape disagreement returns -1 before any launch.
+int wrap_sparse_attention_indexer(
+    RuntimeState *state, const void *query, const void *query_norm_weight,
+    const void *key_norm_weight, const void *cos_cache, const void *sin_cache,
+    const void *mask, const void *past_key, void *selected_indices,
+    void *present_key, int64_t batch, int64_t seq_len, int64_t past_len,
+    int64_t num_heads, int64_t head_size, int64_t rotary_width,
+    int64_t rotary_rows, int64_t rotary_batched, int64_t compress_ratio,
+    int64_t token_budget, int64_t element_size_bytes, int64_t past_batch,
+    int64_t mask_batch, int64_t mask_len, int64_t cos_batch, int64_t sin_batch,
+    int64_t sin_rows, float epsilon, float scale);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================
@@ -1720,6 +1982,11 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+// Element-wise IsNaN. `data_type` is the floating-point INPUT type. The
+// output is always one byte per element (0 or 1), matching ONNX bool as
+// consumed by wrap_where.
+int wrap_isnan(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type);
 
 // ONNX NonZero wrapper.
 // Returns the indices of the non-zero elements of `input` in row-major

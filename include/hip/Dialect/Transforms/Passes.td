@@ -177,6 +177,8 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
   let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect",
     "mlir::ub::UBDialect"
   ];
 }
@@ -202,6 +204,36 @@ def HipFusionTransformPass
 def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   let dependentDialects = [
     "mlir::tosa::TosaDialect"
+  ];
+}
+
+def DecomposeConvTransposePass
+    : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
+  let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
+  let description = [{
+    Splits a transposed convolution into `stride` dense stride-1 forward
+    convolutions plus a strided reassembly, following MIOpen's implicit-gemm
+    backward-data v4r1 decomposition.
+
+    rocMLIR anchors kernel outlining on gemm / convolution / attention, so a
+    `hip.conv_transpose` reaching `convert-hip-to-tosa` leaves the outlined
+    region without an anchor and the backend rejects it. Emitting plain
+    `hip.conv` ops instead lets the existing `hip-fuse-rocmlir` and
+    `convert-hip-to-tosa` machinery claim the kernel unchanged, with no new
+    anchor op and no new TOSA op.
+
+    The per-residue tap selection, spatial flip, and channel swap apply only
+    to the filter, so they are constant-folded into fresh `hip.constant`s
+    rather than emitted as ops -- TOSA has no strided slice to lower a tap
+    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
+    which bufferizes to a `memref.subview` plus a copy.
+
+    Restricted to the statically shaped, non-grouped, dilation-1 case with
+    `stride <= kernel` (so the residues tile the output with no holes) and a
+    compile-time filter. Anything else is left for the MIOpen path.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
   ];
 }
 
@@ -743,6 +775,13 @@ def ExternalizeConstantsPass
     `memref.global` +
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
+
+    With `skip-constant-data`, a file-backed carrier of at least 1.6e9
+    logical elements (4-bit `hip.gather_block_quantized` data counts two per
+    byte) whose every use is the `data` operand of an axis-0 `hip.gather` or
+    `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
+    `hip.external_data`, takes no range in the GPU constants layout, and is
+    recorded with source kind `DiskFile`.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before

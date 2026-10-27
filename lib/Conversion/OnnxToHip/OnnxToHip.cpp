@@ -16,6 +16,7 @@
 #include "hip/debug_log.h"
 #include "hip/timing.h"
 
+#include "llvm/ADT/BitVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -211,13 +212,54 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
+namespace {
+
+static bool hasUnrankedTensor(mlir::TypeRange types) {
+  return llvm::any_of(types, llvm::IsaPred<mlir::UnrankedTensorType>);
+}
+
+/// Declines ops whose rank is unknown on both sides.
+///
+/// Converters read ranks through `mlir::cast<RankedTensorType>`, which is
+/// unchecked in release builds and dereferences garbage on `tensor<*xT>`.
+/// Ranks the importer could not derive (see
+/// docs/design/unranked-tensor-handling.md) are only recoverable from the other
+/// side of the op: a ranked input for an unranked result (reductions) or a
+/// ranked result for unranked operands (Where). With neither, the op is left
+/// unconverted and reported, instead of being handed to a converter that would
+/// crash.
+struct UnrankedOpGuard : public mlir::RewritePattern {
+  explicit UnrankedOpGuard(std::unique_ptr<mlir::RewritePattern> inner)
+      : RewritePattern(inner->getRootKind()->getStringRef(),
+                       inner->getBenefit(), inner->getContext()),
+        inner(std::move(inner)) {
+    setDebugName(this->inner->getDebugName());
+    setHasBoundedRewriteRecursion(this->inner->hasBoundedRewriteRecursion());
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (hasUnrankedTensor(op->getOperandTypes()) &&
+        hasUnrankedTensor(op->getResultTypes()))
+      return rewriter.notifyMatchFailure(op, "operand and result are unranked");
+    return inner->matchAndRewrite(op, rewriter);
+  }
+
+  std::unique_ptr<mlir::RewritePattern> inner;
+};
+
+} // namespace
+
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
   populateMatMulConversionPatterns(patterns, ctx);
+  populateEinsumConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
   populatePowerConversionPatterns(patterns, ctx);
+  populatePowConversionPatterns(patterns, ctx);
   populateActivationConversionPatterns(patterns, ctx);
   populateBiasGeluConversionPatterns(patterns, ctx);
   populateFastGeluConversionPatterns(patterns, ctx);
@@ -230,11 +272,15 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateOneHotConversionPatterns(patterns, ctx);
   populateGatherElementsConversionPatterns(patterns, ctx);
   populateTopKConversionPatterns(patterns, ctx);
+  populateRandomNormalLikeConversionPatterns(patterns, ctx);
+  populateArgMaxConversionPatterns(patterns, ctx);
   populateScatterElementsConversionPatterns(patterns, ctx);
   populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
+  populateNhwcConvConversionPatterns(patterns, ctx);
   populateConvTransposeConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
+  populateHyperConnectionConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateOnnxRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateGqaConversionPatterns(patterns, ctx);
@@ -242,14 +288,19 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateAttentionConversionPatterns(patterns, ctx);
   populateOnnxAttentionConversionPatterns(patterns, ctx);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
+  populateMatMulBnb4ConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
   populateQMoEAmdConversionPatterns(patterns, ctx);
   populateGatherBlockQuantizedConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
   populateCausalConvWithStateConversionPatterns(patterns, ctx);
+  populateNGramHashMappingConversionPatterns(patterns, ctx);
   populateGemmConversionPatterns(patterns, ctx);
   populateWhereConversionPatterns(patterns, ctx);
   populateLinearAttentionConversionPatterns(patterns, ctx);
+  populateGatedDeltaNetConversionPatterns(patterns, ctx);
+  populateDynamicSparseAttentionConversionPatterns(patterns, ctx);
+  populateSparseAttentionIndexerConversionPatterns(patterns, ctx);
   populateRangeConversionPatterns(patterns, ctx);
   populateEqualConversionPatterns(patterns, ctx);
   populateDivConversionPatterns(patterns, ctx);
@@ -257,6 +308,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateReduceMinConversionPatterns(patterns, ctx);
   populateMinConversionPatterns(patterns, ctx);
   populateMaxConversionPatterns(patterns, ctx);
+  populateIsNaNConversionPatterns(patterns, ctx);
   populateNotConversionPatterns(patterns, ctx);
   populateCosConversionPatterns(patterns, ctx);
   populateErfConversionPatterns(patterns, ctx);
@@ -290,15 +342,28 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateNonZeroConversionPatterns(patterns, ctx);
   populateConcatConversionPatterns(patterns, ctx);
   populateReluConversionPatterns(patterns, ctx);
+  populateImageScalerConversionPatterns(patterns, ctx);
   populateLeakyReluConversionPatterns(patterns, ctx);
+  populatePReluConversionPatterns(patterns, ctx);
+  populateLRNConversionPatterns(patterns, ctx);
+  populateTriluConversionPatterns(patterns, ctx);
   populateSwishConversionPatterns(patterns, ctx);
   populateClipConversionPatterns(patterns, ctx);
   populatePoolConversionPatterns(patterns, ctx);
   populateResizeConversionPatterns(patterns, ctx);
+  populateQLinearConvConversionPatterns(patterns, ctx);
+  populateQLinearMatMulConversionPatterns(patterns, ctx);
+  populateUpsampleConversionPatterns(patterns, ctx);
   populateGridSampleConversionPatterns(patterns, ctx);
   populateGlobalPoolConversionPatterns(patterns, ctx);
   populateFlattenConversionPatterns(patterns, ctx);
+  populateDepthToSpaceConversionPatterns(patterns, ctx);
+  populateSpaceToDepthConversionPatterns(patterns, ctx);
   populateQdqConversionPatterns(patterns, ctx);
+
+  for (std::unique_ptr<mlir::RewritePattern> &pattern :
+       patterns.getNativePatterns())
+    pattern = std::make_unique<UnrankedOpGuard>(std::move(pattern));
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -312,6 +377,28 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 // Module metadata generation
 //===----------------------------------------------------------------------===//
 
+/// Drop `@main_graph` arguments nothing reads. The EP passes only inputs the
+/// graph uses; an unread argument (an imported reshape shape tensor with no
+/// consumer) would make `inference_compute` call `prepare_input` past the end
+/// of that span. Outlined branch functions are left alone: an unused capture
+/// is part of the shared `hip.if` / `hip.loop` argument list.
+static mlir::LogicalResult
+dropUnreadMainGraphInputs(mlir::func::FuncOp mainFunc) {
+  llvm::BitVector dead(mainFunc.getNumArguments());
+  for (unsigned i : llvm::seq<unsigned>(0u, mainFunc.getNumArguments())) {
+    mlir::BlockArgument arg = mainFunc.getArgument(i);
+    if (mlir::isa<mlir::hip::ContextType>(arg.getType()))
+      continue;
+    if (arg.use_empty())
+      dead.set(i);
+  }
+  if (dead.none())
+    return mlir::success();
+  if (mlir::failed(mainFunc.eraseArguments(dead)))
+    return mainFunc.emitError("failed to drop unread @main_graph arguments");
+  return mlir::success();
+}
+
 /// Generate module metadata attributes required by GenerateInterfacePass.
 /// Must be called BEFORE patterns transform function signatures.
 static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
@@ -320,6 +407,8 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
     module.emitError("expected @main_graph function for metadata generation");
     return mlir::failure();
   }
+  if (mlir::failed(dropUnreadMainGraphInputs(mainFunc)))
+    return mlir::failure();
 
   auto originalFuncType = mainFunc.getFunctionType();
   mlir::OpBuilder builder(module.getContext());
@@ -437,10 +526,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
     return signalPassFailure();
   logSubpass("metadata");
 
-  // MorphiZen may import com.microsoft Q/DQ function ops as onnx.Custom.
-  // Normalize them to native onnx.QuantizeLinear / onnx.DequantizeLinear so
-  // that QdqConversion below can lower them; nothing downstream matches the
-  // onnx.Custom spelling.
+  // MorphiZen imports com.microsoft Q/DQ and the fused QLinear* function ops
+  // as onnx.Custom. Normalize Q/DQ to native onnx.QuantizeLinear /
+  // onnx.DequantizeLinear, and decompose QLinearAdd / QLinearMul /
+  // QLinearConcat / QLinearGlobalAveragePool / QLinearAveragePool /
+  // QLinearLeakyRelu into native ONNX ops, so that QdqConversion below can
+  // lower them; nothing downstream matches the onnx.Custom spelling.
   {
     mlir::RewritePatternSet customQdqPatterns(ctx);
     populateCustomQdqCanonicalizationPatterns(customQdqPatterns, ctx);
@@ -530,6 +621,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
+        populateHardSigmoidConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;
         mlir::GreedyRewriteConfig preLoweringConfig;
         preLoweringConfig.setStrictness(
@@ -550,6 +642,27 @@ void ConvertOnnxToHipPass::runOnOperation() {
         funcOp.emitWarning()
             << "convert-onnx-to-hip: pre-lowering round loop hit kMaxRounds="
             << kMaxRounds << " without quiescence";
+    }
+    // onnx.Sum is variadic elementwise addition. Gelu fusion above matches
+    // the Sums it needs; what remains becomes a chain of onnx.Add so the
+    // existing hip.add lowering applies. Rank>4 Adds created here missed
+    // the pack pass inside the loop, so pack once more before constants
+    // are rewritten.
+    {
+      mlir::RewritePatternSet sumPatterns(ctx);
+      populateSumConversionPatterns(sumPatterns, ctx);
+      mlir::GreedyRewriteConfig sumConfig;
+      sumConfig.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(sumPatterns), sumConfig)))
+        return signalPassFailure();
+      mlir::RewritePatternSet packPatterns(ctx);
+      populatePackBroadcastTo4DPatterns(packPatterns, ctx);
+      mlir::GreedyRewriteConfig packConfig;
+      packConfig.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
+      if (mlir::failed(mlir::applyPatternsGreedily(
+              funcOp, std::move(packPatterns), packConfig)))
+        return signalPassFailure();
     }
     // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can still
     // see the original `onnx.Constant` (or `onnx.Shape`) as the shape input.
@@ -580,6 +693,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // exactly like every imported constant.
     if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
+    // Compute conversion can visit Reshape before its shape producers.
+    // Resolve the resulting host shape chains once all producers are ready.
+    simplifyReshapeShapeComputations(funcOp);
   }
 
   logSubpass("constant carriers + compute ops");

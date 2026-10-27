@@ -15,13 +15,8 @@ namespace {
 // onnx.MaxPool / onnx.AveragePool / onnx.LpPool -> hip.pool
 //===----------------------------------------------------------------------===//
 //
-// General (fallback) lowering for window pooling. MaxPool and LpPool always
-// land here. AveragePool is tried first by `AveragePoolToReshapeMean` in
-// `ProjectorOpsRewrites.cpp` (pre-lowering, benefit = 2) when NCHW,
-// kernel == stride, no pad, and static divisible spatial dims — that fast
-// path decomposes into Reshape + Transpose + ReduceMean. Any AveragePool
-// outside those constraints (overlapping windows, padding, 1D/3D, etc.)
-// survives pre-lowering and is converted here via `hip.pool` (benefit = 1).
+// General lowering for window pooling. MaxPool, LpPool, and AveragePool all
+// land here as hip.pool. AveragePoolToReshapeMean is not registered.
 //
 // One conversion pattern services all three ONNX window-pooling ops; the
 // reduction kind is injected per registered op name via `poolMode`
@@ -106,10 +101,14 @@ struct PoolToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "only 1D / 2D / 3D pool supported (spatial_rank in {1,2,3})");
 
-    if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
-        inputType.getElementType() != outputType.getElementType())
+    // Average and LP accumulate in float. Max compares elements directly, so
+    // the 8-bit integers used by quantized graphs (ui8 / i8) are legal too.
+    mlir::Type elemType = inputType.getElementType();
+    bool floatElem = mlir::isa<mlir::FloatType>(elemType);
+    bool int8Max = poolMode == kPoolMax && elemType.isInteger(8);
+    if (elemType != outputType.getElementType() || !(floatElem || int8Max))
       return rewriter.notifyMatchFailure(
-          op, "pool runtime supports only float types and matching in/out");
+          op, "pool runtime supports float types, plus i8/ui8 for MaxPool");
 
     // Optional Indices output (MAX only) must be i64.
     if (numResults == 2) {

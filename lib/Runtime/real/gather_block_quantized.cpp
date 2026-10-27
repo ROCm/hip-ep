@@ -26,6 +26,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -53,27 +54,17 @@ int map_to_hip_dtype(int64_t hipdnn_dtype) {
   }
 }
 
-} // namespace
-
-extern "C" int wrap_gather_block_quantized(
-    RuntimeState *state, const void *data, const void *indices,
-    const void *scales, const void *zero_points, void *output,
-    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
-    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
-    const int64_t *output_shape, int64_t output_rank, int64_t bits,
-    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
-    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
-  OP_PROFILE(
-      "gather_block_quantized",
-      [&] {
-        char b[128];
-        snprintf(b, sizeof(b), "bits=%lld bs=%lld dr=%lld qr=%lld",
-                 (long long)bits, (long long)block_size, (long long)data_rank,
-                 (long long)indices_rank);
-        return std::string(b);
-      },
-      state);
-
+int gather_block_quantized(RuntimeState *state, const void *data,
+                           const void *indices, const void *scales,
+                           const void *zero_points, void *output,
+                           const int64_t *data_shape, int64_t data_rank,
+                           const int64_t *indices_shape, int64_t indices_rank,
+                           const int64_t *scales_shape, int64_t scales_rank,
+                           const int64_t *output_shape, int64_t output_rank,
+                           int64_t bits, int64_t block_size,
+                           int64_t gather_axis, int64_t quantize_axis,
+                           int64_t data_dtype, int64_t indices_dtype,
+                           int64_t scales_dtype, bool compact_rows) {
   if (!state || !data || !indices || !scales || !output || !data_shape ||
       !indices_shape || !scales_shape || !output_shape) {
     fprintf(stderr,
@@ -104,7 +95,8 @@ extern "C" int wrap_gather_block_quantized(
   // (cheap) instead of producing silently-wrong output.
   bool is_signed_data =
       (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
-  if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
+  const bool is_float8_data = (data_dtype == HIPDNN_EP_DATATYPE_FLOAT8E4M3FN);
+  if (bits == 8 && !is_signed_data && !is_float8_data && gather_axis_n != 0) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: ONNX spec requires "
             "gather_axis == 0 for uint8 data, got %d\n",
@@ -126,7 +118,7 @@ extern "C" int wrap_gather_block_quantized(
   // model dequantises to roughly +0.65/+0.73 in place of the correct
   // values, which cluster around 0).
   int default_zp;
-  if (is_signed_data) {
+  if (is_signed_data || is_float8_data) {
     default_zp = 0;
   } else {
     default_zp = 1 << (static_cast<int>(bits) - 1);
@@ -211,5 +203,96 @@ extern "C" int wrap_gather_block_quantized(
       static_cast<int>(scales_rank), output_shape,
       static_cast<int>(output_rank), static_cast<int>(bits),
       static_cast<int>(block_size), gather_axis_n, quantize_axis_n, default_zp,
-      is_signed_data ? 1 : 0, indices_is_int64, hip_out_dtype);
+      is_signed_data ? 1 : 0, is_float8_data ? 1 : 0, indices_is_int64,
+      compact_rows ? 1 : 0, hip_out_dtype);
+}
+
+} // namespace
+
+extern "C" int wrap_gather_block_quantized(
+    RuntimeState *state, const void *data, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+  OP_PROFILE(
+      "gather_block_quantized",
+      [&] {
+        char b[128];
+        snprintf(b, sizeof(b), "bits=%lld bs=%lld dr=%lld qr=%lld",
+                 (long long)bits, (long long)block_size, (long long)data_rank,
+                 (long long)indices_rank);
+        return std::string(b);
+      },
+      state);
+  return gather_block_quantized(
+      state, data, indices, scales, zero_points, output, data_shape, data_rank,
+      indices_shape, indices_rank, scales_shape, scales_rank, output_shape,
+      output_rank, bits, block_size, gather_axis, quantize_axis, data_dtype,
+      indices_dtype, scales_dtype, /*compact_rows=*/false);
+}
+
+extern "C" int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+  OP_PROFILE(
+      "gather_block_quantized_from_file",
+      [&] {
+        char b[128];
+        snprintf(b, sizeof(b), "bits=%lld bs=%lld dr=%lld qr=%lld",
+                 (long long)bits, (long long)block_size, (long long)data_rank,
+                 (long long)indices_rank);
+        return std::string(b);
+      },
+      state);
+
+  auto isAxis0 = [data_rank](int64_t axis) {
+    return axis == 0 || axis == -data_rank;
+  };
+  if (!state || !data_shape || !indices_shape || data_rank < 1 ||
+      !isAxis0(gather_axis) || (bits == 4 && isAxis0(quantize_axis)) ||
+      (indices_dtype != HIPDNN_EP_DATATYPE_INT32 &&
+       indices_dtype != HIPDNN_EP_DATATYPE_INT64)) {
+    fprintf(stderr,
+            "[REAL] wrap_gather_block_quantized_from_file: constant "
+            "%lld is not an axis-0 gather of rows packed along another axis "
+            "with i32/i64 indices\n",
+            (long long)constant_index);
+    return -1;
+  }
+  // Quantized storage is one byte per stored element.
+  int64_t row_bytes = 1;
+  for (int64_t i = 1; i < data_rank; ++i) {
+    row_bytes *= data_shape[i];
+  }
+  int64_t num_indices = 1;
+  for (int64_t i = 0; i < indices_rank; ++i) {
+    num_indices *= indices_shape[i];
+  }
+  if (num_indices == 0) {
+    return 0;
+  }
+  if (hipdnn_ep_state_ensure_workspace(
+          state, static_cast<size_t>(num_indices * row_bytes)) != 0) {
+    return -1;
+  }
+  void *rows = hipdnn_ep_state_get_workspace(state);
+  int64_t index_bytes = indices_dtype == HIPDNN_EP_DATATYPE_INT64 ? 8 : 4;
+  if (hipdnn_ep_disk_constant_gather_rows(
+          state, constant_index, indices, num_indices, index_bytes,
+          data_shape[0], row_bytes, rows) != 0) {
+    return -1;
+  }
+  return gather_block_quantized(
+      state, rows, indices, scales, zero_points, output, data_shape, data_rank,
+      indices_shape, indices_rank, scales_shape, scales_rank, output_shape,
+      output_rank, bits, block_size, gather_axis, quantize_axis, data_dtype,
+      indices_dtype, scales_dtype, /*compact_rows=*/true);
 }

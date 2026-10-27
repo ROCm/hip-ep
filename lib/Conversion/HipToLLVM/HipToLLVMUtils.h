@@ -59,13 +59,27 @@ inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
+inline constexpr const char *kWrapBatchNormalization =
+    "wrap_batch_normalization";
+inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
+inline constexpr const char *kWrapGatedRmsNorm = "wrap_gated_rms_norm";
+inline constexpr const char *kWrapEngramGate = "wrap_engram_gate";
+inline constexpr const char *kWrapHyperConnectionPreMix =
+    "wrap_hyper_connection_pre_mix";
+inline constexpr const char *kWrapHyperConnectionPostMix =
+    "wrap_hyper_connection_post_mix";
+inline constexpr const char *kWrapHyperConnectionPostMixNorm =
+    "wrap_hyper_connection_post_mix_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
+inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
+inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
+inline constexpr const char *kWrapArgMax = "wrap_arg_max";
 inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
@@ -75,10 +89,16 @@ inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu";                                        // hip.leaky_relu
+inline constexpr const char *kWrapPRelu = "wrap_prelu";       // hip.prelu
+inline constexpr const char *kWrapLRN = "wrap_lrn";           // hip.lrn
+inline constexpr const char *kWrapTrilu = "wrap_trilu";       // hip.trilu
 inline constexpr const char *kWrapSwish = "wrap_swish";       // hip.swish
+inline constexpr const char *kWrapPow = "wrap_pow";           // hip.pow
+inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
+inline constexpr const char *kWrapMRotaryEmbedding = "wrap_mrotary_embedding";
 inline constexpr const char *kWrapElementwise =
     "wrap_elementwise"; // hip.mul/add/min/max (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
@@ -93,24 +113,34 @@ inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+inline constexpr const char *kWrapDequantBnb4 = "wrap_dequant_bnb4";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
+inline constexpr const char *kWrapGatherBlockQuantizedFromFile =
+    "wrap_gather_block_quantized_from_file";
 inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
+inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapDynamicSparseAttention =
+    "wrap_dynamic_sparse_attention";
+inline constexpr const char *kWrapSparseAttentionIndexer =
+    "wrap_sparse_attention_indexer";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
+inline constexpr const char *kWrapNGramHashMapping = "wrap_ngram_hash_mapping";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
 inline constexpr const char *kWrapOr = "wrap_or";
 inline constexpr const char *kWrapAnd = "wrap_and";
 inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
+inline constexpr const char *kWrapIsNaN = "wrap_isnan";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapErf = "wrap_erf";
@@ -145,6 +175,8 @@ inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
 inline constexpr const char *kWrapQGemm = "wrap_qgemm";
 inline constexpr const char *kWrapQConv = "wrap_qconv";
+inline constexpr const char *kWrapQLinearConv = "wrap_qlinear_conv";
+inline constexpr const char *kWrapQLinearMatMul = "wrap_qlinear_matmul";
 inline constexpr const char *kWrapQLpNormalization = "wrap_qlpnormalization";
 inline constexpr const char *kWrapQSigmoid = "wrap_qsigmoid";
 // Synchronize the stream and read a device i32 scalar back to the host
@@ -168,6 +200,10 @@ inline constexpr int64_t kStridesIdx = 4;
 // Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
+// hip.qmoe / wrap_qmoe relu2 activation. Must match
+// HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEActivationRelu2 = 5;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -206,6 +242,9 @@ inline int64_t getHipdnnDataType(Type elemType) {
     return HIPDNN_EP_DATATYPE_UINT16;
   if (elemType.isInteger(16))
     return HIPDNN_EP_DATATYPE_INT16;
+  if (isa<Float8E4M3FNType>(elemType)) {
+    return HIPDNN_EP_DATATYPE_FLOAT8E4M3FN;
+  }
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 
@@ -426,6 +465,8 @@ void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
 void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
                                       RewritePatternSet &patterns);
+void populateTriluLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
@@ -434,6 +475,10 @@ void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateRandomNormalLikeLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateArgMaxLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
@@ -460,6 +505,8 @@ void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
+void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateQMoEAmdLoweringPatterns(const LLVMTypeConverter &converter,
@@ -472,12 +519,20 @@ void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateNGramHashMappingLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateWhereLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
+void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
+void populateDynamicSparseAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateSparseAttentionIndexerLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
@@ -539,6 +594,10 @@ void populateQGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateQConvLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateQLinearConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateQLinearMatMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateQLpNormalizationLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateQSigmoidLoweringPatterns(const LLVMTypeConverter &converter,

@@ -211,9 +211,14 @@ _WRAP_SUFFIX_TO_OP: dict[str, str] = {
     "group_query_attention": "GroupQueryAttention",
     "multi_head_attention": "MultiHeadAttention",
     "rotary_embedding": "RotaryEmbedding",
+    "mrotary_embedding": "MRotaryEmbedding",
     "linear_attention": "LinearAttention",
+    "gated_delta_net": "GatedDeltaNet",
+    "dynamic_sparse_attention": "DynamicSparseAttention",
+    "sparse_attention_indexer": "SparseAttentionIndexer",
     "qmoe": "QMoE",
     "causal_conv_with_state": "CausalConvWithState",
+    "ngram_hash_mapping": "NGramHashMapping",
     "layer_normalization": "LayerNormalization",
     "skip_simplified_layer_norm": "SkipSimplifiedLayerNormalization",
 }
@@ -430,6 +435,12 @@ def _discover_repo_op_support() -> RepoOpSupport:
                 op = match.group(1)
                 if op != "Custom":
                     onnx_ops.add(op)
+            # PoolToHip is constructed with the op name as an argument, so the
+            # RewritePattern("onnx.X") scan above does not see MaxPool/LpPool.
+            for match in re.finditer(
+                r'patterns\.add<PoolToHip>\([^,]+,\s*"onnx\.(\w+)"', text
+            ):
+                onnx_ops.add(match.group(1))
             for match in RE_MS_CUSTOM_FUNC.finditer(text):
                 ms_custom.add(match.group(1))
 
@@ -811,6 +822,54 @@ def _mlir_attr_int(attrs: dict[str, str], key: str, default: int = 0) -> int:
     return int(match.group(0)) if match else default
 
 
+_POOL_FLOAT_ELEMS = frozenset(
+    {
+        "f16",
+        "f32",
+        "f64",
+        "bf16",
+        "float",
+        "float16",
+        "float32",
+        "float64",
+        "double",
+        "bfloat16",
+    }
+)
+# MaxPool compares in-type, so quantized activations (i8/ui8) are supported.
+# AveragePool still needs a float accumulator.
+_POOL_INT_MAX_ELEMS = frozenset({"i8", "ui8", "si8", "int8", "uint8"})
+
+
+def _type_elem_token(type_str: str) -> str:
+    """Element type of a tensor/memref string, or a bare ONNX dtype name.
+
+    ``tensor<1x64x111x111xuint8>`` must yield ``uint8``. A search for a
+    trailing identifier also matches ``x64x111x111xuint8`` because ``x`` is
+    a letter, so split off the last ``x``-separated component instead.
+    """
+    text = type_str.strip()
+    shaped = re.search(r"(?:tensor|memref)<([^>]+)>", text)
+    body = shaped.group(1) if shaped else text
+    body = body.split(",", 1)[0].strip()
+    if "x" in body:
+        body = body.rsplit("x", 1)[-1]
+    return body.strip().lower()
+
+
+def _pool_elem_issue(op: str, type_str: str) -> str | None:
+    if not type_str:
+        return None
+    token = _type_elem_token(type_str)
+    if token in _POOL_FLOAT_ELEMS:
+        return None
+    if op == "MaxPool" and token in _POOL_INT_MAX_ELEMS:
+        return None
+    if op == "MaxPool":
+        return "MaxPool runtime supports float, int8, and uint8 only"
+    return "Pool runtime supports float element types only"
+
+
 def _variant_issue_for_op(
     op: str,
     *,
@@ -853,14 +912,15 @@ def _variant_issue_for_op(
         if (
             input_types
             and len(input_types) >= 2
-            and "none" not in input_types[1].lower()
+            and _resize_roi_type_is_present(input_types[1])
         ):
             return "Resize with roi (tf_crop_and_resize) not supported"
 
     if op in {"MaxPool", "AveragePool"}:
         in_type = input_types[0] if input_types else ""
-        if in_type and not re.search(r"f16|f32|f64", in_type):
-            return "Pool runtime supports float element types only"
+        issue = _pool_elem_issue(op, in_type)
+        if issue:
+            return issue
         in_dims = _tensor_dims_from_type(in_type)
         if len(in_dims) > 5:
             return "Pool spatial rank > 3 not supported"
@@ -953,7 +1013,11 @@ def _onnx_resize_variant_issue(node, values_by_name: dict) -> str | None:
     if kar and kar != "stretch":
         return "Resize keep_aspect_ratio_policy must be 'stretch'"
     if len(node.input) >= 2 and node.input[1]:
-        return "Resize with roi (tf_crop_and_resize) not supported"
+        roi = values_by_name.get(node.input[1])
+        # Exporters pass a 0-element tensor for an omitted roi. The converter
+        # treats that as absent; only a real crop is tf_crop_and_resize.
+        if not _onnx_tensor_is_empty(roi):
+            return "Resize with roi (tf_crop_and_resize) not supported"
     return None
 
 
@@ -967,8 +1031,13 @@ def _onnx_pool_variant_issue(node, values_by_name: dict) -> str | None:
     if rank > 5:
         return "Pool spatial rank > 3 not supported"
     elem = _onnx_elem_type_name(input_value)
-    if elem and elem not in {"float", "float16", "double"}:
-        return "Pool runtime supports float element types only"
+    if not elem:
+        return None
+    allowed = set(_POOL_FLOAT_ELEMS)
+    if node.op_type == "MaxPool":
+        allowed.update(_POOL_INT_MAX_ELEMS)
+    if elem not in allowed:
+        return _pool_elem_issue(node.op_type, elem)
     return None
 
 
@@ -1085,6 +1154,40 @@ def _onnx_dims_dynamic(dims: Iterable) -> list[bool]:
         else:
             flags.append(True)
     return flags
+
+
+def _resize_roi_type_is_present(type_fragment: str) -> bool:
+    """True when an MLIR roi operand is a real crop, not none or empty."""
+    if "none" in type_fragment.lower():
+        return False
+    dims = _tensor_dims_from_type(type_fragment)
+    if dims and any(dim == "0" for dim in dims):
+        return False
+    return True
+
+
+def _onnx_tensor_is_empty(value) -> bool:
+    """True for a 0-element initializer or value_info. Scalars are not empty."""
+    if value is None:
+        return False
+    if hasattr(value, "dims") and hasattr(value, "data_type"):
+        if len(value.dims) == 0:
+            return False
+        count = 1
+        for dim in value.dims:
+            count *= int(dim)
+        return count == 0
+    if hasattr(value, "type"):
+        tensor_type = value.type.tensor_type
+        if not tensor_type.HasField("shape") or len(tensor_type.shape.dim) == 0:
+            return False
+        count = 1
+        for dim in tensor_type.shape.dim:
+            if not dim.HasField("dim_value"):
+                return False
+            count *= int(dim.dim_value)
+        return count == 0
+    return False
 
 
 def _onnx_value_rank(value) -> int:

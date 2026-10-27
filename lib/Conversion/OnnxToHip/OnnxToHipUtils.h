@@ -14,8 +14,10 @@
 
 #include "ReadbackScalar.h"
 
+#include "hip/Conversion/HipConversionUtils.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"
 
@@ -27,6 +29,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -35,8 +38,12 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <optional>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -112,81 +119,6 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
 }
 
-/// Create a tensor.empty for a DPS init whose shape is the NumPy-style
-/// broadcast of \p operands. Operand shapes are right-aligned with the
-/// result. For each dynamic dimension of \p resultType, the size is taken
-/// from the first operand that truly contributes at that axis -- i.e. whose
-/// corresponding dim is not statically 1. Shorter-rank operands (left-padded
-/// with 1) and statically-1 dims are skipped. If every spanning operand is
-/// statically 1 at the axis, fall back to the first operand that spans it.
-///
-/// Use this for binary/multinary broadcast elementwise ops (Add, Mul, Where,
-/// ...). Do NOT use `createEmptyTensor(resultType, source)` when operands can
-/// disagree on which side supplies a dynamic extent (e.g. `[?x1] + [1x?] ->
-/// [?x?]` -- dim 0 from lhs, dim 1 from rhs).
-inline mlir::FailureOr<mlir::Value>
-createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::ValueRange operands) {
-  int64_t resultRank = resultType.getRank();
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-
-    mlir::Value chosen;
-    int64_t chosenDim = -1;
-    mlir::Value fallback;
-    int64_t fallbackDim = -1;
-    for (mlir::Value operand : operands) {
-      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
-      if (!t)
-        continue;
-      int64_t offset = resultRank - t.getRank();
-      if (dimIdx < offset)
-        continue;
-      int64_t operandDim = dimIdx - offset;
-      if (!fallback) {
-        fallback = operand;
-        fallbackDim = operandDim;
-      }
-      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
-        continue;
-      chosen = operand;
-      chosenDim = operandDim;
-      break;
-    }
-    if (!chosen) {
-      chosen = fallback;
-      chosenDim = fallbackDim;
-    }
-    if (!chosen)
-      return mlir::failure();
-    dynSizes.push_back(
-        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes));
-}
-
-/// Get !hip.context from function argument 0. Returns failure if the
-/// function has no arguments or the first argument is not !hip.context.
-inline mlir::FailureOr<mlir::Value>
-getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
-  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
-  if (!funcOp)
-    return rewriter.notifyMatchFailure(op, "not inside a function");
-  auto &entry = funcOp.getBody().front();
-  if (entry.getNumArguments() == 0)
-    return rewriter.notifyMatchFailure(op, "function has no arguments");
-  mlir::Value ctx = entry.getArgument(0);
-  if (!mlir::isa<mlir::hip::ContextType>(ctx.getType()))
-    return rewriter.notifyMatchFailure(op,
-                                       "first argument is not !hip.context");
-  return ctx;
-}
-
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress
@@ -229,6 +161,118 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 /// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
 constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 
+/// Lower a variadic ONNX operation to a chain of binary HIP operations.
+/// Use each pair's broadcast shape for its intermediate result type.
+/// Keep the imported result type at the final step.
+/// On failure, leave the IR unchanged.
+template <typename HipOpTy>
+mlir::LogicalResult
+lowerVariadicBroadcastChain(mlir::Operation *op,
+                            mlir::PatternRewriter &rewriter) {
+  llvm::StringRef opName = op->getName().getStringRef();
+  unsigned numInputs = op->getNumOperands();
+  if (numInputs == 0)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires at least 1 input");
+
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires exactly 1 result");
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires a ranked result");
+
+  llvm::SmallVector<mlir::RankedTensorType> inputTypes;
+  inputTypes.reserve(numInputs);
+  for (mlir::Value input : op->getOperands()) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inputType)
+      return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                                 " requires ranked inputs");
+    if (inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " requires homogeneous input and result element types");
+    inputTypes.push_back(inputType);
+  }
+
+  if (numInputs == 1) {
+    if (!isResultTypeCompatibleWithInferredShape(resultType,
+                                                 inputTypes.front().getShape()))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the input shape");
+    mlir::Value replacement = op->getOperand(0);
+    if (replacement.getType() != resultType)
+      replacement = mlir::tensor::CastOp::create(rewriter, op->getLoc(),
+                                                 resultType, replacement)
+                        .getResult();
+    rewriter.replaceOp(op, replacement);
+    return mlir::success();
+  }
+
+  mlir::Location loc = op->getLoc();
+
+  // Check all static shapes before creating operations.
+  llvm::SmallVector<llvm::SmallVector<int64_t>> stepStaticShapes;
+  llvm::SmallVector<int64_t> accumulatedShape(inputTypes.front().getShape());
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    llvm::SmallVector<llvm::ArrayRef<int64_t>> pairShapes{
+        accumulatedShape, inputTypes[i].getShape()};
+    auto stepShape = mlir::hip::inferBroadcastShape(
+        pairShapes, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+    accumulatedShape.assign(stepShape->begin(), stepShape->end());
+    stepStaticShapes.push_back(*stepShape);
+  }
+  if (!isResultTypeCompatibleWithInferredShape(resultType, accumulatedShape))
+    return rewriter.notifyMatchFailure(
+        op, llvm::Twine(opName) +
+                " result type is incompatible with the broadcast shape");
+
+  auto context = getContextArg(op, rewriter);
+  if (mlir::failed(context))
+    return mlir::failure();
+
+  // A later pair can expose a folded shape conflict. Keep the complete chain
+  // detached so a failed match cannot leave an earlier pair in the IR.
+  mlir::Block pending;
+  mlir::OpBuilder chainBuilder(rewriter.getContext());
+  chainBuilder.setInsertionPointToEnd(&pending);
+  mlir::Value accumulate = op->getOperand(0);
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    mlir::Value rhs = op->getOperand(i);
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
+                                              resultType.getElementType(),
+                                              resultType.getEncoding());
+    auto init = createBroadcastEmptyTensor(chainBuilder, loc, stepResultType,
+                                           {accumulate, rhs});
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the broadcast shape");
+
+    accumulate = HipOpTy::create(chainBuilder, loc, stepResultType, *context,
+                                 accumulate, rhs, *init)
+                     ->getResult(0);
+  }
+
+  // Notify the rewriter only after all pairs succeed.
+  while (!pending.empty()) {
+    mlir::Operation *created = &pending.front();
+    created->remove();
+    rewriter.insert(created);
+  }
+  rewriter.replaceOp(op, accumulate);
+  return mlir::success();
+}
+
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
 /// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
@@ -254,6 +298,8 @@ constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 /// \param presentKeyType  hip.gqa present_key type (BNSH); for cross-attn or
 ///                        encoder paths an unused-but-required DPS init buffer
 /// \param presentValueType ditto for present_value
+/// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
+///                        seq_kv]. nullptr when absent.
 mlir::LogicalResult
 buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value context, mlir::Value query, mlir::Value key,
@@ -261,7 +307,8 @@ buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                 mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
                 float scale, bool noCausal, mlir::RankedTensorType outputType,
                 mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType);
+                mlir::RankedTensorType presentValueType,
+                mlir::Value attentionBias = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /
@@ -298,12 +345,18 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateEinsumConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateElementwiseConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populateSumConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
+void populatePowConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
@@ -320,6 +373,8 @@ void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
+void populateMatMulBnb4ConversionPatterns(RewritePatternSet &patterns,
+                                          MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateQMoEAmdConversionPatterns(RewritePatternSet &patterns,
@@ -330,10 +385,14 @@ void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateNhwcConvConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateHyperConnectionConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateOnnxRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
@@ -356,20 +415,35 @@ void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateTopKConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateRandomNormalLikeConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
+void populateArgMaxConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+
+/// Simplify host shape values after their ONNX producers are converted.
+void simplifyReshapeShapeComputations(func::FuncOp funcOp);
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
+void populateNGramHashMappingConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateWhereConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateLinearAttentionConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+void populateGatedDeltaNetConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
+void populateDynamicSparseAttentionConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
+void populateSparseAttentionIndexerConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx);
 void populateRangeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateEqualConversionPatterns(RewritePatternSet &patterns,
@@ -384,6 +458,8 @@ void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateIsNaNConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
@@ -450,8 +526,16 @@ void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReluConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateImageScalerConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 void populateLeakyReluConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populatePReluConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
+void populateLRNConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateTriluConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateSwishConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateClipConversionPatterns(RewritePatternSet &patterns,
@@ -460,12 +544,22 @@ void populatePoolConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateResizeConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateQLinearConvConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
+void populateQLinearMatMulConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
+void populateUpsampleConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateGridSampleConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateGlobalPoolConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateFlattenConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateDepthToSpaceConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
+void populateSpaceToDepthConversionPatterns(RewritePatternSet &patterns,
+                                            MLIRContext *ctx);
 
 void populateQdqConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
@@ -583,6 +677,15 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 /// ProjectorOpsRewrites.cpp.
 void populateProjectorOpsRewritePatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.HardSigmoid` into
+/// `onnx.Mul` / `onnx.Add` / `onnx.Clip`, which then flow through their own
+/// ONNX→HIP converters in `convertComputeOps`. Lives in the pre-lowering loop
+/// for the same reason as PowDecompose: the emitted onnx.* primitives are only
+/// picked up because that loop runs to a fixed point. See
+/// HardSigmoidConversion.cpp.
+void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *ctx);
 
 /// Pre-lowering pattern set: decompose `onnx.LpNormalization` into a small
 /// chain of already-supported ONNX primitives (Mul / Sqrt / ReduceSum /

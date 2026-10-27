@@ -11,9 +11,12 @@ add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
+  EinsumConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
+  SumConversion.cpp
   PowerConversion.cpp
+  PowConversion.cpp
   ActivationConversion.cpp
   BiasGeluConversion.cpp
   FastGeluConversion.cpp
@@ -22,12 +25,15 @@ add_library(OnnxToHip STATIC
   ReduceMeanConversion.cpp
   ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
+  MatMulBnb4Conversion.cpp
   QMoEConversion.cpp
   QMoEAmdConversion.cpp
   GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  NhwcConvConversion.cpp
   ConvTransposeConversion.cpp
   NormConversion.cpp
+  HyperConnectionConversion.cpp
   RotaryEmbeddingConversion.cpp
   OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp
@@ -38,6 +44,8 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
+  RandomNormalLikeConversion.cpp
+  ArgMaxConversion.cpp
   ScatterElementsConversion.cpp
   CompressConversion.cpp
   OneHotConversion.cpp
@@ -51,9 +59,13 @@ add_library(OnnxToHip STATIC
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
+  NGramHashMappingConversion.cpp
   GemmConversion.cpp
   WhereConversion.cpp
   LinearAttentionConversion.cpp
+  GatedDeltaNetConversion.cpp
+  DynamicSparseAttentionConversion.cpp
+  SparseAttentionIndexerConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
@@ -65,6 +77,7 @@ add_library(OnnxToHip STATIC
   ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
+  IsNaNConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   ErfConversion.cpp
@@ -99,16 +112,26 @@ add_library(OnnxToHip STATIC
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
+  QLinearConvConversion.cpp
+  QLinearMatMulConversion.cpp
+  UpsampleConversion.cpp
   GridSampleConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
+  DepthToSpaceConversion.cpp
+  SpaceToDepthConversion.cpp
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
+  ImageScalerConversion.cpp
   LeakyReluConversion.cpp
+  PReluConversion.cpp
+  LRNConversion.cpp
+  TriluConversion.cpp
   SwishConversion.cpp
   ClipConversion.cpp
+  HardSigmoidConversion.cpp
 )
 
 add_dependencies(OnnxToHip
@@ -119,6 +142,7 @@ add_dependencies(OnnxToHip
 )
 
 target_link_libraries(OnnxToHip PUBLIC
+  HipConversionUtils
   HipDialectIR
   MLIRPass
   MLIRFuncDialect

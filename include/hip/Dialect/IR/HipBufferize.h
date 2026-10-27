@@ -118,6 +118,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
+    MRotaryEmbeddingOp::attachInterface<
+        HipDstBufferizableModel<MRotaryEmbeddingOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
     AddOp::attachInterface<HipDstBufferizableModel<AddOp>>(*ctx);
     MulOp::attachInterface<HipDstBufferizableModel<MulOp>>(*ctx);
@@ -128,6 +130,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);
     TopKOp::attachInterface<HipDstBufferizableModel<TopKOp>>(*ctx);
+    ArgMaxOp::attachInterface<HipDstBufferizableModel<ArgMaxOp>>(*ctx);
     ScatterElementsOp::attachInterface<
         HipDstBufferizableModel<ScatterElementsOp>>(*ctx);
     CompressOp::attachInterface<HipDstBufferizableModel<CompressOp>>(*ctx);
@@ -142,8 +145,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GeluOp::attachInterface<HipDstBufferizableModel<GeluOp>>(*ctx);
     BiasGeluOp::attachInterface<HipDstBufferizableModel<BiasGeluOp>>(*ctx);
     FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
+    PReluOp::attachInterface<HipDstBufferizableModel<PReluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
+    LRNOp::attachInterface<HipDstBufferizableModel<LRNOp>>(*ctx);
+    TriluOp::attachInterface<HipDstBufferizableModel<TriluOp>>(*ctx);
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
+    PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
+    SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
@@ -158,6 +166,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ReduceL2Op::attachInterface<HipDstBufferizableModel<ReduceL2Op>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
+    DequantBnb4Op::attachInterface<HipDstBufferizableModel<DequantBnb4Op>>(
+        *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
     QMoEAmdOp::attachInterface<HipDstBufferizableModel<QMoEAmdOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
@@ -168,21 +178,41 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<DequantizeLinearOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
+    NGramHashMappingOp::attachInterface<
+        HipDstBufferizableModel<NGramHashMappingOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
     GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
+    GatedDeltaNetOp::attachInterface<HipDstBufferizableModel<GatedDeltaNetOp>>(
+        *ctx);
+    DynamicSparseAttentionOp::attachInterface<
+        HipDstBufferizableModel<DynamicSparseAttentionOp>>(*ctx);
+    SparseAttentionIndexerOp::attachInterface<
+        HipDstBufferizableModel<SparseAttentionIndexerOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     InstanceNormOp::attachInterface<HipDstBufferizableModel<InstanceNormOp>>(
         *ctx);
+    BatchNormOp::attachInterface<HipDstBufferizableModel<BatchNormOp>>(*ctx);
+    GroupNormOp::attachInterface<HipDstBufferizableModel<GroupNormOp>>(*ctx);
+    GatedRmsNormOp::attachInterface<HipDstBufferizableModel<GatedRmsNormOp>>(
+        *ctx);
+    EngramGateOp::attachInterface<HipDstBufferizableModel<EngramGateOp>>(*ctx);
+    HyperConnectionPreMixOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPreMixOp>>(*ctx);
+    HyperConnectionPostMixOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPostMixOp>>(*ctx);
+    HyperConnectionPostMixNormOp::attachInterface<
+        HipDstBufferizableModel<HyperConnectionPostMixNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
+    IsNaNOp::attachInterface<HipDstBufferizableModel<IsNaNOp>>(*ctx);
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
     OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
@@ -216,6 +246,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QMatMulOp::attachInterface<HipDstBufferizableModel<QMatMulOp>>(*ctx);
     QGemmOp::attachInterface<HipDstBufferizableModel<QGemmOp>>(*ctx);
     QConvOp::attachInterface<HipDstBufferizableModel<QConvOp>>(*ctx);
+    QLinearConvOp::attachInterface<HipDstBufferizableModel<QLinearConvOp>>(
+        *ctx);
+    QLinearMatMulOp::attachInterface<HipDstBufferizableModel<QLinearMatMulOp>>(
+        *ctx);
     QLpNormalizationOp::attachInterface<
         HipDstBufferizableModel<QLpNormalizationOp>>(*ctx);
     QSigmoidOp::attachInterface<HipDstBufferizableModel<QSigmoidOp>>(*ctx);

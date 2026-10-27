@@ -199,6 +199,115 @@ static int launch(hipStream_t stream, const void* input, void* output,
   return static_cast<int>(err);
 }
 
+// Integer MaxPool. Compare in the storage type so ui8 200 > 100 stays
+// unsigned. Average and LP are rejected by the dispatcher; they need a
+// float accumulator and are not a quantized-max.
+template <typename T>
+__global__ void pool_max_int_kernel(const T* __restrict__ input,
+                                    T* __restrict__ output,
+                                    int64_t* __restrict__ indices,
+                                    int spatial_rank,
+                                    int64_t N, int64_t C,
+                                    int64_t in0, int64_t in1, int64_t in2,
+                                    int64_t out0, int64_t out1, int64_t out2,
+                                    int64_t k0, int64_t k1, int64_t k2,
+                                    int64_t s0, int64_t s1, int64_t s2,
+                                    int64_t p0, int64_t p1, int64_t p2,
+                                    int64_t d0, int64_t d1, int64_t d2,
+                                    int64_t total_outputs) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid >= total_outputs) return;
+
+  int64_t plane = out0 * out1 * out2;
+  int64_t channel_stride = plane;
+  int64_t batch_stride = C * channel_stride;
+
+  int64_t n = tid / batch_stride;
+  int64_t rem = tid - n * batch_stride;
+  int64_t c = rem / channel_stride;
+  rem -= c * channel_stride;
+  int64_t o0 = rem / (out1 * out2);
+  int64_t r1 = rem - o0 * (out1 * out2);
+  int64_t o1 = r1 / out2;
+  int64_t o2 = r1 - o1 * out2;
+
+  int64_t base_in = (n * C + c) * (in0 * in1 * in2);
+  int64_t in_stride0 = in1 * in2;
+  int64_t in_stride1 = in2;
+
+  int64_t start0 = o0 * s0 - p0;
+  int64_t start1 = o1 * s1 - p1;
+  int64_t start2 = o2 * s2 - p2;
+
+  bool found = false;
+  T best = 0;
+  int64_t best_idx = -1;
+
+  for (int64_t i0 = 0; i0 < k0; ++i0) {
+    int64_t x0 = start0 + i0 * d0;
+    if (x0 < 0 || x0 >= in0) continue;
+    for (int64_t i1 = 0; i1 < k1; ++i1) {
+      int64_t x1 = start1 + i1 * d1;
+      if (x1 < 0 || x1 >= in1) continue;
+      for (int64_t i2 = 0; i2 < k2; ++i2) {
+        int64_t x2 = start2 + i2 * d2;
+        if (x2 < 0 || x2 >= in2) continue;
+
+        int64_t in_off = x0 * in_stride0 + x1 * in_stride1 + x2;
+        int64_t flat = base_in + in_off;
+        T v = input[flat];
+        if (!found || v > best) {
+          found = true;
+          best = v;
+          best_idx = flat;
+        }
+      }
+    }
+  }
+
+  output[tid] = best;
+  if (indices) indices[tid] = best_idx;
+  (void)spatial_rank;
+  (void)N;
+}
+
+template <typename T>
+static int launch_max_int(hipStream_t stream, const void* input, void* output,
+                          void* indices, int spatial_rank,
+                          int64_t N, int64_t C,
+                          int64_t in0, int64_t in1, int64_t in2,
+                          int64_t out0, int64_t out1, int64_t out2,
+                          int64_t k0, int64_t k1, int64_t k2,
+                          int64_t s0, int64_t s1, int64_t s2,
+                          int64_t p0, int64_t p1, int64_t p2,
+                          int64_t d0, int64_t d1, int64_t d2) {
+  int64_t total = N * C * out0 * out1 * out2;
+  if (total <= 0) return 0;
+  int block = 256;
+  int64_t grid = (total + block - 1) / block;
+
+  hipLaunchKernelGGL(pool_max_int_kernel<T>,
+                     dim3(static_cast<unsigned>(grid)), dim3(block),
+                     0, stream,
+                     static_cast<const T*>(input), static_cast<T*>(output),
+                     static_cast<int64_t*>(indices),
+                     spatial_rank, N, C,
+                     in0, in1, in2,
+                     out0, out1, out2,
+                     k0, k1, k2,
+                     s0, s1, s2,
+                     p0, p1, p2,
+                     d0, d1, d2,
+                     total);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_pool int max launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
 } // namespace
 
 extern "C" int hip_pool(void* stream,
@@ -273,6 +382,29 @@ extern "C" int hip_pool(void* stream,
                             out_d0, out_d1, out_d2,
                             k0, k1, k2, s0, s1, s2,
                             p0, p1, p2, dil0, dil1, dil2);
+    case HIP_DTYPE_INT8:
+    case HIP_DTYPE_UINT8: {
+      if (mode != kPoolMax) {
+        fprintf(stderr,
+                "[custom_kernels] hip_pool: i8/ui8 only supported for "
+                "MaxPool (mode=%d)\n",
+                mode);
+        return -1;
+      }
+      if (hip_dtype == HIP_DTYPE_UINT8)
+        return launch_max_int<uint8_t>(
+            hip_stream, input, output, indices, spatial_rank,
+            N, C, in_d0, in_d1, in_d2,
+            out_d0, out_d1, out_d2,
+            k0, k1, k2, s0, s1, s2,
+            p0, p1, p2, dil0, dil1, dil2);
+      return launch_max_int<int8_t>(
+          hip_stream, input, output, indices, spatial_rank,
+          N, C, in_d0, in_d1, in_d2,
+          out_d0, out_d1, out_d2,
+          k0, k1, k2, s0, s1, s2,
+          p0, p1, p2, dil0, dil1, dil2);
+    }
     default:
       fprintf(stderr,
               "[custom_kernels] hip_pool: unsupported dtype=%d\n",

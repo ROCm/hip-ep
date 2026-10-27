@@ -67,7 +67,25 @@ mirror are produced for both artifact formats
   is present in the native artifact too.
 
 The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
-opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+opening the artifact. `NATIVE` is available only when the EP is built with
+`-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON` (default `OFF`); otherwise session
+setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+
+`Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
+built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
+which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch alone when rocMLIR
+compiled with default perfConfigs (`gfx1151`), and the arch with an
+`+autotune=<space>` suffix when `HIPDNN_EP_ROCMLIR_AUTOTUNE` selected
+benchmarked ones (`gfx1151+autotune=quick`). The perfConfig a kernel was tuned
+to is baked into its code object, so a tuned and an untuned artifact are not
+interchangeable even on the same GPU.
+
+The model cache / EPContext identity is derived from the graph alone, so the EP
+refuses to load an artifact whose recorded value differs from the current one;
+delete the cache and recompile after changing GPUs or toggling either
+`HIPDNN_EP_ROCMLIR` or `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
+if autotuning was requested but no HIP device could be reached, so the suffix
+never claims tuning that did not happen.
 
 ---
 
@@ -150,7 +168,8 @@ Dynamic dimensions are encoded as `-1`.
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
-| `input_count` | `int64` | Number of model inputs |
+| `constants[i].disk_resident` | `bool` | Constant `i` is read on demand from its `FileRefSource`; it has no GPU copy |
+| `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
 | `inputs[i].element_size` | `int64` | Bytes per element of input `i` |
@@ -182,13 +201,32 @@ The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, and grow-on-demand runtime contract.
 
+### Disk-resident constants
+
+A constant with `disk_resident` set is consumed only by gathers along axis 0,
+which lower to wrappers that take the constant index instead of a data
+pointer:
+
+- `wrap_gather_from_file(state, constant_index, indices, output, axis, ...)` —
+  same trailing arguments as `wrap_gather`; `axis` is normalized and must be
+  `0`.
+- `wrap_gather_block_quantized_from_file(state, constant_index, indices,
+  scales, zero_points, output, ...)` — same trailing arguments as
+  `wrap_gather_block_quantized`.
+
+`constant_index` is the constant's `globalIndex` and is a compile-time
+constant. For these entries `inference_init` maps the source file instead of
+uploading it, and `hipdnn_ep_constant_get` returns null. See
+[constant-handling-design.md](constant-handling-design.md#disk-resident-gather-tables)
+for selection and the runtime read path.
+
 ---
 
 ## Consumers
 
 | Consumer | Fields used | How |
 |----------|-------------|-----|
-| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset |
+| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset`, `constants[i].disk_resident` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset; maps disk-resident sources |
 | Any caller | all | Reads `__metadata_json` via `inference_get_metadata_json()` |
 
 ---

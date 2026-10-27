@@ -48,6 +48,9 @@ jobs:
           if exist wheelpkg rd /s /q wheelpkg
           if exist vlm-venv rd /s /q vlm-venv
           if exist vlm-results rd /s /q vlm-results
+          if exist main-perf-baseline rd /s /q main-perf-baseline
+          if exist gpu-perf-results rd /s /q gpu-perf-results
+          if exist perf-gate rd /s /q perf-gate
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
@@ -99,8 +102,10 @@ jobs:
       # (lld-link in-process), InferenceState loads it via morphizen::Plugin
       # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
       # lld-link consumes the MSVC/UCRT release CRT import libs + hipdnn-ep-tls.lib
-      # staged into gpu-test-package/lib (+ LIB) to link the model .dll. This is
-      # now a real gate (no exit /b 0): if native breaks, the job fails.
+      # staged into gpu-test-package/lib (+ LIB) to link the model .dll.
+      # A real gate when the package was built with
+      # HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON (marker file staged by
+      # windows-build-real.yml). Otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run native-artifact smoke test (GPU)
         if: always()
@@ -110,6 +115,10 @@ jobs:
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
           set ROOT=%CD%
+          if not exist "%ROOT%\gpu-test-package\native-artifacts.enabled" (
+            echo [SKIP] native artifacts were not built ^(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=OFF^)
+            exit /b 0
+          )
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -142,11 +151,50 @@ jobs:
           exit /b %RC%
 
       # ----------------------------------------------------------------------
+      # AMD GPU umbrella bitcode smoke test. profile=hip selects the hipgpu
+      # backend through amdgpu-ep; artifact_format is left unset so the
+      # production LLVM IR path compiles, JIT-loads, and runs. This step always
+      # runs. The native umbrella smoke below skips when the package was built
+      # without native artifacts, and nothing else drives profile=hip.
+      # ----------------------------------------------------------------------
+      - name: Run AMD GPU umbrella bitcode smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set PATH=%CD%\gpu-test-package\bin;%PATH%
+          set ROOT=%CD%
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          mkdir "%ROOT%\gpu-test-package\results-amdgpu" 2>nul
+          cd /d "%ROOT%\gpu-test-package\bin"
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === AMD GPU umbrella bitcode smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
+            --plugin_eps "AMDGPUExecutionProvider" ^
+            --plugin_ep_options "profile|hip" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "%ROOT%\gpu-test-package\results-amdgpu\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "%ROOT%\gpu-test-package\results-amdgpu\smoke.txt"
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
       # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
       # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
       # directly. profile=hip selects the hipgpu backend; artifact_format=NATIVE
       # is a Hip-owned option forwarded under the shared ep.<amdgpu>.* prefix
-      # (amdgpu-ep PR 102/105 via AMDGPU_PR_PATCHES). Real gate (no exit /b 0).
+      # (amdgpu-ep PR 102/105 via AMDGPU_PR_PATCHES). Real gate when the
+      # package contains native-artifacts.enabled; otherwise the step skips.
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella native smoke test (GPU)
         if: always()
@@ -156,6 +204,10 @@ jobs:
           set PATH=%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib
           set ROOT=%CD%
+          if not exist "%ROOT%\gpu-test-package\native-artifacts.enabled" (
+            echo [SKIP] native artifacts were not built ^(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=OFF^)
+            exit /b 0
+          )
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -576,6 +628,74 @@ jobs:
             }
           }
 
+      - name: Download main perf baseline
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $repo = "${{ github.repository }}"
+          $currentRun = "${{ github.run_id }}"
+          $baselineDir = "main-perf-baseline"
+          if (Test-Path -LiteralPath $baselineDir) {
+            Remove-Item -LiteralPath $baselineDir -Recurse -Force
+          }
+
+          function Test-CompleteBaseline($path) {
+            $data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            foreach ($suite in @("oga", "vlm")) {
+              $entries = @()
+              if ($null -ne $data.$suite) {
+                $entries = @($data.$suite.PSObject.Properties | ForEach-Object { $_.Value })
+              }
+              if ($entries.Count -eq 0) {
+                return $false
+              }
+              foreach ($e in $entries) {
+                if ($null -eq $e.ttft_ms -or $null -eq $e.tps) {
+                  return $false
+                }
+              }
+            }
+            return $true
+          }
+
+          $runsJson = gh run list -R $repo --workflow "Windows Build" --branch main --event push --status success --limit 20 --json databaseId,headSha,url 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $runsJson) {
+            Write-Host "WARNING: gh run list failed, no main perf baseline"
+            exit 0
+          }
+          foreach ($run in @($runsJson | ConvertFrom-Json)) {
+            if ("$($run.databaseId)" -eq $currentRun) {
+              continue
+            }
+            $artsJson = gh api "repos/$repo/actions/runs/$($run.databaseId)/artifacts" 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $artsJson) {
+              continue
+            }
+            $art = @(($artsJson | ConvertFrom-Json).artifacts) | Where-Object { $_.name -eq "gpu-perf-results" -and -not $_.expired } | Select-Object -First 1
+            if (-not $art) {
+              continue
+            }
+            New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+            gh run download $run.databaseId -R $repo -n gpu-perf-results -D $baselineDir 2>$null
+            if (Test-Path -LiteralPath "$baselineDir/perf-results.json") {
+              if (-not (Test-CompleteBaseline "$baselineDir/perf-results.json")) {
+                Write-Host "Skipping run $($run.databaseId): incomplete perf-results.json"
+                Remove-Item -LiteralPath $baselineDir -Recurse -Force -ErrorAction SilentlyContinue
+                continue
+              }
+              $sha7 = $run.headSha.Substring(0, 7)
+              Set-Content -LiteralPath "$baselineDir/source.md" -Value "run [$($run.databaseId)]($($run.url)) - ``$sha7``"
+              Write-Host "Main perf baseline: run $($run.databaseId) ($sha7)"
+              exit 0
+            }
+            Remove-Item -LiteralPath $baselineDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Write-Host "No main perf baseline found"
+          exit 0
+
       # Parse QPS from result files and publish:
       #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
       #   - other trigger → write to GITHUB_STEP_SUMMARY only
@@ -656,15 +776,20 @@ jobs:
 
           # --- OGA benchmark results ---
           $ogaRows = ""
+          $ogaPerf = [ordered]@{}
           foreach ($f in (Get-ChildItem "oga-results/*.txt" -ErrorAction SilentlyContinue)) {
             $model = $f.BaseName
             $content = Get-Content $f.FullName -Raw
             $ttftMatch = [regex]::Match($content, 'Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+([\d.]+)')
             $tpsMatch  = [regex]::Match($content, 'Token generation:\s*\n\s*avg \(us\):\s+([\d.]+)\s*\n\s*avg \(tokens/s\):\s+([\d.]+)')
-            $memMatch  = [regex]::Match($content, 'Peak working set size \(bytes\):\s+(\d+)')
+            $memMatch  = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
             $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
+            $ogaPerf[$model] = [ordered]@{
+              ttft_ms = if ($ttftMatch.Success) { [double]$ttftMatch.Groups[1].Value / 1000 } else { $null }
+              tps     = if ($tpsMatch.Success) { [double]$tpsMatch.Groups[2].Value } else { $null }
+            }
             # GPU peak sampled externally during the run (see OGA benchmark
             # step). Report the total (dedicated + shared): on the UMA APU the
             # WDDM dedicated/shared split drifts with memory pressure run-to-run,
@@ -712,6 +837,7 @@ jobs:
 
           # --- VLM benchmark (vlm_benchmark.py) results ---
           $vlmRows = ""
+          $vlmPerf = [ordered]@{}
           foreach ($f in (Get-ChildItem "vlm-results/*.txt" -ErrorAction SilentlyContinue)) {
             $model = $f.BaseName
             $content = Get-Content $f.FullName -Raw
@@ -719,6 +845,10 @@ jobs:
             $tpsMatch  = [regex]::Match($content, 'TPS:\s+([\d.]+)\s*tokens/sec')
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f [double]$ttftMatch.Groups[1].Value } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[1].Value } else { "-" }
+            $vlmPerf[$model] = [ordered]@{
+              ttft_ms = if ($ttftMatch.Success) { [double]$ttftMatch.Groups[1].Value } else { $null }
+              tps     = if ($tpsMatch.Success) { [double]$tpsMatch.Groups[1].Value } else { $null }
+            }
             $genMatch = [regex]::Match($content, '(?s)Generated output:\s*\n\s*-{10,}\s*\n(.*?)\n\s*-{10,}')
             $gen = if ($genMatch.Success) {
               $g = $genMatch.Groups[1].Value.Trim()
@@ -739,6 +869,89 @@ jobs:
                           $vlmRows
           }
 
+          # --- TTFT / TPS vs main (OGA + VLM) ---
+          $perfThreshold = 0.20
+          $thisPerf = [ordered]@{ oga = $ogaPerf; vlm = $vlmPerf }
+          New-Item -ItemType Directory -Force -Path "gpu-perf-results" | Out-Null
+          $thisPerf | ConvertTo-Json -Depth 4 | Set-Content -Path "gpu-perf-results/perf-results.json" -Encoding utf8
+
+          $mainPerf = $null
+          $mainNote = "unavailable"
+          if (Test-Path -LiteralPath "main-perf-baseline/perf-results.json") {
+            $mainPerf = Get-Content -LiteralPath "main-perf-baseline/perf-results.json" -Raw | ConvertFrom-Json
+            $mainNote = (Get-Content -LiteralPath "main-perf-baseline/source.md" -Raw).Trim()
+          }
+
+          function Get-MainEntry($suite, $model) {
+            if ($null -eq $mainPerf -or $null -eq $mainPerf.$suite) {
+              return $null
+            }
+            $p = $mainPerf.$suite.PSObject.Properties[$model]
+            if ($p) {
+              return $p.Value
+            }
+            return $null
+          }
+
+          function Format-Num($v) {
+            if ($null -eq $v) {
+              return "-"
+            }
+            return "{0:F1}" -f [double]$v
+          }
+
+          function Format-Delta($cur, $base) {
+            if ($null -eq $cur -or $null -eq $base -or [double]$base -eq 0) {
+              return "-"
+            }
+            return "{0:+0.0;-0.0;0.0}%" -f (([double]$cur - [double]$base) / [double]$base * 100)
+          }
+
+          $cmpRows = ""
+          $regressions = @()
+          foreach ($suite in @("oga", "vlm")) {
+            foreach ($model in @($thisPerf[$suite].Keys)) {
+              $cur = $thisPerf[$suite][$model]
+              $base = Get-MainEntry $suite $model
+              if ($null -eq $base) {
+                $note = if ($null -eq $mainPerf) { "-" } else { "new" }
+                $cmpRows += "| $suite | $model | $(Format-Num $cur.ttft_ms) | $note | - | $(Format-Num $cur.tps) | $note | - |`n"
+                continue
+              }
+              $ttftDelta = Format-Delta $cur.ttft_ms $base.ttft_ms
+              $tpsDelta = Format-Delta $cur.tps $base.tps
+              if ($null -ne $cur.ttft_ms -and $null -ne $base.ttft_ms -and [double]$cur.ttft_ms -gt [double]$base.ttft_ms * (1 + $perfThreshold)) {
+                $ttftDelta += " FAIL"
+                $regressions += "$suite/$model TTFT $(Format-Num $cur.ttft_ms) ms vs main $(Format-Num $base.ttft_ms) ms"
+              }
+              if ($null -ne $cur.tps -and $null -ne $base.tps -and [double]$cur.tps -lt [double]$base.tps * (1 - $perfThreshold)) {
+                $tpsDelta += " FAIL"
+                $regressions += "$suite/$model TPS $(Format-Num $cur.tps) vs main $(Format-Num $base.tps)"
+              }
+              $cmpRows += "| $suite | $model | $(Format-Num $cur.ttft_ms) | $(Format-Num $base.ttft_ms) | $ttftDelta | $(Format-Num $cur.tps) | $(Format-Num $base.tps) | $tpsDelta |`n"
+            }
+            if ($null -ne $mainPerf -and $null -ne $mainPerf.$suite) {
+              foreach ($p in $mainPerf.$suite.PSObject.Properties) {
+                if (-not $thisPerf[$suite].Contains($p.Name)) {
+                  $cmpRows += "| $suite | $($p.Name) | not run | $(Format-Num $p.Value.ttft_ms) | - | not run | $(Format-Num $p.Value.tps) | - |`n"
+                }
+              }
+            }
+          }
+          $perfCmpSection = ""
+          if ($cmpRows) {
+            $pct = "{0:F0}" -f ($perfThreshold * 100)
+            $perfCmpSection = "`n## TTFT / TPS vs main`n`n" +
+                              "Baseline: $mainNote | Gate: TTFT +$pct% / TPS -$pct%`n`n" +
+                              "| Suite | Model | TTFT (ms) | Main | Delta | TPS | Main | Delta |`n" +
+                              "|-------|-------|----:|----:|----:|----:|----:|----:|`n" +
+                              $cmpRows
+          }
+          if ($regressions.Count -gt 0) {
+            New-Item -ItemType Directory -Force -Path "perf-gate" | Out-Null
+            Set-Content -Path "perf-gate/regressions.txt" -Value $regressions -Encoding utf8
+          }
+
           $dllRows = Get-DllSizeRows "gpu-test-package/bin"
           $dllSection = ""
           if ($dllRows) {
@@ -749,7 +962,7 @@ jobs:
           }
 
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $dllSection + $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $vlmSection + $footer
+          $summary = $dllSection + $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $vlmSection + $perfCmpSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary
@@ -784,6 +997,14 @@ jobs:
               Write-Host "WARNING: gh api unreachable, skipping PR comment"
             }
           }
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-perf-results
+          path: gpu-perf-results/perf-results.json
+          if-no-files-found: ignore
 
       - name: Check DLL sizes vs main
         if: always()
@@ -960,4 +1181,20 @@ jobs:
           }
           if (-not $gotBaseline) {
             exit 0
+          }
+
+      - name: Check TTFT / TPS vs main
+        if: always()
+        shell: pwsh
+        run: |
+          $eventName = "${{ github.event_name }}"
+          $gateFile = "perf-gate/regressions.txt"
+          if (-not (Test-Path -LiteralPath $gateFile)) {
+            Write-Host "No TTFT / TPS regression vs main"
+            exit 0
+          }
+          Get-Content -LiteralPath $gateFile | Write-Host
+          if ($eventName -eq "pull_request" -or $eventName -eq "merge_group") {
+            Write-Host "ERROR: TTFT / TPS regressed more than 20% vs main"
+            exit 1
           }

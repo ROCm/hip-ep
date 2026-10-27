@@ -97,7 +97,18 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+# Standalone kernel unit-test executables (lib/Runtime/Kernels/unit_test)
+# for the packaging CI. Windows real-runtime builds only; OFF skips them.
+option(BUILD_HIP_KERNEL_UNIT_TESTS
+  "Build the standalone GPU kernel unit-test executables (Windows, real runtime)" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+# Native .dll/.so artifacts (DLLLinker + in-process lld on Windows). Off by
+# default so hipgpu does not carry the native linker. artifact_format=NATIVE
+# throws at runtime unless this is ON. Declared before deps.cmake so a
+# from-source LLVM build can omit the lld project.
+option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
+  OFF)
 
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
 # same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
@@ -131,6 +142,14 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
   message(FATAL_ERROR
     "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
+
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  message(STATUS "Native artifacts: ON")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=1)
+else()
+  message(STATUS "Native artifacts: OFF")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=0)
 endif()
 
 # FlatBuffers schemas (HipSchemas). Added here rather than with the other
@@ -205,6 +224,12 @@ add_subdirectory(lib)
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
 
+# Test-only pass registrations used by hip-mlir-opt LIT coverage.
+# Define the library before configuring tools so the target is linked by name.
+if(BUILD_HIP_UNIT_TESTS)
+  add_subdirectory(test/lib/Dialect/Hip)
+endif()
+
 # Executable targets
 add_subdirectory(tools)
 
@@ -240,7 +265,7 @@ if(BUILD_HIP_UNIT_TESTS)
   add_subdirectory(test/unit)
 
   # Kernel compile-time guards (GPU-free; device-kernel arch-gating invariants).
-  add_subdirectory(lib/Runtime/Kernels/test/lds_barrier_arch_gate)
+  add_subdirectory(test/kernel_guards/lds_barrier_arch_gate)
 endif()
 
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
