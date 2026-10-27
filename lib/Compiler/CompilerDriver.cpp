@@ -427,8 +427,13 @@ bool CompilerDriver::runMLIRPasses(
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createDecomposeConvTransposePass());
       headPm.addPass(mlir::createCanonicalizerPass());
+      // HIPDNN_EP_ROCMLIR_FUSE_VIEWS=0 restores the forward-only kernel
+      // boundaries, for A/B runs against the view fusion.
+      mlir::hip::FuseROCMlirPassOptions fuseOpts;
+      std::string fuseViews = hip_get_env("HIPDNN_EP_ROCMLIR_FUSE_VIEWS");
+      fuseOpts.fuseViews = !(fuseViews == "0" || fuseViews == "off");
       headPm.addNestedPass<mlir::func::FuncOp>(
-          mlir::hip::createFuseROCMlirPass());
+          mlir::hip::createFuseROCMlirPass(fuseOpts));
       headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP + fuse-rocmlir passes failed";
