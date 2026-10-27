@@ -11,19 +11,48 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include <iterator>
 
 namespace {
 
+/// Shared body of the malformed-reifier fixtures: a successful reification
+/// that breaks the contract in the way named by the op's `kind` attribute.
+mlir::LogicalResult
+reifyMalformedShapes(mlir::Operation *op, mlir::OpBuilder &builder,
+                     mlir::ReifiedRankedShapedTypeDims &reified) {
+  auto kind = op->getAttrOfType<mlir::StringAttr>("kind");
+  if (!kind)
+    return op->emitOpError("requires a string 'kind' attribute");
+
+  reified.clear();
+  if (kind.getValue() == "result_count")
+    return mlir::success();
+  if (kind.getValue() == "rank") {
+    reified.push_back({builder.getIndexAttr(1)});
+    return mlir::success();
+  }
+  if (kind.getValue() == "static_contradiction") {
+    reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
+    return mlir::success();
+  }
+  if (kind.getValue() == "negative_extent") {
+    reified.push_back({builder.getIndexAttr(-2)});
+    return mlir::success();
+  }
+  return op->emitOpError("unknown malformed-reifier fixture kind '")
+         << kind.getValue() << "'";
+}
+
+/// Reifies but is not destination-style.
 class TestMalformedReifyOp final
     : public mlir::Op<TestMalformedReifyOp, mlir::OpTrait::ZeroOperands,
                       mlir::OpTrait::VariadicResults,
                       mlir::ReifyRankedShapedTypeOpInterface::Trait> {
 public:
   using Op::Op;
-
   static llvm::StringRef getOperationName() {
     return "hip.test_malformed_reify";
   }
@@ -31,31 +60,36 @@ public:
     static const llvm::StringRef names[] = {"kind"};
     return names;
   }
-
   mlir::LogicalResult
   reifyResultShapes(mlir::OpBuilder &builder,
                     mlir::ReifiedRankedShapedTypeDims &reified) {
-    auto kind = (*this)->getAttrOfType<mlir::StringAttr>("kind");
-    if (!kind)
-      return emitOpError("requires a string 'kind' attribute");
+    return reifyMalformedShapes(*this, builder, reified);
+  }
+};
 
-    reified.clear();
-    if (kind.getValue() == "result_count")
-      return mlir::success();
-    if (kind.getValue() == "rank") {
-      reified.push_back({builder.getIndexAttr(1)});
-      return mlir::success();
-    }
-    if (kind.getValue() == "static_contradiction") {
-      reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
-      return mlir::success();
-    }
-    if (kind.getValue() == "negative_extent") {
-      reified.push_back({builder.getIndexAttr(-2)});
-      return mlir::success();
-    }
-    return emitOpError("unknown malformed-reifier fixture kind '")
-           << kind.getValue() << "'";
+/// The destination-style form of the fixture above: one destination per
+/// result.
+class TestMalformedReifyDpsOp final
+    : public mlir::Op<TestMalformedReifyDpsOp, mlir::OpTrait::VariadicOperands,
+                      mlir::OpTrait::VariadicResults,
+                      mlir::DestinationStyleOpInterface::Trait,
+                      mlir::ReifyRankedShapedTypeOpInterface::Trait> {
+public:
+  using Op::Op;
+  static llvm::StringRef getOperationName() {
+    return "hip.test_malformed_reify_dps";
+  }
+  static llvm::ArrayRef<llvm::StringRef> getAttributeNames() {
+    static const llvm::StringRef names[] = {"kind"};
+    return names;
+  }
+  mlir::MutableOperandRange getDpsInitsMutable() {
+    return mlir::MutableOperandRange(*this);
+  }
+  mlir::LogicalResult
+  reifyResultShapes(mlir::OpBuilder &builder,
+                    mlir::ReifiedRankedShapedTypeDims &reified) {
+    return reifyMalformedShapes(*this, builder, reified);
   }
 };
 
@@ -162,6 +196,7 @@ struct TestHipDpsDefaultReifyPass final
 void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *, HipDialect *dialect) {
     RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
+    RegisteredOperationName::insert<TestMalformedReifyDpsOp>(*dialect);
   });
   PassRegistration<TestHipDpsDefaultReifyPass>();
 }
