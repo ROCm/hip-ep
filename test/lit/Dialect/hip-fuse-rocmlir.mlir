@@ -672,3 +672,136 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
       outs(%ae : tensor<1x4x4x16xf16>) -> tensor<1x4x4x16xf16>
   return %a, %t : tensor<1x4x4x16xf16>, tensor<1x4x4x16xf16>
 }
+
+// -----
+
+// The epilogue runs through a reshape of the conv result: a 1-D conv widened
+// to 2-D is collapsed back before its residual add, and the add joins the
+// kernel.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: %[[R:[a-z0-9]+]]: tensor<1x16x4xf16>) -> tensor<1x16x4xf16>
+// CHECK: %[[C:.*]] = hip.conv
+// CHECK: %[[V:.*]] = tensor.collapse_shape %[[C]]
+// CHECK: hip.add({{.*}}) ins(%[[V]], %[[R]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: tensor.collapse_shape
+// CHECK-NOT: hip.add
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x1x4xf16>,
+                      %w: tensor<16x8x1x3xf16>, %b: tensor<16xf16>,
+                      %r: tensor<1x16x4xf16>) -> tensor<1x16x4xf16> {
+  %e = tensor.empty() : tensor<1x16x1x4xf16>
+  %c = hip.conv(%ctx) ins(%in, %w, %b : tensor<1x8x1x4xf16>,
+                                       tensor<16x8x1x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x1x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3],
+       pads = [0, 1, 0, 1], strides = [1, 1]} : tensor<1x16x1x4xf16>
+  %v = tensor.collapse_shape %c [[0], [1], [2, 3]]
+      : tensor<1x16x1x4xf16> into tensor<1x16x4xf16>
+  %ae = tensor.empty() : tensor<1x16x4xf16>
+  %a = hip.add(%ctx) ins(%v, %r : tensor<1x16x4xf16>, tensor<1x16x4xf16>)
+      outs(%ae : tensor<1x16x4xf16>) -> tensor<1x16x4xf16>
+  return %a : tensor<1x16x4xf16>
+}
+
+// -----
+
+// Views stack on the way out as on the way in: the NCHW result is transposed
+// to NHWC and flattened to a token sequence before the add.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x16xf16>
+// CHECK: hip.conv
+// CHECK: hip.transpose
+// CHECK: tensor.collapse_shape
+// CHECK: hip.add
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK-NOT: tensor.collapse_shape
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %r: tensor<1x16x16xf16>) -> tensor<1x16x16xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %te = tensor.empty() : tensor<1x4x4x16xf16>
+  %t = hip.transpose(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%te : tensor<1x4x4x16xf16>) {perm = [0, 2, 3, 1]} : tensor<1x4x4x16xf16>
+  %v = tensor.collapse_shape %t [[0], [1, 2], [3]]
+      : tensor<1x4x4x16xf16> into tensor<1x16x16xf16>
+  %ae = tensor.empty() : tensor<1x16x16xf16>
+  %a = hip.add(%ctx) ins(%v, %r : tensor<1x16x16xf16>, tensor<1x16x16xf16>)
+      outs(%ae : tensor<1x16x16xf16>) -> tensor<1x16x16xf16>
+  return %a : tensor<1x16x16xf16>
+}
+
+// -----
+
+// rocMLIR cannot invert a broadcast of the conv result, so the forward chain
+// stops before it and the kernel holds only the conv.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x1x1xf16>
+// CHECK-NOT: hip.expand
+// CHECK-NOT: hip.add
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.expand
+// CHECK: hip.add
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x1x1xf16>,
+                      %w: tensor<16x8x1x1xf16>, %b: tensor<16xf16>,
+                      %r: tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x1x1xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x1x1xf16>,
+                                       tensor<16x8x1x1xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x1x1xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x1x1xf16>
+  %shape = arith.constant dense<[1, 16, 4, 4]> : tensor<4xi64>
+  %be = tensor.empty() : tensor<1x16x4x4xf16>
+  %bc = hip.expand(%ctx) ins(%c, %shape : tensor<1x16x1x1xf16>, tensor<4xi64>)
+      outs(%be : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  %ae = tensor.empty() : tensor<1x16x4x4xf16>
+  %a = hip.add(%ctx) ins(%bc, %r : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%ae : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %a : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// A slice of the conv result would make the kernel compute channels it then
+// drops, so the slice and its reader stay outside.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x4x4xf16>
+// CHECK-NOT: tensor.extract_slice
+// CHECK-NOT: hip.add
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: tensor.extract_slice
+// CHECK: hip.add
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %r: tensor<1x8x4x4xf16>) -> tensor<1x8x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %v = tensor.extract_slice %c[0, 0, 0, 0] [1, 8, 4, 4] [1, 1, 1, 1]
+      : tensor<1x16x4x4xf16> to tensor<1x8x4x4xf16>
+  %ae = tensor.empty() : tensor<1x8x4x4xf16>
+  %a = hip.add(%ctx) ins(%v, %r : tensor<1x8x4x4xf16>, tensor<1x8x4x4xf16>)
+      outs(%ae : tensor<1x8x4x4xf16>) -> tensor<1x8x4x4xf16>
+  return %a : tensor<1x8x4x4xf16>
+}
