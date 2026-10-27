@@ -101,30 +101,49 @@ static std::optional<ViewKind> getFusableViewKind(Operation *op) {
 // Which neighbours of an anchor may join its kernel, beyond the forward
 // pointwise chain every anchor takes.
 struct FusionPolicy {
-  // ViewKind bits the forward chain and the input absorption may take.
-  unsigned viewKinds = 0;
+  // ViewKind bits the input absorption may take.
+  unsigned inputViewKinds = 0;
+  // ViewKind bits the forward chain past the anchor may take.
+  unsigned forwardViewKinds = 0;
   // A unary pointwise producer of the activation.
   bool activationPrologue = false;
 
-  bool allowsView(Operation *op) const {
-    std::optional<ViewKind> kind = getFusableViewKind(op);
-    return kind && (viewKinds & static_cast<unsigned>(*kind));
+  bool allowsInputView(Operation *op) const {
+    return hasKind(op, inputViewKinds);
   }
-  bool absorbsInputs() const { return viewKinds != 0 || activationPrologue; }
+  bool allowsForwardView(Operation *op) const {
+    return hasKind(op, forwardViewKinds);
+  }
+  bool absorbsInputs() const {
+    return inputViewKinds != 0 || activationPrologue;
+  }
+
+private:
+  static bool hasKind(Operation *op, unsigned kinds) {
+    std::optional<ViewKind> kind = getFusableViewKind(op);
+    return kind && (kinds & static_cast<unsigned>(*kind));
+  }
 };
 
 // rocMLIR reads every kernel input through rock.transform maps, so a view on
 // one becomes an index remap instead of a separate copy: a transpose next to
 // a convolution folds into its input_layout / output_layout, and a reshape,
-// slice, or broadcast on any input folds into that input's map. Matmul and
-// gemm anchors keep their current boundaries.
+// slice, or broadcast on any input folds into that input's map.
+//
+// Past the anchor, rocMLIR has to invert the view to map each output element
+// back to the GEMM tile that computes it. A transpose or reshape inverts; a
+// broadcast does not ("cannot regularize"). A slice would compute output that
+// the kernel then drops, so it stays outside too.
+//
+// Matmul and gemm anchors keep their current boundaries.
 template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
   FusionPolicy policy;
   if (std::is_same_v<AnchorOp, ConvOp> && fuseViews) {
-    policy.viewKinds = static_cast<unsigned>(ViewKind::Transpose) |
-                       static_cast<unsigned>(ViewKind::Reshape) |
-                       static_cast<unsigned>(ViewKind::Slice) |
-                       static_cast<unsigned>(ViewKind::Broadcast);
+    policy.forwardViewKinds = static_cast<unsigned>(ViewKind::Transpose) |
+                              static_cast<unsigned>(ViewKind::Reshape);
+    policy.inputViewKinds = policy.forwardViewKinds |
+                            static_cast<unsigned>(ViewKind::Slice) |
+                            static_cast<unsigned>(ViewKind::Broadcast);
     policy.activationPrologue = true;
   }
   return policy;
@@ -162,7 +181,9 @@ public:
   SetVector<Operation *> &getOps() { return ops; }
 
   // Follows single-use pointwise ops, and views the policy allows, from the
-  // anchor forward.
+  // anchor forward. Every op on the chain has one reader, so no other operand
+  // of a later op can depend on the anchor, and a multi-input pointwise op
+  // needs no check that it would form a cycle with the kernel.
   void growForward();
   // Drops the leading hip.context the anchor's inputs carry.
   bool takeContext();
@@ -196,7 +217,7 @@ void KernelRegion::growForward() {
   SmallVector<Operation *> chain = {anchor};
   while (chain.back()->hasOneUse()) {
     Operation *user = *chain.back()->user_begin();
-    if (!isFusablePointwise(user) && !policy.allowsView(user))
+    if (!isFusablePointwise(user) && !policy.allowsForwardView(user))
       break;
     chain.push_back(user);
   }
@@ -335,7 +356,7 @@ void KernelRegion::absorbInputProducers(
     for (Value input : *dataInputs)
       if (!isInlineScalarConstant(input))
         inputs.push_back(input);
-    bool absorb = policy.allowsView(producer) ||
+    bool absorb = policy.allowsInputView(producer) ||
                   (allowPointwise && policy.activationPrologue &&
                    isFusablePointwise(producer) && inputs.size() == 1);
     if (!absorb || !llvm::all_of(inputs, isStaticTensor))
