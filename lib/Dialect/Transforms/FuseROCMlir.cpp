@@ -444,6 +444,47 @@ static std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
   return inputs;
 }
 
+// Whether `op` is on the forward chain of an anchor that is still in the
+// graph. Such an op belongs to that anchor's epilogue: there it runs once per
+// output element, while as a prologue of the next kernel it would rerun on
+// every load of that kernel's input. Checking the claim keeps the result
+// independent of the order the greedy driver visits anchors in, which is
+// MIGraphX's order: epilogues first (find_mlir_fused_ops), then the leftover
+// pointwise ops as prologues (find_pointwise_mlir).
+//
+//   %c0 = hip.conv ins(%x, %w0, %b0)
+//   %r  = hip.max ins(%c0, %zero)       // claimed by %c0's epilogue
+//   %c1 = hip.conv ins(%r, %w1, %b1)    // so %c1 does not take %r
+static bool isClaimedByForwardChain(Operation *op, const FusionPolicy &policy) {
+  SmallVector<Operation *> worklist = {op};
+  DenseSet<Operation *> visited;
+  while (!worklist.empty()) {
+    Operation *current = worklist.pop_back_val();
+    if (!visited.insert(current).second)
+      continue;
+    for (Value operand : current->getOperands()) {
+      Operation *def = operand.getDefiningOp();
+      if (!def || def->getBlock() != op->getBlock())
+        continue;
+      if (isa<MatmulOp, ConvOp, GemmOp>(def)) {
+        if (!llvm::all_of(def->getOperands(), [](Value v) {
+              auto type = dyn_cast<TensorType>(v.getType());
+              return !type || type.hasStaticShape();
+            }))
+          continue;
+        KernelRegion region(def, policy);
+        region.growForward();
+        if (region.getOps().contains(op))
+          return true;
+        continue;
+      }
+      if (policy.allowsEpilogue(def) || policy.allowsForwardView(def))
+        worklist.push_back(def);
+    }
+  }
+  return false;
+}
+
 // Pulls the producers of kernel inputs into the kernel: any view the policy
 // allows, on the anchor's inputs and on the epilogue's, and on a root that
 // permits it a unary pointwise op. A producer is absorbed only when the kernel
@@ -492,7 +533,8 @@ void KernelRegion::absorbInputProducers(
         inputs.push_back(input);
     bool absorb = policy.allowsInputView(producer) ||
                   (allowPointwise && policy.activationPrologue &&
-                   isFusablePrologue(producer) && inputs.size() == 1);
+                   isFusablePrologue(producer) && inputs.size() == 1 &&
+                   !isClaimedByForwardChain(producer, policy));
     if (!absorb || !llvm::all_of(inputs, isStaticTensor))
       continue;
 

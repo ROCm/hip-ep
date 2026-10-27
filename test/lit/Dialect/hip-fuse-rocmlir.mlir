@@ -1109,3 +1109,46 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
       outs(%me : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
   return %m : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// A relu between two convolutions belongs to the first conv's epilogue, not
+// the second conv's prologue: as an epilogue it runs once per output element,
+// as a prologue on every load. The claim holds whichever conv the driver
+// outlines first.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: tensor<16x8x3x3xf16>
+// CHECK: hip.conv
+// CHECK: hip.max
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: tensor<16x16x1x1xf16>
+// CHECK: hip.conv
+// CHECK-NOT: hip.max
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.max
+func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
+                      %w0: tensor<16x8x3x3xf16>, %b0: tensor<16xf16>,
+                      %w1: tensor<16x16x1x1xf16>, %b1: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %zero = hip.constant {value = dense<0.000000e+00> : tensor<f16>} : tensor<f16>
+  %e0 = tensor.empty() : tensor<1x16x4x4xf16>
+  %c0 = hip.conv(%ctx) ins(%in, %w0, %b0 : tensor<1x8x4x4xf16>,
+                                           tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e0 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %re = tensor.empty() : tensor<1x16x4x4xf16>
+  %r = hip.max(%ctx) ins(%c0, %zero : tensor<1x16x4x4xf16>, tensor<f16>)
+      outs(%re : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  %e1 = tensor.empty() : tensor<1x16x4x4xf16>
+  %c1 = hip.conv(%ctx) ins(%r, %w1, %b1 : tensor<1x16x4x4xf16>,
+                                          tensor<16x16x1x1xf16>, tensor<16xf16>)
+      outs(%e1 : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c1 : tensor<1x16x4x4xf16>
+}
