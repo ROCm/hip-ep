@@ -29,6 +29,12 @@ std::unique_ptr<Pass> createOnnxLoopOutlinePass();
 /// --convert-onnx-to-hip (same pipeline slot as onnx-loop-outline).
 std::unique_ptr<Pass> createOnnxIfOutlinePass();
 
+/// Creates a pass that replaces each `hip.if_result_dim` placeholder left by
+/// onnx-if-outline with host size arithmetic on the hip.if captures, selected
+/// between the then and else branches. Runs after --convert-onnx-to-hip and
+/// before bufferization.
+std::unique_ptr<Pass> createResolveIfResultDimsPass();
+
 } // namespace hip
 } // namespace mlir
 

@@ -18,7 +18,9 @@
 //      scalar broadcasts to `tensor<1xui8>`. A unit-rank condition is
 //      collapsed to rank 0 and read back with `hip.readback_scalar`,
 //      because that value is GPU-computed.
-//   3. Materialize `tensor.empty` DPS inits for each If output.
+//   3. Materialize `tensor.empty` DPS inits for each If output. Each `?`
+//      dimension is sized by a `hip.if_result_dim` placeholder, resolved
+//      after conversion by `hip-resolve-if-result-dims`.
 //   4. Outline each branch region into a private func.func and replace
 //      `onnx.Yield` with `func.return`.
 //   5. Replace the onnx.If op with hip.if and erase it.
@@ -27,8 +29,7 @@
 //   - Branches with non-empty region block arguments (explicit subgraph
 //     inputs) are rejected — only capture-based outer values are wired.
 //   - Nested `onnx.If` inside a branch is rejected.
-//   - Fully dynamic output shapes (no static dim to anchor `tensor.empty`)
-//     are rejected at outline time.
+//   - Unranked output types are rejected at outline time.
 //
 //===----------------------------------------------------------------------===//
 
@@ -154,19 +155,32 @@ static FailureOr<Value> unboxCond(OpBuilder &builder, Location loc, Value ctx,
       .getResult();
 }
 
+/// One `tensor.empty` per If output. A `?` dimension is sized by a
+/// `hip.if_result_dim` placeholder that `hip-resolve-if-result-dims` replaces
+/// once the branch bodies are lowered.
 static FailureOr<SmallVector<Value>>
-createIfOutputInits(OpBuilder &b, Location loc, TypeRange resultTypes) {
+createIfOutputInits(OpBuilder &b, Location loc, TypeRange resultTypes,
+                    Value cond, ValueRange captures, StringRef thenFn,
+                    StringRef elseFn) {
+  MLIRContext *ctx = b.getContext();
   SmallVector<Value> inits;
   inits.reserve(resultTypes.size());
-  for (Type ty : resultTypes) {
+  for (auto [resultIdx, ty] : llvm::enumerate(resultTypes)) {
     auto rankedTy = dyn_cast<RankedTensorType>(ty);
     if (!rankedTy)
       return failure();
-    for (int64_t i : llvm::seq<int64_t>(0, rankedTy.getRank()))
-      if (rankedTy.isDynamicDim(i))
-        return failure();
-    Value empty = tensor::EmptyOp::create(
-        b, loc, rankedTy.getShape(), rankedTy.getElementType(), ValueRange{});
+    SmallVector<Value> dynSizes;
+    for (int64_t i : llvm::seq<int64_t>(0, rankedTy.getRank())) {
+      if (!rankedTy.isDynamicDim(i))
+        continue;
+      dynSizes.push_back(IfResultDimOp::create(
+          b, loc, cond, captures, FlatSymbolRefAttr::get(ctx, thenFn),
+          FlatSymbolRefAttr::get(ctx, elseFn),
+          b.getI32IntegerAttr(static_cast<int32_t>(resultIdx)),
+          b.getI64IntegerAttr(i)));
+    }
+    Value empty = tensor::EmptyOp::create(b, loc, rankedTy.getShape(),
+                                          rankedTy.getElementType(), dynSizes);
     inits.push_back(empty);
   }
   return inits;
@@ -184,10 +198,30 @@ static LogicalResult collectBranchCaptures(Region &region,
   return success();
 }
 
+/// Largest outer constant copied into the branch bodies instead of captured.
+/// Converters match constant operands (a Pow exponent, Reshape targets,
+/// Slice bounds); as a capture the value is an opaque block argument. Large
+/// constants (weights shared by both branches) stay captures so they are not
+/// duplicated.
+constexpr int64_t kMaxSunkConstantElements = 64;
+
+static bool isSmallConstant(Operation *op) {
+  if (op->getNumOperands() != 0 || op->getNumRegions() != 0 ||
+      op->getNumResults() != 1)
+    return false;
+  if (!op->hasTrait<OpTrait::ConstantLike>() &&
+      op->getName().getStringRef() != "onnx.Constant")
+    return false;
+  auto ty = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  return ty && ty.hasStaticShape() &&
+         ty.getNumElements() <= kMaxSunkConstantElements;
+}
+
 static LogicalResult outlineBranch(Region &region, Location loc,
                                    ModuleOp module, func::FuncOp parentFn,
                                    llvm::StringRef suffix, unsigned &counter,
                                    llvm::ArrayRef<Value> signatureCaptures,
+                                   llvm::ArrayRef<Operation *> sunkConstants,
                                    std::string &fnNameOut) {
   if (!region.hasOneBlock())
     return failure();
@@ -238,6 +272,8 @@ static LogicalResult outlineBranch(Region &region, Location loc,
     mapping.map(c, entry->getArgument(argIdx++));
 
   OpBuilder bodyBuilder(entry, entry->end());
+  for (Operation *c : sunkConstants)
+    bodyBuilder.clone(*c, mapping);
   for (Operation &op : body) {
     if (&op == yieldOp)
       continue;
@@ -298,10 +334,20 @@ LogicalResult OnnxIfOutlinePass::outlineIf(Operation *ifOp, unsigned &counter) {
   if (thenYield->getNumOperands() != elseYield->getNumOperands())
     return ifOp->emitOpError("then/else yield operand count mismatch");
 
-  llvm::SetVector<Value> capturesUnion;
-  if (failed(collectBranchCaptures(thenRegion, capturesUnion)) ||
-      failed(collectBranchCaptures(elseRegion, capturesUnion)))
+  llvm::SetVector<Value> usedAbove;
+  if (failed(collectBranchCaptures(thenRegion, usedAbove)) ||
+      failed(collectBranchCaptures(elseRegion, usedAbove)))
     return ifOp->emitOpError("failed to collect branch captures");
+
+  llvm::SetVector<Value> capturesUnion;
+  SmallVector<Operation *> sunkConstants;
+  for (Value v : usedAbove) {
+    Operation *def = v.getDefiningOp();
+    if (def && isSmallConstant(def))
+      sunkConstants.push_back(def);
+    else
+      capturesUnion.insert(v);
+  }
 
   std::string thenFnName;
   std::string elseFnName;
@@ -309,10 +355,12 @@ LogicalResult OnnxIfOutlinePass::outlineIf(Operation *ifOp, unsigned &counter) {
   llvm::ArrayRef<Value> signatureCaptures = capturesUnion.getArrayRef();
 
   if (failed(outlineBranch(thenRegion, loc, module, parentFn, "_if_then_n",
-                           counter, signatureCaptures, thenFnName)))
+                           counter, signatureCaptures, sunkConstants,
+                           thenFnName)))
     return ifOp->emitOpError("failed to outline then_branch");
   if (failed(outlineBranch(elseRegion, loc, module, parentFn, "_if_else_n",
-                           counter, signatureCaptures, elseFnName)))
+                           counter, signatureCaptures, sunkConstants,
+                           elseFnName)))
     return ifOp->emitOpError("failed to outline else_branch");
 
   if (!parentFn || parentFn.getNumArguments() == 0 ||
@@ -331,13 +379,14 @@ LogicalResult OnnxIfOutlinePass::outlineIf(Operation *ifOp, unsigned &counter) {
                "tensor<i1>, tensor<i8>, or tensor<ui8>, got ")
            << ifOp->getOperand(0).getType() << ")";
 
+  SmallVector<Value> captureVals(capturesUnion.begin(), capturesUnion.end());
   FailureOr<SmallVector<Value>> oInits =
-      createIfOutputInits(outerBuilder, loc, ifOp->getResultTypes());
+      createIfOutputInits(outerBuilder, loc, ifOp->getResultTypes(), *condI1,
+                          captureVals, thenFnName, elseFnName);
   if (failed(oInits))
     return ifOp->emitOpError(
-        "failed to build output inits (fully-static output shapes required)");
+        "failed to build output inits (ranked output types required)");
 
-  SmallVector<Value> captureVals(capturesUnion.begin(), capturesUnion.end());
   unsigned numOutputs = ifOp->getNumResults();
 
   auto hipIfOp = IfOp::create(

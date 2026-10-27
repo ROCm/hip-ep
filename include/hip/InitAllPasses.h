@@ -215,6 +215,9 @@ inline void registerAllPasses() {
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxIfOutlinePass();
     });
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createResolveIfResultDimsPass();
+    });
     // Standard MLIR passes used by the production flow or supported custom/test
     // pipelines, registered so an override can name them around the hip-*
     // passes. The registrar names

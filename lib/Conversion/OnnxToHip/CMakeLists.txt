@@ -123,6 +123,7 @@ add_library(OnnxToHip STATIC
   QdqConversion.cpp
   LoopOutline.cpp
   IfOutline.cpp
+  IfResultDims.cpp
   ReluConversion.cpp
   ImageScalerConversion.cpp
   LeakyReluConversion.cpp
