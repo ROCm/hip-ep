@@ -35,7 +35,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2712 2600 2473 2524 2624 2627 2634 2642 2644 2584 2605 2631 2643 2645 2656 2660 2657 2654 2678 2677 2679 2686 2696 2672 2664 2594 2745 2746 2545 2503 2742 2606 2724 2648 2582 2700 2713 2714 2782"
+  OGA_PR_PATCHES: "2600 2473 2524 2624 2627 2634 2642 2644 2584 2605 2631 2643 2645 2656 2660 2657 2654 2678 2677 2679 2686 2685 2696 2691 2672 2712 2664 2594 2745 2746 2545 2503 2742 2606 2724 2648 2582 2700 2713 2714 2782"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
