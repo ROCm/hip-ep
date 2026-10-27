@@ -805,3 +805,142 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
       outs(%ae : tensor<1x8x4x4xf16>) -> tensor<1x8x4x4xf16>
   return %a : tensor<1x8x4x4xf16>
 }
+
+// -----
+
+// QDQ around a float conv: the dequantize of the activation is the kernel's
+// prologue and the quantize after the activation function its epilogue, so
+// the kernel reads and writes ui8. The rank-0 scale and zero point are
+// inline constants cloned into the kernel.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[XQ:[a-z0-9]+]]: tensor<1x8x4x4xui8>, %{{.*}}: tensor<16x8x3x3xf32>, %{{.*}}: tensor<16xf32>) -> tensor<1x16x4x4xui8>
+// CHECK: hip.dequantize_linear({{.*}}) ins(%[[XQ]]
+// CHECK: hip.conv
+// CHECK: hip.leaky_relu
+// CHECK: %[[Q:.*]] = hip.quantize_linear
+// CHECK: return %[[Q]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.dequantize_linear
+// CHECK-NOT: hip.quantize_linear
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %xq: tensor<1x8x4x4xui8>,
+                      %w: tensor<16x8x3x3xf32>, %b: tensor<16xf32>)
+    -> tensor<1x16x4x4xui8> {
+  %s = hip.constant {value = dense<1.250000e-02> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %de = tensor.empty() : tensor<1x8x4x4xf32>
+  %x = hip.dequantize_linear(%ctx) ins(%xq, %s : tensor<1x8x4x4xui8>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%de : tensor<1x8x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x8x4x4xf32>
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf32>,
+                                       tensor<16x8x3x3xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  %le = tensor.empty() : tensor<1x16x4x4xf32>
+  %l = hip.leaky_relu(%ctx) ins(%c : tensor<1x16x4x4xf32>)
+      outs(%le : tensor<1x16x4x4xf32>) {alpha = 2.000000e-01 : f64}
+      : tensor<1x16x4x4xf32>
+  %qe = tensor.empty() : tensor<1x16x4x4xui8>
+  %q = hip.quantize_linear(%ctx) ins(%l, %s : tensor<1x16x4x4xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%qe : tensor<1x16x4x4xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x16x4x4xui8>
+  return %q : tensor<1x16x4x4xui8>
+}
+
+// -----
+
+// A dequantize after the epilogue's quantize would widen the kernel output
+// back to f32, so the chain stops at the quantize; the dequantize waits for
+// the kernel that reads it. A quantize that wraps (saturate = 0) has no TOSA
+// lowering and is not taken either.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x4x4xui8>
+// CHECK: hip.quantize_linear
+// CHECK-NOT: hip.dequantize_linear
+// CHECK: return
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x4x4xf32>
+// CHECK-NOT: hip.quantize_linear
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.dequantize_linear
+// CHECK: hip.rocmlir
+// CHECK: hip.quantize_linear{{.*}}saturate = 0
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
+                      %w: tensor<16x8x3x3xf32>, %b: tensor<16xf32>)
+    -> (tensor<1x16x4x4xf32>, tensor<1x16x4x4xui8>) {
+  %s = hip.constant {value = dense<1.250000e-02> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf32>,
+                                       tensor<16x8x3x3xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  %qe = tensor.empty() : tensor<1x16x4x4xui8>
+  %q = hip.quantize_linear(%ctx) ins(%c, %s : tensor<1x16x4x4xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%qe : tensor<1x16x4x4xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x16x4x4xui8>
+  %de = tensor.empty() : tensor<1x16x4x4xf32>
+  %d = hip.dequantize_linear(%ctx) ins(%q, %s : tensor<1x16x4x4xui8>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%de : tensor<1x16x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x16x4x4xf32>
+  %e2 = tensor.empty() : tensor<1x16x4x4xf32>
+  %c2 = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf32>,
+                                        tensor<16x8x3x3xf32>, tensor<16xf32>)
+      outs(%e2 : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  %qe2 = tensor.empty() : tensor<1x16x4x4xui8>
+  %q2 = hip.quantize_linear(%ctx) ins(%c2, %s : tensor<1x16x4x4xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%qe2 : tensor<1x16x4x4xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 0 : i64} : tensor<1x16x4x4xui8>
+  return %d, %q2 : tensor<1x16x4x4xf32>, tensor<1x16x4x4xui8>
+}
+
+// -----
+
+// A quantize with a second reader keeps running, so the conv's kernel takes
+// only its own dequantize and reads the ui8 tensor the quantize writes.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%[[XQ:[a-z0-9]+]]: tensor<1x8x4x4xui8>,
+// CHECK-NOT: hip.quantize_linear
+// CHECK: hip.dequantize_linear({{.*}}) ins(%[[XQ]]
+// CHECK: hip.conv
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[Q:.*]] = hip.quantize_linear
+// CHECK: hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins(%[[Q]],
+// CHECK: return {{.*}}, %[[Q]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
+                      %w: tensor<16x8x3x3xf32>, %b: tensor<16xf32>)
+    -> (tensor<1x16x4x4xf32>, tensor<1x8x4x4xui8>) {
+  %s = hip.constant {value = dense<1.250000e-02> : tensor<f32>} : tensor<f32>
+  %zp = hip.constant {value = dense<128> : tensor<ui8>} : tensor<ui8>
+  %qe = tensor.empty() : tensor<1x8x4x4xui8>
+  %q = hip.quantize_linear(%ctx) ins(%x, %s : tensor<1x8x4x4xf32>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%qe : tensor<1x8x4x4xui8>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<1x8x4x4xui8>
+  %de = tensor.empty() : tensor<1x8x4x4xf32>
+  %d = hip.dequantize_linear(%ctx) ins(%q, %s : tensor<1x8x4x4xui8>, tensor<f32>)
+      zero_point(%zp : tensor<ui8>) outs(%de : tensor<1x8x4x4xf32>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<1x8x4x4xf32>
+  %e = tensor.empty() : tensor<1x16x4x4xf32>
+  %c = hip.conv(%ctx) ins(%d, %w, %b : tensor<1x8x4x4xf32>,
+                                       tensor<16x8x3x3xf32>, tensor<16xf32>)
+      outs(%e : tensor<1x16x4x4xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
+  return %c, %q : tensor<1x16x4x4xf32>, tensor<1x8x4x4xui8>
+}
