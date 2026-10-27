@@ -33,10 +33,8 @@ extern "C" int wrap_linear_attention(
     int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
     int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
     int64_t dk, int64_t dv, int64_t type) {
-  const char *profile_name =
-      seq_len > 1 ? "linear_attention.prefill" : "linear_attention.decode";
   OP_PROFILE(
-      profile_name,
+      "linear_attention",
       [&] {
         char b[64];
         snprintf(b, sizeof(b),
