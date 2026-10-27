@@ -503,11 +503,17 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
       return rewriter.notifyMatchFailure(op, os.str());
     }
 
+    if (op.getPromoteActivation() && !elemType.isF16())
+      return rewriter.notifyMatchFailure(
+          op, "promoted SwiGLU requires f16 input/output");
+
     Value dataTypeVal = createI64Const(dataType);
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        ptrType, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapSwiglu, paramTypes, i32Type);
+        rewriter, module,
+        op.getPromoteActivation() ? kWrapSwigluPromoted : kWrapSwiglu,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

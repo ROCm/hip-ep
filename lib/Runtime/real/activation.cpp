@@ -399,3 +399,18 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
   RUNTIME_DEBUG_LOG("[REAL] wrap_swiglu: completed successfully\n");
   return 0;
 }
+
+// The same flat shape contract as wrap_swiglu, with FP32 intermediates.
+int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
+                         void *output, int64_t num_elements,
+                         int64_t data_type) {
+  OP_PROFILE(
+      "swiglu_promoted",
+      [&] { return std::string("n=") + std::to_string(num_elements); }, state);
+  if (!state || !gate || !up || !output || data_type != 1) {
+    fprintf(stderr, "[REAL] wrap_swiglu_promoted: invalid argument/type\n");
+    return -1;
+  }
+  return hip_swiglu_promoted(hipdnn_ep_state_get_stream(state), gate, up,
+                             output, num_elements, HIP_DTYPE_FLOAT16);
+}
