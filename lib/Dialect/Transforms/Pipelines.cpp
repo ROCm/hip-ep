@@ -87,9 +87,10 @@ struct VerifyNoConstantCarriersPass
   void runOnOperation() override {
     bool found = false;
     getOperation().walk([&](mlir::hip::ConstantOp op) {
-      op.emitError("hip.constant survived past hip-externalize-constants; "
-                   "constant-producing frontend/plugin passes must run before "
-                   "the tensor-to-bufferized pipeline reaches "
+      op.emitError("hip.constant was introduced after "
+                   "hip-externalize-constants; create constants before the "
+                   "tensor-to-bufferized pipeline (in the frontend, or at the "
+                   "AfterConvertOnnxToHip plugin slot), not at "
                    "BeforeBufferization");
       found = true;
     });
@@ -351,16 +352,6 @@ void mlir::hip::buildHipTensorToBufferizedPipeline(
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipelineTail(
-    OpPassManager &pm, const mlir::hip::OnnxToHipPipelineOptions &options,
-    morphizen::FileSystem *fs) {
-  HipTensorToBufferizedPipelineOptions tensorOptions;
-  tensorOptions.externalizeOutputDir = options.externalizeOutputDir;
-  tensorOptions.externalizeMinNumElements = options.externalizeMinNumElements;
-  tensorOptions.skipConstantData = options.skipConstantData;
-  buildHipTensorToBufferizedPipeline(pm, tensorOptions, fs);
-}
-
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
                                            CompiledGraphMap output_graphs) {
@@ -439,7 +430,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
   buildOnnxToHipPipelineHead(pm);
-  buildOnnxToHipPipelineTail(pm, options, fs);
+  buildHipTensorToBufferizedPipeline(pm, options, fs);
 }
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
@@ -448,7 +439,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
   buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs));
-  buildOnnxToHipPipelineTail(pm, options, fs);
+  buildHipTensorToBufferizedPipeline(pm, options, fs);
 }
 
 void mlir::hip::buildHipToLLVMPipeline(

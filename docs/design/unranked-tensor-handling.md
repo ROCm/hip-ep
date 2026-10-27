@@ -131,7 +131,7 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                         ranks)      ├─ onnx-if-outline
                                                     ├─ hip-infer-loop-body-shapes
                                                     ├─ convert-onnx-to-hip
-                                                    │  (tail:)
+                                                    │  (hip-tensor-to-bufferized-pipeline:)
                                                     ├─ hip-infer-shapes
                                                     ├─ canonicalize ; CSE
                                                     ├─ hip-split-duplicate-dps-inits

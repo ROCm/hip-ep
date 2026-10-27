@@ -617,8 +617,8 @@ def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
 
     Pipeline placement
     ------------------
-    Wired at the start of `buildHipTensorToBufferizedPipeline`; the ONNX
-    frontend invokes that shared tail immediately after `convert-onnx-to-hip`.
+    Wired at the start of `buildHipTensorToBufferizedPipeline`, which the ONNX
+    pipeline runs immediately after `convert-onnx-to-hip`.
     Refining
     tensor result types BEFORE bufferize propagates static dims through
     the alloc / pool sizing computations and removes spurious

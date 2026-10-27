@@ -582,7 +582,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // result types in-place at emission (constructed explicitly from the dims
     // the rewriter already knows), so no separate ONNX-level shape-inference
     // pass is run between rounds — the HIP-dialect `--hip-infer-shapes` pass
-    // (pipeline tail, post-conversion) resolves any residual dynamic dims. A
+    // (start of the tensor-to-bufferized pipeline) resolves any residual
+    // dynamic dims. A
     // tiny RewriterBase::Listener flips a flag on any IR mutation; the loop
     // breaks the first round that mutates nothing (capped at kMaxRounds as a
     // safety net).

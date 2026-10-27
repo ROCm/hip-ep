@@ -222,8 +222,8 @@ int main(int argc, char **argv) {
         << "  passes) or a module already in the HIP dialect (skips them).\n"
         << "  Then compiles the fused GEMM via the rocMLIR pipeline (linked\n"
         << "  in-tree), embeds the GPU binary into hip.rocmlir, runs the\n"
-        << "  ONNX->HIP tail + HIP->LLVM lowering, and emits LLVM bitcode to\n"
-        << "  <output>.\n"
+        << "  tensor-to-bufferized pipeline + HIP->LLVM lowering, and emits\n"
+        << "  LLVM bitcode to <output>.\n"
         << "\n"
         << "Options:\n"
         << "  --autotune[=quick|full|exhaustive]\n"
@@ -460,7 +460,7 @@ int main(int argc, char **argv) {
   if (!embedOk)
     return 1;
 
-  // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
+  // Stage 4: run the tensor-to-bufferized pipeline (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-
   // constant resolution) -- everything hip-compiler runs after OnnxToHip up to,
   // but not including, the HIP-to-LLVM lowering. The `hip.rocmlir` op now
@@ -473,14 +473,14 @@ int main(int argc, char **argv) {
   // metadata only (matching the EP live-compile path).
   {
     mlir::hip::DiskFileSystem fs(".");
-    mlir::hip::OnnxToHipPipelineOptions tailOpts;
-    tailOpts.externalizeMinNumElements =
+    mlir::hip::HipTensorToBufferizedPipelineOptions tensorOpts;
+    tensorOpts.externalizeMinNumElements =
         mlir::hip::kDefaultExternalizeMinNumElements;
-    tailOpts.skipConstantData = true;
-    mlir::PassManager tailPm(module->getContext());
-    mlir::hip::buildOnnxToHipPipelineTail(tailPm, tailOpts, &fs);
-    if (mlir::failed(tailPm.run(*module))) {
-      llvm::errs() << "error: ONNX-to-HIP tail passes failed\n";
+    tensorOpts.skipConstantData = true;
+    mlir::PassManager tensorPm(module->getContext());
+    mlir::hip::buildHipTensorToBufferizedPipeline(tensorPm, tensorOpts, &fs);
+    if (mlir::failed(tensorPm.run(*module))) {
+      llvm::errs() << "error: tensor-to-bufferized pipeline failed\n";
       return 1;
     }
   }

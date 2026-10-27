@@ -461,7 +461,8 @@ is planned.
   registered with a stable `getArgument()` name in the same registry the
   override resolves against (`include/hip/InitAllPasses.h::registerAllPasses`),
   so it is usable in a textual pipeline string. The composable pipeline names
-  (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
+  (`hip-tensor-to-bufferized-pipeline`, `onnx-to-hip-pipeline`,
+  `hip-to-llvm-pipeline`, `hipdnn-pipeline`) are
   registered too. See the published menu:
   [`docs/pipeline_pass_menu.md`](pipeline_pass_menu.md).
 - **Supply a pipeline as text.** Set the `HIPDNN_EP_PIPELINE` env var to a
