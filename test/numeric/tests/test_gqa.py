@@ -328,9 +328,9 @@ def _make_gqa_packed_rotary_model(
     )
 
 
-def _make_gqa_fixed_cache_rotary_model(seq_len):
+def _make_gqa_fixed_cache_rotary_model(seq_len, elem_type=TensorProto.FLOAT16):
     """The Llama fixed-cache GQA model with RoPE inside GQA (cos/sin caches)."""
-    f16 = TensorProto.FLOAT16
+    f16 = elem_type
     vi = helper.make_tensor_value_info
     cache = [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM]
     rot = [LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM // 2]
@@ -366,11 +366,11 @@ def _make_gqa_fixed_cache_rotary_model(seq_len):
     )
 
 
-def _rope_tables():
+def _rope_tables(np_dtype=np.float16):
     pos = np.arange(LLAMA_CACHE_SIZE, dtype=np.float32)[:, None]
     inv = 1.0 / (10000.0 ** (np.arange(0, LLAMA_HEAD_DIM, 2) / LLAMA_HEAD_DIM))
     ang = pos * inv[None, :].astype(np.float32)
-    return np.cos(ang).astype(np.float16), np.sin(ang).astype(np.float16)
+    return np.cos(ang).astype(np_dtype), np.sin(ang).astype(np_dtype)
 
 
 def _ep_session(model_runner, model, name):
@@ -871,8 +871,15 @@ class TestGroupQueryAttention:
                 "prompt was not appended to the KV cache."
             )
 
+    @pytest.mark.parametrize(
+        "elem_type,np_dtype",
+        [(TensorProto.FLOAT16, np.float16), (TensorProto.FLOAT, np.float32)],
+        ids=["fp16_fused", "fp32_hipblaslt"],
+    )
     @pytest.mark.parametrize("real_count", [1, 22, 128])
-    def test_gqa_padded_first_prompt_rotary(self, model_runner, real_count):
+    def test_gqa_padded_first_prompt_rotary(
+        self, model_runner, real_count, elem_type, np_dtype
+    ):
         """A padded first prompt with RoPE inside GQA, marked as ORT marks one.
 
         The padded window (total_sequence_length = the window) must give the
@@ -887,26 +894,26 @@ class TestGroupQueryAttention:
         pad = seq_len - real_count
 
         def rows(width):
-            return rng.uniform(-1, 1, [1, real_count, width]).astype(np.float16)
+            return rng.uniform(-1, 1, [1, real_count, width]).astype(np_dtype)
 
         def padded(x):
             # Finite, nonzero padding: the token rows and their cache slots
             # must not depend on what the padding rows hold.
-            fill = rng.uniform(-4, 4, [1, pad, x.shape[2]]).astype(np.float16)
+            fill = rng.uniform(-4, 4, [1, pad, x.shape[2]]).astype(np_dtype)
             return np.concatenate([x, fill], 1)
 
         q, k, v = rows(LLAMA_HIDDEN), rows(LLAMA_KV_HIDDEN), rows(LLAMA_KV_HIDDEN)
-        cos, sin = _rope_tables()
+        cos, sin = _rope_tables(np_dtype)
         cache = np.zeros(
-            [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM], np.float16
+            [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM], np_dtype
         )
         seqlens = np.array([real_count - 1], np.int32)
-        model = _make_gqa_fixed_cache_rotary_model(seq_len)
+        model = _make_gqa_fixed_cache_rotary_model(seq_len, elem_type)
         inputs = [padded(q), padded(k), padded(v), cache, cache.copy(), seqlens]
         inputs += [np.array(seq_len, np.int32), cos, sin]
         actual, same_graph = model_runner.run_sample(model, inputs, reference="cpu")
         unpadded = _cpu_gqa(
-            _make_gqa_fixed_cache_rotary_model(real_count),
+            _make_gqa_fixed_cache_rotary_model(real_count, elem_type),
             [q, k, v, cache, cache.copy(), seqlens, np.array(real_count, np.int32)]
             + [cos, sin],
         )
@@ -919,7 +926,14 @@ class TestGroupQueryAttention:
                 atol=2e-3,
             )
 
-    def test_gqa_padded_prefill_then_decode_in_place(self, model_runner):
+    @pytest.mark.parametrize(
+        "elem_type,np_dtype",
+        [(TensorProto.FLOAT16, np.float16), (TensorProto.FLOAT, np.float32)],
+        ids=["fp16_fused", "fp32_hipblaslt"],
+    )
+    def test_gqa_padded_prefill_then_decode_in_place(
+        self, model_runner, elem_type, np_dtype
+    ):
         """A padded first prompt, then a decode step, on caches shared in place.
 
         past_* and present_* are bound to the same GPU buffers, as
@@ -931,7 +945,7 @@ class TestGroupQueryAttention:
         rng = np.random.default_rng(9)
 
         def rows(n, width):
-            return rng.uniform(-1, 1, [1, n, width]).astype(np.float16)
+            return rng.uniform(-1, 1, [1, n, width]).astype(np_dtype)
 
         q, k, v = (
             rows(real_count, LLAMA_HIDDEN),
@@ -944,10 +958,10 @@ class TestGroupQueryAttention:
             rows(1, LLAMA_KV_HIDDEN),
         )
         shape = [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM]
-        cache = np.zeros(shape, np.float16)
+        cache = np.zeros(shape, np_dtype)
 
         def padded(x):
-            pad = np.zeros([1, seq_len - real_count, x.shape[2]], np.float16)
+            pad = np.zeros([1, seq_len - real_count, x.shape[2]], np_dtype)
             return np.concatenate([x, pad], 1)
 
         def model(n):
@@ -959,6 +973,7 @@ class TestGroupQueryAttention:
                 LLAMA_KV_HIDDEN,
                 LLAMA_NUM_HEADS,
                 LLAMA_KV_NUM_HEADS,
+                elem_type=elem_type,
             )
 
         # ORT CPU, unpadded: the prompt, then the decode step on its caches.
@@ -1030,6 +1045,11 @@ class TestGroupQueryAttention:
         )
 
     @pytest.mark.parametrize(
+        "elem_type,np_dtype",
+        [(TensorProto.FLOAT16, np.float16), (TensorProto.FLOAT, np.float32)],
+        ids=["fp16_fused", "fp32_hipblaslt"],
+    )
+    @pytest.mark.parametrize(
         "past,total",
         [
             # A padded step after a past: total is the past plus its tokens.
@@ -1045,7 +1065,9 @@ class TestGroupQueryAttention:
         ],
         ids=["after_past", "total_is_token_count", "total_is_cache_size"],
     )
-    def test_gqa_padded_window_is_rejected(self, model_runner, capfd, past, total):
+    def test_gqa_padded_window_is_rejected(
+        self, model_runner, capfd, past, total, elem_type, np_dtype
+    ):
         """A padded window not marked as a first prompt is refused, cache intact.
 
         The runtime's status is dropped by the generated call today, so the
@@ -1058,14 +1080,14 @@ class TestGroupQueryAttention:
         rng = np.random.default_rng(11)
 
         def rows(width):
-            real = rng.uniform(-1, 1, [1, real_count, width]).astype(np.float16)
-            pad = np.zeros([1, seq_len - real_count, width], np.float16)
+            real = rng.uniform(-1, 1, [1, real_count, width]).astype(np_dtype)
+            pad = np.zeros([1, seq_len - real_count, width], np_dtype)
             return np.concatenate([real, pad], 1)
 
         shape = [1, LLAMA_KV_NUM_HEADS, LLAMA_CACHE_SIZE, LLAMA_HEAD_DIM]
         count = int(np.prod(shape))
-        before_k = ((np.arange(count) % 2039) / 2039.0 - 0.5).astype(np.float16)
-        before_v = ((np.arange(count) % 1987) / 1987.0 + 0.25).astype(np.float16)
+        before_k = ((np.arange(count) % 2039) / 2039.0 - 0.5).astype(np_dtype)
+        before_v = ((np.arange(count) % 1987) / 1987.0 + 0.25).astype(np_dtype)
         before_k, before_v = before_k.reshape(shape), before_v.reshape(shape)
         cache_k, cache_v = _gpu(before_k.copy()), _gpu(before_v.copy())
 
@@ -1079,6 +1101,7 @@ class TestGroupQueryAttention:
                 LLAMA_KV_HIDDEN,
                 LLAMA_NUM_HEADS,
                 LLAMA_KV_NUM_HEADS,
+                elem_type=elem_type,
             ),
             "padded_rejected",
         )
@@ -1106,7 +1129,12 @@ class TestGroupQueryAttention:
             f"past_len={past + real_count - seq_len},"
         )
         assert expected in err, f"no refusal diagnostic in:\n{err}"
-        assert "gqa_forward_fused failed (rc=-1)" in err, err
+        path_failed = (
+            "gqa_forward_fused failed (rc=-1)"
+            if np_dtype == np.float16
+            else "legacy decomposed pipeline failed (rc=-1)"
+        )
+        assert path_failed in err, err
         assert cache_k.numpy().tobytes() == before_k.tobytes(), "present_key changed"
         assert cache_v.numpy().tobytes() == before_v.tobytes(), "present_value changed"
 

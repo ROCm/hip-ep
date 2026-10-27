@@ -1238,7 +1238,7 @@ static int gqa_forward_hipblaslt(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false) {
+    bool reuse_past_kv = false, const void *total_seq_len = nullptr) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -1609,18 +1609,25 @@ static int gqa_forward_hipblaslt(
       past_len = 0;
     } else {
       total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
-      // A first prompt shorter than the window: no past, as in
-      // gqa_forward_fused. The causal mask takes past_len and the scores span
-      // total_seq keys, so padding rows attend to the prompt alone.
-      past_len = total_seq > sq ? total_seq - sq : 0;
-      if (total_seq < 1 || past_len + sq > present_seq ||
+      past_len = total_seq - sq;
+      // A padded first prompt has no past, under the same rule as
+      // gqa_forward_fused (see gqa_padded_window_is_first_prompt). The causal
+      // mask takes past_len and the scores span total_seq keys, so padding
+      // rows attend to the prompt alone.
+      if (past_len < 0 &&
+          gqa_padded_window_is_first_prompt(stream, total_seq_len, sq))
+        past_len = 0;
+      if (total_seq < 1 || past_len < 0 || past_len + sq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(stderr,
                 "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
                 "(sq=%lld, past_len=%lld, present_seq=%lld, "
-                "past_buf_seq=%lld)\n",
+                "past_buf_seq=%lld)%s\n",
                 (long long)total_seq, (long long)sq, (long long)past_len,
-                (long long)present_seq, (long long)past_buf_seq);
+                (long long)present_seq, (long long)past_buf_seq,
+                past_len < 0
+                    ? "; a padded first prompt needs total_sequence_length = sq"
+                    : "");
         return -1;
       }
     }
@@ -3127,7 +3134,7 @@ int wrap_group_query_attention(
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0, reuse_past_kv);
+        kv_bnsd != 0, reuse_past_kv, total_seq_len);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
