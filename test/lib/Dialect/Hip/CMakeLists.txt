@@ -14,6 +14,7 @@ target_include_directories(HipTestPasses PUBLIC
 target_link_libraries(HipTestPasses PUBLIC
   HipDialectIR
   MLIRIR
+  MLIRTensorDialect
   MLIRDestinationStyleOpInterface
   MLIRPass
   MLIRSupport

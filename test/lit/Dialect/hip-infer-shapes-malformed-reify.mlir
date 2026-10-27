@@ -5,7 +5,8 @@
 
 // The tool-only fixture returns successful but contract-invalid shape lists.
 // Explicit checks must reject them in release builds without relying on assert.
-// The fixture is destination-style, with one destination per result.
+// The pass only visits destination-style operations, so the fixture carries
+// one destination per result.
 
 func.func @wrong_result_count(%e: tensor<?xf32>) {
   // expected-error @+1 {{'hip.test_malformed_reify_dps' op --hip-infer-shapes: successful reification returned 0 shape vector(s) for 1 result(s); expected exactly one vector per result}}
