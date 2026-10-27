@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,6 +258,7 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  rms_norm/Xfp32_Wfp32_Yfp32/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -378,6 +379,14 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **rms_norm** (fp32): row widths that take every fp32 block size x
+  float4 / scalar body pair and both width boundaries, each with aligned and
+  misaligned pointers, one row and six, shared and grouped gains (49 cases),
+  plus `outer = 0`, `scale_rows = 0` and an unsupported dtype, at every
+  tier; COVERAGE thins the prefill-sized shapes (tier1 = 1, tier2 = 3,
+  tier3 = 5, up to `2048x4096` and `512x8192`). Outputs are compared with a
+  double-precision reference (`2e-5` relative plus `1e-6` absolute), and each
+  case records its mean launch time.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
