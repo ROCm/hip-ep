@@ -259,10 +259,10 @@ __device__ __forceinline__ float gqa_from_float<float>(float v) {
 }
 
 // The past a call extends, from seqlens_k (the total length less one) on the
-// device. A first prompt shorter than its window holds its tokens in rows
-// 0..seqlens_k with padding after them and no past, so the difference clamps
-// at 0 -- the reading ORT gives a padded first prompt, and the one
-// gqa_forward_fused makes on the host.
+// device. A padded first prompt holds its tokens in rows 0..seqlens_k with
+// padding after them and no past, so the difference clamps at 0 -- the reading
+// ORT gives a padded first prompt. The host (gqa_forward_fused) only launches
+// a padded window once total_sequence_length has marked it as a first prompt.
 __device__ __forceinline__ int gqa_past_len_from_seqlens(int seqlens_k,
                                                          int sq) {
   const int past_len = seqlens_k + 1 - sq;
