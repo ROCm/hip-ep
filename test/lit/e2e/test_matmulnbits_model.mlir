@@ -3,14 +3,14 @@
 // Test MatMulNBits E2E full pipeline
 // Verifies the complete hipdnn-pipeline for 4-bit quantized matmul:
 // 1. convert-onnx-to-hip: ONNX Custom op → hip.matmul_nbits
-// 2. convert-hip-to-llvm: HIP op → wrap_matmul_nbits runtime call
+// 2. convert-hip-to-llvm: HIP op → wrap_matmul_nbits_ex runtime call
 // 3. generate-interface: Create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK: llvm.func @wrap_matmul_nbits
-// CHECK: llvm.call @wrap_matmul_nbits
+// CHECK: llvm.func @wrap_matmul_nbits_ex(
+// CHECK: llvm.call @wrap_matmul_nbits_ex(
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

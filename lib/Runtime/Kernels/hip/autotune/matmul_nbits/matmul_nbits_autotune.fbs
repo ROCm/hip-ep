@@ -84,7 +84,8 @@ enum MatmulNbitsZeroPoint : ubyte {
 enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
-  Padded = 2       // arrival + 128 B (the per-call repack, a 128 B row pad)
+  Padded = 2,      // arrival + 128 B (the per-call repack, a 128 B row pad)
+  Padded256 = 3    // arrival + 256 B (hip-pad-matmul-nbits-weights' default)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,19 @@ struct MatmulNbitsExtendedConfig {
   variant: ubyte;
 }
 
+// Row pad of one int4 weight shape, which hip-pad-matmul-nbits-weights stores
+// once at load with a K/2 + pad_bytes row pitch. Measured per shape: the pad
+// with the lowest prefill plus decode time, the smaller one when they tie.
+// 0 keeps the arrival stride. A shape without an entry gets default_row_pad
+// where its stride aliases into a few cache sets.
+struct MatmulNbitsRowPad {
+  group_size: MatmulNbitsGroupSize;
+  zero_point: MatmulNbitsZeroPoint;
+  pad_bytes: uint16;       // multiple of 16: B is loaded in 16-byte vectors
+  n: uint32;
+  k: uint32;
+}
+
 table MatmulNbitsAutotuneLut {
   schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
@@ -197,9 +211,12 @@ table MatmulNbitsAutotuneLut {
   configs: [MatmulNbitsTuneConfig];
   points: [MatmulNbitsTunePoint];
   fallbacks: [MatmulNbitsFallback];
-  // Appended, so a table without it loads as before: no config names an
-  // extended entry.
+  // Appended, so a table without them loads as before: no config names an
+  // extended entry, and no weight is padded at load.
   extended_configs: [MatmulNbitsExtendedConfig];
+  row_pads: [MatmulNbitsRowPad];
+  // Pad for an aliasing weight row_pads does not list; 0 pads none at load.
+  default_row_pad: uint16 = 0;
 }
 
 root_type MatmulNbitsAutotuneLut;

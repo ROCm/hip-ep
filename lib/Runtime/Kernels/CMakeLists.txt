@@ -135,8 +135,8 @@ set(_kernel_sources
 set(_matmul_nbits_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/matmul_nbits)
 
 # Maps a build arch to the concrete family members whose LUT may ship in its
-# DLL. Mirrors genericTargetFor() in backend-mlir-compiler/custom-op-mlir/src/
-# LlvmIrJit.cpp: a gfx*-generic DLL runs on every member ISA, so it carries each
+# DLL. Mirrors hip::genericTargetFor() in include/hip/Support/GenericTarget.h
+# (used by LlvmIrJit.cpp): a gfx*-generic DLL runs on every member ISA, so it carries each
 # member's table that exists on disk and the loader picks the one matching the
 # live device by gpu_arch. A concrete arch maps to itself.
 function(_lut_arch_members arch out_var)

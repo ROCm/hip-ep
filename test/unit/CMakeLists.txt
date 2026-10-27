@@ -42,6 +42,17 @@ set_target_properties(test-hipsr-externalize-constants PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
 
+# writeConstantsBinToFileSystem expands row-padded constants (memory and file
+# sources) one row at a time; checked byte for byte against the padded layout.
+add_executable(test-constants-io test_constants_io.cpp)
+target_compile_features(test-constants-io PRIVATE cxx_std_17)
+target_include_directories(test-constants-io PRIVATE
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # file_io.hpp
+)
+target_link_libraries(test-constants-io PRIVATE HipConstantsIO)
+add_test(NAME ConstantsIoUnit COMMAND test-constants-io)
+set_target_properties(test-constants-io PROPERTIES FOLDER "mlir/Test/Support")
+
 #=============================================================================
 # ONNX-dtype -> MLIR-type mapping unit test (GPU-free).
 #=============================================================================

@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "matmul_nbits_row_pad_abi.h"
+
 // Exports each launcher from the per-arch kernel shared library
 // (custom_kernels_<arch>.{dll,so}), which the model artifact resolves at load
 // (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
@@ -2574,6 +2576,30 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* hip_matmul_nbits with an explicit weight row pitch. b_row_bytes == 0 is the
+ * arrival layout (identical to hip_matmul_nbits). A nonzero value reads a
+ * bits=4 B whose rows were padded to b_row_bytes (>= K/2) at load, so the
+ * aliasing-prone strides need no per-call repack; it requires bits == 4 and
+ * block_size | K, and every int4 path (WMMA, GEMV, M-blocked GEMV, naive)
+ * honours it. Returns -1 for an unsupported combination. */
+HIP_KERNEL_API int hip_matmul_nbits_ex(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes,
+    int64_t zp_elem_size,
+    const void* pre_unpacked_zp_u8,
+    const void* pre_unpacked_zp_fp16,
+    int64_t b_row_bytes);
+
 // Bitsandbytes FP4/NF4 dequant. Writes row-major [N, K] f32.
 // quant_type 0 is FP4 and 1 is NF4. Even indices read the high nibble.
 HIP_KERNEL_API int hip_dequant_bnb4(
@@ -2686,6 +2712,14 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* hip_matmul_nbits_dp4a against a B with row pitch b_row_bytes (0 = K/2). */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_ex(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t M, int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch, int64_t b_row_bytes);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -2725,6 +2759,13 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
     const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
 
+/* hip_matmul_nbits_dequant_b_fp16 against a B with row pitch b_row_bytes
+ * (0 = the arrival stride). */
+HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16_ex(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size,
+    int b_row_bytes);
+
 /* -------------------------------------------------------------------------
  * int4 row-stride padding and stride-aware WMMA dispatch.
  *
@@ -2741,8 +2782,20 @@ HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
  *   pass has no stride argument) and keys the cache with the stride, so the
  *   winner reflects the layout actually in use. Returns -1 when no fused
  *   config is eligible, leaving the caller to use the arrival-layout path.
+ *
+ * hip_matmul_nbits_u4_row_pads: the autotune table's row-pad policy for an
+ *   arch (NULL: the running device), read by the compiler for
+ *   hip-pad-matmul-nbits-weights; see HipMatmulNBitsRowPadsFn in
+ *   matmul_nbits_row_pad_abi.h. A default pad of 0 (the arch has no table, or
+ *   its table was not measured with weights padded at load) keeps aliasing
+ *   weights dense, and the runtime repacks them per call as before.
  * ------------------------------------------------------------------------- */
 HIP_KERNEL_API size_t hip_matmul_nbits_u4_padrow_bytes(int N, int K);
+
+HIP_KERNEL_API int hip_matmul_nbits_u4_row_pads(const char* arch,
+                                                int32_t* default_pad,
+                                                HipMatmulNBitsRowPad* entries,
+                                                int32_t capacity);
 
 HIP_KERNEL_API int hip_matmul_nbits_u4_prepack_padrow(
     void* stream, const void* B, void* dst, int N, int K);

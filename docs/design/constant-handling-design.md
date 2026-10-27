@@ -258,6 +258,50 @@ it does not surface `FileWriter::fwrite` short writes. `FileSystem` also has no
 atomic rename/remove transaction, so a later failed write can leave a partial
 artifact even though the IR remains unchanged.
 
+### Row-padded constants
+
+`hip-pad-matmul-nbits-weights` (`lib/Dialect/Transforms/PadMatMulNBitsWeights.cpp`)
+runs just before the externalizer. An int4 MatMulNBits weight is retyped to
+`[N, K/2 + pad]` and marked `row_bytes = K/2`; its users get
+`b_row_bytes = K/2 + pad`. The carrier's `size` stays the dense source size.
+
+The pad comes from the compile target's MatMulNBits autotune table
+(`lib/Runtime/Kernels/hip/autotune/matmul_nbits/lut/<arch>.json`). The compiler
+driver reads it through `hip_matmul_nbits_u4_row_pads` (structured entries,
+`matmul_nbits_row_pad_abi.h`) from the custom kernels library the runtime
+loads: `custom_kernels_<arch>`, else the generic ISA's, beside the compiler
+module or in the build tree (`HIP_CUSTOM_KERNELS_DIR` / `_ARCH` override). The
+target is `ROCK_ARCH` when set, else the running device. It passes them as the
+pass's options:
+
+- `row_pads` (`row-pads`): per (N, K, block size, zero points), the pad with the
+  lowest prefill plus decode time. A listed pad of 0 keeps the weight dense and
+  sets its users' `b_row_bytes` to K/2, which tells the runtime not to repack
+  it.
+- `default_row_pad` (`default-row-pad`): the pad for an unlisted weight whose
+  stride K/2 aliases into a few cache sets (K = 4096, 8192, 12288, 14336, ...).
+
+A device whose table sets neither (every arch but gfx1151 today) pads nothing:
+its weights stay dense and the runtime repacks aliasing ones per prefill call,
+as before.
+
+The externalizer plans the padded footprint (`N * (K/2 + pad)`), so offsets and
+`hipdnn.constant_sizes` describe the stored layout:
+
+- full constants file: the padded bytes are written, and the bulk upload copies
+  them as-is. Planning stays metadata-only: the writer
+  (`writeConstantsBinToFileSystem`, `ConstantEntry.row_bytes` / `.row_pitch`)
+  reads the dense rows from the file reference or producer memory and writes
+  each followed by its zero pad, through one buffer of at most 1 MB, so no
+  padded copy of a weight is held on the host;
+- streaming: the source stays dense (file reference, or the hybrid partial
+  file), and `hipdnn.constant_row_bytes` / `hipdnn.constant_row_pitches` reach
+  `ConstantInfo.row_bytes` / `.row_pitch`; the per-entry upload expands the rows
+  in its host staging buffer before the copy.
+
+Either way one copy of the weight exists on the GPU. Inline carriers are padded
+in place by the pass.
+
 ### Step 2 — Code generation: `GenerateInterface` pass
 
 The `GenerateInterface` pass (`lib/Dialect/Transforms/GenerateInterface.cpp`) packs

@@ -61,13 +61,14 @@ the same reason.
 
 Row stride is part of the prefill key because a padded buffer has a different
 winner (measured: cfg11 -> cfg3 at N=5120 K=4096), so layouts must not share a
-row. Each pad is its own category, matched exactly: `Arrival` (dense) and
-`Padded` (arrival + 128 B, the per-call repack). The lookup takes the pad from
-the request's row pitch (a pitch of K/2 is dense); a pad with no category skips
-the point groups and goes to the phase's fallback, so a lookup never uses a
-point measured at another pitch. The sweep driver logs the pad of each
-`prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it to the
-category.
+row. Each pad is its own category, matched exactly: `Arrival` (dense),
+`Padded` (arrival + 128 B: the per-call repack, and the 128-byte row pads) and
+`Padded256` (arrival + 256 B: the load-time default pad). The lookup takes the
+pad from the request's row pitch (a pitch of K/2 is dense); a pad with no
+category skips the point groups and goes to the phase's fallback, so a
+lookup never uses a point measured at another pitch. The sweep driver logs the
+pad of each `prefill_padrow` measurement (`pad=`), and `update_lut.py` maps it
+to the category.
 
 `--out` names the JSON that `update_lut.py build` and `merge` write and
 `compile` reads; `--fb-out` names the binary, which defaults to `lut/<arch>.fb`
@@ -75,6 +76,31 @@ only for the default JSON, so a scratch build never overwrites the shipped
 table. Every step checks the table it writes or reads (`check_table`) and
 rejects one the loader would read differently, for example a config index out
 of range or an extended entry the kernel library does not compile.
+
+## Row pads
+
+A table may opt its device into storing int4 weights row-padded at load
+(`hip-pad-matmul-nbits-weights`), which removes the per-call repack:
+
+- `default_row_pad` is the pad, in bytes, for a weight whose stride aliases
+  (`hip::matmulNBitsRowStrideAliases` in `include/hip/matmul_nbits_row_alias.h`,
+  shared by the compiler, the runtime and the sweep driver). 0, or a table
+  without the field, pads nothing at load, and the runtime keeps repacking such
+  weights per call.
+- `row_pads` overrides it per int4 weight shape (N, K, group size, zero
+  points). A listed pad of 0 keeps that weight dense with no repack.
+
+Both come from measurement: the pad from {0, 16, 128, 256} bytes with the
+lowest prefill (prompt 1024) plus 128-token decode time, in the pad sweep and
+two re-measurements, taking the smaller pad when it is within noise of the
+fastest. For the shapes of the measured models, gfx1151's padded rows are
+measured at each weight's stored pad (`Padded256`, or `Padded` for a 128-byte
+entry), so layout and rows come from the same data; its other `Padded` rows are
+the per-call repack sweep's (arrival + 128 B). The compiler reads both through
+`hip_matmul_nbits_u4_row_pads(arch, ...)` (`matmul_nbits_row_pad_abi.h`).
+`update_lut.py build` and `merge` carry them over unchanged from
+`lut/<arch>.json` (`--carry-from` names another table). Only gfx1151 sets them
+today.
 
 ## Why the row stores geometry, not a config index
 
@@ -118,7 +144,7 @@ python scripts/extract_shapes.py `
 #    product binary" below): gfx11-generic -O2 for the gfx1150/1151/1152
 #    tables, gfx1170 -O2 for gfx1170.
 clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w `
-    -I lib/Runtime/Kernels/include -I <flatbuffers include> -I <generated header dir> `
+    -I lib/Runtime/Kernels/include -I include -I <flatbuffers include> -I <generated header dir> `
     tools/matmul_nbits_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
     ../../matmul_nbits_kernel.hip -o mn_sweep.exe
 

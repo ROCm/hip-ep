@@ -49,14 +49,17 @@ KERNEL_ABI = "matmul_nbits-v1"
 GROUP_SIZES = {16: "G16", 32: "G32", 64: "G64", 128: "G128", 256: "G256",
                512: "G512"}
 # prefill_padrow is measured at arrival + `pad=` bytes (128 when the sweep log
-# predates the field); a pad without a row-stride category is skipped.
+# predates the field); each pad is its own row-stride category.
 PATH_TO_PHASE = {"prefill": "Prefill", "prefill_padrow": "Prefill",
+                 "prefill_padrow256": "Prefill",
                  "decode": "Decode", "dp4a": "DecodeDp4a"}
 PATH_TO_STRIDE = {"prefill": "Arrival", "prefill_padrow": "Padded",
+                  "prefill_padrow256": "Padded256",
                   "decode": "Any", "dp4a": "Any"}
 PATH_TO_KIND = {"prefill": "Wmma", "prefill_padrow": "Wmma",
+                "prefill_padrow256": "Wmma",
                 "decode": "Gemv", "dp4a": "Gemv"}
-PADROW_PATH = {128: "prefill_padrow"}
+PADROW_PATH = {128: "prefill_padrow", 256: "prefill_padrow256"}
 
 
 # ---------------------------------------------------------------------------
@@ -561,13 +564,18 @@ def _geomean_slowdown(ans, pts):
     return math.exp(sum(logs) / len(logs)) if logs else float("inf")
 
 
+# Table fields that are not part of a build or merge result but carried over
+# from the existing table: measured separately from the tile winners.
+CARRIED = ("row_pads", "default_row_pad")
+
+
 class LutError(ValueError):
     """A table the loader would read differently from what was meant."""
 
 
 KERNEL_SRC = ROOT.parent.parent / "matmul_nbits_kernel.hip"
 PHASES = ("Prefill", "Decode", "DecodeDp4a")
-STRIDES = ("Arrival", "Padded")
+STRIDES = ("Arrival", "Padded", "Padded256")
 ZERO_POINTS = ("Symmetric", "Asymmetric")
 
 
@@ -627,6 +635,20 @@ def check_table(t: dict) -> None:
                  e.get("variant"), c["swizzle"])
         if entry not in compiled:
             errors.append(f"extended_configs: no WMMA_EXT_CONFIGS entry {entry}")
+    keys = set()
+    for r in t.get("row_pads", []):
+        key = (r.get("n"), r.get("k"), r.get("group_size"), r.get("zero_point"))
+        if r.get("group_size") not in GROUP_SIZES.values() or \
+                r.get("zero_point") not in ZERO_POINTS or \
+                not r.get("n") or not r.get("k") or r.get("pad_bytes", 1) % 16 or \
+                (r["pad_bytes"] and (r["k"] // 2 + r["pad_bytes"]) % 16):
+            errors.append(f"row_pads: invalid entry {r} (pad and K/2 + pad must "
+                          f"be multiples of 16)")
+        if key in keys:
+            errors.append(f"row_pads: weight {key} listed twice")
+        keys.add(key)
+    if t.get("default_row_pad", 0) % 16:
+        errors.append(f"default_row_pad {t['default_row_pad']} is not a multiple of 16")
     if errors:
         raise LutError("\n".join(errors))
 
@@ -640,7 +662,8 @@ def with_extended(configs, extended):
     return configs
 
 
-def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
+def write_lut_json(out: Path, doc: dict, configs, fallbacks, points,
+                   carried=None) -> None:
     # One entry per line: compact enough to keep the file reviewable and to make
     # a regeneration diff readable, without the 20x blowup of indent=1.
     plain, extended = [], []
@@ -650,12 +673,15 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
             extended.append({"config": i, "variant": c.pop("variant")})
         c.pop("variant", None)
         plain.append(c)
-    check_table({**doc, "configs": plain, "fallbacks": fallbacks,
+    carried = carried or {}
+    check_table({**doc, **carried, "configs": plain, "fallbacks": fallbacks,
                  "points": points, "extended_configs": extended})
     with open(out, "w", encoding="utf-8") as f:
         f.write("{\n")
         for k in doc:
             f.write(f' "{k}": {json.dumps(doc[k])},\n')
+        if carried.get("default_row_pad"):
+            f.write(f' "default_row_pad": {carried["default_row_pad"]},\n')
         f.write(' "configs": [\n')
         f.write(",\n".join("  " + json.dumps(c, sort_keys=True) for c in plain))
         f.write("\n ],\n \"fallbacks\": [\n")
@@ -668,7 +694,19 @@ def write_lut_json(out: Path, doc: dict, configs, fallbacks, points) -> None:
             f.write("\n ],\n \"extended_configs\": [\n")
             f.write(",\n".join("  " + json.dumps(e, sort_keys=True)
                                for e in extended))
+        if carried.get("row_pads"):
+            f.write("\n ],\n \"row_pads\": [\n")
+            f.write(",\n".join("  " + json.dumps(r, sort_keys=True)
+                               for r in carried["row_pads"]))
         f.write("\n ]\n}\n")
+
+
+def existing_carried(path: Path) -> dict:
+    """The CARRIED fields of the table at `path` (see lut/README.md)."""
+    if not path.exists():
+        return {}
+    old = json.loads(path.read_text(encoding="utf-8"))
+    return {k: old[k] for k in CARRIED if k in old}
 
 
 def cmd_merge(args) -> int:
@@ -769,9 +807,11 @@ def cmd_merge(args) -> int:
     fallback_rows = [resolved(r, a) for r, a in fb_rows]
     point_rows = [resolved(r, a) for r, a in rows]
     doc = {k: v for k, v in old.items()
-           if k not in ("configs", "fallbacks", "points", "extended_configs")}
+           if k not in ("configs", "fallbacks", "points", "extended_configs")
+           + CARRIED}
     out = args.json_out
-    write_lut_json(out, doc, new_pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, new_pool, fallback_rows, point_rows,
+                   {k: old[k] for k in CARRIED if k in old})
     print(f"[merge] {len(changes)} {phase} rows changed, {kept_ties} kept as "
           f"within {args.min_gain:.0%}, {len(point_rows)} points total -> {out}")
 
@@ -870,7 +910,8 @@ def cmd_build(args) -> int:
     }
     LUT_DIR.mkdir(parents=True, exist_ok=True)
     out = args.json_out
-    write_lut_json(out, doc, pool, fallback_rows, point_rows)
+    write_lut_json(out, doc, pool, fallback_rows, point_rows,
+                   existing_carried(args.carry_from))
 
     groups = len({(r["phase"], r["group_size"], r["zero_point"],
                    r["row_stride"]) for r in point_rows})
@@ -935,6 +976,9 @@ def main() -> int:
     ap.add_argument("--fb-out", default=None,
                     help="FlatBuffer that compile writes (default lut/<arch>.fb "
                          "for the default JSON, else the JSON's path with .fb)")
+    ap.add_argument("--carry-from", default=None,
+                    help="build: table whose carried fields (row pads) the new "
+                         "table keeps (default lut/<arch>.json)")
     ap.add_argument("--flatc", default="flatc")
     ap.add_argument("--rocm-version", type=int, default=70100)
     ap.add_argument("--model-key", default="oga_models bits=4")
@@ -973,6 +1017,7 @@ def main() -> int:
     args.fb_out = (Path(args.fb_out) if args.fb_out
                    else LUT_DIR / f"{args.arch}.fb" if args.json_out == canonical
                    else args.json_out.with_suffix(".fb"))
+    args.carry_from = Path(args.carry_from) if args.carry_from else canonical
     try:
         return run(args)
     except LutError as e:
