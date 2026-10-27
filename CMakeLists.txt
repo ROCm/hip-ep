@@ -115,7 +115,7 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 # the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
 # assertions) and rocmlirTriton is added with add_subdirectory; its own CMake
 # detects the already-defined MLIRSupport target and skips rebuilding LLVM.
-option(ENABLE_ROCMLIRTRITON "Build rocmlirTriton (rocMLIR/Triton) in-tree, reusing this project's LLVM" OFF)
+option(ENABLE_ROCMLIRTRITON "Build rocmlirTriton (rocMLIR/Triton) in-tree, reusing this project's LLVM" ON)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
 # cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
