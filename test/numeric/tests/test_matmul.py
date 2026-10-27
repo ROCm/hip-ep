@@ -68,8 +68,11 @@ class TestMatMul:
             ([1, 1, 2880], [2880, 128]),  # gpt-oss-120b router
             ([1, 1, 2880], [2880, 32]),  # gpt-oss-20b router
             ([1, 520], [520, 8]),
-            ([1, 1, 2048], [2048, 1024]),
-            ([1, 1, 2048], [2048, 1032]),  # above the one-row GEMV cap
+            ([1, 1, 2048], [2048, 256]),
+            ([1, 1, 2048], [2048, 512]),
+            ([1, 1, 2048], [2048, 520]),  # above the one-row GEMV N cap
+            ([1, 8192], [8192, 128]),
+            ([1, 8200], [8200, 128]),  # above the one-row GEMV K cap
         ],
     )
     def test_matmul_one_row(self, model_runner, input_shape, weight_shape):
