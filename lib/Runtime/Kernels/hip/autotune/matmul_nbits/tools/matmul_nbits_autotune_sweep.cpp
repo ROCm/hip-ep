@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     // below print k_pad rather than s.k.
     const int k_pad = k32 ? s.k : ((s.k + 31) & ~31);
     std::vector<int> ms;
-    if (s.n >= big_n) {
+    if (big_n > 0 && s.n >= big_n) {
       ms.push_back(1);
       std::fprintf(stderr, "#BIGN N=%d K=%d: M=1 only (vocab projection)\n",
                    s.n, s.k);
