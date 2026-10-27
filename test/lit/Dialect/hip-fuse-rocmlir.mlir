@@ -944,3 +944,141 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
        pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf32>
   return %c, %q : tensor<1x16x4x4xf32>, tensor<1x8x4x4xui8>
 }
+
+// -----
+
+// A conv result with a reader outside the kernel still takes its epilogue. The
+// kernel returns the conv result as well, and the outside reader, which sat
+// between the conv and the epilogue, moves below the dispatch.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+// CHECK: %[[C:.*]] = hip.conv
+// CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[C]]
+// CHECK: return %[[C]], %[[S]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-DAG: %[[EC:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
+// CHECK-DAG: %[[ES:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
+// CHECK: %[[R:.*]]:2 = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}) outs(%[[EC]], %[[ES]] : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+// CHECK: %[[N:.*]] = hip.isnan({{.*}}) ins(%[[R]]#0
+// CHECK: return %[[R]]#1, %[[N]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xi1>) {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %ne = tensor.empty() : tensor<1x16x4x4xi1>
+  %n = hip.isnan(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%ne : tensor<1x16x4x4xi1>) : tensor<1x16x4x4xi1>
+  %se = tensor.empty() : tensor<1x16x4x4xf16>
+  %s = hip.sigmoid(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%se : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %s, %n : tensor<1x16x4x4xf16>, tensor<1x16x4x4xi1>
+}
+
+// -----
+
+// A value in the middle of the epilogue escapes: the residual sum is a graph
+// output and also feeds the activation. The kernel returns both, in chain
+// order.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%{{.*}}: tensor<1x8x4x4xf16>, %{{.*}}: tensor<16x8x3x3xf16>, %{{.*}}: tensor<16xf16>, %[[RES:.*]]: tensor<1x16x4x4xf16>) -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+// CHECK: %[[C:.*]] = hip.conv
+// CHECK: %[[A:.*]] = hip.add({{.*}}) ins(%[[C]], %[[RES]]
+// CHECK: %[[T:.*]] = hip.tanh({{.*}}) ins(%[[A]]
+// CHECK: return %[[A]], %[[T]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[R:.*]]:2 = hip.rocmlir
+// CHECK: return %[[R]]#1, %[[R]]#0
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>,
+                      %res: tensor<1x16x4x4xf16>)
+    -> (tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>) {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %ae = tensor.empty() : tensor<1x16x4x4xf16>
+  %a = hip.add(%ctx) ins(%c, %res : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%ae : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  %te = tensor.empty() : tensor<1x16x4x4xf16>
+  %t = hip.tanh(%ctx) ins(%a : tensor<1x16x4x4xf16>)
+      outs(%te : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %t, %a : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// An epilogue operand computed outside from the conv result would make the
+// kernel read its own output, so the add stays outside and the kernel holds
+// the conv alone.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x4x4xf16>
+// CHECK-NOT: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[R:.*]] = hip.rocmlir
+// CHECK: %[[N:.*]] = hip.isnan({{.*}}) ins(%[[R]]
+// CHECK: %[[W:.*]] = hip.where({{.*}}) ins(%[[N]], %[[R]], %[[R]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %ne = tensor.empty() : tensor<1x16x4x4xi1>
+  %n = hip.isnan(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%ne : tensor<1x16x4x4xi1>) : tensor<1x16x4x4xi1>
+  %we = tensor.empty() : tensor<1x16x4x4xf16>
+  %r = hip.where(%ctx) ins(%n, %c, %c : tensor<1x16x4x4xi1>,
+                       tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%we : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  return %r : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// SiLU written out as x * sigmoid(x): the conv result has two readers, both
+// in the kernel, so nothing escapes and the kernel has one result.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x16x4x4xf16>
+// CHECK: %[[C:.*]] = hip.conv
+// CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[C]]
+// CHECK: %[[M:.*]] = hip.mul({{.*}}) ins(%[[C]], %[[S]]
+// CHECK: return %[[M]] :
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[R:.*]] = hip.rocmlir({{.*}}) @rocMlir{{[0-9]+}} ins({{.*}}) outs(%{{.*}} : tensor<1x16x4x4xf16>)
+// CHECK-NEXT: return %[[R]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %w, %b : tensor<1x8x4x4xf16>,
+                                       tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %se = tensor.empty() : tensor<1x16x4x4xf16>
+  %s = hip.sigmoid(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%se : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
+  %me = tensor.empty() : tensor<1x16x4x4xf16>
+  %m = hip.mul(%ctx) ins(%c, %s : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%me : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  return %m : tensor<1x16x4x4xf16>
+}

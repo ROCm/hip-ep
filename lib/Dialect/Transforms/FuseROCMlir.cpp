@@ -122,6 +122,9 @@ struct FusionPolicy {
   bool activationPrologue = false;
   // A quantize on the forward chain.
   bool quantizeEpilogue = false;
+  // The forward chain may pass a value that is also read outside the kernel;
+  // the kernel then returns that value as an extra result.
+  bool multiOutput = false;
 
   bool allowsEpilogue(Operation *op) const {
     return isFusablePointwise(op) ||
@@ -154,6 +157,10 @@ private:
 // broadcast does not ("cannot regularize"). A slice would compute output that
 // the kernel then drops, so it stays outside too.
 //
+// A value on the chain that something outside also reads is written out as
+// one more kernel result instead of ending the chain: it is stored either way,
+// and the epilogue no longer has to load it back.
+//
 // Matmul and gemm anchors keep their current boundaries.
 template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
   FusionPolicy policy;
@@ -165,6 +172,7 @@ template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
                             static_cast<unsigned>(ViewKind::Broadcast);
     policy.activationPrologue = true;
     policy.quantizeEpilogue = true;
+    policy.multiOutput = true;
   }
   return policy;
 }
@@ -193,17 +201,21 @@ public:
   KernelRegion(Operation *anchor, const FusionPolicy &policy)
       : anchor(anchor), policy(policy) {}
 
-  // The op whose results the kernel returns; a DPS op, so its init becomes
-  // the dispatch's outs.
+  // The last op of the forward chain; a DPS op, so its init becomes the
+  // dispatch's last outs.
   DestinationStyleOpInterface getEnd() const { return end; }
+  // What the kernel returns, in chain order: each chain value read outside
+  // the kernel, ending with the end's result. Each comes from a DPS op.
+  ArrayRef<Value> getResults() const { return results; }
   Value getContext() const { return context; }
   SetVector<Value> &getOperands() { return operands; }
   SetVector<Operation *> &getOps() { return ops; }
 
-  // Follows single-use pointwise ops, and views the policy allows, from the
-  // anchor forward. Every op on the chain has one reader, so no other operand
-  // of a later op can depend on the anchor, and a multi-input pointwise op
-  // needs no check that it would form a cycle with the kernel.
+  // Follows pointwise ops, and views the policy allows, from the anchor
+  // forward. Without the multi-output policy every op on the chain has one
+  // reader. With it, a chain value may have readers outside; those readers
+  // can feed a later op's other operand, so each candidate is checked for a
+  // path back into the chain, which would make the kernel read its own output.
   void growForward();
   // Drops the leading hip.context the anchor's inputs carry.
   bool takeContext();
@@ -220,11 +232,15 @@ public:
   // more kernel argument and is what any init producer that cannot be
   // rematerialized -- a caller-supplied buffer, say -- falls back on.
   void collectRemainingOperands();
+  std::optional<SmallVector<Operation *>> readersToMove() const;
 
 private:
+  Operation *nextOnChain(const SetVector<Operation *> &chain) const;
+
   Operation *anchor;
   const FusionPolicy &policy;
   DestinationStyleOpInterface end;
+  SmallVector<Value> results;
   Value context;
   SetVector<Value> operands;
   SetVector<Operation *> ops;
@@ -233,26 +249,87 @@ private:
   SmallVector<Value> epilogueInputs;
 };
 
-void KernelRegion::growForward() {
-  SmallVector<Operation *> chain = {anchor};
-  while (chain.back()->hasOneUse()) {
-    Operation *user = *chain.back()->user_begin();
-    if (!policy.allowsEpilogue(user) && !policy.allowsForwardView(user))
-      break;
-    chain.push_back(user);
+// Whether `value` is computed, through ops outside the kernel, from a chain
+// op. Only ops between the anchor and the reader can be on such a path, so
+// the walk stops at anything defined before the anchor.
+static bool dependsOnChain(Value value, Operation *anchor,
+                           const SetVector<Operation *> &chain) {
+  Block *block = anchor->getBlock();
+  SmallVector<Value> worklist = {value};
+  DenseSet<Operation *> visited;
+  while (!worklist.empty()) {
+    Operation *def = worklist.pop_back_val().getDefiningOp();
+    if (def)
+      def = block->findAncestorOpInBlock(*def);
+    if (!def || def->isBeforeInBlock(anchor))
+      continue;
+    if (chain.contains(def))
+      return true;
+    if (!visited.insert(def).second)
+      continue;
+    // A region can read a chain value without passing it as an operand.
+    def->walk([&](Operation *nested) {
+      llvm::append_range(worklist, nested->getOperands());
+    });
   }
+  return false;
+}
+
+Operation *
+KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
+  Operation *tail = chain.back();
+  if (tail->getNumResults() != 1)
+    return nullptr;
+  Value value = tail->getResult(0);
+  if (!policy.multiOutput) {
+    if (!value.hasOneUse())
+      return nullptr;
+    Operation *user = *value.user_begin();
+    bool fusable =
+        policy.allowsEpilogue(user) || policy.allowsForwardView(user);
+    return fusable ? user : nullptr;
+  }
+
+  SetVector<Operation *> users(value.user_begin(), value.user_end());
+  // An escaping value becomes a kernel result, which needs an init.
+  if (users.size() > 1 && !isa<DestinationStyleOpInterface>(tail))
+    return nullptr;
+  SmallVector<Operation *> candidates;
+  for (Operation *user : users)
+    if (user->getBlock() == anchor->getBlock() &&
+        (policy.allowsEpilogue(user) || policy.allowsForwardView(user)))
+      candidates.push_back(user);
+  llvm::sort(candidates,
+             [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
+  for (Operation *user : candidates) {
+    bool closesCycle = llvm::any_of(user->getOperands(), [&](Value operand) {
+      return !chain.contains(operand.getDefiningOp()) &&
+             dependsOnChain(operand, anchor, chain);
+    });
+    if (!closesCycle)
+      return user;
+  }
+  return nullptr;
+}
+
+void KernelRegion::growForward() {
+  SetVector<Operation *> chain;
+  chain.insert(anchor);
+  while (Operation *next = nextOnChain(chain))
+    chain.insert(next);
   // A view outside the kernel is free, and one with no init cannot supply the
   // dispatch's outs.
   while (!isa<DestinationStyleOpInterface>(chain.back()))
     chain.pop_back();
 
-  Operation *prev = nullptr;
   for (Operation *op : chain) {
     auto dps = dyn_cast<DestinationStyleOpInterface>(op);
     SmallVector<Value> inputs = dps ? SmallVector<Value>(dps.getDpsInputs())
                                     : SmallVector<Value>(op->getOperands());
-    if (prev) {
-      inputs.erase(inputs.begin() + prev->use_begin()->getOperandNumber());
+    if (op != anchor) {
+      llvm::erase_if(inputs, [&](Value input) {
+        return chain.contains(input.getDefiningOp());
+      });
       llvm::append_range(epilogueInputs, inputs);
     }
     operands.insert_range(inputs);
@@ -266,8 +343,17 @@ void KernelRegion::growForward() {
       end = dps;
     }
     ops.insert(op);
-    prev = op;
   }
+
+  for (Operation *op : chain) {
+    if (op == end.getOperation())
+      break;
+    bool readOutside = llvm::any_of(
+        op->getUsers(), [&](Operation *user) { return !chain.contains(user); });
+    if (readOutside)
+      results.push_back(op->getResult(0));
+  }
+  llvm::append_range(results, end->getResults());
 }
 
 bool KernelRegion::takeContext() {
@@ -457,6 +543,47 @@ void KernelRegion::collectRemainingOperands() {
   ops = topologicalSort(ops);
 }
 
+// The dispatch goes where the end is, so an outside reader of an earlier
+// result that sits above the end has to move below the dispatch, together
+// with whatever reads it in turn. Returns them in block order, or nullopt if
+// one feeds the kernel, which growForward's cycle check rules out.
+//
+// Before:
+//   %c = hip.conv ins(%x, %w, %b)
+//   %m = hip.reduce_mean ins(%c, %axes)       <- outside reader of %c
+//   %s = hip.sigmoid ins(%c)
+// After:
+//   %r:2 = hip.rocmlir @rocMlir0 ins(%x, %w, %b) outs(%e0, %e1)
+//   %m = hip.reduce_mean ins(%r#0, %axes)
+std::optional<SmallVector<Operation *>> KernelRegion::readersToMove() const {
+  SmallVector<Operation *> moved;
+  if (results.size() == end->getNumResults())
+    return moved;
+  DenseSet<Value> escaped(results.begin(),
+                          results.end() - end->getNumResults());
+  auto readsEscaped = [&](Operation *op) {
+    WalkResult walk = op->walk([&](Operation *nested) {
+      for (Value operand : nested->getOperands())
+        if (escaped.contains(operand))
+          return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    return walk.wasInterrupted();
+  };
+  Operation *first = results.front().getDefiningOp();
+  for (Operation &op :
+       llvm::make_range(std::next(first->getIterator()), end->getIterator())) {
+    if (ops.contains(&op) || !readsEscaped(&op))
+      continue;
+    moved.push_back(&op);
+    escaped.insert(op.result_begin(), op.result_end());
+  }
+  for (Value operand : operands)
+    if (escaped.contains(operand))
+      return std::nullopt;
+  return moved;
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -496,9 +623,17 @@ public:
     region.absorbOperandFreeProducers();
     region.collectRemainingOperands();
 
+    std::optional<SmallVector<Operation *>> moved = region.readersToMove();
+    if (!moved)
+      return rewriter.notifyMatchFailure(
+          anchorOp, "an outside reader of a kernel result feeds the kernel");
+
     DestinationStyleOpInterface endOp = region.getEnd();
     Value context = region.getContext();
     SetVector<Value> &operands = region.getOperands();
+    ArrayRef<Value> results = region.getResults();
+    auto resultTypes = llvm::map_to_vector(
+        results, [](Value v) -> Type { return v.getType(); });
 
     auto parentModule = anchorOp->template getParentOfType<ModuleOp>();
     func::FuncOp newFunc;
@@ -508,7 +643,7 @@ public:
       auto funcType = rewriter.getFunctionType(
           llvm::map_to_vector(
               operands, [](Value v) { return promoteRankZero(v.getType()); }),
-          endOp->getResultTypes());
+          resultTypes);
 
       newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
                                      "rocMlir" + std::to_string((*counter)++),
@@ -532,13 +667,16 @@ public:
       for (auto *op : region.getOps()) {
         rewriter.clone(*op, mapping);
       }
-      auto returns =
-          llvm::map_to_vector(endOp->getResults(), [&mapping](Value v) {
-            return mapping.lookup(v);
-          });
+      auto returns = llvm::map_to_vector(
+          results, [&mapping](Value v) { return mapping.lookup(v); });
       func::ReturnOp::create(rewriter, rewriter.getUnknownLoc(), returns);
     }
 
+    Operation *last = endOp;
+    for (Operation *op : *moved) {
+      rewriter.moveOpAfter(op, last);
+      last = op;
+    }
     rewriter.setInsertionPointAfter(endOp);
 
     // The graph outside keeps its rank-0 value; only what crosses into the
@@ -562,12 +700,25 @@ public:
           rewriter, rewriter.getUnknownLoc(), promoted, operand, rankOneShape));
     }
 
-    auto rocMlirOp = RocMlirOp::create(
-        rewriter, rewriter.getUnknownLoc(), endOp->getResultTypes(),
-        SymbolRefAttr::get(newFunc), context, dispatchOperands,
-        endOp.getDpsInits().front());
+    auto inits = llvm::map_to_vector(results, [](Value v) {
+      auto result = cast<OpResult>(v);
+      return cast<DestinationStyleOpInterface>(result.getOwner())
+          .getTiedOpOperand(result)
+          ->get();
+    });
+    auto rocMlirOp = RocMlirOp::create(rewriter, rewriter.getUnknownLoc(),
+                                       resultTypes, SymbolRefAttr::get(newFunc),
+                                       context, dispatchOperands, inits);
 
-    rewriter.replaceOp(endOp, rocMlirOp);
+    SetVector<Operation *> &kernelOps = region.getOps();
+    size_t numEscaped = results.size() - endOp->getNumResults();
+    for (auto [value, replacement] :
+         llvm::zip(results.take_front(numEscaped), rocMlirOp.getResults())) {
+      rewriter.replaceUsesWithIf(value, replacement, [&](OpOperand &use) {
+        return !kernelOps.contains(use.getOwner());
+      });
+    }
+    rewriter.replaceOp(endOp, rocMlirOp.getResults().drop_front(numEscaped));
     return success();
   }
 
