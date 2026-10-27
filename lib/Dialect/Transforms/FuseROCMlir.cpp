@@ -22,6 +22,8 @@
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/GreedyPatternRewriteDriver.h>
 
+#include <type_traits>
+
 namespace mlir::hip {
 #define GEN_PASS_DEF_FUSEROCMLIRPASS
 #include "hip/Dialect/Transforms/Passes.h.inc"
@@ -105,7 +107,8 @@ public:
       }
       ops.insert(endOp);
       prevOp = endOp;
-    } while (endOp->hasOneUse() && isaPointwiseOp(*endOp->user_begin()));
+    } while (endOp->hasOneUse() && (isaPointwiseOp(*endOp->user_begin()) ||
+                                    isaFusableView(*endOp->user_begin())));
 
     // Remove the hip.context operand
     auto context = operands.front();
@@ -147,6 +150,8 @@ public:
       operands.insert(dequant.getPacked());
       operands.insert(dequant.getAbsmax());
     }
+
+    absorbInputProducers(anchorOp, context, operands, ops);
 
     // `ops` is cloned into an IsolatedFromAbove func, so every value it reads
     // has to resolve inside that func. The DPS inputs above cover the data,
@@ -260,6 +265,98 @@ public:
 
     rewriter.replaceOp(endOp, rocMlirOp);
     return success();
+  }
+
+  // A convolution reads and writes through rock.transform views, so a
+  // transpose next to it becomes a layout of the kernel instead of a separate
+  // copy (TosaToRock folds it into input_layout / output_layout). Matmul and
+  // gemm anchors keep their current boundaries.
+  static constexpr bool kFuseViews = std::is_same_v<AnchorOp, ConvOp>;
+
+  bool isaFusableView(Operation *op) const {
+    return kFuseViews && isa_and_present<TransposeOp>(op);
+  }
+
+  // Pulls the producers of the anchor's own inputs into the kernel: any
+  // transpose, and on the activation a unary pointwise op whose only reader is
+  // being absorbed (absorbing one with other readers would compute it twice).
+  // Epilogue inputs are left alone; their transposes would not fold into the
+  // conv layout.
+  //
+  // Before:
+  //   %t0 = hip.transpose ins(%x : tensor<1x96x96x512xf16>) {perm = [0,3,1,2]}
+  //   %c  = hip.conv ins(%t0, %w, %b) -> tensor<1x512x96x96xf16>
+  //   %t1 = hip.transpose ins(%c) {perm = [0,2,3,1]}
+  //   %a  = hip.add ins(%t1, %r) -> tensor<1x96x96x512xf16>
+  // After:
+  //   %a = hip.rocmlir @rocMlir0(%x, %w, %b, %r)
+  //   func @rocMlir0 { transpose -> conv -> transpose -> add }
+  void absorbInputProducers(AnchorOp anchorOp, Value context,
+                            SetVector<Value> &operands,
+                            SetVector<Operation *> &ops) const {
+    if (!kFuseViews)
+      return;
+    auto isStatic = [](Value v) {
+      auto type = dyn_cast<RankedTensorType>(v.getType());
+      return type && type.hasStaticShape();
+    };
+    // An absorbed op keeps running outside the kernel while it has readers
+    // there, so a pointwise op feeding it would not be saved, only duplicated.
+    auto onlyReadInKernel = [&](Operation *op) {
+      return llvm::all_of(op->getUsers(),
+                          [&](Operation *user) { return ops.contains(user); });
+    };
+    SmallPtrSet<Operation *, 8> readOutside;
+    // Only the activation takes a pointwise prologue: an elementwise op on the
+    // filter would rerun in every workgroup that loads it.
+    SmallVector<std::pair<Value, bool>> worklist;
+    if constexpr (kFuseViews) {
+      worklist.push_back({anchorOp.getInput(), true});
+      worklist.push_back({anchorOp.getWeights(), false});
+      if (Value bias = anchorOp.getBias())
+        worklist.push_back({bias, false});
+    }
+
+    while (!worklist.empty()) {
+      auto [value, allowPointwise] = worklist.pop_back_val();
+      if (!operands.contains(value))
+        continue;
+      auto producer = value.getDefiningOp<DestinationStyleOpInterface>();
+      if (!producer || ops.contains(producer))
+        continue;
+      SmallVector<Value> inputs;
+      for (Value input : producer.getDpsInputs())
+        if (input != context && !isInlineScalarConstant(input))
+          inputs.push_back(input);
+      bool keepsRunning =
+          !onlyReadInKernel(producer) ||
+          llvm::any_of(producer->getUsers(), [&](Operation *user) {
+            return readOutside.contains(user);
+          });
+      bool absorb = isaFusableView(producer) ||
+                    (allowPointwise && isaPointwiseOp(producer) &&
+                     inputs.size() == 1 && !keepsRunning);
+      if (!absorb || !llvm::all_of(inputs, isStatic))
+        continue;
+
+      if (keepsRunning)
+        readOutside.insert(producer);
+      ops.insert(producer);
+      operands.remove(value);
+      for (Value init : producer.getDpsInits())
+        if (Operation *initOp = init.getDefiningOp())
+          ops.insert(initOp);
+      for (Value input : producer.getDpsInputs()) {
+        if (input == context)
+          continue;
+        if (isInlineScalarConstant(input)) {
+          ops.insert(input.getDefiningOp());
+          continue;
+        }
+        operands.insert(input);
+        worklist.push_back({input, allowPointwise});
+      }
+    }
   }
 
   bool isaPointwiseOp(Operation *op) const {

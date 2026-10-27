@@ -238,3 +238,179 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
       outs(%maxInit : tensor<1x16x4x4xf16>) : tensor<1x16x4x4xf16>
   return %r : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// An NHWC convolution arrives wrapped in layout transposes, and the graph
+// around it transposes back for the residual add. Every transpose becomes part
+// of the kernel's input or output layout, so the kernel reads the NHWC
+// activation and filter directly and main_graph keeps no hip.transpose.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: (%{{[a-z0-9]+}}: tensor<16xf16>, %[[R:[a-z0-9]+]]: tensor<1x16x4x4xf16>, %[[W:[a-z0-9]+]]: tensor<16x3x3x8xf16>, %[[X:[a-z0-9]+]]: tensor<1x4x4x8xf16>) -> tensor<1x4x4x16xf16>
+// CHECK-DAG: hip.transpose({{.*}}) ins(%[[X]] : tensor<1x4x4x8xf16>)
+// CHECK-DAG: hip.transpose({{.*}}) ins(%[[W]] : tensor<16x3x3x8xf16>)
+// CHECK: hip.conv
+// CHECK: hip.transpose
+// CHECK: hip.add
+// CHECK-SAME: %[[R]]
+// CHECK: %[[OUT:.*]] = hip.transpose
+// CHECK: return %[[OUT]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.transpose
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.transpose
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf16>,
+                      %w: tensor<16x3x3x8xf16>, %b: tensor<16xf16>,
+                      %r: tensor<1x16x4x4xf16>) -> tensor<1x4x4x16xf16> {
+  %xe = tensor.empty() : tensor<1x8x4x4xf16>
+  %xn = hip.transpose(%ctx) ins(%x : tensor<1x4x4x8xf16>)
+      outs(%xe : tensor<1x8x4x4xf16>) {perm = [0, 3, 1, 2]} : tensor<1x8x4x4xf16>
+  %we = tensor.empty() : tensor<16x8x3x3xf16>
+  %wn = hip.transpose(%ctx) ins(%w : tensor<16x3x3x8xf16>)
+      outs(%we : tensor<16x8x3x3xf16>) {perm = [0, 3, 1, 2]} : tensor<16x8x3x3xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%xn, %wn, %b : tensor<1x8x4x4xf16>,
+                                         tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  %ce = tensor.empty() : tensor<1x4x4x16xf16>
+  %cl = hip.transpose(%ctx) ins(%c : tensor<1x16x4x4xf16>)
+      outs(%ce : tensor<1x4x4x16xf16>) {perm = [0, 2, 3, 1]} : tensor<1x4x4x16xf16>
+  %te = tensor.empty() : tensor<1x16x4x4xf16>
+  %t = hip.transpose(%ctx) ins(%cl : tensor<1x4x4x16xf16>)
+      outs(%te : tensor<1x16x4x4xf16>) {perm = [0, 3, 1, 2]} : tensor<1x16x4x4xf16>
+  %ae = tensor.empty() : tensor<1x16x4x4xf16>
+  %a = hip.add(%ctx) ins(%t, %r : tensor<1x16x4x4xf16>, tensor<1x16x4x4xf16>)
+      outs(%ae : tensor<1x16x4x4xf16>) -> tensor<1x16x4x4xf16>
+  %oe = tensor.empty() : tensor<1x4x4x16xf16>
+  %o = hip.transpose(%ctx) ins(%a : tensor<1x16x4x4xf16>)
+      outs(%oe : tensor<1x4x4x16xf16>) {perm = [0, 2, 3, 1]} : tensor<1x4x4x16xf16>
+  return %o : tensor<1x4x4x16xf16>
+}
+
+// -----
+
+// A unary op on the activation is a prologue of the kernel when nothing else
+// reads it: the kernel takes the f32 tensor and casts as it loads.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: %[[X:[a-z0-9]+]]: tensor<1x4x4x8xf32>)
+// CHECK: hip.cast({{.*}}) ins(%[[X]] : tensor<1x4x4x8xf32>)
+// CHECK: hip.transpose
+// CHECK: hip.conv
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.cast
+// CHECK-NOT: hip.transpose
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %he = tensor.empty() : tensor<1x4x4x8xf16>
+  %h = hip.cast(%ctx) ins(%x : tensor<1x4x4x8xf32>)
+      outs(%he : tensor<1x4x4x8xf16>) {to = 10 : i64} : tensor<1x4x4x8xf16>
+  %xe = tensor.empty() : tensor<1x8x4x4xf16>
+  %xn = hip.transpose(%ctx) ins(%h : tensor<1x4x4x8xf16>)
+      outs(%xe : tensor<1x8x4x4xf16>) {perm = [0, 3, 1, 2]} : tensor<1x8x4x4xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%xn, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// A transpose with a reader outside the kernel is still cloned in, since a
+// view costs the kernel nothing, but it keeps running for that reader -- so
+// the cast feeding it stays outside rather than being computed twice.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: %[[H:[a-z0-9]+]]: tensor<1x4x4x8xf16>)
+// CHECK-NOT: hip.cast
+// CHECK: hip.transpose({{.*}}) ins(%[[H]]
+// CHECK: hip.conv
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[CAST:.*]] = hip.cast
+// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[CAST]]
+// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @rocMlir{{[0-9]*}} ins({{.*}}, %[[CAST]] :
+// CHECK: return %[[K]], %[[T]]
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
+                      %w: tensor<16x8x3x3xf16>, %b: tensor<16xf16>)
+    -> (tensor<1x16x4x4xf16>, tensor<1x8x4x4xf16>) {
+  %he = tensor.empty() : tensor<1x4x4x8xf16>
+  %h = hip.cast(%ctx) ins(%x : tensor<1x4x4x8xf32>)
+      outs(%he : tensor<1x4x4x8xf16>) {to = 10 : i64} : tensor<1x4x4x8xf16>
+  %xe = tensor.empty() : tensor<1x8x4x4xf16>
+  %xn = hip.transpose(%ctx) ins(%h : tensor<1x4x4x8xf16>)
+      outs(%xe : tensor<1x8x4x4xf16>) {perm = [0, 3, 1, 2]} : tensor<1x8x4x4xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%xn, %w, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c, %xn : tensor<1x16x4x4xf16>, tensor<1x8x4x4xf16>
+}
+
+// -----
+
+// The filter never takes a pointwise prologue: the cast would rerun in every
+// workgroup that loads the filter. It stays a separate op.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: tensor<16x8x3x3xf16>
+// CHECK-NOT: hip.cast
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.cast
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
+                      %w: tensor<16x8x3x3xf32>, %b: tensor<16xf16>)
+    -> tensor<1x16x4x4xf16> {
+  %we = tensor.empty() : tensor<16x8x3x3xf16>
+  %wh = hip.cast(%ctx) ins(%w : tensor<16x8x3x3xf32>)
+      outs(%we : tensor<16x8x3x3xf16>) {to = 10 : i64} : tensor<16x8x3x3xf16>
+  %e = tensor.empty() : tensor<1x16x4x4xf16>
+  %c = hip.conv(%ctx) ins(%x, %wh, %b : tensor<1x8x4x4xf16>,
+                                        tensor<16x8x3x3xf16>, tensor<16xf16>)
+      outs(%e : tensor<1x16x4x4xf16>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3],
+       pads = [1, 1, 1, 1], strides = [1, 1]} : tensor<1x16x4x4xf16>
+  return %c : tensor<1x16x4x4xf16>
+}
+
+// -----
+
+// Views are fused only around convolutions. A matmul keeps its transposes
+// outside the kernel, on both sides.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: hip.transpose
+// CHECK: hip.matmul
+// CHECK-NOT: hip.transpose
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.transpose
+// CHECK: hip.rocmlir
+// CHECK: hip.transpose
+func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
+                      %b: tensor<16x32xf16>) -> tensor<32x8xf16> {
+  %ae = tensor.empty() : tensor<8x16xf16>
+  %at = hip.transpose(%ctx) ins(%a : tensor<16x8xf16>)
+      outs(%ae : tensor<8x16xf16>) {perm = [1, 0]} : tensor<8x16xf16>
+  %e = tensor.empty() : tensor<8x32xf16>
+  %m = hip.matmul(%ctx) ins(%at, %b : tensor<8x16xf16>, tensor<16x32xf16>)
+      outs(%e : tensor<8x32xf16>) : tensor<8x32xf16>
+  %oe = tensor.empty() : tensor<32x8xf16>
+  %o = hip.transpose(%ctx) ins(%m : tensor<8x32xf16>)
+      outs(%oe : tensor<32x8xf16>) {perm = [1, 0]} : tensor<32x8xf16>
+  return %o : tensor<32x8xf16>
+}
