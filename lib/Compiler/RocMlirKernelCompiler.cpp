@@ -34,6 +34,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
 // Headers only -- see loadHipGetDeviceProperties below for why the HIP runtime
@@ -438,13 +439,25 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   if (kernelNames.empty())
     return success();
 
-  // The hip form of each kernel, kept for one whose computation folds away
-  // in lowering: rocMLIR has nothing to compile for it, so its dispatches go
-  // back to the hip ops.
+  // The hip form of each kernel, kept for one rocMLIR cannot take: one whose
+  // computation folds away in lowering, or one it fails to compile (an i64
+  // elementwise kernel, say: rock.blockwise_load/store stop at 32-bit
+  // integers). Its dispatches go back to the hip ops, so one such kernel does
+  // not fail the whole subgraph.
   OwningOpRef<ModuleOp> hipKernels = ModuleOp::create(module.getLoc());
   for (auto func : module.getOps<func::FuncOp>())
     if (func->hasAttr("rock.kernel"))
       hipKernels->push_back(func.clone());
+  llvm::StringSet<> onHipPath;
+  auto runOnHipPath = [&](StringRef name) {
+    inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
+    onHipPath.insert(name);
+  };
+  auto fallBack = [&](StringRef name, StringRef stage) {
+    llvm::errs() << "warning: rocMLIR " << stage << " failed for kernel '"
+                 << name << "'; running its hip ops instead\n";
+    runOnHipPath(name);
+  };
 
   // Lift the kernels out of `module` and convert them all to tosa in one go.
   // This used to clone the whole module for the conversion and then clone it
@@ -477,31 +490,43 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     // points a custom compileOne uses (createTunableParamSpace, tuningSetStr)
     // only see anything once the kernel is in rock form. Handing the callback
     // raw tosa instead gave --autotune an empty search space.
-    if (!runRocMlirHighLevelPipeline(*single))
-      return module.emitError()
-             << "rocMLIR high-level pipeline failed for kernel '" << name
-             << "'";
+    if (!runRocMlirHighLevelPipeline(*single)) {
+      fallBack(name, "high-level pipeline");
+      continue;
+    }
 
     if (!hasRocMlirComputation(*single)) {
       if (options.log)
         *options.log << options.logPrefix << " kernel '" << name
                      << "' has no computation left after lowering; running "
                         "its hip ops instead\n";
-      inlineRocMlirKernel(module, hipKernels->lookupSymbol<func::FuncOp>(name));
+      runOnHipPath(name);
       continue;
     }
 
-    CompiledKernel &out = compiledByKernel[name];
+    CompiledKernel out;
     bool ok = options.compileOne
                   ? options.compileOne(*single, name, out)
                   : compileRocMlirDefaultPerfConfig(*single, options.arch, out);
-    if (!ok)
-      return module.emitError()
-             << "rocMLIR failed to compile kernel '" << name << "'";
+    if (!ok) {
+      fallBack(name, "compile");
+      continue;
+    }
+    compiledByKernel[name] = std::move(out);
   }
 
+  // A deferred compile that fails leaves its kernel without a binary.
   if (options.finishCompiles && !options.finishCompiles(compiledByKernel))
     return module.emitError() << "rocMLIR deferred kernel compiles failed";
+  for (const std::string &name : kernelNames) {
+    if (onHipPath.contains(name))
+      continue;
+    auto it = compiledByKernel.find(name);
+    if (it == compiledByKernel.end() || it->second.binary.empty()) {
+      compiledByKernel.erase(name);
+      fallBack(name, "deferred compile");
+    }
+  }
 
   // Stamp the compiled artifact onto each `hip.rocmlir` dispatch
   // (kernel_binary + grid_size + block_size). The kernel funcs themselves are
@@ -533,6 +558,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
 
   if (options.log) {
     for (const std::string &name : kernelNames) {
+      if (onHipPath.contains(name))
+        continue;
       const CompiledKernel &kernel = compiledByKernel[name];
       *options.log << options.logPrefix << "   " << name << ": "
                    << kernel.binary.size()
@@ -541,7 +568,8 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
     }
     *options.log << options.logPrefix << " embedded " << totalBytes
                  << "-byte binary; deleted " << kernelNames.size()
-                 << " kernel func(s)\n";
+                 << " kernel func(s), " << onHipPath.size()
+                 << " of them back on the hip path\n";
   }
   return success();
 }
