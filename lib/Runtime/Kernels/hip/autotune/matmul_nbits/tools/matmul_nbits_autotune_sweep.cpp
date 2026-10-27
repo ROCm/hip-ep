@@ -17,13 +17,11 @@
  * Shape list is CSV with a header, columns K,N,block_size,has_zp (extra columns
  * ignored) -- i.e. what extract_shapes.py emits.
  *
- * Build (from the repo root) for the release target at the release -O2, so the
- * sweep times the code custom_kernels_<arch>.dll runs (gfx11-generic or gfx1170);
- * the table is still per chip (update_lut.py --arch):
- *   clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w \
- *       -I lib/Runtime/Kernels/include \
- *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
- *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
+ * Build it as "Regenerating" in ../README.md describes: for the release target
+ * at the release -O2, so the sweep times the code custom_kernels_<arch>.dll runs
+ * (gfx11-generic or gfx1170; the table is still per chip, update_lut.py --arch),
+ * and linked with tools/empty_lut_data.cpp, so the shapes it measures do not hit
+ * the shipped table.
  */
 #include <hip/hip_runtime.h>
 
