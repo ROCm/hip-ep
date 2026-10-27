@@ -176,6 +176,12 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 }
 
 def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
+  let options = [
+    Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
+           "Absorb the view ops and the unary prologue that a convolution "
+           "anchor folds into its layouts. Off keeps every kernel a "
+           "forward-only pointwise chain.">
+  ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::tensor::TensorDialect",
