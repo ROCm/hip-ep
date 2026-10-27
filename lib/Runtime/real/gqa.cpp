@@ -292,6 +292,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
     // Skv != sq) and sq otherwise (encoder self-attn, where they are equal).
     // no_causal is fp16/fp32 only (decomposed pipeline), never quantized.
     const int src_tokens = (skv >= 0) ? skv : sq;
+    OP_ROCTX_MARK("kv.append");
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, src_tokens, G,
                                 d, present_seq, /*past_len=*/0,
                                 /*seqlens_k_ptr=*/nullptr, elem_sz,
@@ -313,6 +314,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   const void *v_sc = quantized ? v_scale : nullptr;
   if (past_key && past_len > 0 && past_key != present_key) {
     // Separate-buffer concat: needs host-side past_len for stride computation.
+    OP_ROCTX_MARK("kv.concat");
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
                                 elem_sz, kv_dtype, k_sc, copy_lo) != 0)
@@ -323,6 +325,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
+    OP_ROCTX_MARK("kv.append");
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
                                 present_seq, past_len, seqlens_k_ptr, elem_sz,
                                 kv_dtype, k_sc) != 0)
@@ -451,6 +454,7 @@ static int gqa_forward_fused(
       void *d_Qsplit = ws + off_split;
       void *d_Ksplit = ws + off_split + Q_full_bytes;
       void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
+      OP_ROCTX_MARK("split_qkv");
       if (hip_gqa_split_qkv(
               stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
               static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
@@ -466,6 +470,7 @@ static int gqa_forward_fused(
       void *d_Qroped = ws + off_rope;
       void *d_Kroped = ws + off_rope + Q_full_bytes;
       int half_rot = static_cast<int>(d / 2);
+      OP_ROCTX_MARK("rope");
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
@@ -515,6 +520,7 @@ static int gqa_forward_fused(
       // scan and therefore the split count that wins.
       const int kv_dtype = kv_dtype_abi(kv_format);
       int drc;
+      OP_ROCTX_MARK("flash.decode");
       if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
           static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
         drc = hip_gqa_flash_decode(
@@ -661,6 +667,7 @@ static int gqa_forward_fused(
     void *d_Qsplit = ws + off_split;
     void *d_Ksplit = ws + off_split + Q_full_bytes;
     void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
+    OP_ROCTX_MARK("split_qkv");
     if (hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
                           static_cast<int>(B), static_cast<int>(sq),
                           static_cast<int>(H), static_cast<int>(G),
@@ -676,6 +683,7 @@ static int gqa_forward_fused(
     void *d_Qroped = ws + off_rope;
     void *d_Kroped = ws + off_rope + Q_full_bytes;
     int half_rot = static_cast<int>(d / 2);
+    OP_ROCTX_MARK("rope");
     if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(H), static_cast<int>(d), half_rot,
@@ -720,6 +728,7 @@ static int gqa_forward_fused(
     void *d_Kf16 = ws + off_deq;
     void *d_Vf16 =
         ws + off_deq + static_cast<size_t>(B) * G * total_seq * d * 2;
+    OP_ROCTX_MARK("kv.dequant");
     if (hip_gqa_dequant_kv_i8_to_fp16(
             stream, present_key, d_Kf16, k_scale, static_cast<int>(B),
             static_cast<int>(total_seq), static_cast<int>(G),
@@ -743,6 +752,7 @@ static int gqa_forward_fused(
   const bool v8x_prefill = d == 256;
   const char *fused_prefill_kernel = v8x_prefill ? "v8x" : "v6x";
   int fp_rc;
+  OP_ROCTX_MARK("flash.prefill");
   if (hip_gqa_autotune_mode(state->gqa_autotune_policy) ==
       static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
     fp_rc = hip_gqa_flash_prefill(
@@ -1415,6 +1425,7 @@ static int gqa_forward_hipblaslt(
       void *d_Qsplit = ws + off_split;
       void *d_Ksplit = ws + off_split + Q_full_bytes;
       void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
+      OP_ROCTX_MARK("split_qkv");
       if (hip_gqa_split_qkv(
               stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
               static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
@@ -1432,6 +1443,7 @@ static int gqa_forward_hipblaslt(
       void *d_Kroped = ws + off_rope + Q_full_bytes;
 
       int half_rot = static_cast<int>(d / 2);
+      OP_ROCTX_MARK("rope");
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
@@ -1479,6 +1491,7 @@ static int gqa_forward_hipblaslt(
       return -1;
     }
     // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available.
+    OP_ROCTX_MARK("fused_decode");
     if (hip_gqa_fused_decode(
             stream, qSrc, present_key, present_value, output,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -2270,6 +2283,7 @@ static int gqa_forward_hipblaslt(
       void *d_Qsplit = ws + off_Qsplit;
       void *d_Ksplit = ws + off_Ksplit;
       void *d_Vsplit = ws + off_Vsplit;
+      OP_ROCTX_MARK("split_qkv");
       HIP_CHECK(hip_gqa_split_qkv(
           stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
           static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
@@ -2286,6 +2300,7 @@ static int gqa_forward_hipblaslt(
       void *d_Qroped = ws + off_Qroped;
       void *d_Kroped = ws + off_Kroped;
 
+      OP_ROCTX_MARK("rope");
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
@@ -2306,6 +2321,7 @@ static int gqa_forward_hipblaslt(
     // Skipped at sq == 1: BSHD and BNSD share memory, so the Score GEMM reads
     // qSrc directly.
     if (need_transpose) {
+      OP_ROCTX_MARK("transpose");
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
           static_cast<int>(H), static_cast<int>(d), static_cast<int>(elem_sz)));
@@ -2464,6 +2480,7 @@ static int gqa_forward_hipblaslt(
       // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
       // (BSHD==BNSD@sq=1).
       hipblasLtMatmulAlgo_t sAlgo = sSt->algo;
+      OP_ROCTX_MARK("qk.gemm");
       HIPBLAS_CHECK(hipblasLtMatmul(
           ltHandle, sSt->desc, &scoreAlpha, scoreAc, sSt->layA, scoreB,
           sSt->layB, &beta, d_S_f32, sSt->layC, d_S_f32, sSt->layD, &sAlgo,
@@ -2502,6 +2519,7 @@ static int gqa_forward_hipblaslt(
       // change needed. (At sq == 1 the narrowed range is precisely the window,
       // so the kernel then writes nothing -- correct, just redundant.)
       if ((sq > 1 || local_window_size > 0) && !no_causal) {
+        OP_ROCTX_MARK("mask");
         HIP_CHECK(hip_gqa_causal_mask_f32(
             stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(kv_ext),
             static_cast<int>(c), scoreBatchStride,
@@ -2526,6 +2544,7 @@ static int gqa_forward_hipblaslt(
       // triangle writes -INFINITY: adding any finite bias to it leaves
       // -INFINITY, and where the triangle wrote nothing the sum is the same
       // either way.
+      OP_ROCTX_MARK("softmax");
       if (attention_bias) {
         HIP_CHECK(hip_gqa_softmax_f32_to_out_biased(
             stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * c),
@@ -2556,6 +2575,7 @@ static int gqa_forward_hipblaslt(
       // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
       //        GEMM writes straight to output (BSHD==BNSD).
       hipblasLtMatmulAlgo_t vAlgo = vSt->algo;
+      OP_ROCTX_MARK("pv.gemm");
       HIPBLAS_CHECK(hipblasLtMatmul(
           ltHandle, vSt->desc, &valAlpha, valueAc, vSt->layA, d_S_fp16,
           vSt->layB, &beta, valueC, vSt->layC, valueC, vSt->layD, &vAlgo,
@@ -2565,6 +2585,7 @@ static int gqa_forward_hipblaslt(
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
     // Skipped at sq == 1: the Value GEMM already wrote into output.
     if (need_transpose) {
+      OP_ROCTX_MARK("transpose");
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, d_O, output, static_cast<int>(B), static_cast<int>(H),
           static_cast<int>(sq), static_cast<int>(d),

@@ -28,10 +28,12 @@ namespace {
 
 using RoctxRangePushFn = int (*)(const char *);
 using RoctxRangePopFn = int (*)();
+using RoctxMarkFn = void (*)(const char *);
 
 struct RoctxApi {
   RoctxRangePushFn push = nullptr;
   RoctxRangePopFn pop = nullptr;
+  RoctxMarkFn mark = nullptr; // optional: ranges work without it
 };
 
 bool roctxVerbose() {
@@ -53,6 +55,8 @@ RoctxApi loadRoctxApi() {
         ::GetProcAddress(module, "roctxRangePushA"));
     api.pop = reinterpret_cast<RoctxRangePopFn>(
         ::GetProcAddress(module, "roctxRangePop"));
+    api.mark =
+        reinterpret_cast<RoctxMarkFn>(::GetProcAddress(module, "roctxMarkA"));
   }
 #else
   const char *library =
@@ -65,6 +69,7 @@ RoctxApi loadRoctxApi() {
         reinterpret_cast<RoctxRangePushFn>(::dlsym(module, "roctxRangePushA"));
     api.pop =
         reinterpret_cast<RoctxRangePopFn>(::dlsym(module, "roctxRangePop"));
+    api.mark = reinterpret_cast<RoctxMarkFn>(::dlsym(module, "roctxMarkA"));
   }
 #endif
 
@@ -107,4 +112,10 @@ extern "C" HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void) {
 
 extern "C" HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void) {
   return roctxApi().push != nullptr;
+}
+
+extern "C" HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_mark(const char *name) {
+  const RoctxApi &api = roctxApi();
+  if (api.mark && name)
+    api.mark(name);
 }

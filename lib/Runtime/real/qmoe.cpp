@@ -244,6 +244,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                     (long long)num_tokens, (long long)num_experts, (long long)k,
                     (long long)normalize_routing_weights,
                     router_weights ? "yes" : "no");
+  OP_ROCTX_MARK("route");
   HIP_CHECK(hip_qmoe_topk_routing(
       stream, router_probs, router_weights, d_expert_indices, d_expert_weights,
       num_tokens, num_experts, k, normalize_routing_weights, elem_size));
@@ -267,6 +268,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     if (dp4a_ok) {
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld)\n",
                         (long long)k);
+      OP_ROCTX_MARK("decode.dp4a");
       HIP_CHECK(hip_qmoe_decode_fused_dp4a(
           stream, input, d_expert_indices, d_expert_weights, fc1_weights,
           fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
@@ -278,6 +280,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
                       (long long)k);
+    OP_ROCTX_MARK("decode.fp");
     HIP_CHECK(hip_qmoe_decode_fused(
         stream, input, d_expert_indices, d_expert_weights, fc1_weights,
         fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
@@ -295,6 +298,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                           expert_weight_bits, elem_size)) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: relu2 fused decode path (k=%lld)\n",
                       (long long)k);
+    OP_ROCTX_MARK("decode.relu2");
     HIP_CHECK(hip_qmoe_amd_decode_fused(
         stream, input, d_expert_indices, d_expert_weights, fc1_weights,
         fc1_scales, fc2_weights, fc2_scales, d_act_buf, d_fc2_buf, output,
@@ -316,6 +320,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
 
     auto activate = [&]() -> int {
+      OP_ROCTX_MARK("act");
       if (swiglu)
         return hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, routed_rows,
                                inter_size, activation_alpha, activation_beta,
@@ -365,10 +370,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     if (grouped) {
       // Routing slots that name no expert leave the tail of the sorted ids
       // unwritten; zero it so the fixed-size gather below stays in bounds.
+      OP_ROCTX_MARK("zero_ids");
       HIP_CHECK(hipMemsetAsync(d_sorted_token_ids, 0,
                                routed_rows * sizeof(int32_t),
                                static_cast<hipStream_t>(stream)));
     }
+    OP_ROCTX_MARK("bucket");
     HIP_CHECK(hip_qmoe_bucket_tokens_ragged(
         stream, d_expert_indices, d_expert_weights, d_expert_counts,
         d_expert_offsets, d_sorted_token_ids, d_sorted_weights,
@@ -377,23 +384,28 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         elem_size));
 
     if (grouped) {
+      OP_ROCTX_MARK("row_tiles");
       HIP_CHECK(hip_qmoe_build_row_tiles(
           stream, d_expert_counts, num_experts, kGroupedSplitRows,
           kGroupedSmallTile, kGroupedBigTile, d_tiles_small, d_num_tiles,
           d_tiles_big, d_num_tiles + 1));
+      OP_ROCTX_MARK("gather");
       HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
                                        d_sorted_token_ids, hidden_size,
                                        routed_rows, elem_size));
 
       auto grouped_fc = [&](const void *a, const void *w, const void *s,
                             const void *zp, const void *b, void *out, int64_t n,
-                            int64_t kdim) -> int {
+                            int64_t kdim, const char *small_step,
+                            const char *big_step) -> int {
+        OP_ROCTX_MARK(small_step);
         int rc = hip_matmul_nbits_wmma_smallm_grouped(
             stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b, d_expert_offsets,
             d_tiles_small, d_num_tiles, out, max_small_tiles, kGroupedSmallTile,
             n, kdim, expert_weight_bits, block_size, elem_size);
         if (rc != 0)
           return rc;
+        OP_ROCTX_MARK(big_step);
         return hip_matmul_nbits_wmma_smallm_grouped(
             stream, -1, a, w, s, zp, /*zp_packed_u4=*/1, b, d_expert_offsets,
             d_tiles_big, d_num_tiles + 1, out, max_big_tiles, kGroupedBigTile,
@@ -401,16 +413,19 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       };
       HIP_CHECK(grouped_fc(d_gather_buf, fc1_weights, fc1_scales,
                            fc1_zero_points, fc1_bias, d_fc1_buf, fusion_inter,
-                           hidden_size));
+                           hidden_size, "fc1.small", "fc1.big"));
       HIP_CHECK(activate());
       HIP_CHECK(grouped_fc(d_act_buf, fc2_weights, fc2_scales, fc2_zero_points,
-                           fc2_bias, d_fc2_buf, hidden_size, inter_size));
+                           fc2_bias, d_fc2_buf, hidden_size, inter_size,
+                           "fc2.small", "fc2.big"));
+      OP_ROCTX_MARK("reduce");
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
           stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
           d_expert_weights, output, num_tokens, hidden_size, k, elem_size));
       return 0;
     }
 
+    OP_ROCTX_MARK("fc1.ragged");
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, input, d_sorted_token_ids, d_row_groups, d_row_group_count,
         d_fc1_queue_head, fc1_weights, fc1_scales, fc1_pre_zp_u8, fc1_bias,
@@ -419,12 +434,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
     HIP_CHECK(activate());
 
+    OP_ROCTX_MARK("fc2.ragged");
     HIP_CHECK(hip_qmoe_ragged_matmul_nbits(
         stream, d_act_buf, /*input_row_ids=*/nullptr, d_row_groups,
         d_row_group_count, d_fc2_queue_head, fc2_weights, fc2_scales,
         fc2_pre_zp_u8, fc2_bias, d_fc2_buf, routed_rows, num_experts,
         hidden_size, inter_size, block_size, elem_size));
 
+    OP_ROCTX_MARK("reduce");
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
         stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
         output, num_tokens, hidden_size, k, elem_size));

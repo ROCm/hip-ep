@@ -168,6 +168,9 @@ struct OpProfileScope {
 #define OP_ROCTX_SCOPE_SHAPE(opname, shape_fn)                                 \
   OpRoctxScope HIPDNN_EP_DETAIL_CONCAT(_opRoctxScope_, __LINE__)(opname,       \
                                                                  shape_fn)
+// Names the step whose kernel launches follow, within the enclosing operator
+// range, until the next mark. `step` must be a string literal.
+#define OP_ROCTX_MARK(step) hipdnn_ep_roctx_mark(step)
 
 #define OP_PROFILE(opname, shape_fn, state_arg)                                \
   OP_PROFILE_BYTES(                                                            \
@@ -194,6 +197,15 @@ struct OpProfileScope {
 
 #define OP_PROFILE_CPU(opname, state_arg)                                      \
   OP_ROCTX_SCOPE(opname);                                                      \
+  OP_PROFILE_CPU_DETAIL(opname, state_arg)
+
+// OP_PROFILE_CPU with a shape string (e.g. the byte count) appended to the
+// ROCTx range; the [PERF] table keeps the bare op name.
+#define OP_PROFILE_CPU_SHAPE(opname, shape_fn, state_arg)                      \
+  OP_ROCTX_SCOPE_SHAPE(opname, shape_fn);                                      \
+  OP_PROFILE_CPU_DETAIL(opname, state_arg)
+
+#define OP_PROFILE_CPU_DETAIL(opname, state_arg)                               \
   std::optional<OpProfileCpuScope> _opProfCpu;                                 \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \

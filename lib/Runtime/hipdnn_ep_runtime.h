@@ -302,6 +302,9 @@ HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_range_push(const char *name);
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void);
 HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void);
+// Instant ROCTx mark naming the step whose launches follow, inside an
+// operator range. No-op when ROCTx is off or the library has no roctxMarkA.
+HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_mark(const char *name);
 
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
