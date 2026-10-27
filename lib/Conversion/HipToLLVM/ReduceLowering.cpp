@@ -152,14 +152,16 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     // standard ONNX reduce ops we lower (single reduced axis, keepdims or not).
     // `axes` is a runtime memref here so we cannot cross-check the inferred
     // axis against it at compile time; the inner<=0 / outNum%inner!=0 fallback
-    // below (and the dynamic-shape guard) keep us on the original contiguous
-    // path when the inference does not apply.
+    // below keeps us on the original contiguous path when the inference does
+    // not apply.
     //
-    // Falls back to 1 (contiguous fast path, original behavior) if the
-    // trailing-match product does not divide the output size. Shapes with a
-    // dynamic dim locate the axis with inferSingleReducedAxis instead.
-    int64_t innerSize = 1;
+    // Shapes with a dynamic dim locate the axis with inferSingleReducedAxis
+    // and read dynamic trailing dims from the descriptor. Shapes alone cannot
+    // always identify the axis (e.g. [?,4,4] -> [?,4]); those keep inner=1,
+    // which is only correct when the last axis is reduced.
+    Value innerSizeVal;
     if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
+      int64_t innerSize = 1;
       llvm::ArrayRef<int64_t> inShape = dataType.getShape();
       llvm::ArrayRef<int64_t> outShape = outputType.getShape();
       int64_t i = static_cast<int64_t>(inShape.size()) - 1;
@@ -174,26 +176,26 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         outNum *= d;
       if (innerSize <= 0 || (outNum % innerSize) != 0)
         innerSize = 1;
-    }
-    Value innerSizeVal = createI64Const(innerSize);
-    if (!(dataType.hasStaticShape() && outputType.hasStaticShape())) {
+      innerSizeVal = createI64Const(innerSize);
+    } else {
       int64_t axis = inferSingleReducedAxis(
           dataType.getShape(), outputType.getShape(), op.getKeepdims() != 0);
+      int64_t staticInner = 1;
+      SmallVector<int64_t> dynamicDims;
       if (axis >= 0) {
-        int64_t staticInner = 1;
         for (int64_t i = axis + 1; i < dataType.getRank(); ++i) {
-          if (!dataType.isDynamicDim(i)) {
+          if (dataType.isDynamicDim(i)) {
+            dynamicDims.push_back(i);
+          } else {
             staticInner *= dataType.getDimSize(i);
           }
         }
-        innerSizeVal = createI64Const(staticInner);
-        MemRefDescriptor desc(adaptor.getData());
-        for (int64_t i = axis + 1; i < dataType.getRank(); ++i) {
-          if (dataType.isDynamicDim(i)) {
-            innerSizeVal = LLVM::MulOp::create(rewriter, loc, innerSizeVal,
-                                               desc.size(rewriter, loc, i));
-          }
-        }
+      }
+      innerSizeVal = createI64Const(staticInner);
+      MemRefDescriptor desc(adaptor.getData());
+      for (int64_t i : dynamicDims) {
+        innerSizeVal = LLVM::MulOp::create(rewriter, loc, innerSizeVal,
+                                           desc.size(rewriter, loc, i));
       }
     }
 

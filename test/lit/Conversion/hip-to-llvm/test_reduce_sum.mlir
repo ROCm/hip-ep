@@ -106,4 +106,25 @@ module {
 
     return
   }
+
+  // Test 5: a dynamic dim after the reduced axis is read from the input
+  // descriptor and multiplied into the static part (5*6).
+  func.func @reduce_sum_middle_axis_dynamic_inner(
+      %ctx: !hip.context,
+      %input: memref<4x5x?x6xf16, 1>,
+      %axes: memref<1xi64, 1>,
+      %output: memref<5x?x6xf16, 1>) {
+    // CHECK-LABEL: llvm.func @reduce_sum_middle_axis_dynamic_inner
+
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<4x5x?x6xf16, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<5x?x6xf16, 1>)
+                         {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
+
+    // CHECK: %[[STATIC:.*]] = llvm.mlir.constant(30 : i64) : i64
+    // CHECK-NEXT: %[[DIM:.*]] = llvm.extractvalue %{{.*}}[3, 2]
+    // CHECK-NEXT: %[[INNER:.*]] = llvm.mul %[[STATIC]], %[[DIM]] : i64
+    // CHECK-NEXT: llvm.call @wrap_reduce_sum({{.*}}, %[[INNER]])
+
+    return
+  }
 }

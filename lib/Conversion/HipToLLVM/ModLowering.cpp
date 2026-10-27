@@ -14,7 +14,7 @@ namespace {
 //               a_n..a_w, b_n..b_w, out_n..out_w, data_type, fmod)
 //
 // Full 4D shapes (rank <= 4, left-padded with 1) let the runtime materialise
-// ONNX multidirectional broadcast via hip_expand -- mirrors LessOpLowering.
+// ONNX multidirectional broadcast via hip_expand.
 struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -54,7 +54,6 @@ struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    // 18 params: state + 3 data ptrs + 12 shape dims + data_type + fmod
     SmallVector<Type, 18> paramTypes(4, ptrType);
     paramTypes.append(14, i64Type);
 

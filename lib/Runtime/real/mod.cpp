@@ -15,7 +15,7 @@
 // Operand shapes are passed as 4D (N, C, H, W); the compiler left-pads
 // ranks 0-3 with 1. When lhs or rhs does not match the output shape,
 // hip_expand materialises the broadcast into the per-session workspace, then
-// the flat hip_elementwise_mod runs on same-shape buffers (mirrors wrap_less).
+// the flat hip_elementwise_mod runs on same-shape buffers.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
