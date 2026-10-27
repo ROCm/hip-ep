@@ -4429,8 +4429,7 @@ constexpr int kWmmaVariantCuMode = 128;
         int group_size, int num_groups_k, _Float16* __restrict__ C, int ldc,    \
         int swizzle_n, int b_row_bytes)                                         \
     {                                                                           \
-        GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, true, BK_T,      \
-                        false, false, false, false, false,                      \
+        GemmFp16U4ImplX<BM_T, BN_T, WT_M, WT_N, USE_ZEROS, BC, BK_T,            \
                         WMMAX_VARIANT_ARGS(VARIANT)>(                           \
             M, N, K, A, lda, B_packed, scales, zeros, group_size, num_groups_k, \
             C, ldc, swizzle_n, b_row_bytes);                                    \

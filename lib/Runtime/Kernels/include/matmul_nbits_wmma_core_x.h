@@ -4,8 +4,9 @@
  *
  * Extended packed-U4 / FP16 WMMA tile core, GemmFp16U4ImplX. Same tile model as
  * GemmFp16U4Impl (matmul_nbits_wmma_core.h, which every existing kWmmaConfigs
- * entry keeps using) plus the pipeline options measured in
- * docs/experiments/matmul-nbits-prefill-2026-10:
+ * entry keeps using) plus these pipeline options, specialized to the one
+ * contract its callers use (fused int4 dequant, fp16 zero points, dense tile
+ * mapping, whole K-steps, no bias):
  *   PGR_P   global prefetch depth (1, or 2 register sets)
  *   ADDR_P  1 = wave-uniform source base plus 32-bit per-thread offsets
  *   PIPE_P  1 = store-first: write tile i+1 to LDS, issue tile i+2, then run
@@ -34,12 +35,8 @@
  * WMMA per (WT_M+WT_N)=6 fragment loads instead of 4 per 4, so the LDS reads per
  * Matrix Core op drop by a quarter. */
 template <int BM_T, int BN_T, int WT_M, int WT_N, bool USE_ZEROS,
-          bool BOUNDS_CHECK = false, bool FUSED_DQ = true,
-          int BK_IN = BM_T / (WT_M * WT_N), bool ZEROS_U8 = false,
-          bool ADD_BIAS = false, bool EXPLICIT_TILE = false,
-          bool CHECK_K_TAIL = false, bool RUNTIME_OPTIONAL = false,
-          int PGR_P = 1, int ADDR_P = 0, int PIPE_P = 0, int SCHED_P = 0,
-          int EPI_P = 0, int XOR_P = 0>
+          bool BOUNDS_CHECK, int BK_IN, int PGR_P = 1, int ADDR_P = 0,
+          int PIPE_P = 0, int SCHED_P = 0, int EPI_P = 0, int XOR_P = 0>
 __device__ __forceinline__
 void GemmFp16U4ImplX(
     int M, int N, int K,
@@ -58,13 +55,7 @@ void GemmFp16U4ImplX(
      * serves both layouts and the autotuner stays free to pick any tile for a
      * padded buffer. As a template parameter it would multiply the
      * instantiation count of every tile shape. */
-    int b_row_bytes = 0,
-    /* Descriptor-driven callers supply an explicit output tile and optional
-     * gather map. Dense MatMulNBits leaves EXPLICIT_TILE=false, so its original
-     * blockIdx/swizzle mapping is compiled unchanged. */
-    int tile_row0 = 0, int tile_col0 = 0, int tile_rows = BM_T,
-    const int32_t* __restrict__ a_row_ids = nullptr,
-    const _Float16* __restrict__ output_bias = nullptr)
+    int b_row_bytes = 0)
 {
     constexpr int WM_L   = BM_T / (WT_M * 16);
     constexpr int WN_L   = BN_T / (WT_N * 16);
@@ -114,14 +105,13 @@ void GemmFp16U4ImplX(
      * tied the thread count to BN; several chunks lift that, e.g. a 96-wide B
      * tile with 128 threads and BK = 64 is 3 chunks of 16.
      *
-     * 0 picks the chunk width. 0 takes the whole per-thread share when it
-     * is <= 32 and tiles BK_T in a power-of-two number of chunks (the original
-     * mapping), else the widest of 32/16/8 dividing both the share and BK_T. */
+     * The chunk is the whole per-thread share when it is <= 32 and tiles BK_T
+     * in a power-of-two number of chunks (the original mapping), else the
+     * widest of 32/16/8 dividing both the share and BK_T. */
     constexpr int B_EPT = (BN_T * BK_T) / THR_L;
     constexpr bool B_WHOLE = B_EPT <= 32 && BK_T % B_EPT == 0 &&
                              (((BK_T / B_EPT) & (BK_T / B_EPT - 1)) == 0);
-    constexpr int B_CW  = 0 ? 0
-                        : B_WHOLE ? B_EPT
+    constexpr int B_CW  = B_WHOLE ? B_EPT
                         : (B_EPT % 32 == 0 && BK_T % 32 == 0) ? 32
                         : (B_EPT % 16 == 0 && BK_T % 16 == 0) ? 16 : 8;
     constexpr int B_NCH  = B_EPT / B_CW;
@@ -138,28 +128,18 @@ void GemmFp16U4ImplX(
     constexpr int PGR = PGR_P;
     /* Pipeline and LDS knobs (all 0 = the original structure).
      *   PIPE_P=1   store-first: each step writes tile i+1 (already in
-     *               registers) to the other LDS buffer, issues the global
-     *               loads for tile i+2 and then runs tile i's WMMAs. One
-     *               register set, global reads two steps ahead of their WMMAs,
-     *               and tile i+1's dequant is independent of tile i's WMMAs.
-     *   0=1    double-buffer the WMMA fragments across the K-step's
-     *               16-wide slices: load slice ks+1 while ks runs.
-     *   SCHED_P=1  sched_group_barrier pattern over the store-first step that
-     *               interleaves WMMA with LDS reads/writes, global loads and
-     *               dequant VALU (needs PIPE_P=1).
+     *              registers) to the other LDS buffer, issues the global
+     *              loads for tile i+2 and then runs tile i's WMMAs. One
+     *              register set, global reads two steps ahead of their WMMAs,
+     *              and tile i+1's dequant is independent of tile i's WMMAs.
+     *   SCHED_P    sched_group_barrier pattern over the store-first step
+     *              (needs PIPE_P=1): 1 interleaves WMMA with LDS reads/writes,
+     *              global loads and dequant VALU, 2 with LDS reads and global
+     *              loads only, 3 with dequant VALU only.
      *   EPI_P=1    stage C through LDS and write it as 16-byte rows.
-     *   XOR_P=1 XOR-swizzle 16-byte LDS chunks by row instead of padding
-     *               rows (PAD_K is then 0). */
-    /*   SCHED_P    1 = full pattern, 2 = WMMA with LDS reads and global loads
-     *               only, 3 = WMMA with dequant VALU only.
-     *   0=1 keep B packed (int4) in LDS with each row's scale/zero
-     *               point, and dequantize when a WMMA fragment is loaded
-     *               (int4 only; one quant group per K-step).
-     *   1=S this workgroup computes 1/S of K and writes fp32 partials
-     *               (C is then a float buffer); the launcher reduces them. */
+     *   XOR_P=1    XOR-swizzle 16-byte LDS chunks by row instead of padding
+     *              rows (PAD_K is then 0). */
     constexpr bool PIPE_SF = PIPE_P != 0;
-    static_assert(!0 || FUSED_DQ, "packed-B LDS is for the int4 path");
-    static_assert(!(EPI_P && 1 > 1), "split-K partials use the per-lane fp32 epilogue");
     static_assert(!PIPE_SF || PGR == 1, "store-first uses one register set");
     static_assert(!SCHED_P || PIPE_SF, "the schedule pattern is for the store-first step");
 
@@ -176,16 +156,13 @@ void GemmFp16U4ImplX(
     static_assert(THR_L % B_TPR == 0, "a pass must cover whole B rows");
     static_assert(B_NCH * B_ROWS == BN_T, "B passes must cover BN rows");
     static_assert(PGR == 1 || PGR == 2, "prefetch depth 1 or 2");
-    static_assert(PGR == 1 || !CHECK_K_TAIL, "K-tail masking needs prefetch depth 1");
 
     /* Source addressing. 0: one 64-bit pointer per A and B chunk, each
      * advanced per K-step (2 VGPRs and 2 VALU ops per chunk). 1: the tile's
      * base is wave-uniform (SGPRs, advanced with scalar ops) and each chunk is
      * that base plus one per-thread 32-bit offset plus a uniform chunk step, so
-     * the loads can use the scalar-base global form. Dense tile mapping only. */
+     * the loads can use the scalar-base global form. */
     constexpr bool UADDR = ADDR_P != 0;
-    static_assert(!UADDR || (!EXPLICIT_TILE && !CHECK_K_TAIL),
-                  "uniform-base addressing is for the dense tile mapping");
     static_assert(!UADDR || THR_L % A_ROW_SPLIT == 0, "A chunks must share a k offset");
 
     // One raw buffer holds the A/B tiles during the K-loop and the C tile
@@ -205,14 +182,6 @@ void GemmFp16U4ImplX(
     _Float16 (&smB)[2][BN_T][K_STR] = *reinterpret_cast<_Float16 (*)[2][BN_T][K_STR]>(
         EPI_P ? static_cast<void*>(sm_raw + SMA_BYTES) : static_cast<void*>(smB_));
     [[maybe_unused]] _Float16* smC = reinterpret_cast<_Float16*>(sm_raw);
-    // Packed B for 0: BK/8 words per row plus one, an odd dword stride,
-    // so 16 lanes reading 16 rows at one word offset hit 16 different banks.
-    constexpr int BQW = BK_T / 8 + 1;
-    __shared__ __align__(16) uint32_t smBq[2][0 ? BN_T : 1][BQW];
-    // Per-row packed scale and bias of the K-step's quant group (two arrays:
-    // a u32x2 array here was read back as word 0 for both on this toolchain).
-    __shared__ __align__(16) uint32_t smSs[2][0 ? BN_T : 1];
-    __shared__ __align__(16) uint32_t smSb[2][0 ? BN_T : 1];
     auto swz = [&](int row, int k) __attribute__((always_inline)) -> int {
         if constexpr (XOR_P) return (((k >> 3) ^ ((row / XP) % XC)) << 3) | (k & 7);
         else return k;
@@ -235,10 +204,7 @@ void GemmFp16U4ImplX(
     // output data from prior kernel launches.
     int row0;
     int col0;
-    if constexpr (EXPLICIT_TILE) {
-        row0 = tile_row0;
-        col0 = tile_col0;
-    } else {
+    {
         const int n_tiles  = gridDim.x;
         const int m_tiles  = gridDim.y;
         int by, bx;
@@ -296,39 +262,20 @@ void GemmFp16U4ImplX(
      * padding), so the intra-row byte offset (b_k8 >> 1) and the per-K-step
      * advance below are unaffected -- only the per-row stride changes.  */
     [[maybe_unused]] const unsigned char* b_src_u4[B_NCH] = {};
-    [[maybe_unused]] const _Float16*      b_src_fp[B_NCH] = {};
     [[maybe_unused]] const _Float16*      s_src[B_NCH]    = {};
     [[maybe_unused]] const _Float16*      z_src_f16[B_NCH] = {};
-    [[maybe_unused]] const uint8_t*       z_src_u8[B_NCH]  = {};
 #pragma unroll
     for (int c = 0; c < B_NCH; c++) {
-        if constexpr (FUSED_DQ) {
-            // 0 means the arrival layout, whose stride carries the ONNX group
-            // padding described above; a repacked buffer passes its own.
-            const int row_bytes =
-                b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
-            b_src_u4[c] = static_cast<const unsigned char*>(B_data) +
-                          (static_cast<size_t>(b_n_g[c]) * row_bytes + (b_k8 >> 1));
-            s_src[c] = scales + static_cast<size_t>(b_n_g[c]) * num_groups_k;
-            if constexpr (USE_ZEROS) {
-                if constexpr (ZEROS_U8) {
-                    if (!RUNTIME_OPTIONAL || zeros)
-                        z_src_u8[c] = static_cast<const uint8_t*>(zeros) +
-                                      static_cast<size_t>(b_n_g[c]) * num_groups_k;
-                } else {
-                    if (!RUNTIME_OPTIONAL || zeros)
-                        z_src_f16[c] = static_cast<const _Float16*>(zeros) +
-                                       static_cast<size_t>(b_n_g[c]) * num_groups_k;
-                }
-            }
-        } else {
-            // b_row_bytes = 0 is the dense [N,K] layout; a larger value reads
-            // rows padded to break cache-set aliasing, as on the int4 path.
-            const size_t row_halfs = b_row_bytes ? static_cast<size_t>(b_row_bytes) / 2
-                                                 : static_cast<size_t>(K);
-            b_src_fp[c] = static_cast<const _Float16*>(B_data) +
-                          (static_cast<size_t>(b_n_g[c]) * row_halfs + b_k8);
-        }
+        // 0 means the arrival layout, whose stride carries the ONNX group
+        // padding described above; a repacked buffer passes its own.
+        const int row_bytes =
+            b_row_bytes ? b_row_bytes : (num_groups_k * (group_size >> 1));
+        b_src_u4[c] = static_cast<const unsigned char*>(B_data) +
+                      (static_cast<size_t>(b_n_g[c]) * row_bytes + (b_k8 >> 1));
+        s_src[c] = scales + static_cast<size_t>(b_n_g[c]) * num_groups_k;
+        if constexpr (USE_ZEROS)
+            z_src_f16[c] = static_cast<const _Float16*>(zeros) +
+                           static_cast<size_t>(b_n_g[c]) * num_groups_k;
     }
 
     int              a_row[A_NCH];
@@ -342,11 +289,7 @@ void GemmFp16U4ImplX(
         a_koff[c]     = (idx % A_ROW_SPLIT) * A_CH;
         const int logical_row = row0 + a_row[c];
         a_valid[c] = logical_row < M;
-        if constexpr (EXPLICIT_TILE)
-            a_valid[c] = a_valid[c] && a_row[c] < tile_rows;
-        int source_row = a_valid[c] ? logical_row : 0;
-        if (a_valid[c] && a_row_ids)
-            source_row = a_row_ids[logical_row];
+        const int source_row = a_valid[c] ? logical_row : 0;
         a_src[c] = A + static_cast<size_t>(source_row) * lda + a_koff[c];
     }
 
@@ -358,10 +301,9 @@ void GemmFp16U4ImplX(
         a_voff  = static_cast<uint32_t>((a_row[0] * lda + a_koff[0]) * 2);
         a_cstep = static_cast<uint32_t>((THR_L / A_ROW_SPLIT) * lda * 2);
         const uint32_t b_row =
-            FUSED_DQ ? static_cast<uint32_t>(b_row_bytes ? b_row_bytes : num_groups_k * (group_size >> 1))
-                     : static_cast<uint32_t>(b_row_bytes ? b_row_bytes : 2 * K);
+            static_cast<uint32_t>(b_row_bytes ? b_row_bytes : num_groups_k * (group_size >> 1));
         b_sbase = static_cast<const unsigned char*>(B_data) + static_cast<size_t>(col0) * b_row;
-        b_voff  = static_cast<uint32_t>(b_col[0]) * b_row + (FUSED_DQ ? (b_k8 >> 1) : b_k8 * 2);
+        b_voff  = static_cast<uint32_t>(b_col[0]) * b_row + (b_k8 >> 1);
         b_cstep = static_cast<uint32_t>(B_ROWS) * b_row;
     }
     auto aSrc = [&](int c) __attribute__((always_inline)) -> const void* {
@@ -370,8 +312,7 @@ void GemmFp16U4ImplX(
     };
     auto bSrc = [&](int c) __attribute__((always_inline)) -> const void* {
         if constexpr (UADDR) return b_sbase + static_cast<size_t>(b_voff + c * b_cstep);
-        else if constexpr (FUSED_DQ) return b_src_u4[c];
-        else return b_src_fp[c];
+        else return b_src_u4[c];
     };
 
     float8 acc[WT_M][WT_N];
@@ -396,7 +337,6 @@ void GemmFp16U4ImplX(
 
     uint32_t pf_a[PGR][A_NCH][A_CH / 2];
     [[maybe_unused]] uint32_t pf_b4[PGR][B_NCH][B_U32] = {};
-    [[maybe_unused]] u32x4    pf_bfp[PGR][B_NCH][B_U32] = {};
 
     /* Quant-group state, depth 1.
      *
@@ -412,9 +352,6 @@ void GemmFp16U4ImplX(
     [[maybe_unused]] int      grp_k_end = 0;
     [[maybe_unused]] uint32_t s_pk[B_NCH]    = {};
     [[maybe_unused]] uint32_t bias_pk[B_NCH] = {};
-    [[maybe_unused]] uint32_t zp_u4[B_NCH];
-#pragma unroll
-    for (int c = 0; c < B_NCH; c++) zp_u4[c] = 8;
     // Depth 2: raw per-tile group constants, packed at dequant time.
     [[maybe_unused]] _Float16 s_raw[PGR][B_NCH]  = {};
     [[maybe_unused]] _Float16 zp_raw[PGR][B_NCH] = {};
@@ -427,18 +364,8 @@ void GemmFp16U4ImplX(
 
     auto zeroPoint = [&](int c, int grp) __attribute__((always_inline)) -> _Float16
     {
-        _Float16 zp = (_Float16)8;
-        if constexpr (USE_ZEROS) {
-            if constexpr (ZEROS_U8) {
-                if (!RUNTIME_OPTIONAL || z_src_u8[c]) {
-                    zp_u4[c] = z_src_u8[c][grp];
-                    zp = static_cast<_Float16>(zp_u4[c]);
-                }
-            } else {
-                if (!RUNTIME_OPTIONAL || z_src_f16[c]) zp = z_src_f16[c][grp];
-            }
-        }
-        return zp;
+        if constexpr (USE_ZEROS) return z_src_f16[c][grp];
+        else return (_Float16)8;
     };
 
     auto packConstants = [&](_Float16 s16, _Float16 zp, uint32_t& s_out, uint32_t& b_out)
@@ -470,7 +397,7 @@ void GemmFp16U4ImplX(
             }
     };
 
-    if constexpr (FUSED_DQ && PGR == 1) {
+    if constexpr (PGR == 1) {
         grp_cur   = b_k8 / group_size;
         grp_k_end = (grp_cur + 1) * group_size;
         loadGroupConstants(grp_cur);
@@ -483,10 +410,7 @@ void GemmFp16U4ImplX(
         for(int c = 0; c < A_NCH; c++)
         {
             const bool ok = BOUNDS_CHECK ? a_valid[c] : true;
-            const int tile_k = k_abs - b_k8;
-            const int a_k = tile_k + a_koff[c];
-            const bool full_k = CHECK_K_TAIL ? (a_k + A_CH <= K) : true;
-            if (ok && full_k) {
+            if (ok) {
                 if constexpr (A_CH == 8)
                     *reinterpret_cast<u32x4*>(pf_a[S][c]) =
                         *reinterpret_cast<const u32x4*>(aSrc(c));
@@ -496,111 +420,56 @@ void GemmFp16U4ImplX(
             } else {
 #pragma unroll
                 for (int e = 0; e < A_CH / 2; e++) pf_a[S][c][e] = 0;
-                if constexpr (CHECK_K_TAIL) {
-                    if (ok && a_k < K) {
-                        _Float16* tail = reinterpret_cast<_Float16*>(pf_a[S][c]);
-#pragma unroll
-                        for (int e = 0; e < A_CH; e++)
-                            if (a_k + e < K) tail[e] = a_src[c][e];
-                    }
-                }
             }
             if constexpr (!UADDR) a_src[c] += BK_T;
         }
 
-        if constexpr (FUSED_DQ) {
 #pragma unroll
-            for (int c = 0; c < B_NCH; c++) {
-                if (b_valid[c]) {
-                    if constexpr (B_U32 == 1)
-                        pf_b4[S][c][0] = *reinterpret_cast<const uint32_t*>(bSrc(c));
-                    else if constexpr (B_U32 == 2)
-                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
-                            *reinterpret_cast<const u32x2*>(bSrc(c));
-                    else if constexpr (B_U32 == 3) {
-                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
-                            *reinterpret_cast<const u32x2*>(bSrc(c));
-                        pf_b4[S][c][2] = reinterpret_cast<const uint32_t*>(bSrc(c))[2];
-                    } else
-                        *reinterpret_cast<u32x4*>(pf_b4[S][c]) =
-                            *reinterpret_cast<const u32x4*>(bSrc(c));
-                }
-                if constexpr (!UADDR) b_src_u4[c] += BK_T >> 1;
+        for (int c = 0; c < B_NCH; c++) {
+            if (b_valid[c]) {
+                if constexpr (B_U32 == 1)
+                    pf_b4[S][c][0] = *reinterpret_cast<const uint32_t*>(bSrc(c));
+                else if constexpr (B_U32 == 2)
+                    *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                        *reinterpret_cast<const u32x2*>(bSrc(c));
+                else if constexpr (B_U32 == 3) {
+                    *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                        *reinterpret_cast<const u32x2*>(bSrc(c));
+                    pf_b4[S][c][2] = reinterpret_cast<const uint32_t*>(bSrc(c))[2];
+                } else
+                    *reinterpret_cast<u32x4*>(pf_b4[S][c]) =
+                        *reinterpret_cast<const u32x4*>(bSrc(c));
             }
-            if constexpr (PGR == 1) {
-                // This thread's chunks are contiguous in k starting at a
-                // multiple of B_CW, and group_size is a power of two >= 16 >=
-                // B_CW for every config that sets B_CW > 8, so each shares one
-                // quant group. The loop form (rather than a single compare)
-                // covers BK_T > group_size, where one K-step spans several
-                // groups: the 128x32 WT2x1 tile has BK_T=64 and would otherwise
-                // decode the upper half with a stale scale.
-                if (__builtin_expect(k_abs >= grp_k_end, 0)) {
-                    do {
-                        grp_cur++;
-                        grp_k_end += group_size;
-                    } while (k_abs >= grp_k_end);
-                    loadGroupConstants(grp_cur);
-                }
-                if constexpr (CHECK_K_TAIL) {
-                    if (__builtin_expect(k_abs + B_CW > K, 0)) {
-#pragma unroll
-                        for (int c = 0; c < B_NCH; c++) {
-                            const uint32_t zp_word = zp_u4[c] * 0x11111111u;
-#pragma unroll
-                            for (int w = 0; w < B_U32; w++) {
-                                int valid = K - (k_abs + w * 8);
-                                valid = valid < 0 ? 0 : (valid > 8 ? 8 : valid);
-                                const uint32_t keep =
-                                    valid == 8 ? 0xffffffffu :
-                                    (valid == 0 ? 0u : ((1u << (valid * 4)) - 1u));
-                                pf_b4[S][c][w] = (pf_b4[S][c][w] & keep) | (zp_word & ~keep);
-                            }
-                        }
-                    }
-                }
-            } else {
-                const int grp = k_abs >> gs_shift;
-#pragma unroll
-                for (int c = 0; c < B_NCH; c++)
-                    if (b_valid[c]) {
-                        s_raw[S][c]  = s_src[c][grp];
-                        zp_raw[S][c] = zeroPoint(c, grp);
-                    }
+            if constexpr (!UADDR) b_src_u4[c] += BK_T >> 1;
+        }
+        if constexpr (PGR == 1) {
+            // This thread's chunks are contiguous in k starting at a
+            // multiple of B_CW, and group_size is a power of two >= 16 >=
+            // B_CW for every config that sets B_CW > 8, so each shares one
+            // quant group. The loop form (rather than a single compare)
+            // covers BK_T > group_size, where one K-step spans several
+            // groups: the 128x32 WT2x1 tile has BK_T=64 and would otherwise
+            // decode the upper half with a stale scale.
+            if (__builtin_expect(k_abs >= grp_k_end, 0)) {
+                do {
+                    grp_cur++;
+                    grp_k_end += group_size;
+                } while (k_abs >= grp_k_end);
+                loadGroupConstants(grp_cur);
             }
         } else {
+            const int grp = k_abs >> gs_shift;
 #pragma unroll
-            for (int c = 0; c < B_NCH; c++) {
+            for (int c = 0; c < B_NCH; c++)
                 if (b_valid[c]) {
-#pragma unroll
-                    for (int w = 0; w < B_U32; w++)
-                        pf_bfp[S][c][w] = reinterpret_cast<const u32x4*>(bSrc(c))[w];
+                    s_raw[S][c]  = s_src[c][grp];
+                    zp_raw[S][c] = zeroPoint(c, grp);
                 }
-                if constexpr (!UADDR) b_src_fp[c] += BK_T;
-            }
         }
         if constexpr (UADDR) {
             a_sbase += BK_T * 2;
-            b_sbase += FUSED_DQ ? (BK_T >> 1) : BK_T * 2;
+            b_sbase += BK_T >> 1;
         }
-    };
-
-    // 8 packed nibbles -> 8 fp16 values (q - zp) * s, in k order.
-    auto dq8 = [&](uint32_t packed, half2v bias2, half2v scale2) __attribute__((always_inline)) -> u32x4
-    {
-        const uint32_t lo = packed & 0x0F0F0F0Fu;
-        const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;
-        u32x4 raw, out;
-        raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
-        raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
-        raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
-        raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
-#pragma unroll
-        for (int i = 0; i < 4; i++) {
-            const half2v q = __builtin_bit_cast(half2v, raw[i] | kMagicPk);
-            out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
-        }
-        return out;
     };
 
     auto storeToShared = [&](int buf, auto SETC) __attribute__((always_inline))
@@ -612,70 +481,44 @@ void GemmFp16U4ImplX(
             // kernel; hoisting it changed the dequant/WMMA interleave.
 #define MNX_SMB_DST(w) (*reinterpret_cast<u32x4*>(&smB[buf][b_col[c]][swz(b_col[c], b_k8 + 8 * (w))]))
             if (b_valid[c]) {
-                if constexpr (0) {
-                    uint32_t sp, bp;
-                    if constexpr (PGR == 1) {
-                        sp = s_pk[c];
-                        bp = bias_pk[c];
-                    } else {
-                        packConstants(s_raw[S][c], zp_raw[S][c], sp, bp);
-                    }
-#pragma unroll
-                    for (int w = 0; w < B_U32; w++) smBq[buf][b_col[c]][(b_k8 >> 3) + w] = pf_b4[S][c][w];
-                    if (b_k8 == 0) {
-                        smSs[buf][b_col[c]] = sp;
-                        smSb[buf][b_col[c]] = bp;
-                    }
-                } else if constexpr (FUSED_DQ) {
-                    /* uint4 -> fp16 without a single v_cvt.
-                     *
-                     * OR-ing a nibble into the mantissa of fp16 1024.0 gives exactly
-                     * 1024+q, and v_perm_b32 places two nibbles into the low bytes
-                     * of the two 16-bit lanes in one instruction. Per 8 weights that
-                     * is 3 mask ops + 4 perms + 4 ORs + 4 pk_add + 4 pk_mul, against
-                     * 8 extracts + 8 v_cvt_f32_ubyte0 + 8 v_cvt_f16_f32 + 4 packs +
-                     * 4 pk_fma for the arithmetic conversion the compiler generates
-                     * from static_cast<_Float16>(unsigned). */
-                    uint32_t sp, bp;
-                    if constexpr (PGR == 1) {
-                        sp = s_pk[c];
-                        bp = bias_pk[c];
-                    } else {
-                        packConstants(s_raw[S][c], zp_raw[S][c], sp, bp);
-                    }
-                    const half2v bias2 = __builtin_bit_cast(half2v, bp);
-                    const half2v scale2 = __builtin_bit_cast(half2v, sp);
-#pragma unroll
-                    for (int w = 0; w < B_U32; w++) {
-                        const uint32_t packed = pf_b4[S][c][w];
-                        const uint32_t lo = packed & 0x0F0F0F0Fu;         // q0 q2 q4 q6
-                        const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;  // q1 q3 q5 q7
-                        u32x4 raw;
-                        // Selector byte i picks byte i of {hi, lo} for output byte i:
-                        // 0..3 are lo's bytes, 4..7 are hi's, 0x0C is a literal zero.
-                        raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
-                        raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
-                        raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
-                        raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
-                        u32x4 out;
-#pragma unroll
-                        for (int i = 0; i < 4; i++) {
-                            const half2v q =
-                                __builtin_bit_cast(half2v, raw[i] | kMagicPk);
-                            out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
-                        }
-                        MNX_SMB_DST(w) = out;
-                    }
+                /* uint4 -> fp16 without a single v_cvt.
+                 *
+                 * OR-ing a nibble into the mantissa of fp16 1024.0 gives exactly
+                 * 1024+q, and v_perm_b32 places two nibbles into the low bytes
+                 * of the two 16-bit lanes in one instruction. Per 8 weights that
+                 * is 3 mask ops + 4 perms + 4 ORs + 4 pk_add + 4 pk_mul, against
+                 * 8 extracts + 8 v_cvt_f32_ubyte0 + 8 v_cvt_f16_f32 + 4 packs +
+                 * 4 pk_fma for the arithmetic conversion the compiler generates
+                 * from static_cast<_Float16>(unsigned). */
+                uint32_t sp, bp;
+                if constexpr (PGR == 1) {
+                    sp = s_pk[c];
+                    bp = bias_pk[c];
                 } else {
-#pragma unroll
-                    for (int w = 0; w < B_U32; w++) MNX_SMB_DST(w) = pf_bfp[S][c][w];
+                    packConstants(s_raw[S][c], zp_raw[S][c], sp, bp);
                 }
-            } else if constexpr (0) {
+                const half2v bias2 = __builtin_bit_cast(half2v, bp);
+                const half2v scale2 = __builtin_bit_cast(half2v, sp);
 #pragma unroll
-                for (int w = 0; w < B_U32; w++) smBq[buf][b_col[c]][(b_k8 >> 3) + w] = 0;
-                if (b_k8 == 0) {
-                    smSs[buf][b_col[c]] = 0;
-                    smSb[buf][b_col[c]] = 0;
+                for (int w = 0; w < B_U32; w++) {
+                    const uint32_t packed = pf_b4[S][c][w];
+                    const uint32_t lo = packed & 0x0F0F0F0Fu;         // q0 q2 q4 q6
+                    const uint32_t hi = (packed >> 4) & 0x0F0F0F0Fu;  // q1 q3 q5 q7
+                    u32x4 raw;
+                    // Selector byte i picks byte i of {hi, lo} for output byte i:
+                    // 0..3 are lo's bytes, 4..7 are hi's, 0x0C is a literal zero.
+                    raw[0] = __builtin_amdgcn_perm(hi, lo, 0x0C040C00u);
+                    raw[1] = __builtin_amdgcn_perm(hi, lo, 0x0C050C01u);
+                    raw[2] = __builtin_amdgcn_perm(hi, lo, 0x0C060C02u);
+                    raw[3] = __builtin_amdgcn_perm(hi, lo, 0x0C070C03u);
+                    u32x4 out;
+#pragma unroll
+                    for (int i = 0; i < 4; i++) {
+                        const half2v q =
+                            __builtin_bit_cast(half2v, raw[i] | kMagicPk);
+                        out[i] = __builtin_bit_cast(uint32_t, (q + bias2) * scale2);
+                    }
+                    MNX_SMB_DST(w) = out;
                 }
             } else {
                 const u32x4 zero4 = {0, 0, 0, 0};
@@ -703,18 +546,10 @@ void GemmFp16U4ImplX(
         const int k_off = hipdnn_wmma_k_off(sub);
         const int row = (wcol * WT_N + wn) * WMMA_TILE + lane;
         u32x4* dst = reinterpret_cast<u32x4*>(&f);
-        if constexpr (0) {
-            const half2v scale2 = __builtin_bit_cast(half2v, smSs[buf][row]);
-            const half2v bias2 = __builtin_bit_cast(half2v, smSb[buf][row]);
 #pragma unroll
-            for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                dst[i] = dq8(smBq[buf][row][((ks * WMMA_TILE + k_off) >> 3) + i], bias2, scale2);
-        } else {
-#pragma unroll
-            for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
-                dst[i] = *reinterpret_cast<const u32x4*>(
-                    &smB[buf][row][swz(row, ks * WMMA_TILE + k_off + 8 * i)]);
-        }
+        for (int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
+            dst[i] = *reinterpret_cast<const u32x4*>(
+                &smB[buf][row][swz(row, ks * WMMA_TILE + k_off + 8 * i)]);
     };
     auto loadA = [&](int buf, int ks, int wm, half16& f) __attribute__((always_inline))
     {
@@ -732,42 +567,18 @@ void GemmFp16U4ImplX(
     auto computeWMMA = [&](int buf, int ks_begin, int ks_end)
         __attribute__((always_inline))
     {
-        if constexpr (!0) {
 #pragma unroll
-            for (int ks = ks_begin; ks < ks_end; ks++) {
-                half16 b_frag[WT_N];
+        for (int ks = ks_begin; ks < ks_end; ks++) {
+            half16 b_frag[WT_N];
 #pragma unroll
-                for (int wn = 0; wn < WT_N; wn++) loadB(buf, ks, wn, b_frag[wn]);
+            for (int wn = 0; wn < WT_N; wn++) loadB(buf, ks, wn, b_frag[wn]);
 #pragma unroll
-                for (int wm = 0; wm < WT_M; wm++) {
-                    half16 a_frag;
-                    loadA(buf, ks, wm, a_frag);
+            for (int wm = 0; wm < WT_M; wm++) {
+                half16 a_frag;
+                loadA(buf, ks, wm, a_frag);
 #pragma unroll
-                    for (int wn = 0; wn < WT_N; wn++)
-                        acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag[wn], acc[wm][wn]);
-                }
-            }
-        } else {
-            // Slice ks+1's fragments load while slice ks's WMMAs run.
-            half16 bf[2][WT_N], af[2][WT_M];
-#pragma unroll
-            for (int wn = 0; wn < WT_N; wn++) loadB(buf, ks_begin, wn, bf[0][wn]);
-#pragma unroll
-            for (int wm = 0; wm < WT_M; wm++) loadA(buf, ks_begin, wm, af[0][wm]);
-#pragma unroll
-            for (int ks = ks_begin; ks < ks_end; ks++) {
-                const int cur = (ks - ks_begin) & 1;
-                if (ks + 1 < ks_end) {
-#pragma unroll
-                    for (int wn = 0; wn < WT_N; wn++) loadB(buf, ks + 1, wn, bf[cur ^ 1][wn]);
-#pragma unroll
-                    for (int wm = 0; wm < WT_M; wm++) loadA(buf, ks + 1, wm, af[cur ^ 1][wm]);
-                }
-#pragma unroll
-                for (int wm = 0; wm < WT_M; wm++)
-#pragma unroll
-                    for (int wn = 0; wn < WT_N; wn++)
-                        acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(af[cur][wm], bf[cur][wn], acc[wm][wn]);
+                for (int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag[wn], acc[wm][wn]);
             }
         }
     };
@@ -780,8 +591,8 @@ void GemmFp16U4ImplX(
         constexpr int NW   = K_STEPS * WT_M * WT_N;
         constexpr int NDSR = K_STEPS * (WT_M + WT_N) * (HIPDNN_WMMA_FRAG_ELEMS / 8);
         constexpr int NDSW = A_NCH + B_NCH * B_U32;
-        constexpr int NVM  = A_NCH + B_NCH * (FUSED_DQ ? (B_U32 == 3 ? 2 : 1) : B_U32);
-        constexpr int NVA  = FUSED_DQ ? B_NCH * B_U32 * 19 : 0;
+        constexpr int NVM  = A_NCH + B_NCH * (B_U32 == 3 ? 2 : 1);
+        constexpr int NVA  = B_NCH * B_U32 * 19;
         constexpr int R  = (NDSR + NW - 1) / NW;
         constexpr int Wd = (NDSW + NW - 1) / NW;
         constexpr int V  = (NVM + NW - 1) / NW;
@@ -879,9 +690,7 @@ void GemmFp16U4ImplX(
             const int nxt = 1 - buf;
             if constexpr (decltype(ISSUE)::value)
                 issueLoads(t + BK_T + b_k8, std::integral_constant<int, 1 - S>{});
-            if constexpr (0) __builtin_amdgcn_sched_barrier(0);
             computeWMMA(buf, 0, K_STEPS);
-            if constexpr (0) __builtin_amdgcn_sched_barrier(0);
             storeToShared(nxt, SETC);
             HIPDNN_LDS_BARRIER();
             buf = nxt;
@@ -909,8 +718,8 @@ void GemmFp16U4ImplX(
     /* Staged epilogue: each wave writes its accumulators into an fp16 C tile
      * in LDS (reusing the A/B buffers), then the workgroup copies whole rows to
      * C as 16-byte stores. Interior tiles with a 16-byte-aligned row stride
-     * only; edge tiles, bias and explicit tiles use the per-lane stores below. */
-    if constexpr (!BOUNDS_CHECK && !ADD_BIAS && !EXPLICIT_TILE) {
+     * only; edge tiles use the per-lane stores below. */
+    if constexpr (!BOUNDS_CHECK) {
         if ((ldc & 7) == 0) {
             constexpr int CV = BN_T / 8;                    // 16-byte vectors per C row
             constexpr int VPT = (BM_T * CV) / THR_L;
@@ -960,34 +769,8 @@ void GemmFp16U4ImplX(
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
                 _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
-                const int tile_r =
-                    (wrow * WT_M + wm) * WMMA_TILE + r;
-                if constexpr (BOUNDS_CHECK) {
-                    if (mbase + r < M && nbase + lane < N &&
-                        (!EXPLICIT_TILE || tile_r < tile_rows)) {
-                        float value = acc[wm][wn][e];
-                        if constexpr (ADD_BIAS) {
-                            if constexpr (RUNTIME_OPTIONAL) {
-                                if (output_bias)
-                                    value += static_cast<float>(output_bias[nbase + lane]);
-                            } else {
-                                value += static_cast<float>(output_bias[nbase + lane]);
-                            }
-                        }
-                        *cp = (_Float16)value;
-                    }
-                } else {
-                    float value = acc[wm][wn][e];
-                    if constexpr (ADD_BIAS) {
-                        if constexpr (RUNTIME_OPTIONAL) {
-                            if (output_bias)
-                                value += static_cast<float>(output_bias[nbase + lane]);
-                        } else {
-                            value += static_cast<float>(output_bias[nbase + lane]);
-                        }
-                    }
-                    *cp = (_Float16)value;
-                }
+                if (!BOUNDS_CHECK || (mbase + r < M && nbase + lane < N))
+                    *cp = (_Float16)acc[wm][wn][e];
             }
         }
     }
