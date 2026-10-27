@@ -35,12 +35,6 @@ struct ConvFields {
   std::string supportsSplitK;
 };
 
-// matmul_nbits_autotune.fbs defaults. One octave of M, N, or K is the same
-// distance. This dump has not been fit, so the weights stay at 1.
-constexpr float kWeightM = 1.0f;
-constexpr float kWeightN = 1.0f;
-constexpr float kWeightK = 1.0f;
-
 struct GemmShape {
   int64_t m = 1;
   int64_t n = 1;
@@ -234,15 +228,15 @@ bool sameGroup(const ConvFields &query, const ConvFields &row) {
          query.supportsSplitK == row.supportsSplitK;
 }
 
-float gemmDistance(const GemmShape &query, const GemmShape &row) {
+float gemmDistance(const GemmShape &query, const GemmShape &row, float weightM,
+                  float weightN, float weightK) {
   auto term = [](float weight, int64_t a, int64_t b) {
     const float delta = weight * (std::log2(static_cast<float>(a)) -
                                   std::log2(static_cast<float>(b)));
     return delta * delta;
   };
-  return std::sqrt(term(kWeightM, query.m, row.m) +
-                   term(kWeightN, query.n, row.n) +
-                   term(kWeightK, query.k, row.k));
+  return std::sqrt(term(weightM, query.m, row.m) +
+                   term(weightN, query.n, row.n) + term(weightK, query.k, row.k));
 }
 
 bool isConvSolution(std::string_view solution) {
@@ -252,42 +246,60 @@ bool isConvSolution(std::string_view solution) {
 
 } // namespace
 
-bool loadProblemCacheConvEntries(const uint8_t *data, size_t size,
-                                 std::vector<ProblemCacheConvEntry> &entries,
-                                 std::string &error) {
-  entries.clear();
+bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
+                         std::string &error) {
+  lut = {};
   if (data == nullptr || size == 0) {
     error = "problem cache is empty";
     return false;
   }
   flatbuffers::Verifier verifier(data, size);
-  if (!hipdnn_ep::problem_cache::VerifyProblemCacheBuffer(verifier)) {
-    error = "problem cache is not an MXPC flatbuffer";
+  namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
+  if (!fbs::VerifyRocmlirAutotuneLutBuffer(verifier)) {
+    error = "problem cache is not an RCAL flatbuffer";
     return false;
   }
-  const auto *cache = hipdnn_ep::problem_cache::GetProblemCache(data);
-  if (cache->schema_version() != 1) {
-    error = "unsupported problem-cache schema version " +
-            std::to_string(cache->schema_version());
+  const auto *table = fbs::GetRocmlirAutotuneLut(data);
+  if (table->schema_version() != 1) {
+    error = "unsupported rocmlir LUT schema version " +
+            std::to_string(table->schema_version());
     return false;
   }
-  const auto *rows = cache->entries();
-  if (rows == nullptr)
+  if (table->kernel_abi() == nullptr ||
+      table->kernel_abi()->str() != "rocmlir-conv-v1") {
+    error = "unsupported rocmlir LUT kernel_abi";
+    return false;
+  }
+  if (!(table->weight_m() > 0.0f) || !(table->weight_n() > 0.0f) ||
+      !(table->weight_k() > 0.0f)) {
+    error = "rocmlir LUT has a non-positive distance weight";
+    return false;
+  }
+  lut.weightM = table->weight_m();
+  lut.weightN = table->weight_n();
+  lut.weightK = table->weight_k();
+  const auto *configs = table->configs();
+  const auto *points = table->points();
+  if (configs == nullptr || points == nullptr)
     return true;
-  for (const auto *row : *rows) {
-    if (row == nullptr || row->problem() == nullptr || row->solution() == nullptr)
+  for (const auto *point : *points) {
+    if (point == nullptr || point->problem() == nullptr)
       continue;
-    std::string solution = row->solution()->str();
+    if (point->config() >= configs->size())
+      continue;
+    const auto *config = configs->Get(point->config());
+    if (config == nullptr || config->perf_config() == nullptr)
+      continue;
+    std::string solution = config->perf_config()->str();
     if (!isConvSolution(solution))
       continue;
-    entries.push_back({row->problem()->str(), std::move(solution)});
+    lut.entries.push_back({point->problem()->str(), std::move(solution)});
   }
   return true;
 }
 
-bool loadProblemCacheConvEntries(const std::string &path,
-                                 std::vector<ProblemCacheConvEntry> &entries,
-                                 std::string &error) {
+bool loadProblemCacheLut(const std::string &path, ProblemCacheLut &lut,
+                         std::string &error) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     error = "problem cache not found: " + path;
@@ -299,14 +311,27 @@ bool loadProblemCacheConvEntries(const std::string &path,
     error = "failed reading problem cache: " + path;
     return false;
   }
-  return loadProblemCacheConvEntries(bytes.data(), bytes.size(), entries,
-                                     error);
+  return loadProblemCacheLut(bytes.data(), bytes.size(), lut, error);
+}
+
+bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,
+                      int64_t &k) {
+  m = n = k = 0;
+  auto fields = parseConvProblem(std::string(problem));
+  if (!fields)
+    return false;
+  const GemmShape shape = gemmShape(*fields);
+  m = shape.m;
+  n = shape.n;
+  k = shape.k;
+  return true;
 }
 
 std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
-                    const std::vector<std::string> &rejectedSolutions) {
+                    const std::vector<std::string> &rejectedSolutions,
+                    float weightM, float weightN, float weightK) {
   // The stored perfConfig was benchmarked for this exact kernel. Do not
   // re-check the block against the derived GEMM; rocMLIR pads past it.
   for (const auto &entry : entries) {
@@ -332,7 +357,7 @@ findNearestConvTune(std::string_view problemKey,
   ConvFields bestFields;
   float bestDistance = 0;
   for (const auto &entry : entries) {
-    if (!isConvSolution(entry.solution))
+    if (!isConvSolution(entry.solution) || entry.problem == problemKey)
       continue;
     if (std::find(rejectedSolutions.begin(), rejectedSolutions.end(),
                   entry.solution) != rejectedSolutions.end())
@@ -341,7 +366,8 @@ findNearestConvTune(std::string_view problemKey,
     if (!fields || !sameGroup(*query, *fields) ||
         !tileLegal(*query, entry.solution))
       continue;
-    const float distance = gemmDistance(queryGemm, gemmShape(*fields));
+    const float distance =
+        gemmDistance(queryGemm, gemmShape(*fields), weightM, weightN, weightK);
     // Ties keep the earlier row, matching the MatMulNBits probe.
     if (best != nullptr && distance >= bestDistance)
       continue;

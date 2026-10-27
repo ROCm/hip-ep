@@ -135,42 +135,47 @@ int main() {
   expect(hit.has_value() && hit->solution == tile128,
          "a rejected solution yields the next nearest row");
 
+  namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
   flatbuffers::FlatBufferBuilder builder;
-  auto problem = builder.CreateString(exact);
-  auto solution = builder.CreateString(tile32);
-  auto name = builder.CreateString("gpu::mlir_op");
-  auto convEntry = hipdnn_ep::problem_cache::CreateProblemCacheEntry(
-      builder, 0, 0, 20, 32, name, problem, solution);
+  auto tileOff = builder.CreateString(tile32);
+  auto reduceOff = builder.CreateString("{\"algo\":\"block\"}");
+  auto gemmOff = builder.CreateString(gemmTile);
+  std::vector<flatbuffers::Offset<fbs::RocmlirTuneConfig>> configs = {
+      fbs::CreateRocmlirTuneConfig(builder, tileOff),
+      fbs::CreateRocmlirTuneConfig(builder, reduceOff),
+      fbs::CreateRocmlirTuneConfig(builder, gemmOff),
+  };
+  auto convProblem = builder.CreateString(exact);
   auto reduceProblem = builder.CreateString("{\"lens\":[1,2]}");
-  auto reduceSolution = builder.CreateString("{\"algo\":\"block\"}");
-  auto reduceName = builder.CreateString("fused_reduce");
-  auto reduceEntry = hipdnn_ep::problem_cache::CreateProblemCacheEntry(
-      builder, 0, 0, 20, 32, reduceName, reduceProblem, reduceSolution);
-  auto gemmProblemOff = builder.CreateString(gemmKey);
-  auto gemmSolutionOff = builder.CreateString(gemmTile);
-  auto gemmName = builder.CreateString("hip::rocmlir");
-  auto gemmEntry = hipdnn_ep::problem_cache::CreateProblemCacheEntry(
-      builder, 0, 0, 20, 32, gemmName, gemmProblemOff, gemmSolutionOff);
-  std::vector<flatbuffers::Offset<hipdnn_ep::problem_cache::ProblemCacheEntry>>
-      rows = {convEntry, reduceEntry, gemmEntry};
-  auto cache = hipdnn_ep::problem_cache::CreateProblemCache(
-      builder, 1, builder.CreateVector(rows));
-  hipdnn_ep::problem_cache::FinishProblemCacheBuffer(builder, cache);
+  auto gemmProblem = builder.CreateString(gemmKey);
+  std::vector<flatbuffers::Offset<fbs::RocmlirTunePoint>> points = {
+      fbs::CreateRocmlirTunePoint(builder, convProblem, 0, 32, 4096, 144),
+      fbs::CreateRocmlirTunePoint(builder, reduceProblem, 1, 0, 0, 0),
+      fbs::CreateRocmlirTunePoint(builder, gemmProblem, 2, 0, 0, 0),
+  };
+  auto gpuArch = builder.CreateString("gfx1151");
+  auto kernelAbi = builder.CreateString("rocmlir-conv-v1");
+  auto modelKey = builder.CreateString("");
+  std::vector<flatbuffers::Offset<fbs::RocmlirTuneFallback>> fallbacks;
+  auto table = fbs::CreateRocmlirAutotuneLut(
+      builder, 1, gpuArch, 0, kernelAbi, modelKey, 1.0f, 1.0f, 1.0f,
+      builder.CreateVector(configs), builder.CreateVector(points),
+      builder.CreateVector(fallbacks));
+  fbs::FinishRocmlirAutotuneLutBuffer(builder, table);
 
-  std::vector<ProblemCacheConvEntry> loaded;
+  mlir::hip::ProblemCacheLut loaded;
   std::string error;
-  expect(mlir::hip::loadProblemCacheConvEntries(builder.GetBufferPointer(),
-                                                builder.GetSize(), loaded,
-                                                error),
-         "MXPC buffer loads");
-  expect(loaded.size() == 2 && loaded[0].solution == tile32 &&
-             loaded[1].solution == gemmTile,
-         "loader keeps conv and gemm rows and drops fused_reduce");
+  expect(mlir::hip::loadProblemCacheLut(builder.GetBufferPointer(),
+                                        builder.GetSize(), loaded, error),
+         "RCAL buffer loads");
+  expect(loaded.entries.size() == 2 && loaded.entries[0].solution == tile32 &&
+             loaded.entries[1].solution == gemmTile && loaded.weightM == 1.0f,
+         "loader keeps conv and gemm rows and drops a non-gemm config");
 
   const uint8_t garbage[] = {1, 2, 3, 4};
-  expect(!mlir::hip::loadProblemCacheConvEntries(garbage, sizeof(garbage),
-                                                 loaded, error),
-         "a non-MXPC buffer is rejected");
+  expect(!mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded,
+                                         error),
+         "a non-RCAL buffer is rejected");
 
   if (gFailures != 0) {
     std::fprintf(stderr, "%d nearest-conv-tune checks failed\n", gFailures);
