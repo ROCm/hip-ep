@@ -300,15 +300,17 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
 /// \param presentValueType ditto for present_value
 /// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
 ///                        seq_kv]. nullptr when absent.
-mlir::LogicalResult
-buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
-                mlir::Value context, mlir::Value query, mlir::Value key,
-                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
-                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
-                float scale, bool noCausal, mlir::RankedTensorType outputType,
-                mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType,
-                mlir::Value attentionBias = nullptr);
+/// \param presentLength   Optional index: the present buffers' sequence
+///                        extent when it is dynamic and not the past's
+///                        (present = concat(past, this step)).
+mlir::LogicalResult buildHipGqaCall(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter, mlir::Value context,
+    mlir::Value query, mlir::Value key, mlir::Value value, mlir::Value pastKey,
+    mlir::Value pastValue, mlir::Value seqlensK, mlir::Value totalSeqLen,
+    int64_t numHeads, float scale, bool noCausal,
+    mlir::RankedTensorType outputType, mlir::RankedTensorType presentKeyType,
+    mlir::RankedTensorType presentValueType,
+    mlir::Value attentionBias = nullptr, mlir::Value presentLength = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /
