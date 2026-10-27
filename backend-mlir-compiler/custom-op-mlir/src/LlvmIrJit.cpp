@@ -31,6 +31,15 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/TargetParser/Triple.h>
 
+#ifndef _WIN32
+#include <llvm/Config/llvm-config.h>
+#include <llvm/ExecutionEngine/Orc/MapperJITLinkMemoryManager.h>
+#include <llvm/ExecutionEngine/Orc/MemoryMapper.h>
+#if LLVM_VERSION_MAJOR < 23
+#include <llvm/ExecutionEngine/Orc/SelfExecutorProcessControl.h>
+#endif
+#endif
+
 // Plugin-registry accessors (pluginBitcodeBuffers / pluginLibraries /
 // pluginLibraryPaths). Provided by LibHipCompiler, which every host linking
 // this lib also links (see this dir's CMakeLists).
@@ -119,7 +128,24 @@ void ensureLLVMNativeTargetInitialized() {
 // custom JITLinkMemoryManager, or the full COFFPlatform and the ORC runtime.
 // Not worth it when one bool restores the guarantee RuntimeDyld asks for.
 //
-// Set HIPDNN_EP_JIT_UNRESERVED=1 to fall back to the stock LLJIT layer.
+// Linux has the JITLink twin of this problem. JITLink's default
+// InProcessMemoryManager maps every LinkGraph independently, and LLJIT's
+// generic platform JITs `__dso_handle` in its own small module. runtime.bc's
+// static-init code (__cxa_atexit(dtor, obj, &__dso_handle)) reaches that hidden
+// symbol PC-relative, i.e. with a Delta32 fixup limited to +/-2 GB. In a
+// fragmented address space (ROCm reserves large VA ranges; seen reliably under
+// pytest) consecutive mappings land >2 GB apart and every session dies in
+// initialize() with
+//
+//   relocation target ... (__dso_handle ...) is out of range of Delta32 fixup
+//
+// so the EP aborts on its first JIT. The fix mirrors ReserveAlloc: a
+// MapperJITLinkMemoryManager carves all of one JIT's allocations out of a
+// single reservation of kJitSlabBytes (address space only; pages are committed
+// on first touch), keeping every intra-JIT PC-relative reference in range.
+//
+// Set HIPDNN_EP_JIT_UNRESERVED=1 to fall back to the stock LLJIT memory
+// management on either OS.
 
 #ifdef _WIN32
 // A functor rather than a lambda because LLJITBuilderState::
@@ -164,20 +190,53 @@ static_assert(
         ReservingObjectLayerCreator::Result, ReservingObjectLayerCreator,
         llvm::orc::ExecutionSession &, llvm::jitlink::JITLinkMemoryManager &>,
     "ObjectLinkingLayerCreator arity for LLVM >= 23");
+#else
+// Must exceed one JIT's total code + data (runtime.bc plus the per-model
+// module); must stay below 2 GB so any two addresses in it are
+// Delta32-reachable.
+constexpr std::size_t kJitSlabBytes = std::size_t{1} << 30;
+
+llvm::Expected<std::unique_ptr<llvm::jitlink::JITLinkMemoryManager>>
+makeSlabMemoryManager() {
+  return llvm::orc::MapperJITLinkMemoryManager::CreateWithMapper<
+      llvm::orc::InProcessMemoryMapper>(kJitSlabBytes);
+}
 #endif
 
 llvm::orc::LLJITBuilder makeLLJITBuilder() {
   llvm::orc::LLJITBuilder builder;
 
-#ifdef _WIN32
   if (hipdnn_ep::env_enabled("HIPDNN_EP_JIT_UNRESERVED")) {
     LOG(WARNING) << "LlvmIrJit: HIPDNN_EP_JIT_UNRESERVED=1 -- using the stock "
-                    "LLJIT memory manager; IMAGE_REL_AMD64_ADDR32NB aborts are "
-                    "possible.";
+                    "LLJIT memory manager; out-of-range relocation failures "
+                    "(IMAGE_REL_AMD64_ADDR32NB on Windows, Delta32 on Linux) "
+                    "are possible.";
     return builder;
   }
 
+#ifdef _WIN32
   builder.setObjectLinkingLayerCreator(ReservingObjectLayerCreator{});
+#elif LLVM_VERSION_MAJOR >= 23
+  builder.setMemoryManagerCreator(
+      [](llvm::orc::ExecutionSession &) { return makeSlabMemoryManager(); });
+#else
+  // LLVM <= 22 has no setMemoryManagerCreator; the EPC owns the manager there.
+  auto mem_mgr = makeSlabMemoryManager();
+  if (!mem_mgr) {
+    LOG(WARNING) << "LlvmIrJit: slab memory manager failed ("
+                 << llvm::toString(mem_mgr.takeError())
+                 << "); using the stock LLJIT memory manager.";
+    return builder;
+  }
+  auto epc = llvm::orc::SelfExecutorProcessControl::Create(nullptr, nullptr,
+                                                           std::move(*mem_mgr));
+  if (!epc) {
+    LOG(WARNING) << "LlvmIrJit: SelfExecutorProcessControl failed ("
+                 << llvm::toString(epc.takeError())
+                 << "); using the stock LLJIT memory manager.";
+    return builder;
+  }
+  builder.setExecutorProcessControl(std::move(*epc));
 #endif
 
   return builder;
@@ -643,7 +702,7 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
   // (LLJITBuilderState::prepareForConstruction): RuntimeDyld on Windows
   // (x86_64 COFF), JITLink on Linux (x86_64 ELF). Both are linked in (see this
   // dir's CMakeLists) for that reason. makeLLJITBuilder keeps that choice but
-  // fixes the Windows memory layout; see the comment there.
+  // fixes each linker's memory layout; see the comment there.
   auto jit_or_err = makeLLJITBuilder().create();
   if (!jit_or_err) {
     LOG(ERROR) << "LlvmIrJit::create: LLJITBuilder failed: "
