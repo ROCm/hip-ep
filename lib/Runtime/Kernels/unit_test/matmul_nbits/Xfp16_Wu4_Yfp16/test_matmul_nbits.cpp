@@ -72,6 +72,7 @@ extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
 #include <random>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 // ---- Tiny inline coverage-tier resolver + CSV writer (replaces
@@ -768,6 +769,10 @@ static int run() {
   const int pads[] = {0, 128, 256};
   hipStream_t stream;
   HIP_CHECK(hipStreamCreate(&stream));
+  // Entries with the same tile share their shapes, and the CPU reference is
+  // the expensive part, so each (M, N, group size, zero points) is generated
+  // once and reused by every entry that runs it.
+  std::map<std::tuple<int, int, int, bool>, CaseData> cases;
   int entries = 0, fail = 0;
   std::string never_ran;
   for (int cfg = 0; cfg < count; ++cfg) {
@@ -780,9 +785,13 @@ static int run() {
       const int M = mn[0], N = mn[1];
       for (int gs : {32, 128}) {
         for (bool zero : {true, false}) {
-          CaseData d;
-          genCase(M, K, N, gs, zero, /*fp32=*/false,
-                  /*seed=*/7000u + static_cast<unsigned>(cfg * 8 + ran), d);
+          auto it = cases.find(std::make_tuple(M, N, gs, zero));
+          if (it == cases.end()) {
+            it = cases.emplace(std::make_tuple(M, N, gs, zero), CaseData{}).first;
+            genCase(M, K, N, gs, zero, /*fp32=*/false,
+                    /*seed=*/7000u + static_cast<unsigned>(cases.size()), it->second);
+          }
+          const CaseData& d = it->second;
           const int row_bytes = K / 2;
           void *dA = nullptr, *dB = nullptr, *dS = nullptr, *dZ = nullptr, *dC = nullptr;
           HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
@@ -849,8 +858,9 @@ static int run() {
     }
   }
   HIP_CHECK(hipStreamDestroy(stream));
-  std::printf("\nForced extended entries: %d entries, %d failed%s%s\n", entries, fail,
-              never_ran.empty() ? "" : "; served no case:", never_ran.c_str());
+  std::printf("\nForced extended entries: %d entries, %zu reference cases, %d failed%s%s\n",
+              entries, cases.size(), fail, never_ran.empty() ? "" : "; served no case:",
+              never_ran.c_str());
   return entries > 0 && fail == 0 ? 0 : 1;
 }
 
