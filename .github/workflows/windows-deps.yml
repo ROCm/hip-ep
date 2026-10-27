@@ -37,7 +37,7 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2685 2691 2705 2712 2763"
+  OGA_PR_PATCHES: "2685 2691 2705 2712 2763 2593 2794 2795"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
