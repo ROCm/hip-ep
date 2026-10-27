@@ -180,7 +180,11 @@ def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
     Option<"fuseViews", "fuse-views", "bool", /*default=*/"true",
            "Absorb the view ops, unary prologues, quantize epilogues and "
            "extra outputs around a convolution, matmul or gemm anchor. Off "
-           "keeps every kernel a forward-only pointwise chain.">
+           "keeps every kernel a forward-only pointwise chain.">,
+    Option<"fuseGemmGemm", "fuse-geg", "bool", /*default=*/"true",
+           "Merge a matmul/gemm kernel into the next one when its only "
+           "result feeds that gemm's A operand and MIGraphX's "
+           "gemm-elementwise-gemm shape gates pass.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
