@@ -113,7 +113,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Attention (`ai.onnx`, opset 23/24) | Lowered to GroupQueryAttention for supported rank-3/rank-4, causal/masked, output, and KV-cache forms |
 | MatMulNBits (`com.microsoft`) | Custom HIP kernel |
 | MatMulBnb4 (`com.microsoft`) | HIP dequant of FP4 (`quant_type` 0) or NF4 (`quant_type` 1) into `[N, K]`, then `hip.matmul` with `transB = 1`. The first packed value is the high nibble. Static shapes pull that dequant into the rocMLIR matmul kernel. A dynamic activation leaves the dequant on HIP and the GEMM on hipBLASLt. Block size 16, 32, 64, 128, or 256. `transB` must be 1 and `training_mode` must be 0 |
-| QMoE (`com.microsoft`) | Custom HIP kernel |
+| QMoE (`com.microsoft`) | Custom HIP kernel. FP16 activations with 2-bit or 4-bit expert weights |
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel |
 | DequantizeLinear | Custom HIP kernel |

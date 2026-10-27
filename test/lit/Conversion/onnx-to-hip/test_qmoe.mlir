@@ -155,4 +155,77 @@ module {
   // CHECK-LABEL: func.func @test_weights_prepacked_alternate_rejected
   // CHECK-NOT: hip.qmoe
   // CHECK: onnx.Custom
+
+  func.func @test_two_bit(
+      %input: tensor<1x4x64xf16>,
+      %router: tensor<4x8xf16>,
+      %fc1_w: tensor<8x128x16xui8>,
+      %fc1_s: tensor<8x128x2xf16>,
+      %fc2_w: tensor<8x64x16xui8>,
+      %fc2_s: tensor<8x64x2xf16>) -> tensor<1x4x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 32 : si64,
+      expert_weight_bits = 2 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x16xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x16xui8>, tensor<8x64x2xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_two_bit
+  // CHECK: hip.qmoe
+  // CHECK-SAME: expert_weight_bits = 2
+  // CHECK-NOT: onnx.Custom
+
+  func.func @test_two_bit_packed_shape_rejected(
+      %input: tensor<1x4x64xf16>,
+      %router: tensor<4x8xf16>,
+      %fc1_w: tensor<8x128x17xui8>,
+      %fc1_s: tensor<8x128x2xf16>,
+      %fc2_w: tensor<8x64x16xui8>,
+      %fc2_s: tensor<8x64x2xf16>) -> tensor<1x4x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 32 : si64,
+      expert_weight_bits = 2 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x17xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x16xui8>, tensor<8x64x2xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_two_bit_packed_shape_rejected
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
+
+  func.func @test_unsupported_bits(
+      %input: tensor<1x4x64xf16>,
+      %router: tensor<4x8xf16>,
+      %fc1_w: tensor<8x128x24xui8>,
+      %fc1_s: tensor<8x128x2xf16>,
+      %fc2_w: tensor<8x64x24xui8>,
+      %fc2_s: tensor<8x64x2xf16>) -> tensor<1x4x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 32 : si64,
+      expert_weight_bits = 3 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x24xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x24xui8>, tensor<8x64x2xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_unsupported_bits
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
 }

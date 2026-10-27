@@ -739,8 +739,8 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
       d_scales.get(),
       use_zero_points ? static_cast<const void*>(d_zero_points.get()) : nullptr,
       use_bias ? static_cast<const void*>(d_bias.get()) : nullptr,
-      output, shape.rows, shape.experts, shape.n, shape.k, shape.block_size,
-      sizeof(__half));
+      output, shape.rows, shape.experts, shape.n, shape.k, 4,
+      shape.block_size, sizeof(__half));
   if (status != static_cast<int>(hipSuccess)) {
     std::cerr << "FAIL launch status=" << status << " shape=" << shape.name
               << '\n';
@@ -791,7 +791,8 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             expert_weights.part(c, 1),
             use_zero_points ? expert_weights.part(c, 2) : nullptr,
             use_bias ? expert_weights.part(c, 3) : nullptr, output, shape.rows,
-            shape.experts, shape.n, shape.k, shape.block_size, sizeof(__half));
+            shape.experts, shape.n, shape.k, 4, shape.block_size,
+            sizeof(__half));
       });
 
   std::cout << (pass ? "PASS" : "FAIL") << " relL2=" << metrics.rel_l2
@@ -1321,7 +1322,7 @@ bool run_pipeline_case(hipStream_t stream) {
         d_groups.get(), d_group_count.get(), d_fc1_queue.get(),
         d_fc1_weights.get(), d_fc1_scales.get(), d_fc1_zero_points.get(),
         d_fc1_bias.get(), d_fc1_output.get(), pairs, experts, fusion_inter,
-        hidden, block_size, sizeof(__half));
+        hidden, 4, block_size, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_swiglu(reinterpret_cast<void*>(stream), d_fc1_output.get(),
                              d_act.get(), pairs, inter, alpha, beta, limit,
@@ -1331,7 +1332,7 @@ bool run_pipeline_case(hipStream_t stream) {
         reinterpret_cast<void*>(stream), d_act.get(), nullptr, d_groups.get(),
         d_group_count.get(), d_fc2_queue.get(), d_fc2_weights.get(),
         d_fc2_scales.get(), d_fc2_zero_points.get(), d_fc2_bias.get(),
-        d_fc2_output.get(), pairs, experts, hidden, inter, block_size,
+        d_fc2_output.get(), pairs, experts, hidden, inter, 4, block_size,
         sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_reduce_sorted_pairs(

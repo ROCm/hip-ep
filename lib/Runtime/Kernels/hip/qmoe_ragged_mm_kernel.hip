@@ -304,7 +304,7 @@ __device__ __forceinline__ void qmoe_gemv_task(
     const uint8_t* weights, const _Float16* scales,
     const uint8_t* zero_points, const _Float16* bias, _Float16* output,
     int N, int K, int block_size, int row_begin, int row_count, int n_begin,
-    int weight_row_bytes, int k_blocks) {
+    int weight_row_bytes, int k_blocks, int bits) {
   const int tid = static_cast<int>(threadIdx.x);
   const int wave = tid / 32;
   const int lane = tid & 31;
@@ -328,14 +328,21 @@ __device__ __forceinline__ void qmoe_gemv_task(
         a_sum += a_values[i];
       }
 
-      uint4 packed[kGemvTileN];
+      uint4 packed_u4[kGemvTileN];
+      uint2 packed_u2[kGemvTileN];
       float scale_values[kGemvTileN];
 #pragma unroll
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        packed[tn] = *reinterpret_cast<const uint4*>(
-            weights + static_cast<size_t>(safe_n) * weight_row_bytes + k32 / 2);
+        const uint8_t* packed =
+            weights + static_cast<size_t>(safe_n) * weight_row_bytes;
+        if (bits == 2)
+          packed_u2[tn] =
+              *reinterpret_cast<const uint2*>(packed + k32 / 4);
+        else
+          packed_u4[tn] =
+              *reinterpret_cast<const uint4*>(packed + k32 / 2);
         scale_values[tn] = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
       }
@@ -343,32 +350,47 @@ __device__ __forceinline__ void qmoe_gemv_task(
 #pragma unroll
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         float dot = 0.0f;
+        if (bits == 2) {
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[i],
-                          static_cast<float>((packed[tn].x >> (i * 4)) & 15u),
+          for (int i = 0; i < 16; ++i)
+            dot = __fmaf_rn(
+                a_values[i],
+                static_cast<float>((packed_u2[tn].x >> (i * 2)) & 3u), dot);
+#pragma unroll
+          for (int i = 0; i < 16; ++i)
+            dot = __fmaf_rn(
+                a_values[16 + i],
+                static_cast<float>((packed_u2[tn].y >> (i * 2)) & 3u), dot);
+        } else {
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            dot =
+                __fmaf_rn(a_values[i],
+                          static_cast<float>(
+                              (packed_u4[tn].x >> (i * 4)) & 15u),
                           dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[8 + i],
-                          static_cast<float>((packed[tn].y >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[8 + i],
+                static_cast<float>((packed_u4[tn].y >> (i * 4)) & 15u), dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[16 + i],
-                          static_cast<float>((packed[tn].z >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[16 + i],
+                static_cast<float>((packed_u4[tn].z >> (i * 4)) & 15u), dot);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[24 + i],
-                          static_cast<float>((packed[tn].w >> (i * 4)) & 15u),
-                          dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[24 + i],
+                static_cast<float>((packed_u4[tn].w >> (i * 4)) & 15u), dot);
+        }
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] += (dot - a_sum * zp) * scale_values[tn];
       }
     }
@@ -387,23 +409,37 @@ __device__ __forceinline__ void qmoe_gemv_task(
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        const uint2 packed = *reinterpret_cast<const uint2*>(
-            weights + static_cast<size_t>(safe_n) * weight_row_bytes + k16 / 2);
         float dot = 0.0f;
+        const uint8_t* packed =
+            weights + static_cast<size_t>(safe_n) * weight_row_bytes;
+        if (bits == 2) {
+          const uint32_t packed_u2 =
+              *reinterpret_cast<const uint32_t*>(packed + k16 / 4);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[i],
-                          static_cast<float>((packed.x >> (i * 4)) & 15u), dot);
+          for (int i = 0; i < 16; ++i)
+            dot =
+                __fmaf_rn(a_values[i],
+                          static_cast<float>((packed_u2 >> (i * 2)) & 3u), dot);
+        } else {
+          const uint2 packed_u4 =
+              *reinterpret_cast<const uint2*>(packed + k16 / 2);
 #pragma unroll
-        for (int i = 0; i < 8; ++i)
-          dot = __fmaf_rn(a_values[8 + i],
-                          static_cast<float>((packed.y >> (i * 4)) & 15u), dot);
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[i],
+                static_cast<float>((packed_u4.x >> (i * 4)) & 15u), dot);
+#pragma unroll
+          for (int i = 0; i < 8; ++i)
+            dot = __fmaf_rn(
+                a_values[8 + i],
+                static_cast<float>((packed_u4.y >> (i * 4)) & 15u), dot);
+        }
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] += (dot - a_sum * zp) * scale;
       }
     }
@@ -416,16 +452,18 @@ __device__ __forceinline__ void qmoe_gemv_task(
       for (int tn = 0; tn < kGemvTileN; ++tn) {
         const int n = wave_n_begin + tn;
         const int safe_n = n < N ? n : 0;
-        const uint8_t packed = weights[
-            static_cast<size_t>(safe_n) * weight_row_bytes + k / 2];
+        const uint8_t packed =
+            weights[static_cast<size_t>(safe_n) * weight_row_bytes +
+                    (k * bits) / 8];
+        const unsigned shift = static_cast<unsigned>((k * bits) & 7);
         const float q = static_cast<float>(
-            (k & 1) ? (packed >> 4) : (packed & 15u));
+            (packed >> shift) & static_cast<uint8_t>((1u << bits) - 1u));
         const float scale = static_cast<float>(
             scales[static_cast<size_t>(safe_n) * k_blocks + group]);
         const float zp = zero_points
             ? static_cast<float>(zero_points[
                   static_cast<size_t>(safe_n) * k_blocks + group])
-            : 8.0f;
+            : bits == 2 ? 2.0f : 8.0f;
         partial[tn] = __fmaf_rn(a, (q - zp) * scale, partial[tn]);
       }
     }
@@ -476,6 +514,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
     int64_t num_experts,
     int64_t N,
     int64_t K,
+    int64_t bits,
     int64_t block_size,
     int gemv_max_rows,
     int wmma16_max_rows) {
@@ -524,13 +563,16 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
     const int expert = groups[group_id * 4 + 0];
     const int row_begin = groups[group_id * 4 + 1];
     const int row_count = groups[group_id * 4 + 2];
-    const int task_kind = select_ragged_task_kind(
-        row_count, gemv_max_rows, wmma16_max_rows);
+    const int task_kind =
+        bits == 2 ? kTaskGemv
+                  : select_ragged_task_kind(row_count, gemv_max_rows,
+                                            wmma16_max_rows);
     const int n_begin = n_tile * kColsPerBlock;
     const bool valid_expert = expert >= 0 && expert < num_experts;
 
     const int k_blocks = static_cast<int>((K + block_size - 1) / block_size);
-    const int weight_row_bytes = k_blocks * static_cast<int>(block_size / 2);
+    const int weight_row_bytes =
+        k_blocks * static_cast<int>((block_size * bits + 7) / 8);
     if (valid_expert) {
       const size_t expert_cols = static_cast<size_t>(expert) * N;
       const uint8_t* expert_weights =
@@ -545,7 +587,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
                         expert_zeros, expert_bias, output, static_cast<int>(N),
                         static_cast<int>(K), static_cast<int>(block_size),
                         row_begin, row_count, n_begin, weight_row_bytes,
-                        k_blocks);
+                        k_blocks, static_cast<int>(bits));
       } else if (task_kind == kTaskWmma16) {
         qmoe_wmma16_task(
             input, input_row_ids, expert_weights, expert_scales, expert_zeros,
@@ -681,7 +723,7 @@ hipError_t launch_ragged_matmul_nbits(
     const void* row_groups, const void* row_group_count, void* queue_head,
     const void* weights, const void* scales, const void* zero_points_u8,
     const void* bias, void* output, int64_t total_rows, int64_t num_experts,
-    int64_t N, int64_t K, int64_t block_size, int grid_blocks,
+    int64_t N, int64_t K, int64_t bits, int64_t block_size, int grid_blocks,
     int gemv_max_rows, int wmma16_max_rows) {
   hipLaunchKernelGGL(
       qmoe_ragged_matmul_nbits_adaptive_kernel<QueuePolicy>,
@@ -695,7 +737,7 @@ hipError_t launch_ragged_matmul_nbits(
       static_cast<const _Float16 *>(scales),
       static_cast<const uint8_t *>(zero_points_u8),
       static_cast<const _Float16 *>(bias), static_cast<_Float16 *>(output),
-      total_rows, num_experts, N, K, block_size, gemv_max_rows,
+      total_rows, num_experts, N, K, bits, block_size, gemv_max_rows,
       wmma16_max_rows);
   return hipGetLastError();
 }
@@ -794,7 +836,8 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
     const void *row_groups, const void *row_group_count, void *queue_head,
     const void *weights, const void *scales, const void *zero_points_u8,
     const void *bias, void *output, int64_t total_rows, int64_t num_experts,
-    int64_t N, int64_t K, int64_t block_size, int64_t element_size_bytes) {
+    int64_t N, int64_t K, int64_t bits, int64_t block_size,
+    int64_t element_size_bytes) {
   if (!stream || !input || !row_groups || !row_group_count || !queue_head ||
       !weights || !scales || !output) {
     fprintf(stderr,
@@ -807,8 +850,15 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits: fp16 only\n");
     return -1;
   }
+  if (bits != 2 && bits != 4) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_ragged_matmul_nbits: bits must be 2 "
+            "or 4\n");
+    return -1;
+  }
   if (total_rows <= 0 || num_experts <= 0 || N <= 0 || K <= 0 ||
-      block_size <= 0 || (block_size & 1) != 0) {
+      block_size <= 0 || (block_size & 1) != 0 ||
+      (bits == 2 && (block_size & 3) != 0)) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits: invalid shape\n");
     return -1;
@@ -838,35 +888,35 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kAtomic1>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk2:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk2>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk4:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk4>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kChunk8:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kChunk8>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
     case RaggedQueuePolicy::kGridStride:
       err = launch_ragged_matmul_nbits<RaggedQueuePolicy::kGridStride>(
           hip_stream, input, input_row_ids, row_groups, row_group_count,
           queue_head, weights, scales, zero_points_u8, bias, output, total_rows,
-          num_experts, N, K, block_size, config.grid_blocks,
+          num_experts, N, K, bits, block_size, config.grid_blocks,
           task_policy.gemv_max_rows, task_policy.wmma16_max_rows);
       break;
   }
