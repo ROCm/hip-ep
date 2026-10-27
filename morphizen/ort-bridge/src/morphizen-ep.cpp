@@ -7,6 +7,7 @@
 #include "./morphizen-deps.hpp"
 #include "./ort-api-version.hpp"
 #include "./ort-graph-wrapper.hpp"
+#include "./roctx-range.hpp"
 #include "glog/logging.h"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
@@ -14,6 +15,7 @@
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <google/protobuf/util/json_util.h>
 #include <set>
 
@@ -511,6 +513,37 @@ void MorphiZenEP::update_input_output_argument_indice(
   update_argument_indice(meta_def.outputs(),
                          meta_def.mutable_output_argument_indice(), outputs);
 }
+// Names a compiled subgraph after the model file it came from, so a trace can
+// tell a VLM's vision encoder from its embedding and decoder sessions:
+// "vision.onnx" -> "hip-ep.vision#0", "vision_encoder/model.onnx" ->
+// "hip-ep.vision_encoder#0". The index separates the subgraphs of one model
+// when nodes outside them run on another EP.
+static std::string subgraph_roctx_label(const OrtApi &ort_api,
+                                        const OrtGraph *graph, size_t index) {
+  std::string model = "subgraph";
+  try {
+    const ORTCHAR_T *model_path = nullptr;
+    OrtStatus *status = ort_api.Graph_GetModelPath(graph, &model_path);
+    if (status != nullptr) {
+      ort_api.ReleaseStatus(status);
+    } else if (model_path != nullptr && model_path[0] != 0) {
+      // u8string() is std::string in C++17 and std::u8string in C++20.
+      auto utf8 = [](const std::filesystem::path &p) {
+        auto s = p.u8string();
+        return std::string(s.begin(), s.end());
+      };
+      std::filesystem::path path(model_path);
+      std::string stem = utf8(path.stem());
+      if (stem == "model" && path.has_parent_path())
+        stem = utf8(path.parent_path().filename());
+      if (!stem.empty())
+        model = stem;
+    }
+  } catch (...) {
+  }
+  return "hip-ep." + model + "#" + std::to_string(index);
+}
+
 OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
                                 const OrtNode **fused_nodes, size_t count,
                                 OrtNodeComputeInfo **node_compute_infos,
@@ -537,6 +570,10 @@ OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
       MY_LOG(1) << "Failed to compile subgraph for execution provider at index "
                 << index << ": " << ort_api.GetErrorMessage(status);
       return status;
+    }
+    if (roctx::enabled()) {
+      static_cast<MorphiZenEP_ComputeInfo *>(node_compute_infos[index])
+          ->roctx_label = subgraph_roctx_label(ort_api, graphs[index], index);
     }
   }
   return nullptr;
@@ -600,7 +637,7 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
         [](OrtNodeComputeInfo *this_ptr, void *compute_state,
            OrtKernelContext *kernel_context) -> OrtStatus * {
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
-      (void)self;
+      roctx::Range range(self->roctx_label);
       static_cast<morphizen::CustomOp *>(compute_state)
           ->Compute(&Ort::GetApi(), kernel_context);
       return nullptr;
