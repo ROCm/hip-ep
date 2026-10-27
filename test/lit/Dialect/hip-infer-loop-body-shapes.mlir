@@ -272,3 +272,16 @@ func.func @upsample_refines_dynamic_dims(%x: tensor<1x3x18x21xf32>) -> tensor<?x
       : (tensor<?x?x?x?xf32>) -> tensor<?x?x?x?xf16>
   return %result : tensor<?x?x?x?xf16>
 }
+
+// A rule that knows less than the declared type must not widen it: opset-10
+// Slice takes its bounds as operands, so its rule reports every extent dynamic.
+// CHECK-LABEL: func.func @refinement_keeps_known_extents
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<1x?x12x32xf16>
+func.func @refinement_keeps_known_extents(%x: tensor<1x?x12x64xf16>,
+    %starts: tensor<1xi64>, %ends: tensor<1xi64>, %axes: tensor<1xi64>)
+    -> tensor<1x?x12x32xf16> {
+  %y = "onnx.Slice"(%x, %starts, %ends, %axes)
+      : (tensor<1x?x12x64xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+      -> tensor<1x?x12x32xf16>
+  return %y : tensor<1x?x12x32xf16>
+}

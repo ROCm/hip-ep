@@ -1218,6 +1218,34 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
   return failure();
 }
 
+/// Combine a rule's result type with the type the result already has. Rules
+/// may know less than the importer (opset-10 Slice reads its bounds from
+/// operands and reports every extent dynamic), so an extent that is already
+/// static is kept and only dynamic ones are filled in. Returns null when the
+/// two cannot describe the same tensor.
+static Type refineResultType(Type current, Type inferred) {
+  auto inferredRanked = dyn_cast<RankedTensorType>(inferred);
+  if (!inferredRanked)
+    return {};
+  auto currentRanked = dyn_cast<RankedTensorType>(current);
+  if (!currentRanked)
+    return inferred;
+  if (currentRanked.getRank() != inferredRanked.getRank() ||
+      currentRanked.getElementType() != inferredRanked.getElementType())
+    return {};
+  SmallVector<int64_t> shape(currentRanked.getShape().begin(),
+                             currentRanked.getShape().end());
+  for (int64_t i : llvm::seq<int64_t>(currentRanked.getRank())) {
+    int64_t known = currentRanked.getDimSize(i);
+    int64_t rule = inferredRanked.getDimSize(i);
+    if (ShapedType::isDynamic(known))
+      shape[i] = rule;
+    else if (!ShapedType::isDynamic(rule) && rule != known)
+      return {};
+  }
+  return currentRanked.clone(shape);
+}
+
 /// Forward-propagate static shape information onto incomplete `onnx.*` results
 /// within `body` until no further result can be refined.
 ///
@@ -1225,8 +1253,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
 /// operand is defined by an earlier op or a block arg, so a producer is
 /// always ranked before its consumer is visited). The bounded fixed point is
 /// a guard for any future shape in which a consumer precedes its producer in
-/// walk order; it is monotone (unranked -> ranked only) so it always
-/// terminates well within the cap.
+/// walk order; it is monotone (a result only gains rank or static extents) so
+/// it always terminates well within the cap.
 static void forwardInferUnrankedResults(func::FuncOp body) {
   static constexpr unsigned kMaxIters = 8;
   for (unsigned iter = 0; iter < kMaxIters; ++iter) {
@@ -1237,11 +1265,12 @@ static void forwardInferUnrankedResults(func::FuncOp body) {
           inferred.size() != op->getNumResults())
         return;
       for (auto [result, type] : llvm::zip(op->getResults(), inferred)) {
-        if (result.getType() == type)
+        Type refined = refineResultType(result.getType(), type);
+        if (!refined || refined == result.getType())
           continue;
         LLVM_DEBUG(DBGS() << "rank " << op->getName() << ": "
-                          << result.getType() << " -> " << type << "\n");
-        result.setType(type);
+                          << result.getType() << " -> " << refined << "\n");
+        result.setType(refined);
         ++NumOnnxResultsRanked;
         changed = true;
       }
