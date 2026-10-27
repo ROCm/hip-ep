@@ -113,14 +113,18 @@ struct FusionPolicy {
   bool absorbsInputs() const { return viewKinds != 0 || activationPrologue; }
 };
 
-// A convolution reads and writes through rock.transform views, so a transpose
-// next to it becomes a layout of the kernel instead of a separate copy
-// (TosaToRock folds it into input_layout / output_layout). Matmul and gemm
-// anchors keep their current boundaries.
+// rocMLIR reads every kernel input through rock.transform maps, so a view on
+// one becomes an index remap instead of a separate copy: a transpose next to
+// a convolution folds into its input_layout / output_layout, and a reshape,
+// slice, or broadcast on any input folds into that input's map. Matmul and
+// gemm anchors keep their current boundaries.
 template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
   FusionPolicy policy;
   if (std::is_same_v<AnchorOp, ConvOp> && fuseViews) {
-    policy.viewKinds = static_cast<unsigned>(ViewKind::Transpose);
+    policy.viewKinds = static_cast<unsigned>(ViewKind::Transpose) |
+                       static_cast<unsigned>(ViewKind::Reshape) |
+                       static_cast<unsigned>(ViewKind::Slice) |
+                       static_cast<unsigned>(ViewKind::Broadcast);
     policy.activationPrologue = true;
   }
   return policy;
@@ -183,6 +187,9 @@ private:
   Value context;
   SetVector<Value> operands;
   SetVector<Operation *> ops;
+  // What the forward chain past the anchor reads from outside: the residuals,
+  // biases, and scales of the epilogue.
+  SmallVector<Value> epilogueInputs;
 };
 
 void KernelRegion::growForward() {
@@ -203,8 +210,10 @@ void KernelRegion::growForward() {
     auto dps = dyn_cast<DestinationStyleOpInterface>(op);
     SmallVector<Value> inputs = dps ? SmallVector<Value>(dps.getDpsInputs())
                                     : SmallVector<Value>(op->getOperands());
-    if (prev)
+    if (prev) {
       inputs.erase(inputs.begin() + prev->use_begin()->getOperandNumber());
+      llvm::append_range(epilogueInputs, inputs);
+    }
     operands.insert_range(inputs);
     if (dps) {
       for (Value init : dps.getDpsInits()) {
@@ -260,74 +269,108 @@ void KernelRegion::absorbDequantBnb4() {
   }
 }
 
-// Pulls the producers of the anchor's own inputs into the kernel: any view the
-// policy allows, and on a root that permits it a unary pointwise op whose only
-// reader is being absorbed (absorbing one with other readers would compute it
-// twice). Epilogue inputs are left alone; their transposes would not fold into
-// the conv layout.
+// The values an absorbed producer reads as data, which become kernel arguments
+// unless absorbed in turn. A hip.expand's target shape is not data: HipToTosa
+// takes the broadcast from the result type, so the shape only has to resolve
+// inside the kernel, and absorbOperandFreeProducers clones a constant one.
+// Returns nullopt for an expand whose shape is computed at run time.
+static std::optional<SmallVector<Value>> getDataInputs(Operation *producer,
+                                                       Value context) {
+  if (auto expand = dyn_cast<ExpandOp>(producer)) {
+    Operation *shape = expand.getShape().getDefiningOp();
+    if (!shape || shape->getNumOperands() != 0 || !isMemoryEffectFree(shape))
+      return std::nullopt;
+    return SmallVector<Value>{expand.getInput()};
+  }
+  auto dps = dyn_cast<DestinationStyleOpInterface>(producer);
+  SmallVector<Value> inputs = dps ? SmallVector<Value>(dps.getDpsInputs())
+                                  : SmallVector<Value>(producer->getOperands());
+  llvm::erase(inputs, context);
+  return inputs;
+}
+
+// Pulls the producers of kernel inputs into the kernel: any view the policy
+// allows, on the anchor's inputs and on the epilogue's, and on a root that
+// permits it a unary pointwise op. A producer is absorbed only when the kernel
+// is its only reader. One that keeps running for another reader saves nothing
+// -- a hip.transpose outside rocMLIR is a real copy -- and the kernel would
+// become a second reader of the producer's input, which stops that input's
+// own kernel from growing forward through the producer.
 //
 // Before:
 //   %t0 = hip.transpose ins(%x : tensor<1x96x96x512xf16>) {perm = [0,3,1,2]}
 //   %c  = hip.conv ins(%t0, %w, %b) -> tensor<1x512x96x96xf16>
 //   %t1 = hip.transpose ins(%c) {perm = [0,2,3,1]}
-//   %a  = hip.add ins(%t1, %r) -> tensor<1x96x96x512xf16>
+//   %rb = hip.expand ins(%r : tensor<1x1x1x512xf16>, %shape)
+//   %a  = hip.add ins(%t1, %rb) -> tensor<1x96x96x512xf16>
 // After:
 //   %a = hip.rocmlir @rocMlir0(%x, %w, %b, %r)
-//   func @rocMlir0 { transpose -> conv -> transpose -> add }
+//   func @rocMlir0 { transpose -> conv -> transpose, expand -> add }
 void KernelRegion::absorbInputProducers(
     ArrayRef<std::pair<Value, bool>> roots) {
   if (!policy.absorbsInputs())
     return;
-  // An absorbed op keeps running outside the kernel while it has readers
-  // there, so a pointwise op feeding it would not be saved, only duplicated.
   auto onlyReadInKernel = [&](Operation *op) {
     return llvm::all_of(op->getUsers(),
                         [&](Operation *user) { return ops.contains(user); });
   };
-  SmallPtrSet<Operation *, 8> readOutside;
+  SmallVector<Value> original(operands.begin(), operands.end());
+  DenseMap<Value, SmallVector<Value>> replacedBy;
   SmallVector<std::pair<Value, bool>> worklist(roots.begin(), roots.end());
+  for (Value input : epilogueInputs)
+    worklist.push_back({input, false});
 
   while (!worklist.empty()) {
     auto [value, allowPointwise] = worklist.pop_back_val();
     if (!operands.contains(value))
       continue;
-    auto producer = value.getDefiningOp<DestinationStyleOpInterface>();
-    if (!producer || ops.contains(producer))
+    Operation *producer = value.getDefiningOp();
+    if (!producer || ops.contains(producer) || !onlyReadInKernel(producer))
+      continue;
+    std::optional<SmallVector<Value>> dataInputs =
+        getDataInputs(producer, context);
+    if (!dataInputs)
       continue;
     SmallVector<Value> inputs;
-    for (Value input : producer.getDpsInputs())
-      if (input != context && !isInlineScalarConstant(input))
+    for (Value input : *dataInputs)
+      if (!isInlineScalarConstant(input))
         inputs.push_back(input);
-    bool keepsRunning =
-        !onlyReadInKernel(producer) ||
-        llvm::any_of(producer->getUsers(), [&](Operation *user) {
-          return readOutside.contains(user);
-        });
-    bool absorb =
-        policy.allowsView(producer) ||
-        (allowPointwise && policy.activationPrologue &&
-         isFusablePointwise(producer) && inputs.size() == 1 && !keepsRunning);
+    bool absorb = policy.allowsView(producer) ||
+                  (allowPointwise && policy.activationPrologue &&
+                   isFusablePointwise(producer) && inputs.size() == 1);
     if (!absorb || !llvm::all_of(inputs, isStaticTensor))
       continue;
 
-    if (keepsRunning)
-      readOutside.insert(producer);
     ops.insert(producer);
     operands.remove(value);
-    for (Value init : producer.getDpsInits())
-      if (Operation *initOp = init.getDefiningOp())
-        ops.insert(initOp);
-    for (Value input : producer.getDpsInputs()) {
-      if (input == context)
-        continue;
+    if (auto dps = dyn_cast<DestinationStyleOpInterface>(producer))
+      for (Value init : dps.getDpsInits())
+        if (Operation *initOp = init.getDefiningOp())
+          ops.insert(initOp);
+    for (Value input : *dataInputs) {
       if (isInlineScalarConstant(input)) {
         ops.insert(input.getDefiningOp());
         continue;
       }
       operands.insert(input);
+      replacedBy[value].push_back(input);
       worklist.push_back({input, allowPointwise});
     }
   }
+
+  // An absorbed producer's inputs take the place of the value it produced,
+  // so the kernel arguments keep the order of the anchor's operands.
+  SetVector<Value> ordered;
+  std::function<void(Value)> place = [&](Value value) {
+    if (operands.contains(value))
+      ordered.insert(value);
+    for (Value input : replacedBy.lookup(value))
+      place(input);
+  };
+  for (Value value : original)
+    place(value);
+  assert(ordered.size() == operands.size() && "kernel argument lost");
+  operands = std::move(ordered);
 }
 
 // `ops` is cloned into an IsolatedFromAbove func, so every value it reads has
