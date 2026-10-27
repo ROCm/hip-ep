@@ -86,4 +86,24 @@ module {
 
     return
   }
+
+  // Test 4: the reduced axis sits after a dynamic dim, so the static
+  // trailing-match above cannot run. The axis is located from the shapes
+  // ([?,4,5,6] -> [?,5,6]) and inner_size is the product of the dims after it.
+  func.func @reduce_sum_middle_axis_dynamic_leading(
+      %ctx: !hip.context,
+      %input: memref<?x4x5x6xf16, 1>,
+      %axes: memref<1xi64, 1>,
+      %output: memref<?x5x6xf16, 1>) {
+    // CHECK-LABEL: llvm.func @reduce_sum_middle_axis_dynamic_leading
+
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<?x4x5x6xf16, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<?x5x6xf16, 1>)
+                         {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
+
+    // CHECK: %[[INNER:.*]] = llvm.mlir.constant(30 : i64) : i64
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}, %[[INNER]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+    return
+  }
 }

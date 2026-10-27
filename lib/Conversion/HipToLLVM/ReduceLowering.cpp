@@ -24,6 +24,44 @@ namespace {
 //                     int64_t keepdims, int64_t noop_with_empty_axes)
 //
 // Supports both static and dynamic shapes (computes num_elements at runtime).
+
+// The single axis whose removal (keepdims=0) or collapse to 1 (keepdims=1)
+// turns `in` into `out`, or -1 if none or more than one axis fits. A dynamic
+// dim matches only a dynamic dim.
+static int64_t inferSingleReducedAxis(ArrayRef<int64_t> in,
+                                      ArrayRef<int64_t> out, bool keepdims) {
+  const int64_t rank = static_cast<int64_t>(in.size());
+  if (static_cast<int64_t>(out.size()) != (keepdims ? rank : rank - 1)) {
+    return -1;
+  }
+  auto same = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) ? ShapedType::isDynamic(b) : a == b;
+  };
+  int64_t found = -1;
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    if (in[axis] == 1) {
+      continue;
+    }
+    bool fits = true;
+    for (int64_t i = 0, o = 0; i < rank && fits; ++i) {
+      if (i == axis) {
+        if (keepdims) {
+          fits = out[o++] == 1;
+        }
+        continue;
+      }
+      fits = same(in[i], out[o++]);
+    }
+    if (fits) {
+      if (found >= 0) {
+        return -1;
+      }
+      found = axis;
+    }
+  }
+  return found;
+}
+
 template <typename OpTy>
 struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -117,8 +155,9 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     // below (and the dynamic-shape guard) keep us on the original contiguous
     // path when the inference does not apply.
     //
-    // Falls back to 1 (contiguous fast path, original behavior) for any dynamic
-    // dim or if the trailing-match product does not divide the output size.
+    // Falls back to 1 (contiguous fast path, original behavior) if the
+    // trailing-match product does not divide the output size. Shapes with a
+    // dynamic dim locate the axis with inferSingleReducedAxis instead.
     int64_t innerSize = 1;
     if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
       llvm::ArrayRef<int64_t> inShape = dataType.getShape();
@@ -137,6 +176,26 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         innerSize = 1;
     }
     Value innerSizeVal = createI64Const(innerSize);
+    if (!(dataType.hasStaticShape() && outputType.hasStaticShape())) {
+      int64_t axis = inferSingleReducedAxis(
+          dataType.getShape(), outputType.getShape(), op.getKeepdims() != 0);
+      if (axis >= 0) {
+        int64_t staticInner = 1;
+        for (int64_t i = axis + 1; i < dataType.getRank(); ++i) {
+          if (!dataType.isDynamicDim(i)) {
+            staticInner *= dataType.getDimSize(i);
+          }
+        }
+        innerSizeVal = createI64Const(staticInner);
+        MemRefDescriptor desc(adaptor.getData());
+        for (int64_t i = axis + 1; i < dataType.getRank(); ++i) {
+          if (dataType.isDynamicDim(i)) {
+            innerSizeVal = LLVM::MulOp::create(rewriter, loc, innerSizeVal,
+                                               desc.size(rewriter, loc, i));
+          }
+        }
+      }
+    }
 
     SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
