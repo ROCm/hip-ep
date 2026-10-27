@@ -3,7 +3,9 @@
 
 // RUN: split-file %s %t
 // RUN: mkdir -p %t/out
+// RUN: mkdir -p %t/scalar-out
 // RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/valid.mlir | FileCheck %s --check-prefix=EXTERNAL
+// RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/scalar-out' %t/compile-time-scalar.mlir | FileCheck %s --check-prefix=SCALAR
 // RUN: %python %S/../Inputs/check_hip_constant_artifact.py %t/out/model.constants.bin %t/out/model.constants.json
 // RUN: hip-mlir-opt --hip-externalize-constants %t/default-inline.mlir | FileCheck %s --check-prefix=INLINE
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/stale.mlir 2>&1 | FileCheck %s --check-prefix=STALE
@@ -47,6 +49,16 @@
 // TYPED: arith.constant dense<[-2, -32768]> : tensor<2xsi16>
 // TYPED: arith.constant dense<[32768, 65535]> : tensor<2xui16>
 // TYPED: return {{.*}} : tensor<2xsi16>, tensor<2xui16>
+
+// attachCompileTimeScalarAttr: single-element signless i64/i32 extern globals
+// record the host value for compile-time folds; multi-element, float, and
+// signed-i8 carriers do not get the tag.
+// SCALAR-DAG: memref.global "private" @{{.*}} : memref<i64> {alignment = 64 : i64, hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 8 : i64}, hip.compile_time_scalar = 7 : i64}
+// SCALAR-DAG: memref.global "private" @{{.*}} : memref<i32> {alignment = 64 : i64, hip.external_data = {index = 1 : i64, offset = 64 : i64, size = 4 : i64}, hip.compile_time_scalar = -3 : i64}
+// SCALAR-DAG: memref.global "private" @{{.*}} : memref<4xi64> {alignment = 64 : i64, hip.external_data = {index = 2 : i64, offset = 128 : i64, size = 32 : i64}
+// SCALAR-DAG: memref.global "private" @{{.*}} : memref<f32> {alignment = 64 : i64, hip.external_data = {index = 3 : i64, offset = 192 : i64, size = 4 : i64}
+// SCALAR-DAG: memref.global "private" @{{.*}} : memref<si8> {alignment = 64 : i64, hip.external_data = {index = 4 : i64, offset = 256 : i64, size = 1 : i64}
+// SCALAR-NOT: hip.compile_time_scalar
 
 //--- valid.mlir
 module {
@@ -120,6 +132,18 @@ module {
       memory_address = 1 : i64, size = 4 : i64
     } : tensor<4xi8>
     return %0 : tensor<4xi8>
+  }
+}
+
+//--- compile-time-scalar.mlir
+module {
+  func.func @scalar_constants() -> (tensor<i64>, tensor<i32>, tensor<4xi64>, tensor<f32>, tensor<si8>) {
+    %i64 = hip.constant {value = dense<7> : tensor<i64>} : tensor<i64>
+    %i32 = hip.constant {value = dense<-3> : tensor<i32>} : tensor<i32>
+    %vec = hip.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi64>} : tensor<4xi64>
+    %f = hip.constant {value = dense<1.5> : tensor<f32>} : tensor<f32>
+    %si8 = hip.constant {value = dense<5> : tensor<si8>} : tensor<si8>
+    return %i64, %i32, %vec, %f, %si8 : tensor<i64>, tensor<i32>, tensor<4xi64>, tensor<f32>, tensor<si8>
   }
 }
 
