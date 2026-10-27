@@ -225,14 +225,47 @@ def DecomposeConvTransposePass
     The per-residue tap selection, spatial flip, and channel swap apply only
     to the filter, so they are constant-folded into fresh `hip.constant`s
     rather than emitted as ops -- TOSA has no strided slice to lower a tap
-    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
-    which bufferizes to a `memref.subview` plus a copy.
+    stride to. When every residue shares a kernel shape and padding, their
+    filters are stacked on the output-channel axis into one convolution whose
+    result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace, as in MIGraphX
+    `reassemble_interleave`); `hip-fuse-rocmlir` folds that transpose into
+    the convolution's store. Residues whose tap counts differ stay on one
+    strided `tensor.insert_slice` each, which bufferizes to a
+    `memref.subview` plus a copy.
 
     Restricted to the statically shaped, non-grouped, dilation-1 case with
     `stride <= kernel` (so the residues tile the output with no holes) and a
     compile-time filter. Anything else is left for the MIOpen path.
   }];
   let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def SimplifyAlgebraPass : Pass<"hip-simplify-algebra", "mlir::func::FuncOp"> {
+  let summary = "Horizontal merge of sibling convolutions";
+  let description = [{
+    Algebra rewrites that run after `hip-decompose-conv-transpose` and before
+    `hip-fuse-rocmlir`. The pass is the home for further algebra matchers;
+    the only one implemented is the horizontal convolution merge
+    (`find_conv_dot_horiz_fusion`).
+
+    Users of one value in one block are partitioned the way MIGraphX
+    `group_by` does it. A cluster of two or more `hip.conv` ops that share
+    group 1, padding, stride, dilation, kernel, and output shape, and whose
+    weights are inline floating-point `hip.constant`s of the same shape, is
+    merged: the weights are concatenated on the output-channel axis and
+    replaced by one convolution placed before the first sibling. Each original
+    result becomes a channel `tensor.extract_slice` of that convolution. A
+    convolution that does not match, such as a 3x3 beside two 2x2 siblings,
+    stays on the original activation. So does one whose only use reaches a
+    `hip.transpose` through reshapes, such as the interleave after a
+    decomposed ConvTranspose: `hip-fuse-rocmlir` folds that transpose into
+    the convolution's store only while the convolution has that single use.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
     "mlir::tensor::TensorDialect"
   ];
 }

@@ -92,7 +92,7 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 | `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants. |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |
-| `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
+| `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, merge sibling convolutions of one activation, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
 
 Options use MLIR's pipeline-option syntax:
 `onnx-to-hip-pipeline{skip-constant-data=true}`.
@@ -166,16 +166,21 @@ against HIP **tensor** IR (before bufferization) and are reached through
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into one stride-1 `hip.conv` per stride residue (MIOpen backward-data v4r1), reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Leaves unsupported cases (grouped, dilated, dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. |
-| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor. |
+| `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into stride-1 `hip.conv` residues (MIOpen backward-data v4r1). When every residue has the same taps and padding, their filters are stacked into one convolution followed by a DepthToSpace interleave (`tensor.expand_shape`, `hip.transpose`, `tensor.collapse_shape`, as in MIGraphX `reassemble_interleave`); otherwise there is one convolution per residue, reassembled with strided `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Leaves unsupported cases (grouped, dilated, dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. |
+| `hip-simplify-algebra` | func.func | Merge sibling `hip.conv` ops of one activation in one block with matching attributes, output shape, and inline floating-point filters of one shape into one convolution with concatenated filters; each result becomes a channel `tensor.extract_slice` (MIGraphX `find_conv_dot_horiz_fusion`). A convolution whose only use reaches a `hip.transpose` through reshapes, such as the ConvTranspose interleave, is not merged, so `hip-fuse-rocmlir` can still fold that transpose into its store. |
+| `hip-fuse-rocmlir` | func.func | Outline rocMLIR-eligible op groups into `rock.kernel` funcs around a gemm/convolution/attention anchor; a `hip.transpose` after the anchor, such as the ConvTranspose interleave, is folded into the kernel's store. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
 Order matters: `hip-decompose-conv-transpose` must run **before**
 `hip-fuse-rocmlir`, because rocMLIR has no transposed-convolution anchor and
-would otherwise refuse to outline the op at all. The registered pipeline runs
+would otherwise refuse to outline the op at all. `hip-simplify-algebra` runs
+between them: it merges sibling convolutions, so it has to see them before
+`hip-fuse-rocmlir` outlines each into its own kernel. The registered pipeline
+runs
 
 ```
 func.func(hip-decompose-conv-transpose)
+func.func(hip-simplify-algebra)
 func.func(hip-fuse-rocmlir)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)
