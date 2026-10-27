@@ -1599,24 +1599,25 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
   hipdnn_wmma_f32_16x16x16_f16_unavailable((a), (b), (c))
 #endif
 
-// [removed] fused_gqa_decode_kernel / hip_gqa_fused_decode: the legacy
-// one-block-per-(batch,head_q) decode kernel has been retired. Decode is now a
-// single path -- hip_gqa_flash_decode (FA-2 split-K, scalar|WMMA selected by
-// geometry) -- which serves GQA and MHA (HpG==1) alike. See gqa.cpp decode
-// dispatch and the SCALAR/WMMA kernels above.
+// Decode kernels in this file (sq == 1), all writing the same split-K partials:
+//   - gqa_flash_decode_kernel        : scalar, LDS-staged, any templated HpG
+//   - gqa_flash_decode_wmma_kernel   : WMMA, HpG packed into a 16-row tile
+//   - gqa_flash_decode_ring_kernel   : register ring, fp16 D96 / D128 at the
+//                                      HpG it is instantiated for
+// hip_gqa_flash_decode picks among them per geometry;
+// legacy_fused_gqa_decode_kernel near the end of the file only backs the
+// decomposed hipBLASLt fallback.
 
 //===----------------------------------------------------------------------===//
-// FA-2 Split-K GQA Decode Kernel (Phase 1)
+// FA-2 Split-K GQA Decode Kernel (scalar)
 //===----------------------------------------------------------------------===//
-// Goal: 4-15x speedup over hip_gqa_fused_decode at high KV depth (skv >= 256)
-// by exploiting:
+// Exploits:
 //   1. GQA-aware KV reuse: one block per (batch, head_kv) instead of per
-//      (batch, head_q). HPG=4 query heads share K/V loaded once into LDS,
-//      reducing global KV bandwidth by 4x.
+//      (batch, head_q). The HPG query heads share K/V loaded once into LDS.
 //   2. Split-K parallelism: K_SPLITS blocks per (batch, head_kv) cover
 //      different KV ranges, raising occupancy for long sequences.
 //   3. LDS-staged K/V tiles (BKV=64): K[t] is loaded once and reused HPG
-//      times for dot products across 4 query heads.
+//      times for dot products across the query heads.
 //
 // Algorithm:
 //   Each block computes partial (m, l, O) for its slice [kv_start, kv_end)
@@ -1633,9 +1634,8 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 //   gridX = B * G        - one block per (batch, head_kv)
 //   gridY = K_SPLITS     - split-K dimension
 //
-// Supported HPG specializations (template param):
-//   - HPG=4  (Llama-3.x family at d=64 and d=128)
-//   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
+// HPG is a template parameter, instantiated for the set gqa.cpp's
+// flash_decode_geometry_ok accepts.
 //
 // Constraints (asserted at launcher):
 //   - D must be 64, 96, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=8 to keep
@@ -2210,6 +2210,279 @@ gqa_flash_decode_d96_kernel(
 }
 
 //===----------------------------------------------------------------------===//
+// Register-ring Split-K Decode Kernel (fp16 KV, D in {96, 128})
+//===----------------------------------------------------------------------===//
+// Generalizes gqa_flash_decode_d96_kernel; produces the same
+// [B, H, K_SPLITS, D+2] partials, so the FA-2 reduce is shared.
+//   - LPK lanes score one key, so a wave scores KPS = 32 / LPK keys per step.
+//     Each lane holds D / LPK fp16 of a row (one or two b128 loads at D=128).
+//     A key's dot product reduces within its LPK-lane group (DPP row_xmask,
+//     plus v_permlanex16 when LPK == 32); the KPS scores of a step then
+//     combine with an xor butterfly across groups, so every lane ends with
+//     bit-identical m and l (fp add/max are commutative per butterfly step).
+//   - K/V rows stream through a RING-deep register ring (static slot indices,
+//     each slot refilled right after it is consumed), no LDS, no barrier.
+//   - QPW query heads share one wave. QPW == HPG reads each KV row once per
+//     KV head instead of once per query head, trading VMEM issue for VALU.
+//   - NT marks the K/V stream non-temporal: decode reads every row exactly
+//     once per step, so it should not evict the weights the next GEMV reuses.
+// Block: (HPG / QPW) waves.  Grid: (B * G, K_SPLITS).
+template <int MASK>
+__device__ __forceinline__ float ring_lane_xor(float v) {
+  if constexpr (MASK == 16) return d96_swap_halves(v);
+  else return d96_row_xor<MASK>(v);
+}
+
+// Sum within aligned groups of N lanes (N a power of two <= 32).
+template <int N>
+__device__ __forceinline__ float ring_group_sum(float v) {
+  if constexpr (N >= 32) v += ring_lane_xor<16>(v);
+  if constexpr (N >= 16) v += ring_lane_xor<8>(v);
+  if constexpr (N >= 8)  v += ring_lane_xor<4>(v);
+  if constexpr (N >= 4)  v += ring_lane_xor<2>(v);
+  if constexpr (N >= 2)  v += ring_lane_xor<1>(v);
+  return v;
+}
+
+// Butterfly across the wave's KPS key groups of LPK lanes each.
+template <int LPK>
+__device__ __forceinline__ float ring_cross_max(float v) {
+  if constexpr (LPK <= 8)  v = fmaxf(v, ring_lane_xor<8>(v));
+  if constexpr (LPK <= 16) v = fmaxf(v, ring_lane_xor<16>(v));
+  return v;
+}
+template <int LPK>
+__device__ __forceinline__ float ring_cross_sum(float v) {
+  if constexpr (LPK <= 8)  v += ring_lane_xor<8>(v);
+  if constexpr (LPK <= 16) v += ring_lane_xor<16>(v);
+  return v;
+}
+
+typedef unsigned int ring_u32x4 __attribute__((ext_vector_type(4)));
+typedef unsigned int ring_u32x2 __attribute__((ext_vector_type(2)));
+
+template <int DW, bool NT>
+__device__ __forceinline__ void ring_load_row(const uint32_t* p,
+                                              uint32_t (&out)[DW]) {
+  if constexpr (DW % 4 == 0) {
+    #pragma unroll
+    for (int i = 0; i < DW / 4; ++i) {
+      const ring_u32x4* vp = reinterpret_cast<const ring_u32x4*>(p) + i;
+      const ring_u32x4 x = NT ? __builtin_nontemporal_load(vp) : *vp;
+      out[4 * i] = x.x; out[4 * i + 1] = x.y;
+      out[4 * i + 2] = x.z; out[4 * i + 3] = x.w;
+    }
+  } else if constexpr (DW % 2 == 0) {
+    #pragma unroll
+    for (int i = 0; i < DW / 2; ++i) {
+      const ring_u32x2* vp = reinterpret_cast<const ring_u32x2*>(p) + i;
+      const ring_u32x2 x = NT ? __builtin_nontemporal_load(vp) : *vp;
+      out[2 * i] = x.x; out[2 * i + 1] = x.y;
+    }
+  } else {
+    #pragma unroll
+    for (int i = 0; i < DW; ++i)
+      out[i] = NT ? __builtin_nontemporal_load(p + i) : p[i];
+  }
+}
+
+// Kernel arguments of gqa_flash_decode_ring_kernel. O is written directly
+// when the launch has one split (null otherwise: the reduce writes it).
+struct RingDecodeArgs {
+  const __half* Q;             // [B, 1, H, D]
+  const __half* K;             // cache [B, G, max_seq, D]
+  const __half* V;
+  float* partials;             // [B, H, splits, D + 2]
+  __half* O;                   // [B, 1, H, D] or null
+  const __half* head_sink;     // [H] or null
+  const int* seqlens_k;        // [B] or null
+  float scale;
+  int H, G, max_seq, splits, local_window_size, use_smooth_softmax;
+};
+
+template <int D, int HPG, int QPW, int LPK, int RING, bool NT>
+__global__ void __launch_bounds__((HPG / QPW) * WAVE_SIZE)
+gqa_flash_decode_ring_kernel(const RingDecodeArgs a) {
+  const int H = a.H, G = a.G, max_seq = a.max_seq, K_SPLITS = a.splits;
+  float* const partials = a.partials;
+  constexpr int EPL = D / LPK;  // fp16 elements per lane
+  constexpr int DW  = EPL / 2;  // dwords per lane per row
+  static_assert(D % LPK == 0 && EPL % 2 == 0, "lane slice must be whole dwords");
+  static_assert(HPG % QPW == 0, "query heads must split evenly across waves");
+  static_assert(LPK == 8 || LPK == 16 || LPK == 32, "LPK in {8,16,32}");
+  // Flash decode never runs on wave64, but the device pass still compiles it.
+  if constexpr (WAVE_SIZE != 32) {
+    __builtin_trap();
+  } else {
+  constexpr int KPS = WAVE_SIZE / LPK;  // keys per wave step
+
+  const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
+  const int head_kv = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
+  const int split   = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+  const int lane    = threadIdx.x % WAVE_SIZE;
+  const int grp     = lane / LPK;  // which key of the step this lane scores
+  const int hl      = lane % LPK;  // which slice of the row
+  const int head_q0 = head_kv * HPG + wave_id * QPW;
+
+  // Same length / window / split partition as gqa_flash_decode_kernel.
+  const int raw_skv = a.seqlens_k
+      ? __builtin_amdgcn_readfirstlane(a.seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  int kv_lo = 0;
+  if (a.local_window_size > 0 && eff_skv > a.local_window_size)
+    kv_lo = eff_skv - a.local_window_size;
+  const int kv_range = eff_skv - kv_lo;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split;
+  const int kv_end   = min(kv_start + chunk, eff_skv);
+
+  // Lane slice [e0, e0 + EPL) of each query head in fp32.
+  const int e0 = hl * EPL;
+  float q[QPW][EPL];
+  #pragma unroll
+  for (int j = 0; j < QPW; ++j) {
+    const __half2* qp = reinterpret_cast<const __half2*>(
+        a.Q + (size_t)(batch * H + head_q0 + j) * D + e0);
+    #pragma unroll
+    for (int i = 0; i < DW; ++i) {
+      const float2 f = __half22float2(qp[i]);
+      q[j][2 * i]     = f.x;
+      q[j][2 * i + 1] = f.y;
+    }
+  }
+
+  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+      (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
+  const uint32_t* Kw = reinterpret_cast<const uint32_t*>(a.K + kv_base) + hl * DW;
+  const uint32_t* Vw = reinterpret_cast<const uint32_t*>(a.V + kv_base) + hl * DW;
+
+  // A group whose key is past kv_end re-reads row kv_start (always valid)
+  // and masks its score to -inf, so the loads stay unpredicated.
+  auto load_rows = [&](int kv, uint32_t (&k)[DW], uint32_t (&v)[DW]) {
+    const size_t off = (size_t)(kv < kv_end ? kv : kv_start) * (D / 2);
+    ring_load_row<DW, NT>(Kw + off, k);
+    ring_load_row<DW, NT>(Vw + off, v);
+  };
+  auto unpack = [](const uint32_t (&w)[DW], float (&f)[EPL]) {
+    #pragma unroll
+    for (int i = 0; i < DW; ++i) {
+      const float2 x = __half22float2(__builtin_bit_cast(__half2, w[i]));
+      f[2 * i]     = x.x;
+      f[2 * i + 1] = x.y;
+    }
+  };
+
+  const float scale_log2e = a.scale * LOG2E;
+  float m[QPW], l[QPW], o[QPW][EPL];
+  #pragma unroll
+  for (int j = 0; j < QPW; ++j) {
+    m[j] = -INFINITY;
+    l[j] = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < EPL; ++i) o[j][i] = 0.0f;
+  }
+
+  auto score = [&](const float (&kf)[EPL], bool valid, float (&s)[QPW]) {
+    #pragma unroll
+    for (int j = 0; j < QPW; ++j) {
+      float dot = 0.0f;
+      #pragma unroll
+      for (int i = 0; i < EPL; ++i) dot += q[j][i] * kf[i];
+      dot = ring_group_sum<LPK>(dot);
+      s[j] = valid ? dot * scale_log2e : -INFINITY;
+    }
+  };
+  // The first merged step of a split always holds an in-range key, so m is
+  // finite after it and a step whose scores are all -inf leaves it unchanged.
+  auto merge = [&](const float (&s)[QPW], const float (&vf)[EPL]) {
+    #pragma unroll
+    for (int j = 0; j < QPW; ++j) {
+      const float m_new = fmaxf(m[j], ring_cross_max<LPK>(s[j]));
+      const float corr  = exp2f(m[j] - m_new);
+      const float p     = exp2f(s[j] - m_new);
+      l[j] = corr * l[j] + ring_cross_sum<LPK>(p);
+      #pragma unroll
+      for (int i = 0; i < EPL; ++i) o[j][i] = corr * o[j][i] + p * vf[i];
+      m[j] = m_new;
+    }
+  };
+
+  // Steps wholly past kv_end are skipped (wave-uniform), so the tail of the
+  // last ring pass neither computes nor issues loads nobody consumes.
+  uint32_t kb[RING][DW], vb[RING][DW];
+  #pragma unroll
+  for (int r = 0; r < RING; ++r)
+    if (kv_start + KPS * r < kv_end)
+      load_rows(kv_start + KPS * r + grp, kb[r], vb[r]);
+
+  for (int base = kv_start; base < kv_end; base += KPS * RING) {
+    #pragma unroll
+    for (int r = 0; r < RING; ++r) {
+      const int step = base + KPS * r;
+      if (step < kv_end) {
+        const int kv = step + grp;
+        float kf[EPL], vf[EPL], s[QPW];
+        unpack(kb[r], kf);
+        unpack(vb[r], vf);
+        score(kf, kv < kv_end, s);
+        merge(s, vf);
+        if (step + KPS * RING < kv_end)
+          load_rows(kv + KPS * RING, kb[r], vb[r]);
+      }
+    }
+  }
+
+  // Each group accumulated its own keys against the shared m: add the groups.
+  #pragma unroll
+  for (int j = 0; j < QPW; ++j) {
+    #pragma unroll
+    for (int i = 0; i < EPL; ++i) o[j][i] = ring_cross_sum<LPK>(o[j][i]);
+  }
+
+  // Sink / smooth-softmax term of the denominator, as in the FA-2 reduce.
+  auto sink_term = [&](int hq, float gm) {
+    if (a.head_sink)
+      return exp2f(__half2float(a.head_sink[hq]) * (float)LOG2E - gm);
+    return a.use_smooth_softmax ? exp2f(-gm) : 0.0f;
+  };
+
+  if (K_SPLITS == 1 && a.O) {
+    #pragma unroll
+    for (int j = 0; j < QPW; ++j) {
+      const int hq = head_q0 + j;
+      const float inv = isfinite(m[j])
+          ? 1.0f / fmaxf(l[j] + sink_term(hq, m[j]), 1e-6f) : 0.0f;
+      if (grp == 0) {
+        __half2* op = reinterpret_cast<__half2*>(
+            a.O + (size_t)(batch * H + hq) * D + e0);
+        #pragma unroll
+        for (int i = 0; i < DW; ++i)
+          op[i] = __floats2half2_rn(o[j][2 * i] * inv, o[j][2 * i + 1] * inv);
+      }
+    }
+    return;
+  }
+
+  #pragma unroll
+  for (int j = 0; j < QPW; ++j) {
+    float* pd = partials +
+        flash_decode_partial_offset(batch, head_q0 + j, split, H, K_SPLITS, D);
+    if (grp == 0) {
+      #pragma unroll
+      for (int i = 0; i < EPL; ++i) pd[2 + e0 + i] = o[j][i];
+    }
+    if (lane == 0) {
+      pd[0] = m[j];
+      pd[1] = l[j];
+    }
+  }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // WMMA Split-K Decode Kernel (sq == 1) -- optimized TPS path
 //===----------------------------------------------------------------------===//
 // Drop-in producer of the SAME [B, H, K_SPLITS, D+2] partials as the scalar
@@ -2706,6 +2979,85 @@ static inline bool flash_decode_wmma_supported(int d, int hpg) {
   return false;
 }
 
+// Ring-kernel shape (see gqa_flash_decode_ring_kernel).
+struct RingCfg { int lpk; int ring; int qpw; bool nt; };
+
+static inline bool flash_decode_ring_supported(int d, int hpg) {
+  if (d == 96) return hpg == 1;
+  if (d == 128) return hpg == 1 || hpg == 4 || hpg == 5;
+  return false;
+}
+
+// Per-geometry ring shape, chosen by sweeping LPK / RING / QPW / NT together
+// with the split count at 2k and 8k keys, on both the generic and the
+// chip-specific code object. Eight lanes per key (the most elements per lane),
+// a two-row ring and nontemporal loads stay within a few percent of the best
+// everywhere; one wave per KV head pays off only at HpG 4, where it reads each
+// row once for four heads.
+template <int D, int HPG> struct RingDefault {
+  static constexpr int kLpk = 8, kRing = 2, kQpw = 1;
+  static constexpr bool kNt = true;
+};
+template <> struct RingDefault<128, 4> {
+  static constexpr int kLpk = 8, kRing = 2, kQpw = 4;
+  static constexpr bool kNt = true;
+};
+
+template <int D, int HPG>
+static constexpr RingCfg ringDefaultOf() {
+  using R = RingDefault<D, HPG>;
+  return RingCfg{R::kLpk, R::kRing, R::kQpw, R::kNt};
+}
+
+static inline RingCfg ringDefaultCfg(int d, int hpg) {
+  if (d == 96) return ringDefaultOf<96, 1>();
+  switch (hpg) {
+    case 4: return ringDefaultOf<128, 4>();
+    case 5: return ringDefaultOf<128, 5>();
+    default: return ringDefaultOf<128, 1>();
+  }
+}
+
+template <int D, int HPG, int QPW, int LPK, int RING, bool NT>
+static inline void launchRingInstance(const RingDecodeArgs& a, int B,
+                                      hipStream_t stream) {
+  dim3 grid((unsigned)(B * a.G), (unsigned)a.splits);
+  gqa_flash_decode_ring_kernel<D, HPG, QPW, LPK, RING, NT>
+      <<<grid, (HPG / QPW) * WAVE_SIZE, 0, stream>>>(a);
+}
+
+template <int D, int HPG>
+static bool launchRing(const RingDecodeArgs& a, int B, hipStream_t s) {
+  using R = RingDefault<D, HPG>;
+  launchRingInstance<D, HPG, R::kQpw, R::kLpk, R::kRing, R::kNt>(a, B, s);
+  return true;
+}
+
+static bool launchRingDecode(int d, int hpg, const RingDecodeArgs& a, int B,
+                             hipStream_t s) {
+  if (d == 96) return launchRing<96, 1>(a, B, s);
+  switch (hpg) {
+    case 1: return launchRing<128, 1>(a, B, s);
+    case 4: return launchRing<128, 4>(a, B, s);
+    case 5: return launchRing<128, 5>(a, B, s);
+    default: return false;
+  }
+}
+
+static inline RingDecodeArgs ringPartialsArgs(
+    const __half* Q, const __half* K, const __half* V, float* P, __half* O,
+    int H, int G, int max_seq, float scale, const int* seqlens_k,
+    int local_window_size, int splits, const __half* sink, int smooth) {
+  RingDecodeArgs a{};
+  a.Q = Q; a.K = K; a.V = V; a.partials = P;
+  a.O = splits == 1 ? O : nullptr;
+  a.head_sink = sink; a.use_smooth_softmax = smooth;
+  a.seqlens_k = seqlens_k; a.scale = scale;
+  a.H = H; a.G = G; a.max_seq = max_seq; a.splits = splits;
+  a.local_window_size = local_window_size;
+  return a;
+}
+
 // Launch one (impl, splits, bkv) configuration: split-K decode + FA-2 reduce.
 // Both impls emit identical [B,H,splits,D+2] partials, so the reduce is shared.
 //
@@ -2731,8 +3083,12 @@ static inline void launchFlashDecodeConfig(
     fprintf(stderr,
             "[gqa-cfg] decode B=%d H=%d G=%d d=%d hpg=%d maxseq=%d -> "
             "impl=%s splits=%d bkv=%d\n",
-            B, H, G, d, hpg, max_seq, use_wmma ? "wmma" : "scalar", splits,
-            cfg.bkv);
+            B, H, G, d, hpg, max_seq,
+            use_wmma ? "wmma"
+            : (FMT == KvDtype::kF16 && flash_decode_ring_supported(d, hpg))
+                ? "ring" : "scalar",
+            splits, cfg.bkv);
+  bool ring_done = false;
   if (use_wmma) {
     // BKV: D=64 has both 16 and 32 instantiated and cfg.bkv picks between them;
     // D=128 has only 32. Grid (G, splits, B), one wave per block.
@@ -2758,6 +3114,14 @@ static inline void launchFlashDecodeConfig(
     }
     #undef LAUNCH_DW
   } else {
+    if constexpr (FMT == KvDtype::kF16) {
+      if (flash_decode_ring_supported(d, hpg)) {
+        const RingDecodeArgs ra = ringPartialsArgs(
+            hQ, hK, hV, hP, hO, H, G, max_seq, scale, iSeq, local_window_size,
+            splits, hSink, use_smooth_softmax);
+        ring_done = launchRingDecode(d, hpg, ra, B, stream);
+      }
+    }
     dim3 grid_main(B * G, splits);
     // Scalar decode: one wave (32 lanes) per query head, HpG waves per block.
     // The kernel body is HpG-generic (each wave owns one query head and reads
@@ -2787,7 +3151,7 @@ static inline void launchFlashDecodeConfig(
         else if (d == 96)  LAUNCH_SCALAR_D96(HPG_);                            \
         else               LAUNCH_SCALAR_D(64, HPG_);                          \
       } while (0)
-    switch (hpg) {
+    if (!ring_done) switch (hpg) {
       case 1:  LAUNCH_SCALAR(1);  break;
       case 2:  LAUNCH_SCALAR(2);  break;
       case 3:  LAUNCH_SCALAR(3);  break;
@@ -2802,6 +3166,9 @@ static inline void launchFlashDecodeConfig(
     #undef LAUNCH_SCALAR_D96
     #undef LAUNCH_SCALAR_D
   }
+
+  // A one-split ring launch already wrote O.
+  if (ring_done && splits == 1) return;
 
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
   // head_sink / smooth_softmax are all folded in here (not the partials).
@@ -2822,8 +3189,11 @@ static inline void launchFlashDecodeConfig(
 
 // Candidate split counts, clamped to [1, cap] and to the useful range for skv
 // (no point launching more splits than there are 16-key tiles). Deduplicated.
-static void flashDecodeCandidateSplits(int skv, int max_splits,
-                                       int (&out)[7], int& n) {
+// `floor` applies the serial-scan floor below; the ring kernel keeps its
+// loads in flight from registers, so one split scanning thousands of keys
+// stays at full bandwidth and it takes the whole ladder (`floor` false).
+static void flashDecodeCandidateSplits(int skv, int max_splits, bool floor,
+                                       int (&out)[8], int& n) {
   // Small counts {2,4} let short contexts pick a leaner reduce (fewer partial
   // rows -> smaller reduce launch). But a small split at LARGE skv makes each
   // block serial-scan skv/splits keys, which is a hard cliff (measured at
@@ -2842,13 +3212,15 @@ static void flashDecodeCandidateSplits(int skv, int max_splits,
   // several bursts, so the tuner can be trusted with the wider set. 1024 still
   // fences off the cliff (it leaves min_splits=8 at skv=8192, where the worst
   // survivor is ~1.4x off the best rather than 4.5x).
-  static const int kBase[7] = {2, 4, 8, 16, 32, 48, 64};
+  // 1 lets a short context skip the reduce launch entirely (the ring kernel
+  // writes O itself at one split).
+  static const int kBase[8] = {1, 2, 4, 8, 16, 32, 48, 64};
   constexpr int kMaxKeysPerSplit = 1024;
   int cap = max_splits < kFlashDecodeMaxSplits ? max_splits : kFlashDecodeMaxSplits;
   if (cap < 1) cap = 1;
   int eff = skv > 0 ? skv : 1;
   int max_useful = (eff + 15) / 16; if (max_useful < 1) max_useful = 1;
-  int min_splits = (eff + kMaxKeysPerSplit - 1) / kMaxKeysPerSplit;
+  int min_splits = floor ? (eff + kMaxKeysPerSplit - 1) / kMaxKeysPerSplit : 1;
   if (min_splits < 1) min_splits = 1;
   if (min_splits > cap) min_splits = cap;
   n = 0;
@@ -2899,19 +3271,45 @@ static int flashDecodeTargetWaves() {
 // 8060S once -- a fifth of them would get no work at all.
 //
 // Candidates come from flashDecodeCandidateSplits so the pick inherits its
-// min_splits floor; occupancy alone would happily choose splits=1 for the
-// scalar kernel at skv=8192 (already 64 waves), which is the 4.5x serial-scan
-// cliff that floor exists to fence off.
-static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
-                                    int cap) {
-  int split_set[7];
+// min_splits floor (`floor`); occupancy alone would happily choose splits=1
+// for the LDS-staged scalar kernel at skv=8192 (already 64 waves), which is
+// the 4.5x serial-scan cliff that floor exists to fence off.
+static int flashDecodeDefaultSplits(bool use_wmma, bool floor, int B, int H,
+                                    int G, int skv, int cap) {
+  int split_set[8];
   int n = 0;
-  flashDecodeCandidateSplits(skv, cap, split_set, n);
+  flashDecodeCandidateSplits(skv, cap, floor, split_set, n);
   const int waves_per_split = use_wmma ? (B * G) : (B * H);
   const int target = flashDecodeTargetWaves();
   for (int i = 0; i < n; ++i)
     if (waves_per_split * split_set[i] >= target) return split_set[i];
   return split_set[n - 1];  // ascending; nothing reaches the target
+}
+
+// Isolated-dispatch timing (the LUT sweep and online tuning) can pick a ring
+// split count that leaves most SIMDs without a wave. Inside a decode step that
+// count is measurably slower than one that fills the device, and splits past
+// that point cost almost nothing, so the ring kernel is floored at half the
+// default wave target, rounded up to a count the tuner itself offers. Each
+// split keeps at least kMinKeysPerSplit keys, so short ranges keep their
+// single-split or small-reduce picks.
+static int ringMinSplits(int B, int G, int d, int hpg, int kv_range, int cap) {
+  constexpr int kMinKeysPerSplit = 128;
+  const RingCfg c = ringDefaultCfg(d, hpg);
+  const int waves_per_block = (c.qpw == 1) ? hpg : 1;
+  const int waves_per_split = B * G * waves_per_block;
+  const int want = (flashDecodeTargetWaves() / 2 + waves_per_split - 1) /
+                   waves_per_split;
+  const int limit = kv_range / kMinKeysPerSplit;
+  int ladder[8];
+  int n = 0;
+  flashDecodeCandidateSplits(kv_range, cap, /*floor=*/false, ladder, n);
+  int s = 1;
+  for (int i = 0; i < n && ladder[i] <= limit; ++i) {
+    s = ladder[i];
+    if (s >= want) break;
+  }
+  return s;
 }
 
 // A taller WMMA tile pays for itself by halving the barriers per KV element,
@@ -3048,15 +3446,17 @@ static float timeDecodeCandidate(hipStream_t stream, LaunchFn&& launch) {
 // that format silently pick a worse configuration while every test still
 // passed, since the choice affects speed and not results. `launch` is a lambda
 // and inlines, so this costs nothing at runtime.
+// `ring` says the scalar candidates run the ring kernel (fp16 cache at a ring
+// geometry), which takes the split ladder without the serial-scan floor.
 template <typename LaunchFn>
 static FlashDecodeCfg tuneFlashDecodeConfig(
-    hipStream_t stream, int d, int hpg, int skv, int max_splits,
+    hipStream_t stream, int d, int hpg, int skv, int max_splits, bool ring,
     const char* tag, LaunchFn&& launch) {
-  int split_set[7]; int n_splits = 0;
-  flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
 
   const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
+  int split_set[8]; int n_splits = 0;
+  flashDecodeCandidateSplits(skv, max_splits, !ring, split_set, n_splits);
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
 
@@ -3066,6 +3466,8 @@ static FlashDecodeCfg tuneFlashDecodeConfig(
 
   for (int ii = 0; ii < 2; ++ii) {
     if (impls[ii] && !wmma_ok) continue;  // skip WMMA where it isn't templated
+    flashDecodeCandidateSplits(skv, max_splits, impls[ii] || !ring, split_set,
+                               n_splits);
     const int bkv_count = impls[ii] ? n_bkv : 1;
     for (int bi = 0; bi < bkv_count; ++bi) {
       for (int si = 0; si < n_splits; ++si) {
@@ -3198,9 +3600,11 @@ static int runGqaFlashDecode(
   // count is sized from the device rather than fixed, and keys off tune_len so
   // sliding-window layers do not over-split their (much shorter) range.
   const bool default_wmma = flash_decode_wmma_supported(d, hpg) && (d == 64);
+  const bool ring = !kv_i8 && flash_decode_ring_supported(d, hpg);
   FlashDecodeCfg cfg{
       default_wmma,
-      flashDecodeDefaultSplits(default_wmma, B, H, G, tune_len, cap)};
+      flashDecodeDefaultSplits(default_wmma, default_wmma || !ring, B, H, G,
+                               tune_len, cap)};
 
   bool forced = !allow_autotune;
   if (!allow_autotune) {
@@ -3227,8 +3631,10 @@ static int runGqaFlashDecode(
   }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
+  bool splits_from_env = false;
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
-    int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
+    int v = atoi(e);
+    if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; splits_from_env = true; }
   }
   if (const char* e = getenv("HIPDNN_GQA_DECODE_BKV")) {
     int v = atoi(e); if (v == 16 || v == 32) { cfg.bkv = v; forced = true; }
@@ -3251,7 +3657,7 @@ static int runGqaFlashDecode(
         cfg = it->second;
       } else {
         cfg = tuneFlashDecodeConfig(
-            stream, d, hpg, tune_len, cap, "flash_decode_i8",
+            stream, d, hpg, tune_len, cap, /*ring=*/false, "flash_decode_i8",
             [&](const FlashDecodeCfg& c) {
               launchFlashDecodeConfig<KvDtype::kI8>(
                   c, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg,
@@ -3277,7 +3683,7 @@ static int runGqaFlashDecode(
       cfg = it->second;
     } else {
       cfg = tuneFlashDecodeConfig(
-          stream, d, hpg, tune_len, cap, "flash_decode",
+          stream, d, hpg, tune_len, cap, ring, "flash_decode",
           [&](const FlashDecodeCfg& c) {
             launchFlashDecodeConfig<KvDtype::kF16>(
                 c, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d,
@@ -3291,6 +3697,11 @@ static int runGqaFlashDecode(
           (unsigned long long)key, cfg.use_wmma ? "wmma" : "scalar", cfg.splits,
           g_flash_decode_cache.size());
     }
+  }
+
+  if (ring && !cfg.use_wmma && !splits_from_env) {
+    const int floor_splits = ringMinSplits(B, G, d, hpg, tune_len, cap);
+    if (cfg.splits < floor_splits) cfg.splits = floor_splits;
   }
 
   // Produce the correct output with the selected config (tuning above left the

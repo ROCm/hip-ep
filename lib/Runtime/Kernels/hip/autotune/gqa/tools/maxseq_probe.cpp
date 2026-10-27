@@ -178,9 +178,10 @@ int main(int argc, char **argv) {
       PROBE_CHECK(hipMemcpy(dSeq, &seqlen, sizeof(int), hipMemcpyHostToDevice));
 
       for (int max_seq = seq_kv; max_seq <= kMaxCap; max_seq *= 2) {
-        int splits_set[7];
+        int splits_set[8];
         int n_splits = 0;
-        flashDecodeCandidateSplits(seq_kv, cap, splits_set, n_splits);
+        flashDecodeCandidateSplits(seq_kv, cap, /*floor=*/true, splits_set,
+                                   n_splits);
         const bool wmma_ok = flash_decode_wmma_supported(g.d, hpg);
 
         for (int impl = 0; impl < 2; ++impl) {
