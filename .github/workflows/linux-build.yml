@@ -375,8 +375,8 @@ jobs:
             curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
               "$url" -o "/tmp/oga-pr-${pr}.diff"
             echo "Applying PR #${pr}"
-            git apply --whitespace=n--exclude='*.md' owarn --3way --exclude='test/*' \
-              --exclude='.github/*' "/tmp/oga-pr-${pr}.diff" \
+            git apply --whitespace=nowarn --3way --exclude='test/*' \
+              --exclude='.github/*' --exclude='*.md' "/tmp/oga-pr-${pr}.diff" \
               || { echo "PR #${pr} failed to apply"; exit 1; }
           done
 
