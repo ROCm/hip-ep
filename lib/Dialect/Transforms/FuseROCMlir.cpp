@@ -320,9 +320,6 @@ KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
   }
 
   SetVector<Operation *> users(value.user_begin(), value.user_end());
-  // An escaping value becomes a kernel result, which needs an init.
-  if (users.size() > 1 && !isa<DestinationStyleOpInterface>(tail))
-    return nullptr;
   SmallVector<Operation *> candidates;
   for (Operation *user : users)
     if (user->getBlock() == anchor->getBlock() && canTake(user))
@@ -345,6 +342,25 @@ void KernelRegion::growForward() {
   chain.insert(anchor);
   while (Operation *next = nextOnChain(chain))
     chain.insert(next);
+  // A chain value read outside becomes a kernel result, which needs an init,
+  // so a view with an outside reader ends the chain. A view whose readers all
+  // joined the chain stays inside, as in an erf GELU after a matmul:
+  //
+  //   %v = tensor.expand_shape %matmul        // read by %s and %g
+  //   %s = hip.mul ins(%v, %scale)
+  //   %e = hip.erf ins(%s)
+  //   %a = hip.add ins(%e, %one)
+  //   %g = hip.mul ins(%v, %a)                // all of it in one kernel
+  auto escapingView = llvm::find_if(chain, [&](Operation *op) {
+    return !isa<DestinationStyleOpInterface>(op) &&
+           llvm::any_of(op->getUsers(),
+                        [&](Operation *user) { return !chain.contains(user); });
+  });
+  if (escapingView != chain.end()) {
+    Operation *cut = *escapingView;
+    while (chain.back() != cut)
+      chain.pop_back();
+  }
   // A view outside the kernel is free, and one with no init cannot supply the
   // dispatch's outs.
   while (!isa<DestinationStyleOpInterface>(chain.back()))
