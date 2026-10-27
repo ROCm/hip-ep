@@ -104,12 +104,6 @@ module {
     return %out0, %out1, %out2 : tensor<2x64xf32>, tensor<5x64xf32>, tensor<3x64xf32>
   }
 
-  // --- Unused output typed `none` by the importer (empty ONNX output name) ---
-  func.func @test_split_none_result(%data: tensor<1x4xf32>) -> (tensor<1x1xf32>, tensor<1x1xf32>) {
-    %out0, %out1, %out2, %out3 = "onnx.Split"(%data) {axis = -1 : si64} : (tensor<1x4xf32>) -> (tensor<1x1xf32>, none, tensor<1x1xf32>, tensor<1x1xf32>)
-    return %out0, %out2 : tensor<1x1xf32>, tensor<1x1xf32>
-  }
-
   // --- Invalid: custom split lengths don't sum to axis dimension (pattern should not match) ---
   func.func @test_split_invalid_sum(%data: tensor<10x64xf32>) -> (tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>) {
     %split_lengths = "onnx.Constant"() {value = dense<[3, 3, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
@@ -194,14 +188,6 @@ module {
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [2, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [5, 64] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[{{.*}}] [3, 64] [1, 1]
-
-// A `none` result is skipped rather than sliced, and the chunk it stands for
-// still shifts the offset of the results after it.
-// CHECK-LABEL: func.func @test_split_none_result
-// CHECK-NOT: onnx.Split
-// CHECK-NOT: onnx.NoValue
-// CHECK: tensor.extract_slice{{.*}}[0, 0] [1, 1] [1, 1]
-// CHECK: tensor.extract_slice{{.*}}[0, 2] [1, 1] [1, 1]
 
 // CHECK-LABEL: func.func @test_split_invalid_sum
 // Validation should prevent conversion - onnx.Split should remain

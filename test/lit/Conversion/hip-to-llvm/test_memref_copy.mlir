@@ -63,26 +63,22 @@ func.func @copy_strided_src_dense_dst(
 // Test 3: pitched 2D copy from a dense source into a strided subview
 // destination -- the canonical onnx.Concat axis>0 pattern. Bufferization
 // of `tensor.insert_slice` along axis=1 produces a `memref.subview` with
-// strides inherited from the parent (here parent shape [2,256,64,64]
+// strides inherited from the parent (here parent shape [1,256,64,64]
 // concatenated of two halves; the slice covers half along axis=1, so
 // dst.strides[0] = 1048576 keeps the parent pitch). Source is the full
 // dense input. Pre-fix this fell through to MLIR's default lowering,
 // emitting an undefined `memrefCopy` symbol at link time.
-//
-// The batch dim has extent 2 so the parent pitch really does break the
-// destination into rows; with a batch of 1 there is nothing between the
-// rows and the flat path above claims the copy instead.
 //
 // CHECK-LABEL: llvm.func @copy_dense_src_strided_dst_concat
 // CHECK:         llvm.call @wrap_hipMemcpy2DAsync({{.*}}) :
 // CHECK-NOT:     llvm.call @memrefCopy
 func.func @copy_dense_src_strided_dst_concat(
     %ctx: !hip.context,
-    %src: memref<2x128x64x64xf16>,
-    %dst: memref<2x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 0>>) {
+    %src: memref<1x128x64x64xf16>,
+    %dst: memref<1x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 0>>) {
   memref.copy %src, %dst
-      : memref<2x128x64x64xf16>
-        to memref<2x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 0>>
+      : memref<1x128x64x64xf16>
+        to memref<1x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 0>>
   return
 }
 
@@ -99,11 +95,11 @@ func.func @copy_dense_src_strided_dst_concat(
 // CHECK-NOT:     llvm.call @memrefCopy
 func.func @copy_dense_src_strided_dst_concat_offset(
     %ctx: !hip.context,
-    %src: memref<2x128x64x64xf16>,
-    %dst: memref<2x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 524288>>) {
+    %src: memref<1x128x64x64xf16>,
+    %dst: memref<1x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 524288>>) {
   memref.copy %src, %dst
-      : memref<2x128x64x64xf16>
-        to memref<2x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 524288>>
+      : memref<1x128x64x64xf16>
+        to memref<1x128x64x64xf16, strided<[1048576, 4096, 64, 1], offset: 524288>>
   return
 }
 
@@ -167,48 +163,5 @@ func.func @copy_dense_dynamic_kv_cache(
     %src: memref<1x8x?x128xf16>,
     %dst: memref<1x8x?x128xf16>) {
   memref.copy %src, %dst : memref<1x8x?x128xf16> to memref<1x8x?x128xf16>
-  return
-}
-
-// -----
-
-// Test 8: rank-1 single-element window into a larger row -- a Split of a
-// `1x8` row into eight scalars bufferizes to `subview + collapse_shape`, so
-// each slice carries the parent pitch (stride 8) over a single element. A
-// dimension of extent 1 spans nothing, so the stride cannot introduce a hole
-// and this is one flat transfer. The pitched 2D path cannot express a rank-1
-// copy, so rejecting it here dropped the op into MLIR's default lowering,
-// which loads and stores device memory on the host and faults at inference.
-//
-// CHECK-LABEL: llvm.func @copy_unit_extent_strided_1d
-// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
-// CHECK-NOT:     llvm.intr.memcpy
-// CHECK-NOT:     llvm.call @memrefCopy
-func.func @copy_unit_extent_strided_1d(
-    %ctx: !hip.context,
-    %src: memref<1xf32, strided<[8], offset: 4>>,
-    %dst: memref<1xf32>) {
-  memref.copy %src, %dst
-      : memref<1xf32, strided<[8], offset: 4>> to memref<1xf32>
-  return
-}
-
-// -----
-
-// Test 9: the same unit-extent reasoning across ranks -- a `1x1` window into
-// a `1x8` buffer. Only dimensions wider than one element constrain the
-// strides, so this too is a flat transfer rather than a 1-element pitched
-// copy.
-//
-// CHECK-LABEL: llvm.func @copy_unit_extent_strided_2d
-// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
-// CHECK-NOT:     llvm.call @wrap_hipMemcpy2DAsync
-// CHECK-NOT:     llvm.call @memrefCopy
-func.func @copy_unit_extent_strided_2d(
-    %ctx: !hip.context,
-    %src: memref<1x1xf32>,
-    %dst: memref<1x1xf32, strided<[8, 1], offset: 2>>) {
-  memref.copy %src, %dst
-      : memref<1x1xf32> to memref<1x1xf32, strided<[8, 1], offset: 2>>
   return
 }

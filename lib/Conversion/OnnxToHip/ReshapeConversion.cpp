@@ -1050,23 +1050,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
     int64_t inputRank = inputType.getRank();
     unsigned numOutputs = op->getNumResults();
 
-    // Every result is classified before the rewrite starts creating ops. A
-    // pattern that gives up midway leaves those ops behind, so the greedy
-    // driver re-runs it on every iteration and never converges -- the pass
-    // then fails with no diagnostic at all.
-    //
-    // An exporter names an output it does not use with the empty string, and
-    // the importer types that result `none`. Such a result has no shape to
-    // slice; it becomes the `onnx.NoValue` placeholder the rest of the
-    // lowering already reads as an omitted value.
-    for (mlir::Value result : op->getResults())
-      if (!mlir::isa<mlir::RankedTensorType, mlir::NoneType>(result.getType()))
-        return rewriter.notifyMatchFailure(
-            op, "expected ranked tensor or none result types");
-
     // Edge case: single output is identity operation
-    if (numOutputs == 1 &&
-        mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType())) {
+    if (numOutputs == 1) {
       rewriter.replaceOp(op, input);
       return mlir::success();
     }
@@ -1174,22 +1159,7 @@ struct SplitToStdTensor : public mlir::RewritePattern {
     }
 
     // Handle equal splits
-    if (isEqualSplit && !inputType.isDynamicDim(axis)) {
-      // A static axis needs no index arithmetic. ONNX sizes every chunk but
-      // the last at ceil(extent / outputs), and gives the last the remainder,
-      // so these lengths agree with the result types the importer declared --
-      // which matters for a `none` result, the one case below with no result
-      // type of its own to measure.
-      int64_t axisDimSize = inputType.getDimSize(axis);
-      int64_t chunkSize = llvm::divideCeil(axisDimSize, numOutputs);
-      int64_t lastChunkSize =
-          axisDimSize - chunkSize * static_cast<int64_t>(numOutputs - 1);
-      if (lastChunkSize <= 0)
-        return rewriter.notifyMatchFailure(
-            op, "more outputs than the axis extent can be split into");
-      splitLengths.append(numOutputs - 1, rewriter.getIndexAttr(chunkSize));
-      splitLengths.push_back(rewriter.getIndexAttr(lastChunkSize));
-    } else if (isEqualSplit) {
+    if (isEqualSplit) {
       mlir::Value axisDim =
           rewriter.create<mlir::tensor::DimOp>(loc, input, axis);
       mlir::Value numOutputsVal =
@@ -1219,44 +1189,11 @@ struct SplitToStdTensor : public mlir::RewritePattern {
     llvm::SmallVector<mlir::Value> replacements;
     mlir::OpFoldResult currentOffset = rewriter.getIndexAttr(0);
 
-    // IMPORTANT: Use the actual slice size (which may differ from
-    // splitLengths[i] when output type has static dimension). This ensures
-    // correct offset calculation.
-    auto advanceOffset = [&](mlir::OpFoldResult actualSliceSize) {
-      // Keep a static split static: a running offset built from index ops
-      // would leave this "zero-cost view" carrying index arithmetic.
-      std::optional<int64_t> offsetConst =
-          mlir::getConstantIntValue(currentOffset);
-      std::optional<int64_t> sizeConst =
-          mlir::getConstantIntValue(actualSliceSize);
-      if (offsetConst && sizeConst) {
-        currentOffset = rewriter.getIndexAttr(*offsetConst + *sizeConst);
-        return;
-      }
-      mlir::Value offsetVal =
-          mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
-      mlir::Value lengthVal =
-          mlir::getValueOrCreateConstantIndexOp(rewriter, loc, actualSliceSize);
-      currentOffset =
-          rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal)
-              .getResult();
-    };
-
     for (unsigned i = 0; i < numOutputs; ++i) {
-      mlir::Type resultType = op->getResult(i).getType();
-      auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(resultType);
-
-      // A `none` result is not sliced, but the chunk it stands for still
-      // shifts the offset of every result after it.
-      if (!outputType) {
-        mlir::OperationState noValue(loc, "onnx.NoValue");
-        noValue.addTypes(resultType);
-        noValue.addAttribute("value", rewriter.getUnitAttr());
-        replacements.push_back(rewriter.create(noValue)->getResult(0));
-        if (i < numOutputs - 1)
-          advanceOffset(splitLengths[i]);
-        continue;
-      }
+      auto outputType =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(i).getType());
+      if (!outputType)
+        return rewriter.notifyMatchFailure(op, "expected ranked output type");
 
       // Track the actual slice size used for this output (for offset
       // calculation)
@@ -1319,8 +1256,18 @@ struct SplitToStdTensor : public mlir::RewritePattern {
       replacements.push_back(sliceOp->getResult(0));
 
       // Update offset for next slice
-      if (i < numOutputs - 1)
-        advanceOffset(actualSliceSize);
+      if (i < numOutputs - 1) {
+        // IMPORTANT: Use the actual slice size (which may differ from
+        // splitLengths[i] when output type has static dimension). This ensures
+        // correct offset calculation.
+        mlir::Value offsetVal =
+            mlir::getValueOrCreateConstantIndexOp(rewriter, loc, currentOffset);
+        mlir::Value lengthVal = mlir::getValueOrCreateConstantIndexOp(
+            rewriter, loc, actualSliceSize);
+        mlir::Value newOffsetVal =
+            rewriter.create<mlir::arith::AddIOp>(loc, offsetVal, lengthVal);
+        currentOffset = newOffsetVal;
+      }
     }
 
     rewriter.replaceOp(op, replacements);
