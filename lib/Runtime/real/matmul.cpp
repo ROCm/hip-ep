@@ -484,6 +484,18 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
+  // One row against a narrow row-major B (an MoE router, N=128): a single
+  // GEMV pass, where hipBLASLt runs a split-K GEMM plus a reduce launch. With
+  // M=1 the activation is K contiguous elements whatever transA says. The N
+  // cap keeps wide outputs such as lm_head on hipBLASLt, which this kernel is
+  // not tuned to beat.
+  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N <= 1024 &&
+      N % 8 == 0 && reinterpret_cast<uintptr_t>(B) % 16 == 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
+                      (long long)N, (long long)K);
+    return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
+  }
+
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "

@@ -3880,6 +3880,12 @@ HIP_KERNEL_API int hip_conv_transpose(
     int64_t dil_h, int64_t dil_w,
     int64_t group);
 
+// fp16 GEMV out[N] = a[K] . B[K, N] with B row-major (N contiguous), fp32
+// accumulation. For narrow decode MatMuls such as an MoE router (N=128).
+// N must be a multiple of 8 and B 16-byte aligned; returns -1 otherwise.
+HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
+
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
