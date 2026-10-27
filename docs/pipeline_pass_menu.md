@@ -109,20 +109,23 @@ plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
-overrides the search space. `--problem-cache <file.mxpc>` (or
-`HIP_ROCMLIR_PROBLEM_CACHE`) consults a local problem-cache FlatBuffer before
-that search. An identical problem string, conv or gemm, is compiled as
-stored. A conv miss takes the nearest `gemm:`/`attn:` tile in the
-MatMulNBits style: arch, conv kind, `-F`, layouts, stride, dilation, and the
-fusion suffix must match, then one weighted log2 distance is taken over the
-implicit GEMM `M`, `N`, and `K`. The weights are `1, 1, 1`. A borrowed tile
-must fit this GEMM. A tile that fails to compile is skipped and the next
-nearest row is tried. When no legal row remains, the quick search runs.
-`--dump-problem-cache <file.json>` writes those same problem keys and the
-winning perfConfig after autotune, one row per unique kernel, in the
-device-keyed JSON.
-The operator name on each row is `hip::rocmlir`. The flag requires autotune;
-`HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
+overrides the search space. `--problem-cache <file.fb>` (or
+`HIP_ROCMLIR_PROBLEM_CACHE`) consults a rocMLIR LUT FlatBuffer before that
+search. The file is the same kind of artifact as the MatMulNBits and GQA
+LUTs: a JSON document (`schema_version`, `gpu_arch`, `kernel_abi`,
+`weight_m/n/k`, `configs`, `points`, `fallbacks`) compiled with
+`flatc --binary --strict-json` to a `.fb`.
+`tools/problem-cache/problem_cache_to_fb.py` does that compile.
+An identical problem string, conv or gemm, is compiled as stored. A conv
+miss takes the nearest `gemm:`/`attn:` tile: arch, conv kind, `-F`, layouts,
+stride, dilation, and the fusion suffix must match, then one weighted log2
+distance is taken over the implicit GEMM `M`, `N`, and `K`. The weights are
+the table's `weight_m/n/k` (1, 1, 1 until fitted). A borrowed tile must fit
+this GEMM. A tile that fails to compile is skipped and the next nearest row
+is tried. When no legal row remains, the quick search runs.
+`--dump-problem-cache <file.json>` writes that JSON after autotune, one
+point per unique problem and one config per distinct perfConfig. The flag
+requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
 Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any value
 other than `0`) to skip the GPU search and affix the first enumerated
 perfConfig. The problem cache is not consulted in that mode. The log names the space (`quick`, `full`, or `exhaustive`) and the

@@ -15,11 +15,12 @@
 //   K = (C / groups) * filter_h * filter_w
 //   d = sqrt(wM*log2(M)^2 + wN*log2(N)^2 + wK*log2(K)^2)
 //
-// wM, wN, and wK are 1. The neighbor supplies only its gemm:/attn: perfConfig.
-// An identical problem string is returned as stored, including a gemm key:
-// that tile already compiled for this kernel. tileLegal applies only when
-// borrowing a neighbor. `rejectedSolutions` are tiles that already failed to
-// compile; the next nearest legal row is returned.
+// The distance weights live in the .fb (`weight_m/n/k`), defaulting to 1.
+// The neighbor supplies only its gemm:/attn: perfConfig. An identical problem
+// string is returned as stored, including a gemm key: that tile already
+// compiled for this kernel. tileLegal applies only when borrowing a neighbor.
+// `rejectedSolutions` are tiles that already failed to compile; the next
+// nearest legal row is returned.
 
 #ifndef HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
 #define HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
@@ -39,6 +40,15 @@ struct ProblemCacheConvEntry {
   std::string solution;
 };
 
+// One loaded .fb. `entries` are the gemm:/attn: points; other perfConfigs are
+// dropped. Weights are the table's log-space metric.
+struct ProblemCacheLut {
+  float weightM = 1.0f;
+  float weightN = 1.0f;
+  float weightK = 1.0f;
+  std::vector<ProblemCacheConvEntry> entries;
+};
+
 struct NearestConvTuneHit {
   std::string solution;
   std::string matchedProblem;
@@ -47,20 +57,25 @@ struct NearestConvTuneHit {
   bool exact = false;
 };
 
-// Rows whose solution is a gemm:/attn: perfConfig. A fused_reduce row is
-// skipped. Gemm problem keys are kept so an exact string match can hit them.
-bool loadProblemCacheConvEntries(const uint8_t *data, size_t size,
-                                 std::vector<ProblemCacheConvEntry> &entries,
-                                 std::string &error);
+// Implicit GEMM of a conv problem string. False, and m/n/k left at 0, when
+// `problem` is not a conv. The dump writes these into each LUT point.
+bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,
+                      int64_t &k);
 
-bool loadProblemCacheConvEntries(const std::string &path,
-                                 std::vector<ProblemCacheConvEntry> &entries,
-                                 std::string &error);
+// Rows whose perfConfig is gemm:/attn:. Anything else is skipped. Gemm
+// problem keys are kept so an exact string match can hit them.
+bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
+                         std::string &error);
+
+bool loadProblemCacheLut(const std::string &path, ProblemCacheLut &lut,
+                         std::string &error);
 
 std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
-                    const std::vector<std::string> &rejectedSolutions = {});
+                    const std::vector<std::string> &rejectedSolutions = {},
+                    float weightM = 1.0f, float weightN = 1.0f,
+                    float weightK = 1.0f);
 
 } // namespace hip
 } // namespace mlir
