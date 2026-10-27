@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -8238,5 +8239,19 @@ class HipToTosaPass : public impl::ConvertHipToTosaPassBase<HipToTosaPass> {
 };
 
 } // namespace
+
+bool isTosaLowerableReshape(Operation *op) {
+  if (auto expand = dyn_cast_if_present<tensor::ExpandShapeOp>(op))
+    return isStaticReshape(expand);
+  if (auto collapse = dyn_cast_if_present<tensor::CollapseShapeOp>(op))
+    return isStaticReshape(collapse);
+  return false;
+}
+
+bool isTosaLowerableSlice(tensor::ExtractSliceOp op) {
+  return isTosaExpressibleSlice(op);
+}
+
+bool isTosaLowerableExpand(ExpandOp op) { return isTosaExpressibleExpand(op); }
 
 } // namespace mlir::hip
