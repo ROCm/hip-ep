@@ -8,6 +8,7 @@ reference are generated in-process, no python, no data files, no
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
 make test_custom OFFLOAD=... HIP_SDK=... B=1 H=32 G=8 D=128 MAX_SEQ=4096 TOTAL=2048
+make test_fused  OFFLOAD=... HIP_SDK=... [FUSED_ARGS="--h 32 --g 8 --d 128 --len 2048"]
 make clean
 ```
 
@@ -15,6 +16,7 @@ make clean
 |---|---|
 | `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
 | `test_custom` | One shape from `B=`, `H=`, `G=`, `D=`, `MAX_SEQ=`, `TOTAL=` (in-process rng). |
+| `test_fused` | `test_gqa_decode_fused.cpp`: `hip_gqa_flash_decode_fused()` (RoPE, in-place KV append, decode and reduce in one dispatch) against a CPU reference and against the multi-dispatch path, over position-id / rope / window / sink / smooth-softmax / batch / spare-capacity-with-peaked-softmax variants, then a cold-KV bench of both paths. `FUSED_ARGS` runs one shape on both paths instead (`--h --g --d --len --window --cap N --qscale X --splits N --no-bench`). |
 | `clean` | Removes `out/`. |
 
 ## Shape coverage (3 tiers)

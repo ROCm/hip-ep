@@ -266,13 +266,10 @@ __global__ void rope_kernel(
     const T* __restrict__ sin_cache,
     int seq_len, int num_heads, int head_dim,
     int half_rot, int past_len,
-    const int* __restrict__ seqlens_k) {
+    const int* __restrict__ seqlens_k,
+    const int64_t* __restrict__ position_ids) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  // When seqlens_k is provided, read past_len from device memory
-  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
-  // All threads read the same address; hardware coalesces into a broadcast.
-  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
   int elems = seq_len * num_heads * half_rot;
   if (idx >= elems) return;
 
@@ -282,7 +279,17 @@ __global__ void rope_kernel(
   int s = remaining / num_heads;
   if (s >= seq_len) return;
 
-  int pos = eff_past_len + s;
+  // position_ids wins when given. Otherwise read past_len from device memory
+  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
+  // All threads read the same address; hardware coalesces into a broadcast.
+  int pos;
+  if (position_ids) {
+    pos = static_cast<int>(position_ids[batch_idx * seq_len + s]);
+  } else {
+    int eff_past_len =
+        seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
+    pos = eff_past_len + s;
+  }
   int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
 
   float x1 = gqa_to_float<T>(input[base + d]);
@@ -811,14 +818,16 @@ static void launch_rope(
     hipStream_t stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
-    int head_dim, int half_rot, int past_len, const void* seqlens_k) {
+    int head_dim, int half_rot, int past_len, const void* seqlens_k,
+    const void* position_ids) {
   int elems = seq_len * num_heads * half_rot;
   int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
   rope_kernel<T><<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
       static_cast<const T*>(input), static_cast<T*>(output),
       static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
       seq_len, num_heads, head_dim, half_rot, past_len,
-      static_cast<const int*>(seqlens_k));
+      static_cast<const int*>(seqlens_k),
+      static_cast<const int64_t*>(position_ids));
 }
 
 template <typename T>
@@ -910,11 +919,12 @@ extern "C" int hip_gqa_rope(
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k, int element_size_bytes) {
+    const void* seqlens_k, const void* position_ids, int element_size_bytes) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_rope, stream, input,
                             output, cos_cache, sin_cache, batch_size, seq_len,
-                            num_heads, head_dim, half_rot, past_len, seqlens_k);
+                            num_heads, head_dim, half_rot, past_len, seqlens_k,
+                            position_ids);
   GQA_RETURN_LAUNCH_STATUS();
 }
 
@@ -1603,7 +1613,9 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 //   - gqa_flash_decode_kernel        : scalar, LDS-staged, any templated HpG
 //   - gqa_flash_decode_wmma_kernel   : WMMA, HpG packed into a 16-row tile
 //   - gqa_flash_decode_ring_kernel   : register ring, fp16 D96 / D128 at the
-//                                      HpG it is instantiated for
+//                                      HpG it is instantiated for; also the
+//                                      single-dispatch decode
+//                                      (hip_gqa_flash_decode_fused)
 // hip_gqa_flash_decode picks among them per geometry;
 // legacy_fused_gqa_decode_kernel near the end of the file only backs the
 // decomposed hipBLASLt fallback.
@@ -2286,18 +2298,37 @@ __device__ __forceinline__ void ring_load_row(const uint32_t* p,
   }
 }
 
-// Kernel arguments of gqa_flash_decode_ring_kernel. O is written directly
-// when the launch has one split (null otherwise: the reduce writes it).
+// Kernel arguments of gqa_flash_decode_ring_kernel. The optional stages are
+// selected by which pointers are non-null:
+//   cos_cache  : Q (and K_new) are rotated in registers at `position_ids[b]`,
+//                or at seqlens_k[b] when position_ids is null.
+//   K_new      : the decoded token's K/V are not in the cache yet. The split
+//                owning row seqlens_k[b] writes them to K_out/V_out (the same
+//                buffers as K/V) and scores that key from registers.
+//   tickets    : the last block of each (batch, KV head) merges the splits and
+//                writes O, so no separate reduce kernel runs. tickets[b*G+g]
+//                must be 0 on entry and is 0 again on exit.
+//   O alone    : written directly when the launch has one split.
+static constexpr int kRingReduceMaxSplits = 64;
+
 struct RingDecodeArgs {
   const __half* Q;             // [B, 1, H, D]
   const __half* K;             // cache [B, G, max_seq, D]
   const __half* V;
+  __half* K_out;               // == K when K_new is set
+  __half* V_out;
+  const __half* K_new;         // [B, 1, G, D] or null
+  const __half* V_new;
+  const __half* cos_cache;     // [max_position, D / 2] or null
+  const __half* sin_cache;
+  const int64_t* position_ids; // [B] or null
   float* partials;             // [B, H, splits, D + 2]
+  int* tickets;                // [B * G] or null
   __half* O;                   // [B, 1, H, D] or null
   const __half* head_sink;     // [H] or null
   const int* seqlens_k;        // [B] or null
   float scale;
-  int H, G, max_seq, splits, local_window_size, use_smooth_softmax;
+  int H, G, max_seq, splits, min_chunk, local_window_size, use_smooth_softmax;
 };
 
 template <int D, int HPG, int QPW, int LPK, int RING, bool NT>
@@ -2335,34 +2366,80 @@ gqa_flash_decode_ring_kernel(const RingDecodeArgs a) {
   if (a.local_window_size > 0 && eff_skv > a.local_window_size)
     kv_lo = eff_skv - a.local_window_size;
   const int kv_range = eff_skv - kv_lo;
-  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  // The separate reduce reads every launched split, so a partials-only launch
+  // keeps them all. With tickets the last block reduces and the split count
+  // follows the live range: blocks past it exit without touching memory.
+  int n_splits = K_SPLITS;
+  if (a.tickets) {
+    const int want = (kv_range + a.min_chunk - 1) / a.min_chunk;
+    n_splits = max(1, min(K_SPLITS, want));
+    if (split >= n_splits) return;
+  }
+  const int chunk    = (kv_range + n_splits - 1) / n_splits;
   const int kv_start = kv_lo + chunk * split;
   const int kv_end   = min(kv_start + chunk, eff_skv);
 
-  // Lane slice [e0, e0 + EPL) of each query head in fp32.
+  // Rotation position of the decoded token (sq == 1).
+  const int pos = a.position_ids
+      ? __builtin_amdgcn_readfirstlane((int)a.position_ids[batch])
+      : raw_skv - 1;
+  const bool rotate = a.cos_cache != nullptr;
+  // Lane slice [e0, e0 + EPL) of a row in fp32. Rotated rows pair element e
+  // with e +- D/2 (half-rotated RoPE) and round to fp16 like hip_gqa_rope.
+  constexpr int HALF = D / 2;
+  static_assert(HALF % EPL == 0, "a lane slice must not straddle the halves");
   const int e0 = hl * EPL;
-  float q[QPW][EPL];
-  #pragma unroll
-  for (int j = 0; j < QPW; ++j) {
-    const __half2* qp = reinterpret_cast<const __half2*>(
-        a.Q + (size_t)(batch * H + head_q0 + j) * D + e0);
+  auto load_slice = [&](const __half* row, bool rot, float (&x)[EPL]) {
+    const __half2* own = reinterpret_cast<const __half2*>(row + e0);
+    if (!rot) {
+      #pragma unroll
+      for (int i = 0; i < DW; ++i) {
+        const float2 f = __half22float2(own[i]);
+        x[2 * i]     = f.x;
+        x[2 * i + 1] = f.y;
+      }
+      return;
+    }
+    const __half2* par =
+        reinterpret_cast<const __half2*>(row + (e0 + HALF) % D);
+    const size_t crow = (size_t)pos * HALF + e0 % HALF;
+    const __half2* cs = reinterpret_cast<const __half2*>(a.cos_cache + crow);
+    const __half2* sn = reinterpret_cast<const __half2*>(a.sin_cache + crow);
+    const float sign = e0 < HALF ? -1.0f : 1.0f;
     #pragma unroll
     for (int i = 0; i < DW; ++i) {
-      const float2 f = __half22float2(qp[i]);
-      q[j][2 * i]     = f.x;
-      q[j][2 * i + 1] = f.y;
+      const float2 xo = __half22float2(own[i]);
+      const float2 xp = __half22float2(par[i]);
+      const float2 c  = __half22float2(cs[i]);
+      const float2 s  = __half22float2(sn[i]);
+      x[2 * i]     = __half2float(__float2half(xo.x * c.x + sign * xp.x * s.x));
+      x[2 * i + 1] = __half2float(__float2half(xo.y * c.y + sign * xp.y * s.y));
     }
-  }
+  };
+
+  float q[QPW][EPL];
+  #pragma unroll
+  for (int j = 0; j < QPW; ++j)
+    load_slice(a.Q + (size_t)(batch * H + head_q0 + j) * D, rotate, q[j]);
+
+  // The decoded token is row eff_skv - 1. When it arrives as K_new / V_new,
+  // the split owning that row appends it and scores it from registers. Its
+  // loop stops one row short, so no block of this launch reads a row that is
+  // being written.
+  const bool append = a.K_new != nullptr && raw_skv >= 1 && raw_skv <= max_seq;
+  const int t = eff_skv - 1;
+  const bool owner = append && chunk > 0 && split == (t - kv_lo) / chunk;
+  const int loop_end = owner ? t : kv_end;
 
   const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
       (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
   const uint32_t* Kw = reinterpret_cast<const uint32_t*>(a.K + kv_base) + hl * DW;
   const uint32_t* Vw = reinterpret_cast<const uint32_t*>(a.V + kv_base) + hl * DW;
 
-  // A group whose key is past kv_end re-reads row kv_start (always valid)
+  // A group whose key is past loop_end re-reads row kv_start (always valid)
   // and masks its score to -inf, so the loads stay unpredicated.
   auto load_rows = [&](int kv, uint32_t (&k)[DW], uint32_t (&v)[DW]) {
-    const size_t off = (size_t)(kv < kv_end ? kv : kv_start) * (D / 2);
+    const size_t off = (size_t)(kv < loop_end ? kv : kv_start) * (D / 2);
     ring_load_row<DW, NT>(Kw + off, k);
     ring_load_row<DW, NT>(Vw + off, v);
   };
@@ -2410,29 +2487,47 @@ gqa_flash_decode_ring_kernel(const RingDecodeArgs a) {
     }
   };
 
-  // Steps wholly past kv_end are skipped (wave-uniform), so the tail of the
+  // Steps wholly past loop_end are skipped (wave-uniform), so the tail of the
   // last ring pass neither computes nor issues loads nobody consumes.
   uint32_t kb[RING][DW], vb[RING][DW];
   #pragma unroll
   for (int r = 0; r < RING; ++r)
-    if (kv_start + KPS * r < kv_end)
+    if (kv_start + KPS * r < loop_end)
       load_rows(kv_start + KPS * r + grp, kb[r], vb[r]);
 
-  for (int base = kv_start; base < kv_end; base += KPS * RING) {
+  for (int base = kv_start; base < loop_end; base += KPS * RING) {
     #pragma unroll
     for (int r = 0; r < RING; ++r) {
       const int step = base + KPS * r;
-      if (step < kv_end) {
+      if (step < loop_end) {
         const int kv = step + grp;
         float kf[EPL], vf[EPL], s[QPW];
         unpack(kb[r], kf);
         unpack(vb[r], vf);
-        score(kf, kv < kv_end, s);
+        score(kf, kv < loop_end, s);
         merge(s, vf);
-        if (step + KPS * RING < kv_end)
+        if (step + KPS * RING < loop_end)
           load_rows(kv + KPS * RING, kb[r], vb[r]);
       }
     }
+  }
+
+  if (owner) {
+    float kn[EPL], vn[EPL], s[QPW];
+    const size_t new_off = (size_t)(batch * G + head_kv) * D;
+    load_slice(a.K_new + new_off, rotate, kn);
+    load_slice(a.V_new + new_off, false, vn);
+    if (wave_id == 0 && grp == 0) {
+      __half2* kd = reinterpret_cast<__half2*>(a.K_out + kv_base + (size_t)t * D + e0);
+      __half2* vd = reinterpret_cast<__half2*>(a.V_out + kv_base + (size_t)t * D + e0);
+      #pragma unroll
+      for (int i = 0; i < DW; ++i) {
+        kd[i] = __floats2half2_rn(kn[2 * i], kn[2 * i + 1]);
+        vd[i] = __floats2half2_rn(vn[2 * i], vn[2 * i + 1]);
+      }
+    }
+    score(kn, grp == 0, s);
+    merge(s, vn);
   }
 
   // Each group accumulated its own keys against the shared m: add the groups.
@@ -2449,7 +2544,7 @@ gqa_flash_decode_ring_kernel(const RingDecodeArgs a) {
     return a.use_smooth_softmax ? exp2f(-gm) : 0.0f;
   };
 
-  if (K_SPLITS == 1 && a.O) {
+  if (n_splits == 1 && a.O) {
     #pragma unroll
     for (int j = 0; j < QPW; ++j) {
       const int hq = head_q0 + j;
@@ -2478,6 +2573,71 @@ gqa_flash_decode_ring_kernel(const RingDecodeArgs a) {
       pd[0] = m[j];
       pd[1] = l[j];
     }
+  }
+  if (!a.tickets) return;
+
+  // Publish this split, then take a ticket; the last of the n_splits blocks
+  // of this (batch, KV head) merges them. The fence before the ticket makes
+  // the partials visible device-wide; the one after it drops stale cached
+  // lines of the partials buffer (it is reused by every layer).
+  __shared__ int s_last;
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int* tk = a.tickets + batch * G + head_kv;
+    const bool last = atomicAdd(tk, 1) == n_splits - 1;
+    if (last) *tk = 0;  // every block of this (batch, KV head) has arrived
+    s_last = last;
+  }
+  __syncthreads();
+  if (!s_last) return;
+  __threadfence();
+
+  // One block (as little as one wave) merges HPG heads, so each split's (m, l)
+  // is read once into LDS and folded into a weight; the output pass then
+  // issues independent loads instead of re-walking the splits per element.
+  __shared__ float s_m[HPG][kRingReduceMaxSplits];
+  __shared__ float s_l[HPG][kRingReduceMaxSplits];
+  __shared__ float s_den[HPG];
+  const float* const p_head = partials +
+      flash_decode_partial_offset(batch, head_kv * HPG, 0, H, K_SPLITS, D);
+  const size_t head_stride = (size_t)K_SPLITS * (D + 2);
+  for (int idx = threadIdx.x; idx < HPG * n_splits; idx += blockDim.x) {
+    const int j = idx / n_splits, k = idx % n_splits;
+    const float* p = p_head + j * head_stride + (size_t)k * (D + 2);
+    s_m[j][k] = p[0];
+    s_l[j][k] = p[1];
+  }
+  __syncthreads();
+  if (threadIdx.x < HPG) {
+    const int j = threadIdx.x;
+    float gm = -INFINITY;
+    for (int k = 0; k < n_splits; ++k) gm = fmaxf(gm, s_m[j][k]);
+    float ls = 0.0f;
+    for (int k = 0; k < n_splits; ++k) {
+      const float w = isfinite(gm) ? exp2f(s_m[j][k] - gm) : 0.0f;
+      s_m[j][k] = w;
+      ls += w * s_l[j][k];
+    }
+    s_den[j] = isfinite(gm) ? fmaxf(ls + sink_term(head_kv * HPG + j, gm), 1e-6f)
+                            : 0.0f;
+  }
+  __syncthreads();
+  for (int idx = threadIdx.x; idx < HPG * (D / 2); idx += blockDim.x) {
+    const int j = idx / (D / 2);
+    const int c = 2 * (idx % (D / 2));
+    const float* p = p_head + j * head_stride + 2 + c;
+    float2 os = {0.0f, 0.0f};
+    #pragma unroll 4
+    for (int k = 0; k < n_splits; ++k) {
+      const float2 x = *reinterpret_cast<const float2*>(p + (size_t)k * (D + 2));
+      os.x += s_m[j][k] * x.x;
+      os.y += s_m[j][k] * x.y;
+    }
+    const float den = s_den[j];
+    reinterpret_cast<__half2*>(a.O + (size_t)(batch * H + head_kv * HPG + j) * D)[c / 2] =
+        den > 0.0f ? __floats2half2_rn(os.x / den, os.y / den)
+                   : __floats2half2_rn(0.0f, 0.0f);
   }
   }
 }
@@ -2956,6 +3116,8 @@ gqa_flash_decode_reduce_kernel(
 // 20-CU part yields diminishing returns and inflates the partials workspace and
 // the reduce's per-head serial scan, so cap here.
 static constexpr int kFlashDecodeMaxSplits = 64;
+static_assert(kFlashDecodeMaxSplits <= kRingReduceMaxSplits,
+              "the ring kernel's in-kernel reduce stages every split in LDS");
 
 // bkv is the WMMA KV tile height and only applies to d==64, where both 16 and
 // 32 are instantiated. A taller tile halves the barrier count per KV element
@@ -3053,7 +3215,7 @@ static inline RingDecodeArgs ringPartialsArgs(
   a.O = splits == 1 ? O : nullptr;
   a.head_sink = sink; a.use_smooth_softmax = smooth;
   a.seqlens_k = seqlens_k; a.scale = scale;
-  a.H = H; a.G = G; a.max_seq = max_seq; a.splits = splits;
+  a.H = H; a.G = G; a.max_seq = max_seq; a.splits = splits; a.min_chunk = 1;
   a.local_window_size = local_window_size;
   return a;
 }
@@ -3760,6 +3922,111 @@ extern "C" int hip_gqa_flash_decode_configured(
       max_seq, max_splits, scale, seqlens_k, local_window_size, head_sink,
       use_smooth_softmax, kv_dtype, k_scale, v_scale, use_wmma, splits, bkv,
       /*allow_autotune=*/false);
+}
+
+//===----------------------------------------------------------------------===//
+// Single-dispatch decode: RoPE + KV append + split-K attention + reduce
+//===----------------------------------------------------------------------===//
+// One gqa_flash_decode_ring_kernel launch replaces rope(Q), rope(K), two
+// cache appends, the split-K kernel and the reduce. The host does not know the
+// live length (it is on the device), so the grid is sized from max_seq and the
+// kernel trims it: each (batch, KV head) uses ceil(range / min_chunk) splits,
+// capped by the launch count, and the surplus blocks exit at once.
+
+// Fewest keys a split scans before another split is worth its partials row.
+constexpr int kFusedDecodeMinChunk = 128;
+
+// multiProcessorCount reports WGPs on RDNA, two compute units each (see
+// flashDecodeTargetWaves); the ring kernel only runs on wave32 RDNA.
+static int deviceComputeUnits() {
+  static const int cus = [] {
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess ||
+        prop.multiProcessorCount <= 0)
+      return 32;
+    return 2 * prop.multiProcessorCount;
+  }();
+  return cus;
+}
+
+// Launch split count; a positive `splits` is the caller's. Each split adds one
+// block per (batch, KV head), and each block streams its own K/V range, so
+// the count is set in blocks per compute unit: two when a row serves one query
+// head, one and a half when it serves several (more math per byte). More
+// concurrent streams than that lose DRAM locality faster than they add
+// bandwidth, and every extra split adds a partials row to the in-kernel
+// reduce. Swept with fused splits 1-16 at 2k and 8k keys (D96 HpG1, D128
+// HpG 1/4/5): within 8% of the best split at HpG 1 and 4; HpG5 lands 14% /
+// 28% off at 2k / 8k.
+static int fusedDecodeLaunchSplits(int B, int G, int hpg, int max_seq,
+                                   int splits) {
+  int s = splits;
+  if (s <= 0) {
+    const int blocks = B * G;
+    const int target = hpg > 1 ? (3 * deviceComputeUnits() + 1) / 2
+                               : 2 * deviceComputeUnits();
+    s = (target + blocks - 1) / blocks;
+  }
+  const int useful = (max_seq + kFusedDecodeMinChunk - 1) / kFusedDecodeMinChunk;
+  if (s > useful) s = useful;
+  if (s > kFlashDecodeMaxSplits) s = kFlashDecodeMaxSplits;
+  return s < 1 ? 1 : s;
+}
+
+extern "C" int hip_gqa_flash_decode_fused_supported(int H, int G, int d) {
+  if (G <= 0 || H % G != 0) return 0;
+  return flash_decode_ring_supported(d, H / G) ? 1 : 0;
+}
+
+extern "C" int hip_gqa_flash_decode_fused(
+    void* stream_ptr, const void* Q, const void* K_new, const void* V_new,
+    void* Kcache, void* Vcache, void* O, void* partials_workspace,
+    int* tickets, const void* cos_cache, const void* sin_cache,
+    const void* position_ids, int B, int H, int G, int d, int max_seq,
+    int splits, float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax) {
+  if (!hip_gqa_flash_decode_fused_supported(H, G, d) || !tickets ||
+      !seqlens_k || (cos_cache == nullptr) != (sin_cache == nullptr) ||
+      (K_new == nullptr) != (V_new == nullptr)) {
+    fprintf(stderr, "hip_gqa_flash_decode_fused: unsupported arguments "
+                    "(H=%d G=%d d=%d)\n", H, G, d);
+    return -1;
+  }
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  const int hpg = H / G;
+  RingDecodeArgs a{};
+  a.Q = static_cast<const __half*>(Q);
+  a.K = static_cast<const __half*>(Kcache);
+  a.V = static_cast<const __half*>(Vcache);
+  a.K_out = K_new ? static_cast<__half*>(Kcache) : nullptr;
+  a.V_out = V_new ? static_cast<__half*>(Vcache) : nullptr;
+  a.K_new = static_cast<const __half*>(K_new);
+  a.V_new = static_cast<const __half*>(V_new);
+  a.cos_cache = static_cast<const __half*>(cos_cache);
+  a.sin_cache = static_cast<const __half*>(sin_cache);
+  a.position_ids = static_cast<const int64_t*>(position_ids);
+  a.partials = static_cast<float*>(partials_workspace);
+  a.tickets = tickets;
+  a.O = static_cast<__half*>(O);
+  a.head_sink = static_cast<const __half*>(head_sink);
+  a.seqlens_k = static_cast<const int*>(seqlens_k);
+  a.scale = scale;
+  a.H = H; a.G = G; a.max_seq = max_seq;
+  a.splits = fusedDecodeLaunchSplits(B, G, hpg, max_seq, splits);
+  a.min_chunk = kFusedDecodeMinChunk;
+  a.local_window_size = local_window_size;
+  a.use_smooth_softmax = use_smooth_softmax;
+  static const bool s_log = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
+  if (s_log)
+    fprintf(stderr, "[gqa-cfg] fused decode B=%d H=%d G=%d d=%d maxseq=%d -> "
+                    "splits=%d min_chunk=%d rope=%d append=%d\n",
+            B, H, G, d, max_seq, a.splits, a.min_chunk, cos_cache != nullptr,
+            K_new != nullptr);
+  (void)hipGetLastError();
+  if (!launchRingDecode(d, hpg, a, B, stream)) return -1;
+  GQA_RETURN_LAUNCH_STATUS();
 }
 
 //===----------------------------------------------------------------------===//

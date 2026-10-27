@@ -207,6 +207,89 @@ def _make_gqa_fixed_cache_model(
     )
 
 
+def _make_rope_gqa_fixed_cache_model(
+    batch, seq_len, cache_size, num_heads, kv_num_heads, head_dim, max_pos
+):
+    """Build RotaryEmbedding(Q), RotaryEmbedding(K) -> GQA(do_rotary=0).
+
+    The export form of models that rotate outside the attention op. The
+    compiler folds both ropes into the attention op, which then rotates Q and
+    K at the graph's position_ids.
+    """
+    hidden = num_heads * head_dim
+    kv_hidden = kv_num_heads * head_dim
+    half = head_dim // 2
+
+    def vi(name, dtype, shape):
+        return helper.make_tensor_value_info(name, dtype, shape)
+
+    cache_shape = [batch, kv_num_heads, cache_size, head_dim]
+    inputs = [
+        vi("query", TensorProto.FLOAT16, [batch, seq_len, hidden]),
+        vi("key", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]),
+        vi("value", TensorProto.FLOAT16, [batch, seq_len, kv_hidden]),
+        vi("past_key", TensorProto.FLOAT16, cache_shape),
+        vi("past_value", TensorProto.FLOAT16, cache_shape),
+        vi("seqlens_k", TensorProto.INT32, [batch]),
+        vi("total_seq", TensorProto.INT32, []),
+        vi("position_ids", TensorProto.INT64, [batch, seq_len]),
+    ]
+    outputs = [
+        vi("output", TensorProto.FLOAT16, [batch, seq_len, hidden]),
+        vi("present_key", TensorProto.FLOAT16, cache_shape),
+        vi("present_value", TensorProto.FLOAT16, cache_shape),
+    ]
+
+    inv_freq = 10000.0 ** (-np.arange(half, dtype=np.float64) * 2.0 / head_dim)
+    angles = np.arange(max_pos, dtype=np.float64)[:, None] * inv_freq[None, :]
+    initializers = [
+        numpy_helper.from_array(np.cos(angles).astype(np.float16), "cos_cache"),
+        numpy_helper.from_array(np.sin(angles).astype(np.float16), "sin_cache"),
+    ]
+
+    def rope(src, dst):
+        return helper.make_node(
+            "RotaryEmbedding",
+            [src, "position_ids", "cos_cache", "sin_cache"],
+            [dst],
+            domain="com.microsoft",
+            interleaved=0,
+            num_heads=0,
+            rotary_embedding_dim=0,
+        )
+
+    gqa = helper.make_node(
+        "GroupQueryAttention",
+        [
+            "query_rot",
+            "key_rot",
+            "value",
+            "past_key",
+            "past_value",
+            "seqlens_k",
+            "total_seq",
+            "",
+            "",
+        ],
+        ["output", "present_key", "present_value"],
+        domain="com.microsoft",
+        num_heads=num_heads,
+        kv_num_heads=kv_num_heads,
+        scale=1.0 / np.sqrt(head_dim).item(),
+        do_rotary=0,
+        rotary_interleaved=0,
+        softcap=0.0,
+    )
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    return make_model_from_nodes(
+        [rope("query", "query_rot"), rope("key", "key_rot"), gqa],
+        inputs,
+        outputs,
+        initializers=initializers,
+        extra_opsets=[ms_opset],
+    )
+
+
 def _make_gqa_packed_rotary_model(
     batch,
     seq_len,
@@ -768,6 +851,50 @@ class TestGroupQueryAttention:
         assert np.any(ep_prefix != 0), (
             "GQA prefix output is all-zero; the chunk-opt clamp regressed."
         )
+
+    @pytest.mark.parametrize(
+        "seq_len,past_valid,num_heads,kv_num_heads,head_dim",
+        [
+            (1, 0, 8, 2, 64),
+            (1, 200, 8, 2, 64),
+            (16, 37, 8, 2, 64),
+            (1, 255, LLAMA_NUM_HEADS, LLAMA_KV_NUM_HEADS, LLAMA_HEAD_DIM),
+            (128, 0, LLAMA_NUM_HEADS, LLAMA_KV_NUM_HEADS, LLAMA_HEAD_DIM),
+            (1, 130, 32, 32, 96),
+        ],
+    )
+    def test_gqa_rope_fold_fixed_cache(
+        self, model_runner, seq_len, past_valid, num_heads, kv_num_heads, head_dim
+    ):
+        """RotaryEmbedding on Q and K feeding GQA, which the compiler folds.
+
+        position_ids run 5 ahead of the cache row (as with left padding), so
+        the result only matches when the attention op rotates at position_ids
+        rather than at the row seqlens_k implies.
+        """
+        cache_size = 256
+        max_pos = 512
+        model = _make_rope_gqa_fixed_cache_model(
+            1, seq_len, cache_size, num_heads, kv_num_heads, head_dim, max_pos
+        )
+        hidden = num_heads * head_dim
+        kv_hidden = kv_num_heads * head_dim
+
+        rng = np.random.default_rng(7)
+        q = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        k = rng.uniform(-1, 1, [1, seq_len, kv_hidden]).astype(np.float16)
+        v = rng.uniform(-1, 1, [1, seq_len, kv_hidden]).astype(np.float16)
+        cache = [1, kv_num_heads, cache_size, head_dim]
+        pk = rng.uniform(-1, 1, cache).astype(np.float16)
+        pv = rng.uniform(-1, 1, cache).astype(np.float16)
+        seqlens = np.array([past_valid + seq_len - 1], dtype=np.int32)
+        total = np.array(cache_size, dtype=np.int32)
+        pos = (past_valid + 5 + np.arange(seq_len, dtype=np.int64)).reshape(1, -1)
+
+        actual, expected = model_runner.run_sample(
+            model, [q, k, v, pk, pv, seqlens, total, pos]
+        )
+        compare_outputs(actual, expected, atol=2e-3)
 
     def test_gqa_decode_early_cache_llama_shape(self, model_runner):
         """GQA single-token decode right after prefill (Llama-3.1-8B pattern).

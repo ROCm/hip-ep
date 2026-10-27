@@ -351,7 +351,8 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1, const void *position_ids = nullptr,
+    int *decode_tickets = nullptr) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -360,6 +361,37 @@ static int gqa_forward_fused(
   const size_t elem_sz = 2;        // fp16 only on the fused path
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
+
+  // Decode over an in-place cache: one kernel does RoPE, the append, split-K
+  // attention and the reduce. It reads seqlens_k on the device, so this path
+  // never synchronizes with the host.
+  if (sq == 1 && decode_tickets && !packed_qkv && !kv_quantized &&
+      seqlens_k_ptr && past_key && past_key == present_key &&
+      past_value == present_value &&
+      hip_gqa_flash_decode_fused_supported(
+          static_cast<int>(H), static_cast<int>(G), static_cast<int>(d))) {
+    const size_t partials_bytes = static_cast<size_t>(B) * H *
+                                  kFlashDecodeMaxSplits * (d + 2) *
+                                  sizeof(float);
+    if (hipdnn_ep_state_ensure_workspace(state, partials_bytes) != 0)
+      return -1;
+    // The live length stays on the device, so the kernel sizes the split
+    // count from the geometry and trims it to the live range itself.
+    if (hip_gqa_flash_decode_fused(
+            stream, query, key, value, present_key, present_value, output,
+            hipdnn_ep_state_get_workspace(state), decode_tickets,
+            need_rope ? cos_cache : nullptr, need_rope ? sin_cache : nullptr,
+            need_rope ? position_ids : nullptr, static_cast<int>(B),
+            static_cast<int>(H), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(present_seq), /*splits=*/0, scale, seqlens_k_ptr,
+            local_window_size, head_sink, use_smooth_softmax ? 1 : 0) != 0)
+      return -1;
+    RUNTIME_DEBUG_LOG("[REAL] fused GQA decode: B=%lld H=%lld G=%lld d=%lld "
+                      "rope=%d window=%d\n",
+                      (long long)B, (long long)H, (long long)G, (long long)d,
+                      static_cast<int>(need_rope), local_window_size);
+    return 0;
+  }
 
   // B==1 pre-read (cached per Compute) feeds host past_len where needed.
   const int32_t seqlens_k_pre =
@@ -469,13 +501,13 @@ static int gqa_forward_fused(
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
       if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
       qSrc = d_Qroped;
@@ -679,13 +711,13 @@ static int gqa_forward_fused(
     if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(H), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
+                     static_cast<int>(past_len), nullptr, position_ids,
                      static_cast<int>(elem_sz)) != 0)
       return -1;
     if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                      static_cast<int>(B), static_cast<int>(sq),
                      static_cast<int>(G), static_cast<int>(d), half_rot,
-                     static_cast<int>(past_len), nullptr,
+                     static_cast<int>(past_len), nullptr, position_ids,
                      static_cast<int>(elem_sz)) != 0)
       return -1;
     qSrc = d_Qroped;
@@ -1062,7 +1094,45 @@ struct GqaGemmCache {
 // distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
+  // Split-arrival counters of the single-dispatch decode kernel, one per
+  // (batch, KV head). The kernel leaves them zero, so they are cleared only
+  // when allocated. Per op instance because layers run back to back on one
+  // stream and each layer's launch must find its own counters at zero.
+  int *decode_tickets = nullptr;
+  int64_t decode_ticket_count = 0;
+  ~GqaState() {
+    if (decode_tickets)
+      (void)hipFree(decode_tickets);
+  }
 };
+
+// Zeroed counters for `n` (batch, KV head) pairs, or nullptr when the slot is
+// missing or the allocation fails (the caller then takes the unfused path).
+static int *gqa_decode_tickets(RuntimeState *state, hipStream_t stream,
+                               int op_state_slot, int64_t n) {
+  GqaState *gs = GqaState::get_op_state(state, op_state_slot);
+  if (!gs || n <= 0)
+    return nullptr;
+  if (gs->decode_ticket_count >= n)
+    return gs->decode_tickets;
+  if (gs->decode_tickets) {
+    (void)hipFree(gs->decode_tickets);
+    gs->decode_tickets = nullptr;
+    gs->decode_ticket_count = 0;
+  }
+  void *p = nullptr;
+  if (hipMalloc(&p, static_cast<size_t>(n) * sizeof(int)) != hipSuccess)
+    return nullptr;
+  // Ordered before the first decode launch on the same stream.
+  if (hipMemsetAsync(p, 0, static_cast<size_t>(n) * sizeof(int), stream) !=
+      hipSuccess) {
+    (void)hipFree(p);
+    return nullptr;
+  }
+  gs->decode_tickets = static_cast<int *>(p);
+  gs->decode_ticket_count = n;
+  return gs->decode_tickets;
+}
 
 // Resolve this GQA instance's descriptor cache from its op-state slot. Returns
 // nullptr when the slot is unconstructed (init failure) -- callers propagate
@@ -1206,7 +1276,7 @@ static int gqa_forward_hipblaslt(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false) {
+    bool reuse_past_kv = false, const void *position_ids = nullptr) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -1435,13 +1505,13 @@ static int gqa_forward_hipblaslt(
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
       if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(past_len), seqlens_k_ptr, position_ids,
                        static_cast<int>(elem_sz)) != 0)
         return -1;
 
@@ -2289,7 +2359,7 @@ static int gqa_forward_hipblaslt(
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr,
+                             static_cast<int>(past_len), nullptr, position_ids,
                              static_cast<int>(elem_sz)));
       qSrc = d_Qroped;
       if (!reuse_past_kv) {
@@ -2297,7 +2367,7 @@ static int gqa_forward_hipblaslt(
                                static_cast<int>(B), static_cast<int>(sq),
                                static_cast<int>(G), static_cast<int>(d),
                                half_rot, static_cast<int>(past_len), nullptr,
-                               static_cast<int>(elem_sz)));
+                               position_ids, static_cast<int>(elem_sz)));
         kSrc = d_Kroped;
       }
     }
@@ -2893,8 +2963,16 @@ int wrap_group_query_attention(
   // wrong results. present_key/present_value are required by both paths (the
   // legacy decomposed pipeline reads/writes them as the BNSD KV cache).
   //===------------------------------------------------------------------===//
-  if (position_ids != nullptr) {
-    fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
+  // position_ids only selects the RoPE rows. Without do_rotary it has nothing
+  // to index, and every RoPE kernel here is half-rotated.
+  if (position_ids != nullptr && (!do_rotary || !cos_cache || !sin_cache)) {
+    fprintf(stderr, "wrap_group_query_attention: position_ids requires "
+                    "do_rotary with cos_cache/sin_cache\n");
+    return -1;
+  }
+  if (do_rotary && rotary_interleaved != 0) {
+    fprintf(stderr,
+            "wrap_group_query_attention: rotary_interleaved=1 not supported\n");
     return -1;
   }
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
@@ -2948,7 +3026,6 @@ int wrap_group_query_attention(
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
-  (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)softcap;            // softcap not applied on either path
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
@@ -3050,6 +3127,13 @@ int wrap_group_query_attention(
   }
 
   if (fp32_int8_fused) {
+    // The adapter casts only the cos/sin rows [0, total_seq); position_ids may
+    // index any row.
+    if (position_ids != nullptr) {
+      fprintf(stderr, "wrap_group_query_attention: position_ids with an fp32 "
+                      "query over a quantized KV cache is not supported\n");
+      return -1;
+    }
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: fp32->fp16 adapter onto fused "
         "(elem=%lld d=%lld sq=%lld packed=%d)\n",
@@ -3093,7 +3177,7 @@ int wrap_group_query_attention(
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0, reuse_past_kv);
+        kv_bnsd != 0, reuse_past_kv, position_ids);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "
@@ -3110,12 +3194,22 @@ int wrap_group_query_attention(
       (long long)do_rotary,
       static_cast<int>(key == nullptr && value == nullptr));
 
+  int *decode_tickets = nullptr;
+  if (is_decode && key && value && past_key && past_key == present_key &&
+      !kv_quantized &&
+      hip_gqa_flash_decode_fused_supported(static_cast<int>(num_heads),
+                                           static_cast<int>(kv_num_heads),
+                                           static_cast<int>(head_dim)))
+    decode_tickets = gqa_decode_tickets(state, stream, op_state_slot,
+                                        batch_size * kv_num_heads);
+
   int rc = gqa_forward_fused(
       state, stream, query, key, value, past_key, past_value, seqlens_k,
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size), position_ids,
+      decode_tickets);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "

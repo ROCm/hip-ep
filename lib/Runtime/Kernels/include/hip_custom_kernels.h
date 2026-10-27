@@ -1055,13 +1055,16 @@ HIP_KERNEL_API int hip_gqa_dequant_kv_i8_to_fp16(
  * out[d+half] = in[d+half]*cos + in[d]*sin
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
+ * position_ids: optional device pointer [B, seq_len] int64. When non-null,
+ * token (b, s) rotates by cache row position_ids[b, s] and both past_len and
+ * seqlens_k are ignored. Rows must lie inside cos_cache/sin_cache.
  * element_size_bytes: 2 = fp16, 4 = fp32. */
 HIP_KERNEL_API int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k, int element_size_bytes);
+    const void* seqlens_k, const void* position_ids, int element_size_bytes);
 
 /* Transpose middle two dims of 4D tensor:
  * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
@@ -1390,6 +1393,28 @@ HIP_KERNEL_API int hip_gqa_flash_decode_configured(
     int use_wmma,
     int splits,
     int bkv);
+
+/* 1 when hip_gqa_flash_decode_fused implements this fp16 geometry. */
+HIP_KERNEL_API int hip_gqa_flash_decode_fused_supported(int H, int G, int d);
+
+/* Single-dispatch fp16 decode (sq == 1) over an in-place BNSD cache
+ * [B, G, max_seq, d]: optional RoPE of Q / K_new (cos_cache, sin_cache at
+ * position_ids[b], or at seqlens_k[b] when position_ids is null), append of
+ * K_new / V_new at row seqlens_k[b] (skipped when K_new is null, i.e. the
+ * cache already holds the token), split-K attention and the FA-2 reduce, all
+ * in one kernel. Q and O are [B, 1, H, d]; K_new / V_new are [B, 1, G, d].
+ * tickets: device int[B * G], zero-initialized once and left zero by every
+ * call. splits: the launch split count (at most 64), or 0 to derive one from
+ * the geometry; a short live range uses fewer. partials_workspace:
+ * B * H * 64 * (d + 2) floats. seqlens_k is required; the host never reads
+ * it. Returns 0 on success. */
+HIP_KERNEL_API int hip_gqa_flash_decode_fused(
+    void* stream, const void* Q, const void* K_new, const void* V_new,
+    void* Kcache, void* Vcache, void* O, void* partials_workspace,
+    int* tickets, const void* cos_cache, const void* sin_cache,
+    const void* position_ids, int B, int H, int G, int d, int max_seq,
+    int splits, float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
