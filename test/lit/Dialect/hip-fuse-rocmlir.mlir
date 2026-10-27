@@ -1152,3 +1152,74 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
        pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x16x4x4xf16>
   return %c1 : tensor<1x16x4x4xf16>
 }
+
+// -----
+
+// An erf GELU behind a reshape reads the reshaped matmul result twice. Both
+// readers join the chain, so the reshape and the whole GELU go in the kernel.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.matmul
+// CHECK: tensor.expand_shape
+// CHECK: hip.mul
+// CHECK: hip.erf
+// CHECK: hip.add
+// CHECK: %[[G:.*]] = hip.mul
+// CHECK: return %[[G]]
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.erf
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.mul
+func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
+                      %b: tensor<16x32xf16>) -> tensor<1x8x32xf16> {
+  %scale = hip.constant {value = dense<7.070310e-01> : tensor<f16>} : tensor<f16>
+  %one = hip.constant {value = dense<1.000000e+00> : tensor<f16>} : tensor<f16>
+  %e = tensor.empty() : tensor<8x32xf16>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<8x16xf16>, tensor<16x32xf16>)
+      outs(%e : tensor<8x32xf16>) : tensor<8x32xf16>
+  %v = tensor.expand_shape %m [[0, 1], [2]] output_shape [1, 8, 32]
+      : tensor<8x32xf16> into tensor<1x8x32xf16>
+  %se = tensor.empty() : tensor<1x8x32xf16>
+  %s = hip.mul(%ctx) ins(%v, %scale : tensor<1x8x32xf16>, tensor<f16>)
+      outs(%se : tensor<1x8x32xf16>) -> tensor<1x8x32xf16>
+  %ee = tensor.empty() : tensor<1x8x32xf16>
+  %erf = hip.erf(%ctx) ins(%s : tensor<1x8x32xf16>)
+      outs(%ee : tensor<1x8x32xf16>) : tensor<1x8x32xf16>
+  %ae = tensor.empty() : tensor<1x8x32xf16>
+  %add = hip.add(%ctx) ins(%erf, %one : tensor<1x8x32xf16>, tensor<f16>)
+      outs(%ae : tensor<1x8x32xf16>) -> tensor<1x8x32xf16>
+  %ge = tensor.empty() : tensor<1x8x32xf16>
+  %g = hip.mul(%ctx) ins(%v, %add : tensor<1x8x32xf16>, tensor<1x8x32xf16>)
+      outs(%ge : tensor<1x8x32xf16>) -> tensor<1x8x32xf16>
+  return %g : tensor<1x8x32xf16>
+}
+
+// -----
+
+// A reshape that is also a graph output has no init to be a kernel result
+// from, so it ends the chain and its readers stay outside.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.erf
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[R:.*]] = hip.rocmlir
+// CHECK: %[[V:.*]] = tensor.expand_shape %[[R]]
+// CHECK: hip.erf({{.*}}) ins(%[[V]]
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
+                      %b: tensor<16x32xf16>)
+    -> (tensor<1x8x32xf16>, tensor<1x8x32xf16>) {
+  %e = tensor.empty() : tensor<8x32xf16>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<8x16xf16>, tensor<16x32xf16>)
+      outs(%e : tensor<8x32xf16>) : tensor<8x32xf16>
+  %v = tensor.expand_shape %m [[0, 1], [2]] output_shape [1, 8, 32]
+      : tensor<8x32xf16> into tensor<1x8x32xf16>
+  %ee = tensor.empty() : tensor<1x8x32xf16>
+  %erf = hip.erf(%ctx) ins(%v : tensor<1x8x32xf16>)
+      outs(%ee : tensor<1x8x32xf16>) : tensor<1x8x32xf16>
+  return %v, %erf : tensor<1x8x32xf16>, tensor<1x8x32xf16>
+}
