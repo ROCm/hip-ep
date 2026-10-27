@@ -1308,15 +1308,14 @@ struct SplitToStdTensor : public mlir::RewritePattern {
         strides.push_back(rewriter.getIndexAttr(1));
       }
 
-      // Create extract_slice operation using OpBuilder
-      // This will properly decompose OpFoldResults into static attrs and
-      // dynamic operands
-      mlir::OperationState state(
-          loc, mlir::tensor::ExtractSliceOp::getOperationName());
-      mlir::tensor::ExtractSliceOp::build(rewriter, state, outputType, input,
-                                          offsets, sizes, strides);
-      auto sliceOp = rewriter.create(state);
-      replacements.push_back(sliceOp->getResult(0));
+      // The slice type is inferred from the sizes: a static split length is
+      // more precise than a result type the importer left dynamic on the
+      // split axis, and the verifier rejects the dynamic type outright.
+      mlir::Value slice = rewriter.create<mlir::tensor::ExtractSliceOp>(
+          loc, input, offsets, sizes, strides);
+      if (slice.getType() != outputType)
+        slice = rewriter.create<mlir::tensor::CastOp>(loc, outputType, slice);
+      replacements.push_back(slice);
 
       // Update offset for next slice
       if (i < numOutputs - 1)

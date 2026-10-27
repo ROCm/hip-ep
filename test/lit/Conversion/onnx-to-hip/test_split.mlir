@@ -110,6 +110,12 @@ module {
     return %out0, %out2 : tensor<1x1xf32>, tensor<1x1xf32>
   }
 
+  // --- Equal split of a static axis whose result types leave it dynamic ---
+  func.func @test_split_static_axis_dynamic_result(%data: tensor<1x?x12x64xf16>) -> (tensor<1x?x12x?xf16>, tensor<1x?x12x?xf16>) {
+    %out0, %out1 = "onnx.Split"(%data) {axis = 3 : si64} : (tensor<1x?x12x64xf16>) -> (tensor<1x?x12x?xf16>, tensor<1x?x12x?xf16>)
+    return %out0, %out1 : tensor<1x?x12x?xf16>, tensor<1x?x12x?xf16>
+  }
+
   // --- Invalid: custom split lengths don't sum to axis dimension (pattern should not match) ---
   func.func @test_split_invalid_sum(%data: tensor<10x64xf32>) -> (tensor<3x64xf32>, tensor<3x64xf32>, tensor<3x64xf32>) {
     %split_lengths = "onnx.Constant"() {value = dense<[3, 3, 3]> : tensor<3xi64>} : () -> tensor<3xi64>
@@ -202,6 +208,14 @@ module {
 // CHECK-NOT: onnx.NoValue
 // CHECK: tensor.extract_slice{{.*}}[0, 0] [1, 1] [1, 1]
 // CHECK: tensor.extract_slice{{.*}}[0, 2] [1, 1] [1, 1]
+
+// The static chunk length types the slice; a cast restores the declared type.
+// CHECK-LABEL: func.func @test_split_static_axis_dynamic_result
+// CHECK-NOT: onnx.Split
+// CHECK: %[[S0:.*]] = tensor.extract_slice{{.*}}[0, 0, 0, 0] [1, %{{.*}}, 12, 32] [1, 1, 1, 1] : tensor<1x?x12x64xf16> to tensor<1x?x12x32xf16>
+// CHECK: tensor.cast %[[S0]] : tensor<1x?x12x32xf16> to tensor<1x?x12x?xf16>
+// CHECK: %[[S1:.*]] = tensor.extract_slice{{.*}}[0, 0, 0, 32] [1, %{{.*}}, 12, 32] [1, 1, 1, 1] : tensor<1x?x12x64xf16> to tensor<1x?x12x32xf16>
+// CHECK: tensor.cast %[[S1]] : tensor<1x?x12x32xf16> to tensor<1x?x12x?xf16>
 
 // CHECK-LABEL: func.func @test_split_invalid_sum
 // Validation should prevent conversion - onnx.Split should remain
