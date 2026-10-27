@@ -75,10 +75,10 @@ struct Storage {
   // the process lifetime.
   std::vector<void (*)(mlir::DialectRegistry &)> dialectRegistrations;
 
-  // Named source-specific tensor-lowering prefixes. Identifiers are owned so
-  // plugin registration may pass transient StringRefs. Duplicate identifiers
-  // remain visible and are rejected deterministically when selected.
-  std::vector<PluginSourcePipeline> sourcePipelines;
+  // Named frontend pipeline builders from addFrontendPipeline calls. The
+  // ids are owned copies, like the paths above. Duplicate ids are kept so the
+  // driver can reject an ambiguous selection.
+  std::vector<PluginFrontendPipeline> frontendPipelines;
 };
 
 Storage &storage() {
@@ -155,15 +155,15 @@ void addDialectRegistrationImpl(void * /*self*/,
   storage().dialectRegistrations.push_back(registerFn);
 }
 
-void addSourcePipelineImpl(void * /*self*/, const char *id, std::size_t idLen,
-                           SourcePipelineBuilder builder) {
+void addFrontendPipelineImpl(void * /*self*/, const char *id, std::size_t idLen,
+                             FrontendPipelineBuilder builder) {
   if (id == nullptr || idLen == 0 || builder == nullptr) {
-    llvm::errs() << "[plugin] WARNING: addSourcePipeline requires a nonempty "
+    llvm::errs() << "[plugin] WARNING: addFrontendPipeline requires a nonempty "
                     "identifier and non-null callback; skipping.\n";
     return;
   }
-  storage().sourcePipelines.push_back(
-      PluginSourcePipeline{std::string(id, idLen), builder});
+  storage().frontendPipelines.push_back(
+      PluginFrontendPipeline{std::string(id, idLen), builder});
 }
 
 const HipEpPluginRegistry::VTable g_vtable = {
@@ -172,7 +172,7 @@ const HipEpPluginRegistry::VTable g_vtable = {
     /* addLibraryPath          = */ &addLibraryPathImpl,
     /* addLibrary              = */ &addLibraryImpl,
     /* addDialectRegistration  = */ &addDialectRegistrationImpl,
-    /* addSourcePipeline       = */ &addSourcePipelineImpl,
+    /* addFrontendPipeline       = */ &addFrontendPipelineImpl,
 };
 
 } // namespace
@@ -218,9 +218,9 @@ pluginDialectRegistrations() {
   return llvm::to_vector(storage().dialectRegistrations);
 }
 
-llvm::SmallVector<PluginSourcePipeline> pluginSourcePipelines() {
+llvm::SmallVector<PluginFrontendPipeline> pluginFrontendPipelines() {
   dispatchPluginRegistrationsOnce();
-  return llvm::to_vector(storage().sourcePipelines);
+  return llvm::to_vector(storage().frontendPipelines);
 }
 
 } // namespace hip::compiler
