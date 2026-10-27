@@ -565,13 +565,20 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
-def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir"> {
+def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir", [AttrSizedOperandSegments]> {
   let summary = "RocMlir backend dispatch";
+  let description = [{
+    Launches one outlined rocMLIR kernel. The kernel returns one tensor per
+    `outs` operand, in order; a kernel with more than one result also writes
+    values that are read outside it, such as the anchor that feeds both its
+    epilogue and a residual. The compiled kernel takes the data pointers of
+    `ins` and then of `outs`, in operand order.
+  }];
   let arguments = (ins
     FlatSymbolRefAttr:$kernel,
     Hip_ContextType:$ctx,
     Variadic<Hip_TensorOrMemRef>:$inputs,
-    Hip_TensorOrMemRef:$output,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
     DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
     DefaultValuedAttr<I64Attr, "0">:$grid_size,
     DefaultValuedAttr<I64Attr, "0">:$block_size
@@ -580,9 +587,10 @@ def Hip_RocMlirOp : Hip_DpsOp_AutoReify<"rocmlir"> {
   let assemblyFormat = [{
     `(` $ctx `)` $kernel `ins` `(` $inputs `:`
     type($inputs) `)`
-    `outs` `(` $output `:` type($output) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+  let hasVerifier = 1;
 }
 
 // ===== MIOpen DNN Operations =================================================
