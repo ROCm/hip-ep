@@ -229,6 +229,28 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("seq_len", [1, 37])
+    @pytest.mark.parametrize("top_k", [4, 8])
+    @pytest.mark.parametrize("num_experts", [64, 128, 256])
+    def test_qmoe_many_experts(self, model_runner, num_experts, top_k, seq_len):
+        """Expert counts of gpt-oss-120b (128) and Qwen3.5-35B-A3B (256) and
+        between, at small hidden/intermediate sizes. Routing holds 2, 4 or 8
+        experts per wave lane for these counts; seq_len=1 is the fused decode
+        path, 37 the prefill path.
+        """
+        model = _make_qmoe_model(1, seq_len, 64, 128, num_experts, top_k)
+
+        rng = np.random.default_rng(7)
+        x = rng.uniform(-1, 1, [1, seq_len, 64]).astype(np.float16)
+        # Each token's logits are a shuffle of distinct fp16 values: a tie at
+        # the k-th logit would make the expert choice backend-defined.
+        levels = np.linspace(-4.0, 4.0, num_experts).astype(np.float16)
+        assert len(np.unique(levels)) == num_experts
+        router = rng.permuted(np.tile(levels, (seq_len, 1)), axis=1)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_qmoe_gpt_oss_shape(self, model_runner, seq_len):
         """QMoE with GPT-OSS-20B shapes: 32 experts, top-4, hidden=2880.
