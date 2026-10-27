@@ -2217,6 +2217,11 @@ HIP_KERNEL_API int hip_group_norm(
  *
  * FLOAT16 automatically uses a packed __half2 body when norm_size is even and
  * all three pointers are 4-byte aligned; otherwise it falls back to scalar.
+ *
+ * FLOAT32 sizes its block to the row and reduces with wave shuffles and one
+ * barrier: 1024 threads from 2048 values, 256 below that, and a single
+ * 32-lane wave for a row under 512 values that takes the float4 body
+ * (norm_size a multiple of 4 and all three pointers 16-byte aligned).
  */
 HIP_KERNEL_API int hip_rms_norm(
     void* stream,

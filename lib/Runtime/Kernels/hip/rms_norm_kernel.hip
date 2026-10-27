@@ -380,7 +380,9 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
     }
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
     // The block grows with the row: a wave for a head-sized row, a full
-    // block for a hidden-sized one.
+    // block for a hidden-sized one. A lone wave only pays off on the float4
+    // body: reading a scalar row of a few hundred values one per lane takes
+    // it longer than a 256-thread block's barrier costs.
     const bool vec4 = norm_size % 4 == 0 &&
                       reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
                       reinterpret_cast<uintptr_t>(scale) % 16 == 0 &&
@@ -392,7 +394,7 @@ extern "C" int hip_rms_norm(void *stream, const void *input, const void *scale,
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_f32_kernel<1024>), grid,
                          dim3(1024), 0, hip_stream, x, g, y, norm_size,
                          scale_rows, epsilon, vec4);
-    else if (norm_size >= 512)
+    else if (norm_size >= 512 || !vec4)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_rms_norm_f32_kernel<256>), grid,
                          dim3(256), 0, hip_stream, x, g, y, norm_size,
                          scale_rows, epsilon, vec4);

@@ -28,9 +28,10 @@ HIDDEN = 4096
 # when the row is even, so these pin down the scalar fp16 fallback. 33 also
 # lands mid-block (block size 256), exercising the strided loop tail.
 ODD_HIDDENS = [33, 4095]
-# fp32 RMS-norm row widths by block size: below 512 a 32-thread block, below
-# 2048 a 256-thread block, from 2048 a 1024-thread block. Multiples of 4 take
-# the float4 body, the rest the scalar one.
+# fp32 RMS-norm row widths by block size: from 2048 a 1024-thread block, below
+# that a 256-thread block, and below 512 a 32-thread block when the row takes
+# the float4 body. Multiples of 4 take the float4 body, the rest the scalar
+# one (64 then runs on 32 threads, 511 on 256).
 F32_ROW_WIDTHS = [64, 511, 512, 1030, 2047, 2048, 4099, 5120]
 
 
