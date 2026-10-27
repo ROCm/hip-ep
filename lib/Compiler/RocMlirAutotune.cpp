@@ -8,6 +8,7 @@
 
 #include "hip/Compiler/RocMlirAutotune.h"
 
+#include "hip/Compiler/AdaptiveBenchmark.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "hip/InitAllPasses.h"
 // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL, whose
@@ -25,7 +26,10 @@
 #include "mlir/Dialect/Rock/Tuning/RockTuning.h"
 #include "mlir/InitRocMLIRDialects.h"
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
@@ -48,12 +52,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -97,6 +103,34 @@ bool rocMlirAutotuneFromEnv(AutotuneSpace &out) {
   llvm::errs() << "warning: ignoring unknown HIPDNN_EP_ROCMLIR_AUTOTUNE='"
                << mode << "' (expected quick, full, exhaustive, or off)\n";
   return false;
+}
+
+const char *autotuneBenchmarkName(AutotuneBenchmark benchmark) {
+  switch (benchmark) {
+  case AutotuneBenchmark::Adaptive:
+    return "adaptive";
+  case AutotuneBenchmark::Simple:
+    return "simple";
+  }
+  return "unknown";
+}
+
+bool parseAutotuneBenchmark(StringRef name, AutotuneBenchmark &out) {
+  if (name == "adaptive")
+    out = AutotuneBenchmark::Adaptive;
+  else if (name == "simple")
+    out = AutotuneBenchmark::Simple;
+  else
+    return false;
+  return true;
+}
+
+void rocMlirAutotuneBenchmarkFromEnv(AutotuneBenchmark &out) {
+  std::string mode = hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH");
+  if (mode.empty() || parseAutotuneBenchmark(mode, out))
+    return;
+  llvm::errs() << "warning: ignoring unknown HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH='"
+               << mode << "' (expected adaptive or simple)\n";
 }
 
 #ifdef HIPDNN_EP_HAVE_HIP_RUNTIME
@@ -178,6 +212,7 @@ void *hipRuntimeSymbol(const char *name) {
   X(hipMalloc, hipError_t, (void **, size_t))                                  \
   X(hipFree, hipError_t, (void *))                                             \
   X(hipMemsetAsync, hipError_t, (void *, int, size_t, hipStream_t))            \
+  X(hipMemcpy, hipError_t, (void *, const void *, size_t, hipMemcpyKind))      \
   X(hipModuleLoadData, hipError_t, (hipModule_t *, const void *))              \
   X(hipModuleUnload, hipError_t, (hipModule_t))                                \
   X(hipModuleGetFunction, hipError_t,                                          \
@@ -260,6 +295,63 @@ bool getBufferSize(Type type, size_t &bytes) {
   return true;
 }
 
+// Benchmark inputs in the ranges MIGraphX generates: floats in [-1, 1) and
+// small integers. All-zero inputs let the hardware skip work and draw less
+// power, so they can rank candidates differently from real data. The pattern
+// repeats every kPatternElements elements; returns false for sub-byte element
+// types, which stay zero-filled.
+constexpr size_t kPatternElements = 64 * 1024;
+
+bool fillBenchmarkPattern(Type elementType, uint64_t seed,
+                          std::vector<uint8_t> &pattern) {
+  const unsigned bits =
+      elementType.isIndex() ? 64 : elementType.getIntOrFloatBitWidth();
+  if (bits == 0 || bits % 8 != 0)
+    return false;
+  const unsigned elementBytes = bits / 8;
+  pattern.resize(kPatternElements * elementBytes);
+
+  uint64_t state = 0x9E3779B97F4A7C15ull ^ seed;
+  auto next = [&state] {
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return state * 0x2545F4914F6CDD1Dull;
+  };
+  auto store = [&](size_t element, const llvm::APInt &value) {
+    for (unsigned byte = 0; byte < elementBytes; ++byte)
+      pattern[element * elementBytes + byte] =
+          static_cast<uint8_t>(value.extractBitsAsZExtValue(8, byte * 8));
+  };
+
+  auto floatType = dyn_cast<FloatType>(elementType);
+  const bool isUnsigned = elementType.isUnsignedInteger();
+  for (size_t element = 0; element < kPatternElements; ++element) {
+    uint64_t random = next();
+    if (floatType) {
+      // The top 53 bits scaled into [0, 2).
+      double value = -1.0 + static_cast<double>(random >> 11) * 0x1.0p-52;
+      llvm::APFloat converted(value);
+      bool losesInfo = false;
+      (void)converted.convert(floatType.getFloatSemantics(),
+                              llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+      // Formats without a sign bit turn negative values into NaN.
+      if (converted.isNaN()) {
+        converted = llvm::APFloat(std::fabs(value));
+        (void)converted.convert(floatType.getFloatSemantics(),
+                                llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+      }
+      store(element, converted.bitcastToAPInt());
+      continue;
+    }
+    int64_t value = isUnsigned ? static_cast<int64_t>(random % 8)
+                               : static_cast<int64_t>(random % 8) - 4;
+    store(element, llvm::APInt(bits, static_cast<uint64_t>(value),
+                               /*isSigned=*/!isUnsigned));
+  }
+  return true;
+}
+
 // Dialects the backend pipeline needs, built once. DialectRegistry is
 // move-only; each worker context reads this registry while loading its own
 // copy of the dialects. A throwaway context loads them on the calling thread
@@ -336,7 +428,8 @@ struct PendingWinnerCompile {
   std::string cacheKey;
 };
 
-// Device buffers for one kernel's arguments, zero-filled. Sized from the func
+// Device buffers for one kernel's arguments, filled by fillBenchmarkPattern.
+// The candidates of one search share them. Sized from the func
 // signature, so every argument must be statically shaped.
 class AutotuneBuffers {
 public:
@@ -442,10 +535,15 @@ struct RocMlirAutotuner::Impl {
   bool checkDevice();
   bool launch(hipFunction_t function, const CompiledKernel &kernel,
               AutotuneBuffers &buffers) const;
-  bool benchmark(const CompiledKernel &kernel, StringRef kernelName,
-                 AutotuneBuffers &buffers, double &milliseconds) const;
-  // Times every compiled candidate and keeps the fastest. `numbered` drives
-  // the "N/M" progress lines.
+  // `warmupLaunches` untimed launches, then `nruns` event pairs around
+  // `bundle` launches each. Returns the interquartile mean per launch.
+  std::optional<double> timeLaunches(hipFunction_t function,
+                                     const CompiledKernel &kernel,
+                                     AutotuneBuffers &buffers,
+                                     unsigned warmupLaunches, unsigned bundle,
+                                     unsigned nruns) const;
+  // Times the compiled candidates with options.benchmark and keeps the
+  // fastest.
   bool pickWinner(std::vector<CompiledCandidate> &candidates,
                   StringRef kernelName, ModuleOp benchModule,
                   std::string &bestConfig, CompiledKernel &winner);
@@ -482,7 +580,8 @@ bool AutotuneBuffers::initialize(ModuleOp module,
     return false;
   }
 
-  for (Type type : kernelArgTypes) {
+  std::vector<uint8_t> pattern;
+  for (auto [argIndex, type] : llvm::enumerate(kernelArgTypes)) {
     size_t bytes = 0;
     if (!getBufferSize(type, bytes)) {
       llvm::errs() << "error: autotune requires statically-shaped "
@@ -498,11 +597,26 @@ bool AutotuneBuffers::initialize(ModuleOp module,
       return false;
     }
     deviceBuffers.push_back(buffer);
-    if (hipError_t status = fns.hipMemsetAsync(buffer, 0, bytes, stream);
-        status != hipSuccess) {
-      llvm::errs() << "error: hipMemsetAsync failed: "
-                   << fns.hipGetErrorString(status) << "\n";
-      return false;
+    Type elementType = cast<ShapedType>(type).getElementType();
+    if (!fillBenchmarkPattern(elementType, argIndex, pattern)) {
+      if (hipError_t status = fns.hipMemsetAsync(buffer, 0, bytes, stream);
+          status != hipSuccess) {
+        llvm::errs() << "error: hipMemsetAsync failed: "
+                     << fns.hipGetErrorString(status) << "\n";
+        return false;
+      }
+      continue;
+    }
+    for (size_t offset = 0; offset < bytes; offset += pattern.size()) {
+      size_t chunk = std::min(pattern.size(), bytes - offset);
+      if (hipError_t status =
+              fns.hipMemcpy(static_cast<uint8_t *>(buffer) + offset,
+                            pattern.data(), chunk, hipMemcpyHostToDevice);
+          status != hipSuccess) {
+        llvm::errs() << "error: hipMemcpy failed: "
+                     << fns.hipGetErrorString(status) << "\n";
+        return false;
+      }
     }
   }
   (void)options;
@@ -564,54 +678,42 @@ bool RocMlirAutotuner::Impl::launch(hipFunction_t function,
   return launchOk && pendingOk;
 }
 
-bool RocMlirAutotuner::Impl::benchmark(const CompiledKernel &kernel,
-                                       StringRef kernelName,
-                                       AutotuneBuffers &buffers,
-                                       double &milliseconds) const {
+std::optional<double> RocMlirAutotuner::Impl::timeLaunches(
+    hipFunction_t function, const CompiledKernel &kernel,
+    AutotuneBuffers &buffers, unsigned warmupLaunches, unsigned bundle,
+    unsigned nruns) const {
   const HipRuntime &fns = hipRuntime();
-  hipModule_t hipModule = nullptr;
-  if (!reportError(fns.hipModuleLoadData(&hipModule, kernel.binary.data()),
-                   "hipModuleLoadData"))
-    return false;
-
-  hipFunction_t function = nullptr;
-  std::string kernelNameStorage = kernelName.str();
-  if (!reportError(fns.hipModuleGetFunction(&function, hipModule,
-                                            kernelNameStorage.c_str()),
-                   "hipModuleGetFunction")) {
-    (void)fns.hipModuleUnload(hipModule);
-    return false;
-  }
-
   bool ok = true;
-  for (unsigned i = 0; ok && i < options.warmupRuns; ++i)
+  for (unsigned i = 0; ok && i < warmupLaunches; ++i)
     ok = launch(function, kernel, buffers);
-  if (ok)
+  if (ok && warmupLaunches > 0)
     ok = reportError(fns.hipStreamSynchronize(buffers.getStream()),
                      "hipStreamSynchronize(warmup)");
 
-  std::vector<hipEvent_t> starts(options.measuredRuns, nullptr);
-  std::vector<hipEvent_t> stops(options.measuredRuns, nullptr);
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i)
+  std::vector<hipEvent_t> starts(nruns, nullptr);
+  std::vector<hipEvent_t> stops(nruns, nullptr);
+  for (unsigned i = 0; ok && i < nruns; ++i)
     ok = reportError(fns.hipEventCreate(&starts[i]), "hipEventCreate(start)") &&
          reportError(fns.hipEventCreate(&stops[i]), "hipEventCreate(stop)");
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i)
+  for (unsigned i = 0; ok && i < nruns; ++i) {
     ok = reportError(fns.hipEventRecord(starts[i], buffers.getStream()),
-                     "hipEventRecord(start)") &&
-         launch(function, kernel, buffers) &&
-         reportError(fns.hipEventRecord(stops[i], buffers.getStream()),
-                     "hipEventRecord(stop)");
+                     "hipEventRecord(start)");
+    for (unsigned j = 0; ok && j < bundle; ++j)
+      ok = launch(function, kernel, buffers);
+    ok = ok && reportError(fns.hipEventRecord(stops[i], buffers.getStream()),
+                           "hipEventRecord(stop)");
+  }
   if (ok)
     ok = reportError(fns.hipStreamSynchronize(buffers.getStream()),
                      "hipStreamSynchronize(benchmark)");
 
-  std::vector<float> samples;
-  for (unsigned i = 0; ok && i < options.measuredRuns; ++i) {
+  std::vector<double> samples;
+  for (unsigned i = 0; ok && i < nruns; ++i) {
     float elapsed = 0.0f;
     ok = reportError(fns.hipEventElapsedTime(&elapsed, starts[i], stops[i]),
                      "hipEventElapsedTime");
     if (ok)
-      samples.push_back(elapsed);
+      samples.push_back(static_cast<double>(elapsed) / bundle);
   }
   for (hipEvent_t event : starts)
     if (event)
@@ -619,23 +721,37 @@ bool RocMlirAutotuner::Impl::benchmark(const CompiledKernel &kernel,
   for (hipEvent_t event : stops)
     if (event)
       (void)fns.hipEventDestroy(event);
-  (void)fns.hipModuleUnload(hipModule);
 
   if (!ok || samples.empty())
-    return false;
+    return std::nullopt;
   // Interquartile mean: drops the tail a shared GPU introduces without
   // letting one lucky sample decide the winner.
   std::sort(samples.begin(), samples.end());
   size_t trim = samples.size() / 4;
   auto first = samples.begin() + trim;
   auto last = samples.end() - trim;
-  milliseconds = std::accumulate(first, last, 0.0) / std::distance(first, last);
-  return true;
+  return std::accumulate(first, last, 0.0) / std::distance(first, last);
 }
 
 bool RocMlirAutotuner::Impl::pickWinner(
     std::vector<CompiledCandidate> &candidates, StringRef kernelName,
     ModuleOp benchModule, std::string &bestConfig, CompiledKernel &winner) {
+  const unsigned numConfigs = static_cast<unsigned>(candidates.size());
+  auto line = [&](unsigned index) -> llvm::raw_ostream & {
+    return *detail() << options.logPrefix << " autotune " << (index + 1) << "/"
+                     << numConfigs << ": ";
+  };
+
+  // A single candidate is already the winner, as in MIGraphX's run_benchmark.
+  if (numConfigs == 1 && candidates.front().compiled) {
+    bestConfig = candidates.front().perfConfig;
+    winner = std::move(candidates.front().kernel);
+    if (detail())
+      *detail() << options.logPrefix << " autotune winner for '" << kernelName
+                << "': only candidate  " << bestConfig << "\n";
+    return true;
+  }
+
   // Benchmarking is only meaningful when this kernel has the GPU to itself.
   // Search state is per-instance so concurrent sessions can each tune, but two
   // instances timing candidates at once would measure each other's work and
@@ -649,50 +765,79 @@ bool RocMlirAutotuner::Impl::pickWinner(
   if (!buffers.initialize(benchModule, options))
     return false;
 
-  const unsigned numConfigs = static_cast<unsigned>(candidates.size());
-  double bestMilliseconds = std::numeric_limits<double>::infinity();
+  // Loaded once for both adaptive passes.
+  const HipRuntime &fns = hipRuntime();
+  std::vector<hipModule_t> modules(numConfigs, nullptr);
+  std::vector<hipFunction_t> functions(numConfigs, nullptr);
+  auto unloadModules = llvm::make_scope_exit([&] {
+    for (hipModule_t hipModule : modules)
+      if (hipModule)
+        (void)fns.hipModuleUnload(hipModule);
+  });
+  const std::string kernelNameStorage = kernelName.str();
   unsigned compiled = 0;
-  unsigned benchmarked = 0;
-  const auto benchmarkStart = std::chrono::steady_clock::now();
   for (unsigned index = 0; index < numConfigs; ++index) {
     CompiledCandidate &candidate = candidates[index];
     if (!candidate.compiled) {
       if (detail())
-        *detail() << options.logPrefix << " autotune " << (index + 1) << "/"
-                  << numConfigs << ": compile failed\n";
+        line(index) << "compile failed\n";
       continue;
     }
     ++compiled;
-
-    double elapsed = 0.0;
-    if (!benchmark(candidate.kernel, kernelName, buffers, elapsed)) {
+    if (!reportError(fns.hipModuleLoadData(&modules[index],
+                                           candidate.kernel.binary.data()),
+                     "hipModuleLoadData") ||
+        !reportError(fns.hipModuleGetFunction(&functions[index], modules[index],
+                                              kernelNameStorage.c_str()),
+                     "hipModuleGetFunction")) {
+      functions[index] = nullptr;
       if (detail())
-        *detail() << options.logPrefix << " autotune " << (index + 1) << "/"
-                  << numConfigs << ": benchmark failed\n";
-      continue;
-    }
-    ++benchmarked;
-    if (detail())
-      *detail() << options.logPrefix << " autotune " << (index + 1) << "/"
-                << numConfigs << ": " << elapsed << " ms  "
-                << candidate.perfConfig << "\n";
-    if (elapsed < bestMilliseconds) {
-      bestMilliseconds = elapsed;
-      bestConfig = candidate.perfConfig;
-      winner = std::move(candidate.kernel);
+        line(index) << "load failed\n";
     }
   }
+
+  const auto benchmarkStart = std::chrono::steady_clock::now();
+  CandidateTimer timer = [&](size_t index, unsigned warmupLaunches,
+                             unsigned bundle,
+                             unsigned nruns) -> std::optional<double> {
+    if (!functions[index])
+      return std::nullopt;
+    return timeLaunches(functions[index], candidates[index].kernel, buffers,
+                        warmupLaunches, bundle, nruns);
+  };
+  std::optional<BenchmarkSelection> selection =
+      options.benchmark == AutotuneBenchmark::Simple
+          ? selectBySimpleBenchmark(numConfigs, options.warmupRuns,
+                                    /*bundle=*/1, options.measuredRuns, timer)
+          : selectByAdaptiveBenchmark(numConfigs, AdaptiveBenchmarkOptions{},
+                                      timer);
+  // Let the GPU settle before the next problem, as MIGraphX does.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
   times.benchmarkMs += millisecondsSince(benchmarkStart);
 
-  if (bestConfig.empty()) {
+  if (!selection) {
     llvm::errs() << "error: autotune found no runnable perfConfig for '"
-                 << kernelName << "' (compiled " << compiled << ", benchmarked "
-                 << benchmarked << ")\n";
+                 << kernelName << "' (compiled " << compiled << ")\n";
     return false;
   }
+  if (detail()) {
+    for (unsigned index = 0; index < numConfigs; ++index) {
+      if (!functions[index])
+        continue;
+      llvm::raw_ostream &os = line(index);
+      if (!selection->coarseMs.empty())
+        os << "coarse " << selection->coarseMs[index] << " ms, ";
+      os << "precise " << selection->preciseMs[index] << " ms  "
+         << candidates[index].perfConfig << "\n";
+    }
+  }
+  CompiledCandidate &best = candidates[selection->winner];
+  bestConfig = best.perfConfig;
+  winner = std::move(best.kernel);
   if (detail())
     *detail() << options.logPrefix << " autotune winner for '" << kernelName
-              << "': " << bestMilliseconds << " ms  " << bestConfig << "\n";
+              << "': " << selection->winnerMs << " ms  " << bestConfig << " ("
+              << autotuneBenchmarkName(options.benchmark) << ")\n";
   return true;
 }
 
