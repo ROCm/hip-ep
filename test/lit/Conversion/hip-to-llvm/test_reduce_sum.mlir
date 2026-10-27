@@ -127,4 +127,25 @@ module {
 
     return
   }
+
+  // Test 6: reduced_axes takes precedence over shape inference, which would
+  // read [2,4,4] -> [2,4] as a reduce over axis 1 (inner_size 4).
+  func.func @reduce_sum_reduced_axes_attr(
+      %ctx: !hip.context,
+      %input: memref<2x4x4xf16, 1>,
+      %axes: memref<1xi64, 1>,
+      %output: memref<2x4xf16, 1>) {
+    // CHECK-LABEL: llvm.func @reduce_sum_reduced_axes_attr
+
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<2x4x4xf16, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<2x4xf16, 1>)
+                         {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64, reduced_axes = array<i64: 2>}
+
+    // CHECK: llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
+    // CHECK-NEXT: %[[INNER:.*]] = llvm.mlir.constant(1 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_reduce_sum({{.*}}, %[[INNER]])
+
+    return
+  }
 }
