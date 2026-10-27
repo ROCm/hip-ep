@@ -228,6 +228,29 @@ uploading it, and `hipdnn_ep_constant_get` returns null. See
 [constant-handling-design.md](constant-handling-design.md#disk-resident-gather-tables)
 for selection and the runtime read path.
 
+### rocMLIR kernel dispatch
+
+Each `hip.rocmlir` op lowers to one call:
+
+```text
+wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
+             kernargs, N * sizeof(void*))
+```
+
+- `kernel_binary` is the code object that `hip-fuse-rocmlir` outlined and
+  rocMLIR compiled. `func_name`, `block_size` and `grid_size` come from the
+  same compile.
+- `kernargs` holds `N` bare device pointers: the `ins` operands in order, then
+  the `outs` operands in order.
+- A kernel can have more than one result. rocMLIR appends one output argument
+  per kernel function result, in result order, so the `outs` order is the
+  result order. Extra results are chain values that are also read outside the
+  kernel.
+- Every operand must be contiguous; the lowering passes no layout metadata.
+
+The runtime wrapper does not depend on the operand count, so a kernel with
+more results needs no runtime change.
+
 ---
 
 ## Consumers
