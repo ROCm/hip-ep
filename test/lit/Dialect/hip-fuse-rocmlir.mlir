@@ -424,6 +424,32 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
 
 // -----
 
+// A pointwise op that broadcasts the anchor result ends the chain: rocMLIR
+// cannot map the wider output back to the GEMM tile.
+
+// CHECK-LABEL: func.func @rocMlir
+// CHECK-SAME: -> tensor<1x32xf16>
+// CHECK: hip.matmul
+// CHECK-NOT: hip.add
+// CHECK: return
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[K:.*]] = hip.rocmlir
+// CHECK: hip.add({{.*}}) ins(%{{.*}}, %[[K]] : tensor<2x32xf16>, tensor<1x32xf16>)
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x16xf16>,
+                      %b: tensor<16x32xf16>, %r: tensor<2x32xf16>)
+    -> tensor<2x32xf16> {
+  %e = tensor.empty() : tensor<1x32xf16>
+  %m = hip.matmul(%ctx) ins(%a, %b : tensor<1x16xf16>, tensor<16x32xf16>)
+      outs(%e : tensor<1x32xf16>) : tensor<1x32xf16>
+  %ae = tensor.empty() : tensor<2x32xf16>
+  %s = hip.add(%ctx) ins(%r, %m : tensor<2x32xf16>, tensor<1x32xf16>)
+      outs(%ae : tensor<2x32xf16>) -> tensor<2x32xf16>
+  return %s : tensor<2x32xf16>
+}
+
+// -----
+
 // A group split folded back into channels is a reshape on the activation. The
 // kernel reads the grouped tensor and collapses it as it loads.
 

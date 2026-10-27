@@ -286,19 +286,36 @@ static bool dependsOnChain(Value value, Operation *anchor,
   return false;
 }
 
+// A pointwise op that broadcasts the chain value maps many output elements
+// back to one GEMM element, which rocMLIR cannot invert ("cannot
+// regularize"), so the chain value must keep its shape through it.
+//
+//   %m = hip.matmul ... -> tensor<1x1x1536xf16>
+//   %a = hip.add ins(%r, %m : tensor<1x2x1536xf16>, tensor<1x1x1536xf16>)
+//   // %a stays outside the kernel
+static bool keepsChainShape(Operation *user, Value value) {
+  return llvm::all_of(user->getResultTypes(), [&](Type type) {
+    auto result = dyn_cast<ShapedType>(type);
+    auto chain = dyn_cast<ShapedType>(value.getType());
+    return result && chain && result.getShape() == chain.getShape();
+  });
+}
+
 Operation *
 KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
   Operation *tail = chain.back();
   if (tail->getNumResults() != 1)
     return nullptr;
   Value value = tail->getResult(0);
+  auto canTake = [&](Operation *user) {
+    return (policy.allowsEpilogue(user) && keepsChainShape(user, value)) ||
+           policy.allowsForwardView(user);
+  };
   if (!policy.multiOutput) {
     if (!value.hasOneUse())
       return nullptr;
     Operation *user = *value.user_begin();
-    bool fusable =
-        policy.allowsEpilogue(user) || policy.allowsForwardView(user);
-    return fusable ? user : nullptr;
+    return canTake(user) ? user : nullptr;
   }
 
   SetVector<Operation *> users(value.user_begin(), value.user_end());
@@ -307,8 +324,7 @@ KernelRegion::nextOnChain(const SetVector<Operation *> &chain) const {
     return nullptr;
   SmallVector<Operation *> candidates;
   for (Operation *user : users)
-    if (user->getBlock() == anchor->getBlock() &&
-        (policy.allowsEpilogue(user) || policy.allowsForwardView(user)))
+    if (user->getBlock() == anchor->getBlock() && canTake(user))
       candidates.push_back(user);
   llvm::sort(candidates,
              [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
