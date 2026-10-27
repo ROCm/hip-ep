@@ -2712,7 +2712,8 @@ HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_stride(
  * returns 0, else -1. hip_matmul_nbits_u4_wmma_run_config is
  * hip_matmul_nbits_u4_wmma_stride with config `cfg` and no other: it returns
  * -2 and launches nothing when `cfg` is not a fused config that serves this
- * N, K and group_size, instead of substituting the tuned one. */
+ * N, K and group_size, or the device has no WMMA (wave64), instead of
+ * substituting the tuned one. */
 typedef struct HipMatmulNBitsWmmaConfigDesc {
     int bm, bn, wt_m, wt_n, bk, swizzle_n;
     int fused;   /* 1: dequant fused into the WMMA kernel */

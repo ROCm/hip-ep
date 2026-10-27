@@ -6242,6 +6242,8 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
     const void* zeros, void* C, int ldc, int b_row_bytes)
 {
     if (cfg < 0 || cfg >= kNumWmmaConfigs || group_size <= 0) return -2;
+    // WMMA kernels compile to a trap on wave64 (CDNA) devices.
+    if (hipdnn_device_is_wave64()) return -2;
     const WmmaConfig& c = kWmmaConfigs[cfg];
     if (!c.fused || !wmmaConfigSupported(c, N, K, group_size)) return -2;
     (void)hipGetLastError();

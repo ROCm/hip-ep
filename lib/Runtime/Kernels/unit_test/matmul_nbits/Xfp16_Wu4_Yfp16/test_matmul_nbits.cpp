@@ -888,6 +888,12 @@ int main(int argc, char* argv[]) {
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   const int sweep_rc = sweep::run(tier);
-  const int forced_rc = forced::run();
+  // The extended entries are WMMA kernels, which a wave64 (CDNA) device cannot
+  // run; there only the sweep above applies.
+  int forced_rc = 0;
+  if (prop.warpSize >= 64)
+    std::printf("SKIP: extended WMMA entries unsupported on %s\n", prop.gcnArchName);
+  else
+    forced_rc = forced::run();
   return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
 }
