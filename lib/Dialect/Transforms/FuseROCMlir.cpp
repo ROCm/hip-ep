@@ -118,7 +118,7 @@ struct FusionPolicy {
   unsigned inputViewKinds = 0;
   // ViewKind bits the forward chain past the anchor may take.
   unsigned forwardViewKinds = 0;
-  // A unary pointwise producer of the activation.
+  // A unary pointwise producer of an input root that allows one.
   bool activationPrologue = false;
   // A quantize on the forward chain.
   bool quantizeEpilogue = false;
@@ -161,10 +161,11 @@ private:
 // one more kernel result instead of ending the chain: it is stored either way,
 // and the epilogue no longer has to load it back.
 //
-// Matmul and gemm anchors keep their current boundaries.
-template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
+// Convolution, matmul and gemm anchors share these rules; only where input
+// absorption starts differs (getInputRoots).
+static FusionPolicy getFusionPolicy(bool fuseViews) {
   FusionPolicy policy;
-  if (std::is_same_v<AnchorOp, ConvOp> && fuseViews) {
+  if (fuseViews) {
     policy.forwardViewKinds = static_cast<unsigned>(ViewKind::Transpose) |
                               static_cast<unsigned>(ViewKind::Reshape);
     policy.inputViewKinds = policy.forwardViewKinds |
@@ -178,8 +179,10 @@ template <typename AnchorOp> FusionPolicy getFusionPolicy(bool fuseViews) {
 }
 
 // Where input absorption starts, with whether each root may take a pointwise
-// prologue. Only the activation does: an elementwise op on the filter would
-// rerun in every workgroup that loads it.
+// prologue. A conv's filter does not: an elementwise op on it would rerun in
+// every workgroup that loads it. Both matmul operands may, since in attention
+// both are activations. A gemm's C is added once per output element, so it
+// takes views only.
 template <typename AnchorOp>
 SmallVector<std::pair<Value, bool>> getInputRoots(AnchorOp anchorOp) {
   SmallVector<std::pair<Value, bool>> roots;
@@ -188,6 +191,14 @@ SmallVector<std::pair<Value, bool>> getInputRoots(AnchorOp anchorOp) {
     roots.push_back({anchorOp.getWeights(), false});
     if (Value bias = anchorOp.getBias())
       roots.push_back({bias, false});
+  } else if constexpr (std::is_same_v<AnchorOp, MatmulOp>) {
+    roots.push_back({anchorOp.getA(), true});
+    roots.push_back({anchorOp.getB(), true});
+  } else if constexpr (std::is_same_v<AnchorOp, GemmOp>) {
+    roots.push_back({anchorOp.getInputA(), true});
+    roots.push_back({anchorOp.getInputB(), true});
+    if (Value c = anchorOp.getInputC())
+      roots.push_back({c, false});
   }
   return roots;
 }
@@ -590,7 +601,7 @@ public:
   FuseAnchorPointwise(MLIRContext *context, int *counter, bool fuseViews,
                       PatternBenefit benefit = 1)
       : OpRewritePattern<AnchorOp>(context, benefit), counter(counter),
-        policy(getFusionPolicy<AnchorOp>(fuseViews)) {}
+        policy(getFusionPolicy(fuseViews)) {}
 
   LogicalResult matchAndRewrite(AnchorOp anchorOp,
                                 PatternRewriter &rewriter) const override {

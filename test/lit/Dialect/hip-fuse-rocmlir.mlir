@@ -394,19 +394,20 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 
 // -----
 
-// Views are fused only around convolutions. A matmul keeps its transposes
-// outside the kernel, on both sides.
+// A matmul takes the transposes on both sides, as a convolution does: the
+// kernel reads the untransposed A and writes the transposed result.
 
 // CHECK-LABEL: func.func @rocMlir
-// CHECK-NOT: hip.transpose
-// CHECK: hip.matmul
-// CHECK-NOT: hip.transpose
-// CHECK: return
+// CHECK-SAME: (%[[A:.*]]: tensor<16x8xf16>, %{{.*}}: tensor<16x32xf16>) -> tensor<32x8xf16>
+// CHECK: %[[AT:.*]] = hip.transpose({{.*}}) ins(%[[A]]
+// CHECK: %[[M:.*]] = hip.matmul({{.*}}) ins(%[[AT]],
+// CHECK: %[[O:.*]] = hip.transpose({{.*}}) ins(%[[M]]
+// CHECK: return %[[O]]
 
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.transpose
+// CHECK-NOT: hip.transpose
 // CHECK: hip.rocmlir
-// CHECK: hip.transpose
+// CHECK-NOT: hip.transpose
 func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
                       %b: tensor<16x32xf16>) -> tensor<32x8xf16> {
   %ae = tensor.empty() : tensor<8x16xf16>
