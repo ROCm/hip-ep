@@ -297,8 +297,11 @@ HIPDNN_EP_RT_EXPORT void hipdnn_ep_set_current_stream(void *stream);
 // calls are safe no-ops when no ROCTx runtime is available. Kept outside
 // runtime.bc for the same JIT/native-model dual-path reason as tls_stream.cpp.
 // push returns the ROCTx nesting level, or a negative value when disabled.
+// enabled returns nonzero once the range API has been resolved, so callers can
+// skip building a range label when nothing would record it.
 HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_range_push(const char *name);
 HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void);
+HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void);
 
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)

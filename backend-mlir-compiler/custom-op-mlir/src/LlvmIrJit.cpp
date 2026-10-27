@@ -238,6 +238,7 @@ extern "C" void *hipdnn_ep_get_current_stream(void);
 extern "C" void hipdnn_ep_set_current_stream(void *stream);
 extern "C" int hipdnn_ep_roctx_range_push(const char *name);
 extern "C" void hipdnn_ep_roctx_range_pop(void);
+extern "C" int hipdnn_ep_roctx_enabled(void);
 
 llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
@@ -254,6 +255,8 @@ llvm::Error installRuntimeNativeShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&hipdnn_ep_roctx_range_push));
   add("hipdnn_ep_roctx_range_pop",
       reinterpret_cast<void *>(&hipdnn_ep_roctx_range_pop));
+  add("hipdnn_ep_roctx_enabled",
+      reinterpret_cast<void *>(&hipdnn_ep_roctx_enabled));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }

@@ -104,3 +104,7 @@ extern "C" HIPDNN_EP_RT_EXPORT void hipdnn_ep_roctx_range_pop(void) {
   if (api.pop)
     (void)api.pop();
 }
+
+extern "C" HIPDNN_EP_RT_EXPORT int hipdnn_ep_roctx_enabled(void) {
+  return roctxApi().push != nullptr;
+}

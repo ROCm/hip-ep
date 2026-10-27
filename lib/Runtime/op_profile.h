@@ -8,7 +8,7 @@
 //
 // Usage: add OP_PROFILE("opname", shape_lambda, state) at the top of each
 // runtime wrapper. The shape_lambda is a callable returning std::string,
-// invoked only when profiling is active — zero overhead when disabled.
+// invoked only when profiling or ROCTx is active — zero overhead when disabled.
 //
 // Timing model (single, low-distortion): per inference one "epoch" event is
 // recorded on the stream, then one fenceless marker event per op. Each op's GPU
@@ -22,6 +22,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <utility>
 
 struct OpProfileState;
 
@@ -87,11 +88,33 @@ struct OpProfileCpuScope {
 // RAII keeps ranges balanced across early returns and cleanup gotos.
 struct OpRoctxScope {
   bool active = false;
+  // Owns the "<op> <shape>" label until the pop: ROCTx may keep the pointer.
+  std::string label;
 
   explicit OpRoctxScope(const char *name)
       : active(hipdnn_ep_roctx_range_push(name) >= 0) {}
 
   explicit OpRoctxScope(const std::string &name) : OpRoctxScope(name.c_str()) {}
+
+  // Appends the OP_PROFILE shape string, so ops that share a name but differ
+  // in shape (prefill vs decode, Q vs FFN projections) get distinct ranges.
+  // shape_fn runs only when ROCTx is active.
+  template <typename ShapeFn>
+  OpRoctxScope(const char *name, ShapeFn &&shape_fn) {
+    if (!hipdnn_ep_roctx_enabled() || !name)
+      return;
+    label = name;
+    std::string shape = shape_fn();
+    if (!shape.empty()) {
+      label += ' ';
+      label += shape;
+    }
+    active = hipdnn_ep_roctx_range_push(label.c_str()) >= 0;
+  }
+
+  template <typename ShapeFn>
+  OpRoctxScope(const std::string &name, ShapeFn &&shape_fn)
+      : OpRoctxScope(name.c_str(), std::forward<ShapeFn>(shape_fn)) {}
 
   ~OpRoctxScope() {
     if (active)
@@ -142,6 +165,9 @@ struct OpProfileScope {
 #define HIPDNN_EP_DETAIL_CONCAT(a, b) HIPDNN_EP_DETAIL_CONCAT_INNER(a, b)
 #define OP_ROCTX_SCOPE(opname)                                                 \
   OpRoctxScope HIPDNN_EP_DETAIL_CONCAT(_opRoctxScope_, __LINE__)(opname)
+#define OP_ROCTX_SCOPE_SHAPE(opname, shape_fn)                                 \
+  OpRoctxScope HIPDNN_EP_DETAIL_CONCAT(_opRoctxScope_, __LINE__)(opname,       \
+                                                                 shape_fn)
 
 #define OP_PROFILE(opname, shape_fn, state_arg)                                \
   OP_PROFILE_BYTES(                                                            \
@@ -151,7 +177,7 @@ struct OpProfileScope {
 // [PERF] table can report achieved GB/s and % of the memory roofline. bytes_fn
 // is a callable returning int64_t, invoked only when profiling is active.
 #define OP_PROFILE_BYTES(opname, shape_fn, bytes_fn, state_arg)                \
-  OP_ROCTX_SCOPE(opname);                                                      \
+  OP_ROCTX_SCOPE_SHAPE(opname, shape_fn);                                      \
   std::optional<OpProfileScope> _opProf;                                       \
   if (hipdnn_ep_perf_enabled()) {                                              \
     auto *_ps = static_cast<OpProfileState *>(                                 \
