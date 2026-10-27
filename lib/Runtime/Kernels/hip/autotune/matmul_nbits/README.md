@@ -76,8 +76,10 @@ A table may opt its device into storing int4 weights row-padded at load
 (`hip-pad-matmul-nbits-weights`), which removes the per-call repack:
 
 - `default_row_pad` is the pad, in bytes, for a weight whose stride aliases
-  (see `shouldPadRow`). 0, or a table without the field, pads nothing at load,
-  and the runtime keeps repacking such weights per call.
+  (`hip::matmulNBitsRowStrideAliases` in `include/hip/matmul_nbits_row_alias.h`,
+  shared by the compiler, the runtime and the sweep driver). 0, or a table
+  without the field, pads nothing at load, and the runtime keeps repacking such
+  weights per call.
 - `row_pads` overrides it per int4 weight shape (N, K, group size, zero
   points). A listed pad of 0 keeps that weight dense with no repack.
 
@@ -133,7 +135,7 @@ python scripts/extract_shapes.py `
 #    product binary" below): gfx11-generic -O2 for the gfx1150/1151/1152
 #    tables, gfx1170 -O2 for gfx1170.
 clang++ -x hip --offload-arch=gfx11-generic -O2 -std=c++17 -w `
-    -I lib/Runtime/Kernels/include -I <flatbuffers include> -I <generated header dir> `
+    -I lib/Runtime/Kernels/include -I include -I <flatbuffers include> -I <generated header dir> `
     tools/matmul_nbits_autotune_sweep.cpp tools/empty_lut_data.cpp matmul_nbits_autotune.cpp `
     ../../matmul_nbits_kernel.hip -o mn_sweep.exe
 

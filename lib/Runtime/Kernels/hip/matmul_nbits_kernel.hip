@@ -6195,7 +6195,8 @@ extern "C" int hip_matmul_nbits_u4_wmma_run_config(
 // layer it ever sees, then is reused (overwritten) by every later layer, so the
 // footprint does not scale with layer count and never grows during a run.
 //   N, K here are the weight's out/in dims (independent of prompt length).
-//   Padrow-eligible = fused int4 prefill with M>=16, K%32==0, gs|K, shouldPadRow(K).
+//   Padrow-eligible = fused int4 prefill with M>=16, K%32==0, gs|K,
+//   hip::matmulNBitsRowStrideAliases(K).
 // Worked peaks (one loaded model at a time):
 //   * Generation (lm_head runs at M=1, excluded): ~6 MB (small) up to ~115 MB
 //     (DeepSeek-70B, N=28672 K=8192). Most 7-14B models are 15-70 MB.

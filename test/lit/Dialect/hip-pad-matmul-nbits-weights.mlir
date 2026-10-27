@@ -20,6 +20,7 @@
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BAD
 // RUN: hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:48:16:0=16' %t/skip.mlir | FileCheck %s --check-prefix=MISALIGNED
 // RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=24' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=BADDEFAULT
+// RUN: not hip-mlir-opt --hip-pad-matmul-nbits-weights='row-pads=2:4096:128:0=16,2:4096:128:0=32' %t/pad.mlir 2>&1 | FileCheck %s --check-prefix=DUPLICATE
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/stream skip-constant-data=true' pad.mlir | FileCheck %s --check-prefix=STREAM
 // RUN: cd %t && hip-mlir-opt --hip-pad-matmul-nbits-weights='default-row-pad=256' --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/full' pad.mlir | FileCheck %s --check-prefix=FULL
 // RUN: %python -c "import sys; s = open(sys.argv[1], 'rb').read(); d = open(sys.argv[2], 'rb').read(); assert len(d) == 2 * 2304, len(d); assert d[0:2048] == s[0:2048] and d[2304:4352] == s[2048:4096]; assert d[2048:2304] == bytes(256) and d[4352:4608] == bytes(256)" %t/w.bin %t/full/model.constants.bin
@@ -58,6 +59,7 @@ func.func @pad(%ctx: !hip.context, %a: tensor<4x4096xf16>,
 // TABLE0:          b_row_bytes = 2048 : i64
 // BAD: malformed row-pads entry '2:4096:128:0=24'
 // BADDEFAULT: default-row-pad 24 is not a non-negative multiple of 16
+// DUPLICATE: duplicate row-pads entry '2:4096:128:0=32'
 
 // STREAM:      module attributes
 // STREAM-SAME: hipdnn.constant_row_bytes = array<i64: 2048>

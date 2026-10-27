@@ -19,10 +19,12 @@
  *
  * Build (from the repo root):
  *   clang++ -x hip --offload-arch=gfx1151 -O3 -std=c++17 -w \
- *       -I lib/Runtime/Kernels/include \
+ *       -I lib/Runtime/Kernels/include -I include \
  *       lib/Runtime/Kernels/hip/autotune/matmul_nbits/tools/matmul_nbits_autotune_sweep.cpp \
  *       lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip -o matmul_nbits_sweep.exe
  */
+#include "hip/matmul_nbits_row_alias.h"
+
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -74,16 +76,6 @@ static uint16_t F2H(float f) {
   return o;
 }
 
-// Mirrors shouldPadRow() in lib/Runtime/real/matmul_nbits.cpp. Only shapes the
-// production gate would actually route through the padded layout are swept for
-// it; measuring the rest would fill the table with rows nothing can reach.
-static bool shouldPadRow(long long K) {
-  const long long stride = K / 2;
-  if (stride % 128 != 0) return false;
-  long long a = stride / 128, b = 64;
-  while (b) { long long t = b; b = a % b; a = t; }
-  return a >= 8;
-}
 
 struct Shape {
   int k = 0, n = 0, gs = 0;
@@ -320,7 +312,10 @@ int main(int argc, char** argv) {
                        m, s.n, s.k, 1, 4, s.gs, 2, 2, nullptr, nullptr);
       HIP_OK(hipDeviceSynchronize());
 
-      if (do_padrow && shouldPadRow(s.k) && (s.k % s.gs == 0)) {
+      // Only shapes the production gate routes through the padded layout are
+      // swept for it; the rest would fill the table with unreachable rows.
+      if (do_padrow && hip::matmulNBitsRowStrideAliases(s.k) &&
+          (s.k % s.gs == 0)) {
         static size_t pad_have = 0;
         const size_t need = hip_matmul_nbits_u4_padrow_bytes(s.n, s.k);
         buf.grow((void**)&buf.bpad, &pad_have, need);

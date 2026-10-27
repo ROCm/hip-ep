@@ -39,6 +39,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/matmul_nbits_row_alias.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -51,7 +52,6 @@
 #include <cstring>
 #include <limits>
 #include <map>
-#include <numeric>
 #include <tuple>
 
 namespace mlir {
@@ -61,16 +61,6 @@ namespace hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
-
-// The arrival stride K/2 aliases when it is a whole number of 128-byte lines
-// whose count shares a factor of at least 8 with the 64 cache sets. Mirrors
-// shouldPadRow() in lib/Runtime/real/matmul_nbits.cpp.
-bool strideAliases(int64_t k) {
-  const int64_t stride = k / 2;
-  if (stride % 128 != 0)
-    return false;
-  return std::gcd(stride / 128, int64_t{64}) >= 8;
-}
 
 // The padded layout is defined for whole quant groups of 4-bit weights only,
 // which is also what every int4 runtime path accepts with a row pitch.
@@ -104,7 +94,10 @@ struct PadMatMulNBitsWeightsPass
         return emitError(UnknownLoc::get(context))
                << "hip-pad-matmul-nbits-weights: malformed row-pads entry '"
                << entry << "'";
-      table[RowPadKey{n, k, bs, zp != 0}] = pad;
+      if (!table.try_emplace(RowPadKey{n, k, bs, zp != 0}, pad).second)
+        return emitError(UnknownLoc::get(context))
+               << "hip-pad-matmul-nbits-weights: duplicate row-pads entry '"
+               << entry << "'";
     }
     const int64_t defaultPad = defaultRowPad;
     if (defaultPad < 0 || defaultPad % 16 != 0)
@@ -130,7 +123,9 @@ struct PadMatMulNBitsWeightsPass
     if (it != table.end())
       return it->second;
     const int64_t pad = defaultRowPad;
-    return strideAliases(mm.getK()) && pad > 0 ? pad : int64_t{-1};
+    return ::hip::matmulNBitsRowStrideAliases(mm.getK()) && pad > 0
+               ? pad
+               : int64_t{-1};
   }
 
   void padCarrier(ConstantOp c) {

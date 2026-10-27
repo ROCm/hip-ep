@@ -8,6 +8,7 @@
 #include "../op_state.h"
 #include "../runtime_state_internal.h"
 #include "error_check_macros.h"
+#include "hip/matmul_nbits_row_alias.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -260,38 +261,6 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 // ---------------------------------------------------------------------------
 
 namespace {
-
-// True when the arrival row stride K/2 falls in a cache-aliasing regime.
-//
-// Rows a tile reads in one K-step sit stride_lines = (K/2)/128 cache lines
-// apart, which reaches only 64 / gcd(stride_lines, 64) of the 64 sets. When
-// that GCD is large -- many factors of two in K/2 -- the rows collide and evict
-// each other even though the working set fits in cache. Requiring the stride to
-// be a whole number of lines makes stride_lines exact, and a GCD of at least 8
-// means at most 8 reachable sets, which is where the measured 30-89% slowdowns
-// start.
-//
-// Fires for K=4096 (stride 2048, 16 lines, gcd 16) and K=8192 (gcd 32). Does
-// not for K=2880 (stride 1440, not a whole number of lines) or K=3584 (14
-// lines, gcd 2).
-//
-// Note for the caller: the two conditions together imply K % 2048 == 0, which
-// is why the padrow repack may assume the arrival stride is exactly K/2 for
-// any power-of-two group_size up to 2048. The gate below still checks that
-// explicitly rather than leaning on the implication.
-static bool shouldPadRow(int64_t K) {
-  const int64_t stride = K / 2;
-  if (stride % 128 != 0)
-    return false;
-  const int64_t stride_lines = stride / 128;
-  int64_t a = stride_lines, b = 64;
-  while (b) {
-    int64_t t = b;
-    b = a % b;
-    a = t;
-  }
-  return a >= 8;
-}
 
 // Returns the cached row-major fp16 [N,K] dequant of `B`, dequantizing on the
 // first use for this weight pointer. Returns nullptr on hipMalloc failure.
@@ -828,13 +797,14 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   // RDNA int4 WMMA prefill against a row-padded B, for the K values where the
-  // arrival stride aliases into a handful of cache sets (see shouldPadRow).
+  // arrival stride aliases into a handful of cache sets
+  // (see hip::matmulNBitsRowStrideAliases).
   // Worth 11-16% there and nothing elsewhere, hence the shape gate.
   //
   // block_size dividing K is required, not incidental: the repack copies rows
   // at a K/2 source stride, while the arrival layout is num_groups_k *
   // (block_size/2) bytes per row. The two agree only when the last quant group
-  // is full. shouldPadRow already implies K % 2048 == 0, so this excludes
+  // is full. The alias test already implies K % 2048 == 0, so this excludes
   // nothing in practice, but it keeps the assumption checked rather than
   // inferred.
   //
@@ -851,7 +821,8 @@ int wrap_matmul_nbits_ex(RuntimeState *state, int op_state_slot, const void *A,
   // and goes straight to the dispatch below.
   if (!laid_out_by_compiler && !hipdnn_device_is_wave64() && bits == 4 &&
       batch_count == 1 && (K % 32 == 0) && M >= 16 && elem_size == 2 &&
-      block_size > 0 && (K % block_size == 0) && !bias && shouldPadRow(K)) {
+      block_size > 0 && (K % block_size == 0) && !bias &&
+      hip::matmulNBitsRowStrideAliases(K)) {
     const void *zeros_fp16 = nullptr;
     bool zeros_ok = true;
     if (zero_points) {
