@@ -95,7 +95,10 @@ A config that names an extended WMMA entry (`WMMA_EXT_CONFIGS`: the
 build) is listed in `extended_configs` with that entry's `variant`; it matches
 only extended entries, and an unlisted config only the original ones. A table
 that lists none also keeps the extended entries out of the runtime sweep, so a
-device without measurements searches exactly the original table.
+device without measurements searches exactly the original table. To measure
+them, run the sweep driver with `--extended` (`update_lut.py all
+--sweep-args --extended`); its winners then carry the entry and variant, and
+`build` lists them in `extended_configs`.
 
 `kernel_abi` (`"matmul_nbits-v1"`) is the coarser guard: bump it when a config's *meaning*
 changes rather than its existence, and the whole table is rejected.

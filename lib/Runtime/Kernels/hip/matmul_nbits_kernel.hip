@@ -75,6 +75,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -5756,6 +5757,10 @@ static _Float16* ensureOutColBuffer(int M, int N) {
     return g_out_col_buf;
 }
 
+// Set by the offline sweep driver (hip_matmul_nbits_u4_wmma_sweep_extended)
+// to measure the extended entries on a device whose table does not name them.
+static std::atomic<bool> g_wmma_sweep_extended{false};
+
 /* b_row_bytes = 0 means the arrival stride, num_groups_k * (group_size/2).
  *
  * A non-zero stride has to be measured with rather than assumed away: a
@@ -5791,8 +5796,10 @@ static int tuneWmmaConfig(
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
     // Extended entries are timed only on a device whose LUT names them, i.e.
-    // one they were measured on; elsewhere the sweep keeps the original table.
-    const bool ext_ok = matmul_lut::extendedConfigsMeasured();
+    // one they were measured on, or when the sweep driver measures them;
+    // elsewhere the runtime sweep keeps the original table.
+    const bool ext_ok = matmul_lut::extendedConfigsMeasured() ||
+                        g_wmma_sweep_extended.load(std::memory_order_relaxed);
     auto candidate = [&](int cid) {
         const WmmaConfig& cfg = kWmmaConfigs[cid];
         return wmmaConfigSupported(cfg, N, K, gs) &&
@@ -6234,6 +6241,10 @@ extern "C" int hip_matmul_nbits_u4_wmma_config_desc(
     out->ext = c.ext ? 1 : 0;
     out->variant = c.variant;
     return 0;
+}
+
+extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable) {
+    g_wmma_sweep_extended.store(enable != 0, std::memory_order_relaxed);
 }
 
 extern "C" int hip_matmul_nbits_u4_wmma_run_config(

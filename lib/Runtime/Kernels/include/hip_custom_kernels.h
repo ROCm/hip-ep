@@ -2724,6 +2724,10 @@ typedef struct HipMatmulNBitsWmmaConfigDesc {
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_count(void);
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_config_desc(
     int cfg, HipMatmulNBitsWmmaConfigDesc* out);
+/* Offline LUT sweeps only: a nonzero `enable` makes the WMMA tuner time the
+ * extended entries even though the linked table names none, which is how their
+ * rows are measured. Production dispatch never calls it. */
+HIP_KERNEL_API void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 HIP_KERNEL_API int hip_matmul_nbits_u4_wmma_run_config(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,

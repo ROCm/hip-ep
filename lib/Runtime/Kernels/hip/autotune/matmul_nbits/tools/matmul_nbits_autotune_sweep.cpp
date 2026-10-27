@@ -51,6 +51,7 @@ extern "C" int hip_matmul_nbits_u4_wmma_stride(
     void* stream, int cfg, int M, int N, int K, int group_size,
     const void* A, int lda, const void* B, const void* scales,
     const void* zeros, void* C, int ldc, int b_row_bytes);
+extern "C" void hip_matmul_nbits_u4_wmma_sweep_extended(int enable);
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v, const void* A, const void* B, const void* scales,
     const void* zp_u8, const void* bias, void* out,
@@ -161,6 +162,9 @@ int main(int argc, char** argv) {
   const char* shapes_path = nullptr;
   std::vector<int> m_list = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
   bool do_prefill = true, do_decode = true, do_dp4a = true, do_padrow = true;
+  // Also time the extended WMMA entries (WMMA_EXT_CONFIGS). Only for a device
+  // whose table is meant to name them.
+  bool extended = false;
   int limit = 0;
   /* Skip (M, N) pairs whose C alone would exceed this. Sized to pass every real
    * prefill shape below big_n at the full M ladder -- the widest is N~32768 x
@@ -199,10 +203,12 @@ int main(int argc, char** argv) {
     else if (a == "--no-decode") do_decode = false;
     else if (a == "--no-dp4a") do_dp4a = false;
     else if (a == "--no-padrow") do_padrow = false;
+    else if (a == "--extended") extended = true;
     else {
       std::fprintf(stderr,
                    "usage: %s --shapes shapes.csv [--m 1,8,128] [--limit N]\n"
-                   "          [--no-prefill] [--no-decode] [--no-dp4a] [--no-padrow]\n",
+                   "          [--no-prefill] [--no-decode] [--no-dp4a] [--no-padrow]\n"
+                   "          [--extended]\n",
                    argv[0]);
       return 1;
     }
@@ -218,8 +224,9 @@ int main(int argc, char** argv) {
   if (limit > 0 && static_cast<int>(shapes.size()) > limit)
     shapes.resize(limit);
 
-  std::fprintf(stderr, "#SWEEP arch=%s shapes=%zu\n", props.gcnArchName,
-               shapes.size());
+  hip_matmul_nbits_u4_wmma_sweep_extended(extended ? 1 : 0);
+  std::fprintf(stderr, "#SWEEP arch=%s shapes=%zu extended=%d\n",
+               props.gcnArchName, shapes.size(), extended ? 1 : 0);
 
   Buffers buf;
   std::vector<uint16_t> h_a, h_sc, h_zpf;
