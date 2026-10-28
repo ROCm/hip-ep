@@ -103,15 +103,19 @@ int64_t perfConfigField(StringRef perf, StringRef name, int64_t fallback) {
 // perfConfig, read straight out of the string rather than re-defaulted
 // (perfConfig field `numWaves` is the backend's `numWarps`); a missing field
 // falls back to the rock default and kKnobDefault (-1) leaves a bool knob at
-// its arch default.
+// its arch default. An elementwise kernel has no perfConfig, so it gets the
+// defaults throughout.
 bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
-                             StringRef perfConfig) {
+                             StringRef perfConfig, bool elementwise) {
   RocmDeviceName devName;
   if (arch.empty() || failed(devName.parse(arch)))
     return false;
 
   rock::KernelOptions kOpts;
-  rock::buildKernelPipeline(pm, kOpts);
+  if (elementwise)
+    rock::buildElementwisePipeline(pm, kOpts);
+  else
+    rock::buildKernelPipeline(pm, kOpts);
 
   rock::TritonOptions tOpts;
   tOpts.arch = devName.getChip().str();
@@ -281,15 +285,22 @@ void inlineRocMlirKernel(ModuleOp module, func::FuncOp hipKernel) {
 
 } // namespace
 
-bool hasRocMlirComputation(ModuleOp kernelModule) {
-  WalkResult gemm = kernelModule.walk([](Operation *op) {
-    return isa<rock::RockGemmWrapperInterface,
-               rock::RockGemmGemmWrapperInterface>(op)
-               ? WalkResult::interrupt()
-               : WalkResult::advance();
+bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
+  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
+    return f->hasAttr("rock.kernel") && f->hasAttr("rock.elementwise");
   });
-  return gemm.wasInterrupted() ||
-         isRocMlirElementwiseKernelModule(kernelModule);
+}
+
+bool hasRocMlirComputation(ModuleOp kernelModule) {
+  bool elementwise = isRocMlirElementwiseKernelModule(kernelModule);
+  WalkResult found = kernelModule.walk([&](Operation *op) {
+    bool gemm =
+        isa<rock::RockGemmWrapperInterface, rock::RockGemmGemmWrapperInterface>(
+            op);
+    bool computes = gemm || (elementwise && rock::isFusionOp(op));
+    return computes ? WalkResult::interrupt() : WalkResult::advance();
+  });
+  return found.wasInterrupted();
 }
 
 std::string resolveRocMlirArch() {
@@ -439,7 +450,9 @@ bool compileRocMlirBackend(ModuleOp kernelModule, StringRef arch,
                            StringRef perfConfig, CompiledKernel &out) {
   PassManager pm(kernelModule.getContext());
   pm.setNesting(PassManager::Nesting::Implicit);
-  if (!buildBackendPipelineFor(pm, arch, perfConfig) ||
+  if (!buildBackendPipelineFor(
+          pm, arch, perfConfig,
+          isRocMlirElementwiseKernelModule(kernelModule)) ||
       failed(pm.run(kernelModule)))
     return false;
   return extractCompiledKernel(kernelModule, out);
@@ -452,23 +465,12 @@ bool runRocMlirHighLevelPipeline(ModuleOp kernelModule) {
   return succeeded(pm.run(kernelModule));
 }
 
-bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule) {
-  return llvm::any_of(kernelModule.getOps<func::FuncOp>(), [](func::FuncOp f) {
-    return rock::isElementwiseKernel(f);
-  });
-}
-
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out) {
-  if (isRocMlirElementwiseKernelModule(kernelModule)) {
-    if (!rock::tuningSetStr(kernelModule, kRocMlirElementwisePerfConfig))
-      return false;
-    return compileRocMlirBackend(kernelModule, arch,
-                                 kRocMlirElementwisePerfConfig, out);
-  }
-
   if (!hasRocMlirComputation(kernelModule))
     return false;
+  if (isRocMlirElementwiseKernelModule(kernelModule))
+    return compileRocMlirBackend(kernelModule, arch, /*perfConfig=*/"", out);
 
   // Affix a perfConfig to the gemm op (the `perf_config` string attr). Take
   // the first entry enumerated from the tuning search space; autotuning
