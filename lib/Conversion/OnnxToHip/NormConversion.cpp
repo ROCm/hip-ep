@@ -21,6 +21,7 @@
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
 //   - onnx.BatchNormalization (inference)               -> hip.batch_norm
 //   - onnx.Custom(GroupNorm, com.microsoft)             -> hip.group_norm
+//   - onnx.GroupNormalization (per-channel, opset 21)   -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -1304,6 +1305,109 @@ GroupNormToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// onnx.GroupNormalization -> hip.group_norm (NCHW, no activation)
+//===----------------------------------------------------------------------===//
+
+/// ONNX GroupNormalization (schema 21):
+///   inputs:  X (N,C,D1,...,Dn), scale (C), bias (C)
+///   attrs:   num_groups (required), epsilon (default 1e-5), stash_type
+///   output:  same shape as X
+///
+///   y = scale * (x - mean) / sqrt(variance + epsilon) + bias
+///   mean/var are per (N, group) over the group's channels and D1..Dn.
+///
+/// Schema 18 took scale and bias per group, not per channel. A scale whose
+/// length is num_groups (or cannot be told apart from it) is that form and
+/// stays unconverted unless num_groups equals C, where both readings agree.
+/// hip.group_norm reduces in fp32 for fp16/bf16 and fp64 for f64, which
+/// meets or exceeds every stash_type.
+struct GroupNormalizationToHip : public mlir::RewritePattern {
+  GroupNormalizationToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.GroupNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult GroupNormalizationToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization expects 3 operands (X, scale, bias) and 1 "
+            "result");
+
+  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_groups");
+  if (!groupsAttr)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires num_groups");
+  int64_t groups = groupsAttr.getValue().getSExtValue();
+  if (groups <= 0)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization num_groups must be positive");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires ranked input of rank >= 3");
+
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+  if (!scaleType || scaleType.getRank() != 1 || !biasType ||
+      biasType.getRank() != 1 ||
+      scaleType.getElementType() != inputType.getElementType() ||
+      biasType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization scale and bias must be 1-D with X's element "
+            "type");
+
+  auto outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType || outputType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires a ranked result of X's element type");
+
+  // Per-channel affine (schema 21) is required: lengths must equal C.
+  auto isChannelLength = [&](mlir::RankedTensorType type) {
+    if (type.isDynamicDim(0))
+      return false;
+    int64_t length = type.getDimSize(0);
+    if (!inputType.isDynamicDim(1))
+      return length == inputType.getDimSize(1);
+    return length != groups;
+  };
+  if (!isChannelLength(scaleType) || !isChannelLength(biasType))
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization scale and bias must be per channel (schema "
+            "21); a per-group affine (schema 18) is not supported");
+  if (!inputType.isDynamicDim(1) && inputType.getDimSize(1) % groups != 0)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization channel extent is not divisible by num_groups");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto epsAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = epsAttr.getValue();
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  auto hipOp = mlir::hip::GroupNormOp::create(
+      rewriter, loc, context, input, scale, bias, outputInit,
+      rewriter.getI64IntegerAttr(groups), rewriter.getI64IntegerAttr(0),
+      rewriter.getI64IntegerAttr(0),
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
@@ -1311,7 +1415,8 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
   patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
                BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip,
-               InstanceNormToHip, BatchNormToHip, GroupNormToHip>(ctx);
+               InstanceNormToHip, BatchNormToHip, GroupNormToHip,
+               GroupNormalizationToHip>(ctx);
 }
 
 } // namespace hip

@@ -714,6 +714,13 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fuse Reshape(x, [0, G, -1]) ->
+/// InstanceNormalization(1, 0) -> Reshape(_, Shape(x)) -> [Mul gamma] ->
+/// [Add beta] -> [x * Sigmoid(x)] into com.microsoft GroupNorm (NCHW).
+/// See GroupNormDecompositionFusion.cpp.
+void populateGroupNormDecompositionFusionPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
