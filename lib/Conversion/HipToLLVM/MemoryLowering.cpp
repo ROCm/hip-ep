@@ -605,8 +605,12 @@ struct MemRefDeallocOpLowering
   }
 };
 
-/// Static strides in elements for identity or strided memref types (no dynamic
-/// dims/strides).
+/// Effective static strides in elements for identity or strided memref types.
+/// A dynamic stride on a statically-singleton dimension is immaterial to the
+/// addressed element set, so canonicalize it from the adjacent inner stride
+/// when the inner extents are static. This occurs in rank-expanding output
+/// subviews whose statically-singleton outer dimension retains a dynamic
+/// stride.
 static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
   ArrayRef<int64_t> shape = ty.getShape();
   unsigned rank = ty.getRank();
@@ -628,9 +632,17 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
     auto strides = llvm::to_vector(sl.getStrides());
     if (strides.size() != rank)
       return failure();
-    for (int64_t s : strides)
-      if (ShapedType::isDynamic(s))
+
+    for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+      unsigned dim = static_cast<unsigned>(i);
+      if (ShapedType::isDynamic(strides[dim])) {
+        if (shape[dim] != 1)
+          return failure();
+        strides[dim] = dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
+      }
+      if (ShapedType::isDynamic(shape[dim]))
         return failure();
+    }
     return strides;
   }
 

@@ -212,3 +212,45 @@ func.func @copy_unit_extent_strided_2d(
       : memref<1x1xf32> to memref<1x1xf32, strided<[8, 1], offset: 2>>
   return
 }
+
+// -----
+
+// Test 10: an output subview can have a dynamic outer stride even though the
+// copied slice has a statically-singleton outer dimension. That stride cannot
+// affect any accessed address, so this copy is effectively dense and must use
+// device-to-device memcpy. Falling through to the default lowering emits a host
+// llvm.memcpy on device pointers and crashes at runtime.
+//
+// CHECK-LABEL: llvm.func @copy_singleton_dynamic_outer_stride
+// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
+// CHECK-NOT:     llvm.intr.memcpy
+// CHECK-NOT:     llvm.call @memrefCopy
+func.func @copy_singleton_dynamic_outer_stride(
+    %ctx: !hip.context,
+    %src: memref<1x4x64xf32>,
+    %dst: memref<1x4x64xf32, strided<[?, 64, 1]>>) {
+  memref.copy %src, %dst
+      : memref<1x4x64xf32>
+        to memref<1x4x64xf32, strided<[?, 64, 1]>>
+  return
+}
+
+// -----
+
+// Test 11: canonicalization must derive a singleton dimension's effective
+// stride from the actual inner stride, not from a dense shape product. This
+// preserves a padded row layout and allows a device-to-device pitched copy.
+//
+// CHECK-LABEL: llvm.func @copy_singleton_dynamic_outer_stride_with_padding
+// CHECK:         llvm.call @wrap_hipMemcpy2DAsync({{.*}}) :
+// CHECK-NOT:     llvm.intr.memcpy
+// CHECK-NOT:     llvm.call @memrefCopy
+func.func @copy_singleton_dynamic_outer_stride_with_padding(
+    %ctx: !hip.context,
+    %src: memref<1x4x64xf32>,
+    %dst: memref<1x4x64xf32, strided<[?, 80, 1]>>) {
+  memref.copy %src, %dst
+      : memref<1x4x64xf32>
+        to memref<1x4x64xf32, strided<[?, 80, 1]>>
+  return
+}
