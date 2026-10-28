@@ -134,6 +134,67 @@ def _reference_model(
     )
 
 
+def _group_normalization_model(shape, groups, dtype, seed):
+    """ONNX GroupNormalization-21 (per-channel scale and bias), NCHW."""
+    gamma, beta = _affine(shape[1], dtype, seed)
+    tp = _TENSOR_PROTO[dtype]
+    node = helper.make_node(
+        "GroupNormalization",
+        ["X", "scale", "bias"],
+        ["Y"],
+        num_groups=groups,
+        epsilon=_EPSILON,
+    )
+    return make_model_from_nodes(
+        [node],
+        [helper.make_tensor_value_info("X", tp, shape)],
+        [helper.make_tensor_value_info("Y", tp, shape)],
+        initializers=[
+            numpy_helper.from_array(gamma, name="scale"),
+            numpy_helper.from_array(beta, name="bias"),
+        ],
+        opset=21,
+    )
+
+
+def _decomposed_model(shape, groups, activation, dtype, seed):
+    """GroupNorm as exporters without GroupNormalization spell it, in *dtype*:
+    Reshape [0, G, -1] -> InstanceNormalization(1, 0) -> Reshape(Shape(X))
+    -> Mul gamma -> Add beta (-> x * Sigmoid(x))."""
+    channels = shape[1]
+    gamma, beta = _affine(channels, dtype, seed)
+    affine_shape = [channels] + [1] * (len(shape) - 2)
+    tp = _TENSOR_PROTO[dtype]
+    inits = [
+        numpy_helper.from_array(np.array([0, groups, -1], np.int64), "grouped"),
+        numpy_helper.from_array(np.ones([groups], dtype), "ones"),
+        numpy_helper.from_array(np.zeros([groups], dtype), "zeros"),
+        numpy_helper.from_array(gamma.reshape(affine_shape), "gamma"),
+        numpy_helper.from_array(beta.reshape(affine_shape), "beta"),
+    ]
+    nodes = [
+        helper.make_node("Reshape", ["X", "grouped"], ["xg"]),
+        helper.make_node(
+            "InstanceNormalization", ["xg", "ones", "zeros"], ["ng"], epsilon=_EPSILON
+        ),
+        helper.make_node("Shape", ["X"], ["xshape"]),
+        helper.make_node("Reshape", ["ng", "xshape"], ["nr"]),
+        helper.make_node("Mul", ["nr", "gamma"], ["scaled"]),
+        helper.make_node("Add", ["scaled", "beta"], ["Y" if not activation else "z"]),
+    ]
+    if activation:
+        nodes += [
+            helper.make_node("Sigmoid", ["z"], ["sig"]),
+            helper.make_node("Mul", ["z", "sig"], ["Y"]),
+        ]
+    return make_model_from_nodes(
+        nodes,
+        [helper.make_tensor_value_info("X", tp, shape)],
+        [helper.make_tensor_value_info("Y", tp, shape)],
+        initializers=inits,
+    )
+
+
 _TOLERANCE = {np.float16: (4e-3, 4e-3), np.float32: (1e-4, 1e-4)}
 
 # (shape, groups, channels_last, activation, dtype)
@@ -217,3 +278,54 @@ class TestGroupNorm:
             model, [x.astype(dtype)], reference_model=reference
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
+
+    # ONNX GroupNormalization-21 lowers to the same kernel, NCHW.
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ([2, 64, 8, 8], 32, 0, 0, np.float32),
+            ([1, 320, 32, 32], 32, 0, 0, np.float16),
+            ([1, 128, 128, 128], 32, 0, 0, np.float32),
+        ],
+        ids=_case_id,
+    )
+    def test_group_normalization(self, model_runner, case):
+        shape, groups, channels_last, activation, dtype = case
+        seed = zlib.crc32(_case_id(case).encode())
+        model = _group_normalization_model(shape, groups, dtype, seed)
+        reference = _reference_model(
+            shape, groups, channels_last, activation, dtype, seed
+        )
+        rng = np.random.default_rng(seed)
+        x = (rng.uniform(-1, 1, shape) + 1.5).astype(dtype)
+        actual, expected = model_runner.run_sample(
+            model, [x], reference_model=reference
+        )
+        atol, rtol = _TOLERANCE[dtype]
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)
+
+    # The exported Reshape + InstanceNormalization + Mul/Add (+ SiLU) chain
+    # fuses to one GroupNorm; results must match the unfused reference.
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ([2, 64, 8, 8], 32, 0, 1, np.float32),
+            ([1, 128, 64, 64], 32, 0, 0, np.float16),
+            ([1, 256, 96, 96], 32, 0, 1, np.float16),
+        ],
+        ids=_case_id,
+    )
+    def test_group_norm_decomposition(self, model_runner, case):
+        shape, groups, channels_last, activation, dtype = case
+        seed = zlib.crc32(_case_id(case).encode())
+        model = _decomposed_model(shape, groups, activation, dtype, seed)
+        reference = _reference_model(
+            shape, groups, channels_last, activation, dtype, seed
+        )
+        rng = np.random.default_rng(seed)
+        x = (rng.uniform(-1, 1, shape) + 1.5).astype(dtype)
+        actual, expected = model_runner.run_sample(
+            model, [x], reference_model=reference
+        )
+        atol, rtol = _TOLERANCE[dtype]
+        compare_outputs(actual, expected, atol=atol, rtol=rtol)
