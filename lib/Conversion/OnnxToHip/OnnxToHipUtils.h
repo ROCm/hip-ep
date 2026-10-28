@@ -43,6 +43,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <optional>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
@@ -117,6 +118,46 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
     }
   }
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
+}
+
+/// `reduced_axes` for a hip.reduce_* whose `axes` is a compile-time constant:
+/// normalized, sorted and unique. Empty axes mean every axis, or none under
+/// noop_with_empty_axes. Null when `data` is unranked or `axes` is not
+/// constant.
+inline mlir::DenseI64ArrayAttr
+getConstantReducedAxesAttr(mlir::Builder &builder, mlir::Value data,
+                           mlir::Value axes, int64_t noopWithEmptyAxes) {
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!inputType) {
+    return nullptr;
+  }
+  llvm::SmallVector<int64_t> list;
+  if (!matchConstantIntTensor(axes, list)) {
+    mlir::Operation *def = axes.getDefiningOp();
+    auto dense =
+        def ? def->getAttrOfType<mlir::DenseIntElementsAttr>("value") : nullptr;
+    if (!dense) {
+      return nullptr;
+    }
+    for (const llvm::APInt &v : dense.getValues<llvm::APInt>()) {
+      list.push_back(v.getSExtValue());
+    }
+  }
+  int64_t rank = inputType.getRank();
+  if (list.empty() && noopWithEmptyAxes == 0) {
+    llvm::append_range(list, llvm::seq<int64_t>(0, rank));
+  }
+  for (int64_t &axis : list) {
+    if (axis < 0) {
+      axis += rank;
+    }
+    if (axis < 0 || axis >= rank) {
+      return nullptr;
+    }
+  }
+  llvm::sort(list);
+  list.erase(std::unique(list.begin(), list.end()), list.end());
+  return builder.getDenseI64ArrayAttr(list);
 }
 
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
@@ -300,15 +341,17 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
 /// \param presentValueType ditto for present_value
 /// \param attentionBias   Optional additive mask, [batch/1, heads/1, seq_q,
 ///                        seq_kv]. nullptr when absent.
-mlir::LogicalResult
-buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
-                mlir::Value context, mlir::Value query, mlir::Value key,
-                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
-                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
-                float scale, bool noCausal, mlir::RankedTensorType outputType,
-                mlir::RankedTensorType presentKeyType,
-                mlir::RankedTensorType presentValueType,
-                mlir::Value attentionBias = nullptr);
+/// \param presentLength   Optional index: the present buffers' sequence
+///                        extent when it is dynamic and not the past's
+///                        (present = concat(past, this step)).
+mlir::LogicalResult buildHipGqaCall(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter, mlir::Value context,
+    mlir::Value query, mlir::Value key, mlir::Value value, mlir::Value pastKey,
+    mlir::Value pastValue, mlir::Value seqlensK, mlir::Value totalSeqLen,
+    int64_t numHeads, float scale, bool noCausal,
+    mlir::RankedTensorType outputType, mlir::RankedTensorType presentKeyType,
+    mlir::RankedTensorType presentValueType,
+    mlir::Value attentionBias = nullptr, mlir::Value presentLength = nullptr);
 
 /// `readbackScalarToHost` recovering !hip.context from `op`. Falls back to a
 /// bare `tensor.extract` when the function has no context arg (utility funcs /

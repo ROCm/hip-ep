@@ -13,14 +13,13 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// A single compile-time axis is the product of the input dims after that axis.
-// keepdims=0 deletes the axis, so matching input and output shapes from the
-// trailing end is ambiguous when the deleted extent equals a surviving
-// neighbor: [1, 6, 5, 5] -> [1, 6, 5] matches the last 5 and reports
-// inner_size=5, but axis 3 has inner_size=1. By the time this pattern runs,
-// that constant may still be a memref.global or already an llvm.mlir.global.
-static FailureOr<int64_t> innerSizeFromConstantAxis(Value axes,
-                                                    ArrayRef<int64_t> inShape) {
+// The single axis stored in a constant axes memref, or failure when that
+// memref is not a one-element constant. keepdims=0 deletes the axis, so
+// matching input and output shapes from the trailing end is ambiguous when
+// the deleted extent equals a surviving neighbor. By the time this pattern
+// runs, the constant may still be a memref.global or already an
+// llvm.mlir.global.
+static FailureOr<int64_t> constantReducedAxis(Value axes, int64_t rank) {
   Value root = axes;
   while (auto castOp = root.getDefiningOp<memref::CastOp>())
     root = castOp.getSource();
@@ -44,17 +43,11 @@ static FailureOr<int64_t> innerSizeFromConstantAxis(Value axes,
   if (!dense || dense.getNumElements() != 1)
     return failure();
   int64_t axis = (*dense.getValues<APInt>().begin()).getSExtValue();
-  int64_t rank = static_cast<int64_t>(inShape.size());
   if (axis < 0)
     axis += rank;
   if (axis < 0 || axis >= rank)
     return failure();
-  int64_t inner = 1;
-  for (int64_t dim : inShape.drop_front(axis + 1))
-    inner *= dim;
-  if (inner <= 0)
-    return failure();
-  return inner;
+  return axis;
 }
 
 // Generic template for reduction-style ops with the shared
@@ -72,6 +65,44 @@ static FailureOr<int64_t> innerSizeFromConstantAxis(Value axes,
 //                     int64_t keepdims, int64_t noop_with_empty_axes)
 //
 // Supports both static and dynamic shapes (computes num_elements at runtime).
+
+// The single axis whose removal (keepdims=0) or collapse to 1 (keepdims=1)
+// turns `in` into `out`, or -1 if none or more than one axis fits. A dynamic
+// dim matches only a dynamic dim.
+static int64_t inferSingleReducedAxis(ArrayRef<int64_t> in,
+                                      ArrayRef<int64_t> out, bool keepdims) {
+  const int64_t rank = static_cast<int64_t>(in.size());
+  if (static_cast<int64_t>(out.size()) != (keepdims ? rank : rank - 1)) {
+    return -1;
+  }
+  auto same = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) ? ShapedType::isDynamic(b) : a == b;
+  };
+  int64_t found = -1;
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    if (in[axis] == 1) {
+      continue;
+    }
+    bool fits = true;
+    for (int64_t i = 0, o = 0; i < rank && fits; ++i) {
+      if (i == axis) {
+        if (keepdims) {
+          fits = out[o++] == 1;
+        }
+        continue;
+      }
+      fits = same(in[i], out[o++]);
+    }
+    if (fits) {
+      if (found >= 0) {
+        return -1;
+      }
+      found = axis;
+    }
+  }
+  return found;
+}
+
 template <typename OpTy>
 struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -126,55 +157,57 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value keepdimsVal = createI64Const(op.getKeepdims());
     Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
-    // inner_size = product of input dims AFTER the reduced axis. A constant
-    // axis supplies that directly. Otherwise align the input and output shapes
-    // from the trailing end and multiply the dims that match; the first
-    // mismatch is the reduced axis. The runtime kernel uses
-    // this stride so a NON-trailing-axis reduce (e.g. NCHW channel-axis
-    // LayerNorm2d, axes=[1]) reads the correct strided elements instead of
-    // contiguous trailing ones.
+    // inner_size = product of the input dims after the last reduced axis. The
+    // runtime kernel strides by it, so a non-trailing reduce (e.g. NCHW
+    // channel-axis LayerNorm2d, axes=[1]) reads the right elements; it handles
+    // one contiguous run of reduced axes.
     //
-    // Before / After (channel-axis ReduceSum over NCHW, the LayerNorm2d case;
-    // only the trailing i64 operand of the call changes -- it carries the new
-    // inner_size):
-    //
-    //   %data : memref<1x512x64x64xf16>   %out : memref<1x1x64x64xf16>
-    //   // align from the right: [1,512,64,64] vs [1,1,64,64] -> first mismatch
-    //   // at axis 1, so inner_size = 64*64 = 4096, reduce_size = 512.
-    //
-    //   Before (this lowering, contiguous-only): emitted inner=1 implicitly
-    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
-    //         dataNum, outNum, axesNum, dtype, keepdims, noop)        // 10
-    //         args
-    //     // kernel did out[o] = sum_r data[o*512 + r]  -- WRONG (reads 512
-    //     // contiguous elems instead of 512 elems spaced 4096 apart)
-    //
-    //   After:
-    //     %inner = llvm.mlir.constant(4096 : i64)
-    //     llvm.call @wrap_reduce_sum(state, data, axes, out,
-    //         dataNum, outNum, axesNum, dtype, keepdims, noop, %inner) // 11
-    //         args
-    //     // kernel does out[oo*4096+ii] = sum_r data[oo*512*4096 + r*4096 +
-    //     ii]
-    //
-    // A constant axis wins. Otherwise the reduced axis is the first position
-    // where the input and output shapes diverge when aligned from the trailing
-    // end. That shape match is wrong for keepdims=0 when a deleted extent
-    // equals the dim that slides into its place, so a runtime axes memref
-    // still uses it only as a fallback. inner<=0 or a product that does not
-    // divide the output size falls back to 1, the contiguous path.
-    int64_t innerSize = 1;
-    bool innerFromAxis = false;
-    if (dataType.hasStaticShape()) {
-      if (FailureOr<int64_t> fromAxis =
-              innerSizeFromConstantAxis(op.getAxes(), dataType.getShape());
-          succeeded(fromAxis)) {
-        innerSize = *fromAxis;
-        innerFromAxis = true;
+    // `reduced_axes` gives the axes directly. Without that attribute, a
+    // one-element constant axes memref still names the axis. Shape inference
+    // is only the fallback: the first trailing mismatch for static shapes,
+    // inferSingleReducedAxis otherwise. Shapes alone cannot always identify
+    // the axis (e.g. [1,6,5,5] -> [1,6,5] or [4,4,4] -> [4,4]).
+    auto innerSizeAfter = [&](int64_t axis) -> Value {
+      int64_t staticInner = 1;
+      SmallVector<int64_t> dynamicDims;
+      for (int64_t i = axis + 1; i < dataType.getRank(); ++i) {
+        if (dataType.isDynamicDim(i)) {
+          dynamicDims.push_back(i);
+        } else {
+          staticInner *= dataType.getDimSize(i);
+        }
       }
-    }
-    if (!innerFromAxis && dataType.hasStaticShape() &&
-        outputType.hasStaticShape()) {
+      Value inner = createI64Const(staticInner);
+      MemRefDescriptor desc(adaptor.getData());
+      for (int64_t i : dynamicDims) {
+        inner = LLVM::MulOp::create(rewriter, loc, inner,
+                                    desc.size(rewriter, loc, i));
+      }
+      return inner;
+    };
+
+    Value innerSizeVal;
+    if (std::optional<ArrayRef<int64_t>> axes = op.getReducedAxes()) {
+      if (axes->empty()) {
+        innerSizeVal = createI64Const(1);
+      } else {
+        if (axes->back() >= dataType.getRank()) {
+          return rewriter.notifyMatchFailure(op, "reduced_axes out of range");
+        }
+        for (int64_t i = axes->front(); i < axes->back(); ++i) {
+          if (!llvm::is_contained(*axes, i) && dataType.getDimSize(i) != 1) {
+            return rewriter.notifyMatchFailure(
+                op, "reduced_axes must be contiguous");
+          }
+        }
+        innerSizeVal = innerSizeAfter(axes->back());
+      }
+    } else if (FailureOr<int64_t> axis =
+                   constantReducedAxis(op.getAxes(), dataType.getRank());
+               succeeded(axis)) {
+      innerSizeVal = innerSizeAfter(*axis);
+    } else if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
+      int64_t innerSize = 1;
       llvm::ArrayRef<int64_t> inShape = dataType.getShape();
       llvm::ArrayRef<int64_t> outShape = outputType.getShape();
       int64_t i = static_cast<int64_t>(inShape.size()) - 1;
@@ -184,15 +217,17 @@ struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
         --i;
         --o;
       }
-    }
-    if (dataType.hasStaticShape() && outputType.hasStaticShape()) {
       int64_t outNum = 1;
-      for (int64_t d : outputType.getShape())
+      for (int64_t d : outShape)
         outNum *= d;
       if (innerSize <= 0 || (outNum % innerSize) != 0)
         innerSize = 1;
+      innerSizeVal = createI64Const(innerSize);
+    } else {
+      int64_t axis = inferSingleReducedAxis(
+          dataType.getShape(), outputType.getShape(), op.getKeepdims() != 0);
+      innerSizeVal = axis >= 0 ? innerSizeAfter(axis) : createI64Const(1);
     }
-    Value innerSizeVal = createI64Const(innerSize);
 
     SmallVector<Type, 11> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,

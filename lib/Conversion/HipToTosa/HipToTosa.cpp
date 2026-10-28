@@ -4379,6 +4379,9 @@ static bool isTosaExpressibleResize(hip::ResizeOp op) {
 
   if (op.getMode() != 1)
     return false;
+  // planResizeAxis derives the scale from the extents.
+  if (op.getScales())
+    return false;
 
   int64_t coordTransform = op.getCoordTransform();
   return planResizeAxis(inputType.getDimSize(2), resultType.getDimSize(2),

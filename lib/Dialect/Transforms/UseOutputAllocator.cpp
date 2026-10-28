@@ -19,8 +19,8 @@
 //   - leaves the view ops in place -- only the alloc op itself changes,
 //   - when the output is returned through a rank-changing view (collapse_shape
 //     or expand_shape), stamps `hipdnn.abi_shape` / `hipdnn.abi_groups` so the
-//     HIP->LLVM lowering issues the output-allocator callback at the RETURNED
-//     (ONNX) rank rather than the internal compute rank (see
+//     HIP->LLVM lowering issues the output-allocator callback at the returned
+//     graph rank rather than the internal compute rank (see
 //     stampAbiReshapeAttrs).
 //
 // How outputs are found. Rather than listing every view op by hand, the pass
@@ -30,9 +30,9 @@
 // `memref.cast`, or a reshaped output such as a rank-4 conv result collapsed to
 // rank-2 before the return.
 //
-// Only public (graph-entry) functions are rewritten. Private helpers (e.g.
-// outlined `onnx.Loop` bodies) also take a `!hip.context` arg and return
-// allocs, but those buffers stay inside the DLL and are not EP outputs --
+// Only public (graph-entry) functions are rewritten. Private helper functions
+// may also take a `!hip.context` arg and return allocs, but those buffers stay
+// inside the DLL and are not EP outputs --
 // rewriting them would hand out an `out_idx` that clashes with the real
 // outputs. Functions whose arg 0 is not `!hip.context` are skipped too (no
 // runtime handle to pass to the new op). A pass-through output (a returned
@@ -69,6 +69,8 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
+#include "mlir/Support/LogicalResult.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -175,6 +177,106 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
                        builder.getDenseI64ArrayAttr(groups));
 }
 
+/// Return the single rank-increasing expand_shape in the view chain from
+/// \p retVal back to \p root. Casts are transparent; any other view shape, or
+/// more than one reshape, is deliberately rejected.
+static memref::ExpandShapeOp findSingleExpandShape(Value root, Value retVal) {
+  memref::ExpandShapeOp expand;
+  Value cur = retVal;
+  while (cur != root) {
+    Operation *def = cur.getDefiningOp();
+    if (!def)
+      return {};
+    if (auto e = dyn_cast<memref::ExpandShapeOp>(def)) {
+      if (expand)
+        return {};
+      expand = e;
+      cur = e.getSrc();
+      continue;
+    }
+    if (auto castOp = dyn_cast<memref::CastOp>(def)) {
+      cur = castOp.getSource();
+      continue;
+    }
+    return {};
+  }
+  return expand;
+}
+
+/// A rank-increasing expand can split one internal dynamic dimension into
+/// multiple external dynamic dimensions. The existing abi_groups lowering
+/// cannot reconstruct those individual extents from their product. Allocate
+/// the graph output at the external rank instead, then collapse it back to the
+/// internal compute rank. Both descriptors alias the same contiguous storage:
+///
+///   alloc_output [B, S, H] -> collapse [B*S, H] -> compute -> expand [B,S,H]
+///
+/// Returns null when the ordinary internal-rank allocation + abi_groups path
+/// remains sufficient, or failure when the matched rewrite is invalid.
+static FailureOr<Value> createExternalRankAllocationForMultiDynExpand(
+    memref::AllocOp allocOp, Value retVal, Value ctx, int64_t outIdx,
+    DominanceInfo &dominance, OpBuilder &builder) {
+  memref::ExpandShapeOp expand =
+      findSingleExpandShape(allocOp.getResult(), retVal);
+  if (!expand)
+    return Value{};
+
+  auto internalType = allocOp.getType();
+  auto externalType = expand.getResultType();
+  if (externalType.getRank() <= internalType.getRank())
+    return Value{};
+
+  bool hasMultiDynamicGroup = llvm::any_of(
+      expand.getReassociationIndices(), [&](ArrayRef<int64_t> group) {
+        return llvm::count_if(group, [&](int64_t dim) {
+                 return externalType.isDynamicDim(dim);
+               }) > 1;
+      });
+  if (!hasMultiDynamicGroup)
+    return Value{};
+
+  ValueRange externalDynamicSizes = expand.getOutputShape();
+  if (static_cast<int64_t>(externalDynamicSizes.size()) !=
+      externalType.getNumDynamicDims()) {
+    allocOp.emitError() << "rank-increasing graph output has "
+                        << externalType.getNumDynamicDims()
+                        << " dynamic dimensions but expand_shape carries "
+                        << externalDynamicSizes.size() << " runtime sizes";
+    return failure();
+  }
+  for (Value size : externalDynamicSizes) {
+    if (!dominance.dominates(size, allocOp)) {
+      allocOp.emitError()
+          << "external graph-output dimension does not dominate allocation";
+      return failure();
+    }
+  }
+
+  auto collapsedType = expand.getSrcType();
+  if (collapsedType != internalType &&
+      !memref::CastOp::areCastCompatible(collapsedType, internalType)) {
+    allocOp.emitError() << "cannot cast collapsed graph-output view from "
+                        << collapsedType << " to allocation type "
+                        << internalType;
+    return failure();
+  }
+
+  builder.setInsertionPoint(allocOp);
+  auto allocOutput = AllocOutputOp::create(
+      builder, allocOp.getLoc(), externalType, ctx, externalDynamicSizes,
+      builder.getI64IntegerAttr(outIdx));
+  auto internalView = memref::CollapseShapeOp::create(
+      builder, allocOp.getLoc(), collapsedType, allocOutput.getResult(),
+      expand.getReassociationIndices());
+  Value replacement = internalView.getResult();
+  if (collapsedType != internalType)
+    replacement = memref::CastOp::create(builder, allocOp.getLoc(),
+                                         internalType, replacement);
+  assert(replacement.getType() == internalType &&
+         "graph-output replacement must match the allocation type");
+  return replacement;
+}
+
 /// Walk cast / reshape / subview chains back to the buffer they view.
 static Value skipViews(Value value) {
   while (Operation *def = value.getDefiningOp()) {
@@ -190,9 +292,9 @@ static Value skipViews(Value value) {
 }
 
 /// Copy a returned buffer that is not rooted at `hip.alloc_output` into a new
-/// one and return the copy. The source is typically a graph input forwarded by
-/// `onnx.Identity`. The copy is what makes the output allocator run for this
-/// output index.
+/// one and return the copy. The source is typically a graph input returned
+/// directly or through a view. The copy is what makes the output allocator run
+/// for this output index.
 static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
                                          int64_t outIdx, OpBuilder &builder) {
   Value source = returnOp.getOperand(outIdx);
@@ -231,9 +333,9 @@ struct UseOutputAllocatorPass
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
 
-    // Only public (graph-entry) functions own EP outputs. Private helpers (e.g.
-    // outlined onnx.Loop bodies) also carry a !hip.context arg 0 and return
-    // memref.allocs, but their outputs are DLL-internal -> skip non-public.
+    // Only public (graph-entry) functions own EP outputs. Private helper
+    // functions may also carry a !hip.context arg 0 and return memref.allocs,
+    // but their outputs are DLL-internal -> skip non-public.
     if (!funcOp.isPublic() || funcOp.empty())
       return;
 
@@ -272,14 +374,40 @@ struct UseOutputAllocatorPass
     });
 
     // The single func.return of this graph-entry function. Used to recover the
-    // returned (ONNX ABI) value per output index for the collapse-shape ABI
+    // returned graph value per output index for the collapse-shape ABI
     // adjustment below.
     func::ReturnOp returnOp;
     funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
 
     // Phase 2 -- rewrite (IR mutation only; the analysis is no longer queried).
     OpBuilder builder(funcOp.getContext());
+    DominanceInfo dominance(funcOp);
     for (auto [allocOp, outIdx] : outputs) {
+      Value retVal =
+          returnOp && outIdx >= 0 &&
+                  outIdx < static_cast<int64_t>(returnOp.getNumOperands())
+              ? returnOp.getOperand(outIdx)
+              : Value{};
+      Value replacement;
+      if (retVal) {
+        FailureOr<Value> result = createExternalRankAllocationForMultiDynExpand(
+            allocOp, retVal, ctx, outIdx, dominance, builder);
+        if (failed(result)) {
+          signalPassFailure();
+          return;
+        }
+        replacement = *result;
+      }
+
+      AllocOutputOp allocOutput;
+      if (!replacement) {
+        builder.setInsertionPoint(allocOp);
+        allocOutput = AllocOutputOp::create(
+            builder, allocOp.getLoc(), allocOp.getType(), ctx,
+            allocOp.getDynamicSizes(), builder.getI64IntegerAttr(outIdx));
+        replacement = allocOutput.getResult();
+      }
+
       // The EP owns this buffer now, so drop any dealloc of it. A returned
       // buffer normally has none, but remove one if present -- the EP-owned
       // output must never be freed by the graph.
@@ -287,20 +415,17 @@ struct UseOutputAllocatorPass
         if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
           dealloc.erase();
 
-      builder.setInsertionPoint(allocOp);
-      auto allocOutput = AllocOutputOp::create(
-          builder, allocOp.getLoc(), allocOp.getType(), ctx,
-          allocOp.getDynamicSizes(), builder.getI64IntegerAttr(outIdx));
-      allocOp.getResult().replaceAllUsesWith(allocOutput.getResult());
-      allocOp.erase();
+      allocOp.getResult().replaceAllUsesWith(replacement);
 
       // After RAUW the returned value's view chain is rooted at allocOutput.
-      // Record the ONNX return shape when it is a rank-reduced collapse of the
-      // internal compute buffer, so the lowering issues the output-allocator
-      // callback at the returned (ONNX) rank (see stampAbiReshapeAttrs).
-      if (returnOp && outIdx >= 0 &&
-          outIdx < static_cast<int64_t>(returnOp.getNumOperands()))
-        stampAbiReshapeAttrs(allocOutput, returnOp.getOperand(outIdx), builder);
+      // Record the returned graph shape when it is a rank-reduced collapse of
+      // the internal compute buffer, so the lowering issues the
+      // output-allocator callback at the returned graph rank (see
+      // stampAbiReshapeAttrs).
+      if (allocOutput && retVal)
+        stampAbiReshapeAttrs(allocOutput, retVal, builder);
+
+      allocOp.erase();
     }
 
     // Phase 3 -- pass-through outputs. A returned input (or a view of one)

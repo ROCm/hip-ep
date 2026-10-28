@@ -350,3 +350,27 @@ class TestReduceProd:
         # ULP(1.46) in fp16 ~= 1.4e-3; 2e-3 covers the single output-write
         # rounding (fp32-internal kernel).
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "op_type",
+    ["ReduceSum", "ReduceMean", "ReduceL2", "ReduceMax", "ReduceMin", "ReduceProd"],
+)
+@pytest.mark.parametrize(
+    "shape,axes,keepdims",
+    [
+        ([2, 4, 4], [2], 0),
+        (["N", 4, 4], [1], 0),
+        (["N", 3, 4, 5], [-3, -2], 1),
+    ],
+)
+def test_reduce_axes_not_inferable_from_shape(
+    model_runner, op_type, shape, axes, keepdims
+):
+    """Constant axes whose position the input/output shapes do not pin down."""
+    model = _make_reduce_model(op_type, np.float16, shape, axes, keepdims)
+    rng = np.random.default_rng(58)
+    concrete = [37 if d == "N" else d for d in shape]
+    x = rng.uniform(0.5, 1.5, concrete).astype(np.float16)
+    actual, expected = model_runner.run_sample(model, [x])
+    compare_outputs(actual, expected, atol=2e-2, rtol=2e-2)
