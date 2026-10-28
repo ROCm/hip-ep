@@ -24,6 +24,9 @@ Check the required facts through an explicit contract or analysis.
 
 ## 2. Separate the algorithm from backend policy
 
+Keep each pass focused on one job. Reuse existing passes, analyses, and
+interfaces before adding new logic.
+
 A generic pass may get target information through an interface. Keep the
 backend logic behind that interface.
 
@@ -34,8 +37,6 @@ restrictions.
 Put target-specific transformations in backend passes.
 
 ## 3. Keep operation rules with the operation
-
-Reuse existing helpers and MLIR interfaces before adding new ones.
 
 - Keep shape rules in the operation's inference or reification implementation.
 - Describe aliasing and memory effects through interfaces.
