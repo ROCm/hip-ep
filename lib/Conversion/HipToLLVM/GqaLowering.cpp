@@ -19,6 +19,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 #if HIP_EP_RING_ENABLED != 0
+    // Neither Ring nor its fallback implements softcap. Reject it before
+    // emitting a runtime call whose error return the graph does not propagate.
+    if (!op.getSoftcap().isZero())
+      return op.emitOpError("Ring GQA builds do not support nonzero softcap");
+
     // The runtime's element_size_bytes argument cannot distinguish BF16 from
     // FP16. Ring builds reject ambiguous types before erasing that information.
     Type queryElement =

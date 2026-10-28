@@ -18,7 +18,7 @@ Rebuild/install the compiler, runtime and native kernels together. Point the app
 
 Ring targets gfx1151 with FP16 separate Q/K/V, batch 1, 24 query heads, four KV heads, head dimension 256, scale 1/16, external RoPE and causal attention. It accepts 1..262144 new tokens and at most 262272 valid KV tokens (256K plus 128 outputs). Cache capacity may exceed the valid length. Q/output use BSHD and the prepared present cache uses BNSD. Selection and writable-range validation occur before cache mutation; the existing runtime stream is retained.
 
-Other supported geometries, architectures, packed inputs, in-op RoPE, quantized caches, bias, windows and sinks retain existing GQA routing. Ring builds reject softcap because neither route implements it. They also reject BF16 and mismatched unquantized cache types: the existing runtime ABI conveys element width, which cannot distinguish BF16 from FP16. FP32 retains its existing route. No cache compression or model changes are introduced.
+Other supported geometries, architectures, packed inputs, in-op RoPE, quantized caches, bias, windows and sinks retain existing GQA routing. Ring builds reject nonzero softcap during HIP-to-LLVM lowering, before emitting a runtime call, because neither route implements it. This also applies to FP32 and other fallback configurations; zero or omitted softcap remains accepted. They also reject BF16 and mismatched unquantized cache types: the existing runtime ABI conveys element width, which cannot distinguish BF16 from FP16. FP32 retains its existing route. No cache compression or model changes are introduced.
 
 ## Algorithms
 
