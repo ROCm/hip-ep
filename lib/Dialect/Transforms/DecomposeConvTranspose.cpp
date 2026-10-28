@@ -6,6 +6,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/IR/BuiltinAttributes.h>
@@ -169,6 +170,215 @@ FailureOr<DenseElementsAttr> readConstant(ConstantOp constant,
   return value;
 }
 
+/// Decompose a 1-D transposed convolution through the same 2-D hip.conv path
+/// used by the general decomposition. The temporary height dimension is one:
+///
+///   [N, C, W] -> [N, C, 1, W]
+///
+/// Keeping W dynamic is important: the residue padding is derived solely from
+/// static ConvTranspose attributes, while tensor.dim supplies the dynamic
+/// extent for the temporary tensors and the final crop.
+static LogicalResult decompose1DConvTranspose(ConvTransposeOp op,
+                                              PatternRewriter &rewriter) {
+  auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
+  auto weightType = dyn_cast<RankedTensorType>(op.getWeights().getType());
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!inputType || !weightType || !resultType || !weightType.hasStaticShape())
+    return rewriter.notifyMatchFailure(
+        op, "expected ranked tensors and static weights");
+  if (inputType.getRank() != 3 || weightType.getRank() != 3 ||
+      resultType.getRank() != 3)
+    return rewriter.notifyMatchFailure(op, "expected 1D transposed conv");
+  if (inputType.isDynamicDim(1) || resultType.isDynamicDim(1))
+    return rewriter.notifyMatchFailure(op,
+                                       "expected static channel dimensions");
+  if (op.getGroup() != 1)
+    return rewriter.notifyMatchFailure(op, "grouped transposed conv");
+
+  Type elementType = resultType.getElementType();
+  if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32())
+    return rewriter.notifyMatchFailure(op, "expected f16, bf16, or f32");
+  if (inputType.getElementType() != elementType ||
+      weightType.getElementType() != elementType)
+    return rewriter.notifyMatchFailure(op, "expected matching element types");
+
+  auto weightConst = op.getWeights().getDefiningOp<ConstantOp>();
+  if (!weightConst)
+    return rewriter.notifyMatchFailure(op, "weights are not a hip.constant");
+  FailureOr<DenseElementsAttr> weightData =
+      readConstant(weightConst, weightType);
+  if (failed(weightData))
+    return rewriter.notifyMatchFailure(op, "weights are not readable here");
+  SmallVector<APFloat> weightValues(weightData->getValues<APFloat>().begin(),
+                                    weightData->getValues<APFloat>().end());
+
+  SmallVector<int64_t> strides = getI64Values(op.getStridesAttr());
+  SmallVector<int64_t> pads = getI64Values(op.getPadsAttr());
+  SmallVector<int64_t> dilations = getI64Values(op.getDilationsAttr());
+  SmallVector<int64_t> outputPadding = getI64Values(op.getOutputPaddingAttr());
+  if (strides.size() != 1 || pads.size() != 2 || dilations.size() != 1 ||
+      outputPadding.size() != 1)
+    return rewriter.notifyMatchFailure(op, "expected 1D spatial attributes");
+  if (dilations[0] != 1)
+    return rewriter.notifyMatchFailure(op, "dilated transposed conv");
+
+  const int64_t stride = strides[0];
+  const int64_t kernel = weightType.getDimSize(2);
+  const int64_t padLo = pads[0];
+  const int64_t padHi = pads[1];
+  if (stride < 1 || padLo < 0 || padHi < 0 || stride > kernel)
+    return rewriter.notifyMatchFailure(op, "unsupported stride or padding");
+  if (outputPadding[0] < 0 || outputPadding[0] >= stride)
+    return rewriter.notifyMatchFailure(
+        op, "output_padding must be less than stride");
+
+  const int64_t ydot = llvm::divideCeil(kernel, stride);
+  // With dilation one, the grid length is inputWidth plus this static
+  // extension. The second term is the static counterpart of the 2-D pass's
+  // `max(natural, needed)` calculation.
+  const int64_t neededYdot =
+      llvm::divideCeil(kernel - padHi + outputPadding[0], stride);
+  const int64_t trailingPad =
+      ydot - 1 + std::max<int64_t>(0, neededYdot - ydot);
+
+  const int64_t inChannels = weightType.getDimSize(0);
+  const int64_t outChannels = weightType.getDimSize(1);
+  if (inputType.getDimSize(1) != inChannels ||
+      resultType.getDimSize(1) != outChannels)
+    return rewriter.notifyMatchFailure(op, "incompatible batch or channels");
+  if (!inputType.isDynamicDim(0) && !resultType.isDynamicDim(0) &&
+      inputType.getDimSize(0) != resultType.getDimSize(0))
+    return rewriter.notifyMatchFailure(op, "incompatible batch dimensions");
+
+  Value bias = op.getBias();
+  if (bias) {
+    auto biasType = dyn_cast<RankedTensorType>(bias.getType());
+    if (!biasType || !biasType.hasStaticShape() || biasType.getRank() != 1 ||
+        biasType.getDimSize(0) != outChannels ||
+        biasType.getElementType() != elementType)
+      return rewriter.notifyMatchFailure(
+          op, "expected a static 1-D bias of matching type and length M");
+  }
+
+  Location loc = op.getLoc();
+  auto input4Type = RankedTensorType::get(
+      {inputType.getDimSize(0), inChannels, 1, inputType.getDimSize(2)},
+      elementType);
+  Value input4 = tensor::ExpandShapeOp::create(
+                     rewriter, loc, input4Type, op.getInput(),
+                     SmallVector<ReassociationIndices>{{0}, {1}, {2, 3}})
+                     .getResult();
+
+  Value inputBatch =
+      tensor::DimOp::create(rewriter, loc, op.getInput(), 0).getResult();
+  Value outputBatch =
+      tensor::DimOp::create(rewriter, loc, op.getOutput(), 0).getResult();
+  Value inputWidth =
+      tensor::DimOp::create(rewriter, loc, op.getInput(), 2).getResult();
+  Value outputWidth =
+      tensor::DimOp::create(rewriter, loc, op.getOutput(), 2).getResult();
+  Value partialWidth = arith::AddIOp::create(
+      rewriter, loc, inputWidth,
+      arith::ConstantIndexOp::create(rewriter, loc, ydot - 1 + trailingPad));
+  auto dynamic4Type = RankedTensorType::get(
+      {inputType.getDimSize(0), outChannels, 1, ShapedType::kDynamic},
+      elementType);
+  Value scattered =
+      tensor::EmptyOp::create(rewriter, loc, dynamic4Type,
+                              ValueRange{inputBatch, partialWidth})
+          .getResult();
+  const APFloat zero =
+      APFloat::getZero(cast<FloatType>(elementType).getFloatSemantics());
+
+  for (int64_t residue : llvm::seq<int64_t>(stride)) {
+    const int64_t taps = (kernel - residue + stride - 1) / stride;
+    SmallVector<int64_t, 4> subShape{outChannels, inChannels, 1, taps};
+    SmallVector<APFloat> subValues(outChannels * inChannels * taps, zero);
+    for (int64_t m : llvm::seq<int64_t>(outChannels))
+      for (int64_t c : llvm::seq<int64_t>(inChannels))
+        for (int64_t tap : llvm::seq<int64_t>(taps)) {
+          const int64_t sourceTap = residue + (taps - 1 - tap) * stride;
+          subValues[flatIndex(subShape, m, c, 0, tap)] =
+              weightValues[(c * outChannels + m) * kernel + sourceTap];
+        }
+
+    auto subWeightType = RankedTensorType::get(subShape, elementType);
+    Value subWeight =
+        ConstantOp::create(rewriter, loc, subWeightType,
+                           DenseElementsAttr::get(subWeightType, subValues))
+            .getResult();
+    Value partialInit =
+        tensor::EmptyOp::create(rewriter, loc, dynamic4Type,
+                                ValueRange{inputBatch, partialWidth})
+            .getResult();
+    Value partial =
+        ConvOp::create(
+            rewriter, loc, TypeRange{dynamic4Type},
+            ValueRange{op.getCtx(), input4, subWeight, partialInit},
+            ArrayRef<NamedAttribute>{
+                rewriter.getNamedAttr("kernel_shape",
+                                      rewriter.getI64ArrayAttr({1, taps})),
+                rewriter.getNamedAttr("strides",
+                                      rewriter.getI64ArrayAttr({1, 1})),
+                rewriter.getNamedAttr(
+                    "pads",
+                    rewriter.getI64ArrayAttr({0, taps - 1, 0, trailingPad})),
+                rewriter.getNamedAttr("dilations",
+                                      rewriter.getI64ArrayAttr({1, 1})),
+                rewriter.getNamedAttr("group", rewriter.getI64IntegerAttr(1))})
+            .getResult(0);
+
+    scattered =
+        tensor::InsertSliceOp::create(
+            rewriter, loc, partial, scattered,
+            SmallVector<OpFoldResult>{
+                rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
+                rewriter.getIndexAttr(0), rewriter.getIndexAttr(residue)},
+            SmallVector<OpFoldResult>{inputBatch,
+                                      rewriter.getIndexAttr(outChannels),
+                                      rewriter.getIndexAttr(1), partialWidth},
+            SmallVector<OpFoldResult>{
+                rewriter.getIndexAttr(1), rewriter.getIndexAttr(1),
+                rewriter.getIndexAttr(1), rewriter.getIndexAttr(stride)})
+            .getResult();
+  }
+
+  auto result4Type = RankedTensorType::get(
+      {resultType.getDimSize(0), outChannels, 1, ShapedType::kDynamic},
+      elementType);
+  Value result4 = tensor::ExtractSliceOp::create(
+      rewriter, loc, result4Type, scattered,
+      SmallVector<OpFoldResult>{
+          rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
+          rewriter.getIndexAttr(0), rewriter.getIndexAttr(padLo)},
+      SmallVector<OpFoldResult>{outputBatch, rewriter.getIndexAttr(outChannels),
+                                rewriter.getIndexAttr(1), outputWidth},
+      SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1)));
+
+  if (bias) {
+    auto shapedBiasType =
+        RankedTensorType::get({1, outChannels, 1, 1}, elementType);
+    Value shapedBias = tensor::ExpandShapeOp::create(
+                           rewriter, loc, shapedBiasType, bias,
+                           SmallVector<ReassociationIndices>{{0, 1, 2, 3}})
+                           .getResult();
+    Value biasInit =
+        tensor::EmptyOp::create(rewriter, loc, result4Type,
+                                ValueRange{outputBatch, outputWidth})
+            .getResult();
+    result4 = AddOp::create(rewriter, loc, result4Type, op.getCtx(), result4,
+                            shapedBias, biasInit)
+                  .getResult(0);
+  }
+
+  Value result = tensor::CollapseShapeOp::create(
+                     rewriter, loc, resultType, result4,
+                     SmallVector<ReassociationIndices>{{0}, {1}, {2, 3}})
+                     .getResult();
+  rewriter.replaceOp(op, result);
+  return success();
+}
+
 LogicalResult
 DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
                                         PatternRewriter &rewriter) const {
@@ -178,6 +388,8 @@ DecomposeConvTranspose::matchAndRewrite(ConvTransposeOp op,
   auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
   auto weightType = dyn_cast<RankedTensorType>(op.getWeights().getType());
   auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (inputType && inputType.getRank() == 3)
+    return decompose1DConvTranspose(op, rewriter);
   if (!inputType || !weightType || !resultType || !inputType.hasStaticShape() ||
       !weightType.hasStaticShape() || !resultType.hasStaticShape())
     return rewriter.notifyMatchFailure(op, "expected static ranked tensors");
