@@ -8,8 +8,9 @@
  *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
  *
  * Layout: input/output are (N, C, spatial) row-major. One block per (n, c)
- * row; two-pass FP32 (or FP64 for f64) reduction, matching the LayerNorm
- * small-N kernel.
+ * row; FP32 (or FP64 for f64) reduction in two passes over the row: the
+ * mean, then the sum of squared deviations from it, so the variance stays
+ * accurate when |mean| >> stddev.
  */
 
 #include "hip_custom_kernels.h"
@@ -75,21 +76,20 @@ __global__ void hip_instance_norm_kernel(const T *__restrict__ input,
   const T *x_row = input + row * spatial;
   T *y_row = output + row * spatial;
 
-  __shared__ Compute s_sum;
-  __shared__ Compute s_sumsq;
   __shared__ Compute s_mean;
   __shared__ Compute s_inv_std;
   __shared__ Compute s_reduce[kInstanceNormBlockSize];
 
-  Compute local_sum = Compute(0);
-  Compute local_sumsq = Compute(0);
-  for (int64_t i = threadIdx.x; i < spatial; i += blockDim.x) {
-    Compute v = Tr::load(x_row[i]);
-    local_sum += v;
-    local_sumsq += v * v;
-  }
+  // Exact two-pass variance: E[x^2] - mean^2 loses all precision when
+  // |mean| >> stddev, while sum((x - mean)^2) does not. The mean is summed
+  // relative to the row's first value so its rounding stays at the scale of
+  // the spread. The second read of the row is mostly served from cache.
+  const Compute shift = Tr::load(x_row[0]);
+  Compute local = Compute(0);
+  for (int64_t i = threadIdx.x; i < spatial; i += blockDim.x)
+    local += Tr::load(x_row[i]) - shift;
 
-  s_reduce[threadIdx.x] = local_sum;
+  s_reduce[threadIdx.x] = local;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride)
@@ -97,10 +97,16 @@ __global__ void hip_instance_norm_kernel(const T *__restrict__ input,
     __syncthreads();
   }
   if (threadIdx.x == 0)
-    s_sum = s_reduce[0];
+    s_mean = shift + s_reduce[0] / static_cast<Compute>(spatial);
   __syncthreads();
+  Compute mean = s_mean;
 
-  s_reduce[threadIdx.x] = local_sumsq;
+  local = Compute(0);
+  for (int64_t i = threadIdx.x; i < spatial; i += blockDim.x) {
+    Compute d = Tr::load(x_row[i]) - mean;
+    local += d * d;
+  }
+  s_reduce[threadIdx.x] = local;
   __syncthreads();
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride)
@@ -108,18 +114,11 @@ __global__ void hip_instance_norm_kernel(const T *__restrict__ input,
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    s_sumsq = s_reduce[0];
-    Compute mean = s_sum / static_cast<Compute>(spatial);
-    Compute var =
-        s_sumsq / static_cast<Compute>(spatial) - mean * mean;
-    if (var < Compute(0))
-      var = Compute(0);
-    s_mean = mean;
+    Compute var = s_reduce[0] / static_cast<Compute>(spatial);
     s_inv_std = Tr::rsqrt_fn(var + static_cast<Compute>(epsilon));
   }
   __syncthreads();
 
-  Compute mean = s_mean;
   Compute inv_std = s_inv_std;
   Compute s = Tr::load(scale[channel]);
   Compute b = Tr::load(bias[channel]);
