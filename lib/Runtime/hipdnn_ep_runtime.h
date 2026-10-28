@@ -327,12 +327,34 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
 // Get the host-mapped scratch buffer base, growing it if needed. Called from
 // hip.get_host_scratch (emitted by hip-materialize-host-scalars) once per
 // inference for tiny host-fed scalar memrefs that would otherwise land in the
-// GPU pool. Memory is hipHostMalloc(hipHostMallocMapped) - host-writable AND
-// GPU-readable via the device pointer mapping. Grow semantics mirror
-// hipdnn_ep_get_pool_base: stream-synced hipHostFree + hipHostMalloc; never
-// shrinks.
-// Returns: host-mapped base pointer (NULL on allocation failure)
+// GPU pool. Memory is hipHostMalloc(hipHostMallocMapped) and is what host
+// stores write. Kernels read a separate hipMalloc mirror, because
+// hipHostGetDevicePointer is not a distinct GPU address on every target.
+// Grow semantics mirror hipdnn_ep_get_pool_base: stream-synced free and
+// reallocate; never shrinks.
+// Returns: host base pointer (NULL on allocation failure). Kernels that must
+// read this buffer take hipdnn_ep_as_device_ptr() after
+// hipdnn_ep_copy_scratch_to_device().
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
+
+// If ptr lies in the host scratch allocation, return the matching offset in
+// the device mirror. Every other pointer is returned unchanged.
+void *hipdnn_ep_as_device_ptr(RuntimeState *state, const void *ptr);
+
+// Copy the whole host scratch into the device mirror on `stream`.
+int hipdnn_ep_copy_scratch_to_device(RuntimeState *state, void *stream);
+
+// If host_ptr lies in the host scratch, copy `bytes` from the device mirror
+// back to that host address on `stream`. No-op otherwise.
+int hipdnn_ep_copy_scratch_from_device(RuntimeState *state, void *stream,
+                                       void *host_ptr, size_t bytes);
+
+// Return a pointer the kernel may load or store. Scratch addresses are
+// rewritten to the device mirror. Any other non-device address is copied
+// into a hipMalloc buffer stored in *staged; the caller frees *staged after
+// the kernel completes. *staged is nullptr when ptr is already device memory.
+void *hipdnn_ep_ensure_device_ptr(void *stream, void *ptr, size_t bytes,
+                                  int copy_to_device, void **staged);
 
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);

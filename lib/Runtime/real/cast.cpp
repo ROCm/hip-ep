@@ -57,6 +57,13 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  // Host scratch is not GPU-visible at the host address on this target
+  // (hipHostGetDevicePointer returns that same address). Copy it into the
+  // device mirror and pass the mirror pointer to the kernel.
+  if (hipdnn_ep_copy_scratch_to_device(state, stream) != 0)
+    return -1;
+  void *dev_input = hipdnn_ep_as_device_ptr(state, input);
+  void *dev_output = hipdnn_ep_as_device_ptr(state, output);
 
   // Same-dtype fast-path: ONNX exporters (notably the Qwen3.5-VL vision
   // encoder) sometimes emit redundant `Cast(x, to=src_dtype)` nodes that
@@ -82,9 +89,9 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       return 0;
     }
     size_t bytes = static_cast<size_t>(num_elements) * elem_size;
-    hipError_t err =
-        hipMemcpyAsync(output, input, bytes, hipMemcpyDeviceToDevice,
-                       static_cast<hipStream_t>(stream));
+    hipError_t err = hipMemcpyAsync(
+        dev_output, dev_input, bytes, hipMemcpyDeviceToDevice,
+        static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
       fprintf(stderr,
               "[REAL] wrap_cast same-dtype hipMemcpyAsync failed: %s "
@@ -98,6 +105,8 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
         "bytes=%zu\n",
         (long long)num_elements, hipdnn_ep_datatype_name(src_data_type),
         (long long)src_data_type, bytes);
+    if (dev_output != output)
+      hipdnn_ep_copy_scratch_from_device(state, stream, output, bytes);
     return 0;
   }
 
@@ -118,6 +127,35 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)src_data_type, hipdnn_ep_datatype_name(dst_data_type),
       (long long)dst_data_type);
 
-  return hip_cast(stream, input, output, num_elements, src_hip_dtype,
-                  dst_hip_dtype);
+  int64_t src_size = hipdnn_ep_datatype_size(src_data_type);
+  int64_t dst_size = hipdnn_ep_datatype_size(dst_data_type);
+  size_t in_bytes = src_size > 0 ? static_cast<size_t>(num_elements) *
+                                       static_cast<size_t>(src_size)
+                                 : 0;
+  size_t out_bytes = dst_size > 0 ? static_cast<size_t>(num_elements) *
+                                        static_cast<size_t>(dst_size)
+                                  : 0;
+  void *in_staged = nullptr;
+  void *out_staged = nullptr;
+  void *kernel_input = hipdnn_ep_ensure_device_ptr(stream, dev_input, in_bytes,
+                                                   /*copy_to_device=*/1,
+                                                   &in_staged);
+  void *kernel_output = hipdnn_ep_ensure_device_ptr(
+      stream, dev_output, out_bytes, /*copy_to_device=*/0, &out_staged);
+  int rc = hip_cast(stream, kernel_input, kernel_output, num_elements,
+                    src_hip_dtype, dst_hip_dtype);
+  if (rc == 0 && out_staged) {
+    (void)hipMemcpyAsync(output, out_staged, out_bytes, hipMemcpyDeviceToHost,
+                         static_cast<hipStream_t>(stream));
+  } else if (rc == 0 && dev_output != output && dst_size > 0) {
+    hipdnn_ep_copy_scratch_from_device(state, stream, output, out_bytes);
+  }
+  if (in_staged || out_staged) {
+    (void)hipStreamSynchronize(static_cast<hipStream_t>(stream));
+    if (in_staged)
+      (void)hipFree(in_staged);
+    if (out_staged)
+      (void)hipFree(out_staged);
+  }
+  return rc;
 }
