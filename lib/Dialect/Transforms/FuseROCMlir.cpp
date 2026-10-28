@@ -54,6 +54,25 @@ static Type promoteRankZero(Type type) {
                                tensorType.getEncoding());
 }
 
+/// rocMLIR's arithmetic uses signless integers. ONNX BOOL is ui8 in the
+/// importer, but a Where condition is a one-byte 0/1 mask, so the outlined
+/// kernel can safely view that argument as i8. The dispatch continues to pass
+/// the original ui8 buffer; only the private kernel signature is normalized.
+static Type getRocMlirKernelArgumentType(Value operand,
+                                         const SetVector<Operation *> &ops) {
+  Type type = promoteRankZero(operand.getType());
+  auto tensorType = dyn_cast<RankedTensorType>(type);
+  if (!tensorType || !tensorType.getElementType().isUnsignedInteger(8))
+    return type;
+
+  for (Operation *op : ops) {
+    auto where = dyn_cast<WhereOp>(op);
+    if (where && where.getCondition() == operand)
+      return tensorType.clone(IntegerType::get(type.getContext(), 8));
+  }
+  return type;
+}
+
 template <typename AnchorOp>
 class FuseAnchorPointwise : public OpRewritePattern<AnchorOp> {
 public:
@@ -198,7 +217,8 @@ public:
       rewriter.setInsertionPointToStart(parentModule.getBody());
       auto funcType = rewriter.getFunctionType(
           llvm::map_to_vector(
-              operands, [](Value v) { return promoteRankZero(v.getType()); }),
+              operands,
+              [&ops](Value v) { return getRocMlirKernelArgumentType(v, ops); }),
           endOp->getResultTypes());
 
       newFunc = func::FuncOp::create(rewriter, rewriter.getUnknownLoc(),
