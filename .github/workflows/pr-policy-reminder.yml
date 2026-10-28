@@ -4,9 +4,9 @@
 ##
 
 # Posts a single reminder comment on PR open with links to the
-# development, AI-tool-use, and compiler pass guidelines. Also auto-labels
-# PRs that exceed the soft size threshold as `large-pr`. The bot does
-# not generate review content; it only posts static guidance and a label.
+# incremental-development, AI-tool-use, and compiler pass guidelines.
+# Also labels PRs above the soft size threshold as `large-pr`. The bot
+# does not generate review content; it only posts static guidance and a label.
 
 name: PR policy reminder
 

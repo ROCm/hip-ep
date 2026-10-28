@@ -11,6 +11,9 @@ pass logic.
 
 ## 1. Use IR semantics, not target assumptions
 
+A generic pass uses IR contracts and analyses instead of embedding
+target-specific policy.
+
 Use operation semantics, types, attributes, interfaces, and analysis results.
 
 Do not assume that:
@@ -54,10 +57,15 @@ the same contract in all affected passes.
 Later passes must preserve correctness guarantees. For example, pooling must
 preserve a buffer-reuse restriction.
 
-Document required pass ordering. Do not rely on accidental ordering or optional
-canonicalization for correctness.
+Document required pass ordering and test it when correctness depends on it.
+Do not rely on accidental ordering or optional canonicalization for
+correctness.
 
-Apply a rewrite only when you can prove it is safe.
+Apply a rewrite only when operation semantics, interface contracts, or
+analysis results establish that it is safe.
+
+A rewrite pattern or reifier that reports failure must leave the input IR
+unchanged.
 
 ## 5. Test the general rule
 
