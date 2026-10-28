@@ -23,6 +23,31 @@ on:
         description: Cache key of the prebuilt OGA artifact set.
         required: true
         type: string
+      rocmlir:
+        description: ENABLE_ROCMLIRTRITON value. OFF for the required package.
+        required: false
+        type: string
+        default: "OFF"
+      package_name:
+        description: Artifact name for the staged GPU test package.
+        required: false
+        type: string
+        default: gpu-test-package
+      dll_sizes_name:
+        description: Artifact name for the DLL size report.
+        required: false
+        type: string
+        default: dll-sizes
+      wheel_name:
+        description: Artifact name for the Python wheel package.
+        required: false
+        type: string
+        default: hip-python-package
+      concurrency_group:
+        description: Concurrency group prefix so an RMT build does not cancel the required build.
+        required: false
+        type: string
+        default: build-windows
 
 permissions:
   contents: read
@@ -35,7 +60,7 @@ jobs:
     # actions/runner-images#14017.
     runs-on: windows-2022
     concurrency:
-      group: build-windows-${{ github.ref }}
+      group: ${{ inputs.concurrency_group }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
@@ -140,7 +165,8 @@ jobs:
             --cmake_generator Ninja \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
-            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines ENABLE_ROCMLIRTRITON=${{ inputs.rocmlir }}
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -301,14 +327,14 @@ jobs:
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-test-package
+          name: ${{ inputs.package_name }}
           path: staging/
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 
       - name: Upload DLL sizes
         uses: actions/upload-artifact@v4
         with:
-          name: dll-sizes
+          name: ${{ inputs.dll_sizes_name }}
           path: dll-sizes/dll-sizes.json
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 
@@ -342,7 +368,7 @@ jobs:
       - name: Upload Python wheel package
         uses: actions/upload-artifact@v4
         with:
-          name: hip-python-package
+          name: ${{ inputs.wheel_name }}
           path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
 

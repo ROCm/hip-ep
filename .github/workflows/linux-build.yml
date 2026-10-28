@@ -301,7 +301,8 @@ jobs:
           python3 build.py \
             --config Release \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
-            --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
+            --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install" \
+            --cmake_extra_defines ENABLE_ROCMLIRTRITON=OFF
 
       # Require DF_1_NODELETE and the plugin entry points. No GPU: constructors
       # must not touch a device.
