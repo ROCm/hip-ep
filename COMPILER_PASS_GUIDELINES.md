@@ -3,18 +3,14 @@ Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 
-# Guidelines for keeping compiler passes generic
+# Guidelines for generic compiler passes
 
-Keep compiler passes generic wherever possible. Generic passes should use
-explicit IR information and shared analyses. Backend-specific decisions belong
-in the backend layer.
-
-These guidelines apply to all contributors and reviewers.
+Keep compiler passes generic wherever possible. Use explicit IR information
+and shared analyses. Put backend-specific decisions in the backend layer.
 
 ## 1. Use IR semantics, not target assumptions
 
-Make decisions from operation semantics, types, attributes, interfaces, and
-analysis results.
+Use operation semantics, types, attributes, interfaces, and analysis results.
 
 Do not assume that:
 
@@ -24,50 +20,42 @@ Do not assume that:
 - An earlier operation has finished using a buffer.
 - A pattern observed in one model applies to all models.
 
-If a transformation requires this information, obtain it from an explicit
-contract or analysis.
+Check the required facts through an explicit contract or analysis.
 
 ## 2. Separate the algorithm from backend policy
 
-Keep the general algorithm independent of the target.
+A generic pass may get target information through an interface. Keep the
+backend logic behind that interface.
 
-For example, a buffer-reuse pass should determine whether buffers can safely
-share storage. Backend-specific analysis should provide restrictions caused by
-execution order, memory placement, or runtime requirements.
+For example, a buffer-reuse pass checks whether buffers can safely share
+storage. The backend supplies target-specific execution, memory, and runtime
+restrictions.
 
-A generic pass may consume target information through a defined interface. It
-should not duplicate the backend logic that determines that information.
-
-Put inherently target-specific transformations in clearly identified backend
-passes.
+Put target-specific transformations in backend passes.
 
 ## 3. Keep operation rules with the operation
 
-Use existing helpers and MLIR interfaces where they fit.
+Reuse existing helpers and MLIR interfaces before adding new ones.
 
 - Keep shape rules in the operation's inference or reification implementation.
-- Describe aliasing and memory effects through the appropriate interfaces.
-- Let generic passes query those interfaces.
-- Avoid maintaining separate operation-specific rules in multiple passes.
+- Describe aliasing and memory effects through interfaces.
+- Let generic passes query these interfaces instead of repeating operation rules.
 
 Operation-specific canonicalization and lowering patterns are valid. Their
-semantics should not be duplicated inside otherwise generic passes.
-
-Reuse existing mechanisms before introducing a new interface or framework.
+rules should not be copied into generic passes.
 
 ## 4. Fix the issue at the layer that owns it
 
-Identify where information is missing or behavior becomes incorrect. Correct
-that layer and establish one contract for all affected passes.
+Fix missing information or incorrect behavior in the layer that owns it. Use
+the same contract in all affected passes.
 
-A correctness guarantee must survive the rest of the pipeline. For example, a
-buffer-reuse restriction must remain effective through later pooling.
+Later passes must preserve correctness guarantees. For example, pooling must
+preserve a buffer-reuse restriction.
 
-Document required pass ordering. Do not depend on incidental ordering or
-optional canonicalization for correctness.
+Document required pass ordering. Do not rely on accidental ordering or optional
+canonicalization for correctness.
 
-If an optimization cannot prove that a rewrite is safe, it must not apply the
-rewrite.
+Apply a rewrite only when you can prove it is safe.
 
 ## 5. Test the general rule
 
@@ -78,15 +66,15 @@ Include tests for:
 - Relevant aliases and views.
 - Interactions with later passes.
 
-Use small IR examples that demonstrate the rule. A successful run of one model
-does not establish that a transformation is generally correct.
+Use small IR examples to test the rule. A successful run of one model does not
+prove that a transformation is correct in general.
 
 ## Questions for code review
 
-- Does the decision follow from the IR or from an unstated target assumption?
-- Can an existing interface or shared analysis provide the information?
-- Would supporting another target require changes to this generic algorithm?
-- Do later passes preserve the same correctness guarantees?
+- Does the decision use IR facts or an unstated target assumption?
+- Can an existing interface or analysis provide the information?
+- Would another target require changes to the generic algorithm?
+- Do later passes preserve the same guarantees?
 
 ## References
 
