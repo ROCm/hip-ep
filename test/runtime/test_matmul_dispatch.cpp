@@ -46,8 +46,7 @@ int main() {
       !hipdnn_ep_real::isGfx1151("gfx1151:") ||
       !hipdnn_ep_real::isGfx1151("gfx1151:sramecc+:xnack-") ||
       hipdnn_ep_real::isGfx1151("gfx11510") ||
-      hipdnn_ep_real::isGfx1151("gfx1100") ||
-      hipdnn_ep_real::isGfx1151(""))
+      hipdnn_ep_real::isGfx1151("gfx1100") || hipdnn_ep_real::isGfx1151(""))
     return 1;
 
   return 0;

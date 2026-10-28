@@ -501,9 +501,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // transB is set, B is physically [N,K], which the GEMV kernel consumes
   // directly on the target where this policy was measured. Other targets,
   // prefill, and wider projections retain the tuned GEMM path below.
-  if (hipdnn_ep_real::useF32TransposedBDecodeGemv(
-          ms->use_f32_decode_gemv, M, N, K, batch_count, elem_size, transA,
-          transB)) {
+  if (hipdnn_ep_real::useF32TransposedBDecodeGemv(ms->use_f32_decode_gemv, M, N,
+                                                  K, batch_count, elem_size,
+                                                  transA, transB)) {
     if (hipdnn_ep_real::useF32TransposedBMultiwaveGfx1151(N, K)) {
       return hip_gemv_f32_transposed_b_multiwave_gfx1151(
           stream, static_cast<const float *>(A), static_cast<const float *>(B),
