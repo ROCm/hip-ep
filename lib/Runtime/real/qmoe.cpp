@@ -73,10 +73,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     fprintf(stderr, "wrap_qmoe: expert_weight_bits must be 2 or 4\n");
     return -1;
   }
-  if (block_size <= 0 || (block_size * expert_weight_bits) % 8 != 0) {
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
     fprintf(stderr,
-            "wrap_qmoe: block_size must produce a whole number of packed "
-            "bytes\n");
+            "wrap_qmoe: block_size must be a power of two and at least 32\n");
     return -1;
   }
   if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||

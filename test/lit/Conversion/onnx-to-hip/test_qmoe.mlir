@@ -181,6 +181,54 @@ module {
   // CHECK-SAME: expert_weight_bits = 2
   // CHECK-NOT: onnx.Custom
 
+  func.func @test_block_size_too_small_rejected(
+      %input: tensor<1x4x64xf16>,
+      %router: tensor<4x8xf16>,
+      %fc1_w: tensor<8x128x16xui8>,
+      %fc1_s: tensor<8x128x4xf16>,
+      %fc2_w: tensor<8x64x16xui8>,
+      %fc2_s: tensor<8x64x4xf16>) -> tensor<1x4x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 16 : si64,
+      expert_weight_bits = 2 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x16xui8>, tensor<8x128x4xf16>, none,
+         tensor<8x64x16xui8>, tensor<8x64x4xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_block_size_too_small_rejected
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
+
+  func.func @test_non_power_of_two_block_size_rejected(
+      %input: tensor<1x4x64xf16>,
+      %router: tensor<4x8xf16>,
+      %fc1_w: tensor<8x128x16xui8>,
+      %fc1_s: tensor<8x128x2xf16>,
+      %fc2_w: tensor<8x64x16xui8>,
+      %fc2_s: tensor<8x64x2xf16>) -> tensor<1x4x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %Y = "onnx.Custom"(%input, %router, %fc1_w, %fc1_s, %none, %fc2_w, %fc2_s) {
+      function_name = "QMoE", domain_name = "com.microsoft",
+      activation_type = "swiglu", block_size = 48 : si64,
+      expert_weight_bits = 2 : si64, k = 2 : si64,
+      normalize_routing_weights = 1 : si64, swiglu_fusion = 1 : si64,
+      use_sparse_mixer = 0 : si64
+    } : (tensor<1x4x64xf16>, tensor<4x8xf16>,
+         tensor<8x128x16xui8>, tensor<8x128x2xf16>, none,
+         tensor<8x64x16xui8>, tensor<8x64x2xf16>) -> tensor<1x4x64xf16>
+    return %Y : tensor<1x4x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_non_power_of_two_block_size_rejected
+  // CHECK-NOT: hip.qmoe
+  // CHECK: onnx.Custom
+
   func.func @test_two_bit_packed_shape_rejected(
       %input: tensor<1x4x64xf16>,
       %router: tensor<4x8xf16>,

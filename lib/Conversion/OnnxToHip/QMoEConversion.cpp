@@ -121,6 +121,10 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
         op, "QMoE: missing `block_size` attribute and cannot infer it from "
             "input/fc1_scales tensor shapes");
   }
+  if (blockSizeValue < 32 || (blockSizeValue & (blockSizeValue - 1)) != 0) {
+    return rewriter.notifyMatchFailure(
+        op, "QMoE: block_size must be a power of two and at least 32");
+  }
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSizeValue);
 
   auto normIntAttr =

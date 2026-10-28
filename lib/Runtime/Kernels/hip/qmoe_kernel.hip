@@ -1418,9 +1418,9 @@ extern "C" int hip_qmoe_decode_fused(
             "[custom_kernels] hip_qmoe_decode_fused: bits must be 2 or 4\n");
     return -1;
   }
-  if (block_size <= 0 || (block_size & 1) != 0) {
-    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: invalid "
-                    "block_size=%lld\n",
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused: block_size must "
+                    "be a power of two and at least 32 (got %lld)\n",
             (long long)block_size);
     return -1;
   }

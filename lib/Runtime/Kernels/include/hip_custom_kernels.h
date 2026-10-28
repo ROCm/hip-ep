@@ -3056,6 +3056,7 @@ HIP_KERNEL_API int hip_qmoe_build_row_tiles(
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
  * each sorted output row to a source input row (FC1 fused gather).
  * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ * block_size must be a power of two and at least 32.
  */
 HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
     void* stream,
@@ -3145,7 +3146,8 @@ HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
  *   output           - GPU [hidden]              fp16  (final, weighted sum)
  *
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
- * inter_size both multiples of 32; block_size > 0 and even.
+ * inter_size both multiples of 32; block_size is a power of two and at
+ * least 32.
  */
 HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* stream,

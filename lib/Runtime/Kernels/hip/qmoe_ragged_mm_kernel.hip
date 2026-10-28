@@ -856,11 +856,15 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
             "or 4\n");
     return -1;
   }
-  if (total_rows <= 0 || num_experts <= 0 || N <= 0 || K <= 0 ||
-      block_size <= 0 || (block_size & 1) != 0 ||
-      (bits == 2 && (block_size & 3) != 0)) {
+  if (total_rows <= 0 || num_experts <= 0 || N <= 0 || K <= 0) {
     fprintf(stderr,
             "[custom_kernels] hip_qmoe_ragged_matmul_nbits: invalid shape\n");
+    return -1;
+  }
+  if (block_size < 32 || (block_size & (block_size - 1)) != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_ragged_matmul_nbits: block_size must "
+            "be a power of two and at least 32\n");
     return -1;
   }
   if (hipdnn_device_is_wave64()) {
