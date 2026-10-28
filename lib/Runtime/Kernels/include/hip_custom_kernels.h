@@ -3908,14 +3908,18 @@ HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B
                        void* C, int M, int K, int N);
 
 /* F32 GEMV for C[1,N] = A[1,K] * transpose(B[N,K]). This decode-oriented
- * path consumes the physical transposed-B layout directly. */
+ * path consumes the physical transposed-B layout directly, one wave per
+ * output. Returns 0 once the kernel is launched, -1 for a null stream or
+ * pointer, N <= 0 or K <= 0 (nothing is written), or a failed launch. */
 HIP_KERNEL_API int hip_gemv_f32_transposed_b(void* stream, const float* A,
                                               const float* B, float* C,
                                               int N, int K);
 
 /* gfx1151 specialization for one-row F32 projections with N <= 256: one
  * 256-thread block per output, float4 loads when K % 4 == 0 and the operands
- * are 16-byte aligned. */
+ * are 16-byte aligned. Returns 0 once the kernel is launched, -1 for a null
+ * stream or pointer, N <= 0, N > 256 or K <= 0 (nothing is written), or a
+ * failed launch. */
 HIP_KERNEL_API int hip_gemv_f32_transposed_b_multiwave_gfx1151(
     void *stream, const float *A, const float *B, float *C, int N, int K);
 

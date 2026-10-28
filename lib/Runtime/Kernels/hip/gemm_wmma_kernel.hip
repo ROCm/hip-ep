@@ -209,6 +209,9 @@ extern "C" int hip_gemv_f32_transposed_b(void *stream, const float *A,
   // wave32 targets. Only the first wave participates, so the same kernel is
   // valid for either hardware wave size without a host-side device query.
   constexpr int kBlockSize = 64;
+  // Clear an error an earlier HIP call left, so the status below is this
+  // launch's own.
+  (void)hipGetLastError();
   hipLaunchKernelGGL(gemv_f32_transposed_b_kernel, dim3(N), dim3(kBlockSize), 0,
                      static_cast<hipStream_t>(stream), A, B, C, N, K);
   return hipGetLastError() == hipSuccess ? 0 : -1;
@@ -269,6 +272,7 @@ extern "C" int hip_gemv_f32_transposed_b_multiwave_gfx1151(
       K % 4 == 0 &&
       ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(B)) &
        15) == 0;
+  (void)hipGetLastError();
   if (vectorized)
     hipLaunchKernelGGL((gemv_f32_transposed_b_vec4_kernel<kBlockSize>), dim3(N),
                        dim3(kBlockSize), 0, static_cast<hipStream_t>(stream), A,
