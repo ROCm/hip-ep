@@ -64,6 +64,45 @@ module {
     return %result : tensor<1x128x4096xf16>
   }
 
+  // Equal dynamic ranked types do not imply an identity runtime reshape.
+  func.func @test_reshape_same_dynamic_type(
+      %data: tensor<1x8x?x?xf16>, %shape: tensor<4xi64>)
+      -> tensor<1x8x?x?xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64}
+        : (tensor<1x8x?x?xf16>, tensor<4xi64>) -> tensor<1x8x?x?xf16>
+    return %result : tensor<1x8x?x?xf16>
+  }
+
+  // Shape(data) proves that every runtime output dimension equals the
+  // corresponding input dimension, so this dynamic Reshape is an identity.
+  func.func @test_reshape_dynamic_identity_from_shape(
+      %data: tensor<1x8x?x?xf16>) -> tensor<1x8x?x?xf16> {
+    %shape = "onnx.Shape"(%data)
+        : (tensor<1x8x?x?xf16>) -> tensor<4xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64}
+        : (tensor<1x8x?x?xf16>, tensor<4xi64>) -> tensor<1x8x?x?xf16>
+    return %result : tensor<1x8x?x?xf16>
+  }
+
+  // Equal dynamic types still require the Reshape when the shape operand
+  // exchanges two runtime dimensions.
+  func.func @test_reshape_dynamic_reordered_dims(
+      %data: tensor<1x8x?x?xf16>) -> tensor<1x8x?x?xf16> {
+    %c1 = arith.constant 1 : i64
+    %c8 = arith.constant 8 : i64
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %d2 = tensor.dim %data, %c2 : tensor<1x8x?x?xf16>
+    %d3 = tensor.dim %data, %c3 : tensor<1x8x?x?xf16>
+    %d2_i64 = arith.index_cast %d2 : index to i64
+    %d3_i64 = arith.index_cast %d3 : index to i64
+    %shape = tensor.from_elements %c1, %c8, %d3_i64, %d2_i64
+        : tensor<4xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64}
+        : (tensor<1x8x?x?xf16>, tensor<4xi64>) -> tensor<1x8x?x?xf16>
+    return %result : tensor<1x8x?x?xf16>
+  }
+
   // --- Rank-0 scalar → rank-1 1-element (Qwen vision shape-arith chain) ---
   // onnx.Reshape on a tensor<i64> scalar to tensor<1xi64> can't be expressed
   // via tensor.expand_shape (source rank 0 can't supply a reassoc group).
@@ -223,6 +262,19 @@ module {
 // CHECK-NOT: tensor.expand_shape
 // CHECK-NOT: tensor.collapse_shape
 // CHECK: return
+
+// CHECK-LABEL: func.func @test_reshape_same_dynamic_type
+// CHECK: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+
+// CHECK-LABEL: func.func @test_reshape_dynamic_identity_from_shape
+// CHECK-NOT: tensor.reshape
+// CHECK-NOT: onnx.Reshape
+// CHECK: return %arg1
+
+// CHECK-LABEL: func.func @test_reshape_dynamic_reordered_dims
+// CHECK: tensor.reshape
+// CHECK-NOT: onnx.Reshape
 
 // A runtime (non-constant) scalar must be read to the host with a synchronized
 // hip.readback_scalar, NOT a bare tensor.extract: the latter lowers to an

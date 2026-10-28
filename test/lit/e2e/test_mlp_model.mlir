@@ -32,7 +32,9 @@
 // DEFAULT-BUFFERIZE: lower-affine
 // DEFAULT-BUFFERIZE: cse
 // DEFAULT-BUFFERIZE: canonicalize
+// DEFAULT-BUFFERIZE: hip-materialize-host-scalars
 // DEFAULT-BUFFERIZE: hip-optimize-memrefs
+// DEFAULT-BUFFERIZE: hip-promote-strided-operands
 // DEFAULT-BUFFERIZE: hip-resolve-memref-dims
 // DEFAULT-BUFFERIZE: cse
 // DEFAULT-BUFFERIZE-NOT: hip-hoist-alloc-size-arith
