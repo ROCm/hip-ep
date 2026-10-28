@@ -406,41 +406,63 @@ void GemmFp16U4ImplX(
     auto issueLoads = [&](int k_abs, auto SETC) __attribute__((always_inline))
     {
         constexpr int S = decltype(SETC)::value;
+        auto issueA = [&]() __attribute__((always_inline)) {
 #pragma unroll
-        for(int c = 0; c < A_NCH; c++)
-        {
-            const bool ok = BOUNDS_CHECK ? a_valid[c] : true;
-            if (ok) {
-                if constexpr (A_CH == 8)
-                    *reinterpret_cast<u32x4*>(pf_a[S][c]) =
-                        *reinterpret_cast<const u32x4*>(aSrc(c));
-                else
-                    *reinterpret_cast<u32x2*>(pf_a[S][c]) =
-                        *reinterpret_cast<const u32x2*>(aSrc(c));
-            } else {
+            for(int c = 0; c < A_NCH; c++)
+            {
+                const bool ok = BOUNDS_CHECK ? a_valid[c] : true;
+                if (ok) {
+                    if constexpr (A_CH == 8)
+                        *reinterpret_cast<u32x4*>(pf_a[S][c]) =
+                            *reinterpret_cast<const u32x4*>(aSrc(c));
+                    else
+                        *reinterpret_cast<u32x2*>(pf_a[S][c]) =
+                            *reinterpret_cast<const u32x2*>(aSrc(c));
+                } else {
 #pragma unroll
-                for (int e = 0; e < A_CH / 2; e++) pf_a[S][c][e] = 0;
+                    for (int e = 0; e < A_CH / 2; e++) pf_a[S][c][e] = 0;
+                }
+                if constexpr (!UADDR) a_src[c] += BK_T;
             }
-            if constexpr (!UADDR) a_src[c] += BK_T;
-        }
-
+        };
+        auto issueB = [&]() __attribute__((always_inline)) {
 #pragma unroll
-        for (int c = 0; c < B_NCH; c++) {
-            if (b_valid[c]) {
-                if constexpr (B_U32 == 1)
-                    pf_b4[S][c][0] = *reinterpret_cast<const uint32_t*>(bSrc(c));
-                else if constexpr (B_U32 == 2)
-                    *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
-                        *reinterpret_cast<const u32x2*>(bSrc(c));
-                else if constexpr (B_U32 == 3) {
-                    *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
-                        *reinterpret_cast<const u32x2*>(bSrc(c));
-                    pf_b4[S][c][2] = reinterpret_cast<const uint32_t*>(bSrc(c))[2];
-                } else
-                    *reinterpret_cast<u32x4*>(pf_b4[S][c]) =
-                        *reinterpret_cast<const u32x4*>(bSrc(c));
+            for (int c = 0; c < B_NCH; c++) {
+                if (b_valid[c]) {
+                    if constexpr (B_U32 == 1)
+                        pf_b4[S][c][0] = *reinterpret_cast<const uint32_t*>(bSrc(c));
+                    else if constexpr (B_U32 == 2)
+                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x2*>(bSrc(c));
+                    else if constexpr (B_U32 == 3) {
+                        *reinterpret_cast<u32x2*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x2*>(bSrc(c));
+                        pf_b4[S][c][2] = reinterpret_cast<const uint32_t*>(bSrc(c))[2];
+                    } else
+                        *reinterpret_cast<u32x4*>(pf_b4[S][c]) =
+                            *reinterpret_cast<const u32x4*>(bSrc(c));
+                }
+                if constexpr (!UADDR) b_src_u4[c] += BK_T >> 1;
             }
-            if constexpr (!UADDR) b_src_u4[c] += BK_T >> 1;
+        };
+        /* PGR 2: the next step dequantizes this B first, and s_waitcnt vmcnt
+         * counts loads in issue order, so B must be the oldest load in flight
+         * at the top of that step. On the 128x128 WT 2x4 BK 64 tile with
+         * uniform addressing the scheduler leaves B after A, and the step
+         * opens with vmcnt(0), which drains the second prefetch stage every
+         * iteration; issuing B first behind a sched barrier fixes the order.
+         * The other PGR 2 tiles are already scheduled oldest-first and
+         * measured slower with the barrier, so they keep A then B.
+         *   Before: A x4, scale, B   -> loop top: s_waitcnt vmcnt(0)
+         *   After:  B, A x4, scale   -> loop top: s_waitcnt vmcnt(5) */
+        if constexpr (PGR == 2 && UADDR && BM_T == 128 && BN_T == 128 && WT_M == 2 && WT_N == 4 &&
+                      BK_T == 64) {
+            issueB();
+            __builtin_amdgcn_sched_barrier(0);
+            issueA();
+        } else {
+            issueA();
+            issueB();
         }
         if constexpr (PGR == 1) {
             // This thread's chunks are contiguous in k starting at a
