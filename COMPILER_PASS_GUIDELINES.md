@@ -6,7 +6,8 @@ Licensed under the MIT License.
 # Guidelines for generic compiler passes
 
 Keep compiler passes generic wherever possible. Use explicit IR information
-and shared analyses. Put backend-specific decisions in the backend layer.
+and shared analyses. Keep target-specific decisions separate from generic
+pass logic.
 
 ## 1. Use IR semantics, not target assumptions
 
