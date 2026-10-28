@@ -356,7 +356,7 @@ module {
 // A key-broadcast mask cannot provide the logical KV length for a cached
 // attention, and the runtime does not broadcast the key extent.
 module {
-  func.func @broadcast_key_mask(
+  func.func @main_graph(
       %query: tensor<1x1x2048xf16>,
       %key: tensor<1x1x1024xf16>,
       %value: tensor<1x1x1024xf16>,
@@ -376,7 +376,7 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // CHECK-LABEL: func.func @broadcast_key_mask
+    // CHECK-LABEL: func.func @main_graph
     // CHECK-NOT: hip.gqa
     // CHECK: onnx.Attention
 
@@ -391,7 +391,7 @@ module {
 // Only rank-4 additive masks have an unambiguous batch/head layout in the
 // runtime contract.
 module {
-  func.func @rank3_mask(
+  func.func @main_graph(
       %query: tensor<1x1x2048xf16>,
       %key: tensor<1x1x1024xf16>,
       %value: tensor<1x1x1024xf16>,
@@ -411,7 +411,7 @@ module {
         -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
             tensor<1x8x128x128xf16>)
 
-    // CHECK-LABEL: func.func @rank3_mask
+    // CHECK-LABEL: func.func @main_graph
     // CHECK-NOT: hip.gqa
     // CHECK: onnx.Attention
 
