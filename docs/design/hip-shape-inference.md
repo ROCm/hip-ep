@@ -175,6 +175,7 @@ simplify-onnx
 → onnx-if-outline
 → hip-infer-loop-body-shapes
 → convert-onnx-to-hip
+→ func.func(hip-fold-constant-extracts)
 → hip-infer-shapes
 → canonicalize
 → CSE
@@ -182,6 +183,8 @@ simplify-onnx
 → func.func(hip-resolve-tensor-dims)
 → one-shot-bufferize
 ```
+
+`--hip-fold-constant-extracts` resolves constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice`, such as the ONNX shape vector `ConstantOfShape(Concat(Shape(q)[0:1], [0, 512]))`, to the `tensor.from_elements` operand or integer constant element it reads. Upstream folds stop at the `insert_slice` and `hip.constant` has no folder, so without it each element reaches runtime as a synchronized device-to-host copy. It runs before `--hip-infer-shapes` so reification sees these scalars as constants, and before `hip-externalize-constants` because it reads inline `hip.constant` payloads. It erases only the producers that the resolved extracts leave without uses, so functions without a resolvable extract are unchanged.
 
 `--hip-infer-shapes` runs before bufferization so static refinements affect destination construction, memref allocation sizes, and downstream pool planning.
 
@@ -224,6 +227,7 @@ Primary regression coverage:
 | File | Contract |
 |---|---|
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
+| `test/lit/Dialect/hip-fold-constant-extracts.mlir` | Constant-index extracts through `insert_slice` chains, and the slices and producers left unresolved |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |

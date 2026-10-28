@@ -33,6 +33,7 @@ add_library(HipDialectTransforms STATIC
   DecomposeConvTranspose.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
+  FoldConstantExtracts.cpp
   FuseROCMlir.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp

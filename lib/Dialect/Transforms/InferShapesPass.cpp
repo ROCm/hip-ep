@@ -46,13 +46,11 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
@@ -69,9 +67,6 @@ STATISTIC(NumProducersRefined,
 STATISTIC(NumLoopSignaturesRefined,
           "Number of hip.loop op + body func signatures synced from refined "
           "v_init operand types");
-STATISTIC(NumShapeExtractsFolded,
-          "Number of constant-index tensor.extract ops resolved to a scalar "
-          "through insert_slice / from_elements / inline constants");
 
 namespace mlir {
 namespace hip {
@@ -464,111 +459,10 @@ static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
                        << kMaxIters << " iterations; bailing";
 }
 
-/// A shape vector assembled from scalars and small constants
-///
-///   %v0 = tensor.from_elements %d : tensor<1xi64>
-///   %v1 = tensor.insert_slice %v0 into %empty[0] [1] [1]
-///   %v2 = tensor.insert_slice %cst into %v1[1] [2] [1]    // %cst = [0, 512]
-///   %e  = tensor.extract %v2[%c2]
-///
-/// is read back element by element when it sizes a tensor (ConstantOfShape,
-/// Expand, ...). Upstream folds stop at the insert_slice and hip.constant has
-/// no folder, so every element survives to runtime, where reading it costs a
-/// device-to-host copy and a stream sync per call. This resolves a
-/// constant-index extract through the insert_slice chain to the scalar it
-/// reads: an element of a tensor.from_elements, or of an inline integer
-/// hip.constant. Only that scalar is materialised; where the constant tensor
-/// itself is stored is still decided by hip-externalize-constants.
-struct FoldConstantIndexShapeExtract
-    : public OpRewritePattern<tensor::ExtractOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(tensor::ExtractOp op,
-                                PatternRewriter &rewriter) const override {
-    if (!op.getType().isIntOrIndex())
-      return failure();
-    SmallVector<int64_t> idx;
-    for (Value v : op.getIndices()) {
-      std::optional<int64_t> c = getConstantIntValue(v);
-      if (!c)
-        return failure();
-      idx.push_back(*c);
-    }
-
-    // Row-major position of `idx` in `type`, or nullopt when out of bounds.
-    auto linearize = [&](RankedTensorType type) -> std::optional<int64_t> {
-      if (!type.hasStaticShape() || type.getRank() != (int64_t)idx.size())
-        return std::nullopt;
-      int64_t lin = 0;
-      for (auto [i, extent] : llvm::enumerate(type.getShape())) {
-        if (idx[i] < 0 || idx[i] >= extent)
-          return std::nullopt;
-        lin = lin * extent + idx[i];
-      }
-      return lin;
-    };
-
-    Value src = op.getTensor();
-    for (int depth = 0; depth < 16; ++depth) {
-      if (auto ins = src.getDefiningOp<tensor::InsertSliceOp>()) {
-        if (ins.getSourceType().getRank() != ins.getDestType().getRank())
-          return failure();
-        ArrayRef<int64_t> offs = ins.getStaticOffsets();
-        ArrayRef<int64_t> sizes = ins.getStaticSizes();
-        ArrayRef<int64_t> strides = ins.getStaticStrides();
-        bool inside = true;
-        for (size_t i = 0; i < idx.size(); ++i) {
-          if (ShapedType::isDynamic(offs[i]) ||
-              ShapedType::isDynamic(sizes[i]) || strides[i] != 1)
-            return failure();
-          if (idx[i] < offs[i] || idx[i] >= offs[i] + sizes[i])
-            inside = false;
-        }
-        if (inside) {
-          for (size_t i = 0; i < idx.size(); ++i)
-            idx[i] -= offs[i];
-          src = ins.getSource();
-        } else {
-          src = ins.getDest();
-        }
-        continue;
-      }
-      if (auto fe = src.getDefiningOp<tensor::FromElementsOp>()) {
-        std::optional<int64_t> lin = linearize(fe.getType());
-        if (!lin)
-          return failure();
-        Value elem = fe.getElements()[*lin];
-        if (elem.getType() != op.getType())
-          return failure();
-        rewriter.replaceOp(op, elem);
-        ++NumShapeExtractsFolded;
-        return success();
-      }
-      if (auto cst = src.getDefiningOp<hip::ConstantOp>()) {
-        auto dense = dyn_cast_or_null<DenseIntElementsAttr>(cst.getValueAttr());
-        if (!dense)
-          return failure();
-        std::optional<int64_t> lin =
-            linearize(cast<RankedTensorType>(cst.getType()));
-        if (!lin)
-          return failure();
-        int64_t v = dense.getValues<APInt>()[*lin].getSExtValue();
-        rewriter.replaceOpWithNewOp<arith::ConstantOp>(
-            op, op.getType(), rewriter.getIntegerAttr(op.getType(), v));
-        ++NumShapeExtractsFolded;
-        return success();
-      }
-      return failure();
-    }
-    return failure();
-  }
-};
-
 struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
   // Restated here (also in TableGen) to match other HIP passes' style.
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<HipDialect, tensor::TensorDialect, func::FuncDialect,
-                    arith::ArithDialect>();
+    registry.insert<HipDialect, tensor::TensorDialect, func::FuncDialect>();
   }
 
   void runOnOperation() override;
@@ -576,15 +470,6 @@ struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
 
 void InferShapesPass::runOnOperation() {
   ModuleOp module = getOperation();
-
-  // Phase 0: resolve shape scalars that are compile-time known, so the reify
-  // walk below sees them as constants and no host readback is left for them.
-  {
-    RewritePatternSet patterns(&getContext());
-    patterns.add<FoldConstantIndexShapeExtract>(&getContext());
-    (void)applyPatternsGreedily(module, std::move(patterns));
-  }
-
   IRRewriter rewriter(&getContext());
 
   // Phase 1: per-func reify walk. Refines all hip-dialect Hip_DpsOp
