@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/Matchers.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -23,8 +25,23 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     Type i64Type = rewriter.getI64Type();
 
     Value statePtr = adaptor.getCtx();
+    std::optional<int64_t> diskConstantIndex;
+    if (auto getConst = op.getData().getDefiningOp<GetConstantOp>();
+        getConst && getConst->hasAttr("hip.disk_resident")) {
+      llvm::APInt index;
+      if (!matchPattern(getConst.getIndex(), m_ConstantInt(&index))) {
+        return rewriter.notifyMatchFailure(
+            op, "disk-resident constant index is not a constant");
+      }
+      diskConstantIndex = index.getSExtValue();
+    }
     Value dataPtr =
-        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+        diskConstantIndex
+            ? LLVM::ConstantOp::create(
+                  rewriter, loc, i64Type,
+                  rewriter.getI64IntegerAttr(*diskConstantIndex))
+                  .getResult()
+            : extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
     Value outputPtr =
@@ -53,13 +70,14 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
     // axis attribute
     int64_t axisAttr = op.getAxis();
+    int64_t dataRank = dataType.getRank();
+    if (axisAttr < 0) {
+      axisAttr += dataRank;
+    }
     Value axisVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(axisAttr));
 
     // axis_size = data.shape[axis]; inner_size = product(data.shape[axis+1:]).
-    int64_t dataRank = dataType.getRank();
-    if (axisAttr < 0)
-      axisAttr += dataRank;
     Value axisSizeVal =
         getMemRefDimSize(dataType, static_cast<unsigned>(axisAttr),
                          adaptor.getData(), rewriter, loc);
@@ -89,9 +107,13 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     SmallVector<Type, 12> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                         i64Type, i64Type, i64Type, i64Type,
                                         i64Type, i64Type, i64Type, i64Type};
+    if (diskConstantIndex) {
+      paramTypes[1] = i64Type;
+    }
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapGather, paramTypes, i32Type);
+        rewriter, module, diskConstantIndex ? kWrapGatherFromFile : kWrapGather,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

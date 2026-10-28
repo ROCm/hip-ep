@@ -18,15 +18,185 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 using ProviderOptions = std::unordered_map<std::string, std::string>;
+
+// Maps the whole file read-only; the view outlives the closed handles.
+void *map_file_readonly(const char *path, size_t *out_size) {
+#ifdef _WIN32
+  HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return nullptr;
+  }
+  LARGE_INTEGER size;
+  void *view = nullptr;
+  if (GetFileSizeEx(file, &size) && size.QuadPart > 0) {
+    HANDLE mapping =
+        CreateFileMappingA(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (mapping) {
+      view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+      CloseHandle(mapping);
+    }
+  }
+  CloseHandle(file);
+  *out_size = view ? static_cast<size_t>(size.QuadPart) : 0;
+  return view;
+#else
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    return nullptr;
+  }
+  struct stat st;
+  void *view = nullptr;
+  if (fstat(fd, &st) == 0 && st.st_size > 0) {
+    view = mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_SHARED,
+                fd, 0);
+    if (view == MAP_FAILED) {
+      view = nullptr;
+    }
+  }
+  close(fd);
+  *out_size = view ? static_cast<size_t>(st.st_size) : 0;
+  return view;
+#endif
 }
+
+void unmap_file(void *view, size_t size) {
+#ifdef _WIN32
+  (void)size;
+  UnmapViewOfFile(view);
+#else
+  munmap(view, size);
+#endif
+}
+
+struct RowCopyTask {
+  const uint8_t *const *rows;
+  uint8_t *dst;
+  size_t row_bytes;
+  size_t begin;
+  size_t end;
+};
+
+// Prefetch issues the slice's reads concurrently so the copy below does not
+// fault the rows in one at a time. A null row is written as zeros.
+void copy_rows(const RowCopyTask &t) {
+#ifdef _WIN32
+  std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+  ranges.reserve(t.end - t.begin);
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (t.rows[i]) {
+      ranges.push_back({const_cast<uint8_t *>(t.rows[i]), t.row_bytes});
+    }
+  }
+  if (!ranges.empty()) {
+    PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+  }
+#else
+  const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (!t.rows[i]) {
+      continue;
+    }
+    uintptr_t begin = reinterpret_cast<uintptr_t>(t.rows[i]) & ~(page - 1);
+    uintptr_t end = reinterpret_cast<uintptr_t>(t.rows[i]) + t.row_bytes;
+    madvise(reinterpret_cast<void *>(begin), end - begin, MADV_WILLNEED);
+  }
+#endif
+  for (size_t i = t.begin; i < t.end; ++i) {
+    if (t.rows[i]) {
+      std::memcpy(t.dst + i * t.row_bytes, t.rows[i], t.row_bytes);
+    } else {
+      std::memset(t.dst + i * t.row_bytes, 0, t.row_bytes);
+    }
+  }
+}
+
+#ifdef _WIN32
+DWORD WINAPI copy_rows_thread(LPVOID arg) {
+  copy_rows(*static_cast<const RowCopyTask *>(arg));
+  return 0;
+}
+#else
+void *copy_rows_thread(void *arg) {
+  copy_rows(*static_cast<const RowCopyTask *>(arg));
+  return nullptr;
+}
+#endif
+
+void gather_rows(const std::vector<const uint8_t *> &rows, size_t row_bytes,
+                 uint8_t *dst) {
+  constexpr size_t kMaxThreads = 8;
+  constexpr size_t kMinBytesPerThread = 4 << 20;
+  size_t n = rows.size();
+  size_t threads = std::min(
+      kMaxThreads, std::max<size_t>(1, n * row_bytes / kMinBytesPerThread));
+  std::vector<RowCopyTask> tasks(threads);
+  for (size_t t = 0; t < threads; ++t) {
+    tasks[t] = {rows.data(), dst, row_bytes, n * t / threads,
+                n * (t + 1) / threads};
+  }
+#ifdef _WIN32
+  std::vector<HANDLE> handles;
+  for (size_t t = 1; t < threads; ++t) {
+    HANDLE h =
+        CreateThread(nullptr, 0, copy_rows_thread, &tasks[t], 0, nullptr);
+    if (h) {
+      handles.push_back(h);
+    } else {
+      copy_rows(tasks[t]);
+    }
+  }
+  copy_rows(tasks[0]);
+  if (!handles.empty()) {
+    WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(),
+                           TRUE, INFINITE);
+  }
+  for (HANDLE h : handles) {
+    CloseHandle(h);
+  }
+#else
+  std::vector<pthread_t> handles;
+  for (size_t t = 1; t < threads; ++t) {
+    pthread_t h;
+    if (pthread_create(&h, nullptr, copy_rows_thread, &tasks[t]) == 0) {
+      handles.push_back(h);
+    } else {
+      copy_rows(tasks[t]);
+    }
+  }
+  copy_rows(tasks[0]);
+  for (pthread_t h : handles) {
+    pthread_join(h, nullptr);
+  }
+#endif
+}
+} // namespace
 
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
@@ -187,6 +357,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
+  state->disk_constants = nullptr;
+  state->disk_gather_staging = nullptr;
+  state->disk_gather_staging_size = 0;
   // Per-domain pool arrays start empty; grown on demand (no compile-time cap).
   state->num_pool_domains = 0;
   state->pool_base = nullptr;
@@ -338,6 +511,9 @@ compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta) {
     return 0;
   size_t total = 0;
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      continue;
+    }
     size_t end = static_cast<size_t>(constants->Get(i)->offset()) +
                  static_cast<size_t>(constants->Get(i)->size());
     if (end > total)
@@ -361,6 +537,9 @@ static int hipmalloc_and_fixup(RuntimeState *state,
              record_elapsed(t_prev), total_size);
   auto *constants = meta->constants();
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      continue;
+    }
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
     state->gpu_constants[i] =
         static_cast<char *>(state->gpu_constants_blob) + offset;
@@ -603,10 +782,23 @@ static int per_entry_load_constants(RuntimeState *state,
 
   // Pre-scan for max tensor size -> one-shot staging alloc.
   size_t max_tensor_size = 0;
+  bool anyDiskResident = false;
   for (int64_t i = 0; i < count; ++i) {
+    if (constants->Get(i)->disk_resident()) {
+      anyDiskResident = true;
+      continue;
+    }
     size_t sz = (size_t)constants->Get(i)->size();
     if (sz > max_tensor_size)
       max_tensor_size = sz;
+  }
+  if (anyDiskResident) {
+    state->disk_constants = static_cast<DiskConstant *>(
+        calloc(static_cast<size_t>(count), sizeof(DiskConstant)));
+    if (!state->disk_constants) {
+      fprintf(stderr, "per_entry: failed to alloc disk constant table\n");
+      return 1;
+    }
   }
   uint8_t *staging =
       max_tensor_size ? (uint8_t *)malloc(max_tensor_size) : nullptr;
@@ -625,9 +817,38 @@ static int per_entry_load_constants(RuntimeState *state,
 
   ConstantsFileReaderCache cfcache; // RAII; default-initialized above
 
+  size_t disk_resident_bytes = 0;
   for (int64_t i = 0; i < count; ++i) {
     auto *c = constants->Get(i);
     size_t sz = (size_t)c->size();
+
+    if (c->disk_resident()) {
+      auto *fref = c->source_as_FileRefSource();
+      const char *path = fref && fref->path() ? fref->path()->c_str() : "";
+      size_t view_size = 0;
+      void *view = map_file_readonly(path, &view_size);
+      int64_t file_offset = fref ? fref->file_offset() : 0;
+      if (view && (file_offset < 0 ||
+                   (uint64_t)file_offset + sz > (uint64_t)view_size)) {
+        unmap_file(view, view_size);
+        view = nullptr;
+      }
+      if (!view) {
+        fprintf(stderr,
+                "per_entry: failed to map disk-resident entry %lld source: "
+                "%s\n",
+                (long long)i, path);
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      state->disk_constants[i] = {static_cast<const uint8_t *>(view) +
+                                      file_offset,
+                                  view, view_size, c->size()};
+      disk_resident_bytes += sz;
+      continue;
+    }
+
     void *dst = static_cast<char *>(state->gpu_constants_blob) + c->offset();
 
     switch (c->source_type()) {
@@ -713,8 +934,9 @@ static int per_entry_load_constants(RuntimeState *state,
     }
   }
 
-  TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants)\n",
-             record_elapsed(t_prev), (long long)count);
+  TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants, %zu bytes "
+             "left disk-resident)\n",
+             record_elapsed(t_prev), (long long)count, disk_resident_bytes);
 
   free(staging);
   fref_cache_release(&fcache);
@@ -857,6 +1079,18 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
+  if (state->disk_constants) {
+    for (size_t i = 0; i < state->num_constants; ++i) {
+      if (state->disk_constants[i].view) {
+        unmap_file(state->disk_constants[i].view,
+                   state->disk_constants[i].view_size);
+      }
+    }
+    free(state->disk_constants);
+  }
+  if (state->disk_gather_staging) {
+    HIP_CLEANUP(hipHostFree(state->disk_gather_staging));
+  }
 
   // (The GQA GEMM descriptor cache is no longer freed here: it moved into each
   // gqa instance's GqaState op-state slot, freed by the slot's deletor in the
@@ -917,6 +1151,88 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
     return nullptr;
   }
   return state->gpu_constants[index];
+}
+
+static int ensure_disk_gather_staging(RuntimeState *state, size_t size) {
+  if (size <= state->disk_gather_staging_size) {
+    return 0;
+  }
+  if (state->disk_gather_staging) {
+    HIP_CLEANUP(hipHostFree(state->disk_gather_staging));
+    state->disk_gather_staging = nullptr;
+    state->disk_gather_staging_size = 0;
+  }
+  if (hipHostMalloc(&state->disk_gather_staging, size, hipHostMallocDefault) !=
+      hipSuccess) {
+    fprintf(stderr, "disk-resident gather: hipHostMalloc(%zu) failed\n", size);
+    state->disk_gather_staging = nullptr;
+    return 1;
+  }
+  state->disk_gather_staging_size = size;
+  return 0;
+}
+
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst) {
+  if (!state || !state->disk_constants || constant_index < 0 ||
+      (size_t)constant_index >= state->num_constants || !indices || !dst ||
+      (index_bytes != 4 && index_bytes != 8)) {
+    fprintf(stderr, "disk-resident gather: invalid arguments (index=%lld)\n",
+            (long long)constant_index);
+    return -1;
+  }
+  const DiskConstant &table = state->disk_constants[constant_index];
+  if (!table.data || num_rows <= 0 || row_bytes <= 0 ||
+      row_bytes * num_rows != table.size) {
+    fprintf(stderr,
+            "disk-resident gather: constant %lld is not a disk-resident table "
+            "of %lld rows x %lld bytes\n",
+            (long long)constant_index, (long long)num_rows,
+            (long long)row_bytes);
+    return -1;
+  }
+
+  const size_t indices_size = (size_t)(num_indices * index_bytes);
+  const size_t indices_region = (indices_size + 63) & ~size_t(63);
+  const size_t rows_size = (size_t)(num_indices * row_bytes);
+  if (ensure_disk_gather_staging(state, indices_region + rows_size) != 0) {
+    return -1;
+  }
+  auto *host_indices = static_cast<uint8_t *>(state->disk_gather_staging);
+  uint8_t *host_rows = host_indices + indices_region;
+
+  if (hipMemcpyAsync(host_indices, indices, indices_size, hipMemcpyDeviceToHost,
+                     state->stream) != hipSuccess ||
+      hipStreamSynchronize(state->stream) != hipSuccess) {
+    fprintf(stderr, "disk-resident gather: indices readback failed\n");
+    return -1;
+  }
+
+  std::vector<const uint8_t *> rows((size_t)num_indices);
+  for (int64_t k = 0; k < num_indices; ++k) {
+    int64_t row = index_bytes == 8
+                      ? reinterpret_cast<const int64_t *>(host_indices)[k]
+                      : reinterpret_cast<const int32_t *>(host_indices)[k];
+    if (row < 0) {
+      row += num_rows;
+    }
+    rows[(size_t)k] = row < 0 || row >= num_rows
+                          ? nullptr
+                          : table.data + (size_t)row * (size_t)row_bytes;
+  }
+  gather_rows(rows, (size_t)row_bytes, host_rows);
+
+  if (hipMemcpyAsync(dst, host_rows, rows_size, hipMemcpyHostToDevice,
+                     state->stream) != hipSuccess ||
+      hipStreamSynchronize(state->stream) != hipSuccess) {
+    fprintf(stderr, "disk-resident gather: row upload failed\n");
+    return -1;
+  }
+  return 0;
 }
 
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {

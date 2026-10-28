@@ -1179,6 +1179,17 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
+// Axis-0 gather whose data is disk-resident constant `constant_index`: rows
+// are read from its source file on the host and copied into `output`.
+// Synchronizes `state->stream`.
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
@@ -1407,9 +1418,10 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`
-// (0=half_pixel, 1=asymmetric, 2=align_corners) and `nearest_mode`
-// (0=round_prefer_floor) are pre-resolved at compile time from the ONNX
-// string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF,
+// (0=half_pixel, 1=asymmetric, 2=align_corners, 3=pytorch_half_pixel) and
+// `nearest_mode` (0=round_prefer_floor) are pre-resolved at compile time
+// from the ONNX string attributes.  data_type: HIPDNN_EP_DATATYPE_* (FLOAT,
+// HALF,
 // BFLOAT16, DOUBLE).
 
 int wrap_resize(RuntimeState *state, void *input, void *output,
@@ -1417,6 +1429,15 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
                 int64_t in0, int64_t in1, int64_t in2, int64_t out0,
                 int64_t out1, int64_t out2, int64_t mode,
                 int64_t coord_transform, int64_t nearest_mode);
+// wrap_resize, but window axis i samples with ONNX scale `scale<i>` (output /
+// input) when it is > 0 instead of out<i> / in<i>. Emitted when hip.resize
+// carries `scales`.
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2);
 
 // GridSample (4-D NCHW). grid is (N, H_out, W_out, 2) with last dim (x, y).
 // mode: 0=nearest, 1=bilinear; padding_mode: 0=zeros, 1=border, 2=reflection;
@@ -1630,6 +1651,18 @@ int wrap_gather_block_quantized(
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
 
+// wrap_gather_block_quantized with gather_axis 0 whose data is disk-resident
+// constant `constant_index`: the selected rows are read from its source file
+// on the host. Synchronizes `state->stream`.
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype);
+
 // QuantizeLinear / DequantizeLinear wrappers (ONNX opset 23).
 //
 //   quantize:   output = saturate((input / scale) + zero_point)
@@ -1707,8 +1740,11 @@ int wrap_dequantize_linear(
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
-// applies activation (e.g. SwiGLU), and combines results.
+// applies activation (SwiGLU, or relu2 with swiglu_fusion=0), and combines
+// results.
 // Optional pointer args: pass nullptr if the corresponding input is absent.
+#define HIPDNN_EP_QMOE_ACTIVATION_RELU2 5
+
 int wrap_qmoe(
     RuntimeState *state,
     const void *input,           // [num_tokens, hidden_size]
@@ -1730,7 +1766,8 @@ int wrap_qmoe(
     int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
     int64_t num_experts, int64_t k, int64_t expert_weight_bits,
     int64_t block_size, int64_t swiglu_fusion,
-    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
+    int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity,
+                             // 5=relu2
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
@@ -1738,9 +1775,8 @@ int wrap_qmoe(
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
 // correction-bias routing (vs softmax), relu2 activation (vs SwiGLU), and a
-// mandatory latent projection + shared-expert branch. Shares only the
-// generic int4 GEMM / gather / bucket / scatter sub-kernels, not any code
-// path in lib/Runtime/real/qmoe.cpp. Hip_QMoEAmdOp in
+// mandatory latent projection + shared-expert branch. Shares only sub-kernels
+// with lib/Runtime/real/qmoe.cpp, not any code path. Hip_QMoEAmdOp in
 // include/hip/Dialect/IR/HipOps.td carries the full op semantics.
 //
 // activation_type / routing_type use the HIPDNN_EP_QMOE_AMD_* identifiers
@@ -2106,8 +2142,14 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 // Mod operation wrapper (element-wise modulo / fmod).
 //   fmod = 0  -> integer modulo (Python %); requires integer data_type
 //   fmod = 1  -> C fmod         ; requires float data_type
+// Operand shapes are passed as 4D (N, C, H, W), left-padded with 1 by the
+// compiler; ONNX multidirectional broadcast is materialised via hip_expand
+// when an operand does not already match the output shape.
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod);
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod);
 
 // Slice operation wrapper (ONNX Slice native fallback).
 //
