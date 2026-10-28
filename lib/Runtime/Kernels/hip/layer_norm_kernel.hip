@@ -12,16 +12,17 @@
  *         (outer = input_num_elements / scale_num_elements,
  *          norm_size = scale_num_elements).
  *
- * Algorithm: two-pass with shared-memory block reduction.
- *   Pass A: each block sums x and x^2 over `norm_size`, all in FP32.
- *   After block sync: thread 0 derives mean, inv_std.
- *   Pass B: each thread writes y in input dtype, using FP32 math.
- *
- * Rejected alternative: Welford online algorithm. Welford is numerically
- * better when the variance is much smaller than the mean^2, but for
- * LayerNorm inputs (zero-mean activations) the two-pass approach with FP32
- * accumulation is already well-conditioned and avoids the per-step branch.
- * Matches PyTorch/TensorFlow LayerNorm implementations.
+ * Algorithm: one block per row, two passes over the row in FP32.
+ *   Pass A: sum d = x - x[0] and d^2, reduced together in one block tree.
+ *           mean = x[0] + E[d] and var = E[d^2] - E[d]^2. The shift keeps
+ *           the sums at the scale of the spread rather than of |mean|, so
+ *           the difference does not cancel the way E[x^2] - mean^2 does when
+ *           |mean| >> stddev, and a row without spread has a variance of
+ *           exactly 0.
+ *   Pass B: write y in the input dtype.
+ * One paired reduction, not a mean reduction followed by a deviation pass:
+ * on rows of a few hundred to a few thousand elements the block reductions,
+ * not the reads, set the kernel's time.
  *
  * Source: onnxruntime/core/providers/cuda/nn/layer_norm_impl.cu @ v1.22.2
  *         (structurally; we keep the simpler "small N" branch -- one
@@ -58,6 +59,21 @@ __device__ inline __half store_from_float<__half>(float v) {
   return __float2half(v);
 }
 
+// Every thread of the block gets the sums of `v` over the block, added in a
+// fixed tree order.
+__device__ inline float2 block_sum2(float2 v, float2 *s_reduce) {
+  s_reduce[threadIdx.x] = v;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      s_reduce[threadIdx.x].x += s_reduce[threadIdx.x + stride].x;
+      s_reduce[threadIdx.x].y += s_reduce[threadIdx.x + stride].y;
+    }
+    __syncthreads();
+  }
+  return s_reduce[0];
+}
+
 // One block per row. blockDim.x == kLayerNormBlockSize.
 // MEAN_OUT_T / INV_STD_OUT_T = float or __half (depending on stash_type).
 template <typename T_IN, typename T_SCALE, typename MEAN_OUT_T>
@@ -76,61 +92,32 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   const T_IN *x_row = input + row * norm_size;
   T_IN *y_row = output + row * norm_size;
 
-  __shared__ float s_sum;
-  __shared__ float s_sumsq;
-  __shared__ float s_mean;
-  __shared__ float s_inv_std;
-  __shared__ float s_reduce[kLayerNormBlockSize];
+  __shared__ float2 s_reduce[kLayerNormBlockSize];
+  const float count = static_cast<float>(norm_size);
 
-  // Pass A: per-thread partial sums.
-  float local_sum = 0.0f;
-  float local_sumsq = 0.0f;
+  // Pass A: sums of d = x - x[0] and d^2 in one read.
+  const float shift = load_as_float<T_IN, T_SCALE>(x_row);
+  float2 local = {0.0f, 0.0f};
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
-    local_sum += v;
-    local_sumsq += v * v;
+    float d = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
+    local.x += d;
+    local.y += d * d;
   }
-
-  // Block reduce sum.
-  s_reduce[threadIdx.x] = local_sum;
-  __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride)
-      s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0)
-    s_sum = s_reduce[0];
-
-  __syncthreads();
-
-  // Block reduce sumsq.
-  s_reduce[threadIdx.x] = local_sumsq;
-  __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride)
-      s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
-    __syncthreads();
-  }
+  const float2 sums = block_sum2(local, s_reduce);
+  const float mean_d = sums.x / count;
+  const float mean = shift + mean_d;
+  // Rounding can take the difference just below 0; a NaN stays NaN.
+  float var = sums.y / count - mean_d * mean_d;
+  var = var < 0.0f ? 0.0f : var;
+  const float inv_std = rsqrtf(var + epsilon);
   if (threadIdx.x == 0) {
-    s_sumsq = s_reduce[0];
-    float mean = s_sum / static_cast<float>(norm_size);
-    float var = s_sumsq / static_cast<float>(norm_size) - mean * mean;
-    if (var < 0.0f)
-      var = 0.0f; // Cancellation-induced negative -> clamp.
-    float inv_std = rsqrtf(var + epsilon);
-    s_mean = mean;
-    s_inv_std = inv_std;
     if (mean_out)
       mean_out[row] = store_from_float<MEAN_OUT_T>(mean);
     if (inv_std_out)
       inv_std_out[row] = store_from_float<MEAN_OUT_T>(inv_std);
   }
-  __syncthreads();
 
   // Pass B: per-element normalize + affine.
-  float mean = s_mean;
-  float inv_std = s_inv_std;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
     float v = load_as_float<T_IN, T_SCALE>(x_row + i);
     float s = load_as_float<T_SCALE, T_SCALE>(scale + i);

@@ -49,7 +49,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 21-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -207,6 +207,13 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
   thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
   are compared bit-exactly with a CPU reference.
+- **group_norm** (fp16, bf16, fp32 and fp64 as separate leaves): layout
+  `{NHWC,NCHW}` x workspace `{split, none, too small, misaligned tensors}` (8
+  combos), SiLU alternating by shape, on a shape list COVERAGE thins (tier1 =
+  6 shapes, tier2 = 10, tier3 = 12) that covers odd channels per group,
+  G = 1, G = C, spatial 1 and prime, groups wider than one block and the
+  Stable Diffusion VAE shapes. Every case also checks guard regions, and the
+  split case checks bitwise-identical output over two launches.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
