@@ -21,6 +21,12 @@
 //     that rank, and ops that copy the shape pick it up
 //     (`reshape_rank_from_shape`). A dynamic-length shape vector does
 //     not (`reshape_rank_unknown`).
+//   - AveragePool writes the pooled spatial size, an opset-7 Upsample
+//     reads its scales attribute, and a Slice with runtime bounds keeps
+//     the stored shape (`average_pool_static`, `upsample_scales_attribute`,
+//     `slice_keeps_stored_shape`).
+//   - a constant Slice that feeds hip.loop updates the loop result and the
+//     body signature to the refined v_init (`loop_follows_refined_slice`).
 
 // -----------------------------------------------------------------------
 // Forward Concat rule: Concat((1x?x1152, ?x?x?), axis=1) -> 1x?x1152.
@@ -271,4 +277,85 @@ func.func @upsample_refines_dynamic_dims(%x: tensor<1x3x18x21xf32>) -> tensor<?x
   %result = "onnx.Cast"(%upsample) {to = f16}
       : (tensor<?x?x?x?xf32>) -> tensor<?x?x?x?xf16>
   return %result : tensor<?x?x?x?xf16>
+}
+
+// AveragePool of 1x64x512x512 with kernel 2 and stride 2 is 1x64x256x256.
+// CHECK-LABEL: func.func @average_pool_static
+// CHECK:         "onnx.AveragePool"{{.*}} -> tensor<1x64x256x256xf32>
+func.func @average_pool_static(%x: tensor<1x64x512x512xf32>) -> tensor<*xf32> {
+  %y = "onnx.AveragePool"(%x) {auto_pad = "NOTSET", kernel_shape = [2, 2],
+                               pads = [0, 0, 0, 0], strides = [2, 2]}
+      : (tensor<1x64x512x512xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// Opset 7-8 Upsample has no scales input. The scales attribute doubles H and W.
+// CHECK-LABEL: func.func @upsample_scales_attribute
+// CHECK:         "onnx.Upsample"{{.*}} -> tensor<1x64x112x112xf32>
+func.func @upsample_scales_attribute(%x: tensor<1x64x56x56xf32>) -> tensor<*xf32> {
+  %y = "onnx.Upsample"(%x) {mode = "nearest",
+       scales = [1.0 : f32, 1.0 : f32, 2.0 : f32, 2.0 : f32]}
+      : (tensor<1x64x56x56xf32>) -> tensor<*xf32>
+  return %y : tensor<*xf32>
+}
+
+// Gemma Slice. starts/ends/axes are runtime tensors, so the rule returns no
+// type and the stored 32 stays. It must not become tensor<?x?x?x?xf16>.
+// CHECK-LABEL: func.func @slice_keeps_stored_shape
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<1x?x12x32xf16>
+func.func @slice_keeps_stored_shape(%x: tensor<1x?x12x64xf16>,
+                                    %starts: tensor<1xi64>,
+                                    %ends: tensor<1xi64>,
+                                    %axes: tensor<1xi64>) -> tensor<1x?x12x32xf16> {
+  %y = "onnx.Slice"(%x, %starts, %ends, %axes)
+      : (tensor<1x?x12x64xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1x?x12x32xf16>
+  return %y : tensor<1x?x12x32xf16>
+}
+
+// The same Slice fills a dynamic axis when starts/ends/axes are constants.
+// CHECK-LABEL: func.func @slice_constant_bounds
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<1x?x12x32xf16>
+func.func @slice_constant_bounds(%x: tensor<1x?x12x64xf16>) -> tensor<1x?x12x?xf16> {
+  %starts = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %ends = "onnx.Constant"() {value = dense<32> : tensor<1xi64>} : () -> tensor<1xi64>
+  %axes = "onnx.Constant"() {value = dense<3> : tensor<1xi64>} : () -> tensor<1xi64>
+  %y = "onnx.Slice"(%x, %starts, %ends, %axes)
+      : (tensor<1x?x12x64xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<1x?x12x?xf16>
+  return %y : tensor<1x?x12x?xf16>
+}
+
+// Qwen attn_output. The Slice axis is dynamic, so constant starts = ends = 0
+// keep that axis as `?` and copy the static dims. hip.loop was outlined while
+// v_init was still tensor<?x?x?xf16>; its result and the body must follow.
+// CHECK-LABEL: func.func @loop_follows_refined_slice
+// CHECK-SAME:    -> tensor<1x?x1152xf16>
+// CHECK:         "onnx.Slice"{{.*}} -> tensor<1x?x1152xf16>
+// CHECK:         iter_args(%{{.*}} : tensor<1x?x1152xf16>)
+// CHECK:         -> (tensor<1x?x1152xf16>)
+// CHECK:         return {{.*}} : tensor<1x?x1152xf16>
+func.func @loop_follows_refined_slice(%ctx: !hip.context, %M: index, %cond: i1,
+                                      %x: tensor<1x?x1152xf16>) -> tensor<?x?x?xf16> {
+  %starts = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %ends = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+  %axes = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+  %slice = "onnx.Slice"(%x, %starts, %ends, %axes)
+      : (tensor<1x?x1152xf16>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>)
+        -> tensor<?x?x?xf16>
+  %r = hip.loop(%ctx, %M, %cond)
+                 iter_args(%slice : tensor<?x?x?xf16>)
+                 -> (tensor<?x?x?xf16>)
+                 body @body_slice_carry
+                 {num_loop_carried = 1 : i32, cond_is_passthrough}
+  return %r : tensor<?x?x?xf16>
+}
+
+// CHECK-LABEL: func.func private @body_slice_carry
+// CHECK-SAME:    -> tensor<1x?x1152xf16>
+// CHECK:         return %{{.*}} : tensor<1x?x1152xf16>
+func.func private @body_slice_carry(%ctx: !hip.context, %iter: tensor<i64>,
+                                    %cond_in: tensor<ui8>,
+                                    %acc: tensor<?x?x?xf16>) -> tensor<?x?x?xf16> {
+  return %acc : tensor<?x?x?xf16>
 }

@@ -849,6 +849,33 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_gather_from_file(RuntimeState *state, int64_t constant_index,
+                          void *indices, void *output, int64_t axis,
+                          int64_t data_num_elements,
+                          int64_t indices_num_elements,
+                          int64_t output_num_elements, int64_t axis_size,
+                          int64_t inner_size, int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes) {
+  (void)indices;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_from_file\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_gather_from_file(constant=%lld, axis=%lld, "
+             "data_num_elements=%lld, indices_num_elements=%lld, "
+             "output_num_elements=%lld, axis_size=%lld, inner_size=%lld, "
+             "element_size=%lld, indices_element_size=%lld)\n",
+             (long long)constant_index, (long long)axis,
+             (long long)data_num_elements, (long long)indices_num_elements,
+             (long long)output_num_elements, (long long)axis_size,
+             (long long)inner_size, (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
+
+  return 0;
+}
+
 int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
                  void *output, int64_t axis, int64_t indices_rank,
                  int64_t output_rank, const int64_t *indices_shape,
@@ -1238,6 +1265,29 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
              (long long)out1, (long long)out2, (long long)mode,
              (long long)coord_transform, (long long)nearest_mode,
              input ? "yes" : "null", output ? "yes" : "null");
+  return 0;
+}
+
+int wrap_resize_scaled(RuntimeState *state, void *input, void *output,
+                       int64_t data_type, int64_t spatial_rank, int64_t N,
+                       int64_t C, int64_t in0, int64_t in1, int64_t in2,
+                       int64_t out0, int64_t out1, int64_t out2, int64_t mode,
+                       int64_t coord_transform, int64_t nearest_mode,
+                       double scale0, double scale1, double scale2) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_resize_scaled\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_resize_scaled(dtype=%s(%lld), rank=%lld, N=%lld, "
+             "C=%lld, in=[%lld,%lld,%lld], out=[%lld,%lld,%lld], mode=%lld, "
+             "coord_transform=%lld, nearest_mode=%lld, scales=[%g,%g,%g], "
+             "in=%s, out=%s)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)spatial_rank, (long long)N, (long long)C,
+             (long long)in0, (long long)in1, (long long)in2, (long long)out0,
+             (long long)out1, (long long)out2, (long long)mode,
+             (long long)coord_transform, (long long)nearest_mode, scale0,
+             scale1, scale2, input ? "yes" : "null", output ? "yes" : "null");
   return 0;
 }
 
@@ -1748,6 +1798,41 @@ int wrap_gather_block_quantized(
       hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype,
       hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype,
       zero_points ? "yes" : "null");
+  return 0;
+}
+
+int wrap_gather_block_quantized_from_file(
+    RuntimeState *state, int64_t constant_index, const void *indices,
+    const void *scales, const void *zero_points, void *output,
+    const int64_t *data_shape, int64_t data_rank, const int64_t *indices_shape,
+    int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
+    const int64_t *output_shape, int64_t output_rank, int64_t bits,
+    int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_block_quantized_from_file\n");
+    return -1;
+  }
+  (void)indices;
+  (void)scales;
+  (void)zero_points;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  (void)scales_shape;
+  (void)output_shape;
+  (void)data_dtype;
+  (void)indices_dtype;
+  (void)scales_dtype;
+
+  MOCK_PRINT("[MOCK] wrap_gather_block_quantized_from_file(constant=%lld, "
+             "data_rank=%lld, indices_rank=%lld, scales_rank=%lld, "
+             "output_rank=%lld, bits=%lld, block_size=%lld, gather_axis=%lld, "
+             "quantize_axis=%lld)\n",
+             (long long)constant_index, (long long)data_rank,
+             (long long)indices_rank, (long long)scales_rank,
+             (long long)output_rank, (long long)bits, (long long)block_size,
+             (long long)gather_axis, (long long)quantize_axis);
   return 0;
 }
 
@@ -2791,15 +2876,21 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod) {
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_mod\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_mod(num_elements=%lld, data_type=%s(%lld), "
-             "fmod=%lld)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type, (long long)fmod);
+  MOCK_PRINT("[MOCK] wrap_mod a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s fmod=%lld\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type),
+             (long long)fmod);
   return 0;
 }
 

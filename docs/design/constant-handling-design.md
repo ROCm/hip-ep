@@ -45,13 +45,16 @@ ONNX models contain constant tensors (weights, biases, etc.), represented as
 the configured constants file (default: `constants.bin`, see
 [compilation-options.md](compilation-options.md)) via a `morphizen::FileSystem*`
 at compile time. The DLL contains only code; the runtime reads the file once at
-`inference_init` time and uploads each constant to the GPU.
+`inference_init` time and uploads each constant to the GPU, except
+[disk-resident gather tables](#disk-resident-gather-tables), which stay in
+their source file and are read row by row during inference.
 
 **Result:**
 
 1. **Stable signatures**: `@main_graph(%ctx, %inputs, %outputs)` regardless of
    constant count.
-2. **One-time upload**: GPU memory allocated and uploaded once during init.
+2. **One-time upload**: GPU memory allocated and uploaded once during init for
+   every constant that is not disk-resident.
 3. **No DLL size or link-time constraint**: Constants live in a separate file;
    no PE/COFF section limit and no linker processing of constant data.
 
@@ -283,6 +286,10 @@ runtime reads `constants_filename` and per-constant offsets, then:
 4. Sets each per-constant GPU pointer to the stored offset within the buffer —
    no per-constant allocation or copy.
 
+Disk-resident constants are excluded from the GPU buffer and its size; their
+source files are memory-mapped instead (see
+[Disk-resident gather tables](#disk-resident-gather-tables)).
+
 Note: This constants buffer is separate from the working memory pool managed
 by `PoolAllocsPass`, which dynamically packs intermediate tensor allocations
 during inference (see `lib/Dialect/Transforms/PoolAllocs.cpp`).
@@ -291,6 +298,41 @@ during inference (see `lib/Dialect/Transforms/PoolAllocs.cpp`).
 
 During inference, generated code retrieves GPU constant pointers by
 `globalIndex` — an O(1) lookup into the runtime state.
+
+### Disk-resident gather tables
+
+Some lookup tables (Per-Layer Embedding, Engram N-gram tables) are several GB
+while each inference reads only the rows selected by its indices. Uploading
+them at init costs GPU memory proportional to the table, not to the rows used.
+
+**Selection** (`hip-externalize-constants`, `skip-constant-data` only): a
+file-backed carrier is disk-resident when it has at least 1.6e9 logical
+elements (4-bit `hip.gather_block_quantized` data counts two per stored byte)
+and every use is the `data` operand of a `hip.gather` or
+`hip.gather_block_quantized` whose gather axis normalizes to 0. A 4-bit table
+quantized along axis 0 is excluded because one stored row packs two table
+rows. The carrier keeps its file reference, takes no range in the constants
+layout, and is recorded as `ConstantInfo.disk_resident` with a
+`FileRefSource`.
+
+**Lowering**: the gather of a disk-resident table calls
+`wrap_gather_from_file` / `wrap_gather_block_quantized_from_file`, which take
+the constant index instead of a data pointer (see
+[compiler-runtime-contract.md](compiler-runtime-contract.md#disk-resident-constants)).
+
+**Runtime**:
+
+1. `inference_init` memory-maps each disk-resident source file read-only; no
+   GPU memory is allocated for it and `hipdnn_ep_constant_get` returns null.
+2. Each gather reads the indices back to the host, prefetches and copies the
+   selected rows from the mapping into pinned staging memory (out-of-range
+   indices produce zero rows), and uploads only those rows.
+3. For `hip.gather` the uploaded rows are the result. For
+   `hip.gather_block_quantized` the rows land in workspace and the dequant
+   kernel runs in compact-rows mode, addressing the gathered rows by output
+   position while scales and zero points are still indexed by table row.
+
+The source file must stay readable and unchanged for the session's lifetime.
 
 ---
 

@@ -809,6 +809,13 @@ def ExternalizeConstantsPass
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
 
+    With `skip-constant-data`, a file-backed carrier of at least 1.6e9
+    logical elements (4-bit `hip.gather_block_quantized` data counts two per
+    byte) whose every use is the `data` operand of an axis-0 `hip.gather` or
+    `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
+    `hip.external_data`, takes no range in the GPU constants layout, and is
+    recorded with source kind `DiskFile`.
+
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before
     canonicalization and bufferization.
