@@ -2593,7 +2593,7 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *                        e's rows start at expert_row_offsets[e] (int32,
  *                        device). A is [rows, K], output [rows, N].
  *   B, scales          : expert-major MatMulNBits layout
- *                        ([E, N, ceil(K/bs)*bs/2] packed, fp16 [E, N, ceil(K/bs)])
+ *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
  *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
  *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
  *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
