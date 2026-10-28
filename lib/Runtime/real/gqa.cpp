@@ -121,6 +121,35 @@ static bool gqa_cache_seqlens_enabled() {
 // they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
+// Copy `count` seqlens_k entries to `dst`. hip-materialize-host-scalars can
+// place a host-written seqlens_k in hipHostMalloc'd host scratch; the host
+// store has already retired, so it is read directly instead of with a copy
+// plus a stream sync that would drain all queued GPU work. Anything else
+// (including pointers the query does not recognise) takes the synchronized
+// readback.
+static hipError_t read_seqlens_k_to_host(hipStream_t stream,
+                                         const void *seqlens_k_ptr,
+                                         int32_t *dst, int64_t count) {
+  const size_t bytes = static_cast<size_t>(count) * sizeof(int32_t);
+  hipPointerAttribute_t attr{};
+  if (hipPointerGetAttributes(&attr, seqlens_k_ptr) != hipSuccess) {
+    // Clear the last error a failed query leaves for unrecognised pointers.
+    (void)hipGetLastError();
+  } else if (attr.type == hipMemoryTypeHost) {
+    std::memcpy(dst, seqlens_k_ptr, bytes);
+    return hipSuccess;
+  }
+
+  // hipMemcpyDefault, not DeviceToHost: if the query above could not classify
+  // host-accessible memory, DeviceToHost would reject it with
+  // `invalid argument`.
+  hipError_t err =
+      hipMemcpyAsync(dst, seqlens_k_ptr, bytes, hipMemcpyDefault, stream);
+  if (err != hipSuccess)
+    return err;
+  return hipStreamSynchronize(stream);
+}
+
 // Read seqlens_k_val from device (or the per-Compute() cache when
 // HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
 // dispatch decision. Two purposes:
@@ -154,10 +183,8 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return state->seqlens_k_cached_val;
 
   int32_t seqlens_k_val = 0;
-  if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                     hipMemcpyDeviceToHost, stream) != hipSuccess)
-    return kSeqlensKNotRead;
-  if (hipStreamSynchronize(stream) != hipSuccess)
+  if (read_seqlens_k_to_host(stream, seqlens_k_ptr, &seqlens_k_val, 1) !=
+      hipSuccess)
     return kSeqlensKNotRead;
 
   if (gqa_cache_seqlens_enabled() && state) {
@@ -385,12 +412,9 @@ static int gqa_forward_fused(
       int32_t seqlens_k_val = 0;
       if (seqlens_k_pre != kSeqlensKNotRead) {
         seqlens_k_val = seqlens_k_pre;
-      } else {
-        if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess)
-          return -1;
-        if (hipStreamSynchronize(stream) != hipSuccess)
-          return -1;
+      } else if (read_seqlens_k_to_host(stream, seqlens_k_ptr, &seqlens_k_val,
+                                        1) != hipSuccess) {
+        return -1;
       }
       if (seqlens_k_val < 0) {
         past_len = 0; // ORT prefill sentinel
@@ -587,11 +611,8 @@ static int gqa_forward_fused(
       seqlens_k_val = seqlens_k_pre;
     } else if (B > 1) {
       std::vector<int32_t> seqlens_k_host(B);
-      if (hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
-                         B * sizeof(int32_t), hipMemcpyDeviceToHost,
-                         stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
+      if (read_seqlens_k_to_host(stream, seqlens_k_ptr, seqlens_k_host.data(),
+                                 B) != hipSuccess)
         return -1;
       seqlens_k_val = seqlens_k_host[0];
       for (int64_t b = 1; b < B; ++b) {
@@ -603,12 +624,9 @@ static int gqa_forward_fused(
           return -1;
         }
       }
-    } else {
-      if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                         hipMemcpyDeviceToHost, stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
-        return -1;
+    } else if (read_seqlens_k_to_host(stream, seqlens_k_ptr, &seqlens_k_val,
+                                      1) != hipSuccess) {
+      return -1;
     }
     if (seqlens_k_val < 0) {
       total_seq = sq; // ORT prefill sentinel
@@ -1350,14 +1368,9 @@ static int gqa_forward_hipblaslt(
       int32_t seqlens_k_val = 0;
       if (seqlens_k_pre != kSeqlensKNotRead) {
         seqlens_k_val = seqlens_k_pre;
-      } else {
-        if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                           hipMemcpyDeviceToHost, stream) != hipSuccess) {
-          return -1;
-        }
-        if (hipStreamSynchronize(stream) != hipSuccess) {
-          return -1;
-        }
+      } else if (read_seqlens_k_to_host(stream, seqlens_k_ptr, &seqlens_k_val,
+                                        1) != hipSuccess) {
+        return -1;
       }
 
       // ORT prefill sentinel: when there is no past KV yet, the producer
@@ -1526,11 +1539,8 @@ static int gqa_forward_hipblaslt(
       seqlens_k_val = seqlens_k_pre;
     } else if (B > 1) {
       std::vector<int32_t> seqlens_k_host(B);
-      if (hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
-                         B * sizeof(int32_t), hipMemcpyDeviceToHost,
-                         stream) != hipSuccess)
-        return -1;
-      if (hipStreamSynchronize(stream) != hipSuccess)
+      if (read_seqlens_k_to_host(stream, seqlens_k_ptr, seqlens_k_host.data(),
+                                 B) != hipSuccess)
         return -1;
       seqlens_k_val = seqlens_k_host[0];
       for (int64_t b = 1; b < B; ++b) {
@@ -1547,24 +1557,16 @@ static int gqa_forward_hipblaslt(
       // (D2H or sync failure). Rare path; not cached because the same failure
       // mode would have prevented the helper from caching too.
       //
-      // Both failures are reported rather than returned bare: this is the one
+      // The failure is reported rather than returned bare: this is the one
       // place the decomposed path can fail before it has done any work, and a
       // silent -1 here surfaces only as a zero-filled attention output, which
       // looks like a kernel bug rather than a seqlens_k that could not be read.
-      hipError_t cp =
-          hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                         hipMemcpyDeviceToHost, stream);
-      if (cp != hipSuccess) {
+      hipError_t rd =
+          read_seqlens_k_to_host(stream, seqlens_k_ptr, &seqlens_k_val, 1);
+      if (rd != hipSuccess) {
         fprintf(stderr,
                 "gqa_forward_hipblaslt: could not read seqlens_k from %p: %s\n",
-                seqlens_k_ptr, hipGetErrorString(cp));
-        return -1;
-      }
-      hipError_t sy = hipStreamSynchronize(stream);
-      if (sy != hipSuccess) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: sync after seqlens_k read failed: %s\n",
-                hipGetErrorString(sy));
+                seqlens_k_ptr, hipGetErrorString(rd));
         return -1;
       }
     }
