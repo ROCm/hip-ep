@@ -168,6 +168,55 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
   return seqlens_k_val;
 }
 
+static int32_t read_shared_mask_seqlens(
+    hipStream_t stream, const void *attentionBias, int64_t biasBatch,
+    int64_t biasHeads, int64_t batch, int64_t querySeq, int64_t keyCapacity,
+    int64_t pastCapacity, int64_t elementSize, RuntimeState *state) {
+  if (!attentionBias || !state || batch != 1 || biasBatch < 1 ||
+      biasHeads < 1 || querySeq <= 0 || keyCapacity <= 0 ||
+      pastCapacity != keyCapacity || (elementSize != 2 && elementSize != 4))
+    return kSeqlensKNotRead;
+
+  if (state->attention_mask_seqlens_cached_valid &&
+      state->attention_mask_seqlens_cached_ptr == attentionBias &&
+      state->attention_mask_seqlens_cached_bias_batch == biasBatch &&
+      state->attention_mask_seqlens_cached_bias_heads == biasHeads &&
+      state->attention_mask_seqlens_cached_query_seq == querySeq &&
+      state->attention_mask_seqlens_cached_key_capacity == keyCapacity &&
+      state->attention_mask_seqlens_cached_element_size == elementSize)
+    return state->attention_mask_seqlens_cached_val;
+
+  if (hipdnn_ep_state_ensure_workspace(state, sizeof(int32_t)) != 0)
+    return kSeqlensKNotRead;
+  void *deviceLastValid = hipdnn_ep_state_get_workspace(state);
+  if (!deviceLastValid ||
+      hip_gqa_bias_key_extent(
+          stream, attentionBias, deviceLastValid, static_cast<int>(biasBatch),
+          static_cast<int>(biasHeads), static_cast<int>(querySeq),
+          static_cast<int>(keyCapacity), static_cast<int>(querySeq),
+          static_cast<int>(querySeq), /*past_len=*/0, /*num_chunks=*/1,
+          static_cast<int>(elementSize)) != 0)
+    return kSeqlensKNotRead;
+
+  int32_t lastValid = -1;
+  if (hipMemcpyAsync(&lastValid, deviceLastValid, sizeof(lastValid),
+                     hipMemcpyDeviceToHost, stream) != hipSuccess ||
+      hipStreamSynchronize(stream) != hipSuccess)
+    return kSeqlensKNotRead;
+  if (lastValid < 0)
+    return kSeqlensKNotRead;
+
+  state->attention_mask_seqlens_cached_valid = true;
+  state->attention_mask_seqlens_cached_val = lastValid;
+  state->attention_mask_seqlens_cached_ptr = attentionBias;
+  state->attention_mask_seqlens_cached_bias_batch = biasBatch;
+  state->attention_mask_seqlens_cached_bias_heads = biasHeads;
+  state->attention_mask_seqlens_cached_query_seq = querySeq;
+  state->attention_mask_seqlens_cached_key_capacity = keyCapacity;
+  state->attention_mask_seqlens_cached_element_size = elementSize;
+  return lastValid;
+}
+
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
 static constexpr int kFlashDecodeMaxSplits = 64;
 
@@ -1201,7 +1250,8 @@ static int gqa_forward_hipblaslt(
     // onnx.Attention external additive mask [B,H,S,T] (broadcastable on the
     // batch / head dims); null for plain GQA.
     const void *attention_bias, int64_t attn_bias_batch,
-    int64_t attn_bias_num_heads, void *output, void *present_key,
+    int64_t attn_bias_num_heads, int64_t attn_bias_seq_q,
+    int64_t attn_bias_seq_kv, void *output, void *present_key,
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
@@ -1244,8 +1294,16 @@ static int gqa_forward_hipblaslt(
   // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
   // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
   // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
+  const int32_t sharedMaskSeqlens = read_shared_mask_seqlens(
+      stream, attention_bias, attn_bias_batch, attn_bias_num_heads, B,
+      attn_bias_seq_q, attn_bias_seq_kv, past_buf_seq, element_size_bytes,
+      state);
   int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+      sharedMaskSeqlens != kSeqlensKNotRead
+          ? sharedMaskSeqlens
+          : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
+  const void *deviceSeqlensK =
+      sharedMaskSeqlens != kSeqlensKNotRead ? nullptr : seqlens_k_ptr;
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
     // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
@@ -1519,7 +1577,7 @@ static int gqa_forward_hipblaslt(
   if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
-  } else if (seqlens_k_ptr) {
+  } else if (seqlens_k_ptr || sharedMaskSeqlens != kSeqlensKNotRead) {
     int32_t seqlens_k_val = 0;
 
     if (seqlens_k_pre != kSeqlensKNotRead) {
@@ -1941,8 +1999,9 @@ static int gqa_forward_hipblaslt(
     if (d_hi &&
         hip_gqa_bias_key_extent(
             stream, attention_bias, d_hi, static_cast<int>(attn_bias_batch),
-            static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
-            static_cast<int>(total_seq), static_cast<int>(sq),
+            static_cast<int>(attn_bias_num_heads),
+            static_cast<int>(attn_bias_seq_q),
+            static_cast<int>(attn_bias_seq_kv), static_cast<int>(sq),
             static_cast<int>(sq_chunk), static_cast<int>(past_len),
             static_cast<int>(nchunks), static_cast<int>(elem_sz)) == 0) {
       std::vector<int32_t> hi(static_cast<size_t>(nchunks), 0);
@@ -2361,7 +2420,7 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
+          (use_no_expand && !bidirectional_no_past) ? deviceSeqlensK : nullptr,
           static_cast<int>(elem_sz), static_cast<int>(kv_lo),
           bidirectional_no_past, static_cast<int>(skv), KvCacheFormat::Fp16,
           /*k_scale=*/nullptr, /*v_scale=*/nullptr, kv_bnsd));
@@ -2534,8 +2593,8 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(use_smooth_softmax), attention_bias,
             static_cast<int>(attn_bias_batch),
             static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
-            static_cast<int>(gemm_fp32), static_cast<int>(sq),
-            static_cast<int>(q0), static_cast<int>(total_seq),
+            static_cast<int>(gemm_fp32), static_cast<int>(attn_bias_seq_q),
+            static_cast<int>(q0), static_cast<int>(attn_bias_seq_kv),
             static_cast<int>(chunk_kv_lo)));
       } else if (gemm_fp32) {
         HIP_CHECK(hip_gqa_softmax_f32_to_f32(
@@ -3127,11 +3186,11 @@ int wrap_group_query_attention(
     int lrc = gqa_forward_hipblaslt(
         state, stream, ltHandle, query, key, value, past_key, past_value,
         seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
-        attention_bias, attn_bias_batch, attn_bias_num_heads, output,
-        present_key, present_value, batch_size, seq_len_q, seq_len_kv,
-        past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-        local_window_size, no_causal != 0, element_size_bytes, op_state_slot,
-        kv_bnsd != 0, reuse_past_kv);
+        attention_bias, attn_bias_batch, attn_bias_num_heads, attn_bias_seq_q,
+        attn_bias_seq_kv, output, present_key, present_value, batch_size,
+        seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+        scale, do_rotary, local_window_size, no_causal != 0, element_size_bytes,
+        op_state_slot, kv_bnsd != 0, reuse_past_kv);
     if (lrc != 0)
       fprintf(stderr,
               "wrap_group_query_attention: legacy decomposed pipeline failed "

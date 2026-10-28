@@ -281,6 +281,14 @@ struct RuntimeState {
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
+  bool attention_mask_seqlens_cached_valid;
+  int32_t attention_mask_seqlens_cached_val;
+  const void *attention_mask_seqlens_cached_ptr;
+  int64_t attention_mask_seqlens_cached_bias_batch;
+  int64_t attention_mask_seqlens_cached_bias_heads;
+  int64_t attention_mask_seqlens_cached_query_seq;
+  int64_t attention_mask_seqlens_cached_key_capacity;
+  int64_t attention_mask_seqlens_cached_element_size;
 
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
