@@ -15,10 +15,12 @@
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir %s \
 // RUN:   | hip-mlir-opt --split-input-file --convert-hip-to-tosa > /dev/null
 
-// A bare `tensor.empty` init is cloned into the kernel, as it always was.
+// A bare `tensor.empty` init is cloned into the kernel, as it always was. A
+// kernel with a conv is not marked rock.elementwise.
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-SAME: (%[[IN:.*]]: tensor<1x8x4x4xf16>, %[[W:.*]]: tensor<16x8x3x3xf16>, %[[B:.*]]: tensor<16xf16>)
+// CHECK-SAME: attributes {rock.arch = "gfx1151", rock.kernel}
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK: %[[E:.*]] = tensor.empty() : tensor<1x16x4x4xf16>
 // CHECK: %[[C:.*]] = hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] :
@@ -246,11 +248,13 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A pointwise chain with no conv, matmul, or gemm is one rocMLIR kernel.
-// PR 122 compiles a rock.kernel that contains only pointwise ops.
+// A pointwise chain with no conv, matmul, or gemm is one rocMLIR kernel,
+// marked rock.elementwise so rocMLIR lowers it with its standalone elementwise
+// pipeline.
 
 // CHECK-LABEL: func.func @rocMlir
 // CHECK-SAME: (%[[A:.*]]: tensor<1x4x4xf16>, %[[B:.*]]: tensor<1x4x4xf16>, %[[C:.*]]: tensor<1x4x4xf16>)
+// CHECK-SAME: attributes {rock.arch = "gfx1151", rock.elementwise, rock.kernel}
 // CHECK: %[[CTX:.*]] = ub.poison : !hip.context
 // CHECK: hip.mul(%[[CTX]])
 // CHECK: hip.add(%[[CTX]])
@@ -278,9 +282,11 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x4x4xf16>,
 // -----
 
 // A conv followed by hip.add stays on the anchor pattern: one kernel, not a
-// convolution kernel plus a separate pointwise kernel.
+// convolution kernel plus a separate pointwise kernel, and not an elementwise
+// one.
 
 // CHECK-LABEL: func.func @rocMlir
+// CHECK-NOT: rock.elementwise
 // CHECK: hip.conv
 // CHECK: hip.add
 // CHECK: return

@@ -295,6 +295,10 @@ static LogicalResult outlineRocMlirChain(DestinationStyleOpInterface start,
                                    funcType);
     newFunc->setAttr("rock.kernel", rewriter.getUnitAttr());
     newFunc->setAttr("rock.arch", rewriter.getStringAttr("gfx1151"));
+    // rocMLIR compiles a kernel with no conv/gemm root through its standalone
+    // elementwise pipeline, and selects that pipeline by this marker.
+    if (llvm::none_of(ops, [](Operation *op) { return isaAnchorOp(op); }))
+      newFunc->setAttr("rock.elementwise", rewriter.getUnitAttr());
     auto *funcBlock = newFunc.addEntryBlock();
     rewriter.setInsertionPointToStart(funcBlock);
     IRMapping mapping;

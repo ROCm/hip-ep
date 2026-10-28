@@ -105,28 +105,35 @@ if(ENABLE_ROCMLIRTRITON)
     set(_rocmlir_link_closure "${HIPDNN_ROCMLIR_LINK_LIBS}")
   endif()
 
-  add_executable(test-rocmlir-tosa-fallback test_rocmlir_tosa_fallback.cpp)
-  target_compile_features(test-rocmlir-tosa-fallback PRIVATE cxx_std_17)
-  target_include_directories(test-rocmlir-tosa-fallback PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_BINARY_DIR}/include
-    ${MLIR_INCLUDE_DIRS}
-    ${LLVM_INCLUDE_DIRS}
-  )
-  target_link_libraries(test-rocmlir-tosa-fallback PRIVATE
-    LibHipCompiler
-    HipDialectIR
-    HipDialectTransforms
-    HipToTosa
-    "${_rocmlir_link_closure}"
-    MLIRIR
-    MLIRParser
-    MLIRPass
-    MLIRSupport
-    ${llvm_libs}
-  )
-  add_test(NAME RocMlirTosaFallbackUnit COMMAND test-rocmlir-tosa-fallback)
-  set_target_properties(test-rocmlir-tosa-fallback PROPERTIES
-    FOLDER "mlir/Test/Dialect/Hipsr"
-  )
+  foreach(_rocmlir_test IN ITEMS
+      "test-rocmlir-tosa-fallback;test_rocmlir_tosa_fallback.cpp;RocMlirTosaFallbackUnit"
+      "test-rocmlir-elementwise-pipeline;test_rocmlir_elementwise_pipeline.cpp;RocMlirElementwisePipelineUnit")
+    list(GET _rocmlir_test 0 _target)
+    list(GET _rocmlir_test 1 _source)
+    list(GET _rocmlir_test 2 _ctest_name)
+    add_executable(${_target} ${_source})
+    target_compile_features(${_target} PRIVATE cxx_std_17)
+    target_include_directories(${_target} PRIVATE
+      ${CMAKE_SOURCE_DIR}/include
+      ${CMAKE_BINARY_DIR}/include
+      ${MLIR_INCLUDE_DIRS}
+      ${LLVM_INCLUDE_DIRS}
+    )
+    target_link_libraries(${_target} PRIVATE
+      LibHipCompiler
+      HipDialectIR
+      HipDialectTransforms
+      HipToTosa
+      "${_rocmlir_link_closure}"
+      MLIRIR
+      MLIRParser
+      MLIRPass
+      MLIRSupport
+      ${llvm_libs}
+    )
+    add_test(NAME ${_ctest_name} COMMAND ${_target})
+    set_target_properties(${_target} PROPERTIES
+      FOLDER "mlir/Test/Dialect/Hipsr"
+    )
+  endforeach()
 endif()
