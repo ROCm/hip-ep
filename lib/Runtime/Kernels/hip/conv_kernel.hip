@@ -649,8 +649,7 @@ __device__ __forceinline__ half8 loadRun8(const _Float16 *__restrict__ p,
 
 // Where neither WMMA encoding exists, trap: this file still has to compile for
 // other architectures, and a silent wrong answer is worse than an abort that
-// names the reason. Keyed off the builtins rather than __GFX11__, because
-// gfx117x is in the gfx11 family yet has only the gfx12-style encoding.
+// names the reason.
 #if !HIPDNN_HAS_WMMA
 static __device__ __forceinline__ float8 conv_wmma_unavailable(half16, half16,
                                                               float8 c) {
@@ -666,7 +665,7 @@ constexpr int kWmma = 16; // 16x16x16 tile, so BK is fixed at 16
 
 // This lane's A or B fragment out of a K-contiguous LDS row: all 16 k on gfx11,
 // where both lane halves carry the same data, or the half of them selected by
-// `pair` on the gfx12-style encoding. Either way it is 16-byte reads at a
+// `pair` on the gfx12-style encoding. Either way it is 16-byte reads at a 0- or
 // 16-byte offset, so the rows' alignment carries over.
 __device__ __forceinline__ half16 loadWmmaFrag(const _Float16 *row, int pair) {
   half16 f;
@@ -679,18 +678,14 @@ __device__ __forceinline__ half16 loadWmmaFrag(const _Float16 *row, int pair) {
 }
 
 // The blocked GEMM again, with the register tile replaced by WMMA fragments.
-//
-// Fragment layout (wave32), matching the in-tree WMMA GEMM:
-//   a_frag[e] at lane m  = A_tile[m][k = e]      lane -> M row, element -> K
-//   b_frag[e] at lane n  = B_tile[k = e][n]      element -> K row, lane -> N
-//   c_frag[e]            -> row (e*2 + pair), col lane,  pair = (tid % 32) / 16
-// Lanes 0-15 and 16-31 must hold identical a/b data, which indexing by
-// `tid % 16` gives for free.
+// Lane % 16 is the M row of A and the N column of B and C; which K run a lane
+// loads and which output rows it holds depend on the encoding, and come from
+// loadWmmaFrag and hipdnn_wmma_acc_row.
 //
 // The LDS tiles are stored K-contiguous (`[tile][BK + pad]`) rather than
-// K-major as in the scalar kernel, because a fragment is 16 consecutive K for
-// one row or column -- that way loading one is two 16-byte reads instead of
-// sixteen 2-byte ones. The padding is what keeps that from serialising: it
+// K-major as in the scalar kernel, because a fragment is a run of consecutive K
+// for one row or column -- that way loading one is 16-byte reads instead of
+// 2-byte ones. The padding is what keeps that from serialising: it
 // makes the row stride an odd multiple of 16 bytes, so the 32 lanes of a
 // fragment load land on 32 distinct banks.
 // VEC selects the vectorised im2col stage. It is a template parameter rather
@@ -936,7 +931,7 @@ void conv_wmma_kernel(const __half *__restrict__ x,
 //   * Padding is resolved once, at staging time. A window element outside the
 //     input is written as zero, so the inner loop has no bounds test at all --
 //     where conv_wmma_kernel tests every element of every tap.
-//   * The contraction is reordered. A WMMA fragment is 16 consecutive k, and
+//   * The contraction is reordered. A WMMA step contracts 16 consecutive k, and
 //     the 16 that are cheap to read here are 16 *channels* at one tap, not 16
 //     entries of the flattened (channel, tap) axis. So the k loop runs taps
 //     outside and channel slices inside, and the window is staged once per
