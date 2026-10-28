@@ -35,6 +35,13 @@ static Value buildShapeArray(MemRefType type, Value memref, Location loc,
 // hip.top_k(ctx, x, k, values, indices, axis, largest, sorted)
 //   -> wrap_top_k(state, x, k, values, indices, axis, largest, sorted, rank,
 //                 x_shape_ptr, num_elements, element_size_bytes)
+//
+// The results hold K elements along `axis`, so when that extent is static it
+// is K. The call then passes it by value to wrap_top_k_static, which skips the
+// device-to-host read of `k` and the stream synchronization it needs:
+//
+//   hip.top_k ... outs(%values : memref<3x2xf32>, ...) {axis = 1}
+//   -> wrap_top_k_static(state, x, /*k=*/2, values, indices, ...)
 struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -54,7 +61,6 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 
     Value statePtr = adaptor.getCtx();
     Value xPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
-    Value kPtr = extractContiguousMemRefPtr(adaptor.getK(), rewriter, loc);
     Value valuesPtr =
         extractContiguousMemRefPtr(adaptor.getValues(), rewriter, loc);
     Value indicesPtr =
@@ -72,6 +78,13 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     int64_t axisAttr = op.getAxis();
     if (axisAttr < 0)
       axisAttr += rank;
+    if (axisAttr < 0 || axisAttr >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    auto valuesType = cast<MemRefType>(op.getValues().getType());
+    std::optional<int64_t> staticK;
+    if (!valuesType.isDynamicDim(axisAttr))
+      staticK = valuesType.getDimSize(axisAttr);
 
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
@@ -82,17 +95,25 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
         xType.getElementType().getIntOrFloatBitWidth() / 8;
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
+    // Same signature for both entry points except K: a pointer to the `k`
+    // tensor, or the static extent by value.
+    Type kType = staticK ? i64Type : ptrType;
+    Value kArg =
+        staticK ? createI64Const(*staticK)
+                : extractContiguousMemRefPtr(adaptor.getK(), rewriter, loc);
+
     SmallVector<Type, 12> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
+        ptrType, ptrType, kType,   ptrType, ptrType, // state, x, k, values, idx
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
         i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, elem
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapTopK, paramTypes, i32Type);
+        rewriter, module, staticK ? kWrapTopKStatic : kWrapTopK, paramTypes,
+        i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
+    SmallVector<Value> args = {statePtr,   xPtr,      kArg,        valuesPtr,
                                indicesPtr, axisVal,   largestVal,  sortedVal,
                                rankVal,    xShapeArr, numElements, elemSizeVal};
 
