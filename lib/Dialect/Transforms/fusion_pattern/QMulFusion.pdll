@@ -31,6 +31,8 @@ Pattern HipQMul with benefit(10) {
   HasExtractableQdqZeropoint(dq_lhs);
   HasExtractableQdqZeropoint(dq_rhs);
   HasExtractableQdqZeropoint(q);
+  // hip.qmul has one element type for both operands and the result.
+  HasSameHipQdqElementType(dq_lhs, dq_rhs, q);
   // hip.mul's init already carries the fused result's shape, so it is the
   // shape source for hip.qmul's own init.
   CanBuildInit(output_type, mul_init);
