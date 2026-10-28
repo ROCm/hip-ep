@@ -2964,10 +2964,11 @@ int wrap_group_query_attention_host_length(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
-    // Shape values (6)
+    // Shape values (12)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
-    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
+    int64_t attn_bias_seq_q, int64_t attn_bias_seq_kv, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length,
     int32_t host_length_value) {
   const std::optional<int32_t> host_length =
@@ -2999,6 +3000,43 @@ int wrap_group_query_attention_host_length(
             "by kv_num_heads (%lld)\n",
             (long long)num_heads, (long long)kv_num_heads);
     return -1;
+  }
+  if (attention_bias != nullptr) {
+    const bool batch_extent_ok =
+        attn_bias_batch == 1 || attn_bias_batch == batch_size;
+    const bool head_extent_ok =
+        attn_bias_num_heads == 1 || attn_bias_num_heads == num_heads;
+    if (!batch_extent_ok || !head_extent_ok || attn_bias_seq_q != seq_len_q) {
+      fprintf(stderr,
+              "wrap_group_query_attention: attention bias shape "
+              "[%lld,%lld,%lld,%lld] is incompatible with "
+              "batch=%lld, heads=%lld, query=%lld\n",
+              (long long)attn_bias_batch, (long long)attn_bias_num_heads,
+              (long long)attn_bias_seq_q, (long long)attn_bias_seq_kv,
+              (long long)batch_size, (long long)num_heads,
+              (long long)seq_len_q);
+      return -1;
+    }
+    if (past_key != nullptr && attn_bias_seq_kv == 1) {
+      fprintf(stderr,
+              "wrap_group_query_attention: a key-broadcast attention bias "
+              "cannot provide the logical KV length for cached attention\n");
+      return -1;
+    }
+    const int64_t cache_extent =
+        past_buf_seq > seq_len_kv ? past_buf_seq : seq_len_kv;
+    const bool kv_extent_ok = past_key != nullptr
+                                  ? attn_bias_seq_kv >= seq_len_new_kv &&
+                                        attn_bias_seq_kv <= cache_extent
+                                  : attn_bias_seq_kv == seq_len_new_kv;
+    if (!kv_extent_ok) {
+      fprintf(stderr,
+              "wrap_group_query_attention: attention bias KV extent %lld is "
+              "incompatible with key length %lld and cache extent %lld\n",
+              (long long)attn_bias_seq_kv, (long long)seq_len_new_kv,
+              (long long)cache_extent);
+      return -1;
+    }
   }
 
   //===------------------------------------------------------------------===//

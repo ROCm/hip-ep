@@ -58,15 +58,13 @@ namespace {
 /// silently miscompiled (see the guards below).
 ///
 /// Not yet supported (rejected with a clear message): the 4th qk_matmul_output
-/// result, the opset-24 nonpad_kv_seqlen external-cache input, and boolean
-/// attn_mask (the runtime's attention_bias is additive-float only).
+/// result, the opset-24 nonpad_kv_seqlen external-cache input, and non-rank-4
+/// or boolean attn_mask (the runtime's attention_bias is additive-float only).
 ///
-/// Mask-extent assumption: the additive mask is passed to the runtime verbatim;
-/// its batch/head dims broadcast (extent 1 -> all), but its q/kv extents must
-/// equal the query seq length and total (past+current) KV length respectively.
-/// The runtime bias kernel does NOT broadcast the q dim (a mask with q==1 while
-/// sq>1 would be read out of range), so exports that emit a full mask (q==S,
-/// the common case) are correct; a q-broadcast mask is not modelled.
+/// Mask-extent contract: the rank-4 additive mask is passed to the runtime
+/// verbatim. Batch/head dims may broadcast from extent 1, while the q/kv
+/// extents must equal the score extents. Runtime checks cover dynamic shapes;
+/// cached attention does not accept a key-broadcast mask.
 ///
 /// Before (Gemma-style decoder layer, is_causal=0, external fp16 mask, 3 out):
 ///   %y, %pk, %pv = onnx.Attention(%q, %k, %v, %mask, %past_k, %past_v)
@@ -215,8 +213,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     if (!maskType)
       return rewriter.notifyMatchFailure(op, "attn_mask must be a ranked "
                                              "tensor");
-    if (maskType.getRank() == 0)
-      return rewriter.notifyMatchFailure(op, "attn_mask must have rank >= 1");
+    if (maskType.getRank() != 4)
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask must be rank 4 [B, H, S, T]");
     // The runtime's attention_bias is additive float; a boolean keep/drop mask
     // would need conversion to additive 0/-inf, which is not modelled here.
     if (maskType.getElementType().isInteger(1))
@@ -226,9 +225,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
 
     const int64_t querySeqDim = rank4 ? 2 : 1;
     const int64_t querySeq = queryType.getDimSize(querySeqDim);
-    const int64_t maskQuerySeq =
-        maskType.getRank() >= 2 ? maskType.getDimSize(maskType.getRank() - 2)
-                                : 1;
+    const int64_t maskQuerySeq = maskType.getDimSize(2);
     if ((querySeq == mlir::ShapedType::kDynamic) !=
             (maskQuerySeq == mlir::ShapedType::kDynamic) ||
         (querySeq != mlir::ShapedType::kDynamic && querySeq != maskQuerySeq)) {
@@ -237,7 +234,7 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
     }
 
     const int64_t keySeq = keyType.getDimSize(querySeqDim);
-    const int64_t maskKvSeq = maskType.getDimSize(maskType.getRank() - 1);
+    const int64_t maskKvSeq = maskType.getDimSize(3);
     if (!pastKey &&
         ((keySeq == mlir::ShapedType::kDynamic) !=
              (maskKvSeq == mlir::ShapedType::kDynamic) ||
@@ -383,9 +380,8 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value logicalTotalKvIdx = concatenatedKvIdx;
   mlir::Value presentSeqIdx = concatenatedKvIdx;
   if (attnMask && pastKey) {
-    logicalTotalKvIdx = mlir::tensor::DimOp::create(rewriter, loc, attnMask,
-                                                    maskType.getRank() - 1)
-                            .getResult();
+    logicalTotalKvIdx =
+        mlir::tensor::DimOp::create(rewriter, loc, attnMask, 3).getResult();
     presentSeqIdx = mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx,
                                                  logicalTotalKvIdx)
                         .getResult();
