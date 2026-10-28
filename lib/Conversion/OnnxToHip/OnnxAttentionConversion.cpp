@@ -85,9 +85,11 @@ namespace {
 ///       outs(%y_init, %pk_init, %pv_init)
 ///       {num_heads = 16, kv_num_heads = 8, scale = 1.0, no_causal = true}
 ///
-/// The mask key extent carries the logical KV length. The present extent is the
-/// larger of that length and the past buffer extent, preserving both growing
-/// and preallocated shared caches. Without a mask, concat semantics apply.
+/// For cached attention, the full mask key extent carries the logical KV
+/// length. The present extent is the larger of that length and the past buffer
+/// extent, preserving both growing and preallocated shared caches. Without a
+/// past cache, K supplies the logical length. Without a mask, concat semantics
+/// apply.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
   OnnxAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
@@ -207,8 +209,9 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
   // whether a mask is present. So is_causal=1 + mask applies BOTH; is_causal=0
   // + mask applies only the mask; no_causal && no mask selects the
   // bidirectional no-past path.
+  mlir::RankedTensorType maskType;
   if (attnMask) {
-    auto maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
+    maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
     if (!maskType)
       return rewriter.notifyMatchFailure(op, "attn_mask must be a ranked "
                                              "tensor");
@@ -220,6 +223,32 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       return rewriter.notifyMatchFailure(
           op, "boolean attn_mask not supported (runtime attention_bias is "
               "additive-float only)");
+
+    const int64_t querySeqDim = rank4 ? 2 : 1;
+    const int64_t querySeq = queryType.getDimSize(querySeqDim);
+    const int64_t maskQuerySeq =
+        maskType.getRank() >= 2 ? maskType.getDimSize(maskType.getRank() - 2)
+                                : 1;
+    if ((querySeq == mlir::ShapedType::kDynamic) !=
+            (maskQuerySeq == mlir::ShapedType::kDynamic) ||
+        (querySeq != mlir::ShapedType::kDynamic && querySeq != maskQuerySeq)) {
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask query extent must equal the query sequence length");
+    }
+
+    const int64_t keySeq = keyType.getDimSize(querySeqDim);
+    const int64_t maskKvSeq = maskType.getDimSize(maskType.getRank() - 1);
+    if (!pastKey &&
+        ((keySeq == mlir::ShapedType::kDynamic) !=
+             (maskKvSeq == mlir::ShapedType::kDynamic) ||
+         (keySeq != mlir::ShapedType::kDynamic && keySeq != maskKvSeq))) {
+      return rewriter.notifyMatchFailure(
+          op, "attn_mask key extent must equal the KV sequence length");
+    }
+    if (pastKey && maskKvSeq == 1)
+      return rewriter.notifyMatchFailure(
+          op, "broadcast attn_mask key extent cannot provide the logical KV "
+              "length for a cached attention");
   }
   // is_causal=0 with no mask is bidirectional attention, which the runtime
   // services only as a no-past path (bidirectional_no_past ignores past KV).
@@ -349,21 +378,20 @@ OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
       mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
           .getResult();
 
-  // The additive mask's last dimension is the logical total KV length. A
-  // preallocated past tensor may be larger because it carries cache capacity.
+  // With a past cache, the additive mask's full key extent is the logical KV
+  // length. Without a past cache, K already carries the complete sequence.
   mlir::Value logicalTotalKvIdx = concatenatedKvIdx;
   mlir::Value presentSeqIdx = concatenatedKvIdx;
-  if (attnMask) {
-    auto maskType = mlir::cast<mlir::RankedTensorType>(attnMask.getType());
+  if (attnMask && pastKey) {
     logicalTotalKvIdx = mlir::tensor::DimOp::create(rewriter, loc, attnMask,
                                                     maskType.getRank() - 1)
                             .getResult();
-    if (pastKey)
-      presentSeqIdx = mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx,
-                                                   logicalTotalKvIdx)
-                          .getResult();
-    else
-      presentSeqIdx = logicalTotalKvIdx;
+    presentSeqIdx = mlir::arith::MaxSIOp::create(rewriter, loc, pastSeqIdx,
+                                                 logicalTotalKvIdx)
+                        .getResult();
+  } else if (attnMask) {
+    logicalTotalKvIdx = curSeqIdx;
+    presentSeqIdx = curSeqIdx;
   }
 
   // seqlens_k[b] = total_seq - 1 (ORT GQA convention total_seq = seqlens_k + 1;

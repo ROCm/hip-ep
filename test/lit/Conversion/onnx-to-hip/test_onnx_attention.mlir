@@ -9,7 +9,8 @@
 //   - is_causal=1 WITH an external attn_mask -> no_causal=false AND the mask
 //     threaded as attention_bias (runtime adds the mask, then the built-in
 //     causal triangle applies on top -- both, mirroring the ONNX reference)
-//   - the mask key extent supplies the logical KV length and seqlens_k
+//   - cached attention uses the full mask key extent as the logical KV length;
+//     no-past attention uses K's sequence extent
 //   - present KV capacity preserves a preallocated past buffer while growing
 //     normally when the logical length is larger
 //
@@ -335,9 +336,8 @@ module {
            tensor<1x1x1x?xf16>)
         -> tensor<1x1x2048xf16>
 
-    // The synthesized present buffers are sized from the mask key extent,
-    // which carries the full logical history.
-    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c3 : tensor<1x1x1x?xf16>
+    // Without a past cache, K carries the full logical history.
+    // CHECK: %[[TOT:.*]] = tensor.dim %{{.*}}, %c1 : tensor<1x?x256xf16>
     // CHECK: arith.subi %[[TOT]], %c1
     // CHECK: tensor.from_elements %{{.*}} : tensor<1xi32>
     // CHECK: tensor.empty(%[[TOT]]) : tensor<1x1x?x256xf16>
@@ -348,6 +348,41 @@ module {
     // CHECK-NOT: onnx.Attention
 
     return %y : tensor<1x1x2048xf16>
+  }
+}
+
+// -----
+
+// A key-broadcast mask cannot provide the logical KV length for a cached
+// attention, and the runtime does not broadcast the key extent.
+module {
+  func.func @broadcast_key_mask(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x1x1xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x1x1x1xf16>,
+           tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @broadcast_key_mask
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
   }
 }
 
