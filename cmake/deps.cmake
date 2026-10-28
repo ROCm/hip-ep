@@ -112,14 +112,22 @@ endfunction()
 #   1. CMake cache variable: -DTHEROCK_DIST=/path/to/therock
 #   2. Environment variable:  THEROCK_DIST=/path/to/therock
 #   3. Auto-downloaded from the pinned TheRock release when neither is set.
+#      The download lands in <build>/_therock and is replaced when the pin in
+#      cmake/deps.txt changes.
 # The resolved path is added to CMAKE_PREFIX_PATH so find_package(hip) finds it.
 if(NOT BUILD_MOCK_RUNTIME)
   set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
+  set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
   set(_therock_dist_resolved "${THEROCK_DIST}")
   if(_therock_dist_resolved)
     string(STRIP "${_therock_dist_resolved}" _therock_dist_resolved)
   elseif(DEFINED ENV{THEROCK_DIST})
     string(STRIP "$ENV{THEROCK_DIST}" _therock_dist_resolved)
+  endif()
+  # The auto-download caches its own path in THEROCK_DIST; re-check that copy
+  # against the pin instead of treating it as a user-provided SDK.
+  if(_therock_dist_resolved STREQUAL _therock_root)
+    set(_therock_dist_resolved "")
   endif()
   if(_therock_dist_resolved AND NOT EXISTS "${_therock_dist_resolved}/bin")
     message(WARNING
@@ -131,7 +139,31 @@ if(NOT BUILD_MOCK_RUNTIME)
     set(THEROCK_DIST "${_therock_dist_resolved}"
         CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
   else()
-    set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
+    if(WIN32)
+      set(_therock_base "${DEP_HASH_therock_windows}")
+      set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
+    else()
+      set(_therock_base "${DEP_HASH_therock_linux}")
+      set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
+    endif()
+    set(_therock_stamp "${_therock_root}/.hip-ep-therock-pin")
+    set(_therock_have "")
+    if(EXISTS "${_therock_stamp}")
+      file(READ "${_therock_stamp}" _therock_have)
+      string(STRIP "${_therock_have}" _therock_have)
+    endif()
+    if(EXISTS "${_therock_root}/bin" AND NOT _therock_have STREQUAL _therock_base)
+      message(STATUS "TheRock SDK in ${_therock_root} is not ${_therock_base} "
+        "(found '${_therock_have}'); replacing it")
+      file(REMOVE_RECURSE "${_therock_root}")
+      if(_therock_have)
+        file(REMOVE "${CMAKE_BINARY_DIR}/${_therock_have}.tar.gz")
+      endif()
+      # The HIP compiler ships inside the SDK at the same path, so CMake would
+      # keep the old clang's version and implicit include/link dirs. Dropping
+      # the cached detection makes enable_language(HIP) probe the new one.
+      file(REMOVE "${CMAKE_PLATFORM_INFO_DIR}/CMakeHIPCompiler.cmake")
+    endif()
     if(NOT EXISTS "${_therock_root}/bin")
       if(WIN32)
         set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153 gfx11-generic gfx1170)
@@ -143,11 +175,6 @@ if(NOT BUILD_MOCK_RUNTIME)
               "your own SDK with -DTHEROCK_DIST=/path/to/therock.")
           endif()
         endforeach()
-        set(_therock_base "${DEP_HASH_therock_windows}")
-        set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
-      else()
-        set(_therock_base "${DEP_HASH_therock_linux}")
-        set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
       endif()
       set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
       if(NOT EXISTS "${_therock_tgz}")
@@ -177,6 +204,7 @@ if(NOT BUILD_MOCK_RUNTIME)
       if(NOT _therock_tar_rc EQUAL 0)
         message(FATAL_ERROR "TheRock extraction failed (tar rc=${_therock_tar_rc}).")
       endif()
+      file(WRITE "${_therock_stamp}" "${_therock_base}\n")
     endif()
     set(THEROCK_DIST "${_therock_root}"
         CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
