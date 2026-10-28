@@ -89,9 +89,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
-| InstanceNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
-| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more use a split reduction over the runtime workspace, sized from the device's unit count; the result is deterministic |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | RMSNormalization | Custom HIP kernel |
 | SimplifiedLayerNormalization | Custom HIP kernel |

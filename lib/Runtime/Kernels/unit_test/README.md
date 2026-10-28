@@ -90,7 +90,7 @@ controller from that `bin` directory:
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
 | `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
 
-The controller runs the 16 leaves serially, with `bin` as the working
+The controller runs the 20 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -193,7 +193,7 @@ Concretely:
   never drops a categorical situation.
 
 A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 16-leaf suite at tier3 is budgeted at **up to ~30 min total**
+the whole 20-leaf suite at tier3 is budgeted at **up to ~30 min total**
 (measured ~20-25 min in practice) — this is intentionally wider than a
 "finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
 multiple K/N/seq scenarios) needs real coverage too, not just the categorical
@@ -258,6 +258,7 @@ unit_test/
   gqa/prefill/Xfp16_Wi8_Yfp16/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
+  group_norm/X{fp16,bf16,fp32,fp64}_W<same>_Y<same>/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the four
@@ -378,6 +379,13 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
   and last rows, negative and out-of-range indices. Outputs are compared
   bit-exactly with the CPU reference.
+- **group_norm** (fp16, bf16, fp32 and fp64 as separate leaves): layout
+  `{NHWC,NCHW}` x workspace `{split, none, too small, misaligned tensors}` (8
+  combos), SiLU alternating by shape, on a shape list COVERAGE thins (tier1 =
+  6 shapes, tier2 = 10, tier3 = 12) that covers odd channels per group,
+  G = 1, G = C, spatial 1 and prime, groups wider than one block and the
+  Stable Diffusion VAE shapes. Every case also checks guard regions, and the
+  split case checks bitwise-identical output over two launches.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
@@ -553,6 +561,8 @@ gather_block_quantized writes `R1024_C160_bs16_I2x8` (table rows, row length,
 block size, indices shape) with `_compact`, `_zp` and `_signed` when set, or
 the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
 `fixed:elementwise` and its `time_ms` 0.
+group_norm writes `N2_C40_HW1000_G8` (batch, channels, spatial, groups); its
+`config` is `<dtype>:<layout>:<workspace>:silu<0|1>` and its `time_ms` 0.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
 leaf's fixed count of launches between two HIP events), not a total, and it is
