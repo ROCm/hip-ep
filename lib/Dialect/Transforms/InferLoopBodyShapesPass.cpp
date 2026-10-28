@@ -32,6 +32,12 @@
 //   4. Reconcile -- rebuild the body func signature from its (seeded) args
 //               and its (now ranked) terminator operands.
 //
+//   Main-graph inference can refine a value that is already a `$v_init`
+//   (a constant Slice is the Qwen case). That happens after the first body
+//   seed, so the walk repeats: copy each refined `$v_init` type onto the
+//   `hip.loop` result, then seed and reconcile that body again. The loop
+//   verifier requires those two types to be identical.
+//
 // The same forward walk also runs on every other function, not only loop
 // bodies. A main-graph `onnx.Reshape` whose shape operand is `tensor<Nxi64>`
 // has result rank N even when the importer left the result `tensor<*xT>`
@@ -189,6 +195,41 @@ static RankedTensorType rankedLike(Type resultType, ArrayRef<int64_t> shape) {
   if (!elementType)
     return {};
   return RankedTensorType::get(shape, elementType);
+}
+
+/// A 1-D integer constant, including a scalar. Defined below, after the
+/// constant folder. A runtime tensor yields nullopt.
+static std::optional<SmallVector<int64_t>> readConstInt1D(Value value);
+
+/// Keep every size the result already has. A `?` becomes a number only when
+/// `inferred` has one. An unranked result takes `inferred` wholesale, which
+/// is how a missing rank is established.
+static Type mergeInferredType(Type existing, Type inferred) {
+  if (isa<UnrankedTensorType>(existing))
+    return inferred;
+  auto existingRanked = dyn_cast<RankedTensorType>(existing);
+  auto inferredRanked = dyn_cast<RankedTensorType>(inferred);
+  if (!existingRanked || !inferredRanked ||
+      existingRanked.getRank() != inferredRanked.getRank() ||
+      existingRanked.getElementType() != inferredRanked.getElementType())
+    return existing;
+  SmallVector<int64_t> shape;
+  shape.reserve(existingRanked.getRank());
+  bool changed = false;
+  for (auto [have, got] :
+       llvm::zip(existingRanked.getShape(), inferredRanked.getShape())) {
+    if (!ShapedType::isDynamic(have)) {
+      shape.push_back(have);
+    } else if (!ShapedType::isDynamic(got)) {
+      shape.push_back(got);
+      changed = true;
+    } else {
+      shape.push_back(have);
+    }
+  }
+  if (!changed)
+    return existing;
+  return RankedTensorType::get(shape, existingRanked.getElementType());
 }
 
 /// Numpy-style broadcast. A missing leading dim counts as size 1. Two static
@@ -405,9 +446,6 @@ static RankedTensorType inferMatMulResult(Operation *op) {
 static RankedTensorType inferReduceResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
-  // A runtime axes operand does not fix which dims disappear.
-  if (op->getNumOperands() > 1)
-    return {};
   auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
   if (!inputType)
     return {};
@@ -416,7 +454,19 @@ static RankedTensorType inferReduceResult(Operation *op) {
   if (auto keepdimsAttr = op->getAttrOfType<IntegerAttr>("keepdims"))
     keepdims = keepdimsAttr.getValue().getSExtValue();
   SmallVector<int64_t> axes;
-  if (auto axesAttr = op->getAttrOfType<ArrayAttr>("axes")) {
+  // A runtime axes operand does not fix which dims disappear.
+  if (op->getNumOperands() > 1) {
+    auto axisValues = readConstInt1D(op->getOperand(1));
+    if (!axisValues)
+      return {};
+    for (int64_t axis : *axisValues) {
+      if (axis < 0)
+        axis += rank;
+      if (axis < 0 || axis >= rank)
+        return {};
+      axes.push_back(axis);
+    }
+  } else if (auto axesAttr = op->getAttrOfType<ArrayAttr>("axes")) {
     for (Attribute attr : axesAttr) {
       auto intAttr = dyn_cast<IntegerAttr>(attr);
       if (!intAttr)
@@ -471,16 +521,29 @@ static RankedTensorType inferGatherResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
-/// Equal Split (no split-lengths operand). Each output keeps the input rank;
-/// the split axis is divided when its extent is static, otherwise dynamic.
+/// An omitted optional ONNX input is either a none type or `onnx.NoValue`.
+static bool isOnnxNone(Value value) {
+  if (isa<NoneType>(value.getType()))
+    return true;
+  Operation *def = value.getDefiningOp();
+  return def && def->getName().getStringRef() == "onnx.NoValue";
+}
+
+/// Equal Split, or a Split whose lengths operand is a constant vector.
+/// Each output keeps the input rank. The split axis is the equal share, or
+/// the matching constant length. A runtime lengths tensor yields no type.
 static LogicalResult inferSplitResults(Operation *op,
                                        SmallVectorImpl<Type> &out) {
   if (op->getNumOperands() < 1 || op->getNumResults() == 0)
     return failure();
-  if (op->getNumOperands() > 1) {
-    Operation *split = op->getOperand(1).getDefiningOp();
-    if (!split || split->getName().getStringRef() != "onnx.NoValue")
+  SmallVector<int64_t> lengths;
+  bool custom = false;
+  if (op->getNumOperands() > 1 && !isOnnxNone(op->getOperand(1))) {
+    auto lens = readConstInt1D(op->getOperand(1));
+    if (!lens || lens->size() != op->getNumResults())
       return failure();
+    lengths = std::move(*lens);
+    custom = true;
   }
   auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
   if (!inputType)
@@ -494,12 +557,12 @@ static LogicalResult inferSplitResults(Operation *op,
     return failure();
   unsigned numOutputs = op->getNumResults();
   int64_t splitDim = ShapedType::kDynamic;
-  if (!inputType.isDynamicDim(axis) && numOutputs > 0 &&
+  if (!custom && !inputType.isDynamicDim(axis) && numOutputs > 0 &&
       inputType.getDimSize(axis) % numOutputs == 0)
     splitDim = inputType.getDimSize(axis) / numOutputs;
-  for (Value result : op->getResults()) {
+  for (auto [index, result] : llvm::enumerate(op->getResults())) {
     SmallVector<int64_t> shape(inputType.getShape());
-    shape[axis] = splitDim;
+    shape[axis] = custom ? lengths[index] : splitDim;
     RankedTensorType ranked = rankedLike(result.getType(), shape);
     if (!ranked)
       return failure();
@@ -537,8 +600,9 @@ static int64_t floorDiv(int64_t n, int64_t d) {
   return q;
 }
 
-/// `onnx.Pad` (pads attribute). out[i] = in[i] + begin[i] + end[i]. A missing
-/// pads list still fixes the rank; those extents stay dynamic.
+/// `onnx.Pad`. out[i] = in[i] + begin[i] + end[i]. Pads come from the
+/// attribute, or from a constant pads input. A runtime pads tensor yields
+/// no type, so a stored shape is left alone.
 static RankedTensorType inferPadResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
@@ -547,18 +611,45 @@ static RankedTensorType inferPadResult(Operation *op) {
     return {};
   int64_t rank = inputType.getRank();
   SmallVector<int64_t> pads;
-  if (!readIntArrayAttr(op, "pads", pads) || (int64_t)pads.size() != rank * 2) {
-    return rankedLike(op->getResult(0).getType(),
-                      SmallVector<int64_t>(rank, ShapedType::kDynamic));
+  if (!readIntArrayAttr(op, "pads", pads)) {
+    if (op->getNumOperands() < 2 || isOnnxNone(op->getOperand(1)))
+      return {};
+    auto padValues = readConstInt1D(op->getOperand(1));
+    if (!padValues)
+      return {};
+    pads = std::move(*padValues);
   }
-  SmallVector<int64_t> shape;
-  shape.reserve(rank);
-  for (int64_t i = 0; i < rank; ++i) {
-    int64_t dim = inputType.getDimSize(i);
-    if (ShapedType::isDynamic(dim))
-      shape.push_back(ShapedType::kDynamic);
-    else
-      shape.push_back(dim + pads[i] + pads[i + rank]);
+  SmallVector<int64_t> axes;
+  bool haveAxes = readIntArrayAttr(op, "axes", axes);
+  if (!haveAxes && op->getNumOperands() >= 4 &&
+      !isOnnxNone(op->getOperand(3))) {
+    auto axisValues = readConstInt1D(op->getOperand(3));
+    if (!axisValues)
+      return {};
+    axes = std::move(*axisValues);
+    haveAxes = true;
+  }
+  SmallVector<int64_t> shape(inputType.getShape());
+  if (!haveAxes) {
+    if ((int64_t)pads.size() != rank * 2)
+      return {};
+    for (int64_t i = 0; i < rank; ++i) {
+      if (ShapedType::isDynamic(shape[i]))
+        continue;
+      shape[i] = shape[i] + pads[i] + pads[i + rank];
+    }
+  } else {
+    if ((int64_t)pads.size() != (int64_t)axes.size() * 2)
+      return {};
+    for (auto [index, axis] : llvm::enumerate(axes)) {
+      if (axis < 0)
+        axis += rank;
+      if (axis < 0 || axis >= rank)
+        return {};
+      if (ShapedType::isDynamic(shape[axis]))
+        continue;
+      shape[axis] = shape[axis] + pads[index] + pads[index + axes.size()];
+    }
   }
   return rankedLike(op->getResult(0).getType(), shape);
 }
@@ -616,6 +707,67 @@ static RankedTensorType inferConvResult(Operation *op) {
     int64_t numer =
         in + pads[s] + pads[spatial + s] - dilations[s] * (kernel[s] - 1) - 1;
     shape[2 + s] = floorDiv(numer, strides[s]) + 1;
+  }
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
+/// `onnx.AveragePool`. N and C are copied. Each spatial extent is
+/// floor((in + pads - dilation * (kernel - 1) - 1) / stride) + 1.
+/// 1x64x512x512 with kernel 2 and stride 2 is 1x64x256x256.
+static RankedTensorType inferAveragePoolResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType || inputType.getRank() < 3)
+    return {};
+  int64_t rank = inputType.getRank();
+  int64_t spatial = rank - 2;
+  SmallVector<int64_t> kernel, strides, pads, dilations;
+  if (!readIntArrayAttr(op, "kernel_shape", kernel) ||
+      (int64_t)kernel.size() != spatial)
+    return {};
+  if (!readIntArrayAttr(op, "strides", strides))
+    strides.assign(spatial, 1);
+  if (!readIntArrayAttr(op, "dilations", dilations))
+    dilations.assign(spatial, 1);
+  if ((int64_t)strides.size() != spatial ||
+      (int64_t)dilations.size() != spatial)
+    return {};
+
+  StringRef autoPad = "NOTSET";
+  if (auto attr = op->getAttrOfType<StringAttr>("auto_pad"))
+    autoPad = attr.getValue();
+  bool same = autoPad == "SAME_UPPER" || autoPad == "SAME_LOWER";
+  bool valid = autoPad == "VALID";
+  if (!same && !valid && autoPad != "NOTSET")
+    return {};
+  if (!same && !valid) {
+    if (!readIntArrayAttr(op, "pads", pads))
+      pads.assign(spatial * 2, 0);
+    if ((int64_t)pads.size() != spatial * 2)
+      return {};
+  }
+  int64_t ceilMode = 0;
+  if (auto attr = op->getAttrOfType<IntegerAttr>("ceil_mode"))
+    ceilMode = attr.getValue().getSExtValue();
+
+  SmallVector<int64_t> shape(inputType.getShape());
+  for (int64_t s = 0; s < spatial; ++s) {
+    int64_t in = inputType.getDimSize(2 + s);
+    if (ShapedType::isDynamic(in) || strides[s] <= 0 || kernel[s] <= 0 ||
+        dilations[s] <= 0)
+      continue;
+    if (same) {
+      shape[2 + s] = (in + strides[s] - 1) / strides[s];
+      continue;
+    }
+    int64_t padBegin = valid ? 0 : pads[s];
+    int64_t padEnd = valid ? 0 : pads[spatial + s];
+    int64_t numer = in + padBegin + padEnd - dilations[s] * (kernel[s] - 1) - 1;
+    int64_t quot = ceilMode ? (numer + strides[s] - 1) / strides[s]
+                            : floorDiv(numer, strides[s]);
+    int64_t out = quot + 1;
+    shape[2 + s] = out > 0 ? out : 0;
   }
   return rankedLike(op->getResult(0).getType(), shape);
 }
@@ -684,8 +836,14 @@ static RankedTensorType inferUnsqueezeResult(Operation *op) {
   if (!inputType)
     return {};
   SmallVector<int64_t> axes;
-  if (!readIntArrayAttr(op, "axes", axes))
-    return {};
+  if (!readIntArrayAttr(op, "axes", axes)) {
+    if (op->getNumOperands() < 2 || isOnnxNone(op->getOperand(1)))
+      return {};
+    auto axisValues = readConstInt1D(op->getOperand(1));
+    if (!axisValues)
+      return {};
+    axes = std::move(*axisValues);
+  }
   int64_t outRank = inputType.getRank() + (int64_t)axes.size();
   SmallVector<bool> inserted(outRank, false);
   for (int64_t &axis : axes) {
@@ -703,31 +861,57 @@ static RankedTensorType inferUnsqueezeResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), shape);
 }
 
-/// `onnx.Slice` with starts/ends/axes attributes (opset <= 9). Rank is
-/// unchanged; a static axis extent becomes end - start.
+/// `onnx.Slice`. Rank is unchanged. A static axis extent becomes the number
+/// of elements from start to end. Bounds come from attributes, or from
+/// constant inputs. A runtime bound yields no type, so a stored shape stays.
 static RankedTensorType inferSliceResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
   auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
   if (!inputType)
     return {};
-  SmallVector<int64_t> starts, ends, axes;
+  SmallVector<int64_t> starts, ends, axes, steps;
   if (!readIntArrayAttr(op, "starts", starts) ||
-      !readIntArrayAttr(op, "ends", ends))
-    return rankedLike(
-        op->getResult(0).getType(),
-        SmallVector<int64_t>(inputType.getRank(), ShapedType::kDynamic));
-  if (!readIntArrayAttr(op, "axes", axes)) {
+      !readIntArrayAttr(op, "ends", ends)) {
+    if (op->getNumOperands() < 3)
+      return {};
+    auto startValues = readConstInt1D(op->getOperand(1));
+    auto endValues = readConstInt1D(op->getOperand(2));
+    if (!startValues || !endValues)
+      return {};
+    starts = std::move(*startValues);
+    ends = std::move(*endValues);
+  }
+  if (!readIntArrayAttr(op, "axes", axes) && op->getNumOperands() >= 4 &&
+      !isOnnxNone(op->getOperand(3))) {
+    auto axisValues = readConstInt1D(op->getOperand(3));
+    if (!axisValues)
+      return {};
+    axes = std::move(*axisValues);
+  }
+  if (axes.empty()) {
     axes.resize(starts.size());
     for (int64_t i = 0; i < (int64_t)starts.size(); ++i)
       axes[i] = i;
   }
-  if (starts.size() != ends.size() || starts.size() != axes.size())
+  if (!readIntArrayAttr(op, "steps", steps) && op->getNumOperands() >= 5 &&
+      !isOnnxNone(op->getOperand(4))) {
+    auto stepValues = readConstInt1D(op->getOperand(4));
+    if (!stepValues)
+      return {};
+    steps = std::move(*stepValues);
+  }
+  if (steps.empty())
+    steps.assign(starts.size(), 1);
+  if (starts.size() != ends.size() || starts.size() != axes.size() ||
+      starts.size() != steps.size())
     return {};
   SmallVector<int64_t> shape(inputType.getShape().begin(),
                              inputType.getShape().end());
   int64_t rank = inputType.getRank();
-  for (auto [axis, start, end] : llvm::zip(axes, starts, ends)) {
+  for (auto [axis, start, end, step] : llvm::zip(axes, starts, ends, steps)) {
+    if (step == 0)
+      return {};
     if (axis < 0)
       axis += rank;
     if (axis < 0 || axis >= rank)
@@ -737,13 +921,16 @@ static RankedTensorType inferSliceResult(Operation *op) {
       shape[axis] = ShapedType::kDynamic;
       continue;
     }
+    if (step < 0)
+      return {};
     if (start < 0)
       start += dim;
     if (end < 0)
       end += dim;
     start = std::clamp(start, static_cast<int64_t>(0), dim);
     end = std::clamp(end, static_cast<int64_t>(0), dim);
-    shape[axis] = end > start ? end - start : 0;
+    int64_t span = end > start ? end - start : 0;
+    shape[axis] = (span + step - 1) / step;
   }
   return rankedLike(op->getResult(0).getType(), shape);
 }
@@ -1097,29 +1284,76 @@ static std::optional<ConstTensor> evalConstTensor(Value value, int depth) {
   return std::nullopt;
 }
 
+static std::optional<SmallVector<int64_t>> readConstInt1D(Value value) {
+  auto tensor = evalConstTensor(value, /*depth=*/0);
+  if (!tensor || tensor->shape.size() > 1)
+    return std::nullopt;
+  SmallVector<int64_t> values;
+  values.reserve(tensor->data.size());
+  for (double element : tensor->data) {
+    if (!std::isfinite(element) || element != std::trunc(element))
+      return std::nullopt;
+    values.push_back(static_cast<int64_t>(element));
+  }
+  return values;
+}
+
+/// Opset 7-8 store scales as an f32 attribute and have no scales input.
+static std::optional<SmallVector<double>>
+readUpsampleScalesAttr(Operation *op) {
+  if (auto dense = op->getAttrOfType<DenseElementsAttr>("scales")) {
+    if (!dense.getElementType().isFloat())
+      return std::nullopt;
+    SmallVector<double> values;
+    values.reserve(dense.getNumElements());
+    for (APFloat value : dense.getValues<APFloat>())
+      values.push_back(value.convertToDouble());
+    return values;
+  }
+  auto array = op->getAttrOfType<ArrayAttr>("scales");
+  if (!array)
+    return std::nullopt;
+  SmallVector<double> values;
+  values.reserve(array.size());
+  for (Attribute element : array) {
+    auto floatAttr = dyn_cast<FloatAttr>(element);
+    if (!floatAttr)
+      return std::nullopt;
+    values.push_back(floatAttr.getValueAsDouble());
+  }
+  return values;
+}
+
+static void applyUpsampleScales(SmallVectorImpl<int64_t> &shape,
+                                ArrayRef<double> scales) {
+  if ((int64_t)scales.size() != (int64_t)shape.size())
+    return;
+  for (auto [dim, scale] : llvm::zip(shape, scales)) {
+    if (ShapedType::isDynamic(dim))
+      continue;
+    if (!(scale > 0.0) || !std::isfinite(scale))
+      continue;
+    dim = static_cast<int64_t>(std::floor(static_cast<double>(dim) * scale));
+  }
+}
+
 /// `onnx.Upsample`. Rank matches the input. A scales tensor that folds to
 /// constants (a dense constant, or the Shape/Gather/Mul/Floor pattern style
-/// models use) turns a static input dim into floor(dim * scale).
+/// models use) turns a static input dim into floor(dim * scale). Opset 7-8
+/// store that list in the `scales` attribute and have no second operand.
 static RankedTensorType inferUpsampleResult(Operation *op) {
-  if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
   auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
   if (!inputType)
     return {};
   SmallVector<int64_t> shape(inputType.getShape().begin(),
                              inputType.getShape().end());
-  if (auto scales = evalConstTensor(op->getOperand(1), /*depth=*/0)) {
-    if ((int64_t)scales->data.size() == inputType.getRank()) {
-      for (int64_t i = 0; i < inputType.getRank(); ++i) {
-        if (ShapedType::isDynamic(shape[i]))
-          continue;
-        double scale = scales->data[i];
-        if (!(scale > 0.0) || !std::isfinite(scale))
-          continue;
-        shape[i] = static_cast<int64_t>(
-            std::floor(static_cast<double>(shape[i]) * scale));
-      }
-    }
+  if (op->getNumOperands() >= 2) {
+    if (auto scales = evalConstTensor(op->getOperand(1), /*depth=*/0))
+      applyUpsampleScales(shape, scales->data);
+  } else if (auto scales = readUpsampleScalesAttr(op)) {
+    applyUpsampleScales(shape, *scales);
   }
   return rankedLike(op->getResult(0).getType(), shape);
 }
@@ -1199,6 +1433,8 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
     return pushSingle(inferPadResult(op));
   if (name == "onnx.Conv")
     return pushSingle(inferConvResult(op));
+  if (name == "onnx.AveragePool")
+    return pushSingle(inferAveragePoolResult(op));
   if (name == "onnx.ConvTranspose")
     return pushSingle(inferConvTransposeResult(op));
   if (name == "onnx.InstanceNormalization") {
@@ -1225,10 +1461,11 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
 /// operand is defined by an earlier op or a block arg, so a producer is
 /// always ranked before its consumer is visited). The bounded fixed point is
 /// a guard for any future shape in which a consumer precedes its producer in
-/// walk order; it is monotone (unranked -> ranked only) so it always
-/// terminates well within the cap.
-static void forwardInferUnrankedResults(func::FuncOp body) {
+/// walk order. A stored number is kept. A `?` is filled only when the rule
+/// has a number, so the walk terminates within the cap.
+static bool forwardInferUnrankedResults(func::FuncOp body) {
   static constexpr unsigned kMaxIters = 8;
+  bool any = false;
   for (unsigned iter = 0; iter < kMaxIters; ++iter) {
     bool changed = false;
     body.walk([&](Operation *op) {
@@ -1237,20 +1474,42 @@ static void forwardInferUnrankedResults(func::FuncOp body) {
           inferred.size() != op->getNumResults())
         return;
       for (auto [result, type] : llvm::zip(op->getResults(), inferred)) {
-        if (result.getType() == type)
+        Type merged = mergeInferredType(result.getType(), type);
+        if (result.getType() == merged)
           continue;
         LLVM_DEBUG(DBGS() << "rank " << op->getName() << ": "
-                          << result.getType() << " -> " << type << "\n");
-        result.setType(type);
+                          << result.getType() << " -> " << merged << "\n");
+        result.setType(merged);
         ++NumOnnxResultsRanked;
         changed = true;
       }
     });
     if (!changed)
-      return;
+      return any;
+    any = true;
   }
   LLVM_DEBUG(DBGS() << body.getSymName()
                     << ": forward inference hit the iteration cap\n");
+  return any;
+}
+
+/// `hip.loop` in tensor mode requires every result type to equal its `$v_init`
+/// operand type. Main-graph inference can refine that operand after the result
+/// type was declared.
+static bool syncLoopResultsToVInit(hip::LoopOp loopOp) {
+  auto vInit = loopOp.getVInit();
+  if (vInit.empty() || !isa<RankedTensorType>(vInit.front().getType()))
+    return false;
+  bool changed = false;
+  for (auto [i, v] : llvm::enumerate(vInit)) {
+    if (i >= loopOp.getNumResults() || !isa<RankedTensorType>(v.getType()))
+      break;
+    if (loopOp.getResult(i).getType() == v.getType())
+      continue;
+    loopOp.getResult(i).setType(v.getType());
+    changed = true;
+  }
+  return changed;
 }
 
 /// Establish rank inside one outlined `hip.loop` body func, then reconcile its
@@ -1278,9 +1537,9 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
   // 2. Forward-infer unranked onnx.* results from their (seeded) operands.
   forwardInferUnrankedResults(body);
 
-  // 3. Loop-contract backstop: a still-unranked loop-carried output must equal
-  //    its v_init type per the ONNX Loop spec (covers ops with no forward
-  //    rule).
+  // 3. Loop-contract backstop. A carried output with no forward rule, or one
+  //    that is still less specific than $v_init, takes the $v_init type. The
+  //    ONNX Loop spec requires those types to match.
   Operation *terminator = entry.getTerminator();
   unsigned resultVCarryStart = loopOp.getCondIsPassthrough() ? 0u : 1u;
   for (auto [i, v] : llvm::enumerate(vInit)) {
@@ -1288,12 +1547,13 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
     if (slot >= terminator->getNumOperands())
       break;
     Value carried = terminator->getOperand(slot);
-    if (isa<UnrankedTensorType>(carried.getType())) {
-      LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
-                        << carried.getType() << " -> " << v.getType() << "\n");
-      carried.setType(v.getType());
-      ++NumLoopContractRanked;
-    }
+    Type merged = mergeInferredType(carried.getType(), v.getType());
+    if (carried.getType() == merged)
+      continue;
+    LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
+                      << carried.getType() << " -> " << merged << "\n");
+    carried.setType(merged);
+    ++NumLoopContractRanked;
   }
 
   // 4. Reconcile the signature so func.return matches the declared result
@@ -1318,18 +1578,42 @@ struct InferLoopBodyShapesPass
     llvm::SmallPtrSet<Operation *, 8> loopBodies;
     module.walk([&](hip::LoopOp loopOp) {
       if (auto body =
-              module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr())) {
+              module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr()))
         loopBodies.insert(body);
-        inferLoopBodyShapes(body, loopOp);
-      }
     });
-    // Main-graph (and any other non-loop) functions. Loop bodies were ranked
-    // above, after their carried args were seeded from $v_init.
+
+    // Main-graph inference can refine a $v_init after the body was seeded
+    // (constant Slice -> hip.loop). Repeat so the loop result and the body
+    // signature catch up, including a nested loop fed by the outer result.
+    static constexpr unsigned kMaxIters = 8;
+    for (unsigned iter = 0; iter < kMaxIters; ++iter) {
+      bool changed = false;
+      module.walk([&](func::FuncOp func) {
+        if (func.isDeclaration() || func.getBody().empty() ||
+            loopBodies.contains(func))
+          return;
+        if (forwardInferUnrankedResults(func))
+          changed = true;
+      });
+      module.walk([&](hip::LoopOp loopOp) {
+        if (syncLoopResultsToVInit(loopOp))
+          changed = true;
+        auto body = module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr());
+        if (!body)
+          return;
+        FunctionType before = body.getFunctionType();
+        inferLoopBodyShapes(body, loopOp);
+        if (body.getFunctionType() != before)
+          changed = true;
+      });
+      if (!changed)
+        break;
+    }
+
     module.walk([&](func::FuncOp func) {
       if (func.isDeclaration() || func.getBody().empty() ||
           loopBodies.contains(func))
         return;
-      forwardInferUnrankedResults(func);
       Block &entry = func.getBody().front();
       Operation *terminator = entry.getTerminator();
       if (!terminator || terminator->getNumOperands() != func.getNumResults())

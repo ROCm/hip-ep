@@ -30,6 +30,28 @@ Shape ownership is intentionally split:
 
 ONNX-level shape inference remains upstream's responsibility. `--hip-infer-shapes` does not convert `UnrankedTensorType` into a ranked type; see [unranked-tensor-handling.md](unranked-tensor-handling.md).
 
+## Shape representation
+
+The foundation represents compile-time extents in `RankedTensorType` and
+runtime extents as ordinary index SSA carried by `OpFoldResult`. It does not
+maintain a persistent inter-operation constraint set for facts such as “these
+two dynamic dimensions are equal.” Type-level verification treats dynamic
+extents as compatible unknowns. Reification derives runtime extents from
+operand shapes.
+
+This does not preclude symbolic reasoning. A future analysis may use MLIR's
+`ValueBoundsOpInterface` and external models over the same dimension SSA without
+changing the infer/reify interfaces defined here. Prefer that standard mechanism
+before introducing another feature-specific symbolic analysis. Frontend payload
+provenance, such as reconstructing a shape tensor's values, is a separate
+problem from proving affine equality between dimensions.
+
+Phase 1 of `--hip-infer-shapes` is intentionally local rather than a global
+fixpoint: each operation is refined once in producer-before-consumer order, and
+cast barriers preserve existing consumer signatures instead of propagating
+narrowed types through the whole graph. The loop-signature phase iterates only
+because outlined loop body signatures form an explicit cyclic contract.
+
 ## DPS shape contract
 
 In tensor mode, each HIP DPS tensor result must equal the corresponding `outs` operand type. In memref mode, the operation has no tensor result; it writes directly through the destination memref.
@@ -48,23 +70,26 @@ This gives two related but distinct jobs:
 | `InferShapedTypeOpInterface` | Not used as the primary HIP DPS contract |
 | `HipDpsOpInterface` | Dialect marker interface extending `DestinationStyleOpInterface`; owns the shared default reification body |
 
-`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior: walk `DestinationStyleOpInterface::getDpsInits()` and return each destination's mixed sizes through `tensor::getMixedSizes` or `memref::getMixedSizes`.
+`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior. In tensor mode it walks `DestinationStyleOpInterface::getDpsInits()` and returns each destination's mixed sizes through `tensor::getMixedSizes`, exactly one vector per SSA result. In memref mode there are no SSA results, so it succeeds with an empty list.
 
 Operations whose shape contract is more specific than "result shape equals destination shape" opt out of the default and provide a dedicated reification implementation.
 
 ## TableGen wiring
 
-`Hip_DpsOp` centralizes the interface boilerplate used by HIP compute operations.
+`Hip_DpsOp` is a structural two-parameter root (`mnemonic`, `traits`) that
+centralizes the interfaces and variadic tensor results used by HIP compute
+operations. Shape behavior is selected by a named family rather than by
+independent booleans or injected function-body parameters:
 
-| Parameter | Default | Purpose |
-|---|---|---|
-| `outsAccessor` | `"Output"` | ODS accessor used by generated result-type inference |
-| `autoReify` | `1` | Emit a dispatcher to the shared `HipDpsOpInterface` reification body |
-| `autoInfer` | `0` | Emit `inferReturnTypes` using the DPS init tensor type |
-| `declareInfer` | `0` | Add `InferTypeOpInterface`; `autoInfer=1` requires it, while `declareInfer=1, autoInfer=0` requires a hand-written `inferReturnTypes` implementation |
-| `customReifyBody` | empty | Provide an inline custom body for parameterized DPS sub-bases |
+- `Hip_DpsOp_AutoReify` forwards to the shared `HipDpsOpInterface` body.
+- `Hip_DpsOp_WithInfer` emits single-result typing from a named outs accessor.
+- `Hip_DpsOp_AutoReifyInfer` combines those two common behaviors.
+- `Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` own fixed family reification
+  bodies that call shared C++ helpers.
 
-`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` use `customReifyBody` to share broadcast and reduction reification across operation families without per-op C++ implementations.
+Families use typed TableGen `code` fragments only for their forwarding methods.
+The shape rules and validation remain in `HipShapeUtils` C++ helpers, while
+semantic long-tail operations keep handwritten reification methods.
 
 Multi-result and specialized operations may keep inferred result construction disabled when a single generated body cannot describe all results.
 
@@ -87,13 +112,27 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
-Shared helpers live in `HipShapeUtils.{h,cpp}`. Operations that set `autoReify=0` and are not covered by a parameterized sub-base define their member functions in `HipReifyResultShapesImpl.cpp`.
+Shared declarations live in `HipShapeUtils.h`; common implementation lives in
+`HipShapeUtils.cpp`, with focused category translation units introduced by the
+stack layer that first consumes each family. This foundation includes
+matmul/Gemm, reduction, gather, and shape-operation helpers; later family PRs
+add attention and convolution/pooling implementations. Operations that select
+a manual-reification family define their member functions in
+`HipReifyResultShapesImpl.cpp`.
+
+Frontend-neutral destination construction lives in
+`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, broadcast
+destination construction, and HIP context
+lookup. `OnnxToHipUtils` retains only ONNX import semantics and wrappers, so a
+future frontend can target HIP without depending on the ONNX conversion layer.
 
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
 
 ## Static result typing
 
-For a single-result DPS operation with `declareInfer=1` and `autoInfer=1`, ODS provides an inferred-type `Op::create` overload. The generated `inferReturnTypes` reads the typed DPS init and emits:
+For a single-result operation in `Hip_DpsOp_WithInfer` (directly or through a
+more specific family), ODS provides an inferred-type `Op::create` overload. The
+generated `inferReturnTypes` reads the typed DPS init and emits:
 
 - one result type in tensor mode;
 - no result type in memref mode.
@@ -115,6 +154,34 @@ Reification returns one `OpFoldResult` for each result dimension:
 Reification is allowed to create IR at the caller's insertion point. Helpers therefore reuse operand dimensions where possible, fold constant operands and attributes, and avoid pretending that a runtime-computed extent is static. For operations whose runtime extent cannot be represented before execution, the honest result remains dynamic.
 
 Reification is per result: `reifyResultShapes` returns one shape vector for every tensor result. The number and rank of those vectors must match the operation's tensor results even when the implementation derives them from DPS init operands.
+
+### Shared converter/reification shape helpers
+
+Converter destination construction and result reification are two views of one
+shape rule. `HipShapeUtils` therefore separates pure `infer*` helpers, which
+validate static shapes without a builder, from `reify*` helpers, which may
+insert index SSA into the input IR only after validation succeeds.
+
+A reifier must validate every precondition before changing the input IR.
+If folding can expose a conflict, build speculative operations in a detached
+block and insert them through the caller's builder only on success.
+Failure must leave the IR unchanged, including when the valid result shape is
+rank zero; `FailureOr` distinguishes that empty success from failure.
+Broadcast destination construction in `HipConversionUtils.cpp` uses the same
+reifier as result-shape queries. For two dynamic extents, both use
+`select(lhs == 1, rhs, lhs)`. This keeps the allocated size consistent with
+the reported result shape, including through reshape and bufferization.
+The builder checks folded extents against the imported result type before it
+inserts new operations. Variadic Min/Max conversion retains the complete new
+chain in a detached block until every pair succeeds.
+Imported and inferred extents follow standard
+shaped-type compatibility: a dynamic extent on either side is compatible,
+while unequal static extents are contradictions.
+
+Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
+checks ranked tensor/memref uniformity, destination count, result count, and
+tensor result/init type equality before a category-specific verifier examines
+shape semantics.
 
 ## `--hip-infer-shapes`
 
@@ -166,6 +233,29 @@ Do not confuse the two dim-resolution surfaces:
 
 ## Pipeline placement
 
+### Reshape shape entries
+
+ONNX Reshape conversion keeps host shape scalars through static tensor casts,
+rank-zero/rank-one views, and constant slice/insert paths. The lookup is bounded
+and stops at unknown producers. Unknown payloads still use synchronized
+`hip.readback_scalar` operations.
+
+A tensor dimension is nonnegative. A non-narrowing index cast or a selection
+of nonnegative values preserves that fact. Such an entry cannot be the ONNX
+`-1` sentinel. Conversion skips inference for that entry and omits the element
+count and division when no entry can be `-1`. This keeps unnecessary late shape
+dependencies out of allocation sizes. Real `-1` requests, zero substitution,
+and `allowzero` retain their existing rules. Exact broadcast sizing is unchanged.
+
+Compute conversion can visit Reshape before its shape producers. A final walk
+forwards host-built shape entries and removes impossible `-1` comparisons.
+The normal canonicalizer then removes unused inference arithmetic. This walk
+does not run general folding or change the pipeline order.
+
+The changes run within `convert-onnx-to-hip`; they do not add a pass.
+
+### Pass order
+
 [pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Transforms/Pipelines.cpp`; the relevant segment is:
 
 ```text
@@ -207,9 +297,11 @@ The loop-carried fallback is authoritative: if a carried body output is still un
 ## Adding or changing a HIP DPS operation
 
 1. **Choose the contract row** in [Shape-contract mechanisms](#shape-contract-mechanisms).
-2. **Set TableGen parameters** on `Hip_DpsOp` or use an existing DPS sub-base; use `declareInfer=1, autoInfer=0` only when supplying custom InferType logic.
+2. **Choose a named DPS behavior family**; add a family only when no existing
+   reify/infer combination fits.
 3. **Add a shared helper** in `HipShapeUtils` only when no existing category fits.
-4. **Add a member reification implementation** in `HipReifyResultShapesImpl.cpp` only for `autoReify=0` operations not covered by a sub-base.
+4. **Add a member reification implementation** in
+   `HipReifyResultShapesImpl.cpp` only for a manual-reify family.
 5. **Return one shape vector per tensor result** and preserve dynamic extents honestly when no pre-execution SSA value exists.
 6. **Use the inferred-type builder** in the converter when the generated or custom InferType contract supports it.
 7. **Add a verifier** only for non-trivial static contracts not already closed by DPS typing.
@@ -226,6 +318,9 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
+| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |
+| `test/lit/Conversion/onnx-to-hip/test_broadcast_destination_consistency.mlir` | Equal allocation and reified extents through collapse and bufferization |
+| `test/lit/Conversion/onnx-to-hip/test_broadcast_folded_failure_atomicity.mlir` | No partial destination or variadic chain after a folded shape conflict |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |

@@ -27,6 +27,23 @@
 // is acyclic.
 #include "op_state.h"
 
+struct DiskConstant {
+  const uint8_t *data; // table start inside the read-only file `view`
+  void *view;
+  size_t view_size;
+  int64_t size;
+};
+
+// Copies the rows of disk-resident constant `constant_index` selected by device
+// `indices` into device `dst`, in index order, and synchronizes state->stream.
+// Negative indices wrap; an out-of-range index yields a zero row.
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst);
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -40,6 +57,13 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
+
+  // Indexed like gpu_constants; null when no constant is disk-resident.
+  // Entry i has a non-null data exactly when ConstantInfo[i].disk_resident,
+  // and then gpu_constants[i] is null.
+  DiskConstant *disk_constants;
+  void *disk_gather_staging; // hipHostMalloc'd, grown on demand
+  size_t disk_gather_staging_size;
 
   // Memory pooling support — multi-domain.
   //

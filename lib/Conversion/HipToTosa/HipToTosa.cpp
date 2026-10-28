@@ -4349,6 +4349,9 @@ static bool isTosaExpressibleResize(hip::ResizeOp op) {
 
   if (op.getMode() != 1)
     return false;
+  // planResizeAxis derives the scale from the extents.
+  if (op.getScales())
+    return false;
 
   int64_t coordTransform = op.getCoordTransform();
   return planResizeAxis(inputType.getDimSize(2), resultType.getDimSize(2),
@@ -7679,8 +7682,8 @@ std::optional<QMoEPlan> planQMoE(hip::QMoEOp op) {
   if (op.getNumResults() != 1)
     return std::nullopt;
 
-  // The runtime supports exactly this envelope: interleaved SwiGLU, no fc3.
-  // activation_type is ignored there too, so it is not gated here.
+  // Only the runtime's interleaved-SwiGLU mode (no fc3) is modelled here.
+  // activation_type is ignored in that mode, so it is not gated.
   if (op.getSwigluFusion() != 1 || op.getUseSparseMixer() != 0)
     return std::nullopt;
   if (op.getFc3ExpertsWeights() || op.getFc3Scales() ||
