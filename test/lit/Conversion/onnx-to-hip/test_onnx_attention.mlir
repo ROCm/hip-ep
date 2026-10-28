@@ -388,6 +388,41 @@ module {
 
 // -----
 
+// Only rank-4 additive masks have an unambiguous batch/head layout in the
+// runtime contract.
+module {
+  func.func @rank3_mask(
+      %query: tensor<1x1x2048xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %attn_mask: tensor<1x1x128xf16>,
+      %past_key: tensor<1x8x127x128xf16>,
+      %past_value: tensor<1x8x127x128xf16>)
+      -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>) {
+    %out:3 = "onnx.Attention"(%query, %key, %value, %attn_mask, %past_key,
+                              %past_value)
+        {q_num_heads = 16 : si64,
+         kv_num_heads = 8 : si64,
+         is_causal = 1 : si64}
+        : (tensor<1x1x2048xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x1x128xf16>,
+           tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>)
+        -> (tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+            tensor<1x8x128x128xf16>)
+
+    // CHECK-LABEL: func.func @rank3_mask
+    // CHECK-NOT: hip.gqa
+    // CHECK: onnx.Attention
+
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x2048xf16>, tensor<1x8x128x128xf16>,
+          tensor<1x8x128x128xf16>
+  }
+}
+
+// -----
+
 // ===== Sliding window recovered from the mask subgraph (windowed layer) =====
 //
 // Before opset 25 there was no window attribute on `onnx.Attention`, so a

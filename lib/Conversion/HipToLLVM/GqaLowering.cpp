@@ -208,8 +208,21 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     // attention_bias broadcast extents: ONNX masks are often [B,1,S,T].
     Value attnBiasBatchVal = createI64Const(1);
     Value attnBiasNumHeadsVal = createI64Const(1);
+    Value attnBiasSeqQVal = createI64Const(1);
+    Value attnBiasSeqKVVal = createI64Const(1);
     if (op.getAttentionBias()) {
       auto biasType = cast<MemRefType>(op.getAttentionBias().getType());
+      unsigned biasRank = biasType.getRank();
+      if (biasRank >= 1)
+        attnBiasSeqKVVal = getMemRefDimSize(
+            biasType, biasRank - 1, adaptor.getAttentionBias(), rewriter, loc);
+      if (biasRank >= 2)
+        attnBiasSeqQVal = getMemRefDimSize(
+            biasType, biasRank - 2, adaptor.getAttentionBias(), rewriter, loc);
+      if (biasRank == 3) {
+        attnBiasNumHeadsVal = getMemRefDimSize(
+            biasType, 0, adaptor.getAttentionBias(), rewriter, loc);
+      }
       if (biasType.getRank() == 4) {
         attnBiasBatchVal = getMemRefDimSize(
             biasType, 0, adaptor.getAttentionBias(), rewriter, loc);
@@ -219,7 +232,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     }
 
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 42> paramTypes = {
+    SmallVector<Type, 45> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -256,7 +269,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
         i32Type, // no_causal
-        // Shape info (10 values)
+        // Shape info (12 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
@@ -265,6 +278,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // element_size_bytes
         i64Type, // attn_bias_batch
         i64Type, // attn_bias_num_heads
+        i64Type, // attn_bias_seq_q
+        i64Type, // attn_bias_seq_kv
         i64Type, // kv_bnsd
         i64Type  // seq_len_new_kv
     };
@@ -274,7 +289,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 42> args = {
+    SmallVector<Value, 45> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -288,10 +303,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (10 values)
+        // Shape info (12 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
-        seqLenNewKVVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, attnBiasSeqQVal,
+        attnBiasSeqKVVal, kvBnsdVal, seqLenNewKVVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
