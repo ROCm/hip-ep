@@ -5,10 +5,11 @@
 
 // Sample static plugin for the plugin registrar + pipeline-slot tests.
 // Exercises the public plugin surface (PluginAPI.h / PluginRegistry.h) end to
-// end: registers a pass, requests a pipeline slot, contributes a minimal vendor
-// dialect (via addDialectRegistration), and contributes runtime bitcode + a
-// link library. Statically linked into the host, so its registrations land in
-// the host's single MLIR/pass/dialect registry.
+// end: registers a pass, requests a pipeline slot, registers a frontend
+// pipeline, contributes a minimal vendor dialect (via addDialectRegistration),
+// and contributes runtime bitcode + a link library. Statically linked into the
+// host, so its registrations land in the host's single MLIR/pass/dialect
+// registry.
 
 #include "hip/Compiler/PluginAPI.h"
 #include "hip/Compiler/PluginRegistry.h"
@@ -20,6 +21,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -27,6 +29,7 @@
 #include "sample_dialect.h"
 
 #include <cstddef>
+#include <memory>
 
 // Embedded bitcode from sample_plugin_runtime.cpp (generated
 // sample_plugin_bitcode.cpp; see CMakeLists.txt). Empty (size 0) in a build
@@ -134,6 +137,48 @@ struct SampleEmitLateConstantPass
   }
 };
 
+// Stand-in for a frontend's lowering to HIP, run only by the sample's frontend
+// pipeline. A function marked hip_ep_sample.frontend_input is otherwise already
+// tensor-form HIP IR; "lowering" it adds a plugin-owned carrier, as a frontend
+// emits its weights, and drops the marker.
+struct SampleFrontendPass
+    : public mlir::PassWrapper<SampleFrontendPass,
+                               mlir::OperationPass<mlir::func::FuncOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SampleFrontendPass)
+
+  llvm::StringRef getArgument() const final { return "hip-ep-sample-frontend"; }
+
+  llvm::StringRef getDescription() const final {
+    return "Sample plugin frontend pipeline: lower a marked function";
+  }
+
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::hip::HipDialect, mlir::tensor::TensorDialect>();
+  }
+
+  void runOnOperation() override {
+    auto function = getOperation();
+    if (!function->removeAttr("hip_ep_sample.frontend_input"))
+      return;
+    emitSampleConstant(function, "sample_frontend_weight");
+  }
+};
+
+// Frontend pipeline selected by `hip.compiler.frontend_pipeline`. Marker
+// attributes on the module exercise both ways a builder can reject its input.
+bool buildSampleFrontendPipeline(
+    hip::compiler::FrontendPipelineContext &context) {
+  if (context.module->hasAttr("hip_ep_sample.reject")) {
+    context.errorMessage = "hip-ep-sample cannot lower this module";
+    return false;
+  }
+  if (context.module->hasAttr("hip_ep_sample.reject_silently"))
+    return false;
+  context.passManager.addNestedPass<mlir::func::FuncOp>(
+      std::make_unique<SampleFrontendPass>());
+  return true;
+}
+
 } // namespace
 
 // HIP_EP_DEFINE_PLUGIN(sample) expands to
@@ -150,6 +195,16 @@ HIP_EP_DEFINE_PLUGIN(sample) {
                         "func.func(hip-ep-sample-print-functions)");
   R.requestPipelineSlot(::hip::compiler::PipelineSlot::BeforeBufferization,
                         "func.func(hip-ep-sample-emit-late-constant)");
+
+  // A module whose `hip.compiler.frontend_pipeline` names this id is lowered by
+  // buildSampleFrontendPipeline and then the host's tensor-to-bufferized and
+  // HIP-to-LLVM pipelines. The second id is registered twice on purpose:
+  // selecting it must fail as ambiguous.
+  R.addFrontendPipeline("hip-ep-sample", &buildSampleFrontendPipeline);
+  R.addFrontendPipeline("hip-ep-sample-duplicate",
+                        &buildSampleFrontendPipeline);
+  R.addFrontendPipeline("hip-ep-sample-duplicate",
+                        &buildSampleFrontendPipeline);
 
   // Contribute a minimal vendor dialect (hip_ep_sample.marker + its
   // ConvertToLLVMPatternInterface). This is the only in-tree exercise of the

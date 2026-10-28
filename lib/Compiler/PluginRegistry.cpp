@@ -74,6 +74,11 @@ struct Storage {
   // into the plugin's code (linked into the host binary), which is mapped for
   // the process lifetime.
   std::vector<void (*)(mlir::DialectRegistry &)> dialectRegistrations;
+
+  // Named frontend pipeline builders from addFrontendPipeline calls. The
+  // ids are owned copies, like the paths above. Duplicate ids are kept so the
+  // driver can reject an ambiguous selection.
+  std::vector<PluginFrontendPipeline> frontendPipelines;
 };
 
 Storage &storage() {
@@ -150,12 +155,24 @@ void addDialectRegistrationImpl(void * /*self*/,
   storage().dialectRegistrations.push_back(registerFn);
 }
 
+void addFrontendPipelineImpl(void * /*self*/, const char *id, std::size_t idLen,
+                             FrontendPipelineBuilder builder) {
+  if (id == nullptr || idLen == 0 || builder == nullptr) {
+    llvm::errs() << "[plugin] WARNING: addFrontendPipeline requires a nonempty "
+                    "identifier and non-null callback; skipping.\n";
+    return;
+  }
+  storage().frontendPipelines.push_back(
+      PluginFrontendPipeline{std::string(id, idLen), builder});
+}
+
 const HipEpPluginRegistry::VTable g_vtable = {
     /* requestPipelineSlot     = */ &requestPipelineSlotImpl,
     /* addRuntimeBitcode       = */ &addRuntimeBitcodeImpl,
     /* addLibraryPath          = */ &addLibraryPathImpl,
     /* addLibrary              = */ &addLibraryImpl,
     /* addDialectRegistration  = */ &addDialectRegistrationImpl,
+    /* addFrontendPipeline       = */ &addFrontendPipelineImpl,
 };
 
 } // namespace
@@ -199,6 +216,11 @@ llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations() {
   dispatchPluginRegistrationsOnce();
   return llvm::to_vector(storage().dialectRegistrations);
+}
+
+llvm::SmallVector<PluginFrontendPipeline> pluginFrontendPipelines() {
+  dispatchPluginRegistrationsOnce();
+  return llvm::to_vector(storage().frontendPipelines);
 }
 
 } // namespace hip::compiler

@@ -54,8 +54,8 @@ that:
    `HIP_EP_DEFINE_PLUGIN(<id>)` macro) — taking a `HipEpPluginRegistry &`.
 2. Inside that entry, calls methods on the registry to contribute extensions:
    MLIR passes, a custom dialect and op (with its bufferization and
-   HIP→LLVM-lowering interface models), runtime bitcode, library paths, and
-   library names.
+   HIP→LLVM-lowering interface models), a frontend pipeline for a non-ONNX
+   input, runtime bitcode, library paths, and library names.
 3. Is selected into the host with `-DHIPDNN_EP_COMPILER_PLUGINS=<id>`; a
    CMake-generated registrar calls its entry once per process. Any host that
    links `LibHipCompiler` (`hip-compiler`, `hip-mlir-opt`, the EP DLL) picks it
@@ -452,10 +452,7 @@ the same flow from the architecture side.
 ## 8. Composing a custom pipeline
 
 Beyond inserting passes at fixed slots (section 4), the compiler lets you
-compose -- or fully replace -- the pass order. Two mechanisms ship today; one
-is planned.
-
-**Available now:**
+compose -- or fully replace -- the pass order:
 
 - **Reference any in-tree pass by name.** Every production pipeline pass is
   registered with a stable `getArgument()` name in the same registry the
@@ -482,19 +479,49 @@ is planned.
 > pipeline, name your pass in the string directly, e.g.
 > `func.func(my-vendor-pass), onnx-to-hip-pipeline, hip-to-llvm-pipeline`.
 
-**Planned (not yet in the ABI):**
-
-- **Register a pipeline builder.** For passes that need runtime-bound state a
-  string cannot carry (e.g. the in-memory-filesystem variant of
-  `convert-onnx-to-hip`), a plugin would register a C++ builder that receives
-  the filesystem + options and composes passes, reusing in-tree stage builders.
-  Like `registerPass`, this needs shared MLIR.
-
 If you fully replace the order you own the load-bearing ordering invariants
 and the required terminal stages (`convert-hip-to-llvm`, `generate-interface`);
 a post-pipeline check fails loudly if the `inference_compute` entry point is
 missing after the override. Pass and pipeline names are version-pinned, not a
 frozen contract -- pin your plugin to a release.
+
+### Adding a non-ONNX frontend
+
+A plugin whose frontend emits its own dialect registers a *frontend pipeline*: a
+C++ builder that adds the passes lowering that dialect to tensor-form HIP IR
+(the form `convert-onnx-to-hip` produces: a `!hip.context` argument, the graph
+metadata attributes and `hip.constant` carriers).
+
+```cpp
+bool buildMyFrontendPipeline(::hip::compiler::FrontendPipelineContext &ctx) {
+  if (!canLower(ctx.module)) {
+    ctx.errorMessage = "myvendor: unsupported module";
+    return false;
+  }
+  ctx.passManager.addPass(createConvertMyDialectToHipPass());
+  return true;
+}
+
+HIP_EP_DEFINE_PLUGIN(myvendor) {
+  R.addDialectRegistration(&registerMyDialect);
+  R.addFrontendPipeline("myvendor", &buildMyFrontendPipeline);
+}
+```
+
+The frontend marks its module with
+`hip.compiler.frontend_pipeline = "myvendor"`. The driver then runs your builder's
+passes instead of the ONNX pipeline, followed by the host's
+`hip-tensor-to-bufferized-pipeline` and `hip-to-llvm-pipeline`, so your passes
+never repeat bufferization, memory planning or LLVM lowering. The ONNX slots do
+not run; slots from `BeforeBufferization` on do. Emit constants as
+`hip.constant` carriers in your passes; the host externalizes them.
+
+The builder must be a non-capturing function. Compilation fails with a
+diagnostic if the attribute is not a nonempty string, if no plugin, or more than
+one, registered the id, or if the builder returns false. `HIPDNN_EP_PIPELINE`
+takes precedence over the attribute. Like `registerPass`,
+this needs shared MLIR. `test/plugin/sample_plugin/sample_plugin.cpp` and
+`test/lit/Plugin/sample_plugin_frontend_pipeline.mlir` are a worked example.
 
 See [`docs/design/plugin-interface.md`](design/plugin-interface.md), "Pipeline
 composition", for the design, and

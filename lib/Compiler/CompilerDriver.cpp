@@ -303,7 +303,7 @@ bool CompilerDriver::runMLIRPasses(
     pm.enableTiming();
 
   if (options.verbose) {
-    COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
+    COMPILER_DEBUG_LOG("Running frontend->HIP->LLVM->Interface passes\n");
   }
 
   // Pipeline composition override: a downstream may replace the built-in
@@ -492,19 +492,73 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_ROCMLIR set\n");
 #endif
   } else {
-    mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeMinNumElements =
-        mlir::hip::kDefaultExternalizeMinNumElements;
-    onnxToHipOpts.skipConstantData = options.skip_constant_data;
+    // A module may name a plugin frontend pipeline (addFrontendPipeline). It
+    // replaces the ONNX pipeline; the host's tensor-to-bufferized and
+    // HIP-to-LLVM pipelines still follow. The HIPDNN_EP_PIPELINE, HIPSR and
+    // rocMLIR modes above take precedence.
+    constexpr llvm::StringLiteral frontendPipelineAttrName =
+        "hip.compiler.frontend_pipeline";
+    mlir::Attribute frontendPipelineAttr =
+        module->getAttr(frontendPipelineAttrName);
+    if (frontendPipelineAttr) {
+      auto frontendPipelineId =
+          mlir::dyn_cast<mlir::StringAttr>(frontendPipelineAttr);
+      if (!frontendPipelineId || frontendPipelineId.getValue().empty()) {
+        error_message = "module attribute '" + frontendPipelineAttrName.str() +
+                        "' must be a nonempty string";
+        return false;
+      }
 
-    if (hipdnnHandle_) {
-      compiledGraphs_ =
-          std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
-      mlir::hip::buildOnnxToHipPipeline(
-          pm, onnxToHipOpts, fileSystem_,
-          static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+      llvm::SmallVector<PluginFrontendPipeline> matches;
+      for (const PluginFrontendPipeline &candidate :
+           pluginFrontendPipelines()) {
+        if (candidate.id == frontendPipelineId.getValue())
+          matches.push_back(candidate);
+      }
+      if (matches.empty()) {
+        error_message = "no compiler plugin registered frontend pipeline '" +
+                        frontendPipelineId.getValue().str() + "'";
+        return false;
+      }
+      if (matches.size() != 1) {
+        error_message =
+            "multiple compiler plugins registered frontend pipeline '" +
+            frontendPipelineId.getValue().str() + "'";
+        return false;
+      }
+
+      FrontendPipelineContext pipelineContext{module, pm, options, fileSystem_,
+                                              error_message};
+      if (!matches.front().builder(pipelineContext)) {
+        if (error_message.empty()) {
+          error_message = "frontend pipeline '" +
+                          frontendPipelineId.getValue().str() +
+                          "' rejected the input module";
+        }
+        return false;
+      }
+
+      mlir::hip::HipTensorToBufferizedPipelineOptions tensorOptions;
+      tensorOptions.externalizeMinNumElements =
+          mlir::hip::kDefaultExternalizeMinNumElements;
+      tensorOptions.skipConstantData = options.skip_constant_data;
+      mlir::hip::buildHipTensorToBufferizedPipeline(pm, tensorOptions,
+                                                    fileSystem_);
     } else {
-      mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+      mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
+      onnxToHipOpts.externalizeMinNumElements =
+          mlir::hip::kDefaultExternalizeMinNumElements;
+      onnxToHipOpts.skipConstantData = options.skip_constant_data;
+
+      if (hipdnnHandle_) {
+        compiledGraphs_ =
+            std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+        mlir::hip::buildOnnxToHipPipeline(
+            pm, onnxToHipOpts, fileSystem_,
+            static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+      } else {
+        mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+      }
     }
 
     mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
@@ -611,7 +665,9 @@ bool CompilerDriver::runMLIRPasses(
   // generate-interface (or otherwise fails to emit the C-ABI entry point)
   // produces a module the rest of the EP cannot consume. Fail loudly here
   // rather than later with a cryptic missing-symbol error at link/load. Only
-  // checked in override mode; the built-in pipeline always emits it.
+  // checked in override mode; the built-in pipelines, including the ones
+  // appended after a plugin frontend pipeline, always emit it
+  // (generate-interface fails the run if it cannot).
   if (overridePipeline &&
       !module.lookupSymbol(hipdnn::abi::kInferenceCompute)) {
     error_message =

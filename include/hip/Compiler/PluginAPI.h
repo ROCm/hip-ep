@@ -50,7 +50,9 @@ class HipEpPluginRegistry;
 ///        interface contribution).
 ///   3 -- static linkage model: one per-id `hipEpRegisterPlugin_<id>` entry
 ///        point, statically linked into the host (no runtime dynamic load).
-#define HIP_EP_PLUGIN_API_VERSION 3
+///   4 -- added addFrontendPipeline (named frontend pipeline, selected by
+///        the `hip.compiler.frontend_pipeline` module attribute).
+#define HIP_EP_PLUGIN_API_VERSION 4
 
 /// Convenience macro for a plugin's registration entry point. Expands to the
 /// correctly-named `extern "C"` function signature; follow it with a body.

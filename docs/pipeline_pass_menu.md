@@ -89,7 +89,7 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 
 | Name | Options | What it builds |
 |---|---|---|
-| `hip-tensor-to-bufferized-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | Tensor-form HIP IR (with `!hip.context`, graph metadata and `hip.constant` carriers) → fully bufferized, pooled HIP memref IR with resolved extern constants. Source-neutral: any frontend that produces tensor-form HIP IR can run it. |
+| `hip-tensor-to-bufferized-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | Tensor-form HIP IR (with `!hip.context`, graph metadata and `hip.constant` carriers) → fully bufferized, pooled HIP memref IR with resolved extern constants. Source-neutral: any frontend that produces tensor-form HIP IR can run it, and the driver runs it after a plugin [frontend pipeline](design/plugin-interface.md#frontend-pipelines). |
 | `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants: the ONNX head (through `convert-onnx-to-hip`) followed by `hip-tensor-to-bufferized-pipeline`. |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |

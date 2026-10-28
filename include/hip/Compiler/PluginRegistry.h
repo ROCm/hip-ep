@@ -15,7 +15,16 @@
 
 namespace mlir {
 class DialectRegistry;
+class ModuleOp;
+class OpPassManager;
+namespace hip {
+struct CompilationOptionsT;
+} // namespace hip
 } // namespace mlir
+
+namespace morphizen {
+class FileSystem;
+} // namespace morphizen
 
 // Public registry passed to a plugin's registration entry
 // (`hipEpRegisterPlugin_<id>`). It exposes the contributions a plugin can make:
@@ -34,6 +43,10 @@ class DialectRegistry;
 //                                 as registerPass.
 //   * requestPipelineSlot(...) -- run a registered pass at a named slot; read
 //                                 by lib/Dialect/Transforms/Pipelines.cpp.
+//   * addFrontendPipeline(...)   -- register a named frontend pipeline;
+//                                 lib/Compiler/CompilerDriver.cpp runs it and
+//                                 then the host's tensor-to-bufferized and
+//                                 HIP-to-LLVM pipelines.
 //   * addRuntimeBitcode(...)   -- contribute LLVM bitcode linked into the
 //                                 model module by
 //                                 lib/Target/LLVM/LLVMBackend.cpp (see the
@@ -63,6 +76,30 @@ class DialectRegistry;
 // See docs/design/plugin-interface.md.
 
 namespace hip::compiler {
+
+/// Context passed to a plugin-owned frontend pipeline builder.
+///
+/// The callback adds to `passManager` only the passes that lower its
+/// frontend's dialect to tensor-form HIP IR. After it returns, the host appends
+/// `buildHipTensorToBufferizedPipeline` and `buildHipToLLVMPipeline`. A
+/// callback that cannot handle `module` returns false, optionally setting
+/// `errorMessage`. References are valid only for the duration of the callback
+/// and must not be retained.
+struct FrontendPipelineContext {
+  mlir::ModuleOp &module;
+  mlir::OpPassManager &passManager;
+  const mlir::hip::CompilationOptionsT &compilationOptions;
+  morphizen::FileSystem *fileSystem;
+  std::string &errorMessage;
+};
+
+using FrontendPipelineBuilder = bool (*)(FrontendPipelineContext &context);
+
+/// One `addFrontendPipeline` registration.
+struct PluginFrontendPipeline {
+  std::string id;
+  FrontendPipelineBuilder builder;
+};
 
 /// Well-defined slots in the public pipeline at which plugin passes
 /// can be inserted.
@@ -126,13 +163,17 @@ public:
     // it -- a bitcode/library-only plugin never touches this entry.
     void (*addDialectRegistration)(void *self,
                                    void (*registerFn)(mlir::DialectRegistry &));
+    // V4: register a named frontend pipeline builder. The host appends
+    // its own tensor-to-bufferized and HIP-to-LLVM pipelines after it.
+    void (*addFrontendPipeline)(void *self, const char *id, std::size_t idLen,
+                                FrontendPipelineBuilder builder);
   };
 
-  /// Tripwire: the current vtable layout has exactly five function pointers.
+  /// Tripwire: the current vtable layout has exactly six function pointers.
   /// Any change to `VTable` makes this assertion fire; the compiler
   /// error is your reminder to bump `HIP_EP_PLUGIN_API_VERSION` in
   /// PluginAPI.h before the new layout ships.
-  static_assert(sizeof(VTable) == 5 * sizeof(void (*)()),
+  static_assert(sizeof(VTable) == 6 * sizeof(void (*)()),
                 "VTable layout changed -- bump HIP_EP_PLUGIN_API_VERSION "
                 "and update this assertion to match the new entry count.");
 
@@ -195,6 +236,19 @@ public:
   void requestPipelineSlot(PipelineSlot slot, llvm::StringRef passName) {
     vtable_->requestPipelineSlot(self_, static_cast<int>(slot), passName.data(),
                                  passName.size());
+  }
+
+  /// Register a named frontend pipeline. A module selects it with the
+  /// `hip.compiler.frontend_pipeline` string attribute, and the driver then
+  /// runs it instead of the ONNX pipeline. `builder` adds only the passes that
+  /// lower the frontend's dialect to tensor-form HIP IR (see
+  /// `FrontendPipelineContext`); the host appends its tensor-to-bufferized and
+  /// HIP-to-LLVM pipelines. Ids must be unique across plugins: selecting a
+  /// duplicated id is an error. `builder` must be a non-capturing function,
+  /// like `registerFn` above.
+  void addFrontendPipeline(llvm::StringRef id,
+                           FrontendPipelineBuilder builder) {
+    vtable_->addFrontendPipeline(self_, id.data(), id.size(), builder);
   }
 
   // ---------- Runtime bitcode and link libraries ----------------------
@@ -272,6 +326,14 @@ llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 /// HIP->LLVM-lowering interface models are present in the pipeline's context.
 llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations();
+
+/// Frontend pipelines from every plugin's `addFrontendPipeline` call, in
+/// registration order. Owning copies; a duplicated id appears once per
+/// registration so the caller can reject an ambiguous selection.
+///
+/// Used by `CompilerDriver::runMLIRPasses` to find the pipeline named by a
+/// module's `hip.compiler.frontend_pipeline` attribute.
+llvm::SmallVector<PluginFrontendPipeline> pluginFrontendPipelines();
 
 /// One bitcode buffer contributed by a plugin's `addRuntimeBitcode` call. The
 /// bytes are host-owned (copied during the call) and stable for the process

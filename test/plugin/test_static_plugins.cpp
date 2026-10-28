@@ -9,8 +9,9 @@
 // StaticPlugins.cpp) and checks the recorded registry state. CMake sets
 // HIP_EP_EXPECT_SAMPLE:
 //   * 1 (sample selected): the registry records the sample's slot request,
-//     library + search path, bitcode buffer (empty => degraded no-clang build,
-//     skipped), and dialect registration (loaded here via loadAllDialects).
+//     frontend pipelines, library + search path, bitcode buffer (empty =>
+//     degraded no-clang build, skipped), and dialect registration (loaded here
+//     via loadAllDialects).
 //   * 0 (no plugins): dispatch is a clean no-op; the registry stays empty.
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
@@ -131,6 +132,35 @@ runMemoryExternalizer(mlir::MLIRContext &context, llvm::StringRef text,
   return module;
 }
 
+std::size_t countFrontendPipelines(llvm::StringRef id) {
+  std::size_t count = 0;
+  for (const hip::compiler::PluginFrontendPipeline &pipeline :
+       hip::compiler::pluginFrontendPipelines())
+    if (pipeline.id == id && pipeline.builder != nullptr)
+      ++count;
+  return count;
+}
+
+// The sample registers "hip-ep-sample" once and "hip-ep-sample-duplicate"
+// twice; the registry keeps both duplicates so the driver can reject the
+// ambiguous selection. A registration without an id or builder is skipped.
+void checkSampleFrontendPipelines() {
+  check(countFrontendPipelines("hip-ep-sample") == 1,
+        "pluginFrontendPipelines() records 'hip-ep-sample' once");
+  check(countFrontendPipelines("hip-ep-sample-duplicate") == 2,
+        "pluginFrontendPipelines() keeps both 'hip-ep-sample-duplicate' "
+        "registrations");
+
+  const std::size_t before = hip::compiler::pluginFrontendPipelines().size();
+  hip::compiler::HipEpPluginRegistry &registry =
+      hip::compiler::getProcessPluginRegistry();
+  registry.addFrontendPipeline(
+      "", +[](hip::compiler::FrontendPipelineContext &) { return true; });
+  registry.addFrontendPipeline("hip-ep-test-null-builder", nullptr);
+  check(hip::compiler::pluginFrontendPipelines().size() == before,
+        "addFrontendPipeline skips an empty id and a null builder");
+}
+
 std::string memorySourceModule(uintptr_t address) {
   return "module {\n"
          "  func.func @memory_source() -> tensor<4xui8> {\n"
@@ -158,6 +188,7 @@ int main() {
   auto libPaths = pluginLibraryPaths();
   auto bitcode = pluginBitcodeBuffers();
   auto dialectRegs = pluginDialectRegistrations();
+  auto frontendPipelines = pluginFrontendPipelines();
 
 #if HIP_EP_EXPECT_SAMPLE
   llvm::outs() << "Mode: sample plugin EXPECTED (statically linked)\n";
@@ -169,6 +200,7 @@ int main() {
   check(contains(libs, "hip_ep_sample_lib"),
         "pluginLibraries() records 'hip_ep_sample_lib'");
   check(!libPaths.empty(), "pluginLibraryPaths() records a search path");
+  checkSampleFrontendPipelines();
 
   // Bitcode is present only when the build had clang to compile it; an empty
   // set is the documented degraded-build case, not a failure.
@@ -219,6 +251,7 @@ int main() {
   check(libPaths.empty(), "no plugin library paths recorded");
   check(bitcode.empty(), "no plugin bitcode recorded");
   check(dialectRegs.empty(), "no plugin dialect registrations recorded");
+  check(frontendPipelines.empty(), "no plugin frontend pipelines recorded");
 
   // The authoritative default build deliberately selects no production
   // plugins, but still links the real sample archive into this focused test.
@@ -231,6 +264,7 @@ int main() {
   check(contains(pluginPassesForSlot(PipelineSlot::BeforeBufferization),
                  "func.func(hip-ep-sample-emit-late-constant)"),
         "focused sample registration records BeforeBufferization");
+  checkSampleFrontendPipelines();
 
   mlir::MLIRContext context;
   context.allowUnregisteredDialects();

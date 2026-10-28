@@ -12,6 +12,7 @@ Licensed under the MIT License.
   - [Entry point](#entry-point)
   - [The registry](#the-registry)
   - [Pipeline slots](#pipeline-slots)
+  - [Frontend pipelines](#frontend-pipelines)
 - [How the host dispatches plugins](#how-the-host-dispatches-plugins)
 - [Linkage model](#linkage-model)
 - [What a downstream team does](#what-a-downstream-team-does)
@@ -71,6 +72,8 @@ Static registrar  -->  HipEpPluginRegistry
   |
   +--  registerPass + requestPipelineSlot  -->  ONNX->HIP->LLVM pipeline
   |
+  +--  addFrontendPipeline                    -->  pipeline selection (CompilerDriver)
+  |
   +--  addDialectRegistration              -->  pipeline MLIRContext (loadAllDialects)
   |
   +--  addRuntimeBitcode                    -->  LLVM backend (link)
@@ -82,6 +85,7 @@ Static registrar  -->  HipEpPluginRegistry
 |---|---|---|
 | MLIR pass | `registerPass<T>()` | `lib/Dialect/Transforms/Pipelines.cpp` |
 | Pass placement | `requestPipelineSlot(slot, name)` | same |
+| Frontend pipeline | `addFrontendPipeline(id, builder)` | `lib/Compiler/CompilerDriver.cpp` |
 | Dialect + op + interface models | `addDialectRegistration(fn)` | `hip::compiler::loadAllDialects` (`include/hip/InitAllPasses.h`) |
 | Runtime bitcode | `addRuntimeBitcode(data, size)` | `lib/Target/LLVM/LLVMBackend.cpp` |
 | Link path / library | `addLibraryPath` / `addLibrary` | `lib/Compiler/CompilerDriver.cpp` |
@@ -137,6 +141,10 @@ public:
 
   // Run a registered pass (by its MLIR command-line name) at a named slot.
   void requestPipelineSlot(PipelineSlot slot, llvm::StringRef passName);
+
+  // Register a named pipeline that lowers a non-ONNX frontend's dialect to
+  // tensor-form HIP IR (see "Frontend pipelines" below).
+  void addFrontendPipeline(llvm::StringRef id, FrontendPipelineBuilder builder);
 
   // Contribute a dialect-registration callback. The host runs it against the
   // DialectRegistry it builds the pipeline's MLIRContext from, so the callback
@@ -207,6 +215,31 @@ follow explicitly ordered producer carriers in stable module walk order. Later
 slots must not emit carriers; the pipeline diagnoses any `hip.constant` that
 survives to `BeforeBufferization`.
 
+### Frontend pipelines
+
+`addFrontendPipeline(id, builder)` lets a plugin add a frontend other than
+ONNX. The plugin owns only the lowering from its dialect to tensor-form HIP IR
+(the `!hip.context` argument, graph metadata and `hip.constant` carriers -- the
+form `convert-onnx-to-hip` produces); the host owns everything after it.
+
+`CompilerDriver::runMLIRPasses` reads the module's
+`hip.compiler.frontend_pipeline` attribute. Without it, the ONNX pipeline runs
+as before. With it, the driver calls the matching builder with a
+`FrontendPipelineContext` (the module, the pass manager, the compilation options,
+the file system and the error message). The builder adds its passes and returns
+true, or returns false to reject the module. The driver then appends the
+tensor-to-bufferized and HIP-to-LLVM pipelines, so slots from
+`BeforeBufferization` on apply as usual; the ONNX slots do not run.
+
+Selection fails, before any pass runs, when the attribute is not a nonempty
+string, when no plugin registered the id, when more than one registration has
+it, or when the builder rejects the module. The `HIPDNN_EP_PIPELINE`, HIPSR and
+rocMLIR modes take precedence over the attribute.
+
+Constants follow the same producer boundary as `AfterConvertOnnxToHip`: the
+frontend pipeline may emit `hip.constant` carriers, and they are externalized by
+the tensor-to-bufferized pipeline.
+
 ## How the host dispatches plugins
 
 Selected plugins are linked statically into the host; the CMake-generated
@@ -220,8 +253,8 @@ crashing the host. When no plugins were selected, dispatch is a no-op.
 
 After dispatch, the host reads back what the plugins contributed through the
 accessors in `PluginRegistry.h` -- `pluginPassesForSlot`,
-`pluginDialectRegistrations`, `pluginBitcodeBuffers`, `pluginLibraryPaths`,
-`pluginLibraries` -- at the hook sites.
+`pluginFrontendPipelines`, `pluginDialectRegistrations`, `pluginBitcodeBuffers`,
+`pluginLibraryPaths`, `pluginLibraries` -- at the hook sites.
 
 ### Multiple plugins
 
@@ -233,6 +266,8 @@ that order:
 - **Pass names:** a pass is resolved by its registered name, so two plugins
   must not register the same name -- prefix plugin pass names to keep them
   unique.
+- **Frontend pipeline ids:** likewise unique; a module that selects an id
+  registered more than once fails to compile.
 - **Bitcode / library symbols:** a symbol defined by more than one source
   resolves to the last contributor (bitcode is linked with `OverrideFromSrc`;
   libraries follow link search order). Prefix vendor symbols so cross-plugin
@@ -606,13 +641,12 @@ support this today; a fourth is planned.
   message when the produced module lacks an `inference_compute` entry point after
   an override; enforcing the remaining ordering invariants automatically is not
   yet done.
-- **Planned -- a registered pipeline builder.** For passes that need
-  runtime-bound state a textual string cannot carry (e.g. the
-  in-memory-filesystem variant of `convert-onnx-to-hip`), a plugin would
-  register a pipeline *builder* that receives a context (the filesystem and
-  pipeline options) and composes passes -- including in-tree stage builders --
-  in C++. This is the full-fidelity path; it would share the
-  [linkage model](#linkage-model).
+- **Frontend pipelines.** A plugin that adds a frontend other than ONNX
+  registers a pipeline builder with `addFrontendPipeline(id, builder)`. A module
+  whose `hip.compiler.frontend_pipeline` string attribute names `id` is compiled
+  by that builder's passes instead of the ONNX pipeline, followed by the host's
+  `buildHipTensorToBufferizedPipeline` and `buildHipToLLVMPipeline`; see
+  [Frontend pipelines](#frontend-pipelines).
 
 **Stability:** pass and pipeline names are version-pinned compiler internals,
 not a frozen cross-release contract -- a plugin that composes by name pins to
