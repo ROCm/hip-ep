@@ -102,10 +102,10 @@ def _make_qmoe_model(
     """
     down_in = intermediate // 2
     values_per_byte = 8 // expert_weight_bits
-    packed_gate_up = hidden // values_per_byte
-    packed_down = down_in // values_per_byte
-    gate_up_num_blocks = hidden // block_size
-    down_num_blocks = down_in // block_size
+    packed_gate_up = (hidden + values_per_byte - 1) // values_per_byte
+    packed_down = (down_in + values_per_byte - 1) // values_per_byte
+    gate_up_num_blocks = (hidden + block_size - 1) // block_size
+    down_num_blocks = (down_in + block_size - 1) // block_size
 
     x = helper.make_tensor_value_info(
         "input",
@@ -277,6 +277,32 @@ class TestQMoE:
         )
 
         rng = np.random.default_rng(17)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+        router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
+
+    @pytest.mark.parametrize("seq_len", [1, 8])
+    @pytest.mark.parametrize("expert_weight_bits", [2, 4])
+    def test_partial_quantization_block(
+        self, model_runner, seq_len, expert_weight_bits
+    ):
+        hidden = 96
+        intermediate = 192
+        num_experts = 4
+        model = _make_qmoe_model(
+            1,
+            seq_len,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k=2,
+            block_size=64,
+            expert_weight_bits=expert_weight_bits,
+        )
+
+        rng = np.random.default_rng(23)
         x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
         router = rng.standard_normal([seq_len, num_experts]).astype(np.float16)
 

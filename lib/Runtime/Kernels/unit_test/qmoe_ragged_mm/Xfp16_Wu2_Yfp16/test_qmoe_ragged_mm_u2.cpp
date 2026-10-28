@@ -19,8 +19,8 @@ namespace {
 constexpr int kRows = 3;
 constexpr int kExperts = 2;
 constexpr int kN = 64;
-constexpr int kK = 64;
-constexpr int kBlockSize = 32;
+constexpr int kK = 96;
+constexpr int kBlockSize = 64;
 constexpr int kBits = 2;
 
 template <typename T> bool upload(T **device, const std::vector<T> &host) {
@@ -32,15 +32,15 @@ template <typename T> bool upload(T **device, const std::vector<T> &host) {
 
 uint8_t packedValue(const std::vector<uint8_t> &weights, int expert, int n,
                     int k) {
-  constexpr int rowBytes = kK / 4;
+  constexpr int rowBytes = (kK + 3) / 4;
   const size_t row = static_cast<size_t>(expert * kN + n) * rowBytes;
   const uint8_t byte = weights[row + k / 4];
   return (byte >> ((k & 3) * 2)) & 3u;
 }
 
 bool runCase(bool gather, bool withZeroPoints) {
-  constexpr int kBlocks = kK / kBlockSize;
-  constexpr int rowBytes = kK / 4;
+  constexpr int kBlocks = (kK + kBlockSize - 1) / kBlockSize;
+  constexpr int rowBytes = (kK + 3) / 4;
   std::vector<__half> input(kRows * kK);
   std::vector<uint8_t> weights(kExperts * kN * rowBytes);
   std::vector<__half> scales(kExperts * kN * kBlocks);

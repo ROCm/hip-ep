@@ -634,8 +634,7 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
   }
 
   const int k_blocks = (shape.k + shape.block_size - 1) / shape.block_size;
-  const int blob_size = shape.block_size / 2;
-  const int weight_row_bytes = k_blocks * blob_size;
+  const int weight_row_bytes = (shape.k + 1) / 2;
   std::vector<uint8_t> weights(
       static_cast<size_t>(shape.experts) * shape.n * weight_row_bytes, 0);
   std::vector<__half> scales(
@@ -652,13 +651,14 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
             float_to_half(scale_value(expert, n, group));
         zero_points[expert_n * k_blocks + group] = static_cast<uint8_t>(
             3 + ((expert * 5 + n * 3 + group) % 10));
-        for (int offset = 0; offset < shape.block_size; offset += 2) {
-          const int k0 = group * shape.block_size + offset;
-          const uint8_t low = k0 < shape.k ? quant_value(expert, n, k0) : 8;
+        const int group_end =
+            std::min(shape.k, (group + 1) * shape.block_size);
+        for (int k0 = group * shape.block_size; k0 < group_end; k0 += 2) {
+          const uint8_t low = quant_value(expert, n, k0);
           const uint8_t high = k0 + 1 < shape.k
                                    ? quant_value(expert, n, k0 + 1)
                                    : 8;
-          weights[expert_n * weight_row_bytes + group * blob_size + offset / 2] =
+          weights[expert_n * weight_row_bytes + k0 / 2] =
               static_cast<uint8_t>(low | (high << 4));
         }
       }
@@ -675,11 +675,10 @@ bool run_case(const Shape& shape, Routing routing, bool gather, bool use_bias,
       const size_t expert_n = static_cast<size_t>(expert) * shape.n + n;
       for (int k = 0; k < shape.k; ++k) {
         const int group = k / shape.block_size;
-        const int offset = k - group * shape.block_size;
-        const uint8_t packed = weights[expert_n * weight_row_bytes +
-                                       group * blob_size + offset / 2];
-        const float q = (offset & 1) ? static_cast<float>(packed >> 4)
-                                     : static_cast<float>(packed & 0x0f);
+        const uint8_t packed =
+            weights[expert_n * weight_row_bytes + k / 2];
+        const float q = (k & 1) ? static_cast<float>(packed >> 4)
+                                : static_cast<float>(packed & 0x0f);
         const float zero_point =
             use_zero_points
                 ? static_cast<float>(zero_points[expert_n * k_blocks + group])
@@ -1067,7 +1066,7 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
   matrix.k = k;
   matrix.block_size = block_size;
   matrix.k_blocks = (k + block_size - 1) / block_size;
-  matrix.row_bytes = matrix.k_blocks * (block_size / 2);
+  matrix.row_bytes = (k + 1) / 2;
   matrix.weights.resize(static_cast<size_t>(experts) * n * matrix.row_bytes, 0);
   matrix.scales.resize(static_cast<size_t>(experts) * n * matrix.k_blocks);
   matrix.zero_points.resize(
@@ -1083,21 +1082,17 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
                 ((expert * 3 + col + group + seed) % 5)));
         matrix.zero_points[expert_col * matrix.k_blocks + group] =
             static_cast<uint8_t>(2 + ((expert + col * 3 + group + seed) % 12));
-        for (int offset = 0; offset < block_size; offset += 2) {
-          const int k0 = group * block_size + offset;
-          const uint8_t low = k0 < k
-                                  ? static_cast<uint8_t>(
-                                        (expert * 7 + col * 5 + k0 * 3 + seed) &
-                                        0x0f)
-                                  : 8;
+        const int group_end = std::min(k, (group + 1) * block_size);
+        for (int k0 = group * block_size; k0 < group_end; k0 += 2) {
+          const uint8_t low = static_cast<uint8_t>(
+              (expert * 7 + col * 5 + k0 * 3 + seed) & 0x0f);
           const uint8_t high = k0 + 1 < k
                                    ? static_cast<uint8_t>(
                                          (expert * 7 + col * 5 +
                                           (k0 + 1) * 3 + seed) &
                                          0x0f)
                                    : 8;
-          matrix.weights[expert_col * matrix.row_bytes +
-                         group * (block_size / 2) + offset / 2] =
+          matrix.weights[expert_col * matrix.row_bytes + k0 / 2] =
               static_cast<uint8_t>(low | (high << 4));
         }
       }
@@ -1110,18 +1105,15 @@ PackedMatrix make_matrix(int experts, int n, int k, int block_size,
 
 void cpu_matrix_row(const __half* input, int expert,
                     const PackedMatrix& matrix, __half* output) {
-  const int blob_size = matrix.block_size / 2;
   for (int col = 0; col < matrix.n; ++col) {
     const size_t expert_col = static_cast<size_t>(expert) * matrix.n + col;
     float accumulator = 0.0f;
     for (int k = 0; k < matrix.k; ++k) {
       const int group = k / matrix.block_size;
-      const int offset = k - group * matrix.block_size;
       const uint8_t packed =
-          matrix.weights[expert_col * matrix.row_bytes + group * blob_size +
-                         offset / 2];
-      const float q = (offset & 1) ? static_cast<float>(packed >> 4)
-                                   : static_cast<float>(packed & 0x0f);
+          matrix.weights[expert_col * matrix.row_bytes + k / 2];
+      const float q = (k & 1) ? static_cast<float>(packed >> 4)
+                              : static_cast<float>(packed & 0x0f);
       const float weight =
           (q - static_cast<float>(
                    matrix.zero_points[expert_col * matrix.k_blocks + group])) *

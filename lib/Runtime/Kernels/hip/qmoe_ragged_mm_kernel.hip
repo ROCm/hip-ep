@@ -572,7 +572,7 @@ void qmoe_ragged_matmul_nbits_adaptive_kernel(
 
     const int k_blocks = static_cast<int>((K + block_size - 1) / block_size);
     const int weight_row_bytes =
-        k_blocks * static_cast<int>((block_size * bits + 7) / 8);
+        static_cast<int>((K * bits + 7) / 8);
     if (valid_expert) {
       const size_t expert_cols = static_cast<size_t>(expert) * N;
       const uint8_t* expert_weights =
