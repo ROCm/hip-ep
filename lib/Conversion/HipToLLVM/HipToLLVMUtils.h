@@ -64,11 +64,18 @@ inline constexpr const char *kWrapBatchNormalization =
 inline constexpr const char *kWrapGroupNorm = "wrap_group_norm";
 inline constexpr const char *kWrapGatedRmsNorm = "wrap_gated_rms_norm";
 inline constexpr const char *kWrapEngramGate = "wrap_engram_gate";
+inline constexpr const char *kWrapHyperConnectionPreMix =
+    "wrap_hyper_connection_pre_mix";
+inline constexpr const char *kWrapHyperConnectionPostMix =
+    "wrap_hyper_connection_post_mix";
+inline constexpr const char *kWrapHyperConnectionPostMixNorm =
+    "wrap_hyper_connection_post_mix_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
+inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapRandomNormalLike = "wrap_random_normal_like";
@@ -91,6 +98,7 @@ inline constexpr const char *kWrapSwiglu = "wrap_swiglu";     // hip.swiglu
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
+inline constexpr const char *kWrapMRotaryEmbedding = "wrap_mrotary_embedding";
 inline constexpr const char *kWrapElementwise =
     "wrap_elementwise"; // hip.mul/add/min/max (with 4D shape for broadcasting)
 inline constexpr const char *kWrapCast = "wrap_cast";
@@ -110,11 +118,17 @@ inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapQMoEAmd = "wrap_qmoe_amd";
 inline constexpr const char *kWrapGatherBlockQuantized =
     "wrap_gather_block_quantized";
+inline constexpr const char *kWrapGatherBlockQuantizedFromFile =
+    "wrap_gather_block_quantized_from_file";
 inline constexpr const char *kWrapQuantizeLinear = "wrap_quantize_linear";
 inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapDynamicSparseAttention =
+    "wrap_dynamic_sparse_attention";
+inline constexpr const char *kWrapSparseAttentionIndexer =
+    "wrap_sparse_attention_indexer";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
@@ -147,6 +161,7 @@ inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
 inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
+inline constexpr const char *kWrapResizeScaled = "wrap_resize_scaled";
 inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
@@ -186,6 +201,10 @@ inline constexpr int64_t kStridesIdx = 4;
 // Values must match HIPDNN_EP_QMOE_AMD_* in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEAmdActivationRelu2 = 0;
 inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
+
+// hip.qmoe / wrap_qmoe relu2 activation. Must match
+// HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoEActivationRelu2 = 5;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -511,6 +530,10 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
+void populateDynamicSparseAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateSparseAttentionIndexerLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
