@@ -416,6 +416,71 @@ buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
   return outputShape;
 }
 
+/// Return whether \p value is the runtime extent of dimension \p expectedDim
+/// of \p data. ReshapeShapeFold represents dynamic shape entries as an
+/// index_cast of tensor.dim, so ignore that element-type conversion.
+static bool isInputDim(mlir::Value value, mlir::Value data,
+                       int64_t expectedDim) {
+  if (auto cast = value.getDefiningOp<mlir::arith::IndexCastOp>())
+    value = cast.getIn();
+
+  auto dimOp = value.getDefiningOp<mlir::tensor::DimOp>();
+  if (!dimOp || dimOp.getSource() != data)
+    return false;
+
+  std::optional<int64_t> dimIndex = mlir::getConstantIntValue(dimOp.getIndex());
+  return dimIndex && *dimIndex == expectedDim;
+}
+
+/// Prove that a same-type dynamic Reshape preserves every runtime dimension.
+///
+/// Type equality alone is insufficient because two different runtime shapes
+/// can both have type tensor<?x...?xT>. The shape operand must be a
+/// host-visible tensor.from_elements whose entries either copy the
+/// corresponding input dimension (ONNX zero with allowzero=0), equal its
+/// static extent, or come directly from tensor.dim(data, i). Unknown entries,
+/// including -1, conservatively keep the Reshape.
+static bool isProvablyIdentityReshape(mlir::Operation *op, mlir::Value data,
+                                      mlir::RankedTensorType inputType,
+                                      mlir::RankedTensorType outputType) {
+  if (inputType != outputType)
+    return false;
+
+  if (op->getNumOperands() < 2)
+    return false;
+
+  mlir::Value shapeOperand = op->getOperand(1);
+  int64_t rank = inputType.getRank();
+
+  bool allowzero = false;
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("allowzero"))
+    allowzero = attr.getValue().getSExtValue() != 0;
+
+  for (int64_t i = 0; i < rank; ++i) {
+    mlir::Value element = getShapeOperandElement(shapeOperand, i, rank);
+    if (!element)
+      return false;
+
+    if (auto cast = element.getDefiningOp<mlir::arith::IndexCastOp>())
+      element = cast.getIn();
+
+    if (std::optional<int64_t> value = mlir::getConstantIntValue(element)) {
+      if (*value == 0 && !allowzero)
+        continue;
+
+      if (!inputType.isDynamicDim(i) && *value == inputType.getDimSize(i))
+        continue;
+
+      return false;
+    }
+
+    if (!isInputDim(element, data, i))
+      return false;
+  }
+
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Reshape -> standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
@@ -447,8 +512,13 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     int64_t inputRank = inputType.getRank();
     int64_t outputRank = outputType.getRank();
 
-    // No-op: same type
-    if (inputType == outputType) {
+    // Equal static types are trivially an identity. For dynamic types, type
+    // equality alone is insufficient: [1,8,S,2S] and [1,8,2S,S] both have type
+    // tensor<1x8x?x?xT>, so require the shape operand to prove every runtime
+    // dimension is unchanged.
+    if (inputType == outputType &&
+        (inputType.hasStaticShape() ||
+         isProvablyIdentityReshape(op, data, inputType, outputType))) {
       rewriter.replaceOp(op, data);
       return mlir::success();
     }
