@@ -86,9 +86,11 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceMaxOp::create(rewriter, loc, context, data, axesOperand,
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceMaxOp::create(
+      rewriter, loc, context, data, axesOperand, init, keepdimsAttr,
+      noopWithEmptyAxesAttr,
+      getConstantReducedAxesAttr(rewriter, data, axesOperand,
+                                 noopWithEmptyAxes));
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

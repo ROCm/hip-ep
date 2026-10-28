@@ -3645,6 +3645,10 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3658,7 +3662,8 @@ def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3688,6 +3693,10 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
@@ -3701,7 +3710,8 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3727,6 +3737,10 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_l2(%ctx) ins(%data, %axes : memref<128x3x256x32xf16, 1>, memref<1xi64, 1>)
@@ -3740,7 +3754,8 @@ def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3762,6 +3777,10 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_max(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3775,7 +3794,8 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -3797,6 +3817,10 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_min(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
@@ -3810,7 +3834,8 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{
@@ -5022,6 +5047,10 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
     Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
     optional axes semantics while keeping all operands required.
 
+    `reduced_axes` is set when `axes` is a compile-time constant: the
+    normalized, sorted reduced axes. The LLVM lowering derives the inner
+    stride from it; without it the stride is inferred from the shapes.
+
     Example:
     ```mlir
     hip.reduce_prod(%ctx) ins(%data, %axes : memref<3x2x2xf32, 1>, memref<0xi64, 1>)
@@ -5035,7 +5064,8 @@ def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "1">:$keepdims,
-    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes,
+    OptionalAttr<DenseI64ArrayAttr>:$reduced_axes
   );
 
   let assemblyFormat = [{

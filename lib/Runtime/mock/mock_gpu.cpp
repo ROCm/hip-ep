@@ -2876,15 +2876,21 @@ int wrap_sign(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
-             int64_t num_elements, int64_t data_type, int64_t fmod) {
+             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
+             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
+             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type,
+             int64_t fmod) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_mod\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_mod(num_elements=%lld, data_type=%s(%lld), "
-             "fmod=%lld)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type, (long long)fmod);
+  MOCK_PRINT("[MOCK] wrap_mod a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s fmod=%lld\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type),
+             (long long)fmod);
   return 0;
 }
 
