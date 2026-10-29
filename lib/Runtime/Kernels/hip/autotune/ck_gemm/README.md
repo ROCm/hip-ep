@@ -31,7 +31,7 @@ The resolver ranks in float32 and the script in float64, so a rival point with a
 
 `shapes/survey.csv` and the winners CSV keep every shape; only `lut/<arch>.json` / `.fb` are pruned. `--keep-all` skips pruning.
 
-For `lut/gfx1151`: 993 measured shapes, 388 kept, 11,064 bytes (25,584 unpruned).
+For `lut/gfx1151`: 993 measured shapes, 352 kept, 9,944 bytes (25,328 unpruned).
 
 ## Files
 
@@ -47,21 +47,42 @@ For `lut/gfx1151`: 993 measured shapes, 388 kept, 11,064 bytes (25,584 unpruned)
 
 ## Regenerating
 
+Regenerate after anything that can move the fastest instance: an edit to `kEntries[]`, a Composable Kernel pin bump, or a ROCm SDK / compiler change in `cmake/deps.txt`. Re-extract the shapes only when the model set changes; otherwise reuse `shapes/survey.csv`.
+
+Sweep against the DLL the table ships in, built at the commit the table lands on. A table is embedded into the `custom_kernels_<arch>` whose family lists its arch (`_lut_arch_members` in `lib/Runtime/Kernels/CMakeLists.txt`): gfx1150 / gfx1151 ship in `custom_kernels_gfx11-generic`, gfx1170 / gfx1171 in `custom_kernels_gfx11-7-generic`. Winners measured on a per-arch DLL describe code that does not ship.
+
+Windows, from a configured hip-ep build directory `<build>`; `<rocm>` is `<build>/_therock`:
+
 ```powershell
-# 1. shapes: any HIPDNN_EP_DEBUG=1 console logs (CI consoleText works)
+# 0. MSVC environment, needed to link the sweep tool
+& "<Visual Studio>\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation
+
+# 1. shapes, only when the model set changed: any HIPDNN_EP_DEBUG=1 console logs (CI consoleText works)
 python scripts/update_lut.py extract --logs <log>... --out shapes/survey.csv
 
-# 2. sweep on the target GPU, against the custom_kernels_<arch> it will ship in
-clang++ --driver-mode=g++ -std=c++17 -O2 -D__HIP_PLATFORM_AMD__ `
+# 2. the shipping DLL: <build>/bin/custom_kernels_gfx11-generic.dll and its import library
+cmake --build <build> --target custom_kernels_gfx11-generic
+
+# 3. sweep on an idle target GPU (about 1.5 minutes for shapes/survey.csv on gfx1151)
+<rocm>/bin/clang++ --driver-mode=g++ -std=c++17 -O2 -D__HIP_PLATFORM_AMD__ `
     -I <rocm>/include -I lib/Runtime/Kernels/include -I lib/Runtime/real `
     tools/ck_gemm_autotune_sweep.cpp -o ck_gemm_sweep.exe `
-    -L <rocm>/lib -l amdhip64 <build>/lib/Runtime/Kernels/custom_kernels_<arch>.lib
+    -L <rocm>/lib -l amdhip64 <build>/lib/Runtime/Kernels/custom_kernels_gfx11-generic.lib
+$env:PATH = "<build>\bin;<rocm>\bin;$env:PATH"
 ck_gemm_sweep.exe shapes/survey.csv winners.csv
 
-# 3. table
-python scripts/update_lut.py build --winners winners.csv --arch gfx1151 --rocm-version 71600
+# 4. table; the arch comes from winners.csv
+python scripts/update_lut.py build --winners winners.csv --rocm-version 71600 --model-key "<where the shapes came from>"
 python scripts/update_lut.py compile --arch gfx1151 --flatc <build>/bin/flatc.exe
 ```
+
+The sweep writes the device it ran on as the first line of `winners.csv` (`# gpu_arch=gfx1151`). `build` names the table after it and refuses a mismatching `--arch` or winners from different GPUs. Exit code `-1073741515` (`0xC0000135`) from the sweep means a DLL is missing from `PATH`. A `custom_kernels_*.dll` next to an executable wins over `PATH`, so do not leave a copy from an earlier build there.
+
+`--rocm-version` is the SDK version in the `therock_windows` tarball name in `cmake/deps.txt` as `major*10000 + minor*100 + patch` (7.16.0 is `71600`). It is a record only; the loader checks `kernel_abi` and `gpu_arch`. `--model-key` records the CI builds or models the shapes came from.
+
+To check a new table, rebuild the DLL (the `.fb` is a configure dependency, so `cmake --build` picks it up) and run any model with `HIPDNN_CK_GEMM_LUT_LOG=1`. Expect `[ck-gemm-lut] loaded <n> points in <g> groups (0 dropped) for gfx1151`; a nonzero dropped count means instance names the build no longer has.
+
+Two sweeps of the same DLL disagree on about 20% of winners (199 of 993 shapes on gfx1151). Judge a regenerated table by load status and end-to-end numbers, not by per-shape winner diffs against the old one.
 
 ## Knobs
 
