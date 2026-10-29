@@ -730,7 +730,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXU]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -843,10 +843,10 @@ module {
         -> (tensor<?x?x4096xf16>, tensor<?x8x?x256xf16>,
             tensor<?x8x?x256xf16>)
 
-    // No local_window_size: the dict goes straight from kv_num_heads to
-    // no_causal.
+    // No local_window_size: the dict goes from the derived-length flag to
+    // kv_num_heads and no_causal.
     // CHECK: hip.gqa(%[[CTXNP]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -939,7 +939,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXNS]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
@@ -1034,7 +1034,7 @@ module {
             tensor<?x8x?x256xf16>)
 
     // CHECK: hip.gqa(%[[CTXTS]])
-    // CHECK-SAME: {kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
+    // CHECK-SAME: {derive_seqlens_from_attention_bias = true, kv_num_heads = 8 : i64, no_causal = true, num_heads = 16 : i64
     // CHECK-NOT: onnx.Attention
 
     return %out#0, %out#1, %out#2
