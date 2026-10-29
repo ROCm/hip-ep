@@ -33,6 +33,7 @@
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
 #include "mlir/Dialect/PDL/IR/PDLOps.h"
@@ -62,12 +63,19 @@ namespace fusion_transform {
 // IR readers
 //===----------------------------------------------------------------------===//
 
-/// value is const op and return value as DenseElementsAttr, if not return {}
+/// value is a hip.constant or arith.constant and return its value as
+/// DenseElementsAttr, if not return {}
+///
+/// Both forms reach the fusion patterns: hip-promote-device-constants turns
+/// device-read arith constants into hip.constant only after
+/// hip-fusion-transform has run.
 inline mlir::DenseElementsAttr tryHipConstantPayload(mlir::Value value) {
   if (!value)
     return {};
-  auto constOp =
-      mlir::dyn_cast_or_null<mlir::hip::ConstantOp>(value.getDefiningOp());
+  mlir::Operation *def = value.getDefiningOp();
+  if (auto arithConst = mlir::dyn_cast_or_null<mlir::arith::ConstantOp>(def))
+    return mlir::dyn_cast<mlir::DenseElementsAttr>(arithConst.getValue());
+  auto constOp = mlir::dyn_cast_or_null<mlir::hip::ConstantOp>(def);
   if (!constOp)
     return {};
   return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(

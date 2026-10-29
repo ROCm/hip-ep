@@ -477,6 +477,10 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
 
     /// Classify the source of a verified carrier.
     SourceKind getSourceKind();
+
+    /// Whether a carrier may hold elements of `type`. The verifier enforces
+    /// this; producers that turn other constants into carriers check it first.
+    static bool isSupportedElementType(::mlir::Type type);
   }];
 
   let assemblyFormat = [{

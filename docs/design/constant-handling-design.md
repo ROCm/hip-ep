@@ -192,6 +192,21 @@ GatherBlockQuantized value-based rewrites have had access to the original
 literal. It does no filesystem access, layout, index assignment, global
 creation, or constant metadata stamping.
 
+Conversion also leaves some literals as tensor `arith.constant` -- a folded
+`ConstantOfShape` fill, for one -- so host-side folds can read them. A tensor
+`arith.constant` bufferizes to a `memref.global` in host memory, which a kernel
+cannot read. `hip-promote-device-constants`
+(`lib/Dialect/Transforms/PromoteDeviceConstants.cpp`) runs immediately before
+`hip-externalize-constants`, after shape inference and fusion have read and
+folded the arith form, and gives every device read of such a constant -- any hip op
+operand, including a DPS init that bufferization copies, and the source or
+destination of `tensor.insert_slice`, directly or through `tensor.cast`,
+`expand_shape`, `collapse_shape`, `extract_slice` or `reshape` -- one
+`hip.constant` with the same value, without a `serialization_order`. Host uses
+keep the `arith.constant`. This function-local pass follows direct uses and
+the listed view operations. Interprocedural or control-flow transport through
+calls, region captures or graph results is outside its contract.
+
 `hip-externalize-constants`
 (`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit
 `serialization_order`, then assigns every externalized carrier a sequential

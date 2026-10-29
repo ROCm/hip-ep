@@ -40,7 +40,9 @@ namespace {
 //      collapses to a single splat `arith.constant`. No runtime work; the
 //      whole computation is materialised at compile time. This is the
 //      common case for transformer-style "allocate a zero KV/mask tensor"
-//      patterns once shape inference + constant folding have run.
+//      patterns once shape inference + constant folding have run. The arith
+//      form keeps the fill visible to host-side folds; a hip op that reads it
+//      gets a device copy from hip-promote-device-constants.
 //
 //   3. ConstantOfShapeDynamic (benefit=1): fallback for non-constant shape
 //      input OR a result type with at least one dynamic dim. Each dynamic

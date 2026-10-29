@@ -127,28 +127,29 @@ ConstantOp::SourceKind ConstantOp::getSourceKind() {
   return getMemoryAddressAttr() ? SourceKind::Memory : SourceKind::File;
 }
 
+bool ConstantOp::isSupportedElementType(Type type) {
+  if (auto integerType = dyn_cast<IntegerType>(type))
+    return llvm::is_contained({1u, 8u, 16u, 32u, 64u}, integerType.getWidth());
+  return type.isF16() || type.isBF16() || type.isF32() || type.isF64() ||
+         isa<Float8E4M3FNType>(type);
+}
+
 LogicalResult ConstantOp::verify() {
   RankedTensorType resultType = getResult().getType();
   if (!resultType.hasStaticShape())
     return emitOpError("requires a statically shaped ranked tensor result");
 
   Type elementType = resultType.getElementType();
-  unsigned elementBits = 0;
-  if (auto floatType = dyn_cast<FloatType>(elementType)) {
-    if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
-        !elementType.isF64() && !isa<Float8E4M3FNType>(elementType))
+  if (!isSupportedElementType(elementType)) {
+    if (isa<FloatType>(elementType))
       return emitOpError("has unsupported floating-point element type ")
              << elementType;
-    elementBits = floatType.getWidth();
-  } else if (auto integerType = dyn_cast<IntegerType>(elementType)) {
-    elementBits = integerType.getWidth();
-    if (elementBits != 1 && elementBits != 8 && elementBits != 16 &&
-        elementBits != 32 && elementBits != 64)
+    if (isa<IntegerType>(elementType))
       return emitOpError("has unsupported integer element type ")
              << elementType;
-  } else {
     return emitOpError("has unsupported element type ") << elementType;
   }
+  unsigned elementBits = elementType.getIntOrFloatBitWidth();
 
   int64_t numElements = 1;
   for (int64_t dim : resultType.getShape()) {
